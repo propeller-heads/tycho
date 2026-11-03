@@ -1,6 +1,9 @@
-use std::{any::Any, collections::HashMap};
+use std::{
+    any::Any,
+    collections::{BTreeMap, HashMap},
+};
 
-use alloy::primitives::{Sign, I256, U256};
+use alloy::primitives::U256;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
@@ -13,896 +16,640 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::evm::protocol::{
-    safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256},
-    u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
-    utils::{
-        add_fee_markup,
-        uniswap::{
-            liquidity_math,
-            sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
-            swap_math,
-            tick_list::{TickInfo, TickList},
-            tick_math::{
-                get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
-                MIN_SQRT_RATIO, MIN_TICK,
-            },
-            StepComputation, SwapState,
+use crate::evm::{
+    engine_db::{create_engine, SHARED_TYCHO_DB},
+    protocol::{
+        fluid::find_max_valid_u256,
+        fluid_v2::{
+            math::{self, SwapOutcome, SwapPool},
+            vm::{self, TokenLiquidity},
         },
+        safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256},
+        u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+        utils::add_fee_markup,
     },
 };
 
+/// Gas of a whole swap through `FluidV2Executor`, measured on a mainnet fork at block 26331500
+/// where every settle went through Fluid Liquidity. A D4 swap always syncs a borrow leg with
+/// Liquidity. Fluid's docs put serving both settles from the dex balance about 75k lower.
+const GAS_D3_THROUGH_LIQUIDITY: u64 = 255_000;
+const GAS_D4: u64 = 277_000;
+const GAS_SAVED_SETTLING_FROM_DEX_BALANCE: u64 = 75_000;
+const GAS_PER_INITIALIZED_TICK_CROSSED: u64 = 21_492;
+
+const EXCHANGE_PRICES_PRECISION: u64 = 1_000_000_000_000;
 const TOKENS_DECIMALS_PRECISION: u8 = 9;
-const GAS_BASE: u64 = 155_000;
-const GAS_CROSS_INIT_TICK: u64 = 21_492;
-const MAX_SQRT_PRICE_CHANGE_PERCENTAGE: u64 = 2_000_000_000;
-const MIN_SQRT_PRICE_CHANGE_PERCENTAGE: u64 = 5;
-const DEFAULT_EXPONENT_SIZE: u32 = 8;
-const DEFAULT_EXPONENT_MASK: u64 = 0xFF;
 const ROUNDING_FACTOR: u64 = 1_000_000_000;
-const ROUNDING_FACTOR_MINUS_ONE: u64 = ROUNDING_FACTOR - 1;
+const MIN_AMOUNT: u64 = 10_000;
+const MAX_AMOUNT_BITS: usize = 128;
+const MAX_ADJUSTED_AMOUNT_BITS: usize = 86;
+const SQRT_PRICE_EXPONENT_BITS: usize = 8;
+const SQRT_PRICE_COEFFICIENT_BITS: usize = 64;
+const FLUID_NATIVE_TOKEN: [u8; 20] = [0xee; 20];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DexType {
+    /// Smart collateral: LP liquidity is supplied to Fluid Liquidity.
     D3,
+    /// Smart debt: LP liquidity is borrowed from Fluid Liquidity.
     D4,
 }
 
+/// A Fluid DEX v2 D3 or D4 pool: Uniswap-v3-style concentrated liquidity whose amounts are
+/// normalized by Fluid Liquidity exchange prices and paid out through the dex and Liquidity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FluidV2State {
-    dex_id: Bytes,
+    dex_type: DexType,
     token0: Token,
     token1: Token,
-    dex_type: DexType,
-    fee: u32,
-    dynamic_fee: bool,
+    /// The DEX v2 resolver whose `getTokenBaseState` reads the tokens' Liquidity state.
+    resolver: Bytes,
     tick_spacing: i32,
-    controller: Bytes,
     dex_variables: DexVariables,
     dex_variables2: DexVariables2,
+    /// Raw-adjusted reserves, bounded by the pool only while per-pool accounting runs.
     token0_reserve: U256,
     token1_reserve: U256,
-    token0_borrow_exchange_price: U256,
-    token0_supply_exchange_price: U256,
-    token1_borrow_exchange_price: U256,
-    token1_supply_exchange_price: U256,
-    ticks: Vec<crate::evm::protocol::utils::uniswap::tick_list::TickInfo>,
+    /// Initialized ticks and their net liquidity.
+    ticks: BTreeMap<i32, i128>,
+    token0_liquidity: TokenLiquidity,
+    token1_liquidity: TokenLiquidity,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DexVariables {
     pub current_tick: i32,
+    /// The stored sqrt price: a 64-bit coefficient and an 8-bit exponent, rounded down.
     pub current_sqrt_price_x96: U256,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DexVariables2 {
-    pub protocol_fee_0_to_1: U256,
-    pub protocol_fee_1_to_0: U256,
-    pub protocol_cut_fee: U256,
+    pub protocol_fee_0_to_1: u64,
+    pub protocol_fee_1_to_0: u64,
+    pub protocol_cut_fee: u64,
     pub token0_decimals: u8,
     pub token1_decimals: u8,
-    pub active_liquidity: U256,
-    pub pool_accounting_flag: bool,
-    pub fetch_dynamic_fee_flag: bool,
-    pub fee_version: U256,
-    pub lp_fee: U256,
-    pub max_decay_time: U256,
-    pub price_impact_to_fee_division_factor: U256,
-    pub min_fee: U256,
-    pub max_fee: U256,
-    pub net_price_impact: i64,
-    pub last_update_timestamp: U256,
-    pub decay_time_remaining: U256,
+    pub active_liquidity: u128,
+    /// Set once `stopPerPoolAccounting` ran: reserves no longer bound the pool.
+    pub per_pool_accounting_stopped: bool,
+    /// Whether the pool asks its controller for the fee of every swap.
+    pub fetch_dynamic_fee: bool,
+    pub fee_version: u8,
+    /// The constant LP fee of fee version 0, in pips.
+    pub lp_fee: u64,
 }
 
-#[derive(Debug, Clone)]
-struct SwapInCalculatedVars {
-    token_out_num_precision: U256,
-    token_out_den_precision: U256,
-    token_out_exchange_price: U256,
-}
-
-#[derive(Debug, Clone)]
-struct SwapInPrepared {
-    zero_for_one: bool,
-    amount_in_raw_adjusted: U256,
-    vars: SwapInCalculatedVars,
-}
-
-#[derive(Debug, Clone)]
-struct SwapInInternalResult {
-    amount_out_raw_adjusted: U256,
-    amount_remaining: I256,
-    sqrt_price: U256,
-    liquidity: u128,
-    tick: i32,
-    gas_used: U256,
+/// One exact-input swap quote.
+struct Quote {
+    amount_out: U256,
+    gas: u64,
+    state: FluidV2State,
 }
 
 impl FluidV2State {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        dex_id: Bytes,
+        dex_type: DexType,
         token0: Token,
         token1: Token,
-        dex_type: DexType,
-        fee: u32,
-        dynamic_fee: bool,
+        resolver: Bytes,
         tick_spacing: i32,
-        controller: Bytes,
         dex_variables: DexVariables,
         dex_variables2: DexVariables2,
         token0_reserve: U256,
         token1_reserve: U256,
-        token0_borrow_exchange_price: U256,
-        token0_supply_exchange_price: U256,
-        token1_borrow_exchange_price: U256,
-        token1_supply_exchange_price: U256,
-        ticks: Vec<TickInfo>,
+        ticks: BTreeMap<i32, i128>,
+        token0_liquidity: TokenLiquidity,
+        token1_liquidity: TokenLiquidity,
     ) -> Self {
-        FluidV2State {
-            dex_id,
+        Self {
+            dex_type,
             token0,
             token1,
-            dex_type,
-            fee,
-            dynamic_fee,
+            resolver,
             tick_spacing,
-            controller,
             dex_variables,
             dex_variables2,
             token0_reserve,
             token1_reserve,
-            token0_borrow_exchange_price,
-            token0_supply_exchange_price,
-            token1_borrow_exchange_price,
-            token1_supply_exchange_price,
             ticks,
+            token0_liquidity,
+            token1_liquidity,
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn swap_in(
-        &self,
-        ticks: &TickList,
-        zero_for_one: bool,
-        amount_specified: I256,
-        sqrt_price_limit: U256,
-        protocol_fee_pips: u32,
-        lp_fee_pips: u32,
-        liquidity: u128,
-        tick: i32,
-        sqrt_price: U256,
-    ) -> Result<SwapInInternalResult, SimulationError> {
-        if liquidity == 0 {
-            return Err(SimulationError::RecoverableError("No liquidity".to_string()));
-        }
+    /// Reads both tokens' Liquidity state through the DEX v2 resolver in the shared VM database.
+    pub(super) fn fetch_token_liquidity(
+        resolver: &Bytes,
+        token0: &Bytes,
+        token1: &Bytes,
+    ) -> Result<(TokenLiquidity, TokenLiquidity), SimulationError> {
+        let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
+        let resolver = alloy::primitives::Address::from_slice(resolver);
+        let token0 = vm::fetch_token_liquidity(&engine, resolver, to_fluid_token(token0))?;
+        let token1 = vm::fetch_token_liquidity(&engine, resolver, to_fluid_token(token1))?;
+        Ok((token0, token1))
+    }
 
-        if zero_for_one {
-            if sqrt_price_limit <= MIN_SQRT_RATIO || sqrt_price_limit >= sqrt_price {
+    fn zero_for_one(&self, token_in: &Bytes, token_out: &Bytes) -> Result<bool, SimulationError> {
+        if *token_in == self.token0.address && *token_out == self.token1.address {
+            Ok(true)
+        } else if *token_in == self.token1.address && *token_out == self.token0.address {
+            Ok(false)
+        } else {
+            Err(SimulationError::InvalidInput(
+                format!("Fluid v2 pool does not trade {token_in} for {token_out}"),
+                None,
+            ))
+        }
+    }
+
+    /// Rejects the pools whose fee this simulation cannot reproduce.
+    fn check_supported(&self) -> Result<(), SimulationError> {
+        if self.dex_variables2.fetch_dynamic_fee {
+            return Err(SimulationError::FatalError(
+                "Fluid v2 pools that fetch their fee from a controller are not supported"
+                    .to_string(),
+            ));
+        }
+        if self.dex_variables2.fee_version != 0 {
+            return Err(SimulationError::FatalError(format!(
+                "Fluid v2 fee version {} is not supported",
+                self.dex_variables2.fee_version
+            )));
+        }
+        Ok(())
+    }
+
+    fn token_liquidity(&self, is_token0: bool) -> &TokenLiquidity {
+        if is_token0 {
+            &self.token0_liquidity
+        } else {
+            &self.token1_liquidity
+        }
+    }
+
+    /// The exchange price the pool math runs on: supply for D3, borrow for D4.
+    fn exchange_price(&self, is_token0: bool) -> Result<U256, SimulationError> {
+        let liquidity = self.token_liquidity(is_token0);
+        match self.dex_type {
+            // D3 prices a token Liquidity does not list at 1.
+            DexType::D3
+                if liquidity
+                    .supply_exchange_price
+                    .is_zero() =>
+            {
+                Ok(U256::from(EXCHANGE_PRICES_PRECISION))
+            }
+            DexType::D3 => Ok(liquidity.supply_exchange_price),
+            DexType::D4
+                if liquidity
+                    .borrow_exchange_price
+                    .is_zero() =>
+            {
+                Err(SimulationError::FatalError(
+                    "Fluid v2 D4 token has no borrow exchange price".to_string(),
+                ))
+            }
+            DexType::D4 => Ok(liquidity.borrow_exchange_price),
+        }
+    }
+
+    fn decimals(&self, is_token0: bool) -> u8 {
+        if is_token0 {
+            self.dex_variables2.token0_decimals
+        } else {
+            self.dex_variables2.token1_decimals
+        }
+    }
+
+    fn swap_pool(&self, zero_for_one: bool) -> SwapPool<'_> {
+        SwapPool {
+            ticks: &self.ticks,
+            tick_spacing: self.tick_spacing,
+            tick: self.dex_variables.current_tick,
+            sqrt_price_x96: decode_sqrt_price(
+                self.dex_variables
+                    .current_sqrt_price_x96,
+                zero_for_one,
+            ),
+            liquidity: self.dex_variables2.active_liquidity,
+            protocol_fee: if zero_for_one {
+                self.dex_variables2.protocol_fee_0_to_1
+            } else {
+                self.dex_variables2.protocol_fee_1_to_0
+            },
+            protocol_cut_fee: self.dex_variables2.protocol_cut_fee,
+            lp_fee: self.dex_variables2.lp_fee,
+        }
+    }
+
+    fn quote(&self, amount_in: U256, zero_for_one: bool) -> Result<Quote, SimulationError> {
+        self.check_supported()?;
+        verify_amount(amount_in)?;
+        let token_in =
+            Normalization::new(self.decimals(zero_for_one), self.exchange_price(zero_for_one)?);
+        let token_out =
+            Normalization::new(self.decimals(!zero_for_one), self.exchange_price(!zero_for_one)?);
+
+        let amount_in_raw = token_in.to_raw_round_down(amount_in)?;
+        verify_adjusted_amount(amount_in_raw)?;
+        let outcome =
+            math::swap_in(&self.swap_pool(zero_for_one), zero_for_one, amount_in_raw, None)?;
+        verify_adjusted_amount(outcome.amount_out_raw)?;
+        let amount_out = token_out.to_amount_round_down(outcome.amount_out_raw)?;
+        verify_amount(amount_out)?;
+
+        let fee_out = token_out
+            .to_amount_round_down(safe_add_u256(outcome.protocol_fee_raw, outcome.lp_fee_raw)?)?;
+        let settled_from_dex_balance =
+            self.check_settles(zero_for_one, amount_in, amount_out, fee_out)?;
+        let state = self.after_swap(zero_for_one, amount_in_raw, &outcome, amount_out, fee_out)?;
+        let base_gas = match self.dex_type {
+            DexType::D3 if settled_from_dex_balance => {
+                GAS_D3_THROUGH_LIQUIDITY - GAS_SAVED_SETTLING_FROM_DEX_BALANCE
+            }
+            DexType::D3 => GAS_D3_THROUGH_LIQUIDITY,
+            DexType::D4 => GAS_D4,
+        };
+        Ok(Quote {
+            amount_out,
+            gas: base_gas + GAS_PER_INITIALIZED_TICK_CROSSED * outcome.initialized_ticks_crossed,
+            state,
+        })
+    }
+
+    /// Checks that the dex can settle both legs, and returns whether it serves both from its own
+    /// token balance without calling Fluid Liquidity.
+    ///
+    /// D3 supplies the token in and withdraws the token out. A leg that fits the dex balance stays
+    /// there; a larger one goes to Liquidity, which rejects it while that leg is paused. D4 pays
+    /// back the token in and borrows the token out plus the swap fee, and syncs every borrow leg
+    /// with Liquidity.
+    ///
+    /// Not modeled: Liquidity also rejects a leg too small to change the dex's stored position
+    /// (`UserModule__OperateAmountInsufficient`). Only dust swaps hit it, such as the fee leg of
+    /// a D4 swap of 0.01 USDC.
+    fn check_settles(
+        &self,
+        zero_for_one: bool,
+        amount_in: U256,
+        amount_out: U256,
+        fee_out: U256,
+    ) -> Result<bool, SimulationError> {
+        let liquidity_in = self.token_liquidity(zero_for_one);
+        let liquidity_out = self.token_liquidity(!zero_for_one);
+        match self.dex_type {
+            DexType::D3 => {
+                let in_from_balance = amount_in <= liquidity_in.float_balance;
+                let out_from_balance = amount_out <= liquidity_out.float_balance;
+                if !in_from_balance && liquidity_in.supply_paused {
+                    return Err(liquidity_rejects("supply", &self.token_address(zero_for_one)));
+                }
+                let payout_cap = if liquidity_out.withdraw_paused {
+                    liquidity_out.float_balance
+                } else {
+                    liquidity_out.available_for_swap_out_withdraw
+                };
+                if amount_out > payout_cap {
+                    return Err(payout_exceeded(amount_out, payout_cap));
+                }
+                Ok(in_from_balance && out_from_balance)
+            }
+            DexType::D4 => {
+                if liquidity_in.payback_paused {
+                    return Err(liquidity_rejects("payback", &self.token_address(zero_for_one)));
+                }
+                if liquidity_out.borrow_paused {
+                    return Err(liquidity_rejects("borrow", &self.token_address(!zero_for_one)));
+                }
+                let borrowed = safe_add_u256(amount_out, fee_out)?;
+                if borrowed > liquidity_out.available_for_swap_out_borrow {
+                    return Err(payout_exceeded(
+                        borrowed,
+                        liquidity_out.available_for_swap_out_borrow,
+                    ));
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    fn token_address(&self, is_token0: bool) -> Bytes {
+        if is_token0 {
+            self.token0.address.clone()
+        } else {
+            self.token1.address.clone()
+        }
+    }
+
+    /// The pool after a swap. The payout lowers what the dex can pay out next.
+    fn after_swap(
+        &self,
+        zero_for_one: bool,
+        amount_in_raw: U256,
+        outcome: &SwapOutcome,
+        amount_out: U256,
+        fee_out: U256,
+    ) -> Result<FluidV2State, SimulationError> {
+        let mut state = self.clone();
+        state.dex_variables.current_tick = outcome.tick;
+        state
+            .dex_variables
+            .current_sqrt_price_x96 = encode_sqrt_price(outcome.sqrt_price_x96);
+        state.dex_variables2.active_liquidity = outcome.liquidity;
+
+        if !self
+            .dex_variables2
+            .per_pool_accounting_stopped
+        {
+            let (reserve_in, reserve_out) = if zero_for_one {
+                (&mut state.token0_reserve, &mut state.token1_reserve)
+            } else {
+                (&mut state.token1_reserve, &mut state.token0_reserve)
+            };
+            *reserve_in = safe_add_u256(*reserve_in, amount_in_raw)?;
+            if *reserve_in >> MAX_AMOUNT_BITS != U256::ZERO {
                 return Err(SimulationError::InvalidInput(
-                    "Invalid sqrt price limit".to_string(),
+                    "Fluid v2 swap overflows the pool's token reserves".to_string(),
                     None,
                 ));
             }
-        } else if sqrt_price_limit >= MAX_SQRT_RATIO || sqrt_price_limit <= sqrt_price {
-            return Err(SimulationError::InvalidInput("Invalid sqrt price limit".to_string(), None));
-        }
-
-        let exact_input = amount_specified > I256::from_raw(U256::from(0u64));
-        let mut state = SwapState {
-            amount_remaining: amount_specified,
-            amount_calculated: I256::from_raw(U256::from(0u64)),
-            sqrt_price,
-            tick,
-            liquidity,
-        };
-        let mut cross_init_tick_loops: u64 = 0;
-        let mut amount_out_raw = U256::from(0u64);
-        let mut protocol_fee_accrued_raw = U256::from(0u64);
-        let mut lp_fee_accrued_raw = U256::from(0u64);
-
-        let protocol_cut_fee = self
-            .dex_variables2
-            .protocol_cut_fee
-            .to::<u32>();
-        let fee_version = self
-            .dex_variables2
-            .fee_version
-            .to::<u32>();
-        let mut constant_lp_fee_pips = lp_fee_pips;
-
-        // Keep the same high-level fee-version split as the Solidity module.
-        // For now we only simulate the static-fee shape and explicitly leave
-        // dynamic-fee/controller overrides out of scope.
-        // TODO: For `fee_version == 1`, apply dynamic-fee variables and controller override logic.
-        if fee_version == 1 {
-            if self
-                .dex_variables2
-                .price_impact_to_fee_division_factor ==
-                U256::from(0u64)
-            {
-                constant_lp_fee_pips = self.dex_variables2.min_fee.to::<u32>();
-            } else {
-                // TODO: Implement the dynamic-fee path. For now, fall back to `min_fee`.
-                constant_lp_fee_pips = self.dex_variables2.min_fee.to::<u32>();
-            }
-        }
-        // TODO: If `fetch_dynamic_fee_flag` is enabled and controller != swapper,
-        // override `constant_lp_fee_pips` with `fetchDynamicFeeForSwapIn`.
-
-        let active_liquidity_start = state.liquidity;
-        let mut sqrt_price_start = state.sqrt_price;
-        let mut sqrt_price_start_changed = false;
-
-        while state.amount_remaining != I256::from_raw(U256::from(0u64)) &&
-            state.sqrt_price != sqrt_price_limit
-        {
-            let (mut next_tick, initialized) = ticks
-                .next_initialized_tick_within_one_word(state.tick, zero_for_one)
-                .map_err(|err| match err.kind {
-                    crate::evm::protocol::utils::uniswap::tick_list::TickListErrorKind::TicksExeeded => {
-                        SimulationError::InvalidInput("Ticks exceeded".to_string(), None)
-                    }
-                    _ => SimulationError::FatalError("Unknown tick list error".to_string()),
-                })?;
-
-            next_tick = next_tick.clamp(MIN_TICK, MAX_TICK);
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
-            // Stored sqrt price is lossy-compressed; when that creates a tiny directional
-            // anomaly, align to the tick price as long as the deviation stays within 0.01%.
-            if (zero_for_one && sqrt_price_next > state.sqrt_price) ||
-                (!zero_for_one && sqrt_price_next < state.sqrt_price)
-            {
-                let diff = if sqrt_price_next > state.sqrt_price {
-                    safe_sub_u256(sqrt_price_next, state.sqrt_price)?
-                } else {
-                    safe_sub_u256(state.sqrt_price, sqrt_price_next)?
-                };
-                if safe_mul_u256(diff, pow10_u256(4))? > state.sqrt_price {
-                    return Err(SimulationError::InvalidInput(
-                        "Sqrt price deviation too high".to_string(),
-                        None,
-                    ));
-                }
-                state.sqrt_price = sqrt_price_next;
-            }
-            let (sqrt_price_next, amount_in, amount_out, _fee_amount) =
-                swap_math::compute_swap_step(
-                    state.sqrt_price,
-                    FluidV2State::get_sqrt_ratio_target(
-                        sqrt_price_next,
-                        sqrt_price_limit,
-                        zero_for_one,
-                    ),
-                    state.liquidity,
-                    state.amount_remaining,
-                    0, // TODO: Only constant LP fee is currently supported here.
-                )?;
-
-            let step = StepComputation {
-                sqrt_price_start: state.sqrt_price,
-                tick_next: next_tick,
-                initialized,
-                sqrt_price_next,
-                amount_in,
-                amount_out,
-                fee_amount: U256::from(0u64),
-            };
-
-            state.sqrt_price = sqrt_price_next;
-            if exact_input {
-                let mut step_amount_out = step.amount_out;
-                let mut step_protocol_fee = U256::from(0u64);
-                let mut step_lp_fee = U256::from(0u64);
-
-                // In swap-in, both protocol fee and LP fee are taken from tokenOut,
-                // matching the contract's exact-input flow.
-                if step_amount_out > U256::from(0u64) && protocol_fee_pips > 0 {
-                    let numerator = safe_add_u256(
-                        safe_mul_u256(step_amount_out, U256::from(protocol_fee_pips))?,
-                        U256::from(1u64),
-                    )?;
-                    step_protocol_fee = safe_add_u256(
-                        safe_div_u256(numerator, U256::from(1_000_000u64))?,
-                        U256::from(1u64),
-                    )?;
-                }
-                if step_amount_out > step_protocol_fee {
-                    step_amount_out = safe_sub_u256(step_amount_out, step_protocol_fee)?;
-                } else {
-                    step_amount_out = U256::from(0u64);
-                }
-
-                if step_amount_out > U256::from(0u64) && constant_lp_fee_pips > 0 {
-                    let numerator = safe_add_u256(
-                        safe_mul_u256(step_amount_out, U256::from(constant_lp_fee_pips))?,
-                        U256::from(1u64),
-                    )?;
-                    step_lp_fee = safe_add_u256(
-                        safe_div_u256(numerator, U256::from(1_000_000u64))?,
-                        U256::from(1u64),
-                    )?;
-                }
-                if step_amount_out > step_lp_fee {
-                    step_amount_out = safe_sub_u256(step_amount_out, step_lp_fee)?;
-                } else {
-                    step_amount_out = U256::from(0u64);
-                }
-
-                if step_lp_fee > U256::from(0u64) && protocol_cut_fee > 0 {
-                    let numerator = safe_add_u256(
-                        safe_mul_u256(step_lp_fee, U256::from(protocol_cut_fee))?,
-                        U256::from(1u64),
-                    )?;
-                    let step_protocol_cut = safe_add_u256(
-                        safe_div_u256(numerator, U256::from(100u64))?,
-                        U256::from(1u64),
-                    )?;
-                    if step_lp_fee > step_protocol_cut {
-                        step_lp_fee = safe_sub_u256(step_lp_fee, step_protocol_cut)?;
-                        step_protocol_fee = safe_add_u256(step_protocol_fee, step_protocol_cut)?;
-                    } else {
-                        step_protocol_fee = safe_add_u256(step_protocol_fee, step_lp_fee)?;
-                        step_lp_fee = U256::from(0u64);
-                    }
-                }
-
-                state.amount_remaining -=
-                    I256::checked_from_sign_and_abs(Sign::Positive, step.amount_in).unwrap();
-                state.amount_calculated -=
-                    I256::checked_from_sign_and_abs(Sign::Positive, step_amount_out).unwrap();
-
-                amount_out_raw = safe_add_u256(amount_out_raw, step_amount_out)?;
-                protocol_fee_accrued_raw =
-                    safe_add_u256(protocol_fee_accrued_raw, step_protocol_fee)?;
-                lp_fee_accrued_raw = safe_add_u256(lp_fee_accrued_raw, step_lp_fee)?;
-            } else {
-                // This branch mirrors the exact-output math shape from the shared Uniswap
-                // helper, but the public simulator currently exposes only exact-input quotes.
-                let amount_in_with_lp = safe_div_u256(
-                    safe_mul_u256(step.amount_in, U256::from(1_000_000u64))?,
-                    safe_sub_u256(U256::from(1_000_000u64), U256::from(constant_lp_fee_pips))?,
-                )?;
-                let amount_in_with_fees = safe_div_u256(
-                    safe_mul_u256(amount_in_with_lp, U256::from(1_000_000u64))?,
-                    safe_sub_u256(U256::from(1_000_000u64), U256::from(protocol_fee_pips))?,
-                )?;
-
-                state.amount_remaining +=
-                    I256::checked_from_sign_and_abs(Sign::Positive, step.amount_out).unwrap();
-                state.amount_calculated +=
-                    I256::checked_from_sign_and_abs(Sign::Positive, amount_in_with_fees).unwrap();
-            }
-
-            // TODO: Update `feeGrowthGlobal` and per-tick `feeGrowthOutside`.
-
-            // If we reached the next price target, apply tick crossing updates.
-            if state.sqrt_price == step.sqrt_price_next {
-                if step.initialized {
-                    let liquidity_raw = ticks
-                        .get_tick(step.tick_next)
-                        .unwrap()
-                        .net_liquidity;
-                    let liquidity_net = if zero_for_one { -liquidity_raw } else { liquidity_raw };
-                    state.liquidity =
-                        liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;
-                    cross_init_tick_loops += 1;
-
-                    if active_liquidity_start == 0 &&
-                        !sqrt_price_start_changed &&
-                        state.liquidity > 0
-                    {
-                        sqrt_price_start = state.sqrt_price;
-                        sqrt_price_start_changed = true;
-                    }
-                }
-                state.tick = if zero_for_one { step.tick_next - 1 } else { step.tick_next };
-            } else if state.sqrt_price != step.sqrt_price_start {
-                state.tick = get_tick_at_sqrt_ratio(state.sqrt_price)?;
-            }
-        }
-
-        verify_sqrt_price_change_limits(sqrt_price_start, state.sqrt_price)?;
-        // TODO: For `fee_version == 1`, update dynamic-fee variables from final price impact.
-
-        let gas_used = U256::from(GAS_BASE) +
-            U256::from(GAS_CROSS_INIT_TICK.saturating_mul(cross_init_tick_loops));
-
-        Ok(SwapInInternalResult {
-            amount_out_raw_adjusted: amount_out_raw,
-            amount_remaining: state.amount_remaining,
-            sqrt_price: state.sqrt_price,
-            liquidity: state.liquidity,
-            tick: state.tick,
-            gas_used,
-        })
-    }
-
-    fn get_sqrt_ratio_target(
-        sqrt_price_next: U256,
-        sqrt_price_limit: U256,
-        zero_for_one: bool,
-    ) -> U256 {
-        let cond = if zero_for_one {
-            sqrt_price_next < sqrt_price_limit
-        } else {
-            sqrt_price_next > sqrt_price_limit
-        };
-        if cond {
-            sqrt_price_limit
-        } else {
-            sqrt_price_next
-        }
-    }
-
-    fn prepare_swap_in(
-        &self,
-        amount_in: U256,
-        token_in: &Token,
-        token_out: &Token,
-    ) -> Result<SwapInPrepared, SimulationError> {
-        let zero_for_one = if token_in.address == self.token0.address {
-            true
-        } else if token_in.address == self.token1.address {
-            false
-        } else {
-            return Err(SimulationError::InvalidInput(
-                "Token in not part of pool".to_string(),
-                None,
-            ));
-        };
-
-        if !(token_out.address == self.token0.address || token_out.address == self.token1.address) {
-            return Err(SimulationError::InvalidInput(
-                "Token out not part of pool".to_string(),
-                None,
-            ));
-        }
-
-        if amount_in < pow10_u256(4) || amount_in > max_x(128) {
-            return Err(SimulationError::InvalidInput("Amount out of limits".to_string(), None));
-        }
-
-        let (token_in_decimals, token_out_decimals) = if zero_for_one {
-            (self.dex_variables2.token0_decimals, self.dex_variables2.token1_decimals)
-        } else {
-            (self.dex_variables2.token1_decimals, self.dex_variables2.token0_decimals)
-        };
-
-        let (token_in_num_precision, token_in_den_precision) =
-            calculate_precisions(token_in_decimals);
-        let (token_out_num_precision, token_out_den_precision) =
-            calculate_precisions(token_out_decimals);
-
-        let (token_in_exchange_price, token_out_exchange_price) = if zero_for_one {
-            match self.dex_type {
-                DexType::D3 => {
-                    (self.token0_supply_exchange_price, self.token1_supply_exchange_price)
-                }
-                DexType::D4 => {
-                    (self.token0_borrow_exchange_price, self.token1_borrow_exchange_price)
-                }
-            }
-        } else {
-            match self.dex_type {
-                DexType::D3 => {
-                    (self.token1_supply_exchange_price, self.token0_supply_exchange_price)
-                }
-                DexType::D4 => {
-                    (self.token1_borrow_exchange_price, self.token0_borrow_exchange_price)
-                }
-            }
-        };
-
-        // Convert token amount into the pool's raw-adjusted accounting unit using the
-        // exchange price, then round down so the simulator stays on the protocol side.
-        let amount_in_raw_adjusted = amount_to_adjusted(
-            amount_in,
-            token_in_num_precision,
-            token_in_den_precision,
-            token_in_exchange_price,
-        )?;
-        let amount_in_raw_adjusted = round_down_raw(amount_in_raw_adjusted);
-        if amount_in_raw_adjusted < pow10_u256(4) || amount_in_raw_adjusted > max_x(86) {
-            return Err(SimulationError::InvalidInput("Adjusted amount limits".to_string(), None));
-        }
-
-        Ok(SwapInPrepared {
-            zero_for_one,
-            amount_in_raw_adjusted,
-            vars: SwapInCalculatedVars {
-                token_out_num_precision,
-                token_out_den_precision,
-                token_out_exchange_price,
-            },
-        })
-    }
-
-    fn execute_swap_in_internal(
-        &self,
-        prepared: &SwapInPrepared,
-    ) -> Result<SwapInInternalResult, SimulationError> {
-        if self.tick_spacing <= 0 {
-            return Err(SimulationError::FatalError("Tick spacing must be positive".to_string()));
-        }
-
-        let tick_list = TickList::from(self.tick_spacing as u16, self.ticks.clone())?;
-        let (tick_min, tick_max) = match (self.ticks.first(), self.ticks.last()) {
-            (Some(min), Some(max)) => (min.index, max.index),
-            _ => return Err(SimulationError::FatalError("No ticks available".to_string())),
-        };
-        // Like the Solidity module, push the limit one unit inside the boundary tick so the
-        // swap can consume liquidity up to the last reachable initialized range.
-        let tick_limit = if prepared.zero_for_one { tick_min } else { tick_max };
-        let mut sqrt_price_limit = get_sqrt_ratio_at_tick(tick_limit)?;
-        sqrt_price_limit = if prepared.zero_for_one {
-            safe_add_u256(sqrt_price_limit, U256::from(1u64))?
-        } else {
-            safe_sub_u256(sqrt_price_limit, U256::from(1u64))?
-        };
-
-        let amount_specified =
-            I256::checked_from_sign_and_abs(Sign::Positive, prepared.amount_in_raw_adjusted)
+            *reserve_out = reserve_out
+                .checked_sub(outcome.amount_out_raw)
                 .ok_or_else(|| {
-                    SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
+                    SimulationError::InvalidInput(
+                        "Fluid v2 swap pays out more than the pool's token reserves".to_string(),
+                        None,
+                    )
                 })?;
+        }
 
-        let (protocol_fee_pips, lp_fee_pips) = if prepared.zero_for_one {
-            (
-                self.dex_variables2
-                    .protocol_fee_0_to_1
-                    .to::<u32>(),
-                self.dex_variables2.lp_fee.to::<u32>(),
-            )
-        } else {
-            (
-                self.dex_variables2
-                    .protocol_fee_1_to_0
-                    .to::<u32>(),
-                self.dex_variables2.lp_fee.to::<u32>(),
-            )
-        };
-
-        self.swap_in(
-            &tick_list,
-            prepared.zero_for_one,
-            amount_specified,
-            sqrt_price_limit,
-            protocol_fee_pips,
-            lp_fee_pips,
-            self.dex_variables2
-                .active_liquidity
-                .to::<u128>(),
-            self.dex_variables.current_tick,
-            decode_sqrt_price(
-                self.dex_variables
-                    .current_sqrt_price_x96,
-                prepared.zero_for_one,
-            ),
-        )
+        let liquidity_out =
+            if zero_for_one { &mut state.token1_liquidity } else { &mut state.token0_liquidity };
+        let paid = safe_add_u256(amount_out, fee_out)?;
+        liquidity_out.float_balance = liquidity_out
+            .float_balance
+            .saturating_sub(amount_out);
+        liquidity_out.available_for_swap_out_withdraw = liquidity_out
+            .available_for_swap_out_withdraw
+            .saturating_sub(amount_out);
+        liquidity_out.available_for_swap_out_borrow = liquidity_out
+            .available_for_swap_out_borrow
+            .saturating_sub(paid);
+        Ok(state)
     }
 
-    fn effective_fee(&self, zero_for_one: bool) -> f64 {
-        let lp_fee_pips = if self.dynamic_fee {
-            // TODO: Dynamic fee is not fully supported yet.
-            self.dex_variables2.min_fee.to::<u32>()
-        } else {
-            self.dex_variables2.lp_fee.to::<u32>()
-        };
-        let protocol_fee_pips = if zero_for_one {
-            self.dex_variables2
-                .protocol_fee_0_to_1
-                .to::<u32>()
-        } else {
-            self.dex_variables2
-                .protocol_fee_1_to_0
-                .to::<u32>()
-        };
-
-        let protocol_fee = protocol_fee_pips as f64 / 1_000_000.0;
-        let lp_fee = lp_fee_pips as f64 / 1_000_000.0;
-        1.0 - ((1.0 - protocol_fee) * (1.0 - lp_fee))
+    /// Applies the pool attributes of `delta`: packed pool variables, reserves and ticks.
+    fn apply_attributes(&mut self, delta: &ProtocolStateDelta) -> Result<(), TransitionError> {
+        let attributes = &delta.updated_attributes;
+        if let Some(value) = attributes.get("dex_variables") {
+            self.dex_variables = DexVariables::from_packed(U256::from_be_slice(value));
+        }
+        if let Some(value) = attributes.get("dex_variables2") {
+            self.dex_variables2 = DexVariables2::from_packed(U256::from_be_slice(value));
+        }
+        if let Some(value) = attributes.get("token0/token_reserves") {
+            self.token0_reserve = U256::from_be_slice(value);
+        }
+        if let Some(value) = attributes.get("token1/token_reserves") {
+            self.token1_reserve = U256::from_be_slice(value);
+        }
+        for (key, value) in attributes {
+            let Some(tick) = parse_tick_key(key)? else {
+                continue;
+            };
+            let net_liquidity =
+                decode_net_liquidity(value).map_err(TransitionError::DecodeError)?;
+            if net_liquidity == 0 {
+                self.ticks.remove(&tick);
+            } else {
+                self.ticks.insert(tick, net_liquidity);
+            }
+        }
+        for key in &delta.deleted_attributes {
+            if let Some(tick) = parse_tick_key(key)? {
+                self.ticks.remove(&tick);
+            }
+        }
+        Ok(())
     }
 }
 
 impl DexVariables {
     pub fn from_packed(value: U256) -> Self {
-        let sign_is_positive = (value & U256::from(1u64)) == U256::from(1u64);
-        let abs_tick = ((value >> 1u32) & u256_mask(19)).to::<u32>();
-        let current_tick = if abs_tick == 0 {
-            0
-        } else if sign_is_positive {
-            abs_tick as i32
-        } else {
-            -(abs_tick as i32)
-        };
-
-        let current_sqrt_price_x96 = (value >> 20u32) & u256_mask(72);
-        // Reserved for future support of packed fee-growth fields:
-        // let fee_growth_global0_x102 = (value >> 92u32) & u256_mask(82);
-        // let fee_growth_global1_x102 = (value >> 174u32) & u256_mask(82);
-
+        let sign_is_positive = value.bit(0);
+        let abs_tick = bits(value, 1, 19).to::<i32>();
         Self {
-            current_tick,
-            current_sqrt_price_x96,
-            // fee_growth_global0_x102,
-            // fee_growth_global1_x102,
+            current_tick: if sign_is_positive { abs_tick } else { -abs_tick },
+            current_sqrt_price_x96: bits(value, 20, 72),
         }
     }
 }
 
 impl DexVariables2 {
     pub fn from_packed(value: U256) -> Self {
-        let protocol_fee_0_to_1 = value & u256_mask(12);
-        let protocol_fee_1_to_0 = (value >> 12u32) & u256_mask(12);
-        let protocol_cut_fee = (value >> 24u32) & u256_mask(6);
-
-        let token0_decimals_raw = ((value >> 30u32) & u256_mask(4)).to::<u8>();
-        let token1_decimals_raw = ((value >> 34u32) & u256_mask(4)).to::<u8>();
-        let token0_decimals = if token0_decimals_raw == 15 { 18 } else { token0_decimals_raw };
-        let token1_decimals = if token1_decimals_raw == 15 { 18 } else { token1_decimals_raw };
-
-        let active_liquidity = (value >> 38u32) & u256_mask(102);
-        let pool_accounting_flag = ((value >> 140u32) & U256::from(1u64)) == U256::from(1u64);
-        let fetch_dynamic_fee_flag = ((value >> 141u32) & U256::from(1u64)) == U256::from(1u64);
-        let fee_version = (value >> 152u32) & u256_mask(4);
-
-        // Bits [156:] are interpreted differently based on fee_version.
-        // fee_version 0: [156:171] = lp_fee (16 bits), remaining bits unused.
-        // fee_version 1+: [156:167] = max_decay_time (12 bits),
-        //   [168:175] = price_impact_to_fee_division_factor, [176:191] = min_fee,
-        //   [192:207] = max_fee, [208] = net_price_impact sign, [209:228] = magnitude,
-        //   [229:243] = last_update_timestamp, [244:255] = decay_time_remaining.
-        let (
-            lp_fee,
-            max_decay_time,
-            price_impact_to_fee_division_factor,
-            min_fee,
-            max_fee,
-            net_price_impact,
-            last_update_timestamp,
-            decay_time_remaining,
-        ) = if fee_version == U256::ZERO {
-            let lp_fee = (value >> 156u32) & u256_mask(16);
-            (lp_fee, U256::ZERO, U256::ZERO, U256::ZERO, U256::ZERO, 0i64, U256::ZERO, U256::ZERO)
-        } else {
-            let max_decay_time = (value >> 156u32) & u256_mask(12);
-            let price_impact_to_fee_division_factor = (value >> 168u32) & u256_mask(8);
-            let min_fee = (value >> 176u32) & u256_mask(16);
-            let max_fee = (value >> 192u32) & u256_mask(16);
-
-            let net_price_impact_sign = ((value >> 208u32) & U256::from(1u64)) == U256::from(1u64);
-            let net_price_impact_abs = ((value >> 209u32) & u256_mask(20)).to::<u32>() as i64;
-            let net_price_impact = if net_price_impact_abs == 0 {
-                0
-            } else if net_price_impact_sign {
-                net_price_impact_abs
-            } else {
-                -net_price_impact_abs
-            };
-
-            let last_update_timestamp = (value >> 229u32) & u256_mask(15);
-            let decay_time_remaining = (value >> 244u32) & u256_mask(12);
-
-            (
-                U256::ZERO,
-                max_decay_time,
-                price_impact_to_fee_division_factor,
-                min_fee,
-                max_fee,
-                net_price_impact,
-                last_update_timestamp,
-                decay_time_remaining,
-            )
+        let decimals = |offset| match bits(value, offset, 4).to::<u8>() {
+            // 4 bits cannot hold 18, so 15 stands for it.
+            15 => 18,
+            decimals => decimals,
         };
-
         Self {
-            protocol_fee_0_to_1,
-            protocol_fee_1_to_0,
-            protocol_cut_fee,
-            token0_decimals,
-            token1_decimals,
-            active_liquidity,
-            pool_accounting_flag,
-            fetch_dynamic_fee_flag,
-            fee_version,
-            lp_fee,
-            max_decay_time,
-            price_impact_to_fee_division_factor,
-            min_fee,
-            max_fee,
-            net_price_impact,
-            last_update_timestamp,
-            decay_time_remaining,
+            protocol_fee_0_to_1: bits(value, 0, 12).to(),
+            protocol_fee_1_to_0: bits(value, 12, 12).to(),
+            protocol_cut_fee: bits(value, 24, 6).to(),
+            token0_decimals: decimals(30),
+            token1_decimals: decimals(34),
+            active_liquidity: bits(value, 38, 102).to(),
+            per_pool_accounting_stopped: value.bit(140),
+            fetch_dynamic_fee: value.bit(141),
+            fee_version: bits(value, 152, 4).to(),
+            lp_fee: bits(value, 156, 16).to(),
         }
     }
 }
 
-fn u256_mask(bits: u32) -> U256 {
-    if bits == 0 {
-        return U256::from(0u64);
-    }
-    (U256::from(1u64) << bits) - U256::from(1u64)
-}
-
-fn pow10_u256(exp: u8) -> U256 {
-    U256::from(10u64).pow(U256::from(exp as u64))
-}
-
-fn calculate_precisions(decimals: u8) -> (U256, U256) {
-    if decimals > TOKENS_DECIMALS_PRECISION {
-        (U256::from(1u64), pow10_u256(decimals - TOKENS_DECIMALS_PRECISION))
-    } else {
-        (pow10_u256(TOKENS_DECIMALS_PRECISION - decimals), U256::from(1u64))
-    }
-}
-
-fn amount_to_adjusted(
-    amount: U256,
-    token_numerator_precision: U256,
-    token_denominator_precision: U256,
+/// Converts between token amounts and the pool's raw-adjusted amounts: 9 decimals, divided by
+/// the Liquidity exchange price.
+struct Normalization {
+    numerator: U256,
+    denominator: U256,
     exchange_price: U256,
-) -> Result<U256, SimulationError> {
-    // Matches the contract's conversion between external token units and the
-    // internal raw-adjusted accounting unit (1e12 exchange-price precision).
-    let scaled = safe_mul_u256(amount, pow10_u256(12))?;
-    let scaled = safe_mul_u256(scaled, token_numerator_precision)?;
-    let denominator = safe_mul_u256(exchange_price, token_denominator_precision)?;
-    safe_div_u256(scaled, denominator)
 }
 
-fn adjusted_to_amount(
-    adjusted: U256,
-    token_numerator_precision: U256,
-    token_denominator_precision: U256,
-    exchange_price: U256,
-) -> Result<U256, SimulationError> {
-    let scaled = safe_mul_u256(adjusted, token_denominator_precision)?;
-    let scaled = safe_mul_u256(scaled, exchange_price)?;
-    let denominator = safe_mul_u256(token_numerator_precision, pow10_u256(12))?;
-    safe_div_u256(scaled, denominator)
-}
-
-fn round_down_raw(amount: U256) -> U256 {
-    // Same conservative round-down used by swapIn entrypoint:
-    // amount * (ROUNDING_FACTOR - 1) / ROUNDING_FACTOR, then subtract 1 if non-zero.
-    let scaled = amount.saturating_mul(U256::from(ROUNDING_FACTOR_MINUS_ONE));
-    let mut out = if ROUNDING_FACTOR == 0 { amount } else { scaled / U256::from(ROUNDING_FACTOR) };
-    if out > U256::from(0u64) {
-        out = out.saturating_sub(U256::from(1u64));
+impl Normalization {
+    fn new(decimals: u8, exchange_price: U256) -> Self {
+        let (numerator, denominator) = if decimals > TOKENS_DECIMALS_PRECISION {
+            (U256::from(1u64), ten_pow(decimals - TOKENS_DECIMALS_PRECISION))
+        } else {
+            (ten_pow(TOKENS_DECIMALS_PRECISION - decimals), U256::from(1u64))
+        };
+        Self { numerator, denominator, exchange_price }
     }
-    out
-}
 
-// `sqrtPriceX96` is rounded down when stored.
-// For a 1->0 swap (price-increasing direction), this may slightly favor the swapper.
-// To keep the protocol conservative, round up by adding 1 to the coefficient when needed.
-fn decode_sqrt_price(raw: U256, swap0_to_1: bool) -> U256 {
-    let mut coeff = raw >> DEFAULT_EXPONENT_SIZE;
-    let exp = (raw & U256::from(DEFAULT_EXPONENT_MASK)).to::<u32>();
-    if exp > 0 && !swap0_to_1 {
-        coeff += U256::from(1u64)
+    /// The raw-adjusted amount credited for `amount` paid in, rounded down for the dex.
+    fn to_raw_round_down(&self, amount: U256) -> Result<U256, SimulationError> {
+        let raw = safe_div_u256(
+            safe_mul_u256(
+                safe_mul_u256(amount, U256::from(EXCHANGE_PRICES_PRECISION))?,
+                self.numerator,
+            )?,
+            safe_mul_u256(self.exchange_price, self.denominator)?,
+        )?;
+        Ok(round_down(raw))
     }
-    coeff << exp
-}
 
-fn encode_big_number(value: U256, coeff_bits: u32) -> U256 {
-    if value.is_zero() {
-        return U256::from(0u64);
+    /// The token amount paid out for `raw`, rounded down for the dex.
+    fn to_amount_round_down(&self, raw: U256) -> Result<U256, SimulationError> {
+        let amount = safe_div_u256(
+            safe_mul_u256(safe_mul_u256(round_down(raw), self.denominator)?, self.exchange_price)?,
+            safe_mul_u256(self.numerator, U256::from(EXCHANGE_PRICES_PRECISION))?,
+        )?;
+        Ok(amount.saturating_sub(U256::from(1u64)))
     }
-    let max_coeff = (U256::from(1u64) << coeff_bits) - U256::from(1u64);
-    let mut coeff = value;
-    let mut exp: u32 = 0;
-    while coeff > max_coeff && exp < 255 {
-        coeff >>= 1u32;
-        exp += 1;
+
+    /// The token amount whose raw-adjusted value is at least `raw`.
+    fn to_amount_round_up(&self, raw: U256) -> Result<U256, SimulationError> {
+        let amount = safe_mul_u256(safe_mul_u256(raw, self.exchange_price)?, self.denominator)?;
+        let precision = safe_mul_u256(U256::from(EXCHANGE_PRICES_PRECISION), self.numerator)?;
+        Ok(amount.div_ceil(precision))
     }
-    (coeff << DEFAULT_EXPONENT_SIZE) | U256::from(exp as u64)
 }
 
-fn max_x(bits: u32) -> U256 {
-    (U256::from(1u64) << bits) - U256::from(1u64)
+/// The dex's rounding idiom: scale by `(1e9 - 1) / 1e9`, then subtract one when non-zero.
+fn round_down(amount: U256) -> U256 {
+    let scaled =
+        amount.saturating_mul(U256::from(ROUNDING_FACTOR - 1)) / U256::from(ROUNDING_FACTOR);
+    scaled.saturating_sub(U256::from(1u64))
 }
 
-fn verify_sqrt_price_change_limits(
-    sqrt_price_start: U256,
-    sqrt_price_end: U256,
-) -> Result<(), SimulationError> {
-    let diff = if sqrt_price_end > sqrt_price_start {
-        safe_sub_u256(sqrt_price_end, sqrt_price_start)?
-    } else {
-        safe_sub_u256(sqrt_price_start, sqrt_price_end)?
-    };
-    let percentage_change = safe_div_u256(safe_mul_u256(diff, pow10_u256(10))?, sqrt_price_start)?;
-    if percentage_change > U256::from(MAX_SQRT_PRICE_CHANGE_PERCENTAGE) ||
-        percentage_change < U256::from(MIN_SQRT_PRICE_CHANGE_PERCENTAGE)
-    {
+fn verify_amount(amount: U256) -> Result<(), SimulationError> {
+    if amount < U256::from(MIN_AMOUNT) || amount >> MAX_AMOUNT_BITS != U256::ZERO {
         return Err(SimulationError::InvalidInput(
-            "Sqrt price change out of bounds".to_string(),
+            format!("Fluid v2 amount {amount} is outside [1e4, 2^128 - 1]"),
             None,
         ));
     }
     Ok(())
 }
 
+fn verify_adjusted_amount(amount: U256) -> Result<(), SimulationError> {
+    if amount < U256::from(MIN_AMOUNT) || amount >> MAX_ADJUSTED_AMOUNT_BITS != U256::ZERO {
+        return Err(SimulationError::InvalidInput(
+            format!("Fluid v2 normalized amount {amount} is outside [1e4, 2^86 - 1]"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn liquidity_rejects(leg: &str, token: &Bytes) -> SimulationError {
+    SimulationError::RecoverableError(format!("Fluid Liquidity has {leg} of {token} paused"))
+}
+
+fn payout_exceeded(amount: U256, cap: U256) -> SimulationError {
+    SimulationError::InvalidInput(
+        format!("Fluid v2 payout {amount} exceeds what the dex can pay out ({cap})"),
+        None,
+    )
+}
+
+/// The stored sqrt price is rounded down. A price-increasing (1 to 0) swap rounds it up, so the
+/// dex never quotes the swapper a better price than it holds.
+fn decode_sqrt_price(packed: U256, zero_for_one: bool) -> U256 {
+    let exponent = bits(packed, 0, SQRT_PRICE_EXPONENT_BITS);
+    let mut coefficient = packed >> SQRT_PRICE_EXPONENT_BITS;
+    if !exponent.is_zero() && !zero_for_one {
+        coefficient += U256::from(1u64);
+    }
+    coefficient << exponent.to::<usize>()
+}
+
+/// `BigMathMinified.toBigNumber(sqrtPrice, 64, 8, ROUND_DOWN)`.
+fn encode_sqrt_price(sqrt_price_x96: U256) -> U256 {
+    let exponent = sqrt_price_x96
+        .bit_len()
+        .saturating_sub(SQRT_PRICE_COEFFICIENT_BITS);
+    ((sqrt_price_x96 >> exponent) << SQRT_PRICE_EXPONENT_BITS) | U256::from(exponent)
+}
+
+fn bits(value: U256, offset: usize, width: usize) -> U256 {
+    (value >> offset) & ((U256::from(1u64) << width) - U256::from(1u64))
+}
+
+fn ten_pow(exponent: u8) -> U256 {
+    U256::from(10u64).pow(U256::from(exponent))
+}
+
+fn to_fluid_token(token: &Bytes) -> alloy::primitives::Address {
+    if token.iter().all(|byte| *byte == 0) {
+        alloy::primitives::Address::from(FLUID_NATIVE_TOKEN)
+    } else {
+        alloy::primitives::Address::from_slice(token)
+    }
+}
+
+/// The tick of a `ticks/{tick}/net-liquidity` attribute key, or `None` for other keys.
+pub(super) fn parse_tick_key(key: &str) -> Result<Option<i32>, TransitionError> {
+    let Some(rest) = key.strip_prefix("ticks/") else {
+        return Ok(None);
+    };
+    let tick = rest
+        .split('/')
+        .next()
+        .and_then(|tick| tick.parse::<i32>().ok())
+        .ok_or_else(|| {
+            TransitionError::DecodeError(format!("Malformed Fluid v2 tick attribute {key}"))
+        })?;
+    Ok(Some(tick))
+}
+
+/// Net liquidity is written as a signed big-endian integer of at most 16 bytes.
+pub(super) fn decode_net_liquidity(value: &Bytes) -> Result<i128, String> {
+    if value.is_empty() {
+        return Ok(0);
+    }
+    if value.len() > 16 {
+        return Err(format!("Fluid v2 tick net liquidity {value} exceeds 16 bytes"));
+    }
+    let fill = if value[0] & 0x80 != 0 { 0xff } else { 0x00 };
+    let mut word = [fill; 16];
+    word[16 - value.len()..].copy_from_slice(value);
+    Ok(i128::from_be_bytes(word))
+}
+
 #[typetag::serde]
 impl ProtocolSim for FluidV2State {
+    /// The fee of a token0 to token1 swap: the protocol fee, then the LP fee on the rest.
     fn fee(&self) -> f64 {
-        // Directional fee selection is not exposed by the trait; default to token0 -> token1.
-        self.effective_fee(true)
+        let protocol_fee = self.dex_variables2.protocol_fee_0_to_1 as f64 / 1e6;
+        let lp_fee = self.dex_variables2.lp_fee as f64 / 1e6;
+        1.0 - (1.0 - protocol_fee) * (1.0 - lp_fee)
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        let zero_for_one =
-            if base.address == self.token0.address && quote.address == self.token1.address {
-                true
-            } else if base.address == self.token1.address && quote.address == self.token0.address {
-                false
-            } else {
-                return Err(SimulationError::InvalidInput(
-                    "Token pair not part of pool".to_string(),
-                    None,
-                ));
-            };
-
-        let (token_in_decimals, token_out_decimals) = if zero_for_one {
-            (self.dex_variables2.token0_decimals, self.dex_variables2.token1_decimals)
-        } else {
-            (self.dex_variables2.token1_decimals, self.dex_variables2.token0_decimals)
-        };
-        let (token_in_num_precision, token_in_den_precision) =
-            calculate_precisions(token_in_decimals);
-        let (token_out_num_precision, token_out_den_precision) =
-            calculate_precisions(token_out_decimals);
-
-        let (exchange_price_in, exchange_price_out) = if zero_for_one {
-            match self.dex_type {
-                DexType::D3 => {
-                    (self.token0_supply_exchange_price, self.token1_supply_exchange_price)
-                }
-                DexType::D4 => {
-                    (self.token0_borrow_exchange_price, self.token1_borrow_exchange_price)
-                }
-            }
-        } else {
-            match self.dex_type {
-                DexType::D3 => {
-                    (self.token1_supply_exchange_price, self.token0_supply_exchange_price)
-                }
-                DexType::D4 => {
-                    (self.token1_borrow_exchange_price, self.token0_borrow_exchange_price)
-                }
-            }
-        };
-
-        let sqrt_price = decode_sqrt_price(
+        let zero_for_one = self.zero_for_one(&base.address, &quote.address)?;
+        let sqrt_price = u256_to_f64(decode_sqrt_price(
             self.dex_variables
                 .current_sqrt_price_x96,
             zero_for_one,
-        );
-        let adjusted_price = if zero_for_one {
-            sqrt_price_q96_to_f64(sqrt_price, token_in_decimals as u32, token_out_decimals as u32)?
+        ))? / 2f64.powi(96);
+        let price_0_in_1 = sqrt_price * sqrt_price;
+        // Raw-adjusted amounts all carry 9 decimals, so only the exchange prices remain.
+        let raw_price = if zero_for_one { price_0_in_1 } else { 1.0 / price_0_in_1 };
+        let exchange_price_ratio = u256_to_f64(self.exchange_price(!zero_for_one)?)? /
+            u256_to_f64(self.exchange_price(zero_for_one)?)?;
+        let protocol_fee = if zero_for_one {
+            self.dex_variables2.protocol_fee_0_to_1
         } else {
-            1.0f64 /
-                sqrt_price_q96_to_f64(
-                    sqrt_price,
-                    token_out_decimals as u32,
-                    token_in_decimals as u32,
-                )?
-        };
-
-        let scale_num = u256_to_f64(token_in_num_precision)? *
-            u256_to_f64(token_out_den_precision)? *
-            u256_to_f64(exchange_price_out)?;
-        let scale_den = u256_to_f64(exchange_price_in)? *
-            u256_to_f64(token_in_den_precision)? *
-            u256_to_f64(token_out_num_precision)?;
-        let price = adjusted_price * (scale_num / scale_den);
-
-        let effective_fee = self.effective_fee(zero_for_one);
-        Ok(add_fee_markup(price, effective_fee))
+            self.dex_variables2.protocol_fee_1_to_0
+        } as f64 /
+            1e6;
+        let lp_fee = self.dex_variables2.lp_fee as f64 / 1e6;
+        let fee = 1.0 - (1.0 - protocol_fee) * (1.0 - lp_fee);
+        Ok(add_fee_markup(raw_price * exchange_price_ratio, fee))
     }
 
     fn get_amount_out(
@@ -911,383 +658,60 @@ impl ProtocolSim for FluidV2State {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        if amount_in == BigUint::from(0u32) {
-            return Ok(GetAmountOutResult::new(
-                BigUint::from(0u32),
-                BigUint::from(0u32),
-                Box::new(self.clone()),
-            ));
-        }
-
-        if !self.controller.is_zero() {
-            return Err(SimulationError::InvalidInput(
-                "Controller pools are not supported".to_string(),
-                None,
-            ));
-        }
-
-        let amount_in_u256 = biguint_to_u256(&amount_in);
-        let prepared = self.prepare_swap_in(amount_in_u256, token_in, token_out)?;
-        let internal = self.execute_swap_in_internal(&prepared)?;
-
-        if internal.amount_remaining > I256::from_raw(U256::from(0u64)) {
-            return Err(SimulationError::InvalidInput("Next tick out of bounds".to_string(), None));
-        }
-
-        // Keep the internal raw output for state updates. The extra round-down below only
-        // affects the user-visible amount, just like the Solidity entrypoint.
-        let amount_out_raw_adjusted_for_state = internal.amount_out_raw_adjusted;
-        if amount_out_raw_adjusted_for_state < pow10_u256(4) ||
-            amount_out_raw_adjusted_for_state > max_x(86)
-        {
-            return Err(SimulationError::InvalidInput("Adjusted amount limits".to_string(), None));
-        }
-
-        let amount_out_raw_adjusted = round_down_raw(amount_out_raw_adjusted_for_state);
-        if amount_out_raw_adjusted < pow10_u256(4) || amount_out_raw_adjusted > max_x(86) {
-            return Err(SimulationError::InvalidInput("Adjusted amount limits".to_string(), None));
-        }
-        let mut amount_out = adjusted_to_amount(
-            amount_out_raw_adjusted,
-            prepared.vars.token_out_num_precision,
-            prepared.vars.token_out_den_precision,
-            prepared.vars.token_out_exchange_price,
-        )?;
-        if amount_out > U256::from(0u64) {
-            amount_out = safe_sub_u256(amount_out, U256::from(1u64))?;
-        }
-        if amount_out < pow10_u256(4) || amount_out > max_x(128) {
-            return Err(SimulationError::InvalidInput("Amount out of limits".to_string(), None));
-        }
-        let mut new_state = self.clone();
-        new_state.dex_variables.current_tick = internal.tick;
-        new_state
-            .dex_variables
-            .current_sqrt_price_x96 = encode_big_number(internal.sqrt_price, 64);
-        new_state
-            .dex_variables2
-            .active_liquidity = U256::from(internal.liquidity);
-
-        // Reserve accounting follows `_swapIn`: tokenIn reserve increases by the prepared
-        // raw-adjusted input and tokenOut reserve decreases by the internal raw output.
-        if !self.dex_variables2.pool_accounting_flag {
-            let reserve_limit = max_x(128);
-            if prepared.zero_for_one {
-                let reserve_in =
-                    safe_add_u256(self.token0_reserve, prepared.amount_in_raw_adjusted)?;
-                if reserve_in > reserve_limit {
-                    return Err(SimulationError::InvalidInput(
-                        "Token reserves overflow".to_string(),
-                        None,
-                    ));
-                }
-                if self.token1_reserve < amount_out_raw_adjusted_for_state {
-                    return Err(SimulationError::InvalidInput(
-                        "Token reserves underflow".to_string(),
-                        None,
-                    ));
-                }
-                new_state.token0_reserve = reserve_in;
-                new_state.token1_reserve =
-                    safe_sub_u256(self.token1_reserve, amount_out_raw_adjusted_for_state)?;
-            } else {
-                let reserve_in =
-                    safe_add_u256(self.token1_reserve, prepared.amount_in_raw_adjusted)?;
-                if reserve_in > reserve_limit {
-                    return Err(SimulationError::InvalidInput(
-                        "Token reserves overflow".to_string(),
-                        None,
-                    ));
-                }
-                if self.token0_reserve < amount_out_raw_adjusted_for_state {
-                    return Err(SimulationError::InvalidInput(
-                        "Token reserves underflow".to_string(),
-                        None,
-                    ));
-                }
-                new_state.token1_reserve = reserve_in;
-                new_state.token0_reserve =
-                    safe_sub_u256(self.token0_reserve, amount_out_raw_adjusted_for_state)?;
-            }
-        }
-
+        let zero_for_one = self.zero_for_one(&token_in.address, &token_out.address)?;
+        let quote = self.quote(biguint_to_u256(&amount_in), zero_for_one)?;
         Ok(GetAmountOutResult::new(
-            u256_to_biguint(amount_out),
-            u256_to_biguint(internal.gas_used),
-            Box::new(new_state),
+            u256_to_biguint(quote.amount_out),
+            BigUint::from(quote.gas),
+            Box::new(quote.state),
         ))
     }
 
+    /// The largest input whose swap the dex accepts, and its output.
+    ///
+    /// One swap may move the sqrt price at most 20%, so the input that reaches that price bounds
+    /// the search; payout caps, reserves and amount bounds can lower it further.
     fn get_limits(
         &self,
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        let zero_for_one = if sell_token == self.token0.address && buy_token == self.token1.address
-        {
-            true
-        } else if sell_token == self.token1.address && buy_token == self.token0.address {
-            false
-        } else {
-            return Err(SimulationError::InvalidInput(
-                "Token pair not part of pool".to_string(),
-                None,
-            ));
-        };
-
-        if self.ticks.is_empty() {
-            return Ok((BigUint::from(0u32), BigUint::from(0u32)));
-        }
-        if self.tick_spacing <= 0 {
-            return Err(SimulationError::FatalError("Tick spacing must be positive".to_string()));
-        }
-
-        let mut current_liquidity = self
-            .dex_variables2
-            .active_liquidity
-            .to::<u128>();
-        if current_liquidity == 0 {
-            return Ok((BigUint::from(0u32), BigUint::from(0u32)));
-        }
-
-        let ticks = TickList::from(self.tick_spacing as u16, self.ticks.clone())?;
-        let mut current_tick = self.dex_variables.current_tick;
-        let mut current_sqrt_price = decode_sqrt_price(
-            self.dex_variables
-                .current_sqrt_price_x96,
+        let zero_for_one = self.zero_for_one(&sell_token, &buy_token)?;
+        self.check_supported()?;
+        let pool = self.swap_pool(zero_for_one);
+        let price_limit = math::max_sqrt_price_move(pool.sqrt_price_x96, zero_for_one)?;
+        let walk = math::swap_in(
+            &pool,
             zero_for_one,
-        );
-
-        let mut total_amount_in_raw_adjusted = U256::ZERO;
-        let mut total_amount_out_raw_adjusted = U256::ZERO;
-
-        while let Ok((tick, initialized)) =
-            ticks.next_initialized_tick_within_one_word(current_tick, zero_for_one)
-        {
-            let next_tick = tick.clamp(MIN_TICK, MAX_TICK);
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
-
-            let (amount_in, amount_out) = if zero_for_one {
-                let amount0 = get_amount0_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    true,
-                )?;
-                let amount1 = get_amount1_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    false,
-                )?;
-                (amount0, amount1)
-            } else {
-                let amount0 = get_amount0_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    false,
-                )?;
-                let amount1 = get_amount1_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    true,
-                )?;
-                (amount1, amount0)
-            };
-
-            total_amount_in_raw_adjusted = safe_add_u256(total_amount_in_raw_adjusted, amount_in)?;
-            total_amount_out_raw_adjusted =
-                safe_add_u256(total_amount_out_raw_adjusted, amount_out)?;
-
-            if initialized {
-                let liquidity_raw = ticks
-                    .get_tick(next_tick)
-                    .unwrap()
-                    .net_liquidity;
-                let liquidity_delta = if zero_for_one { -liquidity_raw } else { liquidity_raw };
-                current_liquidity =
-                    liquidity_math::add_liquidity_delta(current_liquidity, liquidity_delta)?;
-                if current_liquidity == 0 {
-                    break;
-                }
-            }
-
-            current_tick = if zero_for_one { next_tick - 1 } else { next_tick };
-            current_sqrt_price = sqrt_price_next;
-        }
-
-        let (token_in_decimals, token_out_decimals) = if zero_for_one {
-            (self.dex_variables2.token0_decimals, self.dex_variables2.token1_decimals)
-        } else {
-            (self.dex_variables2.token1_decimals, self.dex_variables2.token0_decimals)
-        };
-        let (token_in_num_precision, token_in_den_precision) =
-            calculate_precisions(token_in_decimals);
-        let (token_out_num_precision, token_out_den_precision) =
-            calculate_precisions(token_out_decimals);
-
-        let (token_in_exchange_price, token_out_exchange_price) = if zero_for_one {
-            match self.dex_type {
-                DexType::D3 => {
-                    (self.token0_supply_exchange_price, self.token1_supply_exchange_price)
-                }
-                DexType::D4 => {
-                    (self.token0_borrow_exchange_price, self.token1_borrow_exchange_price)
-                }
-            }
-        } else {
-            match self.dex_type {
-                DexType::D3 => {
-                    (self.token1_supply_exchange_price, self.token0_supply_exchange_price)
-                }
-                DexType::D4 => {
-                    (self.token1_borrow_exchange_price, self.token0_borrow_exchange_price)
-                }
-            }
-        };
-
-        let amount_in_limit = adjusted_to_amount(
-            total_amount_in_raw_adjusted,
-            token_in_num_precision,
-            token_in_den_precision,
-            token_in_exchange_price,
+            U256::from(1u64) << MAX_ADJUSTED_AMOUNT_BITS,
+            Some(price_limit),
         )?;
-        let mut amount_out_limit = adjusted_to_amount(
-            total_amount_out_raw_adjusted,
-            token_out_num_precision,
-            token_out_den_precision,
-            token_out_exchange_price,
-        )?;
-
-        // Reserve caps apply only when pool accounting is disabled, matching the on-chain
-        // reserve checks inside `_swapIn` / `_swapOut`.
-        if !self.dex_variables2.pool_accounting_flag {
-            let reserve_out_raw_adjusted =
-                if zero_for_one { self.token1_reserve } else { self.token0_reserve };
-            let reserve_out_limit = adjusted_to_amount(
-                reserve_out_raw_adjusted,
-                token_out_num_precision,
-                token_out_den_precision,
-                token_out_exchange_price,
-            )?;
-            if amount_out_limit > reserve_out_limit {
-                amount_out_limit = reserve_out_limit;
-            }
-        }
-
-        Ok((u256_to_biguint(amount_in_limit), u256_to_biguint(amount_out_limit)))
+        let upper_bound: U256 =
+            Normalization::new(self.decimals(zero_for_one), self.exchange_price(zero_for_one)?)
+                .to_amount_round_up(walk.amount_in_raw)?;
+        let upper_bound = upper_bound.min((U256::from(1u64) << MAX_AMOUNT_BITS) - U256::from(1u64));
+        let delta: U256 = (upper_bound >> 20usize).max(U256::from(1u64));
+        let (amount_in, quote) =
+            find_max_valid_u256(upper_bound, delta, |amount| self.quote(amount, zero_for_one));
+        let amount_out = quote.map_or(U256::ZERO, |quote| quote.amount_out);
+        Ok((u256_to_biguint(amount_in), u256_to_biguint(amount_out)))
     }
 
+    /// Applies the pool attributes, then reads both tokens' Liquidity state again: a delta also
+    /// arrives when only the dex base state or Fluid Liquidity changed.
     fn delta_transition(
         &mut self,
         delta: ProtocolStateDelta,
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        if let Some(dex_variables) = delta
-            .updated_attributes
-            .get("dex_variables")
-        {
-            self.dex_variables = DexVariables::from_packed(U256::from_be_slice(dex_variables));
-        }
-        if let Some(dex_variables2) = delta
-            .updated_attributes
-            .get("dex_variables2")
-        {
-            self.dex_variables2 = DexVariables2::from_packed(U256::from_be_slice(dex_variables2));
-        }
-        if let Some(token0_reserve) = delta
-            .updated_attributes
-            .get("token0/token_reserves")
-        {
-            self.token0_reserve = U256::from_be_slice(token0_reserve);
-        }
-        if let Some(token1_reserve) = delta
-            .updated_attributes
-            .get("token1/token_reserves")
-        {
-            self.token1_reserve = U256::from_be_slice(token1_reserve);
-        }
-        if let Some(token0_borrow_exchange_price) = delta
-            .updated_attributes
-            .get("token0/borrow_exchange_price")
-        {
-            self.token0_borrow_exchange_price = U256::from_be_slice(token0_borrow_exchange_price);
-        }
-        if let Some(token0_supply_exchange_price) = delta
-            .updated_attributes
-            .get("token0/supply_exchange_price")
-        {
-            self.token0_supply_exchange_price = U256::from_be_slice(token0_supply_exchange_price);
-        }
-        if let Some(token1_borrow_exchange_price) = delta
-            .updated_attributes
-            .get("token1/borrow_exchange_price")
-        {
-            self.token1_borrow_exchange_price = U256::from_be_slice(token1_borrow_exchange_price);
-        }
-        if let Some(token1_supply_exchange_price) = delta
-            .updated_attributes
-            .get("token1/supply_exchange_price")
-        {
-            self.token1_supply_exchange_price = U256::from_be_slice(token1_supply_exchange_price);
-        }
-
-        for (key, value) in &delta.updated_attributes {
-            if key.starts_with("ticks/") {
-                let parts: Vec<&str> = key.split('/').collect();
-                let tick_index = parts
-                    .get(1)
-                    .ok_or_else(|| {
-                        TransitionError::DecodeError(format!(
-                            "Malformed tick key in updated attributes: {key}"
-                        ))
-                    })?
-                    .parse::<i32>()
-                    .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
-                let net_liquidity = i128::from(value.clone());
-
-                if let Some(existing) = self
-                    .ticks
-                    .iter_mut()
-                    .find(|tick| tick.index == tick_index)
-                {
-                    existing.net_liquidity = net_liquidity;
-                } else {
-                    let tick_info = crate::evm::protocol::utils::uniswap::tick_list::TickInfo::new(
-                        tick_index,
-                        net_liquidity,
-                    )
-                    .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
-                    self.ticks.push(tick_info);
-                }
-            }
-        }
-
-        for key in &delta.deleted_attributes {
-            if key.starts_with("ticks/") {
-                let parts: Vec<&str> = key.split('/').collect();
-                let tick_index = parts
-                    .get(1)
-                    .ok_or_else(|| {
-                        TransitionError::DecodeError(format!(
-                            "Malformed tick key in deleted attributes: {key}"
-                        ))
-                    })?
-                    .parse::<i32>()
-                    .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
-                self.ticks
-                    .retain(|tick| tick.index != tick_index);
-            }
-        }
-
-        self.ticks
-            .retain(|tick| tick.net_liquidity != 0);
-        self.ticks
-            .sort_by_key(|tick| tick.index);
-
+        self.apply_attributes(&delta)?;
+        let resolver = self.resolver.clone();
+        let (token0_liquidity, token1_liquidity) =
+            Self::fetch_token_liquidity(&resolver, &self.token0.address, &self.token1.address)
+                .map_err(TransitionError::SimulationError)?;
+        self.token0_liquidity = token0_liquidity;
+        self.token1_liquidity = token1_liquidity;
         Ok(())
     }
 
@@ -1304,364 +728,455 @@ impl ProtocolSim for FluidV2State {
     }
 
     fn eq(&self, other: &dyn ProtocolSim) -> bool {
-        if let Some(other_state) = other.as_any().downcast_ref::<Self>() {
-            self == other_state
-        } else {
-            false
-        }
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| self == other)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::{HashMap, HashSet},
-        str::FromStr,
-    };
+    use std::str::FromStr;
 
-    use tycho_common::{dto::ProtocolStateDelta, models::Chain};
+    use tycho_common::models::Chain;
 
     use super::*;
 
-    fn u256(value: &str) -> U256 {
-        U256::from_str(value).unwrap()
-    }
+    const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+    const USDT: &str = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
+    const ETH: &str = "0x0000000000000000000000000000000000000000";
+    const WBTC: &str = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599";
 
-    fn u256_bytes(value: &str) -> Bytes {
-        Bytes::from(u256(value).to_be_bytes_vec())
-    }
-
-    fn i128_bytes(value: &str) -> Bytes {
-        Bytes::from(
-            i128::from_str(value)
-                .unwrap()
-                .to_be_bytes()
-                .to_vec(),
-        )
-    }
-
-    fn test_token(address: &str, symbol: &'static str, decimals: u32) -> Token {
+    fn token(address: &str, symbol: &str, decimals: u32) -> Token {
         Token::new(
             &Bytes::from_str(address).unwrap(),
             symbol,
             decimals,
             0,
-            &[Some(10_000)],
+            &[Some(20_000)],
             Chain::Ethereum,
             100,
         )
     }
 
-    fn usdc() -> Token {
-        Token::new(
-            &Bytes::from_str("0x3c499c542cef5e3811e1192ce70d8cc03d5c3359").unwrap(),
-            "USDC",
-            6,
-            0,
-            &[Some(44_000)],
-            Chain::Ethereum,
-            10,
+    fn word(hex: &str) -> U256 {
+        U256::from_str(hex).unwrap()
+    }
+
+    fn liquidity(supply: u64, borrow: u64, withdraw: u128, borrow_cap: u128) -> TokenLiquidity {
+        TokenLiquidity {
+            supply_exchange_price: U256::from(supply),
+            borrow_exchange_price: U256::from(borrow),
+            float_balance: U256::ZERO,
+            available_for_swap_out_withdraw: U256::from(withdraw),
+            available_for_swap_out_borrow: U256::from(borrow_cap),
+            supply_paused: false,
+            withdraw_paused: false,
+            borrow_paused: false,
+            payback_paused: false,
+        }
+    }
+
+    // getTokenBaseState of each token on the DEX v2 resolver at block 26331500.
+    fn usdc_liquidity() -> TokenLiquidity {
+        liquidity(1_171_773_205_330, 1_236_471_341_746, 2_598_889_586, 49_535_212_464)
+    }
+
+    fn usdt_liquidity() -> TokenLiquidity {
+        liquidity(1_155_417_702_164, 1_221_235_462_704, 4_121_624_974, 49_412_138_012)
+    }
+
+    fn eth_liquidity() -> TokenLiquidity {
+        liquidity(
+            1_083_871_979_458,
+            1_110_897_496_976,
+            1_314_008_470_875_027_416,
+            20_652_539_020_550_496_307,
         )
     }
 
-    fn usdt0() -> Token {
-        Token::new(
-            &Bytes::from_str("0xc2132d05d31c914a87c6611c10748aeb04b58e8f").unwrap(),
-            "USDT0",
-            6,
-            0,
-            &[Some(44_000)],
-            Chain::Ethereum,
-            10,
-        )
+    fn wbtc_liquidity() -> TokenLiquidity {
+        liquidity(1_011_110_402_971, 1_028_121_493_647, 1_337_193, 61_112_725)
     }
 
-    fn test_state() -> FluidV2State {
+    #[allow(clippy::too_many_arguments)]
+    fn pool(
+        dex_type: DexType,
+        tokens: (Token, Token),
+        tick_spacing: i32,
+        dex_variables: &str,
+        dex_variables2: &str,
+        reserves: &str,
+        ticks: &[(i32, i128)],
+        liquidity: (TokenLiquidity, TokenLiquidity),
+    ) -> FluidV2State {
+        let reserves = word(reserves);
         FluidV2State::new(
-            Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap(),
-            test_token("0x0000000000000000000000000000000000000001", "TK0", 18),
-            test_token("0x0000000000000000000000000000000000000002", "TK1", 6),
+            dex_type,
+            tokens.0,
+            tokens.1,
+            Bytes::from_str("0x143c3927EaF0e50a59b1651C2Eb1e37FB62Aa2a9").unwrap(),
+            tick_spacing,
+            DexVariables::from_packed(word(dex_variables)),
+            DexVariables2::from_packed(word(dex_variables2)),
+            reserves & ((U256::from(1u64) << 128) - U256::from(1u64)),
+            reserves >> 128,
+            ticks.iter().copied().collect(),
+            liquidity.0,
+            liquidity.1,
+        )
+    }
+
+    // Pool storage at block 26331500.
+    fn d3_usdc_usdt() -> FluidV2State {
+        pool(
             DexType::D3,
-            3000,
-            false,
-            60,
-            Bytes::zero(20),
-            DexVariables {
-                current_tick: 100,
-                current_sqrt_price_x96: u256("79228162514264337593543950336"),
-            },
-            DexVariables2 {
-                protocol_fee_0_to_1: U256::from(50u64),
-                protocol_fee_1_to_0: U256::from(70u64),
-                protocol_cut_fee: U256::from(10u64),
-                token0_decimals: 18,
-                token1_decimals: 6,
-                active_liquidity: u256("1000000"),
-                pool_accounting_flag: false,
-                fetch_dynamic_fee_flag: false,
-                fee_version: U256::from(0u64),
-                lp_fee: U256::from(3000u64),
-                max_decay_time: U256::from(0u64),
-                price_impact_to_fee_division_factor: U256::from(1u64),
-                min_fee: U256::from(200u64),
-                max_fee: U256::from(5000u64),
-                net_price_impact: 0,
-                last_update_timestamp: U256::from(0u64),
-                decay_time_remaining: U256::from(0u64),
-            },
-            u256("500000000000000"),
-            u256("700000000000"),
-            u256("1000000000000"),
-            u256("1000000000000"),
-            u256("1000000000000"),
-            u256("1000000000000"),
-            vec![TickInfo::new(-120, 1500).unwrap(), TickInfo::new(120, -1500).unwrap()],
-        )
-    }
-
-    fn onchain_state() -> FluidV2State {
-        FluidV2State::new(
-            Bytes::from_str("0x8d1b5f8da63fa29b191672231d3845740a11fcbef6c76e077cfffe56cc27c707")
-                .unwrap(),
-            usdc(),
-            usdt0(),
-            DexType::D4,
-            100,
-            false,
+            (token(USDC, "USDC", 6), token(USDT, "USDT", 6)),
             1,
-            Bytes::zero(20),
-            DexVariables {
-                current_tick: 20,
-                current_sqrt_price_x96: u256("2363625190206393341985"),
-            },
-            DexVariables2 {
-                protocol_fee_0_to_1: U256::from(0u64),
-                protocol_fee_1_to_0: U256::from(0u64),
-                protocol_cut_fee: U256::from(0u64),
-                token0_decimals: 6,
-                token1_decimals: 6,
-                active_liquidity: U256::from(101337485047035u64),
-                pool_accounting_flag: false,
-                fetch_dynamic_fee_flag: false,
-                fee_version: U256::from(0u64),
-                lp_fee: U256::from(100u64),
-                max_decay_time: U256::from(0u64),
-                price_impact_to_fee_division_factor: U256::from(0u64),
-                min_fee: U256::from(0u64),
-                max_fee: U256::from(0u64),
-                net_price_impact: 0,
-                last_update_timestamp: U256::from(0u64),
-                decay_time_remaining: U256::from(0u64),
-            },
-            u256("317527473125"),
-            u256("478945217925"),
-            u256("1018669616155"),
-            u256("1011576356290"),
-            u256("1016315199661"),
-            u256("1010140557270"),
-            vec![
-                TickInfo::new(-100, 79191010414114).unwrap(),
-                TickInfo::new(18, 4782182157850).unwrap(),
-                TickInfo::new(19, 17364292475071).unwrap(),
-                TickInfo::new(24, -17364292475071).unwrap(),
-                TickInfo::new(27, -4782182157850).unwrap(),
-                TickInfo::new(100, -79191010414114).unwrap(),
+            "0x00000000000000000000210f1464370c3785fc60580f59913bfeaa2ed210012b",
+            "0x0000000000000000000000064000000000000000015e38a1491fd89980000000",
+            "0x00000000000000000000033e8eaa928700000000000000000000006a94814dfd",
+            &[
+                (-915, 8_941_697_813_393),
+                (116, 2_296_191_335_129),
+                (130, 1_531_347_477_443_537),
+                (131, -2_296_191_335_129),
+                (134, 2_901_227_474_466_653),
+                (145, -2_901_227_474_466_653),
+                (150, -1_531_347_477_443_537),
+                (1091, -8_941_697_813_393),
             ],
+            (usdc_liquidity(), usdt_liquidity()),
         )
     }
 
-    #[test]
-    fn test_dex_variables_from_packed_with_sign_and_sqrt_price() {
-        let abs_tick = U256::from(12345u64);
-        let sqrt_price = u256("12345678901234567890");
-        let packed_negative = (sqrt_price << 20u32) | (abs_tick << 1u32);
-        let decoded_negative = DexVariables::from_packed(packed_negative);
-        assert_eq!(decoded_negative.current_tick, -12345);
-        assert_eq!(decoded_negative.current_sqrt_price_x96, sqrt_price);
-
-        let packed_positive = (sqrt_price << 20u32) | (abs_tick << 1u32) | U256::from(1u64);
-        let decoded_positive = DexVariables::from_packed(packed_positive);
-        assert_eq!(decoded_positive.current_tick, 12345);
-        assert_eq!(decoded_positive.current_sqrt_price_x96, sqrt_price);
+    fn d4_usdc_usdt() -> FluidV2State {
+        pool(
+            DexType::D4,
+            (token(USDC, "USDC", 6), token(USDT, "USDT", 6)),
+            1,
+            "0x0000000000000000000000000000000000000000080c8e902f9d860da21000f5",
+            "0x000000000000000000000006400000000000000000c8125a19ac4cd980000000",
+            "0x00000000000000000000005f62d6b7f600000000000000000000006d562448f4",
+            &[(113, 879_924_586_393_907), (133, -879_924_586_393_907)],
+            (usdc_liquidity(), usdt_liquidity()),
+        )
     }
 
-    #[test]
-    fn test_dex_variables2_from_packed_decodes_fields() {
-        let active_liquidity = u256("123456789012345678901234567890");
-        let packed = U256::from(21u64) |
-            (U256::from(34u64) << 12u32) |
-            (U256::from(11u64) << 24u32) |
-            (U256::from(15u64) << 30u32) |
-            (U256::from(6u64) << 34u32) |
-            (active_liquidity << 38u32) |
-            (U256::from(1u64) << 140u32) |
-            (U256::from(1u64) << 141u32) |
-            (U256::from(3u64) << 152u32) |
-            (U256::from(3600u64) << 156u32) |
-            (U256::from(42u64) << 168u32) |
-            (U256::from(150u64) << 176u32) |
-            (U256::from(400u64) << 192u32) |
-            (U256::from(1u64) << 208u32) |
-            (U256::from(777u64) << 209u32) |
-            (U256::from(12345u64) << 229u32) |
-            (U256::from(876u64) << 244u32);
-
-        let decoded = DexVariables2::from_packed(packed);
-
-        assert_eq!(decoded.protocol_fee_0_to_1, U256::from(21u64));
-        assert_eq!(decoded.protocol_fee_1_to_0, U256::from(34u64));
-        assert_eq!(decoded.protocol_cut_fee, U256::from(11u64));
-        assert_eq!(decoded.token0_decimals, 18);
-        assert_eq!(decoded.token1_decimals, 6);
-        assert_eq!(decoded.active_liquidity, active_liquidity);
-        assert!(decoded.pool_accounting_flag);
-        assert!(decoded.fetch_dynamic_fee_flag);
-        assert_eq!(decoded.fee_version, U256::from(3u64));
-        // fee_version != 0 → dynamic fee mode: lp_fee is unused, max_decay_time is active
-        assert_eq!(decoded.lp_fee, U256::ZERO);
-        assert_eq!(decoded.max_decay_time, U256::from(3600u64));
-        assert_eq!(decoded.price_impact_to_fee_division_factor, U256::from(42u64),);
-        assert_eq!(decoded.min_fee, U256::from(150u64));
-        assert_eq!(decoded.max_fee, U256::from(400u64));
-        assert_eq!(decoded.net_price_impact, 777);
-        assert_eq!(decoded.last_update_timestamp, U256::from(12345u64));
-        assert_eq!(decoded.decay_time_remaining, U256::from(876u64));
+    fn d3_usdc_eth() -> FluidV2State {
+        pool(
+            DexType::D3,
+            (token(USDC, "USDC", 6), token(ETH, "ETH", 18)),
+            10,
+            "0x000000000000000000002b78cc3dce206a4b47e11b2e606235ecf8a481b2558c",
+            "0x00000000000000000000001f400000000000000000005e7f8303897d80000000",
+            "0x0000000000000000000000004842a8ad000000000000000000000102aae83c86",
+            &[
+                (-77_790, 416_505_943_288),
+                (-77_430, 264_953_229_623),
+                (-76_850, 942_005_700_598),
+                (-76_390, -942_005_700_598),
+                (-76_080, -264_953_229_623),
+                (-75_780, -416_505_943_288),
+            ],
+            (usdc_liquidity(), eth_liquidity()),
+        )
     }
 
-    #[test]
-    fn test_delta_transition_updates_state_and_ticks() {
-        let mut state = test_state();
+    fn d3_wbtc_usdc() -> FluidV2State {
+        pool(
+            DexType::D3,
+            (token(WBTC, "WBTC", 8), token(USDC, "USDC", 6)),
+            10,
+            "0xfff1df46994405694b05000000000000000000000801e1dc18df777b1293629f",
+            "0x00000000000000000000001f4000000000000000000001cabac7da9a00000000",
+            "0x000000000000000000000097266e495300000000000000000000000000c9cc2c",
+            &[(109_210, 30_784_823_146), (113_260, -30_784_823_146)],
+            (wbtc_liquidity(), usdc_liquidity()),
+        )
+    }
 
-        let new_sqrt_price = u256("999999999999");
-        let new_dex_variables =
-            (new_sqrt_price << 20u32) | (U256::from(77u64) << 1u32) | U256::from(1u64);
-        let new_active_liquidity = u256("987654321012345678");
-        let new_dex_variables2 = U256::from(12u64) |
-            (U256::from(24u64) << 12u32) |
-            (U256::from(5u64) << 24u32) |
-            (U256::from(15u64) << 30u32) |
-            (U256::from(6u64) << 34u32) |
-            (new_active_liquidity << 38u32) |
-            (U256::from(1u64) << 152u32) |
-            (U256::from(2500u64) << 156u32) |
-            (U256::from(99u64) << 176u32) |
-            (U256::from(199u64) << 192u32);
-
-        let updated_attributes: HashMap<String, Bytes> = [
-            ("dex_variables".to_string(), Bytes::from(new_dex_variables.to_be_bytes_vec())),
-            ("dex_variables2".to_string(), Bytes::from(new_dex_variables2.to_be_bytes_vec())),
-            ("token0/token_reserves".to_string(), u256_bytes("111111111")),
-            ("token1/token_reserves".to_string(), u256_bytes("222222222")),
-            ("token0/borrow_exchange_price".to_string(), u256_bytes("333333333")),
-            ("token0/supply_exchange_price".to_string(), u256_bytes("444444444")),
-            ("token1/borrow_exchange_price".to_string(), u256_bytes("555555555")),
-            ("token1/supply_exchange_price".to_string(), u256_bytes("666666666")),
-            ("ticks/-120".to_string(), i128_bytes("2222")),
-            ("ticks/240".to_string(), i128_bytes("3333")),
-            ("ticks/0".to_string(), i128_bytes("0")),
-        ]
-        .into_iter()
-        .collect();
-
-        let deleted_attributes = HashSet::from([String::from("ticks/120")]);
-        let delta = ProtocolStateDelta {
-            component_id: "fluid-v2-test".to_string(),
-            updated_attributes,
-            deleted_attributes,
+    fn amount_out(
+        state: &FluidV2State,
+        amount_in: u128,
+        zero_for_one: bool,
+    ) -> Result<u128, SimulationError> {
+        let (token_in, token_out) = if zero_for_one {
+            (&state.token0, &state.token1)
+        } else {
+            (&state.token1, &state.token0)
         };
-
         state
-            .delta_transition(delta, &HashMap::new(), &Balances::default())
-            .unwrap();
+            .get_amount_out(BigUint::from(amount_in), token_in, token_out)
+            .map(|result| result.amount.try_into().unwrap())
+    }
 
-        assert_eq!(state.dex_variables.current_tick, 77);
-        assert_eq!(
-            state
-                .dex_variables
-                .current_sqrt_price_x96,
-            new_sqrt_price
-        );
-        assert_eq!(state.dex_variables2.active_liquidity, new_active_liquidity);
-        assert_eq!(state.token0_reserve, u256("111111111"));
-        assert_eq!(state.token1_reserve, u256("222222222"));
-        assert_eq!(state.token0_borrow_exchange_price, u256("333333333"));
-        assert_eq!(state.token0_supply_exchange_price, u256("444444444"));
-        assert_eq!(state.token1_borrow_exchange_price, u256("555555555"));
-        assert_eq!(state.token1_supply_exchange_price, u256("666666666"));
+    fn pool_named(name: &str) -> FluidV2State {
+        match name {
+            "d3_usdc_usdt" => d3_usdc_usdt(),
+            "d4_usdc_usdt" => d4_usdc_usdt(),
+            "d3_usdc_eth" => d3_usdc_eth(),
+            "d3_wbtc_usdc" => d3_wbtc_usdc(),
+            other => panic!("unknown pool {other}"),
+        }
+    }
 
-        assert_eq!(state.ticks.len(), 2);
-        assert_eq!(state.ticks[0].index, -120);
-        assert_eq!(state.ticks[0].net_liquidity, 2222);
-        assert_eq!(state.ticks[1].index, 240);
-        assert_eq!(state.ticks[1].net_liquidity, 3333);
+    /// Every amount out was read from a swap through `FluidV2Executor` on a mainnet fork at block
+    /// 26331500, the block the pool fixtures come from.
+    #[rstest::rstest]
+    #[case::d3_usdc_to_usdt_min("d3_usdc_usdt", true, 10_000, 10_006)]
+    #[case::d3_usdc_to_usdt("d3_usdc_usdt", true, 7_777_777, 7_783_795)]
+    #[case::d3_usdc_to_usdt_crossing_ticks("d3_usdc_usdt", true, 2_000_000_000, 2_000_269_022)]
+    #[case::d3_usdt_to_usdc("d3_usdc_usdt", false, 12_345, 12_331)]
+    #[case::d3_usdt_to_usdc_large("d3_usdc_usdt", false, 300_000_000, 294_210_295)]
+    #[case::d4_usdc_to_usdt("d4_usdc_usdt", true, 1_000_000, 999_724)]
+    #[case::d4_usdc_to_usdt_large("d4_usdc_usdt", true, 300_000_000, 299_834_786)]
+    #[case::d4_usdt_to_usdc("d4_usdc_usdt", false, 7_777_777, 7_778_291)]
+    #[case::d4_usdt_to_usdc_large("d4_usdc_usdt", false, 300_000_000, 299_938_811)]
+    #[case::d3_usdc_to_eth("d3_usdc_eth", true, 1_000_000, 440_902_863_163_821)]
+    #[case::d3_usdc_to_eth_large("d3_usdc_eth", true, 2_000_000_000, 860_991_947_364_004_597)]
+    #[case::d3_eth_to_usdc("d3_usdc_eth", false, 123_456_789_012_345, 279_715)]
+    #[case::d3_eth_to_usdc_large("d3_usdc_eth", false, 100_000_000_000_000_000, 225_988_315)]
+    #[case::d3_wbtc_to_usdc_min("d3_wbtc_usdc", true, 10_000, 7_598_689)]
+    #[case::d3_wbtc_to_usdc("d3_wbtc_usdc", true, 1_000_000, 702_667_607)]
+    #[case::d3_usdc_to_wbtc("d3_wbtc_usdc", false, 7_777_777, 10_206)]
+    #[case::d3_usdc_to_wbtc_large("d3_wbtc_usdc", false, 300_000_000, 381_687)]
+    fn test_amount_out_matches_chain(
+        #[case] pool: &str,
+        #[case] zero_for_one: bool,
+        #[case] amount_in: u128,
+        #[case] expected: u128,
+    ) {
+        assert_eq!(amount_out(&pool_named(pool), amount_in, zero_for_one).unwrap(), expected);
+    }
+
+    /// Each of these swaps reverts on chain at block 26331500.
+    #[rstest::rstest]
+    #[case::amount_below_minimum("d3_usdc_usdt", false, 10_000)]
+    #[case::normalized_amount_below_minimum("d3_usdc_eth", true, 12_345)]
+    #[case::output_below_minimum("d3_wbtc_usdc", false, 1_000_000)]
+    #[case::d3_past_last_tick("d3_usdc_usdt", false, 2_000_000_000)]
+    #[case::d4_past_last_tick("d4_usdc_usdt", true, 2_000_000_000)]
+    #[case::eth_past_last_tick("d3_usdc_eth", false, 1_000_000_000_000_000_000)]
+    #[case::wbtc_past_last_tick("d3_wbtc_usdc", true, 10_000_000)]
+    fn test_amount_out_rejects_swaps_the_dex_reverts(
+        #[case] pool: &str,
+        #[case] zero_for_one: bool,
+        #[case] amount_in: u128,
+    ) {
+        assert!(amount_out(&pool_named(pool), amount_in, zero_for_one).is_err());
     }
 
     #[test]
-    fn test_get_limits() {
-        let state = onchain_state();
+    fn test_swap_within_range_keeps_active_liquidity() {
+        let state = d3_usdc_usdt();
 
-        let (limit_in, limit_out) = state
-            .get_limits(
-                Bytes::from_str("0x3c499c542cef5e3811e1192ce70d8cc03d5c3359").unwrap(),
-                Bytes::from_str("0xc2132d05d31c914a87c6611c10748aeb04b58e8f").unwrap(),
-            )
+        let result = state
+            .get_amount_out(BigUint::from(1_000_000u64), &state.token0, &state.token1)
             .unwrap();
 
-        assert_eq!(limit_in, BigUint::from(489809940u32));
-        assert_eq!(limit_out, BigUint::from(486756162u32));
-    }
-
-    #[test]
-    fn test_get_limits_only_caps_with_reserve_accounting() {
-        let mut capped_state = onchain_state();
-        capped_state
-            .dex_variables2
-            .pool_accounting_flag = false;
-        capped_state.token1_reserve = U256::from(1_000_000u64);
-
-        let (_, capped_limit_out) = capped_state
-            .get_limits(usdc().address.clone(), usdt0().address.clone())
-            .unwrap();
-
-        let mut uncapped_state = capped_state.clone();
-        uncapped_state
-            .dex_variables2
-            .pool_accounting_flag = true;
-
-        let (_, uncapped_limit_out) = uncapped_state
-            .get_limits(usdc().address.clone(), usdt0().address.clone())
-            .unwrap();
-
-        assert_eq!(capped_limit_out, BigUint::from(1_016u32));
-        assert_eq!(uncapped_limit_out, BigUint::from(486_756_162u32));
-    }
-
-    #[test]
-    fn test_get_amount_out() {
-        let state = onchain_state();
-        let res = state
-            .get_amount_out(BigUint::from_str("4898099").unwrap(), &usdc(), &usdt0())
-            .unwrap();
-        assert_eq!(res.amount, BigUint::from(4896168u32));
-
-        let prepared = state
-            .prepare_swap_in(U256::from(4_898_099u64), &usdc(), &usdt0())
-            .unwrap();
-        let internal = state
-            .execute_swap_in_internal(&prepared)
-            .unwrap();
-        let rounded_amount_out_raw = round_down_raw(internal.amount_out_raw_adjusted);
-
-        let new_state = res
+        let new_state = result
             .new_state
             .as_any()
             .downcast_ref::<FluidV2State>()
             .unwrap();
-
         assert_eq!(
-            new_state.token1_reserve,
-            state.token1_reserve - internal.amount_out_raw_adjusted
+            new_state
+                .dex_variables2
+                .active_liquidity,
+            state.dex_variables2.active_liquidity
         );
-        assert_ne!(new_state.token1_reserve, state.token1_reserve - rounded_amount_out_raw);
+        assert_eq!(new_state.dex_variables.current_tick, state.dex_variables.current_tick);
+        assert!(
+            decode_sqrt_price(
+                new_state
+                    .dex_variables
+                    .current_sqrt_price_x96,
+                true
+            ) < decode_sqrt_price(
+                state
+                    .dex_variables
+                    .current_sqrt_price_x96,
+                true
+            )
+        );
+    }
+
+    #[test]
+    fn test_swap_lowers_what_the_dex_can_pay_out_next() {
+        let state = d3_usdc_eth();
+
+        let result = state
+            .get_amount_out(BigUint::from(300_000_000u64), &state.token0, &state.token1)
+            .unwrap();
+
+        let new_state = result
+            .new_state
+            .as_any()
+            .downcast_ref::<FluidV2State>()
+            .unwrap();
+        let paid = biguint_to_u256(&result.amount);
+        assert_eq!(
+            new_state
+                .token1_liquidity
+                .available_for_swap_out_withdraw,
+            state
+                .token1_liquidity
+                .available_for_swap_out_withdraw -
+                paid
+        );
+        assert!(new_state.token0_reserve > state.token0_reserve);
+        assert!(new_state.token1_reserve < state.token1_reserve);
+    }
+
+    #[test]
+    fn test_d3_payout_is_capped_by_liquidity_withdrawals() {
+        let mut state = d3_usdc_eth();
+        state
+            .token1_liquidity
+            .available_for_swap_out_withdraw = U256::from(400_000_000_000_000u64);
+
+        // 1 USDC pays out 440_902_863_163_821 wei, more than the dex may withdraw.
+        assert!(amount_out(&state, 1_000_000, true).is_err());
+    }
+
+    #[test]
+    fn test_d3_paused_withdrawal_leaves_only_the_dex_balance() {
+        let mut state = d3_usdc_eth();
+        state.token1_liquidity.withdraw_paused = true;
+        state.token1_liquidity.float_balance = U256::from(500_000_000_000_000u64);
+
+        assert_eq!(amount_out(&state, 1_000_000, true).unwrap(), 440_902_863_163_821);
+        assert!(amount_out(&state, 7_777_777, true).is_err());
+    }
+
+    #[test]
+    fn test_d3_paused_supply_rejects_input_beyond_dex_balance() {
+        let mut state = d3_usdc_usdt();
+        state.token0_liquidity.supply_paused = true;
+
+        assert!(amount_out(&state, 1_000_000, true).is_err());
+
+        state.token0_liquidity.float_balance = U256::from(1_000_000u64);
+        assert_eq!(amount_out(&state, 1_000_000, true).unwrap(), 1_000_776);
+    }
+
+    #[test]
+    fn test_d4_borrow_cap_includes_the_swap_fee() {
+        let mut state = d4_usdc_usdt();
+        // 1 USDC pays out 999_724 USDT and borrows the fee on top.
+        state
+            .token1_liquidity
+            .available_for_swap_out_borrow = U256::from(999_724u64);
+
+        assert!(amount_out(&state, 1_000_000, true).is_err());
+
+        state
+            .token1_liquidity
+            .available_for_swap_out_borrow = U256::from(1_000_000u64);
+        assert_eq!(amount_out(&state, 1_000_000, true).unwrap(), 999_724);
+    }
+
+    #[rstest::rstest]
+    #[case::borrow_paused(false, true)]
+    #[case::payback_paused(true, false)]
+    fn test_d4_paused_liquidity_rejects_swaps(
+        #[case] payback_paused: bool,
+        #[case] borrow_paused: bool,
+    ) {
+        let mut state = d4_usdc_usdt();
+        state.token0_liquidity.payback_paused = payback_paused;
+        state.token1_liquidity.borrow_paused = borrow_paused;
+
+        assert!(amount_out(&state, 1_000_000, true).is_err());
+    }
+
+    #[test]
+    fn test_unsupported_fees_are_rejected() {
+        let mut state = d3_usdc_usdt();
+        state.dex_variables2.fee_version = 1;
+        assert!(amount_out(&state, 1_000_000, true).is_err());
+
+        let mut state = d3_usdc_usdt();
+        state.dex_variables2.fetch_dynamic_fee = true;
+        assert!(amount_out(&state, 1_000_000, true).is_err());
+    }
+
+    #[rstest::rstest]
+    #[case::d3_usdc_usdt_0_to_1("d3_usdc_usdt", true)]
+    #[case::d3_usdc_usdt_1_to_0("d3_usdc_usdt", false)]
+    #[case::d4_usdc_usdt_0_to_1("d4_usdc_usdt", true)]
+    #[case::d3_usdc_eth_1_to_0("d3_usdc_eth", false)]
+    #[case::d3_wbtc_usdc_0_to_1("d3_wbtc_usdc", true)]
+    fn test_limits_are_the_largest_accepted_swap(#[case] pool: &str, #[case] zero_for_one: bool) {
+        let state = pool_named(pool);
+        let (sell, buy) = if zero_for_one {
+            (&state.token0, &state.token1)
+        } else {
+            (&state.token1, &state.token0)
+        };
+
+        let (limit_in, limit_out) = state
+            .get_limits(sell.address.clone(), buy.address.clone())
+            .unwrap();
+
+        let limit_in: u128 = limit_in.try_into().unwrap();
+        assert_eq!(
+            amount_out(&state, limit_in, zero_for_one).unwrap(),
+            u128::try_from(limit_out).unwrap()
+        );
+        assert!(amount_out(&state, limit_in + limit_in / 100, zero_for_one).is_err());
+    }
+
+    #[test]
+    fn test_spot_price_matches_small_swap() {
+        let state = d3_usdc_eth();
+        let amount_in = 1_000_000u128;
+
+        let quoted = amount_out(&state, amount_in, true).unwrap() as f64 / 1e18;
+        let spot = state
+            .spot_price(&state.token0, &state.token1)
+            .unwrap();
+
+        // The spot price carries the fee as a markup; the swap takes it from the output.
+        let without_fee = spot * (1.0 - state.fee()).powi(2);
+        assert!((without_fee - quoted).abs() / quoted < 1e-4, "spot {spot} vs swap {quoted}");
+    }
+
+    #[test]
+    fn test_apply_attributes_updates_and_removes_ticks() {
+        let mut state = d4_usdc_usdt();
+        let delta = ProtocolStateDelta {
+            updated_attributes: HashMap::from([
+                ("ticks/120/net-liquidity".to_string(), Bytes::from(vec![0xff, 0x38])),
+                ("ticks/113/net-liquidity".to_string(), Bytes::from(vec![0x00])),
+                ("token0/token_reserves".to_string(), Bytes::from(vec![0x01, 0x00])),
+            ]),
+            deleted_attributes: ["ticks/133/net-liquidity".to_string()].into(),
+            ..Default::default()
+        };
+
+        state.apply_attributes(&delta).unwrap();
+
+        assert_eq!(state.ticks, BTreeMap::from([(120, -200)]));
+        assert_eq!(state.token0_reserve, U256::from(256u64));
+    }
+
+    #[test]
+    fn test_decode_dex_variables() {
+        let state = d3_wbtc_usdc();
+
+        // Stored sign bit 0 means a negative tick.
+        assert!(state.dex_variables.current_tick > 0);
+        assert_eq!(state.dex_variables2.token0_decimals, 8);
+        assert_eq!(state.dex_variables2.token1_decimals, 6);
+        assert_eq!(state.dex_variables2.lp_fee, 500);
+        assert_eq!(state.dex_variables2.fee_version, 0);
+        assert!(
+            !state
+                .dex_variables2
+                .per_pool_accounting_stopped
+        );
     }
 }
