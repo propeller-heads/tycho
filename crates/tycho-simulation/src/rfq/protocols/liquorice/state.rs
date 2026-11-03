@@ -95,6 +95,10 @@ impl PricesAfterFill for LiquoriceState {
 
 #[typetag::serde]
 impl ProtocolSim for LiquoriceState {
+    #[expect(
+        clippy::todo,
+        reason = "the trait method returns no error, and a book has no separate fee to report"
+    )]
     fn fee(&self) -> f64 {
         todo!()
     }
@@ -147,7 +151,9 @@ impl ProtocolSim for LiquoriceState {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        todo!()
+        Err(TransitionError::DecodeError(
+            "Liquorice state is snapshot-based and does not support deltas".into(),
+        ))
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
@@ -336,7 +342,7 @@ mod tests {
         ));
         assert!(is_invalid_pair(
             state
-                .get_limits(wbtc().address.clone(), state.quote_token.address.clone())
+                .get_limits(wbtc().address, state.quote_token.address.clone())
                 .map(|_| ())
         ));
     }
@@ -421,8 +427,8 @@ mod tests {
                 .get_limits(state.base_token.address.clone(), state.quote_token.address.clone())
                 .unwrap();
 
-            assert_eq!(sell_limit, BigUint::from((7.0 * 10f64.powi(18)) as u128));
-            assert_eq!(buy_limit, BigUint::from((20995.0 * 10f64.powi(6)) as u128));
+            assert_eq!(sell_limit, BigUint::from(7_000_000_000_000_000_000u128));
+            assert_eq!(buy_limit, BigUint::from(20_995_000_000u128));
         }
     }
 

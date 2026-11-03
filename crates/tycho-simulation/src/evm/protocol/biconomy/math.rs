@@ -89,10 +89,11 @@ impl Board {
 
         let mut provider = [0u8; 20];
         provider.copy_from_slice(&w0.to_be_bytes::<32>()[12..]);
-        let level_count = (bits_u64(w0, 200, 8) as usize).min(MAX_LEVELS);
-        let levels = (0..level_count)
-            .map(|i| {
-                let w = word(SLOT_LEVELS + i as u8);
+        let level_count = usize::from(bits(w0, 200, 8).to::<u8>()).min(MAX_LEVELS);
+        let levels = (SLOT_LEVELS..)
+            .take(level_count)
+            .map(|slot| {
+                let w = word(slot);
                 PackedLevel { size: bits(w, 0, 128), value: bits(w, 128, 128) }
             })
             .collect();
@@ -100,7 +101,7 @@ impl Board {
         Self {
             provider,
             expires_at: bits_u64(w0, 160, 40),
-            mode: bits_u64(w0, 208, 8) as u8,
+            mode: bits(w0, 208, 8).to::<u8>(),
             drift_ppm_per_second: bits_u64(w0, 216, 32),
             filled: bits(w1, 48, 128),
             levels,
@@ -229,26 +230,11 @@ fn is_live(board: &Board, av: &AnchorView, env: &BlockEnv) -> bool {
 
 /// Square root rounded up, as OpenZeppelin `Math.sqrt(x, Rounding.Ceil)`.
 fn sqrt_ceil(value: u128) -> u128 {
-    if value < 2 {
-        return value;
-    }
-    let mut x = (value as f64).sqrt() as u128;
-    while x
-        .checked_mul(x)
-        .is_none_or(|sq| sq > value)
-    {
-        x -= 1;
-    }
-    while (x + 1)
-        .checked_mul(x + 1)
-        .is_some_and(|sq| sq <= value)
-    {
-        x += 1;
-    }
-    if x * x < value {
-        x + 1
+    let root = value.isqrt();
+    if root * root < value {
+        root + 1
     } else {
-        x
+        root
     }
 }
 
@@ -272,8 +258,7 @@ fn extra_discount(board: &Board, av: &AnchorView, env: &BlockEnv) -> Result<U256
         let mut in_window = since_commit < window;
         if !in_window && !av.price.is_zero() {
             // The anchor's commit block is kept modulo 2^16.
-            in_window =
-                u64::from((env.number as u16).wrapping_sub(av.commit_block as u16)) < window;
+            in_window = env.number.wrapping_sub(av.commit_block) & 0xFFFF < window;
         }
         if in_window {
             extra += U256::from(board.premium_ppm);
@@ -543,8 +528,8 @@ mod tests {
     fn price_board(levels: &[(u128, u128)], filled: u128) -> Board {
         let mut w =
             vec![(0u8, header(7, 1_000, levels.len() as u64, 1, 0)), (1, U256::from(filled) << 48)];
-        for (i, (size, price)) in levels.iter().enumerate() {
-            w.push((SLOT_LEVELS + i as u8, level(*size, *price)));
+        for (slot, (size, price)) in (SLOT_LEVELS..).zip(levels) {
+            w.push((slot, level(*size, *price)));
         }
         Board::decode(&words(&w))
     }

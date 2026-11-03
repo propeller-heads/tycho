@@ -92,7 +92,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
         )?;
 
         let dynamic_fee_config = DynamicFeeConfig::from_attributes(&snapshot.state.attributes)
-            .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))?;
+            .map_err(InvalidSnapshotError::ValueError)?;
         // `aero_cl` components carry the AERO swap hook's settings instead of a fee module's.
         let aero_hook = snapshot
             .state
@@ -214,7 +214,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
         observations.sort_by_key(|observation| observation.index);
 
         AerodromeSlipstreamsState::new(
-            snapshot.component.id.clone(),
+            snapshot.component.id,
             // Seed value only: the stream decoder points every block-sensitive state at the
             // execution block before the snapshot reaches a consumer.
             block.timestamp,

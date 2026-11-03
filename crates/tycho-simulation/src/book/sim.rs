@@ -13,7 +13,10 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::book::levels::{Fill, Levels};
+use crate::{
+    book::levels::{Fill, Levels},
+    utils::decimals_scale,
+};
 
 /// The direction of a swap relative to a pair's `base`/`quote` orientation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,13 +125,13 @@ pub fn to_human(amount: &BigUint, decimals: u32) -> f64 {
     let amount = amount
         .to_f64()
         .expect("BigUint::to_f64 saturates to infinity instead of failing");
-    amount / 10f64.powi(decimals as i32)
+    amount / decimals_scale(decimals)
 }
 
 /// A human amount back in atomic units. Fails for amounts a `BigUint` cannot hold (negative,
 /// non-finite).
 pub fn to_atomic(amount: f64, decimals: u32) -> Result<BigUint, SimulationError> {
-    BigUint::from_f64(amount * 10f64.powi(decimals as i32))
+    BigUint::from_f64(amount * decimals_scale(decimals))
         .ok_or_else(|| SimulationError::RecoverableError("Can't convert amount to BigUint".into()))
 }
 

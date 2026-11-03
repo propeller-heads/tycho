@@ -70,10 +70,12 @@ pub fn pair_key(a: &Address, b: &Address) -> String {
 
 fn parse_address(value: &str) -> Result<Address, InvalidSnapshotError> {
     let raw = alloy::hex::decode(value.trim_start_matches("0x"))
-        .map_err(|_| InvalidSnapshotError::ValueError(format!("invalid address `{value}`")))?;
+        .map_err(|e| InvalidSnapshotError::ValueError(format!("invalid address `{value}`: {e}")))?;
     raw.as_slice()
         .try_into()
-        .map_err(|_| InvalidSnapshotError::ValueError(format!("address `{value}` is not 20 bytes")))
+        .map_err(|_not_20_bytes| {
+            InvalidSnapshotError::ValueError(format!("address `{value}` is not 20 bytes"))
+        })
 }
 
 fn word(value: &Bytes) -> Result<U256, InvalidSnapshotError> {
@@ -140,13 +142,15 @@ pub fn apply_attributes<'a>(
             }
             [attrs::MAKER_COUNT] => {
                 let count = word(&value)?;
-                state.maker_count = u64::try_from(count).map_err(|_| {
+                state.maker_count = u64::try_from(count).map_err(|_out_of_range| {
                     InvalidSnapshotError::ValueError(format!("maker_count {count}"))
                 })?;
             }
             [attrs::MAKER, index] => {
-                let index: u8 = index.parse().map_err(|_| {
-                    InvalidSnapshotError::ValueError(format!("invalid maker index in `{name}`"))
+                let index: u8 = index.parse().map_err(|e| {
+                    InvalidSnapshotError::ValueError(format!(
+                        "invalid maker index in `{name}`: {e}"
+                    ))
                 })?;
                 state
                     .maker_slots
@@ -260,7 +264,9 @@ pub fn decode_biconomy_snapshot(
         value
             .as_ref()
             .try_into()
-            .map_err(|_| InvalidSnapshotError::ValueError(format!("invalid {name} {value}")))
+            .map_err(|_wrong_length| {
+                InvalidSnapshotError::ValueError(format!("invalid {name} {value}"))
+            })
     };
     let mut state = BiconomyState {
         venue: static_address(attrs::PAMM_ADDRESS)?,

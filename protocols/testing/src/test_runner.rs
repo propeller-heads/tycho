@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, LazyLock, RwLock},
 };
@@ -15,7 +15,7 @@ use itertools::Itertools;
 use miette::{ensure, miette, IntoDiagnostic, WrapErr};
 use num_bigint::{BigInt, BigUint};
 use num_rational::BigRational;
-use num_traits::{Signed, ToPrimitive, Zero};
+use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
 use postgres::NoTls;
 use serde_json::json;
 use tokio::runtime::Runtime;
@@ -218,7 +218,7 @@ impl TestRunner {
         };
         let config_file_path = substreams_path.join(&config_file_name);
 
-        let rpc_provider = RPCProvider::new(rpc_url);
+        let rpc_provider = RPCProvider::new(&rpc_url);
         let runtime = Runtime::new().into_diagnostic()?;
 
         Ok(Self {
@@ -274,7 +274,7 @@ impl TestRunner {
                 })?;
             }
             TestType::Range(test_type) => {
-                self.run_tests_in_range(config, &substreams_yaml_path, test_type, terminal_width)?;
+                self.run_tests_in_range(&config, &substreams_yaml_path, test_type, terminal_width)?;
             }
         }
 
@@ -339,7 +339,7 @@ impl TestRunner {
                 start_block,
                 &protocol_type_names,
                 &protocol_system,
-                module_name,
+                module_name.as_deref(),
             ) {
                 error!("Tycho Index command failed: {:#}", e);
             }
@@ -382,16 +382,20 @@ impl TestRunner {
         .into_diagnostic()
         .wrap_err("Failed to load tokens from Tycho RPC")?;
 
-        let _ = tycho_simulation::evm::engine_db::SHARED_TYCHO_DB.clear();
+        tycho_simulation::evm::engine_db::SHARED_TYCHO_DB
+            .clear()
+            .into_diagnostic()?;
 
         let protocol_stream_builder =
             ProtocolStreamBuilder::new(&format!("{}/", self.tycho_host()), chain)
                 .skip_state_decode_failures(true);
 
         let adapter_contract_path = self.get_adapter_contract_path(
-            &config.adapter_contract,
-            &config.adapter_build_signature,
-            &config.adapter_build_args,
+            config.adapter_contract.as_deref(),
+            config
+                .adapter_build_signature
+                .as_deref(),
+            config.adapter_build_args.as_deref(),
         )?;
         let adapter_contract_path_str = adapter_contract_path
             .as_ref()
@@ -406,7 +410,7 @@ impl TestRunner {
             &config.protocol_system,
             chain,
             decoder_context,
-        )?;
+        );
 
         let stream_builder = protocol_stream_builder
             .skip_state_decode_failures(true)
@@ -538,7 +542,6 @@ impl TestRunner {
                 Err(e) => {
                     error!("Stream error: {:#}", e);
                     // Continue processing instead of breaking - streams can have temporary errors
-                    continue;
                 }
             }
         }
@@ -549,7 +552,7 @@ impl TestRunner {
 
     fn run_tests_in_range(
         &self,
-        config: IntegrationTestsConfig,
+        config: &IntegrationTestsConfig,
         substreams_yaml_path: &PathBuf,
         test_type: &TestTypeRange,
         terminal_width: usize,
@@ -599,11 +602,11 @@ impl TestRunner {
                         test.stop_block,
                         &config.protocol_type_names,
                         &config.protocol_system,
-                        config.module_name.clone(),
+                        config.module_name.as_deref(),
                     )
                     .wrap_err("Failed to run Tycho")?;
             }
-            let rpc_server = tycho_runner.start_rpc_server()?;
+            let rpc_server = tycho_runner.start_rpc_server();
             let result = self
                 .runtime
                 .block_on(self.last_indexed_block(&config.protocol_system))
@@ -614,7 +617,7 @@ impl TestRunner {
                          (stop block {})",
                         test.stop_block
                     );
-                    self.run_test(test, &config, block)
+                    self.run_test(test, config, block)
                 });
             match result {
                 Ok(_) => {
@@ -625,7 +628,7 @@ impl TestRunner {
                     error!("❗️{} failed: {:#}\n", test.name, e);
                 }
             }
-            tycho_runner.stop_rpc_server(rpc_server)?;
+            TychoRunner::stop_rpc_server(rpc_server)?;
             info!("{}\n", "-".repeat(terminal_width));
         }
 
@@ -683,9 +686,9 @@ impl TestRunner {
             .collect();
 
         // Step 1: Validate that all expected components are present on Tycho after indexing
-        self.validate_state(&test.expected_components, protocol_components.clone())?;
+        Self::validate_state(&test.expected_components, &protocol_components)?;
 
-        self.validate_excluded_components(&test.excluded_components, &protocol_components)?;
+        Self::validate_excluded_components(&test.excluded_components, &protocol_components)?;
 
         // Step 2: Validate Token Balances
         match config.skip_balance_check {
@@ -702,9 +705,11 @@ impl TestRunner {
 
         // Step 3: Decode Snapshot with Decoder from tycho simulation
         let adapter_contract_path_str = self.get_adapter_contract_path(
-            &config.adapter_contract,
-            &config.adapter_build_signature,
-            &config.adapter_build_args,
+            config.adapter_contract.as_deref(),
+            config
+                .adapter_build_signature
+                .as_deref(),
+            config.adapter_build_args.as_deref(),
         )?;
 
         let update = self.decode_snapshot(
@@ -712,7 +717,7 @@ impl TestRunner {
             &header,
             snapshot,
             all_tokens,
-            adapter_contract_path_str,
+            adapter_contract_path_str.as_deref(),
             self.vm_simulation_traces,
         )?;
 
@@ -830,7 +835,9 @@ impl TestRunner {
                     self.chain
                 )
             })?;
-        Ok(row.map(|row| row.get::<_, i64>(0) as u64))
+        row.map(|row| u64::try_from(row.get::<_, i64>(0)))
+            .transpose()
+            .into_diagnostic()
     }
 
     async fn tycho_runner(&self, initialized_accounts: Vec<String>) -> miette::Result<TychoRunner> {
@@ -927,7 +934,6 @@ impl TestRunner {
     /// - `Vec<ProtocolComponent>` - Every component of the protocol system
     /// - `Snapshot` - States and contract storage of the expected components at `block`
     /// - `HashMap<Bytes, Token>` - All tokens on the chain, by address
-    #[allow(clippy::type_complexity)]
     fn fetch_from_tycho_rpc(
         &self,
         protocol_system: &str,
@@ -1026,18 +1032,20 @@ impl TestRunner {
         block: &Block,
         snapshot: Snapshot,
         all_tokens: HashMap<Bytes, Token>,
-        adapter_contract_path: Option<PathBuf>,
+        adapter_contract_path: Option<&Path>,
         vm_simulation_traces: bool,
     ) -> miette::Result<Update> {
         // Clear the shared database state to ensure test isolation
         // This prevents state from previous tests from affecting the current test
-        let _ = tycho_simulation::evm::engine_db::SHARED_TYCHO_DB.clear();
+        tycho_simulation::evm::engine_db::SHARED_TYCHO_DB
+            .clear()
+            .into_diagnostic()?;
 
         let protocol_stream_builder =
             ProtocolStreamBuilder::new("", self.chain).skip_state_decode_failures(true);
 
         let mut decoder_context = DecoderContext::new().vm_traces(vm_simulation_traces);
-        if let Some(vm_adapter_path) = adapter_contract_path.as_ref() {
+        if let Some(vm_adapter_path) = adapter_contract_path {
             if let Some(path_str) = vm_adapter_path.to_str() {
                 decoder_context = decoder_context.vm_adapter_path(path_str);
             }
@@ -1047,7 +1055,7 @@ impl TestRunner {
             protocol_system,
             self.chain,
             decoder_context,
-        )?;
+        );
 
         let decoder = protocol_stream_builder.get_decoder();
         initialize_hook_handlers().into_diagnostic()?;
@@ -1107,9 +1115,8 @@ impl TestRunner {
     /// - Any expected component is missing from the Tycho state
     /// - Any component's properties don't match the expected values (shows detailed diff)
     fn validate_state(
-        &self,
         expected_components: &Vec<ProtocolComponentWithTestConfig>,
-        protocol_components: Vec<ProtocolComponent>,
+        protocol_components: &[ProtocolComponent],
     ) -> miette::Result<()> {
         if expected_components.is_empty() {
             debug!("No expected components defined for this test. Skipping state validation.");
@@ -1154,7 +1161,6 @@ impl TestRunner {
     }
 
     fn validate_excluded_components(
-        &self,
         excluded_components: &[String],
         protocol_components: &[ProtocolComponent],
     ) -> miette::Result<()> {
@@ -1312,7 +1318,10 @@ impl TestRunner {
 
                 for percentage in percentages.iter() {
                     // For precision, multiply by 1000 then divide by 1000
-                    let percentage_biguint = BigUint::from((percentage * 1000.0) as u32);
+                    let percentage_biguint =
+                        BigUint::from_f64(percentage * 1000.0).ok_or_else(|| {
+                            miette!("[{id}] Percentage {percentage} is not a non-negative number")
+                        })?;
                     let thousand = BigUint::from(1000u32);
                     let amount_in = (&max_input * &percentage_biguint) / &thousand;
 
@@ -1568,8 +1577,9 @@ impl TestRunner {
                         id, token.symbol
                     );
                     let token_address = bytes_to_address(&token.address).into_diagnostic()?;
-                    let component_address =
-                        Address::from_str(id.as_str()).expect("Failed to parse component address");
+                    let component_address = Address::from_str(id.as_str())
+                        .into_diagnostic()
+                        .wrap_err("Failed to parse component address")?;
                     let node_balance =
                         self.runtime
                             .block_on(self.rpc_provider.get_token_balance(
@@ -1598,9 +1608,9 @@ impl TestRunner {
     /// Gets the adapter contract path if needed, building it if not found
     fn get_adapter_contract_path(
         &self,
-        adapter_contract: &Option<String>,
-        adapter_build_signature: &Option<String>,
-        adapter_build_args: &Option<String>,
+        adapter_contract: Option<&str>,
+        adapter_build_signature: Option<&str>,
+        adapter_build_args: Option<&str>,
     ) -> miette::Result<Option<PathBuf>> {
         // Adapter contract will only be configured for VM protocols, not natively implemented
         // protocols.
@@ -1615,8 +1625,8 @@ impl TestRunner {
                     self.adapter_contract_builder
                         .build_target(
                             adapter_contract_name,
-                            adapter_build_signature.as_deref(),
-                            adapter_build_args.as_deref(),
+                            adapter_build_signature,
+                            adapter_build_args,
                         )
                         .wrap_err("Failed to build adapter contract")?
                 }
@@ -1885,7 +1895,11 @@ mod tests {
     }
 
     fn get_mocked_runner() -> TestRunner {
-        dotenv().ok();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a missing .env file is normal; the variables may come from the environment"
+        )]
+        let _ = dotenv();
         let rpc_url = env::var("RPC_URL").unwrap();
         get_mocked_runner_for(Chain::Ethereum, "test-protocol", rpc_url)
     }
@@ -1974,13 +1988,13 @@ mod tests {
                 .unwrap()
                 .to_be_bytes::<32>(),
         );
-        balances.insert(token_bytes.clone(), balance_bytes.clone());
+        balances.insert(token_bytes, balance_bytes);
         let protocol_state = ProtocolComponentState::new(&component_id, HashMap::new(), balances);
 
         let mut component_tokens = HashMap::new();
         component_tokens.insert(component_id.clone(), vec![token]);
         let mut protocol_states_by_id = HashMap::new();
-        protocol_states_by_id.insert(component_id.clone(), protocol_state);
+        protocol_states_by_id.insert(component_id, protocol_state);
 
         let result =
             runner.validate_token_balances(&component_tokens, &protocol_states_by_id, block_number);
@@ -2000,15 +2014,19 @@ mod tests {
         // Set expected balance to zero
         let mut balances = HashMap::new();
         let balance_bytes = Bytes::from(U256::from(0).to_be_bytes::<32>());
-        balances.insert(token_bytes.clone(), balance_bytes.clone());
+        balances.insert(token_bytes, balance_bytes);
         let protocol_state = ProtocolComponentState::new(&component_id, HashMap::new(), balances);
 
         let mut component_tokens = HashMap::new();
         component_tokens.insert(component_id.clone(), vec![token]);
         let mut protocol_states_by_id = HashMap::new();
-        protocol_states_by_id.insert(component_id.clone(), protocol_state);
+        protocol_states_by_id.insert(component_id, protocol_state);
 
-        dotenv().ok();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a missing .env file is normal; the variables may come from the environment"
+        )]
+        let _ = dotenv();
         let result =
             runner.validate_token_balances(&component_tokens, &protocol_states_by_id, block_number);
         assert!(

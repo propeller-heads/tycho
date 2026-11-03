@@ -115,7 +115,9 @@ impl SynchronizerError {
             SynchronizerError::Timeout(_) |
             SynchronizerError::ConnectionError(_) |
             SynchronizerError::ConnectionClosed => true,
-            _ => false,
+            SynchronizerError::ChannelError(_) |
+            SynchronizerError::CloseError(_) |
+            SynchronizerError::Internal(_) => false,
         }
     }
 }
@@ -130,11 +132,20 @@ impl From<DeltasError> for SynchronizerError {
     fn from(err: DeltasError) -> Self {
         match err {
             DeltasError::NotConnected => SynchronizerError::ConnectionClosed,
-            _ => SynchronizerError::ConnectionError(err.to_string()),
+            DeltasError::UriParsing(..) |
+            DeltasError::SubscriptionAlreadyPending |
+            DeltasError::ServerError(_) |
+            DeltasError::TransportError(_) |
+            DeltasError::BufferFull |
+            DeltasError::AlreadyConnected |
+            DeltasError::ConnectionClosed |
+            DeltasError::ConnectionError(_) |
+            DeltasError::Fatal(_) => SynchronizerError::ConnectionError(err.to_string()),
         }
     }
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "each bool is an independent feature toggle")]
 pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     extractor_id: ExtractorIdentity,
     retrieve_balances: bool,
@@ -445,7 +456,15 @@ where
     D: DeltasClient + Clone + Send + Sync + 'static,
 {
     /// Creates a new state synchronizer.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
+    #[expect(
+        clippy::needless_pass_by_value,
+        clippy::fn_params_excessive_bools,
+        reason = "public API; taking `&ExtractorIdentity` and replacing the bool flags with an options type are breaking changes"
+    )]
     pub fn new(
         extractor_id: ExtractorIdentity,
         retrieve_balances: bool,
@@ -536,7 +555,7 @@ where
     #[instrument(skip(self, block_tx, end_rx), fields(extractor_id = %self.extractor_id))]
     async fn state_sync(
         &mut self,
-        block_tx: &mut Sender<SyncResult<StateSyncMessage<BlockHeader>>>,
+        block_tx: &Sender<SyncResult<StateSyncMessage<BlockHeader>>>,
         mut end_rx: oneshot::Receiver<()>,
         snapshot_delay: Duration,
     ) -> Result<(), Box<SyncError>> {
@@ -576,7 +595,7 @@ where
                     let msg = select! {
                         deltas_result = timeout(Duration::from_secs(self.timeout), msg_rx.recv()) => {
                             deltas_result
-                                .map_err(|_| {
+                                .map_err(|_elapsed| {
                                     SynchronizerError::Timeout(format!(
                                         "First deltas took longer than {t}s to arrive",
                                         t = self.timeout
@@ -764,9 +783,8 @@ where
                         removed_components: HashMap::new(),
                     };
                     break 'init (snapshot_msg.merge(deltas_msg), header);
-                } else {
-                    break 'init (deltas_msg, header);
                 }
+                break 'init (deltas_msg, header);
             };
 
             block_tx.send(Ok(msg)).await?;
@@ -878,7 +896,7 @@ where
                                         );
                                         self.spawn_snapshot_task(
                                             to_fire,
-                                            snapshot_header,
+                                            &snapshot_header,
                                             &deltas,
                                         );
                                     }
@@ -900,7 +918,7 @@ where
                                     );
                                     let snapshot_header =
                                         BlockHeader { revert: false, ..header.clone() };
-                                    self.spawn_snapshot_task(truly_new, snapshot_header, &deltas);
+                                    self.spawn_snapshot_task(truly_new, &snapshot_header, &deltas);
                                 }
 
                                 let snapshots = background_snapshots;
@@ -945,14 +963,13 @@ where
 
         // This cleanup code now runs regardless of how the function exits (error or channel close)
         warn!(last_synced_block = ?&self.last_synced_block, "Deltas processing ended.");
-        //Ignore error
-        let _ = self
+        if let Err(err) = self
             .deltas_client
             .unsubscribe(subscription_id)
             .await
-            .map_err(|err| {
-                warn!(err=?err, "Unsubscribing from deltas on cleanup failed!");
-            });
+        {
+            warn!(err=?err, "Unsubscribing from deltas on cleanup failed!");
+        }
 
         // Handle the result: if it succeeded, we're done. If it errored, we need to determine
         // whether the end_rx was consumed (close signal received) or not
@@ -1062,7 +1079,7 @@ where
     fn spawn_snapshot_task(
         &mut self,
         component_ids: Vec<String>,
-        snapshot_header: BlockHeader,
+        snapshot_header: &BlockHeader,
         current_delta: &BlockAggregatedChanges,
     ) {
         if self.in_snapshot_backoff() {
@@ -1087,6 +1104,10 @@ where
         };
         let ids = component_ids.clone();
         tokio::spawn(async move {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the receiver is dropped only when the synchronizer has shut down"
+            )]
             let _ = tx.send(fetch_snapshot_background(rpc, ids, bg_params).await);
         });
         for id in &component_ids {
@@ -1249,7 +1270,7 @@ where
     async fn start(
         mut self,
     ) -> (SynchronizerTaskHandle, Receiver<SyncResult<StateSyncMessage<BlockHeader>>>) {
-        let (mut tx, rx) = channel(SYNC_CHANNEL_CAPACITY);
+        let (tx, rx) = channel(SYNC_CHANNEL_CAPACITY);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         let jh = tokio::spawn(async move {
@@ -1278,7 +1299,7 @@ where
                     Duration::ZERO
                 };
                 let res = self
-                    .state_sync(&mut tx, current_end_rx, snapshot_delay)
+                    .state_sync(&tx, current_end_rx, snapshot_delay)
                     .await;
                 let made_progress = self
                     .last_synced_block
@@ -1312,12 +1333,13 @@ where
                                 error!(
                                     "Websocket connection closed. State synchronization exiting."
                                 );
-                                let _ = tx.send(Err(e)).await;
+                                if let Err(SendError(Err(e))) = tx.send(Err(e)).await {
+                                    warn!(error = ?e, "consumer is gone; dropping the error that ends the task");
+                                }
                                 return;
-                            } else {
-                                // Store error in case this is our last retry
-                                final_error = Some(e);
                             }
+                            // Store error in case this is our last retry
+                            final_error = Some(e);
                         } else {
                             // Close signal was received, exit cleanly
                             info!(extractor_id=%&self.extractor_id, "Received close signal, exiting.");
@@ -1337,7 +1359,9 @@ where
             }
             if let Some(e) = final_error {
                 warn!(extractor_id=%&self.extractor_id, retry_count, error=%e, "Max retries exceeded");
-                let _ = tx.send(Err(e)).await;
+                if let Err(SendError(Err(e))) = tx.send(Err(e)).await {
+                    warn!(error = ?e, "consumer is gone; dropping the error that ends the task");
+                }
             }
         });
 
@@ -2410,6 +2434,10 @@ mod test {
             .await
             .expect("waiting for third state msg timed out!")
             .expect("state sync block sender closed!");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await
             .expect("state sync task panicked!");
@@ -2759,6 +2787,10 @@ mod test {
             .expect("deltas channel msg 0 closed!");
 
         // Expecting to receive the initial state message
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the first message only shows that the synchronizer started; its content is not under test"
+        )]
         let _ = timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("waiting for first state msg timed out!")
@@ -2787,6 +2819,10 @@ mod test {
             .expect("state sync block sender closed!")
             .expect("no error");
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await
             .expect("state sync task panicked!");
@@ -2982,6 +3018,10 @@ mod test {
                 };
 
                 tokio::spawn(async move {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the receiver may have been dropped when the test no longer reads"
+                    )]
                     let _ = tx.send(delta).await;
                     // Close the channel after sending one message
                 });
@@ -3024,12 +3064,12 @@ mod test {
         });
 
         // Create a channel for state_sync to send messages to
-        let (mut block_tx, _block_rx) = channel(10);
+        let (block_tx, _block_rx) = channel(10);
 
         // Call state_sync directly - this should error during processing
         let (_end_tx, end_rx) = oneshot::channel::<()>();
         let result = state_sync
-            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .state_sync(&block_tx, end_rx, Duration::ZERO)
             .await;
         // Verify that state_sync returned an error
         assert!(result.is_err(), "state_sync should have errored during processing");
@@ -3078,13 +3118,13 @@ mod test {
             .await
             .expect("Init should succeed");
 
-        let (mut block_tx, _block_rx) = channel(10);
+        let (block_tx, _block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         // Start state_sync in a task
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+                .state_sync(&block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3092,6 +3132,10 @@ mod test {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Send close signal
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = end_tx.send(());
 
         // state_sync should exit cleanly
@@ -3154,6 +3198,10 @@ mod test {
                 };
 
                 tokio::spawn(async move {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the receiver may have been dropped when the test no longer reads"
+                    )]
                     let _ = tx.send(first_delta).await;
                     // Keep the sender alive but don't send more messages
                     // This will make the recv() block waiting for the next message
@@ -3186,13 +3234,13 @@ mod test {
             .await
             .expect("Init should succeed");
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         // Start state_sync in a task
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+                .state_sync(&block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3210,6 +3258,10 @@ mod test {
                 first_snapshot.deltas.is_some()
         );
         // Now send close signal - this should be handled in the main processing loop
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = end_tx.send(());
 
         // state_sync should exit cleanly after receiving close signal in main loop
@@ -3305,6 +3357,10 @@ mod test {
         let mut deltas_client = MockDeltasClient::new();
         let (resubscribed_tx, resubscribed_rx) = oneshot::channel();
         let mut resubscribed_tx = Some(resubscribed_tx);
+        #[expect(
+            clippy::collection_is_never_read,
+            reason = "holds the senders so the subscription channels stay open"
+        )]
         let mut open_senders = Vec::new();
         let mut calls = 0;
         deltas_client
@@ -3319,6 +3375,7 @@ mod test {
                         .unwrap();
                 } else {
                     if let Some(notify) = resubscribed_tx.take() {
+                        #[expect(clippy::let_underscore_must_use, reason = "the receiver may have been dropped when the test no longer reads")]
                         let _ = notify.send(std::time::Instant::now());
                     }
                     open_senders.push(tx);
@@ -3355,6 +3412,10 @@ mod test {
             .expect("synchronizer should resubscribe")
             .unwrap();
         let (_jh, close_tx) = handle.split();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
 
         assert!(resubscribed_at - started < Duration::from_secs(1));
@@ -3394,7 +3455,7 @@ mod test {
             timestamp: 123456788,
             partial_block_index: None,
         };
-        state_sync.last_synced_block = Some(previous_header.clone());
+        state_sync.last_synced_block = Some(previous_header);
 
         assert!(
             state_sync.is_next_expected(&incoming_header),
@@ -3464,6 +3525,10 @@ mod test {
                 };
 
                 tokio::spawn(async move {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the receiver may have been dropped when the test no longer reads"
+                    )]
                     let _ = tx.send(expected_next_delta).await;
                 });
 
@@ -3506,13 +3571,13 @@ mod test {
             partial_block_index: None,
         });
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         // Start state_sync
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+                .state_sync(&block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3524,9 +3589,17 @@ mod test {
             .expect("Should not be an error");
 
         // Send close signal
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = end_tx.send(());
 
         // Wait for state_sync to finish
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the mock deltas channel closes, so state sync ends with a connection error"
+        )]
         let _ = state_sync_handle
             .await
             .expect("Task should not panic");
@@ -3670,6 +3743,7 @@ mod test {
 
                 tokio::spawn(async move {
                     for message in old_messages {
+                        #[expect(clippy::let_underscore_must_use, reason = "the receiver may have been dropped when the test no longer reads")]
                         let _ = tx.send(message).await;
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
@@ -3713,13 +3787,13 @@ mod test {
             partial_block_index: None,
         });
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         // Start state_sync
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+                .state_sync(&block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3731,12 +3805,17 @@ mod test {
             .expect("Should not be an error");
 
         // Send close signal
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = end_tx.send(());
 
         // Wait for state_sync to finish
-        let _ = state_sync_handle
+        state_sync_handle
             .await
-            .expect("Task should not panic");
+            .expect("Task should not panic")
+            .expect("state sync should end without an error");
 
         // Verify we only got the message for block 6 (the expected next block)
         assert!(result_msg.deltas.is_some(), "Should contain deltas");
@@ -3809,6 +3888,10 @@ mod test {
             .return_once(move |_, _| {
                 tokio::spawn(async move {
                     for block in blocks {
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "the outcome is not under test"
+                        )]
                         let _ = tx
                             .send(make_block_changes(block, None))
                             .await;
@@ -3835,11 +3918,11 @@ mod test {
             .expect("Init should succeed");
         state_sync.last_synced_block = Some(header_of(&make_block_changes(5, None)));
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
         let handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::from_millis(300))
+                .state_sync(&block_tx, end_rx, Duration::from_millis(300))
                 .await
         });
 
@@ -3853,10 +3936,15 @@ mod test {
             .expect("Should receive second message")
             .expect("Channel should be open")
             .expect("Should not be an error");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = end_tx.send(());
-        let _ = handle
+        handle
             .await
-            .expect("Task should not panic");
+            .expect("Task should not panic")
+            .expect("state sync should end without an error");
 
         // Blocks 10-15 arrive within the 300 ms delay, 50 ms apart.
         let snapshot_blocks = snapshot_blocks.lock().unwrap().clone();
@@ -3895,11 +3983,11 @@ mod test {
             .expect("Init should succeed");
         state_sync.last_synced_block = Some(header_of(&make_block_changes(9, None)));
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
         let handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::from_millis(300))
+                .state_sync(&block_tx, end_rx, Duration::from_millis(300))
                 .await
         });
 
@@ -3908,10 +3996,15 @@ mod test {
             .expect("Should receive the next expected block at once")
             .expect("Channel should be open")
             .expect("Should not be an error");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = end_tx.send(());
-        let _ = handle
+        handle
             .await
-            .expect("Task should not panic");
+            .expect("Task should not panic")
+            .expect("state sync should end without an error");
 
         assert_eq!(msg.header.number, 10);
         assert!(msg.snapshots.states.is_empty());
@@ -3937,6 +4030,10 @@ mod test {
             .expect("Should receive the first block at once")
             .expect("Channel should be open")
             .expect("Should not be an error");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
 
@@ -3968,6 +4065,10 @@ mod test {
             .return_once(move |_, _| {
                 tokio::spawn(async move {
                     for block in 1..=5 {
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "the outcome is not under test"
+                        )]
                         let _ = tx
                             .send(make_block_changes(block, None))
                             .await;
@@ -3995,6 +4096,10 @@ mod test {
             .expect("Should receive the first block")
             .expect("Channel should be open")
             .expect("Should not be an error");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
 
@@ -4022,6 +4127,10 @@ mod test {
             .expect("Should receive the first block at once")
             .expect("Channel should be open")
             .expect("Should not be an error");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
         msg.header.number
@@ -4067,9 +4176,14 @@ mod test {
     }
 
     fn make_block_changes(block_num: u64, partial_idx: Option<u32>) -> BlockAggregatedChanges {
-        // Use vec to create Bytes from block number
-        let hash = Bytes::from(vec![block_num as u8; 32]);
-        let parent_hash = Bytes::from(vec![block_num.saturating_sub(1) as u8; 32]);
+        // A 32-byte hash whose last 8 bytes are the block number, so every block has its own hash.
+        let hash_of = |number: u64| {
+            let mut hash = [0u8; 32];
+            hash[24..].copy_from_slice(&number.to_be_bytes());
+            Bytes::from(hash.to_vec())
+        };
+        let hash = hash_of(block_num);
+        let parent_hash = hash_of(block_num.saturating_sub(1));
         BlockAggregatedChanges {
             extractor: "uniswap-v2".to_string(),
             chain: Chain::Ethereum,
@@ -4115,6 +4229,10 @@ mod test {
         assert_eq!(msg.header.number, 1, "Should use block 1 (full block)");
         assert_eq!(msg.header.partial_block_index, None, "Should be a full block");
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
     }
@@ -4163,6 +4281,10 @@ mod test {
         assert_eq!(msg.header.number, 2, "Should use block 2 (block number increased)");
         assert_eq!(msg.header.partial_block_index, Some(5));
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
     }
@@ -4227,6 +4349,10 @@ mod test {
 
         assert_eq!(msg.header.number, 6, "Should use block 6 (after last synced)");
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
     }
@@ -4662,6 +4788,10 @@ mod test {
                 .collect::<Vec<_>>()
         );
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
     }
@@ -4728,7 +4858,7 @@ mod test {
                         .into_iter()
                         .map(|id| ProtocolComponent { id, ..Default::default() })
                         .collect();
-                    let total = components.len() as i64;
+                    let total = i64::try_from(components.len()).unwrap();
                     Ok(Page::new(components, total, 0, 100))
                 });
             rpc_client
@@ -4833,6 +4963,10 @@ mod test {
         }
 
         async fn close(self) {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the synchronizer may already have exited; the test only requests shutdown"
+            )]
             let _ = self.close_tx.send(());
             self.join_handle
                 .await
@@ -5002,12 +5136,20 @@ mod test {
             .snapshot_tasks
             .extend([old_ok, old_err, new]);
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the snapshot task result is only consumed if the receiver is still held"
+        )]
         let _ = new_tx.send(Err(stale_block_error()));
         state_sync.drain_completed_snapshots();
         let backoff_started = state_sync
             .snapshot_backoff
             .expect("The failure of New starts a backoff");
         tokio::time::advance(Duration::from_secs(2)).await;
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the snapshot task result is only consumed if the receiver is still held"
+        )]
         let _ = old_ok_tx.send(Ok(SnapshotFetchResult {
             components: HashMap::new(),
             contract_ids: HashSet::new(),
@@ -5015,6 +5157,10 @@ mod test {
             snapshot: Snapshot::default(),
             snapshot_block: 1,
         }));
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the snapshot task result is only consumed if the receiver is still held"
+        )]
         let _ = old_err_tx.send(Err(stale_block_error()));
         state_sync.drain_completed_snapshots();
 

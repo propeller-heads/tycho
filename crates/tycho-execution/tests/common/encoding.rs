@@ -97,16 +97,19 @@ const CLIENT_FEE_RECEIVER_PK: &str =
 /// # Errors
 /// - Returns `EncodingError::FatalError` if the function signature is unsupported or required
 ///   fields (e.g., permit or signature) are missing.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "passes through every input of the router call, including the client fee terms"
+)]
 pub fn encode_tycho_router_call(
     chain_id: u64,
-    encoded_solution: EncodedSolution,
+    encoded_solution: &EncodedSolution,
     solution: &Solution,
     native_address: &Bytes,
     signer: Option<PrivateKeySigner>,
     client_fee_bps: u32,
-    client_fee_receiver: Bytes,
-    max_client_contribution: BigUint,
+    client_fee_receiver: &Bytes,
+    max_client_contribution: &BigUint,
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.expected_amount_out());
@@ -119,13 +122,13 @@ pub fn encode_tycho_router_call(
     let checked_token = if checked_token == native_addr { router_eth } else { checked_token };
     let receiver = bytes_to_address(solution.receiver())?;
     let n_tokens = U256::from(encoded_solution.n_tokens());
-    let max_client_contribution = biguint_to_u256(&max_client_contribution);
+    let max_client_contribution = biguint_to_u256(max_client_contribution);
     let deadline = U256::MAX;
-    let (client_fee_receiver, client_signature) = if client_fee_receiver == Bytes::zero(20) {
+    let (client_fee_receiver, client_signature) = if *client_fee_receiver == Bytes::zero(20) {
         (Address::ZERO, vec![])
     } else {
         let router_address = bytes_to_address(encoded_solution.interacting_with())?;
-        let client_fee_receiver = bytes_to_address(&client_fee_receiver)?;
+        let client_fee_receiver = bytes_to_address(client_fee_receiver)?;
         let sig = sign_client_fee(
             chain_id,
             router_address,
@@ -147,35 +150,35 @@ pub fn encode_tycho_router_call(
     // ABI tuple matching ClientFeeParams: (uint32, address, uint256, uint256, bytes)
     let client_fee_params =
         (client_fee_bps, client_fee_receiver, max_client_contribution, deadline, client_signature);
-    let (permit, signature) = if *solution.user_transfer_type() ==
-        UserTransferType::TransferFromPermit2
-    {
-        let permit2 = Permit2::new()?;
-        let permit_single = permit2.get_permit(
-            encoded_solution.interacting_with(),
-            solution.sender(),
-            solution.token_in(),
-            solution.amount_in(),
-        )?;
-        let permit = Some(
-            PermitSingle::try_from(&permit_single)
-                .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?,
-        );
-        let signer = signer
-            .ok_or(EncodingError::FatalError("Signer must be set to use permit2".to_string()))?;
-        let signature = sign_permit(chain_id, &permit_single, signer)?;
-        (permit, signature.as_bytes().to_vec())
-    } else {
-        (None, vec![])
-    };
+    let (permit, signature) =
+        if *solution.user_transfer_type() == UserTransferType::TransferFromPermit2 {
+            let permit2 = Permit2::new()?;
+            let permit_single = permit2.get_permit(
+                encoded_solution.interacting_with(),
+                solution.sender(),
+                solution.token_in(),
+                solution.amount_in(),
+            )?;
+            let permit = Some(
+                PermitSingle::try_from(&permit_single)
+                    .map_err(|e| EncodingError::InvalidInput(format!("Invalid permit: {e}")))?,
+            );
+            let signer = signer.ok_or_else(|| {
+                EncodingError::FatalError("Signer must be set to use permit2".to_string())
+            })?;
+            let signature = sign_permit(chain_id, &permit_single, &signer)?;
+            (permit, signature.as_bytes().to_vec())
+        } else {
+            (None, vec![])
+        };
 
     let function_signature = encoded_solution.function_signature();
     let swaps = encoded_solution.swaps().to_vec();
 
     let method_calldata = if function_signature.contains("Permit2") {
-        let permit = permit.ok_or(EncodingError::FatalError(
-            "permit2 object must be set to use permit2".to_string(),
-        ))?;
+        let permit = permit.ok_or_else(|| {
+            EncodingError::FatalError("permit2 object must be set to use permit2".to_string())
+        })?;
         if function_signature.contains("splitSwap") {
             (
                 given_amount,
@@ -261,7 +264,10 @@ pub fn encode_tycho_router_call(
 /// `clientFeeReceiver` field passed in.
 ///
 /// Uses `deadline = U256::MAX` so signatures never expire in fork tests.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one argument per field of the signed ClientFee typed data"
+)]
 fn sign_client_fee(
     chain_id: u64,
     router_address: Address,
@@ -280,7 +286,12 @@ fn sign_client_fee(
     let signer = PrivateKeySigner::from_str(CLIENT_FEE_RECEIVER_PK)
         .map_err(|e| EncodingError::FatalError(format!("Invalid CLIENT_FEE_RECEIVER_PK: {e}")))?;
 
-    assert_eq!(signer.address(), client_fee_receiver);
+    if signer.address() != client_fee_receiver {
+        return Err(EncodingError::FatalError(format!(
+            "CLIENT_FEE_RECEIVER_PK controls {}, not the client fee receiver {client_fee_receiver}",
+            signer.address()
+        )));
+    }
     // Must match CLIENT_FEE_TYPEHASH in TychoRouterV3.sol.
     let type_hash: B256 = keccak256(
         b"ClientFee(uint32 clientFeeBps,address clientFeeReceiver,\
@@ -349,10 +360,10 @@ uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
 fn sign_permit(
     chain_id: u64,
     permit_single: &models::PermitSingle,
-    signer: PrivateKeySigner,
+    signer: &PrivateKeySigner,
 ) -> Result<Signature, EncodingError> {
     let permit2_address = Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3")
-        .map_err(|_| EncodingError::FatalError("Permit2 address not valid".to_string()))?;
+        .map_err(|e| EncodingError::FatalError(format!("Permit2 address not valid: {e}")))?;
     let domain = eip712_domain! {
         name: "Permit2",
         chain_id: chain_id,

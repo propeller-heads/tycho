@@ -45,7 +45,7 @@ mod tests {
         out.extend(
             vault
                 .map(|v| Bytes::from(v).to_vec())
-                .unwrap_or(vec![0u8; 20]),
+                .unwrap_or_else(|| vec![0u8; 20]),
         );
         Bytes::from(out)
     }
@@ -304,7 +304,10 @@ mod tests {
     fn makers_state(levels: &[(u128, u128)], approved: &[bool]) -> BiconomyState {
         let mut attributes = HashMap::from([
             ("fee_bps".to_owned(), Bytes::from(vec![0u8])),
-            ("maker_count".to_owned(), Bytes::from(vec![levels.len() as u8])),
+            (
+                "maker_count".to_owned(),
+                Bytes::from(vec![u8::try_from(levels.len()).expect("fewer than 256 makers")]),
+            ),
         ]);
         for (i, ((size, price), ok)) in levels.iter().zip(approved).enumerate() {
             let mm = format!("0x{:040x}", 0x1000 + i);
@@ -544,7 +547,7 @@ mod tests {
         assert_eq!(amount_in, &weth - 1u8);
         // A tolerance wide enough to admit the second level fills the first.
         let (amount_in, _) = query(&state, pool_target(usdc_per_weth(1980, 1), 0.01)).unwrap();
-        assert_eq!(amount_in, weth.clone());
+        assert_eq!(amount_in, weth);
         // Below the whole book: take all of it.
         let (amount_in, _) = query(&state, pool_target(usdc_per_weth(1000, 1), 0.0)).unwrap();
         assert_eq!(amount_in, &weth * 2u8);

@@ -44,8 +44,7 @@ pub struct DirectGateway {
 }
 
 impl DirectGateway {
-    #[allow(private_interfaces)]
-    pub fn new(
+    pub(crate) fn new(
         pool: Pool<AsyncPgConnection>,
         state_gateway: PostgresGateway,
         chain: Chain,

@@ -26,7 +26,10 @@ use super::{
         Plan, PricingError,
     },
 };
-use crate::evm::protocol::u256_num::{biguint_to_u256, u256_to_biguint};
+use crate::{
+    evm::protocol::u256_num::{biguint_to_u256, u256_to_biguint},
+    utils::decimals_exponent,
+};
 
 /// Gas of a venue swap. The venue reads every registered maker's board (a live board loads its
 /// levels and calls the provider's `signer` and `available`), then fills each maker the order
@@ -106,10 +109,11 @@ fn balance_value(word: U256) -> U256 {
 impl BiconomyState {
     /// Registered makers in registry order, which breaks price ties.
     pub fn makers(&self) -> Vec<Address> {
-        (0..self.maker_count.min(u64::from(u8::MAX)))
+        let count = u8::try_from(self.maker_count).unwrap_or(u8::MAX);
+        (0..count)
             .map(|i| {
                 self.maker_slots
-                    .get(&(i as u8))
+                    .get(&i)
                     .copied()
                     .unwrap_or_default()
             })
@@ -492,7 +496,9 @@ fn address(token: &Bytes) -> Result<Address, SimulationError> {
     token
         .as_ref()
         .try_into()
-        .map_err(|_| SimulationError::InvalidInput(format!("invalid token address {token}"), None))
+        .map_err(|_not_20_bytes| {
+            SimulationError::InvalidInput(format!("invalid token address {token}"), None)
+        })
 }
 
 fn wad_to_f64(value: U256) -> f64 {
@@ -530,8 +536,8 @@ impl ProtocolSim for BiconomyState {
             .ok_or_else(inactive)?;
         // `best` is raw base per raw quote (1e18-scaled); invert to quote per base in whole
         // tokens, then add the fee as a markup.
-        let base_per_quote =
-            wad_to_f64(best) * 10f64.powf(f64::from(quote.decimals as i32 - base.decimals as i32));
+        let base_per_quote = wad_to_f64(best) *
+            10f64.powf(f64::from(decimals_exponent(quote.decimals, base.decimals)?));
         if base_per_quote <= 0.0 {
             return Err(inactive());
         }

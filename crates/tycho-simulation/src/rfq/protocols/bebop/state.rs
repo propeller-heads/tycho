@@ -505,7 +505,7 @@ mod tests {
 
         // Test selling WBTC for USDC (should use bids)
         let (wbtc_limit, usdc_limit) = state
-            .get_limits(wbtc().address.clone(), usdc().address.clone())
+            .get_limits(wbtc().address, usdc().address)
             .unwrap();
 
         // Use bids: vec![(65000.0, 1.5), (64950.0, 2.0), (64900.0, 0.5)]
@@ -527,7 +527,7 @@ mod tests {
 
         // Test buying WBTC with USDC (should use asks)
         let (usdc_limit, wbtc_limit) = state
-            .get_limits(usdc().address.clone(), wbtc().address.clone())
+            .get_limits(usdc().address, wbtc().address)
             .unwrap();
 
         // Use asks: vec![(65100.0, 1.0), (65150.0, 2.5), (65200.0, 1.5)]
@@ -560,7 +560,7 @@ mod tests {
                 .get_amount_out(amount, &wbtc(), &weth())
                 .map(|_| ()),
             state
-                .get_limits(weth().address.clone(), usdc().address.clone())
+                .get_limits(weth().address, usdc().address)
                 .map(|_| ()),
         ];
 
@@ -583,7 +583,7 @@ mod tests {
             Err(SimulationError::InvalidInput(_, None))
         ));
         assert!(matches!(
-            state.get_limits(usdc().address.clone(), wbtc().address.clone()),
+            state.get_limits(usdc().address, wbtc().address),
             Err(SimulationError::RecoverableError(_))
         ));
     }

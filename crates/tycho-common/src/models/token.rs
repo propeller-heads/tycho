@@ -62,7 +62,7 @@ impl Token {
     /// ## Return
     /// Returns one token as BigUint
     pub fn one(&self) -> BigUint {
-        BigUint::from((1.0 * 10f64.powi(self.decimals as i32)) as u128)
+        BigUint::from(10u32).pow(self.decimals)
     }
 
     pub fn gas_usage(&self) -> BigUint {
@@ -138,6 +138,10 @@ impl TokenQuality {
         matches!(self, Self::Good { .. })
     }
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "public API; taking `&impl ToString` is a breaking change"
+    )]
     pub fn bad(reason: impl ToString) -> Self {
         Self::Bad { reason: reason.to_string() }
     }

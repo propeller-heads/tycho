@@ -29,7 +29,7 @@ const MAX_CACHED_STEPS: usize = 512;
 /// The price, tick, liquidity, fee and gas that a swap starts from. Cached steps hold only for a
 /// swap that starts from the same values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct StepCacheKey {
+pub struct StepCacheKey {
     sqrt_price: U256,
     tick: i32,
     liquidity: u128,
@@ -60,7 +60,7 @@ impl StepCacheKey {
 /// A swap after its first `steps_taken` steps, each taken all the way to its target: the input,
 /// output and gas of those steps together, and the pool's price, tick and liquidity after them.
 #[derive(Clone, Debug)]
-pub(crate) struct CachedSwapProgress {
+pub struct CachedSwapProgress {
     pub(crate) steps_taken: usize,
     /// The smallest swap input that takes all `steps_taken` steps to their targets.
     ///
@@ -134,7 +134,7 @@ struct DirectionCache {
 /// The swap steps cached for one pool state, stored apart for each direction: index 0 sells
 /// token1, index 1 sells token0.
 #[derive(Clone, Default)]
-pub(crate) struct SwapStepCache {
+pub struct SwapStepCache {
     directions: Arc<[Mutex<DirectionCache>; 2]>,
 }
 
@@ -220,7 +220,7 @@ impl SwapStepCache {
 
 /// The step cache's part in one swap: the cached progress the swap starts from, and the progress
 /// it caches after each step.
-pub(crate) struct StepCacheRun<'a> {
+pub struct StepCacheRun<'a> {
     cache: &'a SwapStepCache,
     zero_for_one: bool,
     /// `None` when the swap does not use the cache, and after a step that cannot be cached.
@@ -278,7 +278,7 @@ impl<'a> StepCacheRun<'a> {
 
 /// A pool and amounts that the v3 and v4 step cache tests share.
 #[cfg(test)]
-pub(crate) mod test_fixtures {
+pub mod test_fixtures {
     use std::str::FromStr;
 
     use num_bigint::BigUint;
@@ -289,11 +289,11 @@ pub(crate) mod test_fixtures {
 
     use crate::evm::protocol::utils::uniswap::tick_list::TickInfo;
 
-    pub(crate) const LIQUIDITY: u128 = 377952820878029838;
-    pub(crate) const SQRT_PRICE: &str = "28437325270877025820973479874632004";
-    pub(crate) const TICK: i32 = 255830;
+    pub const LIQUIDITY: u128 = 377952820878029838;
+    pub const SQRT_PRICE: &str = "28437325270877025820973479874632004";
+    pub const TICK: i32 = 255830;
 
-    pub(crate) fn wbtc_weth() -> (Token, Token) {
+    pub fn wbtc_weth() -> (Token, Token) {
         let wbtc = Token::new(
             &Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
             "WBTC",
@@ -315,7 +315,7 @@ pub(crate) mod test_fixtures {
         (wbtc, weth)
     }
 
-    pub(crate) fn test_ticks() -> Vec<TickInfo> {
+    pub fn test_ticks() -> Vec<TickInfo> {
         [
             (255760, 1759015528199933i128),
             (255770, 6393138051835308),
@@ -335,7 +335,7 @@ pub(crate) mod test_fixtures {
     }
 
     /// 70 amounts, from `smallest` and doubling each time, which ends far past the pool's depth.
-    pub(crate) fn test_amounts(smallest: u64) -> Vec<BigUint> {
+    pub fn test_amounts(smallest: u64) -> Vec<BigUint> {
         (0..70u32)
             .map(|doubling| BigUint::from(smallest) << doubling)
             .collect()
@@ -343,7 +343,7 @@ pub(crate) mod test_fixtures {
 
     /// Three orders of the amounts: ascending, descending, and the amounts at even indices before
     /// those at odd indices.
-    pub(crate) fn amount_orders(amounts: &[BigUint]) -> Vec<Vec<BigUint>> {
+    pub fn amount_orders(amounts: &[BigUint]) -> Vec<Vec<BigUint>> {
         let mut even_then_odd: Vec<BigUint> = amounts
             .iter()
             .step_by(2)

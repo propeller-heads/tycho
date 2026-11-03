@@ -65,7 +65,7 @@ fn encode_swap_group(
                 initial_protocol_data.extend(protocol_data);
             }
         } else {
-            initial_protocol_data.extend(ple_encode(grouped_protocol_data));
+            initial_protocol_data.extend(ple_encode(grouped_protocol_data)?);
         }
     }
 
@@ -129,29 +129,22 @@ fn encode_swap_groups(
 /// * `single_swap_validator`: SingleSwapValidator, responsible for checking validity of the swap
 ///   path
 #[derive(Clone)]
-pub(crate) struct SingleSwapStrategyEncoder {
+pub struct SingleSwapStrategyEncoder {
     swap_encoder_registry: SwapEncoderRegistry,
     router_address: Bytes,
     single_swap_validator: SingleSwapValidator,
 }
 
 impl SingleSwapStrategyEncoder {
-    pub(crate) fn new(
-        swap_encoder_registry: SwapEncoderRegistry,
-        router_address: Bytes,
-    ) -> Result<Self, EncodingError> {
-        Ok(Self {
-            swap_encoder_registry,
-            router_address: router_address.clone(),
-            single_swap_validator: SingleSwapValidator,
-        })
+    pub(crate) fn new(swap_encoder_registry: SwapEncoderRegistry, router_address: Bytes) -> Self {
+        Self { swap_encoder_registry, router_address, single_swap_validator: SingleSwapValidator }
     }
 
     /// Encodes information necessary for performing a single hop against a given executor for
     /// a protocol.
-    fn encode_swap_header(&self, executor_address: Bytes, protocol_data: Vec<u8>) -> Vec<u8> {
+    fn encode_swap_header(executor_address: &Bytes, protocol_data: Vec<u8>) -> Vec<u8> {
         let mut encoded = Vec::new();
-        encoded.extend(executor_address.to_vec());
+        encoded.extend_from_slice(executor_address);
         encoded.extend(protocol_data);
         encoded
     }
@@ -212,7 +205,7 @@ impl SingleSwapStrategyEncoder {
             std::slice::from_mut(&mut encoded_group),
         )?;
         let swap_data =
-            self.encode_swap_header(encoded_group.executor_address, encoded_group.protocol_data);
+            Self::encode_swap_header(&encoded_group.executor_address, encoded_group.protocol_data);
         let subsidy_signing_data = subsidized_group_signature
             .map(|signature| signature.build_signing_data(swap_data.len()));
         let gas_usage = estimate_gas_usage(solution, Strategy::Single);
@@ -238,29 +231,26 @@ impl SingleSwapStrategyEncoder {
 /// * `sequential_swap_validator`: SequentialSwapValidator, responsible for checking validity of
 ///   sequential swap solutions
 #[derive(Clone)]
-pub(crate) struct SequentialSwapStrategyEncoder {
+pub struct SequentialSwapStrategyEncoder {
     swap_encoder_registry: SwapEncoderRegistry,
     router_address: Bytes,
     sequential_swap_validator: SequentialSwapValidator,
 }
 
 impl SequentialSwapStrategyEncoder {
-    pub(crate) fn new(
-        swap_encoder_registry: SwapEncoderRegistry,
-        router_address: Bytes,
-    ) -> Result<Self, EncodingError> {
-        Ok(Self {
+    pub(crate) fn new(swap_encoder_registry: SwapEncoderRegistry, router_address: Bytes) -> Self {
+        Self {
             swap_encoder_registry,
-            router_address: router_address.clone(),
+            router_address,
             sequential_swap_validator: SequentialSwapValidator,
-        })
+        }
     }
 
     /// Encodes information necessary for performing a single hop against a given executor for
     /// a protocol.
-    fn encode_swap_header(&self, executor_address: Bytes, protocol_data: Vec<u8>) -> Vec<u8> {
+    fn encode_swap_header(executor_address: &Bytes, protocol_data: Vec<u8>) -> Vec<u8> {
         let mut encoded = Vec::new();
-        encoded.extend(executor_address.to_vec());
+        encoded.extend_from_slice(executor_address);
         encoded.extend(protocol_data);
         encoded
     }
@@ -289,8 +279,7 @@ impl SequentialSwapStrategyEncoder {
         .to_string();
         self.sequential_swap_validator
             .validate_swap_path(solution.swaps(), solution.token_in(), solution.token_out())?;
-        self.sequential_swap_validator
-            .validate_no_back_to_back_venue_hops(solution.swaps())?;
+        SequentialSwapValidator::validate_no_back_to_back_venue_hops(solution.swaps())?;
 
         let grouped_swaps = group_swaps(solution.swaps());
         let subsidized_group =
@@ -306,15 +295,17 @@ impl SequentialSwapStrategyEncoder {
 
         let mut swaps = vec![];
         for encoded_group in encoded_groups {
-            let swap_data = self
-                .encode_swap_header(encoded_group.executor_address, encoded_group.protocol_data);
+            let swap_data = Self::encode_swap_header(
+                &encoded_group.executor_address,
+                encoded_group.protocol_data,
+            );
             swaps.push(swap_data);
         }
 
         let subsidy_signing_data = subsidized_group_signature.map(|signature| {
             signature.build_signing_data(find_ple_item_end(&swaps, signature.group_index))
         });
-        let encoded_swaps = ple_encode(swaps);
+        let encoded_swaps = ple_encode(swaps)?;
         let gas_usage = estimate_gas_usage(solution, Strategy::Sequential);
         Ok(EncodedSolution::new(
             encoded_swaps,
@@ -337,39 +328,31 @@ impl SequentialSwapStrategyEncoder {
 ///   solutions
 /// * `router_address`: Address of the router to be used to execute swaps
 #[derive(Clone)]
-pub(crate) struct SplitSwapStrategyEncoder {
+pub struct SplitSwapStrategyEncoder {
     swap_encoder_registry: SwapEncoderRegistry,
     split_swap_validator: SplitSwapValidator,
     router_address: Bytes,
 }
 
 impl SplitSwapStrategyEncoder {
-    pub(crate) fn new(
-        swap_encoder_registry: SwapEncoderRegistry,
-        router_address: Bytes,
-    ) -> Result<Self, EncodingError> {
-        Ok(Self {
-            swap_encoder_registry,
-            split_swap_validator: SplitSwapValidator,
-            router_address: router_address.clone(),
-        })
+    pub(crate) fn new(swap_encoder_registry: SwapEncoderRegistry, router_address: Bytes) -> Self {
+        Self { swap_encoder_registry, split_swap_validator: SplitSwapValidator, router_address }
     }
 
     /// Encodes information necessary for performing a single hop against a given executor for
     /// a protocol as part of a split swap solution.
     fn encode_swap_header(
-        &self,
         token_in: U8,
         token_out: U8,
         split: U24,
-        executor_address: Bytes,
+        executor_address: &Bytes,
         protocol_data: Vec<u8>,
     ) -> Vec<u8> {
         let mut encoded = Vec::new();
         encoded.push(token_in.to_be_bytes_vec()[0]);
         encoded.push(token_out.to_be_bytes_vec()[0]);
         encoded.extend_from_slice(&split.to_be_bytes_vec());
-        encoded.extend(executor_address.to_vec());
+        encoded.extend_from_slice(executor_address);
         encoded.extend(protocol_data);
         encoded
     }
@@ -396,8 +379,7 @@ impl SplitSwapStrategyEncoder {
             }
         }
         .to_string();
-        self.split_swap_validator
-            .validate_split_percentages(solution.swaps())?;
+        SplitSwapValidator::validate_split_percentages(solution.swaps())?;
         self.split_swap_validator
             .validate_swap_path(solution.swaps(), solution.token_in(), solution.token_out())?;
 
@@ -450,11 +432,11 @@ impl SplitSwapStrategyEncoder {
         let mut swaps = Vec::with_capacity(grouped_swaps.len());
         for (index, encoded_group) in encoded_groups.into_iter().enumerate() {
             let (token_in_index, token_out_index) = token_indices[index];
-            let swap_data = self.encode_swap_header(
+            let swap_data = Self::encode_swap_header(
                 token_in_index,
                 token_out_index,
                 percentage_to_uint24(grouped_swaps[index].split),
-                encoded_group.executor_address,
+                &encoded_group.executor_address,
                 encoded_group.protocol_data,
             );
             swaps.push(swap_data);
@@ -463,7 +445,7 @@ impl SplitSwapStrategyEncoder {
         let subsidy_signing_data = subsidized_group_signature.map(|signature| {
             signature.build_signing_data(find_ple_item_end(&swaps, signature.group_index))
         });
-        let encoded_swaps = ple_encode(swaps);
+        let encoded_swaps = ple_encode(swaps)?;
         let tokens_len = if solution.token_in() == solution.token_out() {
             tokens.len() - 1
         } else {
@@ -552,8 +534,7 @@ mod tests {
             )
             .with_origin(origin.clone());
             let encoder =
-                SingleSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
-                    .unwrap();
+                SingleSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address());
 
             encoder
                 .encode_strategy(&solution)
@@ -581,8 +562,7 @@ mod tests {
                 BigUint::ZERO,
             );
             let swap_encoder_registry = get_swap_encoder_registry();
-            let encoder =
-                SingleSwapStrategyEncoder::new(swap_encoder_registry, router_address()).unwrap();
+            let encoder = SingleSwapStrategyEncoder::new(swap_encoder_registry, router_address());
             let solution = Solution::new(
                 Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
                 Bytes::default(),
@@ -652,14 +632,13 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                default_token(wbtc.clone()),
+                default_token(wbtc),
                 default_token(usdc.clone()),
                 BigUint::ZERO,
             );
             let swap_encoder_registry = get_swap_encoder_registry();
             let encoder =
-                SequentialSwapStrategyEncoder::new(swap_encoder_registry, router_address())
-                    .unwrap();
+                SequentialSwapStrategyEncoder::new(swap_encoder_registry, router_address());
             let solution = Solution::new(
                 Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
                 Bytes::default(),
@@ -719,12 +698,11 @@ mod tests {
                 BigUint::from(900u64),
                 vec![
                     delayed_bebop_swap(usdc.clone(), weth.clone(), delay),
-                    delayed_bebop_swap(weth.clone(), dai.clone(), delay),
+                    delayed_bebop_swap(weth, dai.clone(), delay),
                 ],
             );
             let encoder =
-                SequentialSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
-                    .unwrap();
+                SequentialSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address());
 
             let start = Instant::now();
             let encoded_solution = encoder
@@ -820,7 +798,7 @@ mod tests {
                     },
                     ..Default::default()
                 },
-                default_token(weth.clone()),
+                default_token(weth),
                 default_token(usdc.clone()),
                 BigUint::ZERO,
             );
@@ -828,14 +806,13 @@ mod tests {
             let encoder = SplitSwapStrategyEncoder::new(
                 swap_encoder_registry,
                 Bytes::from("0xcd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2"),
-            )
-            .unwrap();
+            );
 
             let solution = Solution::new(
                 Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
                 Bytes::default(),
                 usdc.clone(),
-                usdc.clone(),
+                usdc,
                 BigUint::from_str("100000000").unwrap(),
                 BigUint::from_str("99574171").unwrap(),
                 BigUint::from_str("97582687").unwrap(),
@@ -957,7 +934,7 @@ mod tests {
                     },
                     ..Default::default()
                 },
-                default_token(weth.clone()),
+                default_token(weth),
                 default_token(usdc.clone()),
                 BigUint::ZERO,
             );
@@ -966,14 +943,13 @@ mod tests {
             let encoder = SplitSwapStrategyEncoder::new(
                 swap_encoder_registry,
                 Bytes::from("0xcd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2"),
-            )
-            .unwrap();
+            );
 
             let solution = Solution::new(
                 Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
                 Bytes::default(),
                 usdc.clone(),
-                usdc.clone(),
+                usdc,
                 BigUint::from_str("100000000").unwrap(),
                 BigUint::from_str("99025908").unwrap(),
                 BigUint::from_str("97045389").unwrap(),
@@ -1179,14 +1155,14 @@ mod tests {
         ) -> Result<EncodedSolution, EncodingError> {
             match kind {
                 StrategyKind::Single => {
-                    SingleSwapStrategyEncoder::new(registry(), router_address())?
+                    SingleSwapStrategyEncoder::new(registry(), router_address())
                         .encode_strategy(solution)
                 }
                 StrategyKind::Sequential => {
-                    SequentialSwapStrategyEncoder::new(registry(), router_address())?
+                    SequentialSwapStrategyEncoder::new(registry(), router_address())
                         .encode_strategy(solution)
                 }
-                StrategyKind::Split => SplitSwapStrategyEncoder::new(registry(), router_address())?
+                StrategyKind::Split => SplitSwapStrategyEncoder::new(registry(), router_address())
                     .encode_strategy(solution),
             }
         }

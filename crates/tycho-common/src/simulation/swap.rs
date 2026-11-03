@@ -549,6 +549,10 @@ impl SwapConstraint {
     ///
     /// # Returns
     /// The modified constraint with the lower bound applied.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn with_lower_bound(mut self, lower: BigUint) -> SimulationResult<Self> {
         match &mut self {
             SwapConstraint::PoolTargetPrice { min_amount_in, .. } => {
@@ -569,6 +573,10 @@ impl SwapConstraint {
     ///
     /// # Returns
     /// The modified constraint with the upper bound applied.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn with_upper_bound(mut self, upper: BigUint) -> SimulationResult<Self> {
         match &mut self {
             SwapConstraint::PoolTargetPrice { max_amount_in, .. } => {
@@ -706,6 +714,10 @@ impl Swap {
     ///
     /// Each tuple contains (amount_in, amount_out, price) at various points
     /// during the swap calculation, useful for optimizing subsequent calls.
+    #[expect(
+        clippy::ref_option,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn price_points(&self) -> &Option<Vec<PricePoint>> {
         &self.price_points
     }

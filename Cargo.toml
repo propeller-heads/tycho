@@ -114,6 +114,66 @@ mockito = "1.1.1"
 pretty_assertions = "1.4.0"
 rstest = "0.24.0"
 
+# Lints beyond clippy's default groups. Every member crate opts in with `[lints] workspace = true`.
+# A deliberate exception is suppressed at the site with `#[expect(clippy::<lint>, reason = "...")]`.
+[workspace.lints.clippy]
+# Control flow: keep the happy path unindented.
+manual_let_else = "warn"
+redundant_else = "warn"
+needless_continue = "warn"
+# Parameters and receivers: borrow what is only read, take ownership of what is kept.
+needless_pass_by_value = "warn"
+needless_pass_by_ref_mut = "warn"
+unused_self = "warn"
+self_only_used_in_recursion = "warn"
+ref_option = "warn"
+ref_option_ref = "warn"
+renamed_function_params = "warn"
+# Allocation.
+or_fun_call = "warn"
+needless_collect = "warn"
+redundant_clone = "warn"
+# Visibility.
+redundant_pub_crate = "warn"
+partial_pub_fields = "warn"
+same_name_method = "warn"
+# Types that make invalid states unrepresentable.
+fn_params_excessive_bools = "warn"
+struct_excessive_bools = "warn"
+option_option = "warn"
+unnecessary_wraps = "warn"
+iter_not_returning_iterator = "warn"
+# Errors are propagated with their source, not discarded or turned into panics.
+map_err_ignore = "warn"
+let_underscore_must_use = "warn"
+unused_result_ok = "warn"
+match_wild_err_arm = "warn"
+unwrap_in_result = "warn"
+panic_in_result_fn = "warn"
+fallible_impl_from = "warn"
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+# Exhaustive matches, so that a new variant is handled everywhere it matters. A wildcard arm on a
+# foreign #[non_exhaustive] enum is required; suppress the lint there.
+wildcard_enum_match_arm = "warn"
+match_wildcard_for_single_variants = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+# Numeric casts that can truncate, wrap or drop the sign.
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"
+# Suppressions use #[expect] with a reason, so one that stops suppressing anything is reported.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+# Dead code and tests.
+collection_is_never_read = "warn"
+no_effect_underscore_binding = "warn"
+should_panic_without_expect = "warn"
+ignore_without_reason = "warn"
+# Lock guards.
+significant_drop_in_scrutinee = "warn"
+
 [profile.substreams]
 inherits = "release"
 opt-level = 'z'

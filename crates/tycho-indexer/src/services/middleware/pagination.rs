@@ -22,7 +22,7 @@ pub trait RequestPaginationValidation: PaginationLimits {
         let max_allowed = Self::effective_max_page_size(supports_compression);
 
         if page_size > max_allowed {
-            Err(RpcError::Pagination(max_allowed as usize))
+            Err(RpcError::Pagination(max_allowed))
         } else {
             Ok(())
         }
@@ -120,11 +120,8 @@ mod tests {
 
             if let Err(RpcError::Pagination(limit)) = result {
                 let has_zstd = accept_encoding.is_some_and(|e| e.contains("zstd"));
-                let expected_limit = if has_zstd {
-                    MAX_PAGE_SIZE_COMPRESSED as usize
-                } else {
-                    MAX_PAGE_SIZE_UNCOMPRESSED as usize
-                };
+                let expected_limit =
+                    if has_zstd { MAX_PAGE_SIZE_COMPRESSED } else { MAX_PAGE_SIZE_UNCOMPRESSED };
                 assert_eq!(limit, expected_limit, "Wrong limit reported");
             }
         }

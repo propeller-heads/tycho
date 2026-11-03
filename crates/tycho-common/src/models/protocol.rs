@@ -46,7 +46,10 @@ impl<T> ProtocolComponent<T>
 where
     T: Into<Address> + Clone,
 {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         id: &str,
         protocol_system: &str,
@@ -84,21 +87,24 @@ impl ProtocolComponent<Arc<Token>> {
 }
 
 impl DeepSizeOf for ProtocolComponent {
-    fn deep_size_of_children(&self, ctx: &mut Context) -> usize {
-        self.id.deep_size_of_children(ctx) +
+    fn deep_size_of_children(&self, context: &mut Context) -> usize {
+        self.id.deep_size_of_children(context) +
             self.protocol_system
-                .deep_size_of_children(ctx) +
+                .deep_size_of_children(context) +
             self.protocol_type_name
-                .deep_size_of_children(ctx) +
-            self.chain.deep_size_of_children(ctx) +
-            self.tokens.deep_size_of_children(ctx) +
+                .deep_size_of_children(context) +
+            self.chain
+                .deep_size_of_children(context) +
+            self.tokens
+                .deep_size_of_children(context) +
             self.contract_addresses
-                .deep_size_of_children(ctx) +
+                .deep_size_of_children(context) +
             self.static_attributes
-                .deep_size_of_children(ctx) +
-            self.change.deep_size_of_children(ctx) +
+                .deep_size_of_children(context) +
+            self.change
+                .deep_size_of_children(context) +
             self.creation_tx
-                .deep_size_of_children(ctx)
+                .deep_size_of_children(context)
     }
 }
 
@@ -145,6 +151,10 @@ impl ProtocolComponentState {
     /// Applies balance deltas to this state.
     ///
     /// This method assumes that the passed delta is "newer" than the current state.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn apply_balance_delta(
         &mut self,
         delta: &HashMap<Bytes, ComponentBalance>,
@@ -266,7 +276,10 @@ impl QualityRange {
         Self { min: Some(min), max: None }
     }
 
-    #[allow(non_snake_case)]
+    #[expect(
+        non_snake_case,
+        reason = "named after the Option::None it stands for; renaming the public constructor is a breaking change"
+    )]
     pub fn None() -> Self {
         Self { min: None, max: None }
     }
