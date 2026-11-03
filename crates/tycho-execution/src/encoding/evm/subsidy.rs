@@ -196,8 +196,8 @@ pub fn validate_subsidy(
         return Ok(());
     };
     let group_index = find_subsidized_group(solution, terms, groups)?;
+    check_not_wrap(&groups[group_index])?;
     validate_terms(solution, terms)?;
-    check_reaches_token_out(groups, group_index, solution.token_out())?;
     swap_encoder_registry.get_subsidy_encoder()?;
     Ok(())
 }
@@ -232,15 +232,6 @@ fn validate_terms(solution: &Solution, terms: &SubsidyTerms) -> Result<(), Encod
             )));
         }
     }
-    if solution.min_amount_out() + &terms.amount > *solution.expected_amount_out() {
-        return Err(EncodingError::InvalidInput(format!(
-            "min_amount_out {} must be at most expected_amount_out {} minus the subsidy {}, so the \
-             swap still succeeds if the subsidy is not paid",
-            solution.min_amount_out(),
-            solution.expected_amount_out(),
-            terms.amount
-        )));
-    }
     if terms.deadline > MAX_ENCODABLE_DEADLINE {
         return Err(EncodingError::InvalidInput(format!(
             "Subsidy deadline {} does not fit in 48 bits",
@@ -250,42 +241,12 @@ fn validate_terms(solution: &Solution, terms: &SubsidyTerms) -> Result<(), Encod
     Ok(())
 }
 
-/// The subsidized group's output must be `token_out`, or the input of a final wrap/unwrap that
-/// takes all of it.
-fn check_reaches_token_out(
-    groups: &[SwapGroup],
-    index: usize,
-    token_out: &Bytes,
-) -> Result<(), EncodingError> {
-    let group = &groups[index];
+/// Fails with `InvalidInput` when `group` is a wrap/unwrap, which cannot carry a subsidy.
+fn check_not_wrap(group: &SwapGroup) -> Result<(), EncodingError> {
     if group.protocol_system == NATIVE_WRAPPER_PROTOCOL_SYSTEM {
         return Err(EncodingError::InvalidInput(
-            "A wrap/unwrap cannot carry a subsidy: name the pool swap before it".to_string(),
+            "A wrap/unwrap cannot carry a subsidy: name a pool swap".to_string(),
         ));
-    }
-    if group.token_out == *token_out {
-        return Ok(());
-    }
-    let consumers: Vec<&SwapGroup> = groups
-        .iter()
-        .filter(|consumer| consumer.token_in == group.token_out)
-        .collect();
-    let Some(wrap) = consumers.iter().find(|consumer| {
-        consumer.protocol_system == NATIVE_WRAPPER_PROTOCOL_SYSTEM &&
-            consumer.token_out == *token_out
-    }) else {
-        return Err(EncodingError::InvalidInput(format!(
-            "The subsidized swap group outputs {}, which reaches token_out {token_out} neither \
-             directly nor through a final wrap/unwrap",
-            group.token_out
-        )));
-    };
-    if consumers.len() > 1 || wrap.split != 0.0 {
-        return Err(EncodingError::InvalidInput(format!(
-            "The final wrap/unwrap into token_out {token_out} takes only part of the subsidized \
-             swap group's output {}",
-            group.token_out
-        )));
     }
     Ok(())
 }
