@@ -9,6 +9,8 @@ mod curve;
 mod ekubo;
 mod ekubo_v3;
 mod elfomofi;
+pub(crate) use elfomofi::validate_swaps as validate_elfomofi_swaps;
+pub use elfomofi::ElfomofiSwapPolicy;
 mod erc_4626;
 mod etherfi;
 mod fallback;

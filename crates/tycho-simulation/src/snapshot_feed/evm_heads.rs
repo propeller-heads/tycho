@@ -1,134 +1,141 @@
-//! Ethereum `newHeads` notifications used to trigger helper snapshots without a polling delay.
+//! Ethereum `newHeads` notifications that trigger complete snapshots.
 
-use std::time::Duration;
-
-use futures::{stream::BoxStream, SinkExt, StreamExt};
+use ::http::Request;
+use futures::{future::BoxFuture, stream::BoxStream, SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    time::{sleep, timeout},
-};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{
-    connect_async_with_config,
-    tungstenite::{protocol::WebSocketConfig, Message},
+    tungstenite::{client::IntoClientRequest, Message},
     WebSocketStream,
 };
 use tycho_common::Bytes;
 
+use crate::snapshot_feed::{
+    errors::FeedError,
+    failures::FailureTracker,
+    ws::{connection_events, WsConnection, WsEvent, WsFeedConfig, WsPayload, WsSource},
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RpcHeader {
+pub struct RpcHeader {
     pub number: u64,
     pub hash: Bytes,
     pub timestamp: u64,
 }
-use crate::snapshot_feed::{errors::FeedError, failures::FailureTracker, ws::WsFeedConfig};
-
-const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum HeadEvent {
-    /// A fresh subscription is ready; fetch the current HTTP head to recover missed blocks.
+pub enum HeadEvent {
     Connected,
     Head(RpcHeader),
+    Reorg(RpcHeader),
 }
 
-/// Subscribes to chain heads and reconnects after errors, yielding a recovery marker on every
-/// successful subscription. Provider URLs and error bodies are deliberately omitted from errors.
-pub(crate) fn head_events(
+pub fn head_events(
     ws_url: String,
     expected_chain_id: u64,
-    config: WsFeedConfig,
+    config: &WsFeedConfig,
 ) -> BoxStream<'static, Result<HeadEvent, FeedError>> {
-    Box::pin(async_stream::stream! {
-        let WsFeedConfig { connect_timeout, read_idle_timeout, backoff_unit,
-            max_backoff_exp, max_consecutive_failures, .. } = config;
-        if connect_timeout.is_zero() || read_idle_timeout.is_zero() || backoff_unit.is_zero() {
-            yield Err(FeedError::Fatal("EVM WebSocket durations must be positive".into()));
-            return;
+    let WsFeedConfig {
+        connect_timeout,
+        read_idle_timeout,
+        backoff_unit,
+        max_backoff_exp,
+        max_consecutive_failures,
+        max_snapshot_age: _,
+    } = *config;
+    if connect_timeout.is_zero() || read_idle_timeout.is_zero() || backoff_unit.is_zero() {
+        return Box::pin(futures::stream::once(async {
+            Err(FeedError::Fatal("EVM WebSocket durations must be positive".into()))
+        }));
+    }
+    let failures = FailureTracker::new(max_consecutive_failures, backoff_unit, max_backoff_exp);
+    let source = HeadSource { ws_url, expected_chain_id, subscription: None, previous: None };
+    Box::pin(connection_events(connect_timeout, read_idle_timeout, failures, source).map(|event| {
+        match event {
+            Ok(WsEvent::Snapshot(head)) => Ok(head),
+            Ok(WsEvent::Disconnected(error)) => Err(error),
+            Err(error) => Err(FeedError::Fatal(error.to_string())),
         }
-        let mut failures = FailureTracker::new(max_consecutive_failures, backoff_unit, max_backoff_exp);
-        loop {
-            let configuration = WebSocketConfig::default()
-                .max_message_size(Some(MAX_MESSAGE_BYTES))
-                .max_frame_size(Some(MAX_MESSAGE_BYTES));
-            let opened = timeout(connect_timeout, async {
-                let (mut socket, _response) = connect_async_with_config(ws_url.as_str(), Some(configuration), true)
-                    .await.map_err(|_| FeedError::Connection("EVM WebSocket connection failed".into()))?;
-                let subscription = subscribe(&mut socket, expected_chain_id).await?;
-                Ok::<_, FeedError>((socket, subscription))
-            }).await;
-            let ended = match opened {
-                Ok(Ok((mut socket, subscription))) => {
-                    yield Ok(HeadEvent::Connected);
-                    let mut previous: Option<RpcHeader> = None;
-                    loop {
-                        match read_json(&mut socket, read_idle_timeout).await {
-                            Ok(notification) => match parse_notification(&notification, &subscription) {
-                                Ok(header) => {
-                                    failures.record_success();
-                                    if previous.as_ref().is_some_and(|last| header.number <= last.number && header != *last) {
-                                        yield Err(FeedError::Connection("EVM canonical head was replaced".into()));
-                                    }
-                                    previous = Some(header.clone());
-                                    yield Ok(HeadEvent::Head(header));
-                                }
-                                Err(error) => break error,
-                            },
-                            Err(error) => break error,
-                        }
-                    }
-                }
-                Ok(Err(error)) => error,
-                Err(_) => FeedError::Connection("EVM WebSocket connection or subscription timed out".into()),
-            };
-            if ended.is_fatal() {
-                yield Err(ended);
-                return;
-            }
-            // A handshake alone does not reset the budget: only an actual head proves that
-            // the subscription serves data. A configured failure limit ends the feed.
-            match failures.record_failure() {
-                Ok(retry) => {
-                    yield Err(ended);
-                    sleep(retry.backoff).await;
-                }
-                Err(consecutive) => {
-                    yield Err(FeedError::Fatal(format!("EVM head subscription gave up after {consecutive} consecutive failures: {ended}")));
-                    return;
-                }
-            }
-        }
-    })
+    }))
 }
 
-async fn subscribe<S>(
-    socket: &mut WebSocketStream<S>,
+struct HeadSource {
+    ws_url: String,
     expected_chain_id: u64,
-) -> Result<String, FeedError>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    send_json(socket, json!({"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []}))
-        .await?;
-    // The caller bounds the entire handshake, including ping/pong and response reads.
-    let chain_response = read_json_unbounded(socket).await?;
-    let chain_id = parse_quantity(response_result(&chain_response, 1)?, "chain ID")?;
-    if chain_id != expected_chain_id {
-        return Err(FeedError::Fatal(format!(
-            "EVM WebSocket endpoint must serve chain ID {expected_chain_id}"
-        )));
+    subscription: Option<String>,
+    previous: Option<RpcHeader>,
+}
+
+impl WsSource for HeadSource {
+    type Snapshot = HeadEvent;
+
+    fn request(&self) -> Result<Request<()>, FeedError> {
+        self.ws_url
+            .as_str()
+            .into_client_request()
+            .map_err(|_error| FeedError::Connection("Invalid EVM WebSocket endpoint".into()))
     }
-    send_json(
-        socket,
-        json!({"jsonrpc": "2.0", "id": 2, "method": "eth_subscribe", "params": ["newHeads"]}),
-    )
-    .await?;
-    let subscribe_response = read_json_unbounded(socket).await?;
-    let subscription = response_result(&subscribe_response, 2)?
-        .as_str()
-        .filter(|subscription| !subscription.is_empty() && subscription.len() <= 256)
-        .ok_or_else(|| FeedError::Parsing("Invalid EVM head subscription ID".into()))?;
-    Ok(subscription.to_owned())
+
+    fn on_connect<'a>(
+        &'a mut self,
+        socket: &'a mut WsConnection,
+    ) -> BoxFuture<'a, Result<Option<HeadEvent>, FeedError>> {
+        Box::pin(async move {
+            send_json(
+                socket,
+                json!({"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []}),
+            )
+            .await?;
+            let response = read_json_unbounded(socket).await?;
+            let chain_id = parse_quantity(response_result(&response, 1)?, "chain ID")?;
+            if chain_id != self.expected_chain_id {
+                return Err(FeedError::Fatal(format!(
+                    "EVM WebSocket endpoint must serve chain ID {}",
+                    self.expected_chain_id
+                )));
+            }
+            send_json(
+            socket,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "eth_subscribe", "params": ["newHeads"]}),
+        )
+        .await?;
+            let response = read_json_unbounded(socket).await?;
+            let subscription = response_result(&response, 2)?
+                .as_str()
+                .filter(|subscription| !subscription.is_empty() && subscription.len() <= 256)
+                .ok_or_else(|| FeedError::Parsing("Invalid EVM head subscription ID".into()))?;
+            self.subscription = Some(subscription.to_owned());
+            self.previous = None;
+            Ok(Some(HeadEvent::Connected))
+        })
+    }
+
+    fn idle_until_snapshot(&self) -> bool {
+        true
+    }
+
+    fn transport_error(&self, _error: FeedError) -> FeedError {
+        FeedError::Connection("EVM WebSocket connection unavailable".into())
+    }
+
+    fn decode(&mut self, payload: WsPayload) -> Result<Option<HeadEvent>, FeedError> {
+        let WsPayload::Text(text) = payload else {
+            return Err(FeedError::Parsing("EVM WebSocket requires JSON text frames".into()));
+        };
+        let value: Value = serde_json::from_str(text.as_str())
+            .map_err(|_error| FeedError::Parsing("Invalid EVM WebSocket JSON".into()))?;
+        let subscription = self
+            .subscription
+            .as_deref()
+            .ok_or_else(|| FeedError::Parsing("EVM head subscription is not ready".into()))?;
+        let header = parse_notification(&value, subscription)?;
+        let reorg = self
+            .previous
+            .as_ref()
+            .is_some_and(|last| header.number <= last.number && header != *last);
+        self.previous = Some(header.clone());
+        Ok(Some(if reorg { HeadEvent::Reorg(header) } else { HeadEvent::Head(header) }))
+    }
 }
 
 async fn send_json<S>(socket: &mut WebSocketStream<S>, value: Value) -> Result<(), FeedError>
@@ -138,22 +145,7 @@ where
     socket
         .send(Message::Text(value.to_string().into()))
         .await
-        .map_err(|_transport| FeedError::Connection("EVM WebSocket request failed".into()))
-}
-
-async fn read_json<S>(
-    socket: &mut WebSocketStream<S>,
-    idle_timeout: Duration,
-) -> Result<Value, FeedError>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    // Ping/pong traffic must not keep a silent head subscription alive forever.
-    timeout(idle_timeout, read_json_unbounded(socket))
-        .await
-        .map_err(|_elapsed| {
-            FeedError::Connection("EVM WebSocket head notification timed out".into())
-        })?
+        .map_err(|_error| FeedError::Connection("EVM WebSocket request failed".into()))
 }
 
 async fn read_json_unbounded<S>(socket: &mut WebSocketStream<S>) -> Result<Value, FeedError>
@@ -164,29 +156,17 @@ where
         let message = socket
             .next()
             .await
-            .ok_or_else(|| FeedError::Connection("EVM WebSocket stream ended".into()))?;
+            .ok_or_else(|| FeedError::Connection("EVM WebSocket stream ended".into()))?
+            .map_err(|_error| FeedError::Connection("EVM WebSocket read failed".into()))?;
         match message {
-            Ok(Message::Text(text)) => {
+            Message::Text(text) => {
                 return serde_json::from_str(text.as_str())
-                    .map_err(|_json| FeedError::Parsing("Invalid EVM WebSocket JSON".into()));
+                    .map_err(|_error| FeedError::Parsing("Invalid EVM WebSocket JSON".into()))
             }
-            Ok(Message::Ping(payload)) => {
-                socket
-                    .send(Message::Pong(payload))
-                    .await
-                    .map_err(|_transport| {
-                        FeedError::Connection("EVM WebSocket pong failed".into())
-                    })?;
-            }
-            Ok(Message::Pong(_payload)) => {}
-            Ok(Message::Close(_frame)) => {
-                return Err(FeedError::Connection("EVM WebSocket closed".into()));
-            }
-            Ok(Message::Binary(_)) | Ok(Message::Frame(_)) => {
-                return Err(FeedError::Parsing("EVM WebSocket requires JSON text frames".into()));
-            }
-            Err(_transport) => {
-                return Err(FeedError::Connection("EVM WebSocket read failed".into()));
+            Message::Ping(_) | Message::Pong(_) => {}
+            Message::Close(_) => return Err(FeedError::Connection("EVM WebSocket closed".into())),
+            Message::Binary(_) | Message::Frame(_) => {
+                return Err(FeedError::Parsing("EVM WebSocket requires JSON text frames".into()))
             }
         }
     }
@@ -256,7 +236,13 @@ fn parse_quantity(value: &Value, name: &str) -> Result<u64, FeedError> {
 
 #[cfg(test)]
 mod tests {
-    use tokio::{net::TcpListener, task::JoinHandle};
+    use std::time::Duration;
+
+    use tokio::{
+        net::TcpListener,
+        task::JoinHandle,
+        time::{sleep, timeout},
+    };
     use tokio_tungstenite::accept_async;
 
     use super::*;
@@ -317,7 +303,7 @@ mod tests {
         head_events(
             url,
             8453,
-            WsFeedConfig {
+            &WsFeedConfig {
                 connect_timeout: Duration::from_secs(1),
                 read_idle_timeout: Duration::from_secs(1),
                 backoff_unit: Duration::from_millis(5),
@@ -381,8 +367,7 @@ mod tests {
             let mut stream = events(url);
             assert_eq!(stream.next().await.unwrap().unwrap(), HeadEvent::Connected);
             assert!(matches!(stream.next().await.unwrap().unwrap(), HeadEvent::Head(_)));
-            assert!(matches!(stream.next().await.unwrap(), Err(FeedError::Connection(_))));
-            let HeadEvent::Head(replacement) = stream.next().await.unwrap().unwrap() else {
+            let HeadEvent::Reorg(replacement) = stream.next().await.unwrap().unwrap() else {
                 panic!("replacement head missing")
             };
             assert_eq!(replacement.hash, Bytes::from(vec![0xcd; 32]));
@@ -414,6 +399,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscriptions_without_heads_do_not_reset_the_failure_budget() {
+        let (listener, url) = server().await;
+        let task = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = accept_async(stream).await.unwrap();
+                acknowledge(&mut socket).await;
+                socket.close(None).await.unwrap();
+            }
+        });
+        let mut stream = head_events(
+            url,
+            8453,
+            &WsFeedConfig {
+                connect_timeout: Duration::from_secs(1),
+                max_consecutive_failures: Some(2),
+                backoff_unit: Duration::from_millis(1),
+                ..crate::snapshot_feed::ws::default_ws_feed_config()
+            },
+        );
+        assert_eq!(stream.next().await.unwrap().unwrap(), HeadEvent::Connected);
+        assert!(matches!(stream.next().await.unwrap(), Err(FeedError::Connection(_))));
+        assert_eq!(stream.next().await.unwrap().unwrap(), HeadEvent::Connected);
+        assert!(matches!(stream.next().await.unwrap(), Err(FeedError::Fatal(_))));
+        assert!(stream.next().await.is_none());
+        finish(task).await;
+    }
+
+    #[tokio::test]
+    async fn subscription_setup_shares_the_connection_deadline() {
+        let (listener, url) = server().await;
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            read_json_unbounded(&mut socket)
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut stream = head_events(
+            url,
+            8453,
+            &WsFeedConfig {
+                connect_timeout: Duration::from_millis(20),
+                max_consecutive_failures: Some(1),
+                ..crate::snapshot_feed::ws::default_ws_feed_config()
+            },
+        );
+        let error = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("connect timed out"));
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn wrong_chain_is_rejected_before_subscribing() {
         for expected in [8453, 56, 4663] {
             let (listener, url) = server().await;
@@ -437,7 +482,7 @@ mod tests {
             let mut stream = head_events(
                 url,
                 expected,
-                WsFeedConfig {
+                &WsFeedConfig {
                     connect_timeout: Duration::from_secs(1),
                     read_idle_timeout: Duration::from_secs(1),
                     backoff_unit: Duration::from_millis(5),
@@ -472,7 +517,7 @@ mod tests {
             let mut stream = head_events(
                 url,
                 chain_id,
-                WsFeedConfig {
+                &WsFeedConfig {
                     connect_timeout: Duration::from_secs(1),
                     read_idle_timeout: Duration::from_secs(1),
                     backoff_unit: Duration::from_millis(5),
@@ -556,7 +601,7 @@ mod tests {
         let mut stream = head_events(
             url,
             8453,
-            WsFeedConfig {
+            &WsFeedConfig {
                 connect_timeout: Duration::from_secs(1),
                 read_idle_timeout: Duration::from_millis(30),
                 backoff_unit: Duration::from_millis(5),
@@ -571,7 +616,7 @@ mod tests {
             .unwrap_err();
         assert!(error
             .to_string()
-            .contains("head notification timed out"));
+            .contains("read_idle_timeout"));
         task.abort();
     }
 
@@ -621,13 +666,13 @@ mod tests {
         let events = head_events(
             "invalid://no-websocket".into(),
             8453,
-            WsFeedConfig {
+            &WsFeedConfig {
                 max_consecutive_failures: Some(2),
                 backoff_unit: Duration::from_secs(1),
                 ..crate::snapshot_feed::ws::default_ws_feed_config()
             },
         )
-        .map(|event| event.map(|_| ()));
+        .map(|event| event.map(|_| crate::snapshot_feed::trigger::TriggerEvent::Fetch));
         let (publisher, snapshots) = Publisher::<u32>::channel();
         let result = run_triggered_feed(
             default_http_feed_config(),
@@ -649,7 +694,7 @@ mod tests {
         let mut events = head_events(
             "invalid://no-websocket".into(),
             8453,
-            WsFeedConfig {
+            &WsFeedConfig {
                 max_consecutive_failures: Some(4),
                 backoff_unit: Duration::from_secs(2),
                 max_backoff_exp: 0,

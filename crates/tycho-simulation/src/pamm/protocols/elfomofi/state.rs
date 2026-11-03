@@ -1,8 +1,4 @@
-use std::{
-    any::Any,
-    collections::HashMap,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{any::Any, collections::HashMap};
 
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -18,15 +14,19 @@ use tycho_common::{
 };
 
 use super::models::{Level, Snapshot};
-use crate::book::component::PairState;
+use crate::book::{all_pairs::PricesAfterFill, component::PairState};
 
 // Conservative protocol-only allowance; router/transfer overhead is estimated separately.
-fn swap_gas(chain: tycho_common::models::Chain) -> u64 {
+#[expect(clippy::wildcard_enum_match_arm, reason = "Chain is non-exhaustive across crates")]
+fn swap_gas(chain: tycho_common::models::Chain) -> Result<u64, SimulationError> {
     match chain {
-        tycho_common::models::Chain::Base => 320_000,
-        tycho_common::models::Chain::Bsc => 300_000,
-        tycho_common::models::Chain::Robinhood => 340_000,
-        _ => unreachable!("validated supported chain"),
+        tycho_common::models::Chain::Base => Ok(320_000),
+        tycho_common::models::Chain::Bsc => Ok(300_000),
+        tycho_common::models::Chain::Robinhood => Ok(340_000),
+        _ => Err(SimulationError::InvalidInput(
+            format!("ElFomoFi is not configured for {chain}"),
+            None,
+        )),
     }
 }
 
@@ -38,6 +38,7 @@ pub struct ElfomofiState {
     pub(super) snapshot: Snapshot,
     pub(super) base_token: Token,
     pub(super) quote_token: Token,
+    used: bool,
 }
 
 impl<'de> Deserialize<'de> for ElfomofiState {
@@ -50,10 +51,14 @@ impl<'de> Deserialize<'de> for ElfomofiState {
             snapshot: Snapshot,
             base_token: Token,
             quote_token: Token,
+            #[serde(default)]
+            used: bool,
         }
         let value = SerializedState::deserialize(deserializer)?;
-        Self::from_snapshot(value.snapshot, value.base_token, value.quote_token)
-            .map_err(serde::de::Error::custom)
+        let mut state = Self::from_snapshot(value.snapshot, value.base_token, value.quote_token)
+            .map_err(serde::de::Error::custom)?;
+        state.used = value.used;
+        Ok(state)
     }
 }
 
@@ -74,20 +79,11 @@ impl ElfomofiState {
                 None,
             ));
         }
-        Ok(Self { snapshot, base_token, quote_token })
+        Ok(Self { snapshot, base_token, quote_token, used: false })
     }
 
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
-    }
-
-    fn is_fresh(&self) -> bool {
-        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else { return false };
-        self.is_fresh_at(now.as_secs())
-    }
-
-    pub(super) fn is_fresh_at(&self, now: u64) -> bool {
-        self.snapshot.ensure_fresh(now).is_ok()
     }
 
     fn book(&self, sell: &Bytes, buy: &Bytes) -> Result<(&[Level], &BigUint), SimulationError> {
@@ -101,15 +97,6 @@ impl ElfomofiState {
         }
     }
 
-    fn available(&self) -> Result<(), SimulationError> {
-        if !self.is_fresh() {
-            return Err(SimulationError::RecoverableError(
-                "ElFomoFi book expired; wait for a fresh block snapshot".into(),
-            ));
-        }
-        Ok(())
-    }
-
     fn validate_tokens(&self, first: &Token, second: &Token) -> Result<(), SimulationError> {
         if first.chain != self.snapshot.chain || second.chain != self.snapshot.chain {
             return Err(SimulationError::InvalidInput("ElFomoFi token chain mismatch".into(), None));
@@ -118,6 +105,9 @@ impl ElfomofiState {
     }
 
     fn interpolate(levels: &[Level], amount: &BigUint) -> Result<BigUint, SimulationError> {
+        if amount == &BigUint::ZERO {
+            return Ok(BigUint::ZERO);
+        }
         let mut input = BigUint::ZERO;
         let mut output = BigUint::ZERO;
         for level in levels {
@@ -168,15 +158,30 @@ impl PairState for ElfomofiState {
         &self.quote_token
     }
     fn directions(&self) -> Vec<(Bytes, Bytes)> {
+        if self.used {
+            return Vec::new();
+        }
+        let book = &self.snapshot.book;
         let mut directions = Vec::new();
-        if !self.snapshot.book.bids.is_empty() && self.snapshot.book.quote_balance != BigUint::ZERO
-        {
+        if Self::limits(&book.bids, &book.quote_balance).0 > BigUint::ZERO {
             directions.push((self.base_token.address.clone(), self.quote_token.address.clone()));
         }
-        if !self.snapshot.book.asks.is_empty() && self.snapshot.book.base_balance != BigUint::ZERO {
+        if Self::limits(&book.asks, &book.base_balance).0 > BigUint::ZERO {
             directions.push((self.quote_token.address.clone(), self.base_token.address.clone()));
         }
         directions
+    }
+}
+
+impl PricesAfterFill for ElfomofiState {
+    fn marginal_price(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        _filled: &BigUint,
+    ) -> Result<f64, SimulationError> {
+        self.book(token_in, token_out)?;
+        Err(SimulationError::RecoverableError("ElFomoFi does not quote after a fill".into()))
     }
 }
 
@@ -188,12 +193,11 @@ impl ProtocolSim for ElfomofiState {
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         self.validate_tokens(base, quote)?;
-        self.available()?;
         // Tycho's BUY price of base in quote uses the quote -> base ladder.
         let (levels, balance) = self.book(&quote.address, &base.address)?;
         let first = levels
             .first()
-            .filter(|_| balance != &BigUint::ZERO)
+            .filter(|_| !self.used && balance != &BigUint::ZERO)
             .ok_or_else(|| SimulationError::RecoverableError("empty ElFomoFi book".into()))?;
         let price = first
             .amount_in
@@ -218,12 +222,17 @@ impl ProtocolSim for ElfomofiState {
     ) -> Result<GetAmountOutResult, SimulationError> {
         self.validate_tokens(token_in, token_out)?;
         let (levels, balance) = self.book(&token_in.address, &token_out.address)?;
-        self.available()?;
         if amount_in == BigUint::ZERO {
             return Ok(GetAmountOutResult::new(
                 BigUint::ZERO,
-                BigUint::from(swap_gas(self.snapshot.chain)),
+                BigUint::from(swap_gas(self.snapshot.chain)?),
                 self.clone_box(),
+            ));
+        }
+        if self.used {
+            return Err(SimulationError::InvalidInput(
+                "ElFomoFi pair can only be used once per solution".into(),
+                None,
             ));
         }
         if amount_in > Self::limits(levels, balance).0 {
@@ -233,10 +242,12 @@ impl ProtocolSim for ElfomofiState {
             ));
         }
         let amount = Self::interpolate(levels, &amount_in)?;
+        let mut next = self.clone();
+        next.used = true;
         Ok(GetAmountOutResult::new(
             amount,
-            BigUint::from(swap_gas(self.snapshot.chain)),
-            self.clone_box(),
+            BigUint::from(swap_gas(self.snapshot.chain)?),
+            Box::new(next),
         ))
     }
 
@@ -246,7 +257,7 @@ impl ProtocolSim for ElfomofiState {
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let (levels, balance) = self.book(&sell_token, &buy_token)?;
-        if !self.is_fresh() {
+        if self.used {
             return Ok((BigUint::ZERO, BigUint::ZERO));
         }
         Ok(Self::limits(levels, balance))
@@ -277,7 +288,8 @@ impl ProtocolSim for ElfomofiState {
             .is_some_and(|other| {
                 self.snapshot == other.snapshot &&
                     self.base_token == other.base_token &&
-                    self.quote_token == other.quote_token
+                    self.quote_token == other.quote_token &&
+                    self.used == other.used
             })
     }
 }

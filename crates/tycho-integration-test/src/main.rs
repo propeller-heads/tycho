@@ -112,6 +112,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     enable_elfomofi: bool,
 
+    /// Include helper tokens outside the configured token universe.
+    #[arg(long, default_value_t = false)]
+    discover_elfomofi_tokens: bool,
+
     /// Poll ElFomoFi books over HTTP instead of subscribing to new block heads.
     #[arg(long, default_value_t = false)]
     book_polling: bool,
@@ -540,11 +544,9 @@ async fn run(mut cli: Cli) -> miette::Result<()> {
         )
         .unwrap_or_else(|e| panic!("Failed to create book stream processor: {e}"));
         if cli.enable_elfomofi {
-            book_stream_processor = book_stream_processor.with_pamm_rpc(
-                cli.rpc_url.clone(),
-                cli.ws_rpc_url.clone(),
-                cli.book_polling,
-            );
+            book_stream_processor = book_stream_processor
+                .with_pamm_rpc(cli.rpc_url.clone(), cli.ws_rpc_url.clone(), cli.book_polling)
+                .with_elfomofi_token_discovery(cli.discover_elfomofi_tokens);
         }
         rfq_handle = Some(
             book_stream_processor
@@ -2427,8 +2429,8 @@ mod tests {
     use tycho_simulation::tycho_common::models::Chain;
 
     use super::{
-        await_block_limit, book_swap_directions, is_oracle_stale_revert, is_stale_quote, pamm_venue,
-        reached_max_blocks, record_book_block, sample_swap_directions,
+        await_block_limit, book_swap_directions, is_oracle_stale_revert, is_stale_quote,
+        pamm_venue, reached_max_blocks, record_book_block, sample_swap_directions,
         should_fetch_block_by_number, Cli, TestStatistics, TychoExecutionResult, TychoState,
     };
 

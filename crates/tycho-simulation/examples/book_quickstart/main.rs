@@ -66,6 +66,10 @@ pub struct Transaction {
 }
 
 #[derive(Parser)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent command-line switches, not mutually exclusive states"
+)]
 struct Cli {
     #[arg(long)]
     sell_token: Option<String>,
@@ -81,6 +85,10 @@ struct Cli {
     /// Include ElFomoFi books on supported chains.
     #[arg(long, default_value_t = false)]
     enable_elfomofi: bool,
+
+    /// Include helper tokens outside the configured token universe.
+    #[arg(long, default_value_t = false)]
+    discover_elfomofi_tokens: bool,
     /// HTTP RPC endpoint on --chain, used by ElFomoFi and swap simulation.
     #[arg(long, env = "RPC_URL", hide_env_values = true)]
     rpc_url: Option<String>,
@@ -101,9 +109,7 @@ struct Cli {
 
 impl Cli {
     fn elfomofi_enabled(&self) -> bool {
-        self.enable_elfomofi &&
-            !self.disable_pamm &&
-            matches!(self.chain, Chain::Base | Chain::Bsc | Chain::Robinhood)
+        self.enable_elfomofi && !self.disable_pamm
     }
 
     fn with_defaults(mut self) -> Self {
@@ -168,7 +174,7 @@ async fn main() {
         .with_target(false)
         .init();
 
-    dotenv().ok();
+    let _dotenv = dotenv();
     let cli = Cli::parse().with_defaults();
     let enable_elfomofi = cli.elfomofi_enabled();
 
@@ -369,7 +375,8 @@ async fn main() {
             use tycho_simulation::pamm::protocols::elfomofi::{self, feed::ElfomofiFeedBuilder};
 
             if let Some(rpc_url) = &cli.rpc_url {
-                let mut builder = ElfomofiFeedBuilder::new(book_config, rpc_url.clone());
+                let mut builder = ElfomofiFeedBuilder::new(book_config, rpc_url.clone())
+                    .discover_tokens(cli.discover_elfomofi_tokens);
                 if cli.book_polling {
                     builder = builder.polling();
                 } else if let Some(ws_rpc_url) = &cli.ws_rpc_url {
@@ -381,10 +388,10 @@ async fn main() {
                             .add(elfomofi::PROTOCOL_SYSTEM, feed)
                             .expect("each provider is added once");
                     }
-                    Err(error) => eprintln!("Skipping ElFomoFi feed: {error}"),
+                    Err(error) => panic!("Cannot enable ElFomoFi feed: {error}"),
                 }
             } else {
-                eprintln!("Skipping ElFomoFi feed: RPC_URL not set");
+                panic!("Cannot enable ElFomoFi feed: RPC_URL not set");
             }
         }
     }
@@ -1185,7 +1192,7 @@ mod tests {
     }
 
     #[test]
-    fn elfomofi_requires_explicit_enable_on_a_supported_chain() {
+    fn elfomofi_requires_explicit_enable() {
         for chain in ["base", "bsc", "robinhood"] {
             let cli =
                 Cli::try_parse_from(["book_quickstart", "--chain", chain, "--enable-elfomofi"])
@@ -1193,7 +1200,7 @@ mod tests {
             assert!(cli.elfomofi_enabled());
         }
         let cli = Cli::try_parse_from(["book_quickstart", "--enable-elfomofi"]).unwrap();
-        assert!(!cli.elfomofi_enabled());
+        assert!(cli.elfomofi_enabled());
     }
 
     #[test]

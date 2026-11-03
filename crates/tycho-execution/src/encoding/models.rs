@@ -298,11 +298,10 @@ pub struct Swap {
     split: f64,
     /// Optional user data to be passed to encoding.
     user_data: Option<Bytes>,
-    /// Optional protocol state used to perform the swap.
+    /// Optional protocol state used for RFQ requests or local execution floors.
     #[serde(skip)]
     protocol_state: Option<Arc<dyn ProtocolSim>>,
-    /// Optional estimated amount in for this Swap. This is necessary for RFQ protocols. This value
-    /// is used to request the quote
+    /// Estimated input used for RFQ requests and local per-swap execution floors.
     estimated_amount_in: Option<BigUint>,
     /// Estimated gas usage for this swap by simulation
     estimated_gas: BigUint,
@@ -350,7 +349,7 @@ impl Swap {
         self
     }
 
-    /// Sets the estimated amount in for RFQ protocols
+    /// Sets the estimated input for quote requests or local execution floors.
     pub fn with_estimated_amount_in(mut self, estimated_amount_in: BigUint) -> Self {
         self.estimated_amount_in = Some(estimated_amount_in);
         self

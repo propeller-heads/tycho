@@ -18,10 +18,9 @@ interface IElfomofiRouter {
 
 error ElfomofiExecutor__InvalidData();
 error ElfomofiExecutor__InvalidRouter();
-error ElfomofiExecutor__QuoteExpired();
 error ElfomofiExecutor__InvalidAmount();
 
-/// @notice Directly funded ERC20 swaps with a snapshot deadline and minimum output rate.
+/// @notice Directly funded ERC20 swaps with a minimum output floor.
 contract ElfomofiExecutor is IExecutor {
     address public immutable elfomofiRouter;
     uint256 public constant partnerId = 299;
@@ -47,20 +46,16 @@ contract ElfomofiExecutor is IExecutor {
         (
             address tokenIn,
             address tokenOut,
-            uint64 validUntil,
             uint256 referenceIn,
             uint256 referenceMinOut
         ) = _decodeData(data);
         if (amountIn == 0) revert ElfomofiExecutor__InvalidAmount();
-        // Enforce the snapshot deadline.
-        // slither-disable-next-line timestamp
-        if (block.timestamp >= validUntil) {
-            revert ElfomofiExecutor__QuoteExpired();
-        }
-        // Scale to the actual preceding leg's output, retaining a positive minimum after rounding.
-        uint256 minimum = Math.mulDiv(
-            amountIn, referenceMinOut, referenceIn, Math.Rounding.Ceil
-        );
+        // A larger input may cross a price level; retain the quoted absolute floor.
+        uint256 minimum = amountIn >= referenceIn
+            ? referenceMinOut
+            : Math.mulDiv(
+                amountIn, referenceMinOut, referenceIn, Math.Rounding.Ceil
+            );
         IElfomofiRouter(elfomofiRouter).swapWithContractBalance({
             fromToken: tokenIn,
             toToken: tokenOut,
@@ -81,7 +76,7 @@ contract ElfomofiExecutor is IExecutor {
             bool outputToRouter
         )
     {
-        (tokenIn, tokenOut,,,) = _decodeData(data);
+        (tokenIn, tokenOut,,) = _decodeData(data);
         return (
             TransferManager.TransferType.Transfer,
             elfomofiRouter,
@@ -97,19 +92,17 @@ contract ElfomofiExecutor is IExecutor {
         returns (
             address tokenIn,
             address tokenOut,
-            uint64 validUntil,
             uint256 referenceIn,
             uint256 referenceMinOut
         )
     {
-        if (data.length != 112) {
+        if (data.length != 104) {
             revert ElfomofiExecutor__InvalidData();
         }
         tokenIn = address(bytes20(data[0:20]));
         tokenOut = address(bytes20(data[20:40]));
-        validUntil = uint64(bytes8(data[40:48]));
-        referenceIn = uint256(bytes32(data[48:80]));
-        referenceMinOut = uint256(bytes32(data[80:112]));
+        referenceIn = uint256(bytes32(data[40:72]));
+        referenceMinOut = uint256(bytes32(data[72:104]));
         if (
             tokenIn == tokenOut || tokenIn == address(0)
                 || tokenOut == address(0) || tokenIn == ETH_ADDRESS

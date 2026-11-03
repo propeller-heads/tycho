@@ -13,6 +13,7 @@ pub const BSC_HELPER: &str = "0x78015e3544d989f0712a0b9986cb05838c3fe06d";
 pub const ROBINHOOD_HELPER: &str = "0x20d24ee45c9b338ef7acf2eede75183b9e2c9e3c";
 pub const PARTNER_ID: u64 = 299;
 
+#[expect(clippy::wildcard_enum_match_arm, reason = "Chain is non-exhaustive across crates")]
 pub fn helper_for(chain: Chain) -> Result<&'static str, FeedError> {
     match chain {
         Chain::Base => Ok(BASE_HELPER),
@@ -22,11 +23,22 @@ pub fn helper_for(chain: Chain) -> Result<&'static str, FeedError> {
     }
 }
 
+#[expect(clippy::wildcard_enum_match_arm, reason = "Chain is non-exhaustive across crates")]
 pub fn router_for(chain: Chain) -> Result<&'static str, FeedError> {
     match chain {
         Chain::Base | Chain::Bsc | Chain::Robinhood => Ok(BASE_ROUTER),
         _ => Err(unsupported_chain(chain)),
     }
+}
+
+#[expect(clippy::wildcard_enum_match_arm, reason = "Chain is non-exhaustive across crates")]
+pub(crate) fn max_snapshot_age(chain: Chain) -> Result<std::time::Duration, FeedError> {
+    let seconds = match chain {
+        Chain::Base | Chain::Robinhood => 2,
+        Chain::Bsc => 1,
+        _ => return Err(unsupported_chain(chain)),
+    };
+    Ok(std::time::Duration::from_secs(seconds))
 }
 
 fn unsupported_chain(chain: Chain) -> FeedError {
@@ -170,12 +182,20 @@ pub(crate) fn decode_orderbooks(
     chain: Chain,
     raw: &[u8],
     block_number: u64,
-    block_hash: Bytes,
+    block_hash: &Bytes,
     block_timestamp: u64,
     observed_at: u64,
     max_age_seconds: u64,
 ) -> Result<Vec<Snapshot>, FeedError> {
     helper_for(chain)?;
+    if block_number == 0 ||
+        block_hash.len() != 32 ||
+        block_timestamp == 0 ||
+        max_age_seconds == 0 ||
+        observed_at < block_timestamp
+    {
+        return Err(FeedError::Parsing("Invalid ElFomoFi snapshot metadata".into()));
+    }
     let decoded = getAllOrderbooksCall::abi_decode_returns_validate(raw)
         .map_err(|error| FeedError::Parsing(format!("Invalid ElFomoFi helper ABI: {error}")))?;
     if decoded.blockNumber != U256::from(block_number) ||
@@ -186,6 +206,8 @@ pub(crate) fn decode_orderbooks(
         ));
     }
     let mut pairs = HashSet::new();
+    let mut duplicates = HashSet::new();
+    let mut invalid = 0usize;
     let mut snapshots = Vec::with_capacity(decoded.books.len());
     for raw_book in decoded.books {
         let book = Book {
@@ -205,13 +227,33 @@ pub(crate) fn decode_orderbooks(
             max_age_seconds,
             book,
         };
-        snapshot.validate()?;
-        if !pairs.insert(snapshot.book.component_id(chain)?) {
-            return Err(FeedError::Parsing(
-                "Duplicate ElFomoFi unordered pair in helper response".into(),
-            ));
+        if snapshot.book.validate().is_err() {
+            invalid += 1;
+            continue;
+        }
+        let pair = snapshot.book.component_id(chain)?;
+        if !pairs.insert(pair.clone()) {
+            duplicates.insert(pair);
+            continue;
         }
         snapshots.push(snapshot);
+    }
+    if !duplicates.is_empty() {
+        snapshots.retain(|snapshot| {
+            !duplicates.contains(
+                &snapshot
+                    .book
+                    .component_id(chain)
+                    .expect("validated chain"),
+            )
+        });
+    }
+    if invalid > 0 || !duplicates.is_empty() {
+        tracing::warn!(
+            invalid_books = invalid,
+            duplicate_pairs = duplicates.len(),
+            "Skipping invalid ElFomoFi books"
+        );
     }
     Ok(snapshots)
 }
@@ -228,6 +270,8 @@ fn big(value: U256) -> BigUint {
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::Address;
+
     use super::*;
 
     #[test]
@@ -270,7 +314,7 @@ mod tests {
                 chain,
                 &raw,
                 number,
-                Bytes::from(vec![1; 32]),
+                &Bytes::from(vec![1; 32]),
                 timestamp,
                 timestamp + 1,
                 10,
@@ -294,6 +338,37 @@ mod tests {
         assert!(ensure_timestamp_fresh(100, 109, 10).is_ok());
         assert!(ensure_timestamp_fresh(100, 110, 10).is_err());
         assert!(ensure_timestamp_fresh(101, 100, 10).is_err());
+    }
+
+    #[test]
+    fn invalid_and_duplicate_pairs_leave_other_books_servable() {
+        let pair = |base, quote| PairOrderbook {
+            base: Address::repeat_byte(base),
+            quote: Address::repeat_byte(quote),
+            askCumulativeLevels: vec![CumulativeLevel {
+                amountIn: U256::from(10),
+                amountOut: U256::from(20),
+            }],
+            bidCumulativeLevels: vec![],
+            balanceBase: U256::from(100),
+            balanceQuote: U256::from(100),
+        };
+        let mut invalid_levels = pair(5, 6);
+        invalid_levels.askCumulativeLevels[0].amountIn = U256::ZERO;
+        let response = getAllOrderbooksReturn {
+            books: vec![pair(1, 2), pair(3, 4), pair(0, 2), pair(3, 3), pair(4, 3), invalid_levels],
+            blockNumber: U256::from(100),
+            blockTimestamp: U256::from(1000),
+        };
+        let raw = getAllOrderbooksCall::abi_encode_returns(&response);
+        let decode = |raw: &[u8], number| {
+            decode_orderbooks(Chain::Base, raw, number, &Bytes::from(vec![1; 32]), 1000, 1000, 2)
+        };
+        let snapshots = decode(&raw, 100).unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].book.base_token, Bytes::from(vec![1; 20]));
+        assert!(decode(&raw, 101).is_err(), "global helper/header mismatches must fail");
+        assert!(decode(&[0x01], 100).is_err(), "invalid outer ABI must fail");
     }
 
     #[test]

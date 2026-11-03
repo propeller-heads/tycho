@@ -15,6 +15,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 
 - **On-chain Protocols**: All DEX protocols supported by Tycho (Uniswap V2/V3, Curve, Balancer, etc.)
 - **RFQ Protocols**: Request-for-Quote protocols like Hashflow
+- **pAMM Book Feeds**: Including ElFomoFi on Base, BSC and Robinhood
 - **Price Level Stream**: Titan pAMM price level stream venues (`pricelevelstream:*`, Ethereum only)
 
 ## Configuration
@@ -26,6 +27,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `RUST_LOG`      | Logging configuration      | `tycho_integration_test=info,error`        |
 | `TYCHO_URL`     | Tycho indexer endpoint     | `tycho-dev.propellerheads.xyz`             |
 | `RPC_URL`       | Blockchain RPC endpoint    | `https://eth-mainnet.alchemyapi.io/v2/...` |
+| `WS_RPC_URL`    | New-block subscription endpoint for ElFomoFi | `wss://your-rpc-endpoint` |
 | `TYCHO_API_KEY` | API key for Tycho services | `your-api-key`                             |
 
 ### Command Line Arguments
@@ -43,7 +45,11 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `--metrics-port`           | `9898`     | Port for Prometheus metrics server                                                                               |
 | `--disable-onchain`        | `false`    | Skip on-chain protocol testing                                                                                   |
 | `--disable-rfq`            | `false`    | Skip the RFQ book feeds (Bebop, Hashflow, Liquorice, Native)                                                     |
-| `--disable-pamm`           | `false`    | Skip the pAMM book feeds (Metric)                                                                                |
+| `--disable-pamm`           | `false`    | Skip the pAMM book feeds                                                                                         |
+| `--enable-elfomofi`        | `false`    | Enable ElFomoFi helper books                                                                                     |
+| `--book-polling`           | `false`    | Poll ElFomoFi over HTTP instead of subscribing to new blocks                                                      |
+| `--discover-elfomofi-tokens` | `false`  | Include unknown helper tokens using RPC metadata instead of only the configured token universe                   |
+| `--executor-fixture`       | -          | Read-only executor override as `PROTOCOL=PATH`; repeat for multiple protocols                                     |
 | `--rfq-all-pairs`          | `false`    | Publish each RFQ venue as one component for every pair it prices                                                 |
 | `--disable-price-level-stream` | `false` | Skip Titan pAMM price level stream testing (only active on Ethereum)                                            |
 | `--price-level-stream-block-interval` | `1` | Emit one sampled price level update per this many blocks                                                    |
@@ -89,3 +95,17 @@ cargo run --package tycho-integration-test -- \
   --max-blocks 10 \
   --protocols uniswap_v2,uniswap_v3
 ```
+
+ElFomoFi uses partner **299** and picks up pair additions/removals automatically. Set
+`RPC_URL` and `WS_RPC_URL` for the selected chain, or use `--book-polling`. Configuration
+errors fail the run. The configured token universe is respected unless discovery is enabled.
+
+```bash
+cargo run -p tycho-integration-test -- --chain base --enable-elfomofi \
+  --disable-onchain --disable-rfq --disable-price-level-stream \
+  --max-blocks 1 --skip-messages-duration 0 \
+  --executor-fixture propamm:elfomofi=protocols/testing/fixtures/Elfomofi.runtime.json
+```
+
+In book-only runs, `--max-blocks` counts distinct snapshot blocks and waits for in-flight
+simulations before printing the summary. Executor fixtures affect only RPC simulation state.

@@ -96,6 +96,13 @@ Enable ElFomoFi with `--enable-elfomofi`. On Base, BSC and Robinhood, set `RPC_U
 `propamm:elfomofi` fetches complete helper books on new block heads, discovers pair changes,
 and interpolates quotes locally. Use `--book-polling` for HTTP-only providers. Settlement uses
 `swapWithContractBalance`, partner **299**, and no venue approval.
+New pairs use the configured token universe. Add `--discover-elfomofi-tokens` to include
+unknown tokens through RPC metadata. Invalid endpoint configuration fails startup.
+Only one ElFomoFi swap is allowed per transaction, across all pairs.
+
+The executor enforces a positive per-leg output floor without a separate snapshot deadline.
+Solvers can allocate their route tolerance with `ElfomofiSwapPolicy` in the swap's `user_data`;
+the default tolerance is 50 bps.
 
 ```bash
 cargo run --release --example book_quickstart -- --chain base --enable-elfomofi
