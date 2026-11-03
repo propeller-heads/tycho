@@ -115,6 +115,15 @@ pub(crate) fn volatile_get_amount_out(
     safe_div_u256(numerator, denominator)
 }
 
+fn token_decimals(token: &Token) -> Result<u8, SimulationError> {
+    u8::try_from(token.decimals).map_err(|e| {
+        SimulationError::InvalidInput(
+            format!("Token {} decimals out of range: {e}", token.address),
+            None,
+        )
+    })
+}
+
 #[typetag::serde]
 impl ProtocolSim for AerodromeV1State {
     fn fee(&self) -> f64 {
@@ -135,19 +144,13 @@ impl ProtocolSim for AerodromeV1State {
         let amount_in = biguint_to_u256(&amount_in);
         let zero2one = token_in.address < token_out.address;
         let amount_out = if self.stable {
+            let decimals_in = token_decimals(token_in)?;
+            let decimals_out = token_decimals(token_out)?;
             StablePool {
                 reserve0: self.reserve0,
                 reserve1: self.reserve1,
-                decimals0: if zero2one {
-                    token_in.decimals as u8
-                } else {
-                    token_out.decimals as u8
-                },
-                decimals1: if zero2one {
-                    token_out.decimals as u8
-                } else {
-                    token_in.decimals as u8
-                },
+                decimals0: if zero2one { decimals_in } else { decimals_out },
+                decimals1: if zero2one { decimals_out } else { decimals_in },
                 math: StableMath::Checked,
             }
             .get_amount_out(amount_in, zero2one, self.resolved_fee_bps())?
@@ -188,11 +191,11 @@ impl ProtocolSim for AerodromeV1State {
                 decimals1: self.decimals1,
                 math: StableMath::Checked,
             }
-            .get_limits(sell_token, buy_token)
+            .get_limits(&sell_token, &buy_token)
         } else {
             cpmm_get_limits(
-                sell_token,
-                buy_token,
+                &sell_token,
+                &buy_token,
                 self.reserve0,
                 self.reserve1,
                 self.resolved_fee_bps(),

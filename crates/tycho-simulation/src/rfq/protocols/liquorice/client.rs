@@ -126,7 +126,9 @@ impl LiquoriceClient {
     ) -> Result<SignedQuote, RFQError> {
         let expiry = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".into()))?
+            .map_err(|_before_epoch| {
+                RFQError::ParsingError("SystemTime before UNIX EPOCH".to_string())
+            })?
             .as_secs() +
             self.quote_expiry_secs;
 
@@ -180,9 +182,8 @@ impl LiquoriceClient {
                     if attempt < MAX_RETRIES - 1 {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
-                    } else {
-                        return Err(last_error.unwrap());
                     }
+                    return Err(last_error.unwrap());
                 }
                 Err(_) => {
                     return Err(RFQError::ConnectionError(format!(
@@ -204,9 +205,8 @@ impl LiquoriceClient {
                         if attempt < MAX_RETRIES - 1 {
                             tokio::time::sleep(Duration::from_millis(100)).await;
                             continue;
-                        } else {
-                            return Err(last_error.unwrap());
                         }
+                        return Err(last_error.unwrap());
                     }
                 };
                 // The venue answering a quote request at all means the request reached it,
@@ -219,9 +219,8 @@ impl LiquoriceClient {
                     warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, error = %err_msg, "returned non-200 status");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
-                } else {
-                    return Err(last_error.unwrap());
                 }
+                return Err(last_error.unwrap());
             }
 
             let quote_response = match response
@@ -237,9 +236,8 @@ impl LiquoriceClient {
                     if attempt < MAX_RETRIES - 1 {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
-                    } else {
-                        return Err(last_error.unwrap());
                     }
+                    return Err(last_error.unwrap());
                 }
             };
 
@@ -328,9 +326,9 @@ impl LiquoriceClient {
         let LiquoriceQuoteLevel { tx, base_token_amount, allowances, partial_fill, .. } =
             quote_level;
 
-        let amount_in = BigUint::from_str(&base_token_amount).map_err(|_| {
+        let amount_in = BigUint::from_str(&base_token_amount).map_err(|e| {
             RFQError::ParsingError(format!(
-                "Failed to parse base token amount: {base_token_amount}"
+                "Failed to parse base token amount: {base_token_amount} ({e})"
             ))
         })?;
         let mut quote_attributes: HashMap<String, Bytes> = HashMap::new();
@@ -380,9 +378,9 @@ impl LiquoriceClient {
                 "min_base_token_amount".to_string(),
                 Bytes::from(
                     biguint_to_u256(&BigUint::from_str(&pf.min_base_token_amount).map_err(
-                        |_| {
+                        |e| {
                             RFQError::ParsingError(format!(
-                                "Failed to parse min_base_token_amount: {}",
+                                "Failed to parse min_base_token_amount: {} ({e})",
                                 pf.min_base_token_amount
                             ))
                         },
@@ -420,9 +418,9 @@ mod tests {
     /// A binding quote as Liquorice answers one, recorded from its API.
     const BINDING_QUOTE: &str = r#"{"rfqId":"test-rfq-id","liquidityAvailable":true,"levels":[{"makerRfqId":"maker-rfq-1","maker":"test-maker","nonce":"0x0000000000000000000000000000000000000000000000000000000000000001","expiry":1707847360,"tx":{"to":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","data":"0xdeadbeef"},"baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","baseTokenAmount":"1000000000000000000","quoteTokenAmount":"3329502","partialFill":null,"allowances":[]}]}"#;
 
-    fn create_test_client(base_url: String, quote_timeout: Duration) -> LiquoriceClient {
+    fn create_test_client(base_url: &str, quote_timeout: Duration) -> LiquoriceClient {
         LiquoriceClient::new(
-            Some(&base_url),
+            Some(base_url),
             Chain::Ethereum.id(),
             "test_solver".to_string(),
             "test_key".to_string(),
@@ -475,8 +473,7 @@ mod tests {
 
     #[test]
     fn debug_output_omits_credentials() {
-        let client =
-            create_test_client("https://liquorice.example".to_string(), Duration::from_secs(1));
+        let client = create_test_client("https://liquorice.example", Duration::from_secs(1));
         let rendered = format!("{client:?}");
 
         assert!(!rendered.contains("test_solver"));
@@ -659,7 +656,7 @@ mod tests {
     async fn a_refused_status_leaves_the_component_quotable() {
         let server =
             spawn_http_server(|_| Some(("429 Too Many Requests", "slow down".to_string()))).await;
-        let client = create_test_client(format!("{}/quote", server.url()), Duration::from_secs(1));
+        let client = create_test_client(&format!("{}/quote", server.url()), Duration::from_secs(1));
 
         let error = client
             .request_binding_quote(&create_test_quote_params(), "test-maker")
@@ -697,7 +694,7 @@ mod tests {
         .await;
 
         let client_short_timeout =
-            create_test_client(format!("{}/rfq", server.url()), Duration::from_millis(200));
+            create_test_client(&format!("{}/rfq", server.url()), Duration::from_millis(200));
         let params = create_test_quote_params();
 
         let start = std::time::Instant::now();
@@ -712,7 +709,10 @@ mod tests {
             RFQError::ConnectionError(msg) => {
                 assert!(msg.contains("timed out"), "Expected timeout error, got: {}", msg);
             }
-            _ => panic!("Expected ConnectionError, got: {:?}", err),
+            RFQError::ParsingError(_) |
+            RFQError::FatalError(_) |
+            RFQError::InvalidInput(_) |
+            RFQError::QuoteNotFound(_) => panic!("Expected ConnectionError, got: {:?}", err),
         }
         assert!(
             elapsed.as_millis() >= 200 && elapsed.as_millis() < 400,
@@ -721,7 +721,7 @@ mod tests {
         );
 
         let client_long_timeout =
-            create_test_client(format!("{}/rfq", server.url()), Duration::from_secs(1));
+            create_test_client(&format!("{}/rfq", server.url()), Duration::from_secs(1));
 
         let result = client_long_timeout
             .request_binding_quote(&params, "test-maker")
@@ -744,7 +744,7 @@ mod tests {
         })
         .await;
 
-        let client = create_test_client(format!("{}/rfq", server.url()), Duration::from_secs(5));
+        let client = create_test_client(&format!("{}/rfq", server.url()), Duration::from_secs(5));
         let params = create_test_quote_params();
         let result = client
             .request_binding_quote(&params, "test-maker")
@@ -797,6 +797,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "hits Liquorice's live API; requires LIQUORICE_USER and LIQUORICE_KEY"]
     async fn live_liquorice_api_refuses_a_chain_it_does_not_price() {
+        #[expect(
+            clippy::unused_result_ok,
+            reason = "a missing .env file is fine; the variables may come from the environment"
+        )]
         dotenv().ok();
         let auth_solver = std::env::var("LIQUORICE_USER").expect("LIQUORICE_USER not set");
         let auth_key = std::env::var("LIQUORICE_KEY").expect("LIQUORICE_KEY not set");

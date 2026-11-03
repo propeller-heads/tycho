@@ -79,7 +79,11 @@ fn grpc_frame(message: &impl Message) -> Bytes {
     let payload = message.encode_to_vec();
     let mut frame = Vec::with_capacity(5 + payload.len());
     frame.push(0); // not compressed
-    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(
+        &u32::try_from(payload.len())
+            .expect("a test frame is below 4 GiB")
+            .to_be_bytes(),
+    );
     frame.extend_from_slice(&payload);
     Bytes::from(frame)
 }

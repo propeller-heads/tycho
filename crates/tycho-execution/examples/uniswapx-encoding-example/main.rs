@@ -89,7 +89,7 @@ fn main() {
             },
             ..Default::default()
         },
-        dai.clone(),
+        dai,
         usdc.clone(),
         BigUint::ZERO,
     );
@@ -105,8 +105,8 @@ fn main() {
             },
             ..Default::default()
         },
-        usdc.clone(),
-        usdt.clone(),
+        usdc,
+        usdt,
         BigUint::ZERO,
     );
 
@@ -115,7 +115,7 @@ fn main() {
         filler.clone(),
         filler.clone(),
         dai_addr.clone(),
-        usdt_addr.clone(),
+        usdt_addr,
         BigUint::from_str("2_000_000000000000000000").unwrap(),
         BigUint::from_str("1_990_000000").unwrap(),
         // min amount out; 2% below the quote

@@ -113,3 +113,6 @@ float_eq = "1.0.1"
 tycho-common = { workspace = true, features = ["test-utils"] }
 metrics-util = { version = "0.20.0", features = ["debugging"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
+
+[lints]
+workspace = true

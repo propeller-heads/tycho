@@ -51,7 +51,9 @@ impl EVMAccountExtractor {
             hash: block.header.hash.to_bytes(),
             parent_hash: block.header.parent_hash.to_bytes(),
             chain: self.chain,
-            ts: DateTime::from_timestamp(block.header.timestamp as i64, 0)
+            ts: i64::try_from(block.header.timestamp)
+                .ok()
+                .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
                 .ok_or_else(|| {
                     RPCError::RequestError(RequestError::Other("Invalid timestamp in block".into()))
                 })?

@@ -403,8 +403,18 @@ pub async fn create_metrics_exporter(port: u16) -> Result<tokio::task::JoinHandl
 
     // Wrap the thread handle in a tokio task
     let join_handle = tokio::spawn(async move {
-        task.join()
-            .map_err(|_| miette::miette!("Metrics server thread panicked"))?
+        task.join().map_err(|payload| {
+            let message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                })
+                .unwrap_or("non-string panic payload");
+            miette::miette!("Metrics server thread panicked: {message}")
+        })?
     });
 
     Ok(join_handle)

@@ -69,7 +69,7 @@ pub fn sale_rate_deltas_from_attributes<T: IntoIterator<Item = (String, Bytes)>>
                 }
             };
 
-            let delta = match i128::try_from(value.clone()) {
+            let delta = match i128::try_from(value) {
                 Ok(delta) => delta,
                 Err(err) => return Some(Err(err.to_string())),
             };

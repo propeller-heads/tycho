@@ -213,9 +213,14 @@ fn decode_bool(name: &'static str, value: &Bytes) -> Result<bool, InvalidSnapsho
 }
 
 fn address_from_bytes(value: &[u8]) -> Result<Address, InvalidSnapshotError> {
-    value.try_into().map_err(|_| {
-        InvalidSnapshotError::ValueError(format!("expected 20-byte address, got {}", value.len()))
-    })
+    value
+        .try_into()
+        .map_err(|_wrong_length| {
+            InvalidSnapshotError::ValueError(format!(
+                "expected 20-byte address, got {}",
+                value.len()
+            ))
+        })
 }
 
 fn address_from_component_id(value: &str) -> Result<Address, InvalidSnapshotError> {

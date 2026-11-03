@@ -254,13 +254,13 @@ pub(super) fn decode_attribute(name: &str, value: &[u8]) -> Result<U256, String>
 /// `decode_attribute` for the `uint64` bucket fields.
 pub(super) fn decode_u64_attribute(name: &str, value: &[u8]) -> Result<u64, String> {
     let value = decode_attribute(name, value)?;
-    u64::try_from(value).map_err(|_| format!("{name} does not fit in 64 bits"))
+    u64::try_from(value).map_err(|_out_of_range| format!("{name} does not fit in 64 bits"))
 }
 
 /// `decode_attribute` for the `uint16` basis-point fields.
 pub(super) fn decode_u16_attribute(name: &str, value: &[u8]) -> Result<u16, String> {
     let value = decode_attribute(name, value)?;
-    u16::try_from(value).map_err(|_| format!("{name} does not fit in 16 bits"))
+    u16::try_from(value).map_err(|_out_of_range| format!("{name} does not fit in 16 bits"))
 }
 
 impl EtherfiState {
@@ -1191,7 +1191,7 @@ mod tests {
         assert!(limit > u256_to_biguint(one_eth() * U256::from(999)));
         assert!(limit < u256_to_biguint(one_eth() * U256::from(1000)));
         let quote = state
-            .get_amount_out(limit.clone(), &eeth_token(), &eth_token())
+            .get_amount_out(limit, &eeth_token(), &eth_token())
             .expect("limit quotes");
         assert_eq!(quote.amount, output);
     }
@@ -1374,7 +1374,7 @@ mod tests {
         assert_eq!(wrapper_of(&after_wrap).weeth_shares, shares_before + weeth);
 
         let unwrapped = after_wrap
-            .get_amount_out(wrapped.amount.clone(), &weeth_token(), &eeth_token())
+            .get_amount_out(wrapped.amount, &weeth_token(), &eeth_token())
             .expect("unwrap");
         let eeth = biguint_to_u256(&unwrapped.amount);
         assert_eq!(
@@ -1513,17 +1513,17 @@ mod tests {
             (&pool, WEETH_ADDRESS, ETH_ADDRESS),
             (&wrapper, WEETH_ADDRESS, ETH_ADDRESS),
         ] {
-            assert!(matches_fatal(state.get_limits(Bytes::from(sell), Bytes::from(buy))));
-            assert!(matches_fatal(state.get_amount_out(
+            assert!(matches_fatal(&state.get_limits(Bytes::from(sell), Bytes::from(buy))));
+            assert!(matches_fatal(&state.get_amount_out(
                 BigUint::from(1u64),
                 &token(sell, "in"),
                 &token(buy, "out")
             )));
-            assert!(matches_fatal(state.spot_price(&token(sell, "in"), &token(buy, "out"))));
+            assert!(matches_fatal(&state.spot_price(&token(sell, "in"), &token(buy, "out"))));
         }
     }
 
-    fn matches_fatal<T>(result: Result<T, SimulationError>) -> bool {
+    fn matches_fatal<T>(result: &Result<T, SimulationError>) -> bool {
         match result {
             Err(SimulationError::FatalError(_)) => true,
             Err(_) | Ok(_) => false,
@@ -1944,14 +1944,14 @@ mod tests {
                 if supported.contains(&(id, sell_bytes, buy_bytes)) {
                     continue;
                 }
-                assert!(matches_fatal(state.get_limits(sell.clone(), buy.clone())));
-                assert!(matches_fatal(state.get_amount_out(
+                assert!(matches_fatal(&state.get_limits(sell.clone(), buy.clone())));
+                assert!(matches_fatal(&state.get_amount_out(
                     BigUint::from(1u64),
                     &token(sell_bytes, "in"),
                     &token(buy_bytes, "out")
                 )));
                 assert!(matches_fatal(
-                    state.spot_price(&token(sell_bytes, "in"), &token(buy_bytes, "out"))
+                    &state.spot_price(&token(sell_bytes, "in"), &token(buy_bytes, "out"))
                 ));
             }
         }

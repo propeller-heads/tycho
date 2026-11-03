@@ -33,14 +33,14 @@ mod typed {
 
 const PAYER_CONFIG_KEY: &str = "payer_address";
 const MAX_ENCODABLE_DEADLINE: u64 = (1 << 48) - 1;
-pub(crate) const SUBSIDY_SIGNATURE_LEN: usize = 65;
+pub const SUBSIDY_SIGNATURE_LEN: usize = 65;
 
 /// Start of the signature in the subsidizing executor's swap data.
-pub(crate) const SUBSIDY_SIGNATURE_OFFSET: usize = 20 + 32 + 32 + 32 + 6;
+pub const SUBSIDY_SIGNATURE_OFFSET: usize = 20 + 32 + 32 + 32 + 6;
 
 /// The subsidizing executor and the subsidy payer of a chain.
 #[derive(Clone, Debug)]
-pub(crate) struct SubsidyEncoder {
+pub struct SubsidyEncoder {
     executor_address: Bytes,
     payer_address: Bytes,
     chain: Chain,
@@ -55,10 +55,9 @@ impl SubsidyEncoder {
     pub(crate) fn from_config(
         executor_address: Bytes,
         chain: Chain,
-        config: Option<HashMap<String, String>>,
+        config: Option<&HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
         let payer = config
-            .as_ref()
             .and_then(|config| config.get(PAYER_CONFIG_KEY))
             .ok_or_else(|| {
                 EncodingError::FatalError(format!(
@@ -66,16 +65,19 @@ impl SubsidyEncoder {
                      is missing from its subsidy protocol config"
                 ))
             })?;
-        let invalid_payer =
-            || EncodingError::FatalError(format!("Invalid subsidy {PAYER_CONFIG_KEY}: {payer}"));
-        let payer_address = Bytes::from_str(payer).map_err(|_| invalid_payer())?;
-        bytes_to_address(&payer_address).map_err(|_| invalid_payer())?;
+        let payer_address = Bytes::from_str(payer).map_err(|e| invalid_payer(payer, e))?;
+        bytes_to_address(&payer_address).map_err(|e| invalid_payer(payer, e))?;
         Ok(Self::new(executor_address, payer_address, chain))
     }
 }
 
+/// The error for a configured payer address that is not a valid address.
+fn invalid_payer(payer: &str, error: impl std::fmt::Display) -> EncodingError {
+    EncodingError::FatalError(format!("Invalid subsidy {PAYER_CONFIG_KEY}: {payer}: {error}"))
+}
+
 /// The swap group that carries a solution's subsidy.
-pub(crate) struct SubsidizedGroup<'a> {
+pub struct SubsidizedGroup<'a> {
     pub(crate) group_index: usize,
     token_out: &'a Bytes,
     terms: &'a SubsidyTerms,
@@ -84,7 +86,7 @@ pub(crate) struct SubsidizedGroup<'a> {
 }
 
 /// Signing hash and signature position of the subsidized group, after wrapping.
-pub(crate) struct SubsidizedGroupSignature {
+pub struct SubsidizedGroupSignature {
     pub(crate) group_index: usize,
     signing_hash: B256,
     /// Distance from the start of the signature to the end of the group's protocol data.
@@ -152,7 +154,7 @@ impl SubsidizedGroup<'_> {
 }
 
 /// The solution's subsidy terms, or `None` when it has none or is cyclical.
-pub(crate) fn encoded_subsidy(solution: &Solution) -> Option<&SubsidyTerms> {
+pub fn encoded_subsidy(solution: &Solution) -> Option<&SubsidyTerms> {
     if solution.token_in() == solution.token_out() {
         return None;
     }
@@ -164,7 +166,7 @@ pub(crate) fn encoded_subsidy(solution: &Solution) -> Option<&SubsidyTerms> {
 ///
 /// Expects a solution that passed [`validate_subsidy`]. Fails with `FatalError` when the chain
 /// has no subsidizing executor.
-pub(crate) fn select_subsidized_group<'a>(
+pub fn select_subsidized_group<'a>(
     solution: &'a Solution,
     groups: &'a [SwapGroup],
     swap_encoder_registry: &'a SwapEncoderRegistry,
@@ -185,7 +187,7 @@ pub(crate) fn select_subsidized_group<'a>(
 /// Fails unless the solution's subsidy, if any, can be paid: `InvalidInput` when the solution, its
 /// subsidy terms or the swap group they name cannot carry it, `FatalError` when the chain has no
 /// subsidizing executor.
-pub(crate) fn validate_subsidy(
+pub fn validate_subsidy(
     solution: &Solution,
     groups: &[SwapGroup],
     swap_encoder_registry: &SwapEncoderRegistry,
@@ -636,8 +638,8 @@ mod tests {
         );
     }
 
-    fn payer_config(payer: &str) -> Option<HashMap<String, String>> {
-        Some(HashMap::from([(PAYER_CONFIG_KEY.to_string(), payer.to_string())]))
+    fn payer_config(payer: &str) -> HashMap<String, String> {
+        HashMap::from([(PAYER_CONFIG_KEY.to_string(), payer.to_string())])
     }
 
     #[test]
@@ -645,7 +647,7 @@ mod tests {
         let encoder = SubsidyEncoder::from_config(
             Bytes::from(EXECUTOR),
             Chain::Ethereum,
-            payer_config(PAYER),
+            Some(&payer_config(PAYER)),
         )
         .unwrap();
 
@@ -655,13 +657,14 @@ mod tests {
 
     #[rstest]
     #[case::missing_config(None, "missing")]
-    #[case::not_hex(payer_config("not an address"), "Invalid subsidy payer_address")]
-    #[case::not_20_bytes(payer_config("0x1234"), "Invalid subsidy payer_address")]
+    #[case::not_hex(Some(payer_config("not an address")), "Invalid subsidy payer_address")]
+    #[case::not_20_bytes(Some(payer_config("0x1234")), "Invalid subsidy payer_address")]
     fn test_from_config_invalid_payer(
         #[case] config: Option<HashMap<String, String>>,
         #[case] message: &str,
     ) {
-        let result = SubsidyEncoder::from_config(Bytes::from(EXECUTOR), Chain::Ethereum, config);
+        let result =
+            SubsidyEncoder::from_config(Bytes::from(EXECUTOR), Chain::Ethereum, config.as_ref());
 
         assert!(
             matches!(result, Err(EncodingError::FatalError(ref error)) if error.contains(message)),

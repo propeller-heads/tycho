@@ -331,6 +331,10 @@ impl FromStr for Bytes {
     }
 }
 
+#[expect(
+    clippy::fallible_impl_from,
+    reason = "public API; replacing it with TryFrom is a breaking change"
+)]
 impl From<&str> for Bytes {
     fn from(value: &str) -> Self {
         value.parse().unwrap()

@@ -139,13 +139,15 @@ fn decode_fee_tier(
     let Some(tick_spacing) = static_attributes.get("tick_spacing") else {
         return FeeAmount::try_from(fee)
             .map(FeeTier::from)
-            .map_err(|_| InvalidSnapshotError::ValueError("Unsupported fee amount".to_string()));
+            .map_err(|()| {
+                InvalidSnapshotError::ValueError(format!("Unsupported fee amount {fee}"))
+            });
     };
     let tick_spacing = decode_i32("tick_spacing", tick_spacing)?;
 
     let fee = u32::try_from(fee)
-        .map_err(|_| InvalidSnapshotError::ValueError(format!("Negative fee {fee}")))?;
-    let tick_spacing = u16::try_from(tick_spacing).map_err(|_| {
+        .map_err(|_out_of_range| InvalidSnapshotError::ValueError(format!("Negative fee {fee}")))?;
+    let tick_spacing = u16::try_from(tick_spacing).map_err(|_out_of_range| {
         InvalidSnapshotError::ValueError(format!("Tick spacing {tick_spacing} out of range"))
     })?;
     FeeTier::new(fee, tick_spacing).map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
@@ -393,7 +395,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.err().unwrap(),
-            InvalidSnapshotError::ValueError(err) if err == *"Unsupported fee amount"
+            InvalidSnapshotError::ValueError(err) if err == *"Unsupported fee amount 4000"
         ));
     }
 }

@@ -26,7 +26,7 @@ use dialoguer::{theme::ColorfulTheme, Select};
 use dotenv::dotenv;
 use futures::StreamExt as _;
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
+use num_traits::{FromPrimitive, ToPrimitive};
 use tracing_subscriber::EnvFilter;
 use tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes};
 use tycho_execution::encoding::{
@@ -95,6 +95,16 @@ impl Cli {
             self.buy_token = Some(match self.chain {
                 Chain::Ethereum => "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
                 Chain::Base => "0x4200000000000000000000000000000000000006".to_string(),
+                Chain::Starknet |
+                Chain::ZkSync |
+                Chain::Arbitrum |
+                Chain::Bsc |
+                Chain::Unichain |
+                Chain::Polygon |
+                Chain::Plasma |
+                Chain::Robinhood |
+                Chain::Arc |
+                Chain::Custom(_) |
                 _ => {
                     panic!(
                         "The book quickstart knows no default tokens on {chain}: pass \
@@ -109,6 +119,16 @@ impl Cli {
             self.sell_token = Some(match self.chain {
                 Chain::Ethereum => "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
                 Chain::Base => "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".to_string(),
+                Chain::Starknet |
+                Chain::ZkSync |
+                Chain::Arbitrum |
+                Chain::Bsc |
+                Chain::Unichain |
+                Chain::Polygon |
+                Chain::Plasma |
+                Chain::Robinhood |
+                Chain::Arc |
+                Chain::Custom(_) |
                 _ => {
                     panic!(
                         "The book quickstart knows no default tokens on {chain}: pass \
@@ -196,8 +216,8 @@ async fn main() {
         .get(&buy_token_address)
         .expect("Buy token not found")
         .clone();
-    let amount_in =
-        BigUint::from((cli.sell_amount * 10f64.powi(sell_token.decimals as i32)) as u128);
+    let amount_in = BigUint::from_f64(cli.sell_amount * 10f64.powf(f64::from(sell_token.decimals)))
+        .expect("sell amount must be finite and non-negative");
 
     println!(
         "Looking for quotes for {amount} {sell_symbol} -> {buy_symbol} on {chain:?}",
@@ -557,10 +577,10 @@ async fn main() {
 
                                 let tx = encode_tycho_router_call(
                                     chain.id(),
-                                    encoded_solution.clone(),
+                                    &encoded_solution,
                                     &solution,
-                                    chain.native_token().address,
-                                    signer.clone(),
+                                    &chain.native_token().address,
+                                    &signer,
                                 )
                                 .expect("Failed to encode router call");
 
@@ -622,7 +642,6 @@ async fn main() {
                                             println!("Consider adjusting parameters and re-simulating before execution.");
                                         }
                                         println!();
-                                        continue;
                                     }
                                     Err(e) => {
                                         eprintln!("\n❌ Simulation failed: {e:?}");
@@ -730,10 +749,10 @@ async fn main() {
 
                                 let swap_tx = encode_tycho_router_call(
                                     chain.id(),
-                                    encoded_solution.clone(),
+                                    &encoded_solution,
                                     &solution,
-                                    chain.native_token().address,
-                                    signer.clone(),
+                                    &chain.native_token().address,
+                                    &signer,
                                 )
                                 .expect("Failed to encode router call");
 
@@ -799,18 +818,14 @@ async fn main() {
                                         buy_symbol = buy_token.symbol,
                                     );
                                     return; // Exit the program after successful execution
-                                } else {
-                                    eprintln!("\nSwap transaction failed!\n");
-                                    continue;
                                 }
+                                eprintln!("\nSwap transaction failed!\n");
                             }
                             "skip" => {
                                 println!("\nSkipping this swap...\n");
-                                continue;
                             }
                             _ => {
                                 println!("\nInvalid input. Please choose 'simulate', 'execute' or 'skip'.\n");
-                                continue;
                             }
                         }
                     }
@@ -825,7 +840,7 @@ async fn main() {
 
 // Format token amounts to human-readable values
 fn format_token_amount(amount: &BigUint, token: &Token) -> String {
-    let decimal_amount = amount.to_f64().unwrap_or(0.0) / 10f64.powi(token.decimals as i32);
+    let decimal_amount = amount.to_f64().unwrap_or(0.0) / 10f64.powf(f64::from(token.decimals));
     format!("{decimal_amount:.6}")
 }
 
@@ -836,8 +851,9 @@ fn format_price_ratios(
     token_in: &Token,
     token_out: &Token,
 ) -> (f64, f64) {
-    let decimal_in = amount_in.to_f64().unwrap_or(0.0) / 10f64.powi(token_in.decimals as i32);
-    let decimal_out = amount_out.to_f64().unwrap_or(0.0) / 10f64.powi(token_out.decimals as i32);
+    let decimal_in = amount_in.to_f64().unwrap_or(0.0) / 10f64.powf(f64::from(token_in.decimals));
+    let decimal_out =
+        amount_out.to_f64().unwrap_or(0.0) / 10f64.powf(f64::from(token_out.decimals));
 
     if decimal_in > 0.0 && decimal_out > 0.0 {
         let forward = decimal_out / decimal_in;
@@ -848,7 +864,10 @@ fn format_price_ratios(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per input of the solution; a struct would only be used here"
+)]
 fn create_solution(
     component: ProtocolComponent,
     state: Arc<dyn ProtocolSim>,
@@ -892,10 +911,10 @@ fn create_solution(
 ///   `minAmountOut`.
 fn encode_tycho_router_call(
     chain_id: u64,
-    encoded_solution: EncodedSolution,
+    encoded_solution: &EncodedSolution,
     solution: &Solution,
-    native_address: Bytes,
-    signer: PrivateKeySigner,
+    native_address: &Bytes,
+    signer: &PrivateKeySigner,
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.expected_amount_out());
@@ -912,7 +931,7 @@ fn encode_tycho_router_call(
         solution.amount_in(),
     )?;
     let permit = PermitSingle::try_from(&p)
-        .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?;
+        .map_err(|e| EncodingError::InvalidInput(format!("Invalid permit: {e}")))?;
     let signature = sign_permit(chain_id, &p, signer)?;
 
     // The router's singleSwapPermit2 expects a ClientFeeParams struct after `receiver`.
@@ -934,7 +953,7 @@ fn encode_tycho_router_call(
         .abi_encode();
 
     let contract_interaction = encode_input(encoded_solution.function_signature(), method_calldata);
-    let value = if solution.token_in() == &native_address {
+    let value = if solution.token_in() == native_address {
         solution.amount_in().clone()
     } else {
         BigUint::ZERO
@@ -960,10 +979,10 @@ fn encode_tycho_router_call(
 fn sign_permit(
     chain_id: u64,
     permit_single: &models::PermitSingle,
-    signer: PrivateKeySigner,
+    signer: &PrivateKeySigner,
 ) -> Result<Signature, EncodingError> {
     let permit2_address = Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3")
-        .map_err(|_| EncodingError::FatalError("Permit2 address not valid".to_string()))?;
+        .map_err(|e| EncodingError::FatalError(format!("Permit2 address not valid: {e}")))?;
     let domain = eip712_domain! {
         name: "Permit2",
         chain_id: chain_id,

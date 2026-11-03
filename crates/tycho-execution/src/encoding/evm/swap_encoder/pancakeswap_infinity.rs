@@ -51,11 +51,9 @@ impl SwapEncoder for PancakeswapInfinitySwapEncoder {
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
         let fee = get_static_attribute(swap, "key_lp_fee")?;
-        let pool_fee_u24 = pad_or_truncate_to_size::<3>(&fee)
-            .map_err(|e| EncodingError::FatalError(format!("key_lp_fee is not a u24: {e}")))?;
+        let pool_fee_u24 = pad_or_truncate_to_size::<3>(&fee);
         let parameters = get_static_attribute(swap, "parameters")?;
-        let parameters = pad_or_truncate_to_size::<32>(&parameters)
-            .map_err(|e| EncodingError::FatalError(format!("parameters is not a bytes32: {e}")))?;
+        let parameters = pad_or_truncate_to_size::<32>(&parameters);
         let hook_address = match get_static_attribute(swap, "hook_address") {
             Ok(hook) => bytes_to_address(&Bytes::from(hook))?,
             Err(_) => Address::ZERO,
@@ -171,8 +169,7 @@ mod tests {
             Bytes::from("0xe54a55121A47451c5727ADBAF9b9FC1643477e25"),
             Chain::Base,
             None,
-        )
-        .unwrap();
+        )?;
         let context = EncodingContext {
             router_address: Some(Bytes::from("0x5615deb798bb3e4dfa0139dfa1b3d433cc23b72f")),
             group_token_in: swap.token_in().address.clone(),

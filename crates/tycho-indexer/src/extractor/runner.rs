@@ -39,7 +39,10 @@ use crate::{
 };
 
 /// Enum to handle both standard DCI and UniswapV4 Hook DCI
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one plugin is alive per extractor, so the size difference between variants is irrelevant"
+)]
 pub(crate) enum DCIPlugin<AE: AccountExtractor + Send + Sync> {
     Standard(DynamicContractIndexer<AE, EVMEntrypointService, CachedGateway>),
     UniswapV4Hooks(Box<UniswapV4HookDCI<AE, EVMEntrypointService, CachedGateway>>),
@@ -159,12 +162,9 @@ impl MessageSender for ExtractorHandle {
         )
         .await;
 
-        match send_result {
-            Ok(Ok(())) => Ok(rx),
-            Ok(Err(e)) => Err(e),
-            // TODO: use a better error type that lets us return this as an error.
-            Err(_) => panic!("Subscription timed out!"),
-        }
+        // TODO: use a better error type that lets us return this as an error.
+        send_result.unwrap_or_else(|_elapsed| panic!("Subscription timed out!"))?;
+        Ok(rx)
     }
 }
 
@@ -261,6 +261,10 @@ impl ExtractorRunner {
     pub fn run(mut self) -> JoinHandle<Result<(), ExtractionError>> {
         info!("Extractor {} started!", self.extractor.get_id());
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "without an explicit handle, `run` is only called from a task on the indexer's multi-thread runtime"
+        )]
         let runtime = self
             .runtime_handle
             .clone()
@@ -512,8 +516,9 @@ pub(crate) fn compute_start_block(
                 .number
                 .checked_add(1)
                 .ok_or_else(|| ExtractionError::Setup("block number overflow".to_string()))?;
-            i64::try_from(next)
-                .map_err(|_| ExtractionError::Setup("block number exceeds i64".to_string()))
+            i64::try_from(next).map_err(|_out_of_range| {
+                ExtractionError::Setup("block number exceeds i64".to_string())
+            })
         }
     }
 }

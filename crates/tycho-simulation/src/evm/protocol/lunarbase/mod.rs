@@ -59,12 +59,12 @@ mod tests {
         }
     }
 
-    fn snapshot(state: LunarBaseState) -> ComponentWithState {
+    fn snapshot(state: &LunarBaseState) -> ComponentWithState {
         let component_id = component_id(state.pool);
         ComponentWithState {
             state: ResponseProtocolState {
                 component_id: component_id.clone(),
-                attributes: encode_state(&state),
+                attributes: encode_state(state),
                 balances: HashMap::new(),
             }
             .into(),
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn decodes_component_snapshot_into_lunarbase_state() {
         let expected = state();
-        let decoded = decode_lunarbase_snapshot(&snapshot(expected.clone())).unwrap();
+        let decoded = decode_lunarbase_snapshot(&snapshot(&expected)).unwrap();
 
         let mut expected = expected;
         expected.head_block = 0;
@@ -117,7 +117,7 @@ mod tests {
     async fn try_from_with_block_uses_header_as_head_block() {
         let expected = state();
         let decoded = LunarBaseState::try_from_with_header(
-            snapshot(expected.clone()),
+            snapshot(&expected),
             BlockHeader { number: 101, partial_block_index: Some(3), ..Default::default() },
             &HashMap::new(),
             &HashMap::new(),
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn snapshot_requires_punishment_configuration_instead_of_legacy_concentration() {
-        let mut snapshot = snapshot(state());
+        let mut snapshot = snapshot(&state());
         snapshot
             .state
             .attributes
@@ -172,14 +172,14 @@ mod tests {
         let mut expected = state();
         expected.anchor_price_x96 = (U256::from(1u64) << 159usize) + U256::from(123u64);
         expected.max_punishment_x24 = lunarbase_pmm_math::MAX_U24;
-        let decoded = decode_lunarbase_snapshot(&snapshot(expected.clone())).unwrap();
+        let decoded = decode_lunarbase_snapshot(&snapshot(&expected)).unwrap();
         expected.head_block = 0;
         assert_eq!(decoded, expected);
     }
 
     #[test]
     fn snapshot_rejects_anchor_larger_than_wire_uint160() {
-        let mut snapshot = snapshot(state());
+        let mut snapshot = snapshot(&state());
         snapshot
             .state
             .attributes
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn snapshot_does_not_require_caller_fee_policy() {
-        let mut snapshot = snapshot(state());
+        let mut snapshot = snapshot(&state());
         for name in ["blacklist_fee_multiplier", "quote_caller_whitelisted"] {
             assert!(!snapshot
                 .state

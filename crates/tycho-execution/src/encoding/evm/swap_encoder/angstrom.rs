@@ -37,7 +37,7 @@ type WindowFetcher = Box<dyn Fn() -> Result<AttestationResponse, EncodingError> 
 ///
 /// A refresh replaces the whole window rather than appending to it, so this holds one window of
 /// `ANGSTROM_BLOCKS_IN_FUTURE + 1` attestations and does not grow with uptime.
-pub(crate) struct AttestationCache {
+pub struct AttestationCache {
     fetcher: Result<WindowFetcher, String>,
     window: RwLock<Option<CachedWindow>>,
 }
@@ -152,8 +152,8 @@ impl ApiConfig {
     /// which is how consumers that do not route over Angstrom opt out, or when
     /// `ANGSTROM_BLOCKS_IN_FUTURE` is set to something that is not a block count.
     fn from_env() -> Result<Self, String> {
-        let key = env::var("ANGSTROM_API_KEY").map_err(|_| {
-            "ANGSTROM_API_KEY environment variable is required for Angstrom swaps".to_string()
+        let key = env::var("ANGSTROM_API_KEY").map_err(|e| {
+            format!("ANGSTROM_API_KEY environment variable is required for Angstrom swaps: {e}")
         })?;
 
         let client = reqwest::blocking::Client::builder()
@@ -188,10 +188,19 @@ impl ApiConfig {
             scope
                 .spawn(|| self.fetch())
                 .join()
-                .map_err(|_| {
-                    EncodingError::RecoverableError(
-                        "Angstrom attestation fetch panicked".to_string(),
-                    )
+                .map_err(|payload| {
+                    let message = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| {
+                            payload
+                                .downcast_ref::<String>()
+                                .map(String::as_str)
+                        })
+                        .unwrap_or("non-string panic payload");
+                    EncodingError::RecoverableError(format!(
+                        "Angstrom attestation fetch panicked: {message}"
+                    ))
                 })
         })?
     }
@@ -282,14 +291,14 @@ fn encode_attestations(response: &AttestationResponse) -> Result<Vec<u8>, Encodi
 
 /// Response from the Angstrom attestation API.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct AttestationResponse {
+pub struct AttestationResponse {
     pub(crate) success: bool,
     pub(crate) attestations: Vec<AttestationData>,
 }
 
 /// The attestation unlocking Angstrom's pools for one block.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct AttestationData {
+pub struct AttestationData {
     #[serde(rename = "blockNumber")]
     pub(crate) block_number: u64,
     #[serde(rename = "unlockData")]
@@ -355,21 +364,21 @@ mod tests {
         encode_attestations(&attestation_response()).unwrap()
     }
 
-    fn window_fetched_ago(age: Duration) -> Option<CachedWindow> {
+    fn window_fetched_ago(age: Duration) -> CachedWindow {
         let fetched_at = Instant::now()
             .checked_sub(age)
             .expect("the monotonic clock is past the requested age");
-        Some(CachedWindow { encoded: vec![1, 2, 3], fetched_at })
+        CachedWindow { encoded: vec![1, 2, 3], fetched_at }
     }
 
-    fn stale() -> Option<CachedWindow> {
+    fn stale() -> CachedWindow {
         window_fetched_ago(ANGSTROM_ATTESTATION_MAX_AGE + Duration::from_secs(1))
     }
 
     #[test]
     fn test_fresh_window_is_served_without_a_fetch() {
         let (fetch, calls) = counted_fetch();
-        let cache = cache_with(fetch, window_fetched_ago(Duration::ZERO));
+        let cache = cache_with(fetch, Some(window_fetched_ago(Duration::ZERO)));
 
         assert_eq!(cache.hook_data().unwrap(), vec![1, 2, 3]);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -378,7 +387,7 @@ mod tests {
     #[test]
     fn test_stale_window_is_replaced_by_a_fetch() {
         let (fetch, calls) = counted_fetch();
-        let cache = cache_with(fetch, stale());
+        let cache = cache_with(fetch, Some(stale()));
 
         assert_eq!(cache.hook_data().unwrap(), fetched_window());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -415,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_failed_refresh_keeps_the_previous_window() {
-        let cache = cache_with(failing_fetch(), window_fetched_ago(Duration::ZERO));
+        let cache = cache_with(failing_fetch(), Some(window_fetched_ago(Duration::ZERO)));
 
         let err = cache.refresh().unwrap_err();
 
@@ -425,7 +434,7 @@ mod tests {
 
     #[test]
     fn test_failed_fetch_surfaces_on_a_stale_window() {
-        let cache = cache_with(failing_fetch(), stale());
+        let cache = cache_with(failing_fetch(), Some(stale()));
 
         let err = cache.hook_data().unwrap_err();
 
@@ -474,7 +483,7 @@ mod tests {
     /// the transaction will land in. Nothing in the encoder checks the block numbers it encodes,
     /// so an API that started returning only past blocks would otherwise go unnoticed.
     #[test]
-    #[ignore] // Performs real Angstrom API and RPC calls
+    #[ignore = "requires ANGSTROM_API_KEY and RPC_URL"]
     fn test_live_window_brackets_the_current_block() {
         let api = ApiConfig::from_env().expect("ANGSTROM_API_KEY must be set");
 
