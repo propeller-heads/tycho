@@ -1,3 +1,11 @@
+## [0.499.0](https://github.com/propeller-heads/tycho/compare/0.498.0...0.499.0) (2026-11-03)
+
+
+### Features
+
+* **client:** filter get_tokens by token address ([9335ede](https://github.com/propeller-heads/tycho/commit/9335ede795b6e25be30aac6c6ab9d4bd51240dbd))
+* **client:** filter get_tokens by token address ([#1717](https://github.com/propeller-heads/tycho/issues/1717)) ([49e1e23](https://github.com/propeller-heads/tycho/commit/49e1e231e791e4923e77b2793e38f4fd88074ddd))
+
 ## [0.498.0](https://github.com/propeller-heads/tycho/compare/0.497.1...0.498.0) (2026-11-03)
 
 
