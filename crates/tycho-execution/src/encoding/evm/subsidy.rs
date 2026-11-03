@@ -415,6 +415,12 @@ mod tests {
         1,
         0
     )]
+    #[case::earlier_pool_swap(
+        vec![swap("uniswap_v2", WETH, DAI, 0.0), swap("uniswap_v2", DAI, USDC, 0.0)],
+        USDC,
+        0,
+        0
+    )]
     #[case::swap_after_a_multi_swap_group(
         vec![
             swap("uniswap_v4", USDC, WETH, 0.0),
@@ -484,31 +490,6 @@ mod tests {
         1,
         "wrap/unwrap cannot carry"
     )]
-    #[case::output_does_not_reach_token_out(
-        WETH,
-        USDC,
-        sequential_weth_dai_usdc(),
-        0,
-        "neither directly"
-    )]
-    #[case::unwrap_takes_part_of_the_token(
-        DAI,
-        ETH,
-        vec![
-            swap("uniswap_v2", DAI, WETH, 0.0),
-            swap(NATIVE_WRAPPER_PROTOCOL_SYSTEM, WETH, ETH, 0.6),
-            swap("uniswap_v4", WETH, ETH, 0.0),
-        ],
-        0,
-        "takes only part"
-    )]
-    #[case::sole_unwrap_with_a_split(
-        DAI,
-        ETH,
-        vec![swap("uniswap_v2", DAI, WETH, 0.0), swap(NATIVE_WRAPPER_PROTOCOL_SYSTEM, WETH, ETH, 0.6)],
-        0,
-        "takes only part"
-    )]
     fn test_validate_subsidy_invalid_swap(
         #[case] token_in: &str,
         #[case] token_out: &str,
@@ -530,6 +511,45 @@ mod tests {
         );
     }
 
+    /// Any pool swap group may carry the subsidy, and its amount is not checked against
+    /// expected_amount_out: the caller keeps min_amount_out below the output without it.
+    #[rstest]
+    #[case::last_pool_swap(WETH, DAI, vec![swap("uniswap_v2", WETH, DAI, 0.0)], 0)]
+    #[case::earlier_pool_swap(WETH, USDC, sequential_weth_dai_usdc(), 0)]
+    #[case::pool_swap_before_a_partial_unwrap(
+        DAI,
+        ETH,
+        vec![
+            swap("uniswap_v2", DAI, WETH, 0.0),
+            swap(NATIVE_WRAPPER_PROTOCOL_SYSTEM, WETH, ETH, 0.6),
+            swap("uniswap_v4", WETH, ETH, 0.0),
+        ],
+        0
+    )]
+    #[case::pool_swap_before_a_sole_unwrap_with_a_split(
+        DAI,
+        ETH,
+        vec![swap("uniswap_v2", DAI, WETH, 0.0), swap(NATIVE_WRAPPER_PROTOCOL_SYSTEM, WETH, ETH, 0.6)],
+        0
+    )]
+    fn test_validate_subsidy_on_any_pool_group(
+        #[case] token_in: &str,
+        #[case] token_out: &str,
+        #[case] swaps: Vec<Swap>,
+        #[case] subsidized_swap_index: usize,
+    ) {
+        let amount = BigUint::from(u128::MAX);
+        let solution = solution(
+            token_in,
+            token_out,
+            swaps,
+            SubsidyTerms { subsidized_swap_index, amount, ..terms() },
+        );
+        let groups = group_swaps(solution.swaps());
+
+        validate_subsidy(&solution, &groups, &registry()).unwrap();
+    }
+
     #[rstest]
     #[case::deadline_over_48_bits(SubsidyTerms { deadline: 1 << 48, ..terms() }, "48 bits")]
     #[case::amount_over_256_bits(
@@ -539,10 +559,6 @@ mod tests {
     #[case::min_amount_in_over_256_bits(
         SubsidyTerms { min_amount_in: BigUint::from(1u32) << 256, ..terms() },
         "Subsidy min_amount_in"
-    )]
-    #[case::min_amount_out_includes_subsidy(
-        SubsidyTerms { amount: BigUint::from(5_000_000_000_000_000_001u64), ..terms() },
-        "must be at most"
     )]
     fn test_validate_subsidy_invalid_terms(#[case] terms: SubsidyTerms, #[case] message: &str) {
         let solution = solution(WETH, DAI, vec![swap("uniswap_v2", WETH, DAI, 0.0)], terms);
