@@ -43,9 +43,10 @@ cargo +"$RUST_NIGHTLY" clippy --workspace --all-targets --all-features -- -D war
 cargo +"$RUST_NIGHTLY" fmt --all --check
 ```
 
-The versions CI uses are pinned in the repository: the Rust toolchain in `rust-toolchain.toml`,
-everything else — including `RUST_NIGHTLY`, the toolchain for `fmt` and `clippy` — in `mise.toml`.
-With [mise](https://mise.jdx.dev) installed, `mise install` sets them up.
+These commands assume [mise](https://mise.jdx.dev) is activated in the repository and its tools are
+installed (`mise install`): it provides the tools and environment variables CI uses, pinned in
+`mise.toml`. The Rust toolchains are pinned in
+`rust-toolchain.toml`, which rustup reads on its own.
 
 ### Join tycho.build
 

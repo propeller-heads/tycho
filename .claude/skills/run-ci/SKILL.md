@@ -111,9 +111,8 @@ or `Scope: full`.
 
 Run formatting first because it modifies source files that all subsequent checks depend on.
 
-CI runs `cargo +$RUST_NIGHTLY fmt --all --check`. `RUST_NIGHTLY` is set in `mise.toml`; if mise is
-not active in the shell, prefix the commands with `mise exec --`. Locally, write the fixes instead
-of just checking:
+CI runs `cargo +$RUST_NIGHTLY fmt --all --check`. Locally, write the fixes instead of just
+checking:
 
 ```bash
 cargo +"$RUST_NIGHTLY" fmt --all

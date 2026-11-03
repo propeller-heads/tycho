@@ -2,10 +2,6 @@
 
 ## Commands
 
-forge and slither are pinned in the repository's `mise.toml`, and CI runs those versions. Another
-forge can format the tree differently, so run the pinned one (`mise install`, or prefix with
-`mise exec --`).
-
 During development, from `crates/tycho-execution/contracts/`:
 
 ```bash

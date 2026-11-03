@@ -241,8 +241,6 @@ Everything else is controlled via CLI args, env vars, and YAML config.
 - Archive RPC tests: `#[ignore]`-d
 - Lint: `cargo +$RUST_NIGHTLY clippy --workspace --all-targets --all-features -- -D warnings`
 - Format: `cargo +$RUST_NIGHTLY fmt --all --check`
-- `RUST_NIGHTLY` and the versions of the non-Rust tools are pinned in `mise.toml`; the Rust
-  toolchains in the `rust-toolchain.toml` files
 - Also gated in CI: `cargo doc --workspace --no-deps --all-features --locked` and
   `cargo check --workspace --no-default-features --locked`
 
