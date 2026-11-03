@@ -31,4 +31,8 @@ A test yaml can opt into `harness: strict`; without it the runner behaves as bef
 rejects keys the runner does not read, requires a reason on every skip (and `evidence` on a
 `skip_execution` when the executor has a fixture), and reports every failed check of a test, not
 just the first. It is not required of any package yet, and new checks go into strict mode only.
+Strict mode requires every direction of every expected component to declare its limit (`limits:
+{kind: hard | soft | under_cap}`, on the package or the component, for every direction or keyed
+`0x<in>->0x<out>`) and tests it at the limit and, for a hard one, one unit past, reporting each
+direction separately.
 `range --report <path>` writes each check's outcome as JSON. See `README.md`, "Strict mode".

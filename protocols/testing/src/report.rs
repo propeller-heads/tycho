@@ -30,6 +30,12 @@ pub enum CheckId {
     SimLadder,
     /// Executing the ladder's quotes on chain matches the simulation.
     ExecLadder,
+    /// Strict: every direction quotes and executes at its limit.
+    LimitsAtLimit,
+    /// Strict: past a hard limit, the quote errors and the execution reverts.
+    LimitsPastLimit,
+    /// Strict: the quote at the limit pays no more than the limit's max output.
+    LimitsMaxOutput,
 }
 
 impl CheckId {
@@ -42,6 +48,9 @@ impl CheckId {
             CheckId::Decode => "decode",
             CheckId::SimLadder => "sim.ladder",
             CheckId::ExecLadder => "exec.ladder",
+            CheckId::LimitsAtLimit => "limits.at_limit",
+            CheckId::LimitsPastLimit => "limits.past_limit",
+            CheckId::LimitsMaxOutput => "limits.max_output",
         }
     }
 }
@@ -84,6 +93,10 @@ pub struct CheckResult {
     /// The component the result is about, when it is about one only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub component: Option<String>,
+    /// The swap direction the result is about, `0x<token in>->0x<token out>`, when it is about one
+    /// only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
     #[serde(flatten)]
     pub outcome: Outcome,
 }
@@ -139,6 +152,7 @@ impl Checks {
             test: self.test.clone(),
             check: id,
             component: Some(component.to_string()),
+            direction: None,
             outcome: Outcome::Skipped { reason: reason.to_string() },
         });
     }
@@ -156,12 +170,14 @@ impl Checks {
     /// Ends the test: an error naming every failed check if any failed, `Ok` otherwise, and the
     /// results either way.
     pub fn finish(self) -> (miette::Result<()>, Vec<CheckResult>) {
-        let failed: Vec<String> = self
-            .results
-            .iter()
-            .filter(|result| matches!(result.outcome, Outcome::Fail { .. }))
-            .map(|result| result.check.to_string())
-            .collect();
+        // A check recorded per direction can fail several times; name it once.
+        let mut failed: Vec<String> = Vec::new();
+        for result in &self.results {
+            let name = result.check.to_string();
+            if matches!(result.outcome, Outcome::Fail { .. }) && !failed.contains(&name) {
+                failed.push(name);
+            }
+        }
         let outcome = if failed.is_empty() {
             Ok(())
         } else {
@@ -170,9 +186,42 @@ impl Checks {
         (outcome, self.results)
     }
 
+    /// Records the outcome of a check on one direction of one component: a failure listing
+    /// `failures` if there are any, else a skip when `skipped` gives a reason, else a pass.
+    pub fn record_direction(
+        &mut self,
+        id: CheckId,
+        component: &str,
+        direction: &str,
+        skipped: Option<&str>,
+        failures: &[String],
+    ) {
+        let outcome = match (skipped, failures.is_empty()) {
+            (_, false) => {
+                let detail = failures.join("; ");
+                error!("[{}] {id} failed for {component} {direction}: {detail}", self.test);
+                Outcome::Fail { detail }
+            }
+            (Some(reason), true) => Outcome::Skipped { reason: reason.to_string() },
+            (None, true) => Outcome::Pass,
+        };
+        self.results.push(CheckResult {
+            test: self.test.clone(),
+            check: id,
+            component: Some(component.to_string()),
+            direction: Some(direction.to_string()),
+            outcome,
+        });
+    }
+
     fn record(&mut self, check: CheckId, outcome: Outcome) {
-        self.results
-            .push(CheckResult { test: self.test.clone(), check, component: None, outcome });
+        self.results.push(CheckResult {
+            test: self.test.clone(),
+            check,
+            component: None,
+            direction: None,
+            outcome,
+        });
     }
 }
 
@@ -274,12 +323,14 @@ mod tests {
                     test: "t".to_string(),
                     check: CheckId::SimLadder,
                     component: None,
+                    direction: None,
                     outcome: Outcome::Fail { detail: "boom".to_string() },
                 },
                 CheckResult {
                     test: "t".to_string(),
-                    check: CheckId::ExecLadder,
+                    check: CheckId::LimitsPastLimit,
                     component: Some("0x01".to_string()),
+                    direction: Some("0x02->0x03".to_string()),
                     outcome: Outcome::Skipped { reason: "off".to_string() },
                 },
             ],
@@ -292,8 +343,45 @@ mod tests {
         assert!(json["results"][0]
             .get("component")
             .is_none());
+        assert!(json["results"][0]
+            .get("direction")
+            .is_none());
+        assert_eq!(json["results"][1]["check"], "limits.past_limit");
         assert_eq!(json["results"][1]["component"], "0x01");
+        assert_eq!(json["results"][1]["direction"], "0x02->0x03");
         assert_eq!(json["results"][1]["outcome"], "skipped");
         assert_eq!(json["results"][1]["reason"], "off");
+    }
+
+    #[test]
+    fn a_check_recorded_per_direction_passes_fails_or_skips_per_direction() {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        let failure = ["quotes past the limit".to_string()];
+        checks.record_direction(CheckId::LimitsPastLimit, "0x01", "0xa->0xb", None, &[]);
+        checks.record_direction(CheckId::LimitsPastLimit, "0x01", "0xb->0xa", None, &failure);
+        checks.record_direction(CheckId::LimitsPastLimit, "0x02", "0xa->0xb", Some("soft"), &[]);
+        checks.record_direction(
+            CheckId::LimitsPastLimit,
+            "0x02",
+            "0xb->0xa",
+            Some("soft"),
+            &failure,
+        );
+
+        let (outcome, results) = checks.finish();
+        // The check failed twice and is named once.
+        assert_eq!(outcome.unwrap_err().to_string(), "Failed checks: limits.past_limit");
+        let outcomes: Vec<_> = results
+            .iter()
+            .map(|r| (r.component.as_deref(), r.direction.as_deref(), &r.outcome))
+            .collect();
+        assert_eq!(outcomes[0], (Some("0x01"), Some("0xa->0xb"), &Outcome::Pass));
+        assert!(matches!(outcomes[1].2, Outcome::Fail { .. }));
+        assert_eq!(
+            outcomes[2],
+            (Some("0x02"), Some("0xa->0xb"), &Outcome::Skipped { reason: "soft".to_string() })
+        );
+        // A failure outranks a skip.
+        assert!(matches!(outcomes[3].2, Outcome::Fail { .. }));
     }
 }
