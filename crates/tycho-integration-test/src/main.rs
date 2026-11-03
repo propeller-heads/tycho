@@ -13,38 +13,40 @@ use std::{
 
 use alloy::{
     eips::BlockNumberOrTag,
-    primitives::Address,
+    primitives::{map::AddressHashMap, Address},
     providers::Provider,
-    rpc::types::{Block, BlockId},
+    rpc::types::{state::AccountOverride, Block, BlockId},
 };
 use clap::Parser;
 use dotenv::dotenv;
 use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, NarratableReportHandler, WrapErr};
 use num_bigint::BigUint;
-use num_traits::{Pow, ToPrimitive, Zero};
-use rand::prelude::IndexedRandom;
+use num_traits::{ToPrimitive, Zero};
+use rand::{prelude::IndexedRandom, seq::SliceRandom};
 use tokio::{signal, sync::Semaphore};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tycho_client::feed::SynchronizerState;
 use tycho_common::{simulation::protocol_sim::ProtocolSim, Bytes};
-use tycho_execution::encoding::evm::get_router_address;
+use tycho_execution::encoding::evm::{
+    get_router_address, swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
+    utils::bytes_to_address, PRICE_LEVEL_STREAM_PREFIX,
+};
 use tycho_simulation::{
+    book::{decode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE},
     evm::protocol::cowamm::constants::PROTOCOL_SYSTEM as COWAMM_PROTOCOL_SYSTEM,
+    price_level_stream::state::PriceLevelStreamState,
     protocol::models::ProtocolComponent,
-    rfq::protocols::{
-        hashflow::{client::HashflowClient, state::HashflowState},
-        liquorice::{client::LiquoriceClient, state::LiquoriceState},
-    },
-    tycho_common::models::{chain_config::TvlThresholdTier, Chain},
+    rfq::protocols::hashflow::state::{HashflowAllPairsState, HashflowState},
+    tycho_common::models::{chain_config::TvlThresholdTier, token::Token, Chain},
     utils::load_all_tokens,
 };
 use tycho_test::{
     execution::{
-        encoding::encode_swap,
-        models::{TychoExecutionInput, TychoExecutionResult},
-        simulate_swap_transaction, tenderly,
+        encoding::{encode_swap, pamm_account_overwrites},
+        models::{RouterOverwritesData, TychoExecutionInput, TychoExecutionResult},
+        simulate_swap_transaction, simulate_swap_transaction_before_block, tenderly,
     },
     is_block_not_found,
     token_prices::{cap_amount_to_eth_value, load_token_prices},
@@ -55,8 +57,10 @@ use crate::{
     fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
     statistics::TestStatistics,
     stream_processor::{
-        protocol_stream_processor::ProtocolStreamProcessor,
-        rfq_stream_processor::RFQStreamProcessor, StreamUpdate, UpdateType,
+        book_stream_processor::BookStreamProcessor,
+        price_level_stream_processor::PriceLevelStreamProcessor,
+        protocol_stream_processor::{ProtocolStreamProcessor, ProtocolTvlThreshold},
+        StreamUpdate, StreamUpdatePayload,
     },
 };
 
@@ -94,13 +98,23 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_onchain: bool,
 
-    /// Disable RFQ protocols
+    /// Disable the RFQ book feeds (Bebop, Hashflow, Liquorice, Native)
     #[arg(long, default_value_t = false)]
     disable_rfq: bool,
 
-    /// Run PAMM RFQ protocols.
-    #[arg(long, default_value_t = true)]
-    run_pamm_protocols: bool,
+    /// Disable the pAMM book feeds (Metric)
+    #[arg(long, default_value_t = false)]
+    disable_pamm: bool,
+
+    /// Publish each RFQ venue as one component for every pair it prices, which a route may
+    /// take one quote from, rather than one component per pair. The number of directions
+    /// simulated per venue and update is --max-simulations.
+    #[arg(long, default_value_t = false)]
+    rfq_all_pairs: bool,
+
+    /// Disable the Titan pAMM price level stream (only active on Ethereum)
+    #[arg(long, default_value_t = false)]
+    disable_price_level_stream: bool,
 
     /// Port for the Prometheus metrics server
     #[arg(long, default_value_t = 9898)]
@@ -124,9 +138,14 @@ struct Cli {
     #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..))]
     max_simulations_stale: u16,
 
-    /// The RFQ stream will skip messages for this duration (in seconds) after processing a message
+    /// The book stream will skip messages for this duration (in seconds) after processing a
+    /// message
     #[arg(long, default_value_t = 600)]
     skip_messages_duration: u64,
+
+    /// The price level stream emits one sampled update per this many blocks
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
+    price_level_stream_block_interval: u64,
 
     /// Maximum number of attempts to poll the RPC when the update block is ahead of the RPC.
     /// Each attempt is separated by --rpc-poll-interval-ms. Adjust for faster chains (e.g. Base,
@@ -158,6 +177,12 @@ struct Cli {
     #[arg(long, default_value_t = 1.1)]
     tvl_buffer_ratio: f64,
 
+    /// TVL thresholds for single protocols, as comma-separated `protocol=threshold` pairs in
+    /// native token units (e.g. `lunarbase=10,pancakeswap_infinity_cl=3`). Each one replaces
+    /// --tvl-threshold for its protocol. Every named protocol must be enabled.
+    #[arg(long, value_delimiter = ',')]
+    protocol_tvl_thresholds: Vec<ProtocolTvlThreshold>,
+
     /// Minimum token quality to filter by (defaults to 100 if not provided)
     #[arg(long)]
     min_token_quality: Option<i32>,
@@ -173,25 +198,52 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     partial_blocks: bool,
 
+    /// Run the protocol-stream test pipeline on every Nth protocol update. 1 tests every update.
+    /// Use a higher value on fast chains where the harness cannot keep up with the head, or with
+    /// --partial-blocks to cap the RPC rate: one update arrives per flashblock, so the tested
+    /// updates spread evenly in time. State from every update is ingested either way.
+    #[arg(
+        long,
+        visible_alias = "test-every-n-blocks",
+        default_value_t = 1,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    test_every_n_updates: u64,
+
     /// Seconds without a protocol update before marking all known protocols as stale in metrics.
+    /// 0 disables the watchdog.
     #[arg(long, default_value_t = 30)]
     stale_threshold_secs: u64,
+
+    /// Seconds without a Titan price level message before marking the served pAMMs as stale in
+    /// metrics. 0 disables the watchdog.
+    #[arg(long, default_value_t = 10)]
+    price_level_stream_stale_threshold_secs: u64,
 
     /// Disable on-chain swap execution validation (RPC simulation only, no swap encoding or
     /// execution). Useful for diagnosing stream latency without execution overhead.
     #[arg(long, default_value_t = false)]
     disable_execution: bool,
+
+    /// Mark all known executors as activated on the router in the execution simulation's state
+    /// overrides, so executors that are unapproved or still inside their 3-day activation timelock
+    /// can be validated. Read-only: this affects the simulation call only, never a real
+    /// transaction. Leave off to keep the test failing when an executor was never activated.
+    #[arg(long, default_value_t = false)]
+    bypass_executor_timelock: bool,
 }
 
 impl Debug for Cli {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Cli")
             .field("tvl_threshold", &self.tvl_threshold)
+            .field("protocol_tvl_thresholds", &self.protocol_tvl_thresholds)
             .field("chain", &self.chain)
             .field("tycho_api_key", &"****")
             .field("tycho_url", &self.tycho_url)
             .field("rpc_url", &self.rpc_url)
             .field("metrics_port", &self.metrics_port)
+            .field("bypass_executor_timelock", &self.bypass_executor_timelock)
             .finish()
     }
 }
@@ -201,6 +253,15 @@ struct TychoState {
     states: HashMap<String, Box<dyn ProtocolSim>>,
     components: HashMap<String, ProtocolComponent>,
     component_ids_by_protocol: HashMap<String, HashSet<String>>,
+    protocol_updates_seen: u64,
+}
+
+impl TychoState {
+    /// Counts one received protocol update and returns its 1-based sequence number.
+    fn next_update_seq(&mut self) -> u64 {
+        self.protocol_updates_seen += 1;
+        self.protocol_updates_seen
+    }
 }
 
 /// Shared, periodically-refreshed token-price snapshot (raw token units per ETH).
@@ -215,6 +276,55 @@ const TOKEN_PRICE_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60)
 /// and gas estimates. Capping the input to a realistic value (~10k USD at recent ETH prices) keeps
 /// simulation and the dashboard gas estimates representative.
 const MAX_INPUT_VALUE_ETH: f64 = 5.0;
+
+/// The directions a component advertises, as the pairs of tokens it carries.
+fn book_swap_directions(
+    attribute: &Bytes,
+    tokens: &[Token],
+) -> Result<Vec<(Token, Token)>, String> {
+    let tokens: HashMap<&Bytes, &Token> = tokens
+        .iter()
+        .map(|token| (&token.address, token))
+        .collect();
+    let mut directions = Vec::new();
+    for (token_in, token_out) in decode_swap_directions(attribute)? {
+        let (Some(token_in), Some(token_out)) = (tokens.get(&token_in), tokens.get(&token_out))
+        else {
+            return Err(format!(
+                "Swap direction {token_in} -> {token_out} names a token the component does not carry"
+            ));
+        };
+        directions.push(((*token_in).clone(), (*token_out).clone()));
+    }
+    Ok(directions)
+}
+
+/// A random sample of at most `most` of them. An all-pairs component carries hundreds of
+/// directions, and each one simulated is a swap.
+fn sample_swap_directions(mut directions: Vec<(Token, Token)>, most: usize) -> Vec<(Token, Token)> {
+    directions.shuffle(&mut rand::rng());
+    directions.truncate(most);
+    directions
+}
+
+/// The smallest input a Hashflow market maker on this direction accepts, in atomic units. A
+/// maker declines an amount below its first level. `None` for every other state.
+fn hashflow_min_amount_in(
+    state: &dyn ProtocolSim,
+    token_in: &Token,
+    token_out: &Token,
+) -> Option<BigUint> {
+    if let Some(state) = state
+        .as_any()
+        .downcast_ref::<HashflowState>()
+    {
+        return Some(state.min_amount_in());
+    }
+    state
+        .as_any()
+        .downcast_ref::<HashflowAllPairsState>()?
+        .min_amount_in(&token_in.address, &token_out.address)
+}
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {
@@ -288,6 +398,13 @@ async fn main() -> miette::Result<()> {
 async fn run(cli: Cli) -> miette::Result<()> {
     info!("Starting integration test");
 
+    if cli.bypass_executor_timelock {
+        warn!(
+            "Executor activation timelock is bypassed in execution simulations - a passing run does \
+             not prove that the executors are activated on the router"
+        );
+    }
+
     let chain = cli.chain;
     let tvl_threshold = cli
         .tvl_threshold
@@ -295,6 +412,14 @@ async fn run(cli: Cli) -> miette::Result<()> {
     let cli = Arc::new(cli);
 
     let rpc_tools = tycho_test::RPCTools::new(&cli.rpc_url, &chain).await?;
+
+    // Everything is simulated against the deployed contracts; the executors are only activated
+    // when asked for, so that a missing activation still surfaces as a revert.
+    let router_overwrites_data = if cli.bypass_executor_timelock {
+        create_router_overwrites_data(chain)?
+    } else {
+        RouterOverwritesData::default()
+    };
 
     // Read the router fee on output from the on-chain FeeCalculator once at start-up. Slippage is
     // computed after backing this fee out of the simulated amount out, so a stale or wrong fee
@@ -312,17 +437,19 @@ async fn run(cli: Cli) -> miette::Result<()> {
 
     // Load tokens from Tycho
     info!(%cli.tycho_url, "Loading tokens...");
-    let all_tokens = load_all_tokens(
-        &cli.tycho_url,
-        cli.no_tls,
-        Some(cli.tycho_api_key.as_str()),
-        true,
-        chain,
-        cli.min_token_quality,
-        cli.max_days_since_last_trade,
-    )
-    .await
-    .map_err(|e| miette!("Failed to load tokens: {e:?}"))?;
+    let all_tokens = Arc::new(
+        load_all_tokens(
+            &cli.tycho_url,
+            cli.no_tls,
+            Some(cli.tycho_api_key.as_str()),
+            true,
+            chain,
+            cli.min_token_quality,
+            cli.max_days_since_last_trade,
+        )
+        .await
+        .map_err(|e| miette!("Failed to load tokens: {e:?}"))?,
+    );
     info!("Loaded {} tokens", all_tokens.len());
 
     let initial_prices = load_token_prices(chain)
@@ -332,13 +459,16 @@ async fn run(cli: Cli) -> miette::Result<()> {
     let token_prices: SharedTokenPrices = Arc::new(RwLock::new(Arc::new(initial_prices)));
     tokio::spawn(refresh_token_prices(chain, token_prices.clone(), TOKEN_PRICE_REFRESH_INTERVAL));
 
-    // Run streams in background tasks with separate channels so RFQ processing
-    // cannot block protocol update consumption
+    // Run streams in background tasks with separate channels so book and price level stream
+    // processing cannot block protocol update consumption
     let (protocol_tx, mut protocol_rx) =
         tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
     let (rfq_tx, mut rfq_rx) = tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
+    let (price_level_tx, mut price_level_rx) =
+        tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
     let mut protocol_handle = None;
     let mut rfq_handle = None;
+    let mut price_level_handle = None;
 
     if !cli.disable_onchain {
         if let Ok(protocol_stream_processor) = ProtocolStreamProcessor::new(
@@ -353,25 +483,44 @@ async fn run(cli: Cli) -> miette::Result<()> {
         ) {
             protocol_handle = Some(
                 protocol_stream_processor
+                    .with_protocol_tvl_thresholds(cli.protocol_tvl_thresholds.clone())
                     .run_stream(&all_tokens, protocol_tx)
                     .await?,
             );
         }
     }
-    if !cli.disable_rfq {
-        let rfq_stream_processor = RFQStreamProcessor::new(
+    if !cli.disable_rfq || !cli.disable_pamm {
+        let book_stream_processor = BookStreamProcessor::new(
             chain,
             tvl_threshold,
             cli.max_simulations as usize,
             Duration::from_secs(cli.skip_messages_duration),
-            cli.run_pamm_protocols,
+            !cli.disable_rfq,
+            !cli.disable_pamm,
+            cli.rfq_all_pairs,
         )
-        .unwrap_or_else(|e| panic!("Failed to create RFQ stream processor: {e}"));
+        .unwrap_or_else(|e| panic!("Failed to create book stream processor: {e}"));
         rfq_handle = Some(
-            rfq_stream_processor
-                .run_stream(&all_tokens, rfq_tx)
+            book_stream_processor
+                .run_stream(Arc::clone(&all_tokens), rfq_tx)
                 .await?,
         );
+    }
+    if !cli.disable_price_level_stream {
+        if let Some(price_level_stream_processor) = PriceLevelStreamProcessor::new(
+            chain,
+            cli.max_simulations as usize,
+            cli.price_level_stream_block_interval,
+            Duration::from_secs(cli.price_level_stream_stale_threshold_secs),
+        ) {
+            price_level_handle = Some(
+                price_level_stream_processor
+                    .run_stream(&all_tokens, price_level_tx)
+                    .await?,
+            );
+        } else {
+            debug!(?chain, "The Titan pAMM price level stream only serves Ethereum; not starting");
+        }
     }
 
     let tycho_state = Arc::new(RwLock::new(TychoState::default()));
@@ -391,8 +540,10 @@ async fn run(cli: Cli) -> miette::Result<()> {
     info!("Waiting for first protocol update...");
     let protocol_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let rfq_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
+    let price_level_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let mut protocol_stream_open = true;
-    let mut rfq_stream_open = !cli.disable_rfq;
+    let mut book_stream_open = !cli.disable_rfq || !cli.disable_pamm;
+    let mut price_level_stream_open = price_level_handle.is_some();
 
     // Staleness watchdog: if no protocol update arrives within stale_threshold_secs, mark all
     // known protocols as Stale in metrics. This catches stream disconnections where the
@@ -404,15 +555,17 @@ async fn run(cli: Cli) -> miette::Result<()> {
     tokio::pin!(stale_sleep);
 
     loop {
-        if !protocol_stream_open && !rfq_stream_open {
+        if !protocol_stream_open && !book_stream_open && !price_level_stream_open {
             info!("All streams closed, exiting");
             break;
         }
 
         tokio::select! {
-            // Monitor protocol stream termination
+            // Monitor protocol stream termination. The handles are awaited by reference: the
+            // select futures are recreated (and the losers dropped) every iteration, so taking
+            // the handle out would detach the task and disable this arm after one poll.
             result = async {
-                if let Some(handle) = protocol_handle.take() {
+                if let Some(handle) = protocol_handle.as_mut() {
                     handle.await
                 } else {
                     std::future::pending().await
@@ -430,22 +583,40 @@ async fn run(cli: Cli) -> miette::Result<()> {
                 }
             }
 
-            // Monitor RFQ stream termination
+            // Monitor book stream termination
             result = async {
-                if let Some(handle) = rfq_handle.take() {
+                if let Some(handle) = rfq_handle.as_mut() {
                     handle.await
                 } else {
                     std::future::pending().await
                 }
             }, if rfq_handle.is_some() => {
+                rfq_handle = None;
                 match result {
                     Ok(()) => {
-                        warn!("RFQ stream terminated");
-                        // rfq_handle is already None due to take()
+                        warn!("Book stream terminated");
                     }
                     Err(e) => {
-                        warn!("RFQ stream panicked: {:?}", e);
-                        // rfq_handle is already None due to take()
+                        warn!("Book stream panicked: {:?}", e);
+                    }
+                }
+            }
+
+            // Monitor price level stream termination
+            result = async {
+                if let Some(handle) = price_level_handle.as_mut() {
+                    handle.await
+                } else {
+                    std::future::pending().await
+                }
+            }, if price_level_handle.is_some() => {
+                price_level_handle = None;
+                match result {
+                    Ok(()) => {
+                        warn!("Price level stream terminated");
+                    }
+                    Err(e) => {
+                        warn!("Price level stream panicked: {:?}", e);
                     }
                 }
             }
@@ -473,35 +644,30 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         };
 
                         // Reset the staleness watchdog and register any newly-seen protocols.
-                        for protocol in update.update.sync_states.keys() {
-                            known_protocols.insert(protocol.clone());
+                        match &update.payload {
+                            StreamUpdatePayload::Protocol(protocol_update) => {
+                                for protocol in protocol_update.sync_states.keys() {
+                                    known_protocols.insert(protocol.clone());
+                                }
+                            }
+                            StreamUpdatePayload::Book { protocol_system, .. } => {
+                                known_protocols.insert(protocol_system.clone());
+                            }
+                            // Price level updates never populate sync_states; the served venues
+                            // are the components' protocol systems.
+                            StreamUpdatePayload::PriceLevelStream(pls_update) => {
+                                for component in pls_update.new_pairs.values() {
+                                    known_protocols.insert(component.protocol_system.clone());
+                                }
+                            }
                         }
                         stale_sleep
                             .as_mut()
                             .reset(tokio::time::Instant::now() + stale_threshold);
 
-                        if cli.max_blocks > 0 {
-                            if let Some(stats) = statistics.as_ref() {
-                                let stats = stats
-                                    .read()
-                                    .expect("Failed to get read lock for statistics (max-block check)");
-                                if stats.blocks_processed >= cli.max_blocks {
-                                    drop(stats);
-                                    info!("Reached max blocks ({}), stopping...", cli.max_blocks);
-                                    break;
-                                }
-                                let block_num = update.update.block_number_or_timestamp;
-                                if !stats.blocks_seen.contains(&block_num)
-                                    && stats.blocks_processed >= cli.max_blocks
-                                {
-                                    drop(stats);
-                                    info!(
-                                        "Next block would exceed max blocks ({}), stopping...",
-                                        cli.max_blocks
-                                    );
-                                    break;
-                                }
-                            }
+                        if reached_max_blocks(cli.max_blocks, statistics.as_ref()) {
+                            info!("Reached max blocks ({}), stopping...", cli.max_blocks);
+                            break;
                         }
 
                         let cli = cli.clone();
@@ -509,6 +675,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let tycho_state = tycho_state.clone();
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
+                        let router_overwrites_data = router_overwrites_data.clone();
                         let permit = protocol_semaphore
                             .clone()
                             .acquire_owned()
@@ -516,7 +683,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire protocol permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -529,8 +696,8 @@ async fn run(cli: Cli) -> miette::Result<()> {
                 }
             }
 
-            // Process RFQ updates independently
-            update = rfq_rx.recv(), if rfq_stream_open => {
+            // Process book updates independently
+            update = rfq_rx.recv(), if book_stream_open => {
                 match update {
                     Some(update) => {
                         let update = match update {
@@ -546,22 +713,66 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let tycho_state = tycho_state.clone();
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
+                        let router_overwrites_data = router_overwrites_data.clone();
                         let permit = rfq_semaphore
                             .clone()
                             .acquire_owned()
                             .await
                             .into_diagnostic()
-                            .wrap_err("Failed to acquire RFQ permit")?;
+                            .wrap_err("Failed to acquire book permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
                         });
                     }
                     None => {
-                        info!("RFQ stream closed");
-                        rfq_stream_open = false;
+                        info!("Book stream closed");
+                        book_stream_open = false;
+                    }
+                }
+            }
+
+            // Process price level stream updates independently
+            update = price_level_rx.recv(), if price_level_stream_open => {
+                match update {
+                    Some(update) => {
+                        let update = match update {
+                            Ok(u) => Arc::new(u),
+                            Err(e) => {
+                                warn!("{}", format_error_chain(&e));
+                                continue;
+                            }
+                        };
+
+                        if reached_max_blocks(cli.max_blocks, statistics.as_ref()) {
+                            info!("Reached max blocks ({}), stopping...", cli.max_blocks);
+                            break;
+                        }
+
+                        let cli = cli.clone();
+                        let rpc_tools = rpc_tools.clone();
+                        let tycho_state = tycho_state.clone();
+                        let statistics = statistics.clone();
+                        let token_prices = token_prices.clone();
+                        let router_overwrites_data = router_overwrites_data.clone();
+                        let permit = price_level_semaphore
+                            .clone()
+                            .acquire_owned()
+                            .await
+                            .into_diagnostic()
+                            .wrap_err("Failed to acquire price level stream permit")?;
+                        tokio::spawn(async move {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
+                                warn!("{}", format_error_chain(&e));
+                            }
+                            drop(permit);
+                        });
+                    }
+                    None => {
+                        info!("Price level stream closed");
+                        price_level_stream_open = false;
                     }
                 }
             }
@@ -615,6 +826,78 @@ async fn refresh_token_prices(chain: Chain, prices: SharedTokenPrices, interval:
                 );
             }
         }
+    }
+}
+
+/// Waits until the RPC has reached `target_block` and returns exactly that block. `Ok(None)`
+/// means the chain did not reach the target within `max_attempts`; `Err` means the polling ended
+/// on an RPC failure instead, carrying the failed operation, target block, and attempt.
+///
+/// Unlike [`poll_rpc_for_block`], an RPC that has already moved past the target is not treated
+/// as stale: the target block is fetched by number, since the caller wants to simulate at that
+/// exact (recent) block. Transient RPC failures are retried like a lagging chain — an `Err` is
+/// only returned once the attempts are exhausted, and a healthy poll clears earlier failures.
+async fn await_target_block(
+    rpc_tools: &tycho_test::RPCTools,
+    target_block: u64,
+    max_attempts: u32,
+    poll_interval: Duration,
+) -> miette::Result<Option<Block>> {
+    let mut last_failure: Option<miette::Report> = None;
+    for attempt in 1..=max_attempts {
+        match rpc_tools
+            .provider
+            .get_block_by_number(BlockNumberOrTag::Latest)
+            .await
+        {
+            Ok(Some(latest)) if latest.header.number == target_block => {
+                return Ok(Some(latest));
+            }
+            Ok(Some(latest)) if latest.header.number > target_block => {
+                // The chain has moved past the target; fetch it by number. A failure here must
+                // not drop the update — keep polling with the remaining attempts instead.
+                match rpc_tools
+                    .provider
+                    .get_block_by_number(BlockNumberOrTag::Number(target_block))
+                    .await
+                {
+                    Ok(Some(target)) => return Ok(Some(target)),
+                    Ok(None) => {
+                        last_failure = Some(miette!(
+                            "RPC reports latest block {} but served no block {target_block} \
+                             (attempt {attempt}/{max_attempts})",
+                            latest.header.number
+                        ));
+                    }
+                    Err(e) => {
+                        last_failure = Some(miette!(e).wrap_err(format!(
+                            "Failed to fetch target block {target_block} by number (attempt \
+                             {attempt}/{max_attempts})"
+                        )));
+                    }
+                }
+            }
+            // The chain has not reached the target yet and the RPC is healthy: any earlier
+            // failure is stale, the block is simply not there.
+            Ok(Some(_)) => last_failure = None,
+            Ok(None) => {
+                last_failure = Some(miette!(
+                    "RPC served no latest block while awaiting target block {target_block} \
+                     (attempt {attempt}/{max_attempts})"
+                ));
+            }
+            Err(e) => {
+                last_failure = Some(miette!(e).wrap_err(format!(
+                    "Failed to fetch the latest block while awaiting target block \
+                     {target_block} (attempt {attempt}/{max_attempts})"
+                )));
+            }
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+    match last_failure {
+        Some(failure) => Err(failure),
+        None => Ok(None),
     }
 }
 
@@ -701,6 +984,39 @@ async fn poll_rpc_for_block(
     Ok(BlockPollResult::Timeout)
 }
 
+/// Creates the router overwrites for the execution simulation: no bytecode is replaced, since the
+/// deployed contracts are what this test validates, but every executor known for `chain` is marked
+/// as activated on the router. That lets an executor be validated while it is unapproved or still
+/// inside its 3-day activation timelock, which `Dispatcher._validateExecutor` would otherwise
+/// reject.
+///
+/// This cannot help an executor that has no bytecode deployed at its address.
+///
+/// # Errors
+/// Returns an error if the default swap encoders cannot be built for `chain`, or if the chain has
+/// no executors configured.
+fn create_router_overwrites_data(chain: Chain) -> miette::Result<RouterOverwritesData> {
+    let registry = SwapEncoderRegistry::new(chain)
+        .add_default_encoders(None)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("Failed to build the default swap encoders for {chain}"))?;
+
+    let mut executors = HashMap::new();
+    for (protocol, executor_address) in registry.executor_addresses() {
+        let executor = bytes_to_address(&executor_address)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("Invalid executor address for protocol {protocol}"))?;
+        // Protocol systems share executors, so this deduplicates by address.
+        executors.insert(executor, None);
+    }
+    if executors.is_empty() {
+        return Err(miette!("No executors configured for {chain}"));
+    }
+    debug!("Activating {} executors for the execution simulations", executors.len());
+
+    Ok(RouterOverwritesData { executors, ..Default::default() })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_update(
     cli: Arc<Cli>,
@@ -711,224 +1027,342 @@ async fn process_update(
     token_prices: SharedTokenPrices,
     router_fee: RouterFeeOnOutput,
     update: &StreamUpdate,
+    router_overwrites_data: RouterOverwritesData,
 ) -> miette::Result<()> {
-    info!(
-        "Got protocol update with block/timestamp {}, {} new pairs, and {} states",
-        update.update.block_number_or_timestamp,
-        update.update.new_pairs.len(),
-        update.update.states.len()
-    );
+    match &update.payload {
+        StreamUpdatePayload::Protocol(protocol_update) => info!(
+            "Got protocol update with block {}, {} new pairs, and {} states",
+            protocol_update.block_number,
+            protocol_update.new_pairs.len(),
+            protocol_update.states.len()
+        ),
+        StreamUpdatePayload::Book { protocol_system, received_at, books } => info!(
+            "Got {} book update received at {} with {} books",
+            protocol_system,
+            received_at,
+            books.len()
+        ),
+        StreamUpdatePayload::PriceLevelStream(pls_update) => info!(
+            "Got price level update targeting block {} with {} new pairs and {} states",
+            pls_update.block_number,
+            pls_update.new_pairs.len(),
+            pls_update.states.len()
+        ),
+    }
 
     let token_prices = token_prices
         .read()
         .map_err(|e| miette!("Failed to acquire read lock on token prices: {e}"))?
         .clone();
 
-    let block = if let UpdateType::Protocol = update.update_type {
-        // Update state cache before block alignment check
-        {
-            let mut current_state = tycho_state
-                .write()
-                .map_err(|e| miette!("Failed to acquire write lock on Tycho state: {e}"))?;
-            for (id, comp) in update.update.new_pairs.iter() {
-                current_state
-                    .components
-                    .insert(id.clone(), comp.clone());
-                current_state
-                    .component_ids_by_protocol
-                    .entry(comp.protocol_system.clone())
-                    .or_insert_with(HashSet::new)
-                    .insert(id.clone());
-            }
-            for (id, state) in update.update.states.iter() {
-                current_state
-                    .states
-                    .insert(id.clone(), state.clone());
-            }
-            for (removed_id, removed_component) in update.update.removed_pairs.iter() {
-                current_state
-                    .components
-                    .remove(removed_id);
-                current_state.states.remove(removed_id);
-                current_state
-                    .component_ids_by_protocol
-                    .get_mut(&removed_component.protocol_system)
-                    .map(|id_set| id_set.remove(removed_id));
-            }
-
-            for (protocol, component_ids) in &current_state.component_ids_by_protocol {
-                metrics::record_protocol_pool_count(protocol, component_ids.len());
-            }
-        }
-
-        let update_block_number = update.update.block_number_or_timestamp;
-
-        // Flashblocks-capable endpoints expose sequencer pre-confirmed state under `pending`;
-        // standard endpoints use `latest` (confirmed blocks only).
-        let block_tag = if cli.partial_blocks && update.update.is_partial {
-            BlockNumberOrTag::Pending
-        } else {
-            BlockNumberOrTag::Latest
-        };
-        let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
-
-        let poll_result = poll_rpc_for_block(
-            &rpc_tools,
-            update_block_number,
-            block_tag,
-            cli.rpc_poll_attempts,
-            poll_interval,
-        )
-        .await?;
-
-        let block_type = if block_tag == BlockNumberOrTag::Pending { "partial" } else { "full" };
-        let block = match poll_result {
-            BlockPollResult::Ready(b) => {
-                let latency_seconds = update.received_at.as_secs_f64() - b.header.timestamp as f64;
-                metrics::record_block_processing_duration(latency_seconds, block_type);
-                Arc::new(*b)
-            }
-            BlockPollResult::Stale { target_block_timestamp } => {
-                if let Some(ts) = target_block_timestamp {
-                    let latency_seconds = update.received_at.as_secs_f64() - ts as f64;
-                    metrics::record_block_processing_duration(latency_seconds, block_type);
+    let block = match &update.payload {
+        StreamUpdatePayload::Protocol(protocol_update) => {
+            // Update state cache before block alignment check
+            let update_seq = {
+                let mut current_state = tycho_state
+                    .write()
+                    .map_err(|e| miette!("Failed to acquire write lock on Tycho state: {e}"))?;
+                for (id, comp) in protocol_update.new_pairs.iter() {
+                    current_state
+                        .components
+                        .insert(id.clone(), comp.clone());
+                    current_state
+                        .component_ids_by_protocol
+                        .entry(comp.protocol_system.clone())
+                        .or_insert_with(HashSet::new)
+                        .insert(id.clone());
                 }
-                metrics::record_protocol_update_skipped();
-                for protocol in update.update.sync_states.keys() {
-                    metrics::record_protocol_sync_state_skipped(protocol);
+                for (id, state) in protocol_update.states.iter() {
+                    current_state
+                        .states
+                        .insert(id.clone(), state.clone());
                 }
+                for (removed_id, removed_component) in protocol_update.removed_pairs.iter() {
+                    current_state
+                        .components
+                        .remove(removed_id);
+                    current_state.states.remove(removed_id);
+                    current_state
+                        .component_ids_by_protocol
+                        .get_mut(&removed_component.protocol_system)
+                        .map(|id_set| id_set.remove(removed_id));
+                }
+
+                for (protocol, component_ids) in &current_state.component_ids_by_protocol {
+                    metrics::record_protocol_pool_count(protocol, component_ids.len());
+                }
+                current_state.next_update_seq()
+            };
+
+            let update_block_number = protocol_update.block_number;
+
+            if !update_seq.is_multiple_of(cli.test_every_n_updates) {
+                metrics::record_protocol_update_sampled_out();
                 return Ok(());
             }
-            BlockPollResult::Timeout => {
-                warn!(
-                    "RPC ({block_tag}) did not reach update block {update_block_number}, skipping."
-                );
-                metrics::record_protocol_update_skipped();
+
+            let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
+
+            let by_number =
+                should_fetch_block_by_number(cli.test_every_n_updates, cli.partial_blocks);
+
+            let block = if by_number {
+                // On fast chains the head is expected to be past the update, so fetch the target
+                // block by number instead of racing the head.
+                match await_target_block(
+                    &rpc_tools,
+                    update_block_number,
+                    cli.rpc_poll_attempts,
+                    poll_interval,
+                )
+                .await
+                {
+                    Ok(Some(b)) => {
+                        let latency_seconds =
+                            update.received_at.as_secs_f64() - b.header.timestamp as f64;
+                        metrics::record_block_processing_duration(latency_seconds, "full");
+                        Arc::new(b)
+                    }
+                    Ok(None) => {
+                        warn!("RPC did not serve sampled block {update_block_number}, skipping.");
+                        metrics::record_protocol_update_skipped();
+                        for protocol in protocol_update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        metrics::record_protocol_update_skipped();
+                        for protocol in protocol_update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
+                        return Err(e);
+                    }
+                }
+            } else {
+                // Flashblocks-capable endpoints expose sequencer pre-confirmed state under
+                // `pending`; standard endpoints use `latest` (confirmed blocks only).
+                let block_tag = if cli.partial_blocks && protocol_update.is_partial {
+                    BlockNumberOrTag::Pending
+                } else {
+                    BlockNumberOrTag::Latest
+                };
+
+                let poll_result = poll_rpc_for_block(
+                    &rpc_tools,
+                    update_block_number,
+                    block_tag,
+                    cli.rpc_poll_attempts,
+                    poll_interval,
+                )
+                .await?;
+
+                let block_type =
+                    if block_tag == BlockNumberOrTag::Pending { "partial" } else { "full" };
+                match poll_result {
+                    BlockPollResult::Ready(b) => {
+                        let latency_seconds =
+                            update.received_at.as_secs_f64() - b.header.timestamp as f64;
+                        metrics::record_block_processing_duration(latency_seconds, block_type);
+                        Arc::new(*b)
+                    }
+                    BlockPollResult::Stale { target_block_timestamp } => {
+                        if let Some(ts) = target_block_timestamp {
+                            let latency_seconds = update.received_at.as_secs_f64() - ts as f64;
+                            metrics::record_block_processing_duration(latency_seconds, block_type);
+                        }
+                        metrics::record_protocol_update_skipped();
+                        for protocol in protocol_update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
+                        return Ok(());
+                    }
+                    BlockPollResult::Timeout => {
+                        warn!(
+                            "RPC ({block_tag}) did not reach update block \
+                             {update_block_number}, skipping."
+                        );
+                        metrics::record_protocol_update_skipped();
+                        for protocol in protocol_update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
+                        return Ok(());
+                    }
+                }
+            };
+            if update.is_first_update {
+                info!("Skipping simulation on first protocol update...");
                 return Ok(());
             }
-        };
-        if update.is_first_update {
-            info!("Skipping simulation on first protocol update...");
-            return Ok(());
-        }
 
-        // Record block number for statistics
-        if let Some(stats) = statistics.as_ref() {
-            let mut stats = stats
-                .write()
-                .expect("Failed to get write lock for statistics (record block)");
-            stats.record_block_processed();
-        }
+            // Record block number for statistics
+            if let Some(stats) = statistics.as_ref() {
+                let mut stats = stats
+                    .write()
+                    .expect("Failed to get write lock for statistics (record block)");
+                stats.record_block_processed(protocol_update.block_number);
+            }
 
-        block
-    } else {
-        // RFQ updates: fetch latest block without alignment checks
-        match rpc_tools
-            .provider
-            .get_block_by_number(BlockNumberOrTag::Latest)
-            .await
-            .into_diagnostic()
-            .wrap_err("Failed to fetch latest block")
-            .ok()
-            .flatten()
-        {
-            Some(b) => Arc::new(b),
-            None => {
-                warn!("Failed to retrieve latest block, continuing to next message...");
-                return Ok(());
+            block
+        }
+        StreamUpdatePayload::Book { .. } => {
+            // Book updates: fetch latest block without alignment checks
+            match rpc_tools
+                .provider
+                .get_block_by_number(BlockNumberOrTag::Latest)
+                .await
+                .into_diagnostic()
+                .wrap_err("Failed to fetch latest block")
+                .ok()
+                .flatten()
+            {
+                Some(b) => Arc::new(b),
+                None => {
+                    warn!("Failed to retrieve latest block, continuing to next message...");
+                    return Ok(());
+                }
+            }
+        }
+        StreamUpdatePayload::PriceLevelStream(pls_update) => {
+            // The quotes target the block Titan was building. Execution is simulated as of
+            // before that block, on its parent with its number and timestamp, so the block is
+            // fetched once mined for its parent hash and timestamp.
+            let target_block = pls_update.block_number;
+            let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
+            // RPC failures propagate instead of counting as a miss: the miss metric means "the
+            // chain did not reach the quoted block", not "the RPC was down".
+            match await_target_block(&rpc_tools, target_block, cli.rpc_poll_attempts, poll_interval)
+                .await?
+            {
+                Some(b) => {
+                    if let Some(stats) = statistics.as_ref() {
+                        let mut stats = stats
+                            .write()
+                            .expect("Failed to get write lock for statistics (record block)");
+                        stats.record_block_processed(target_block);
+                    }
+                    Arc::new(b)
+                }
+                None => {
+                    metrics::record_price_level_target_block_miss();
+                    debug!(
+                        target_block,
+                        "RPC did not serve the price level update's target block, skipping."
+                    );
+                    return Ok(());
+                }
             }
         }
     };
 
-    for (protocol, sync_state) in update.update.sync_states.iter() {
-        metrics::record_protocol_sync_state(protocol, sync_state);
+    match &update.payload {
+        StreamUpdatePayload::Protocol(protocol_update) => {
+            for (protocol, sync_state) in protocol_update.sync_states.iter() {
+                metrics::record_protocol_sync_state(protocol, sync_state);
+            }
+        }
+        // Book and price level updates carry no sync states.
+        StreamUpdatePayload::Book { .. } | StreamUpdatePayload::PriceLevelStream(_) => {}
     }
     let components_to_process = select_components_to_process(update, &tycho_state, &cli)?;
-    // Collect components that implement Validator for batch validation
-    let mut validator_components: Vec<(
-        &dyn Validator,
-        tycho_common::Bytes,
-        String, // protocol_system
-    )> = Vec::new();
 
-    for (id, component, state) in &components_to_process {
-        let component_id = tycho_common::Bytes::from_str(id)
-            .unwrap_or_else(|_| tycho_common::Bytes::from(id.as_bytes()));
+    // State validation is tied to the protocol update cycle: a cached state is only guaranteed
+    // to match on-chain state at its protocol block, which the poll above aligned the RPC to.
+    // Book and price level updates run at a newer block, where an untouched cached state may
+    // legitimately diverge — validating there would report false failures.
+    if let StreamUpdatePayload::Protocol(protocol_update) = &update.payload {
+        // Collect components that implement Validator for batch validation
+        let mut validator_components: Vec<(
+            &dyn Validator,
+            tycho_common::Bytes,
+            String, // protocol_system
+        )> = Vec::new();
 
-        if let Some(validator) = get_validator(&component.protocol_system, state.as_ref()) {
-            validator_components.push((validator, component_id, component.protocol_system.clone()));
+        for (id, component, state) in &components_to_process {
+            let component_id = tycho_common::Bytes::from_str(id)
+                .unwrap_or_else(|_| tycho_common::Bytes::from(id.as_bytes()));
+
+            if let Some(validator) = get_validator(&component.protocol_system, state.as_ref()) {
+                validator_components.push((
+                    validator,
+                    component_id,
+                    component.protocol_system.clone(),
+                ));
+            }
         }
-    }
 
-    // Batch validate all components of this block in a single call
-    if !validator_components.is_empty() {
-        // Extract just the validator data (without protocol_system) for batch_validate_components
-        let validator_data: Vec<_> = validator_components
-            .iter()
-            .map(|(validator, id, _protocol)| (*validator, id.clone()))
-            .collect();
+        // Batch validate all components of this block in a single call
+        if !validator_components.is_empty() {
+            // Extract just the validator data (without protocol_system) for
+            // batch_validate_components
+            let validator_data: Vec<_> = validator_components
+                .iter()
+                .map(|(validator, id, _protocol)| (*validator, id.clone()))
+                .collect();
 
-        let validation_block_id = if update.update.is_partial {
-            BlockId::pending()
-        } else {
-            BlockId::from(block.header.number)
-        };
-        let results =
-            batch_validate_components(&cli.rpc_url, &validator_data, validation_block_id).await;
+            let validation_block_id = if protocol_update.is_partial {
+                BlockId::pending()
+            } else {
+                BlockId::from(block.header.number)
+            };
+            let results =
+                batch_validate_components(&cli.rpc_url, &validator_data, validation_block_id).await;
 
-        for (i, result) in results.iter().enumerate() {
-            let component_id = &validator_components[i].1;
-            let protocol = &validator_components[i].2;
-            match result {
-                Ok(passed) => {
-                    if *passed {
-                        debug!(
-                            component_id = %component_id,
-                            "State validation passed"
-                        );
-                        if let Some(stats) = statistics.as_ref() {
-                            let mut stats = stats
+            for (i, result) in results.iter().enumerate() {
+                let component_id = &validator_components[i].1;
+                let protocol = &validator_components[i].2;
+                match result {
+                    Ok(passed) => {
+                        if *passed {
+                            debug!(
+                                component_id = %component_id,
+                                "State validation passed"
+                            );
+                            if let Some(stats) = statistics.as_ref() {
+                                let mut stats = stats
                                 .write()
                                 .expect("Failed to get write lock for statistics (record validation success)");
-                            stats.record_validation_result(protocol, true);
+                                stats.record_validation_result(protocol, true);
+                            }
+                        } else {
+                            error!(
+                                component_id = %component_id,
+                                "State validation failed"
+                            );
+                            metrics::record_validation_failure(protocol);
+                            if let Some(stats) = statistics.as_ref() {
+                                let mut stats = stats
+                                .write()
+                                .expect("Failed to get write lock for statistics (record validation failure)");
+                                stats.record_validation_result(protocol, false);
+                            }
                         }
-                    } else {
+                    }
+                    Err(e) => {
+                        if is_block_not_found(&e.to_string()) {
+                            // The RPC node still lags behind Tycho after the batch-validation
+                            // retries exhausted: the block genuinely
+                            // isn't available yet. This is infra
+                            // latency, not a state mismatch, so skip it rather than polluting the
+                            // validation-failure metric.
+                            warn!(
+                                component_id = %component_id,
+                                "Skipping validation: RPC block not yet available after retries"
+                            );
+                            continue;
+                        }
                         error!(
                             component_id = %component_id,
-                            "State validation failed"
+                            error = %e,
+                            "Error validating component"
                         );
                         metrics::record_validation_failure(protocol);
                         if let Some(stats) = statistics.as_ref() {
-                            let mut stats = stats
-                                .write()
-                                .expect("Failed to get write lock for statistics (record validation failure)");
-                            stats.record_validation_result(protocol, false);
-                        }
-                    }
-                }
-                Err(e) => {
-                    if is_block_not_found(&e.to_string()) {
-                        // The RPC node still lags behind Tycho after the batch-validation retries
-                        // exhausted: the block genuinely isn't available yet. This is infra
-                        // latency, not a state mismatch, so skip it rather than polluting the
-                        // validation-failure metric.
-                        warn!(
-                            component_id = %component_id,
-                            "Skipping validation: RPC block not yet available after retries"
-                        );
-                        continue;
-                    }
-                    error!(
-                        component_id = %component_id,
-                        error = %e,
-                        "Error validating component"
-                    );
-                    metrics::record_validation_failure(protocol);
-                    if let Some(stats) = statistics.as_ref() {
-                        let mut stats = stats.write().expect(
+                            let mut stats = stats.write().expect(
                             "Failed to get write lock for statistics (record validation failure)",
                         );
-                        stats.record_validation_result(protocol, false);
+                            stats.record_validation_result(protocol, false);
+                        }
                     }
                 }
             }
@@ -937,6 +1371,7 @@ async fn process_update(
 
     // Process all components (updated and stale) in parallel
     let semaphore = Arc::new(Semaphore::new(cli.parallel_simulations as usize));
+    let max_swap_directions = cli.max_simulations as usize;
     let mut tasks = Vec::new();
 
     for (id, component, state) in components_to_process {
@@ -961,6 +1396,7 @@ async fn process_update(
                 state,
                 statistics,
                 token_prices,
+                max_swap_directions,
             )
             .await;
             drop(permit);
@@ -991,13 +1427,43 @@ async fn process_update(
         return Ok(());
     }
 
-    let results =
-        match simulate_swap_transaction(&rpc_tools, block_execution_info.clone(), &block, None)
+    // A price level quote prices the block Titan was building, and its swaps carry the account
+    // state the quote was priced on (`account_overwrites`) whenever the stream attached one. So
+    // they are simulated the way a consumer tests the quote before that block exists: on the
+    // quoted block's parent, with the quoted block's number and timestamp. Every other swap, a
+    // pinned component's say, is simulated on the block's own state.
+    let (before_block, after_block): (HashMap<_, _>, HashMap<_, _>) = block_execution_info
+        .clone()
+        .into_iter()
+        .partition(|(_, info)| simulates_before_block(&info.protocol_system));
+    record_swaps_without_simulation_overrides(&before_block);
+    let mut results = HashMap::new();
+    if !before_block.is_empty() {
+        results.extend(
+            simulate_swap_transaction_before_block(
+                &rpc_tools,
+                before_block,
+                &block,
+                router_overwrites_data.clone(),
+                None,
+            )
             .await
-        {
-            Ok(results) => results,
-            Err((e, _, _)) => return Err(e),
-        };
+            .map_err(|(e, _, _)| e)?,
+        );
+    }
+    if !after_block.is_empty() {
+        results.extend(
+            simulate_swap_transaction(
+                &rpc_tools,
+                after_block,
+                &block,
+                router_overwrites_data,
+                None,
+            )
+            .await
+            .map_err(|(e, _, _)| e)?,
+        );
+    }
 
     let mut n_reverts = 0;
     let mut n_failures = 0;
@@ -1011,6 +1477,29 @@ async fn process_update(
             }
         }
         .clone();
+
+        // A stale quote is an expected outcome, not an integration failure, so it is recorded
+        // apart from the revert metrics.
+        if let Some(pamm) = pamm_venue(&execution_info.protocol_system) {
+            if let TychoExecutionResult::Revert { reason, .. } = result {
+                if is_stale_quote(
+                    pamm,
+                    reason,
+                    execution_info
+                        .account_overwrites
+                        .is_some(),
+                ) {
+                    debug!(
+                        block = block.number(),
+                        protocol = %execution_info.protocol_system,
+                        "pAMM swap without simulation overrides hit the venue's freshness guard; \
+                         skipping execution comparison"
+                    );
+                    metrics::record_execution_stale_quote(&execution_info.protocol_system);
+                    continue;
+                }
+            }
+        }
 
         let state_str = {
             let current_state = tycho_state
@@ -1077,19 +1566,18 @@ fn select_components_to_process(
     // Collect updated components
     // As the component ordering is semi-random, it is safe to just take the first N components and
     // have a good coverage
-    for (id, state) in update
-        .update
-        .states
-        .iter()
-        .take(cli.max_simulations as usize)
-    {
-        let component = match update.update_type {
-            UpdateType::Protocol => {
+    match &update.payload {
+        StreamUpdatePayload::Protocol(protocol_update) => {
+            for (id, state) in protocol_update
+                .states
+                .iter()
+                .take(cli.max_simulations as usize)
+            {
                 let states = &tycho_state
                     .read()
                     .map_err(|e| miette!("Failed to acquire read lock on Tycho state: {e}"))?
                     .components;
-                match states.get(id) {
+                let component = match states.get(id) {
                     Some(comp) => comp.clone(),
                     None => {
                         warn!(id=%id, "Component not found in cached protocol pairs. Potential causes: \
@@ -1097,52 +1585,81 @@ fn select_components_to_process(
                         or the component was never added to the cache. Skipping...");
                         continue;
                     }
-                }
+                };
+                components_to_process.push((id.clone(), component, state.clone_box()));
             }
-            UpdateType::Rfq => match update.update.new_pairs.get(id) {
-                Some(comp) => comp.clone(),
-                None => {
-                    warn!(id=%id, "Component not found in update's new pairs. Potential cause: \
-                    the `states` and `new_pairs` lists don't contain the same items. Skipping...");
-                    continue;
-                }
-            },
-        };
-        components_to_process.push((id.clone(), component, state.clone_box()));
+        }
+        // A book carries the component next to the state; the processor already sampled them.
+        StreamUpdatePayload::Book { books, .. } => {
+            for (id, pair) in books
+                .iter()
+                .take(cli.max_simulations as usize)
+            {
+                components_to_process.push((
+                    id.clone(),
+                    pair.component.clone(),
+                    pair.state.clone_box(),
+                ));
+            }
+        }
+        StreamUpdatePayload::PriceLevelStream(pls_update) => {
+            for (id, state) in pls_update
+                .states
+                .iter()
+                .take(cli.max_simulations as usize)
+            {
+                let component = match pls_update.new_pairs.get(id) {
+                    Some(comp) => comp.clone(),
+                    None => {
+                        warn!(id=%id, "Component not found in update's new pairs. Potential cause: \
+                        the `states` and `new_pairs` lists don't contain the same items. Skipping...");
+                        continue;
+                    }
+                };
+                components_to_process.push((id.clone(), component, state.clone_box()));
+            }
+        }
     }
 
-    if update.update_type == UpdateType::Protocol {
-        // Collect stale components (not updated in this block)
-        let selected_ids = {
-            let current_state = tycho_state
-                .read()
-                .map_err(|e| miette!("Failed to acquire write lock on Tycho state: {e}"))?;
+    // Collect cached components to test on top of the update's own: the pinned
+    // always-test components (on every update kind), plus random stale components
+    // for protocol updates.
+    let selected_ids = {
+        let current_state = tycho_state
+            .read()
+            .map_err(|e| miette!("Failed to acquire write lock on Tycho state: {e}"))?;
 
-            let mut all_selected_ids = Vec::new();
+        let mut all_selected_ids = Vec::new();
 
-            for component_id in &cli.always_test_components {
-                if !update
-                    .update
-                    .states
-                    .keys()
-                    .contains(component_id) &&
-                    current_state
-                        .components
-                        .contains_key(component_id)
-                {
-                    all_selected_ids.push(component_id.clone());
-                }
+        for component_id in &cli.always_test_components {
+            if !components_to_process
+                .iter()
+                .any(|(id, _, _)| id == component_id) &&
+                current_state
+                    .components
+                    .contains_key(component_id)
+            {
+                all_selected_ids.push(component_id.clone());
             }
+        }
 
+        // Stale components (not updated in this block) only exist relative to a protocol
+        // update, which carries the per-protocol sync states.
+        if let StreamUpdatePayload::Protocol(protocol_update) = &update.payload {
             for (protocol, component_ids) in &current_state.component_ids_by_protocol {
-                let protocol_sync_state = update.update.sync_states.get(protocol);
+                let protocol_sync_state = protocol_update
+                    .sync_states
+                    .get(protocol);
                 match protocol_sync_state {
                     None => continue,
                     Some(SynchronizerState::Ready(_)) => {
                         let available_ids: Vec<_> = component_ids
                             .iter()
                             .filter(|id| {
-                                !update.update.states.keys().contains(id) &&
+                                !protocol_update
+                                    .states
+                                    .keys()
+                                    .contains(id) &&
                                     !all_selected_ids.contains(id)
                             })
                             .cloned()
@@ -1161,29 +1678,29 @@ fn select_components_to_process(
                     _ => continue,
                 }
             }
-            all_selected_ids
-        };
-
-        for id in &selected_ids {
-            let (component, state) = {
-                let current_state = tycho_state
-                    .read()
-                    .map_err(|e| miette!("Failed to acquire read lock on Tycho state: {e}"))?;
-
-                match (current_state.components.get(id), current_state.states.get(id)) {
-                    (Some(comp), Some(state)) => (comp.clone(), state.clone()),
-                    (None, _) => {
-                        error!(id=%id, "Component not found in saved protocol components.");
-                        continue;
-                    }
-                    (_, None) => {
-                        error!(id=%id, "State not found in saved protocol states");
-                        continue;
-                    }
-                }
-            };
-            components_to_process.push((id.clone(), component, state.clone_box()));
         }
+        all_selected_ids
+    };
+
+    for id in &selected_ids {
+        let (component, state) = {
+            let current_state = tycho_state
+                .read()
+                .map_err(|e| miette!("Failed to acquire read lock on Tycho state: {e}"))?;
+
+            match (current_state.components.get(id), current_state.states.get(id)) {
+                (Some(comp), Some(state)) => (comp.clone(), state.clone()),
+                (None, _) => {
+                    error!(id=%id, "Component not found in saved protocol components.");
+                    continue;
+                }
+                (_, None) => {
+                    error!(id=%id, "State not found in saved protocol states");
+                    continue;
+                }
+            }
+        };
+        components_to_process.push((id.clone(), component, state.clone_box()));
     }
     Ok(components_to_process)
 }
@@ -1197,6 +1714,8 @@ fn select_components_to_process(
         block_number = %block.header.number,
     )
 )]
+/// Simulates a swap in each of the component's directions, at most `max_swap_directions` of
+/// them where the component advertises a set of its own.
 #[allow(clippy::too_many_arguments)]
 async fn process_state(
     simulation_id: &str,
@@ -1207,55 +1726,36 @@ async fn process_state(
     state: Box<dyn ProtocolSim>,
     statistics: Option<Arc<RwLock<TestStatistics>>>,
     token_prices: Arc<HashMap<Bytes, f64>>,
+    max_swap_directions: usize,
 ) -> HashMap<String, TychoExecutionInput> {
     let tokens_len = component.tokens.len();
     if tokens_len < 2 {
         error!("Component has less than 2 tokens, skipping...");
         return HashMap::new();
     }
-    let mut min_amount = BigUint::ZERO;
     // Get all the possible swap directions
-    let swap_directions = match component.protocol_system.as_str() {
-        HashflowClient::PROTOCOL_SYSTEM => {
-            // Hashflow only supports swaps between the requested base and quote tokens
-            // WARN: we read from state because the component.tokens original order
-            // is modified here: src/protocol/models.rs: ProtocolComponent::from_with_tokens
-            let state = match state
-                .as_any()
-                .downcast_ref::<HashflowState>()
-            {
-                Some(s) => s.clone(),
-                None => {
-                    warn!("Failed to downcast state to HashflowState");
-                    return HashMap::new();
-                }
-            };
-            // The smallest amount acceptable for hashflow is the amount of the first level, random
-            // small amounts are not accepted. The amount in will be capped to this value
-            let min_amount_in = BigUint::from(state.levels.levels[0].quantity.ceil() as u128);
-            min_amount = min_amount_in * BigUint::from(10u32).pow(state.base_token.decimals);
-            vec![(state.base_token, state.quote_token)]
-        }
-        LiquoriceClient::PROTOCOL_SYSTEM => {
-            let state = match state
-                .as_any()
-                .downcast_ref::<LiquoriceState>()
-            {
-                Some(s) => s.clone(),
-                None => {
-                    warn!("Failed to downcast state to LiquoriceState");
-                    return HashMap::new();
-                }
-            };
-            vec![(state.base_token, state.quote_token)]
-        }
-        _ => component
+    let swap_directions = match component
+        .static_attributes
+        .get(SWAP_DIRECTIONS_ATTRIBUTE)
+    {
+        // A component whose token list does not say which way round it trades names its
+        // directions: an all-pairs component prices a set of pairs, and a one-way book quotes
+        // one of the two orderings of its tokens.
+        Some(attribute) => match book_swap_directions(attribute, &component.tokens) {
+            Ok(directions) => sample_swap_directions(directions, max_swap_directions),
+            Err(e) => {
+                error!("Invalid swap directions attribute, skipping: {e}");
+                return HashMap::new();
+            }
+        },
+        None => component
             .tokens
             .iter()
             .permutations(2)
             .map(|perm| (perm[0].clone(), perm[1].clone()))
             .collect(),
     };
+    let account_overwrites = simulation_overwrites(state.as_ref());
     let mut execution_infos = HashMap::new();
     for (i, (token_in, token_out)) in swap_directions.iter().enumerate() {
         debug!(
@@ -1322,7 +1822,10 @@ async fn process_state(
             debug!("Calculated amount_in is zero, skipping...");
             continue;
         }
-        amount_in = amount_in.max(min_amount.clone());
+        // Hashflow rejects quote requests below the first level's quantity.
+        if let Some(min_amount_in) = hashflow_min_amount_in(state.as_ref(), token_in, token_out) {
+            amount_in = amount_in.max(min_amount_in);
+        }
 
         // Safety bound for tokens missing from the price snapshot, whose limit is left uncapped:
         // avoids the "amount exceeds 96 bits" error seen on Uniswap V3/V4 with very high limits.
@@ -1385,8 +1888,9 @@ async fn process_state(
         );
         metrics::record_get_amount_out_duration(&component.protocol_system, duration_seconds);
 
-        // Sometimes the expected amount out might be zero (e.g. pool is depleted in one direction)
-        // Then execution will fail with TychoRouter__UndefinedMinAmountOut
+        // Sometimes the expected amount out might be zero (e.g. pool is depleted in one direction).
+        // Skip: passing expectedAmountOut=0 means minAmountOut=0, which makes the slippage check
+        // trivial.
         if expected_amount_out == BigUint::ZERO {
             continue;
         }
@@ -1406,6 +1910,7 @@ async fn process_state(
             chain,
             None,
             amount_out_result.gas,
+            expected_amount_out.clone(),
         ) {
             Ok(res) => res,
             Err(e) => {
@@ -1424,6 +1929,7 @@ async fn process_state(
                 token_in: token_in.address.to_string(),
                 token_out: token_out.address.to_string(),
                 estimated_gas: transaction.estimated_gas().clone(),
+                account_overwrites: account_overwrites.clone(),
             },
         );
     }
@@ -1500,8 +2006,11 @@ fn process_execution_result(
             };
 
             // Generate Tenderly URL for debugging with state overrides
-            let overrides =
-                tenderly::TenderlySimParams { network: Some(chain_id), ..Default::default() };
+            let overrides = tenderly::TenderlySimParams {
+                network: Some(chain_id),
+                block: tenderly_block(&execution_info, &block),
+                ..Default::default()
+            };
             let tenderly_url = tenderly::build_tenderly_url(
                 &overrides,
                 Some(&execution_info.transaction),
@@ -1587,8 +2096,11 @@ fn process_execution_result(
             let error_name = extract_error_name(revert_reason);
 
             // Generate Tenderly URL for debugging without state overrides
-            let overrides =
-                tenderly::TenderlySimParams { network: Some(chain_id), ..Default::default() };
+            let overrides = tenderly::TenderlySimParams {
+                network: Some(chain_id),
+                block: tenderly_block(&execution_info, &block),
+                ..Default::default()
+            };
             let tenderly_url = tenderly::build_tenderly_url(
                 &overrides,
                 Some(&execution_info.transaction),
@@ -1643,6 +2155,98 @@ fn process_execution_result(
     }
 }
 
+/// Whether the run has processed `--max-blocks` blocks. Always false when no cap is set or
+/// statistics are disabled.
+fn reached_max_blocks(max_blocks: u64, statistics: Option<&Arc<RwLock<TestStatistics>>>) -> bool {
+    if max_blocks == 0 {
+        return false;
+    }
+    let Some(stats) = statistics else {
+        return false;
+    };
+    let stats = stats
+        .read()
+        .expect("Failed to get read lock for statistics (max-block check)");
+    stats.blocks_processed >= max_blocks
+}
+
+/// True when a sampled update's target block should be fetched by number rather than polled for.
+///
+/// A flashblock's pending state cannot be fetched by number after the fact, so under
+/// `--partial-blocks` sampling only gates which updates are tested.
+fn should_fetch_block_by_number(interval: u64, partial_blocks: bool) -> bool {
+    interval > 1 && !partial_blocks
+}
+
+/// Selector of the priority-update-registry's `StaleUpdate()` error, the freshness guard of the
+/// registry-priced pAMMs (FermiSwap, Kipseli, Bebop, TaurusFi).
+const STALE_UPDATE_SELECTOR: &str = "666a2814";
+
+/// Selector of `FeedStalled()`, the equivalent freshness guard of the Metric pAMM's own price
+/// feed.
+const FEED_STALLED_SELECTOR: &str = "9a0423af";
+
+/// The bare venue name of a pAMM component, or `None` for any other protocol system.
+fn pamm_venue(protocol_system: &str) -> Option<&str> {
+    protocol_system.strip_prefix(PRICE_LEVEL_STREAM_PREFIX)
+}
+
+/// Whether a swap of `protocol_system` is simulated before the block it is tested at, on the
+/// block's parent: true for a price level stream venue, whose quote prices a block not built yet.
+fn simulates_before_block(protocol_system: &str) -> bool {
+    pamm_venue(protocol_system).is_some()
+}
+
+/// The block a Tenderly link replays a swap of `block` in. `None` keeps the link's default, the
+/// block after `block`, which matches a simulation on `block`'s own state. A swap simulated before
+/// `block` replays in `block` itself, on its parent's state.
+fn tenderly_block(info: &TychoExecutionInput, block: &Block) -> Option<String> {
+    simulates_before_block(&info.protocol_system).then(|| block.header.number.to_string())
+}
+
+/// Counts the pAMM swaps about to be simulated without simulation overrides, per protocol system:
+/// the stream attached none to their quote's state, so they run against the venue's mined state,
+/// where its freshness guard may reject the quote as stale.
+fn record_swaps_without_simulation_overrides(
+    execution_info: &HashMap<String, TychoExecutionInput>,
+) {
+    for info in execution_info.values() {
+        if pamm_venue(&info.protocol_system).is_some() && info.account_overwrites.is_none() {
+            metrics::record_price_level_simulation_overrides_missing(&info.protocol_system);
+        }
+    }
+}
+
+/// The account overwrites a state's swaps are simulated with: for a price level stream state, the
+/// account state Titan priced its quote on. `None` for any other state, and for a price level
+/// stream state that carries no simulation overrides.
+fn simulation_overwrites(state: &dyn ProtocolSim) -> Option<AddressHashMap<AccountOverride>> {
+    let overrides = state
+        .as_any()
+        .downcast_ref::<PriceLevelStreamState>()?
+        .simulation_overrides()?;
+    Some(pamm_account_overwrites(overrides))
+}
+
+/// Whether a pAMM swap's revert is a stale quote: a freshness-guard revert of a swap simulated
+/// without its quote's account state, which meets the venue's mined price. With the account
+/// state, the same revert means the overrides did not work, so it is a real failure.
+fn is_stale_quote(pamm: &str, reason: &str, simulated_with_overrides: bool) -> bool {
+    !simulated_with_overrides && is_oracle_stale_revert(pamm, reason)
+}
+
+/// Returns whether a revert reason is the freshness guard of `pamm`: `StaleUpdate()` for every
+/// pAMM, plus `FeedStalled()` for Metric.
+///
+/// Selectors are matched without a `0x` prefix, because a wrapped error carries the inner
+/// selector as ABI-encoded bytes.
+fn is_oracle_stale_revert(pamm: &str, reason: &str) -> bool {
+    if reason.contains("StaleUpdate") || reason.contains(STALE_UPDATE_SELECTOR) {
+        return true;
+    }
+    pamm == "metric" && (reason.contains("FeedStalled") || reason.contains(FEED_STALLED_SELECTOR))
+}
+
 /// Extract the error name from a revert reason string
 /// Examples:
 /// - "TychoRouter__NegativeSlippage(1000, 990)" -> "TychoRouter__NegativeSlippage"
@@ -1694,4 +2298,199 @@ fn format_error_chain(e: &miette::Error) -> String {
         chain.push(format!("{cause}"));
     }
     chain.join(" -> ")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use clap::Parser;
+    use rstest::rstest;
+    use tycho_common::{models::token::Token, Bytes};
+    use tycho_simulation::tycho_common::models::Chain;
+
+    use super::{
+        book_swap_directions, is_oracle_stale_revert, is_stale_quote, pamm_venue,
+        sample_swap_directions, should_fetch_block_by_number, Cli, TychoState,
+    };
+
+    #[rstest]
+    #[case::direct("pricelevelstream:fermiswap", Some("fermiswap"))]
+    #[case::auto_detected(
+        "pricelevelstream:0x5979458912f80b96d30d4220af8e2e4925a33320",
+        Some("0x5979458912f80b96d30d4220af8e2e4925a33320")
+    )]
+    #[case::indexed_pamm("vm:fermiswap", None)]
+    #[case::other_protocol("uniswap_v3", None)]
+    fn the_venue_is_read_from_price_level_components(
+        #[case] protocol_system: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        assert_eq!(pamm_venue(protocol_system), expected);
+    }
+
+    #[rstest]
+    #[case::stale_update_name("fermiswap", "execution reverted: StaleUpdate()")]
+    #[case::stale_update_bare_selector("kipseli", "execution reverted: 0x666a2814")]
+    // Metric's FeedStalled() reaches the router wrapped in an outer error whose decoded reason
+    // carries the inner selector only as ABI-encoded bytes, without a `0x` prefix (realistic
+    // shape captured from a live run log).
+    #[case::feed_stalled_inside_wrapped_error(
+        "metric",
+        "WrappedError(0xc0b06c4adfabb5be10ddb1dcd1c80caa6742f7bc, \
+         0xc1701b6700000000000000000000000000000000000000000000000000000000, \
+         0x9a0423af00000000000000000000000000000000000000000000000000000000, 0x)"
+    )]
+    #[case::feed_stalled_name("metric", "execution reverted: FeedStalled()")]
+    fn stale_guard_reverts_are_expected(#[case] pamm: &str, #[case] reason: &str) {
+        assert!(is_oracle_stale_revert(pamm, reason));
+    }
+
+    #[rstest]
+    #[case::negative_slippage("metric", "TychoRouter__NegativeSlippage(1000, 990)")]
+    #[case::plain_revert("fermiswap", "execution reverted")]
+    #[case::arithmetic("fermiswap", "arithmetic underflow or overflow")]
+    #[case::feed_stalled_on_non_metric_pamm("fermiswap", "execution reverted: FeedStalled()")]
+    fn other_reverts_stay_real_failures(#[case] pamm: &str, #[case] reason: &str) {
+        assert!(!is_oracle_stale_revert(pamm, reason));
+    }
+
+    /// A freshness-guard revert is a stale quote only when the swap ran without its quote's
+    /// account state; with it, the overrides did not work.
+    #[rstest]
+    #[case::without_overrides(false, true)]
+    #[case::with_overrides(true, false)]
+    fn a_stale_guard_revert_is_a_stale_quote_only_without_overrides(
+        #[case] simulated_with_overrides: bool,
+        #[case] stale_quote: bool,
+    ) {
+        let reason = "execution reverted: StaleUpdate()";
+
+        let is_stale = is_stale_quote("fermiswap", reason, simulated_with_overrides);
+
+        assert_eq!(is_stale, stale_quote);
+    }
+
+    #[test]
+    fn update_sequence_starts_at_one_and_increments() {
+        let mut state = TychoState::default();
+        assert_eq!(state.next_update_seq(), 1);
+        assert_eq!(state.next_update_seq(), 2);
+    }
+
+    #[test]
+    fn sampled_with_partial_blocks_polls_instead_of_fetching_by_number() {
+        assert!(!should_fetch_block_by_number(10, true));
+    }
+
+    #[test]
+    fn every_n_updates_accepts_partial_blocks() {
+        Cli::try_parse_from([
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+            "--partial-blocks",
+            "--test-every-n-updates",
+            "10",
+        ])
+        .expect("--test-every-n-updates must be accepted alongside --partial-blocks");
+    }
+
+    #[test]
+    fn every_n_blocks_alias_sets_test_every_n_updates() {
+        let cli = Cli::try_parse_from([
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+            "--test-every-n-blocks",
+            "10",
+        ])
+        .expect("--test-every-n-blocks must stay accepted as an alias");
+        assert_eq!(cli.test_every_n_updates, 10);
+    }
+
+    #[test]
+    fn protocol_tvl_thresholds_parses_comma_separated_pairs() {
+        let cli = Cli::try_parse_from([
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+            "--protocol-tvl-thresholds",
+            "lunarbase=10,pancakeswap_infinity_cl=3",
+        ])
+        .expect("comma-separated protocol=threshold pairs must be accepted");
+
+        let parsed: Vec<(&str, f64)> = cli
+            .protocol_tvl_thresholds
+            .iter()
+            .map(|t| (t.protocol.as_str(), t.threshold))
+            .collect();
+        assert_eq!(parsed, [("lunarbase", 10.0), ("pancakeswap_infinity_cl", 3.0)]);
+    }
+
+    #[test]
+    fn protocol_tvl_thresholds_defaults_to_none() {
+        let cli = Cli::try_parse_from([
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+        ])
+        .unwrap();
+
+        assert!(cli.protocol_tvl_thresholds.is_empty());
+    }
+
+    #[test]
+    fn protocol_tvl_thresholds_rejects_malformed_pair() {
+        let result = Cli::try_parse_from([
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+            "--protocol-tvl-thresholds",
+            "lunarbase=10,pancakeswap_infinity_cl",
+        ]);
+
+        assert!(result.is_err());
+    }
+
+    /// An all-pairs component says which pairs it prices; the run reads them rather than
+    /// pairing up its token list.
+    #[test]
+    fn the_advertised_directions_name_the_components_tokens() {
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        let token = |address: &Bytes, symbol: &str| {
+            Token::new(address, symbol, 18, 0, &[], Chain::Ethereum, 100)
+        };
+        let tokens = vec![token(&weth, "WETH"), token(&usdc, "USDC")];
+        let attribute: Bytes = [weth.to_vec(), usdc.to_vec(), usdc.to_vec(), weth.to_vec()]
+            .concat()
+            .into();
+
+        let directions = book_swap_directions(&attribute, &tokens).unwrap();
+
+        assert_eq!(
+            directions
+                .iter()
+                .map(|(token_in, token_out)| (token_in.symbol.as_str(), token_out.symbol.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("WETH", "USDC"), ("USDC", "WETH")]
+        );
+        assert_eq!(sample_swap_directions(directions, 1).len(), 1);
+
+        let unknown: Bytes = [weth.to_vec(), vec![0x11; 20]]
+            .concat()
+            .into();
+        assert!(book_swap_directions(&unknown, &tokens).is_err());
+    }
 }

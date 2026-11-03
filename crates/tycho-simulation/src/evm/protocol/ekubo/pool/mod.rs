@@ -37,9 +37,11 @@ pub trait EkuboPool {
         deleted_attributes: HashSet<String>,
     ) -> Result<(), TransitionError>;
 
+    /// Quotes `token_amount`. A set `sqrt_ratio_limit` stops the swap early at that sqrt ratio.
     fn quote(
         &self,
         token_amount: TokenAmount,
+        sqrt_ratio_limit: Option<U256>,
     ) -> Result<super::pool::EkuboPoolQuote, SimulationError>;
     fn get_limit(&self, token_in: U256) -> Result<i128, SimulationError>;
 }

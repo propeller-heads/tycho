@@ -75,6 +75,16 @@ module.exports = {
             url: process.env.RPC_URL,
             accounts: [process.env.PRIVATE_KEY],
             chainId: 9745
+        },
+        robinhood: {
+            url: process.env.RPC_URL,
+            accounts: [process.env.PRIVATE_KEY],
+            chainId: 4663
+        },
+        arc: {
+            url: process.env.RPC_URL,
+            accounts: [process.env.PRIVATE_KEY],
+            chainId: 5042
         }
     },
 
@@ -84,6 +94,8 @@ module.exports = {
         privateVerification: false,
     },
 
+    // Etherscan-family explorers only. Blockscout chains verify through their
+    // native v2 API in scripts/utils.js, which hardhat-verify never sees.
     etherscan: {
         apiKey: process.env.BLOCKCHAIN_EXPLORER_API_KEY,
         customChains: [

@@ -35,9 +35,7 @@ pub fn div_mod_u256(a: U256, b: U256) -> Result<(U256, U256), SimulationError> {
     if b.is_zero() {
         return Err(SimulationError::FatalError("Division by zero".to_string()));
     }
-    let result = a / b;
-    let rest = a % b;
-    Ok((result, rest))
+    Ok(a.div_rem(b))
 }
 
 pub fn _construc_result_u256(res: Option<U256>) -> Result<U256, SimulationError> {
@@ -74,9 +72,7 @@ pub fn div_mod_u512(a: U512, b: U512) -> Result<(U512, U512), SimulationError> {
     if b.is_zero() {
         return Err(SimulationError::FatalError("Division by zero".to_string()));
     }
-    let result = a / b;
-    let rest = a % b;
-    Ok((result, rest))
+    Ok(a.div_rem(b))
 }
 
 pub fn _construc_result_u512(res: Option<U512>) -> Result<U512, SimulationError> {

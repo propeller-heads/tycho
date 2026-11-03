@@ -30,7 +30,7 @@ pub fn get_router_address(chain: &Chain) -> Result<&'static Bytes, EncodingError
         })
 }
 
-/// The address used by the TychoRouter to represent native ETH.
+/// The address used by the TychoRouterV3 to represent native ETH.
 ///
 /// Callers must use this address (not `address(0)`) for the `tokenIn` / `tokenOut`
 /// parameters when ABI-encoding router function calls that involve native ETH.
@@ -46,7 +46,7 @@ pub static ROUTER_ETH_ADDRESS: LazyLock<Bytes> = LazyLock::new(|| {
 /// It is important to note that fetching more blocks will send more attestations to the
 /// Tycho Router, resulting in a higher gas usage. Fetching fewer blocks may result in attestations
 /// expiring if the transaction is not sent fast enough.
-pub const ANGSTROM_DEFAULT_BLOCKS_IN_FUTURE: u64 = 5;
+pub const ANGSTROM_DEFAULT_BLOCKS_IN_FUTURE: u64 = 10;
 
 /// The endpoint serving Angstrom pool unlock attestations.
 pub(crate) const ANGSTROM_DEFAULT_API_URL: &str =
@@ -126,9 +126,85 @@ pub static NON_PLE_ENCODED_PROTOCOLS: LazyLock<HashSet<&'static str>> = LazyLock
     set
 });
 
+/// Uniswap V2 and its forks encode identically, so they share `UniswapV2SwapEncoder`.
+pub const UNISWAP_V2_FORKS: &[&str] =
+    &["uniswap_v2", "sushiswap_v2", "pancakeswap_v2", "quickswap_v2"];
+
+/// Uniswap V3 and its forks share `UniswapV3SwapEncoder`; see [`UNISWAP_V2_FORKS`].
+pub const UNISWAP_V3_FORKS: &[&str] =
+    &["uniswap_v3", "pancakeswap_v3", "sushiswap_v3", "robinswap_v3", "gigadex_v3"];
+
+/// Slipstream deployments and forks. They share `SlipstreamsSwapEncoder`, which packs
+/// `tick_spacing` where `UniswapV3SwapEncoder` packs the fee. The pool ABI is Uniswap V3's.
+pub const SLIPSTREAMS_FORKS: &[&str] =
+    &["aerodrome_slipstreams", "velodrome_slipstreams", "up_v3", "ramses_v3", "aero_cl"];
+
+/// Protocol system prefix carried by components sourced from the pAMM price level stream. The
+/// venue suffix is either a configured name (e.g. `pricelevelstream:fermiswap`) or, for
+/// auto-detected pAMMs, the venue address (e.g. `pricelevelstream:0x5979…`); every such protocol
+/// maps to the generic `PropAMMSwapEncoder`.
+pub const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
+
+/// The executor-config key serving the whole price-level-stream protocol family: any
+/// `pricelevelstream:{venue}` protocol without an exact entry of its own falls back to this one,
+/// so a single configured executor address covers every pAMM, including auto-detected ones.
+pub const PRICE_LEVEL_STREAM_KEY: &str = "pricelevelstream";
+
+/// Protocol system prefix for components executed through a fallback router, which retries a
+/// failing primary on the fallback protocol named in the swap's `user_data`. pAMM suffixes follow
+/// `PRICE_LEVEL_STREAM_PREFIX`.
+pub const FALLBACK_PREFIX: &str = "fallback:";
+
+/// The executor-config key serving the whole fallback protocol family, mirroring
+/// `PRICE_LEVEL_STREAM_KEY`.
+pub const FALLBACK_KEY: &str = "fallback";
+
+/// Config key of `TychoSubsidizingExecutor` and of its `payer_address`.
+pub(crate) const SUBSIDY_KEY: &str = "subsidy";
+
+/// Protocol system of the native token wrap/unwrap.
+pub(crate) const NATIVE_WRAPPER_PROTOCOL_SYSTEM: &str = "native_wrapper";
+
+/// Metric components executed through `MetricFallbackRouter`.
+pub const METRIC_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
+
+/// Bebop components executed through `BebopFallbackRouter`.
+pub const BEBOP_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:bebop";
+
+/// Hashflow components executed through `HashflowFallbackRouter`.
+pub const HASHFLOW_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:hashflow";
+
+/// Native components executed through `NativeFallbackRouter`.
+pub const NATIVE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:native";
+
+/// Liquorice components executed through `LiquoriceFallbackRouter`.
+pub const LIQUORICE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:liquorice";
+
+/// Components whose fallback router runs a signed RFQ quote first, approving the venue itself and
+/// forwarding the output.
+pub const SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS: [&str; 4] = [
+    BEBOP_FALLBACK_PROTOCOL_SYSTEM,
+    HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
+    NATIVE_FALLBACK_PROTOCOL_SYSTEM,
+    LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `get_encoder` matches on the prefix but looks the executor up under the key, so the two
+    /// must name the same family.
+    #[test]
+    fn test_family_keys_and_prefixes_agree() {
+        assert_eq!(format!("{PRICE_LEVEL_STREAM_KEY}:"), PRICE_LEVEL_STREAM_PREFIX);
+        assert_eq!(format!("{FALLBACK_KEY}:"), FALLBACK_PREFIX);
+        assert!(METRIC_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(BEBOP_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(NATIVE_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+    }
 
     /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus
     /// the retry that follows it still fit inside the maximum window age.

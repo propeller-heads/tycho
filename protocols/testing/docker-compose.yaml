@@ -41,11 +41,13 @@ services:
       MODE: "${MODE:-range}"
       DATABASE_URL: postgres://postgres:mypassword@db:5432/tycho_indexer_0
       RPC_URL: "${RPC_URL}"
+      ARC_RPC_URL: "${ARC_RPC_URL:-}"
       BASE_RPC_URL: "${BASE_RPC_URL:-}"
       ARBITRUM_RPC_URL: "${ARBITRUM_RPC_URL:-}"
       UNICHAIN_RPC_URL: "${UNICHAIN_RPC_URL:-}"
       BSC_RPC_URL: "${BSC_RPC_URL:-}"
       POLYGON_RPC_URL: "${POLYGON_RPC_URL:-}"
+      ROBINHOOD_RPC_URL: "${ROBINHOOD_RPC_URL:-}"
       SUBSTREAMS_API_TOKEN: "${SUBSTREAMS_API_TOKEN}"
     # PROTOCOLS to test separated by space and with optional filter
     # e.g. "ethereum-balancer-v2=weighted_legacy_creation ethereum-ekubo-v2"

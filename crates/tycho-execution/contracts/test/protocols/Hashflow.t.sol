@@ -17,6 +17,7 @@ contract HashflowUtils is Test {
             quote.pool, // pool (20 bytes)
             quote.externalAccount, // externalAccount (20 bytes)
             quote.trader, // trader (20 bytes)
+            quote.effectiveTrader, // effectiveTrader (20 bytes)
             quote.baseToken, // baseToken (20 bytes)
             quote.quoteToken, // quoteToken (20 bytes)
             quote.baseTokenAmount, // baseTokenAmount (32 bytes)
@@ -26,14 +27,6 @@ contract HashflowUtils is Test {
             quote.txid, // txid (32 bytes)
             quote.signature // signature data
         );
-    }
-
-    function encodeRfqtQuoteWithDefaults(IHashflowRouter.RFQTQuote memory quote)
-        internal
-        pure
-        returns (bytes memory)
-    {
-        return encodeRfqtQuote(quote);
     }
 }
 
@@ -53,8 +46,32 @@ contract HashflowExecutorECR20Test is Constants, TestUtils, HashflowUtils {
     }
 
     function testDecodeParams() public view {
-        IHashflowRouter.RFQTQuote memory expected_quote = rfqtQuote();
-        bytes memory encodedQuote = encodeRfqtQuoteWithDefaults(expected_quote);
+        // Synthetic quote instead of the realistic rfqtQuote() fixture: there
+        // trader == effectiveTrader, so a decoder reading the wrong byte slice
+        // still returns the expected value. Unique values per field make any
+        // offset mistake fail an assertion; decoding never checks the
+        // signature, so the values need not be real.
+        IHashflowRouter.RFQTQuote memory expected_quote =
+            IHashflowRouter.RFQTQuote({
+                pool: address(0x1111111111111111111111111111111111111111),
+                externalAccount: address(
+                    0x2222222222222222222222222222222222222222
+                ),
+                trader: address(0x3333333333333333333333333333333333333333),
+                effectiveTrader: address(
+                    0x4444444444444444444444444444444444444444
+                ),
+                baseToken: address(0x5555555555555555555555555555555555555555),
+                quoteToken: address(0x6666666666666666666666666666666666666666),
+                effectiveBaseTokenAmount: 0,
+                baseTokenAmount: 7777,
+                quoteTokenAmount: 8888,
+                quoteExpiry: 9999,
+                nonce: 101010,
+                txid: bytes32(uint256(0xabcdef)),
+                signature: hex"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f4041"
+            });
+        bytes memory encodedQuote = encodeRfqtQuote(expected_quote);
         (IHashflowRouter.RFQTQuote memory quote) =
             executor.decodeData(encodedQuote);
 
@@ -104,14 +121,15 @@ contract HashflowExecutorECR20Test is Constants, TestUtils, HashflowUtils {
     }
 
     function testDecodeParamsInvalidDataLength() public {
-        bytes memory invalidData = new bytes(10);
+        // The previous layout, without effectiveTrader, must not decode
+        bytes memory oldFormatData = new bytes(325);
         vm.expectRevert(HashflowExecutor__InvalidDataLength.selector);
-        executor.decodeData(invalidData);
+        executor.decodeData(oldFormatData);
     }
 
     function testGetTransferData() public {
         IHashflowRouter.RFQTQuote memory expected_quote = rfqtQuote();
-        bytes memory encodedQuote = encodeRfqtQuoteWithDefaults(expected_quote);
+        bytes memory encodedQuote = encodeRfqtQuote(expected_quote);
 
         (
             TransferManager.TransferType transferType,
@@ -136,7 +154,7 @@ contract HashflowExecutorECR20Test is Constants, TestUtils, HashflowUtils {
         address trader = address(ALICE);
         IHashflowRouter.RFQTQuote memory quote = rfqtQuote();
         uint256 amountIn = quote.baseTokenAmount;
-        bytes memory encodedQuote = encodeRfqtQuoteWithDefaults(quote);
+        bytes memory encodedQuote = encodeRfqtQuote(quote);
 
         deal(WETH_ADDR, address(executor), amountIn);
         uint256 balanceBefore = USDC.balanceOf(trader);
@@ -157,7 +175,7 @@ contract HashflowExecutorECR20Test is Constants, TestUtils, HashflowUtils {
         address trader = address(ALICE);
         IHashflowRouter.RFQTQuote memory quote = rfqtQuote();
         uint256 amountIn = quote.baseTokenAmount - 1;
-        bytes memory encodedQuote = encodeRfqtQuoteWithDefaults(quote);
+        bytes memory encodedQuote = encodeRfqtQuote(quote);
 
         deal(WETH_ADDR, address(executor), amountIn);
         uint256 balanceBefore = USDC.balanceOf(trader);
@@ -178,7 +196,7 @@ contract HashflowExecutorECR20Test is Constants, TestUtils, HashflowUtils {
         address trader = address(ALICE);
         IHashflowRouter.RFQTQuote memory quote = rfqtQuote();
         uint256 amountIn = quote.baseTokenAmount + 1;
-        bytes memory encodedQuote = encodeRfqtQuoteWithDefaults(quote);
+        bytes memory encodedQuote = encodeRfqtQuote(quote);
 
         deal(WETH_ADDR, address(executor), amountIn);
         uint256 balanceBefore = USDC.balanceOf(trader);
@@ -243,7 +261,7 @@ contract HashflowExecutorNativeTest is Constants, HashflowUtils {
         address trader = address(ALICE);
         IHashflowRouter.RFQTQuote memory quote = rfqtQuote();
         uint256 amountIn = quote.baseTokenAmount;
-        bytes memory encodedQuote = encodeRfqtQuoteWithDefaults(quote);
+        bytes memory encodedQuote = encodeRfqtQuote(quote);
 
         vm.deal(address(executor), amountIn);
         uint256 balanceBefore = USDC.balanceOf(trader);
@@ -285,6 +303,67 @@ contract HashflowExecutorNativeTest is Constants, HashflowUtils {
     }
 }
 
+contract HashflowExecutorEffectiveTraderTest is Constants, HashflowUtils {
+    HashflowExecutorExposed executor;
+    uint256 forkBlock;
+
+    IERC20 USDC = IERC20(USDC_ADDR);
+
+    function setUp() public {
+        // The quote below lives from its nonce (a maker timestamp) to its
+        // expiry, ~45s; the router rejects it outside that window ("Nonce too
+        // high" before, "Quote expired" after). This block is inside it.
+        forkBlock = 25975788; // Using expiry date: 1789390008
+        vm.createSelectFork("mainnet", forkBlock);
+        executor = new HashflowExecutorExposed(HASHFLOW_ROUTER);
+    }
+
+    function testSwapEffectiveTraderNotCaller() public {
+        // The maker signed this quote with an effectiveTrader nobody controls
+        // (0x…DeaDBeef). The router reads effectiveTrader only to scope quote
+        // nonces, so the swap executes exactly like one whose effectiveTrader
+        // equals the trader.
+        IHashflowRouter.RFQTQuote memory quote = IHashflowRouter.RFQTQuote({
+            pool: address(0x478Eca1b93865dcA0b9f325935eb123C8a4aF011),
+            externalAccount: address(
+                0xBEE3211ab312a8D065c4FeF0247448e17A8da000
+            ),
+            trader: address(ALICE),
+            effectiveTrader: address(
+                0x00000000000000000000000000000000DeaDBeef
+            ),
+            baseToken: WETH_ADDR,
+            quoteToken: USDC_ADDR,
+            effectiveBaseTokenAmount: 0,
+            baseTokenAmount: 1000000000000000000,
+            quoteTokenAmount: 2510840211,
+            quoteExpiry: 1789390008,
+            nonce: 1789389963406,
+            txid: bytes32(
+                uint256(
+                    0x125000064000640000e43f2da72000ffffffffffffff0031418d1897fb6d0000
+                )
+            ),
+            signature: hex"00e59648df10ba85d06a4c6b1eda60d3b48ac658bbfbd969f6b4ff5b7cdce13c3650ce5f8a0ab917164316e2d75886045d5ed7f5dea08a8de2f689e3c37cb7231c"
+        });
+        uint256 amountIn = quote.baseTokenAmount;
+        bytes memory encodedQuote = encodeRfqtQuote(quote);
+
+        deal(WETH_ADDR, address(executor), amountIn);
+        uint256 balanceBefore = USDC.balanceOf(ALICE);
+
+        vm.prank(address(executor));
+        IERC20(quote.baseToken).approve(HASHFLOW_ROUTER, amountIn);
+        vm.stopPrank();
+
+        vm.prank(ALICE);
+        executor.swap(amountIn, encodedQuote, address(executor));
+
+        uint256 balanceAfter = USDC.balanceOf(ALICE);
+        assertEq(balanceAfter - balanceBefore, quote.quoteTokenAmount);
+    }
+}
+
 contract HashflowExecutorExposed is HashflowExecutor {
     constructor(address _hashflowRouter) HashflowExecutor(_hashflowRouter) {}
 
@@ -299,7 +378,7 @@ contract HashflowExecutorExposed is HashflowExecutor {
 
 contract TychoRouterSingleSwapTestForHashflow is TychoRouterTestSetup {
     function getForkBlock() public pure override returns (uint256) {
-        return 24290334;
+        return 25975860;
     }
 
     function testHashflowIntegration() public {
@@ -308,10 +387,11 @@ contract TychoRouterSingleSwapTestForHashflow is TychoRouterTestSetup {
         //   USDC ───(Hashflow RFQ)──> WBTC
 
         // The Hashflow order expects:
-        // - 4308094737 USDC input -> 4795673 WBTC output
+        // - 4308094737 USDC input -> 5542168 WBTC output
+        // The maker signed it with a random effectiveTrader (0x...deadbeef)
 
         uint256 amountIn = 4308094737;
-        uint256 expectedAmountOut = 4795673;
+        uint256 expectedAmountOut = 5542168;
         deal(USDC_ADDR, ALICE, amountIn);
         uint256 balanceBefore = IERC20(WBTC_ADDR).balanceOf(ALICE);
 

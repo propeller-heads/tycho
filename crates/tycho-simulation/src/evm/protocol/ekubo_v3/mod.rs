@@ -19,7 +19,7 @@ fn component_extension_type(component: &ComponentWithState) -> Option<ExtensionT
         .static_attributes
         .get("extension")?;
 
-    extension_type(Address::try_from(&extension_bytes[..]).ok()?)
+    extension_type(Address::try_from(&extension_bytes[..]).ok()?, component.component.chain)
 }
 
 /// Filters out unsupported ekubo_v3 extensions, as well as SignedExclusiveSwap pools.
@@ -46,12 +46,17 @@ mod tests {
 
     use revm::primitives::address;
     use tycho_common::{
-        models::protocol::{ProtocolComponent, ProtocolComponentState},
+        models::{
+            protocol::{ProtocolComponent, ProtocolComponentState},
+            Chain,
+        },
         Bytes,
     };
 
     use super::{
-        addresses::{ORACLE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_ADDRESS},
+        addresses::{
+            ORACLE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS, SIGNED_EXCLUSIVE_SWAP_V3_3_ADDRESS,
+        },
         *,
     };
 
@@ -74,10 +79,33 @@ mod tests {
 
     #[test]
     fn signed_exclusive_swap_excluded_by_default() {
-        let signed = with_extension(SIGNED_EXCLUSIVE_SWAP_ADDRESS);
+        for (chain, extension) in SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS {
+            let mut signed = with_extension(extension);
+            signed.component.chain = chain;
 
-        assert!(!filter_fn(&signed));
-        assert!(filter_fn_with_signed_exclusive_swap(&signed));
+            assert!(!filter_fn(&signed));
+            assert!(filter_fn_with_signed_exclusive_swap(&signed));
+        }
+    }
+
+    #[test]
+    fn signed_exclusive_swap_v3_3_chains() {
+        for chain in [Chain::Robinhood, Chain::Bsc, Chain::Base] {
+            let mut signed = with_extension(SIGNED_EXCLUSIVE_SWAP_V3_3_ADDRESS);
+            signed.component.chain = chain;
+
+            assert!(!filter_fn(&signed), "{chain} pool passed the default filter");
+            assert!(filter_fn_with_signed_exclusive_swap(&signed), "{chain} pool not recognised");
+        }
+    }
+
+    #[test]
+    fn signed_exclusive_swap_address_on_another_chain() {
+        // The default component chain is Ethereum, which only has the v3.2.0 deployment.
+        let v3_3_on_ethereum = with_extension(SIGNED_EXCLUSIVE_SWAP_V3_3_ADDRESS);
+
+        assert!(!filter_fn(&v3_3_on_ethereum));
+        assert!(!filter_fn_with_signed_exclusive_swap(&v3_3_on_ethereum));
     }
 
     #[test]

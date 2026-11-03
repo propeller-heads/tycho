@@ -32,26 +32,35 @@ fi
 infer_chain() {
     local protocol="$1"
     case "$protocol" in
+        arc-*)      echo "arc" ;;
         base-*)     echo "base" ;;
         arbitrum-*) echo "arbitrum" ;;
         unichain-*) echo "unichain" ;;
         bsc-*)      echo "bsc" ;;
         polygon-*)  echo "polygon" ;;
+        robinhood-*) echo "robinhood" ;;
         *)          echo "ethereum" ;;
     esac
 }
 
+# The per-protocol loop below exports RPC_URL for the package it is about to run, so keep the
+# generic endpoint in a separate variable that stays intact across iterations.
+GENERIC_RPC_URL="${RPC_URL:-}"
+
 # Return the appropriate RPC URL for the given protocol.
-# Chain-specific URLs fall back to the generic RPC_URL if not set.
+# Most chain-specific URLs fall back to generic RPC_URL. Arc and Robinhood require explicit archive
+# endpoints.
 get_rpc_url() {
     local protocol="$1"
     case "$protocol" in
-        base-*)     echo "${BASE_RPC_URL:-$RPC_URL}" ;;
-        arbitrum-*) echo "${ARBITRUM_RPC_URL:-$RPC_URL}" ;;
-        unichain-*) echo "${UNICHAIN_RPC_URL:-$RPC_URL}" ;;
-        bsc-*)      echo "${BSC_RPC_URL:-$RPC_URL}" ;;
-        polygon-*)  echo "${POLYGON_RPC_URL:-$RPC_URL}" ;;
-        *)          echo "$RPC_URL" ;;
+        arc-*)      echo "${ARC_RPC_URL:?ARC_RPC_URL must be set to an archive RPC to test an arc-* package}" ;;
+        base-*)     echo "${BASE_RPC_URL:-$GENERIC_RPC_URL}" ;;
+        arbitrum-*) echo "${ARBITRUM_RPC_URL:-$GENERIC_RPC_URL}" ;;
+        unichain-*) echo "${UNICHAIN_RPC_URL:-$GENERIC_RPC_URL}" ;;
+        bsc-*)      echo "${BSC_RPC_URL:-$GENERIC_RPC_URL}" ;;
+        polygon-*)  echo "${POLYGON_RPC_URL:-$GENERIC_RPC_URL}" ;;
+        robinhood-*) echo "${ROBINHOOD_RPC_URL:?ROBINHOOD_RPC_URL must be set to an archive RPC to test a robinhood-* package}" ;;
+        *)          echo "$GENERIC_RPC_URL" ;;
     esac
 }
 
@@ -71,8 +80,10 @@ for test in "${args[@]}"; do
 	rpc_url=$(get_rpc_url "$protocol")
 	export RPC_URL="$rpc_url"
 	echo "Running '$MODE' tests for protocol: $protocol (chain: $chain)"
+	# --prebuilt-wasm: the builder stage compiled every WASM binary and this image ships no Rust
+	# toolchain, so the packages must be packed as they are.
 	cmd=(tycho-protocol-sdk "$MODE" --package "$protocol" --chain "$chain" \
-		--rpc-url "$rpc_url" --db-url "$DATABASE_URL")
+		--rpc-url "$rpc_url" --db-url "$DATABASE_URL" --prebuilt-wasm)
 	# The "=" suffix in PROTOCOLS means different things per mode:
 	#   range → --match-test (run one named test case)
 	#   full  → --initial-block (start syncing from this block)

@@ -1,0 +1,23 @@
+substreams_yaml_path: ./base-sushiswap-v2.yaml
+protocol_system: "sushiswap_v2"
+protocol_type_names:
+  - "sushiswap_v2_pool"
+module_name: "map_pool_events"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # TYBG / WETH, the most traded SushiSwap V2 pool on Base. The pool is created and funded in the
+  # same transaction, then traded in the blocks that follow, so the range covers both the
+  # PairCreated and the Sync path.
+  - name: test_tybg_weth_pool
+    start_block: 8167705
+    stop_block: 8167950
+    expected_components:
+      - id: "0xf65bb528ced09008603509c3fda43e1ccfddf935"
+        tokens:
+          - "0x0d97F261b1e88845184f678e2d1e7a98D9FD38dE"
+          - "0x4200000000000000000000000000000000000006"
+        static_attributes:
+          fee: "0x1e"
+        creation_tx: "0x50322b74939b74f9b0ca202c11cff76747f6f95421c3413af0bf22e8267148b4"
+        skip_simulation: false

@@ -6,11 +6,28 @@ use tycho_common::simulation::errors::SimulationError;
 
 use super::tick_math::{get_sqrt_ratio_at_tick, MAX_TICK, MIN_TICK};
 
+/// An initialized tick and the sqrt price at its index.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "TickInfoData")]
 pub struct TickInfo {
     pub(crate) index: i32,
     pub(crate) net_liquidity: i128,
     pub(crate) sqrt_price: U256,
+}
+
+#[derive(Deserialize)]
+struct TickInfoData {
+    index: i32,
+    net_liquidity: i128,
+}
+
+impl TryFrom<TickInfoData> for TickInfo {
+    type Error = SimulationError;
+
+    fn try_from(data: TickInfoData) -> Result<Self, Self::Error> {
+        // sqrt_price is derived from the index, never trusted from serialized input.
+        Self::new(data.index, data.net_liquidity)
+    }
 }
 
 impl TickInfo {
@@ -35,16 +52,31 @@ pub(crate) struct TickListError {
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum TickListErrorKind {
-    NotFound,
     BelowSmallest,
     AtOrAboveLargest,
     TicksExeeded,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "TickListData")]
 pub(crate) struct TickList {
     tick_spacing: u16,
     ticks: Vec<TickInfo>,
+}
+
+/// Deserialized [`TickList`] fields, checked through [`TickList::from`].
+#[derive(Deserialize)]
+struct TickListData {
+    tick_spacing: u16,
+    ticks: Vec<TickInfo>,
+}
+
+impl TryFrom<TickListData> for TickList {
+    type Error = SimulationError;
+
+    fn try_from(data: TickListData) -> Result<Self, Self::Error> {
+        TickList::from(data.tick_spacing, data.ticks)
+    }
 }
 
 impl TickList {
@@ -52,6 +84,10 @@ impl TickList {
         let tick_list = TickList { tick_spacing: spacing, ticks };
         tick_list.valid_ticks()?;
         Ok(tick_list)
+    }
+
+    pub(crate) fn ticks(&self) -> &[TickInfo] {
+        &self.ticks
     }
 
     // Validates that all attributes are valid. Checks for:
@@ -64,6 +100,12 @@ impl TickList {
         }
 
         for t in &self.ticks {
+            if !(MIN_TICK..=MAX_TICK).contains(&t.index) {
+                return Err(SimulationError::FatalError(format!(
+                    "Tick index {} out of range",
+                    t.index
+                )));
+            }
             if t.index % self.tick_spacing as i32 != 0 {
                 return Err(SimulationError::FatalError(format!(
                     "Tick index {} not aligned with tick spacing {}",
@@ -74,7 +116,7 @@ impl TickList {
         if !self.ticks.is_empty() {
             for i in 0..self.ticks.len() - 1 {
                 let t = &self.ticks[i];
-                if t > &self.ticks[i + 1] {
+                if t.index >= self.ticks[i + 1].index {
                     return Err(SimulationError::FatalError(format!(
                         "Ticks are not ordered at position {}",
                         t.index
@@ -163,14 +205,12 @@ impl TickList {
         tick >= maximum || tick >= MAX_TICK
     }
 
-    pub(crate) fn get_tick(&self, index: i32) -> Result<&TickInfo, TickListError> {
-        match self
-            .ticks
+    #[cfg(test)]
+    pub(crate) fn get_tick(&self, index: i32) -> Option<&TickInfo> {
+        self.ticks
             .binary_search_by(|el| el.index.cmp(&index))
-        {
-            Ok(idx) => Ok(&self.ticks[idx]),
-            Err(_) => Err(TickListError { kind: TickListErrorKind::NotFound }),
-        }
+            .ok()
+            .map(|idx| &self.ticks[idx])
     }
 
     pub(crate) fn has_initialized_ticks(&self) -> bool {
@@ -224,11 +264,13 @@ impl TickList {
         }
     }
 
+    /// The next tick a swap step moves to, within the word of `tick`: the next initialized tick
+    /// with its stored info, or the word boundary with `None`. `lte` searches downwards.
     pub(crate) fn next_initialized_tick_within_one_word(
         &self,
         tick: i32,
         lte: bool,
-    ) -> Result<(i32, bool), TickListError> {
+    ) -> Result<(i32, Option<&TickInfo>), TickListError> {
         let spacing = self.tick_spacing as i32;
         let compressed = div_floor(tick, spacing);
 
@@ -242,14 +284,12 @@ impl TickList {
 
             if self.is_below_smallest(tick) {
                 let minimum = cmp::max(self.ticks[0].index - spacing, min_in_word);
-                return Ok((minimum, false));
+                return Ok((minimum, None));
             }
 
-            let idx = self
-                .next_initialized_tick(tick, lte)?
-                .index;
-            let next_tick_idx = cmp::max(idx, min_in_word);
-            Ok((next_tick_idx, next_tick_idx == idx))
+            let next = self.next_initialized_tick(tick, lte)?;
+            let next_tick_idx = cmp::max(next.index, min_in_word);
+            Ok((next_tick_idx, (next_tick_idx == next.index).then_some(next)))
         } else {
             let word_pos = (compressed + 1) >> 8;
             let max_in_word = (((word_pos + 1) << 8) - 1) * spacing;
@@ -261,13 +301,11 @@ impl TickList {
             if self.is_at_or_above_largest(tick) {
                 let maximum =
                     cmp::min(self.ticks[self.ticks.len() - 1].index + spacing, max_in_word);
-                return Ok((maximum, false));
+                return Ok((maximum, None));
             }
-            let idx = self
-                .next_initialized_tick(tick, lte)?
-                .index;
-            let next_tick_idx = cmp::min(max_in_word, idx);
-            Ok((next_tick_idx, next_tick_idx == idx))
+            let next = self.next_initialized_tick(tick, lte)?;
+            let next_tick_idx = cmp::min(max_in_word, next.index);
+            Ok((next_tick_idx, (next_tick_idx == next.index).then_some(next)))
         }
     }
 }
@@ -287,6 +325,13 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    /// The next tick within one word, and whether it is initialized.
+    fn next_tick(tick_list: &TickList, tick: i32, lte: bool) -> Result<(i32, bool), TickListError> {
+        tick_list
+            .next_initialized_tick_within_one_word(tick, lte)
+            .map(|(next, info)| (next, info.is_some()))
+    }
 
     fn create_tick_list() -> TickList {
         let tick_infos =
@@ -328,10 +373,12 @@ mod tests {
     }
 
     #[test]
-    fn test_get_tick_error() {
+    fn test_get_tick_missing() {
         let tick_list = create_tick_list();
-        let err = tick_list.get_tick(-10).unwrap_err();
-        assert_eq!(err.kind, TickListErrorKind::NotFound);
+
+        let tick = tick_list.get_tick(-10);
+
+        assert!(tick.is_none());
     }
 
     struct TestCaseNextInitializedTick {
@@ -524,9 +571,7 @@ mod tests {
 
         for case in cases {
             assert_eq!(
-                tick_list
-                    .next_initialized_tick_within_one_word(case.args.0, case.args.1)
-                    .unwrap(),
+                next_tick(&tick_list, case.args.0, case.args.1).unwrap(),
                 case.exp,
                 "{}",
                 case.id,
@@ -540,18 +585,8 @@ mod tests {
         let tick_list1 = TickList::from(1, tick_infos.clone()).unwrap();
         let tick_list2 = TickList::from(2, tick_infos).unwrap();
 
-        assert_eq!(
-            tick_list1
-                .next_initialized_tick_within_one_word(0, false)
-                .unwrap(),
-            (255, false)
-        );
-        assert_eq!(
-            tick_list2
-                .next_initialized_tick_within_one_word(0, false)
-                .unwrap(),
-            (510, false)
-        );
+        assert_eq!(next_tick(&tick_list1, 0, false).unwrap(), (255, false));
+        assert_eq!(next_tick(&tick_list2, 0, false).unwrap(), (510, false));
     }
 
     struct TestCaseNextTickError {
@@ -630,7 +665,7 @@ mod tests {
         ];
 
         for case in cases {
-            let res = tick_list.next_initialized_tick_within_one_word(case.args.0, case.args.1);
+            let res = next_tick(&tick_list, case.args.0, case.args.1);
             match case.err {
                 Some(kind) => {
                     let err = res.unwrap_err();
@@ -675,7 +710,35 @@ mod tests {
             .apply_liquidity_change(-10, 10, -100)
             .unwrap();
 
-        assert!(tick_list.get_tick(-10).is_err());
-        assert!(tick_list.get_tick(10).is_err());
+        assert!(tick_list.get_tick(-10).is_none());
+        assert!(tick_list.get_tick(10).is_none());
+    }
+
+    #[test]
+    fn deserialize_rejects_out_of_range_and_duplicate_ticks() {
+        let ticks = vec![create_tick_info(0, 0), create_tick_info(0, 0)];
+        let json = serde_json::json!({"tick_spacing": 1, "ticks": ticks});
+        assert!(serde_json::from_value::<TickList>(json).is_err());
+        let mut json = serde_json::to_value(create_tick_info(0, 0)).unwrap();
+        json["index"] = serde_json::json!(i32::MIN);
+        assert!(serde_json::from_value::<TickInfo>(json).is_err());
+    }
+
+    #[test]
+    fn deserialize_recomputes_tick_sqrt_price() {
+        let tick = TickInfo::new(0, 0).unwrap();
+        let mut json = serde_json::to_value(tick).unwrap();
+        json["sqrt_price"] = serde_json::json!("0x0");
+        assert_eq!(serde_json::from_value::<TickInfo>(json).unwrap(), tick);
+    }
+
+    #[test]
+    fn test_deserialize_checks_tick_list() {
+        let ticks = vec![create_tick_info(20, 0), create_tick_info(10, 0)];
+        let json = serde_json::json!({ "tick_spacing": 10, "ticks": ticks });
+
+        let err = serde_json::from_value::<TickList>(json).unwrap_err();
+
+        assert!(err.to_string().contains("not ordered"), "unexpected error: {err}");
     }
 }

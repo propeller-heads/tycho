@@ -12,8 +12,8 @@ use crate::{
     dto,
     models::{
         blockchain::{
-            Block, EntryPoint, EntryPointWithTracingParams, TracedEntryPoint, TracingParams,
-            TracingResult, Transaction,
+            Block, EntryPoint, EntryPointWithTracingParams, TracedEntryPoint, TracedEntryPoints,
+            TracingParams, TracingResult, Transaction,
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
@@ -22,7 +22,7 @@ use crate::{
         },
         token::Token,
         Address, BlockHash, Chain, ComponentId, ContractId, EntryPointId, ExtractionState,
-        PaginationParams, ProtocolSystem, ProtocolType, TxHash,
+        PaginationParams, ProtocolSystem, ProtocolType, StoreKey, TxHash,
     },
     Bytes,
 };
@@ -605,6 +605,22 @@ pub trait EntryPointGateway {
         &self,
         entry_points: &HashSet<EntryPointId>,
     ) -> Result<HashMap<EntryPointId, HashMap<TracingParams, TracingResult>>, StorageError>;
+
+    /// Retrieves the traced entry points of a set of components from the database.
+    ///
+    /// # Arguments
+    /// * `filter` - The EntryPointFilter to apply to the query.
+    /// * `pagination_params` - The pagination parameters to apply to the query, if None, all
+    ///   results are returned.
+    ///
+    /// # Returns
+    /// A map of component ids to the entry points with the tracing params linked to the
+    /// component, and their tracing results. Params without a tracing result are not included.
+    async fn get_traced_entry_points_by_component(
+        &self,
+        filter: EntryPointFilter,
+        pagination_params: Option<&PaginationParams>,
+    ) -> Result<WithTotal<TracedEntryPoints>, StorageError>;
 }
 
 /// Manage contracts and their state in storage.
@@ -791,4 +807,93 @@ pub trait Gateway:
     + Send
     + Sync
 {
+}
+
+/// When a value was written: the timestamp of the writing block.
+///
+/// This is the unit of the database's `valid_from`, so the cache orders writes the way the
+/// database versions them. Block timestamps are unique per chain: the extractor adds a
+/// microsecond to a block that shares its second with the previous block. A block header supplies
+/// the timestamp; a snapshot row takes it from its `valid_from`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WriteTimestamp(NaiveDateTime);
+
+impl WriteTimestamp {
+    pub fn new(block_ts: NaiveDateTime) -> Self {
+        Self(block_ts)
+    }
+
+    pub fn block_ts(&self) -> NaiveDateTime {
+        self.0
+    }
+}
+
+impl From<&Block> for WriteTimestamp {
+    fn from(block: &Block) -> Self {
+        Self::new(block.ts)
+    }
+}
+
+/// Write timestamps of one account's values, one per database row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountWriteTimestamps {
+    pub slots: HashMap<StoreKey, WriteTimestamp>,
+    pub native_balance: WriteTimestamp,
+    pub code: WriteTimestamp,
+    pub token_balances: HashMap<Address, WriteTimestamp>,
+}
+
+impl AccountWriteTimestamps {
+    /// One timestamp for every value of `account`.
+    pub fn uniform(account: &Account, at: WriteTimestamp) -> Self {
+        Self {
+            slots: account
+                .slots
+                .keys()
+                .map(|key| (key.clone(), at))
+                .collect(),
+            native_balance: at,
+            code: at,
+            token_balances: account
+                .token_balances
+                .keys()
+                .map(|token| (token.clone(), at))
+                .collect(),
+        }
+    }
+}
+
+/// One account's live state and the write timestamp of every value: the row's `valid_from`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountSnapshot {
+    pub account: Account,
+    pub written_at: AccountWriteTimestamps,
+}
+
+/// One component's live state, timestamped with the newest `valid_from` among its rows or, for a
+/// component without rows, its `created_at`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComponentSnapshot {
+    pub system: ProtocolSystem,
+    pub state: ProtocolComponentState,
+    pub updated_at: WriteTimestamp,
+}
+
+/// All live contracts and components of one chain, read from one database snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StateSnapshot {
+    pub accounts: Vec<AccountSnapshot>,
+    pub components: Vec<ComponentSnapshot>,
+}
+
+/// Reads all live contracts and components of a chain from one database snapshot.
+#[async_trait]
+pub trait StateSnapshotGateway {
+    /// All live accounts and components of `chain`, every value timestamped with the block
+    /// that wrote its row.
+    ///
+    /// Implementations must read everything from one database snapshot: a row committed after
+    /// the read starts is invisible to every part of the result. In SQL terms, a read-only
+    /// `REPEATABLE READ` transaction or stricter.
+    async fn state_snapshot(&self, chain: &Chain) -> Result<StateSnapshot, StorageError>;
 }

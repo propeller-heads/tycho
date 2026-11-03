@@ -20,7 +20,7 @@ use tycho_common::{
 use super::{
     arbitrary_recipient,
     bytecode::{analyzeCall, ANALYZER_BYTECODE, FORWARDER_BYTECODE},
-    calculate_fee, map_block_tag,
+    calculate_fee_bps, map_block_tag, ObservedTransfer,
 };
 use crate::{rpc::EthereumRpcClient, BytesCodec};
 
@@ -143,11 +143,24 @@ impl EthCallDetector {
             },
         );
 
-        let raw: AlloyBytes = self
+        let raw: AlloyBytes = match self
             .rpc
             .eth_call_with_state_overrides(tx, block_tag, overrides)
             .await
-            .map_err(|e| format!("eth_call with state overrides failed: {e}"))?;
+        {
+            Ok(raw) => raw,
+            // A revert is caused by the token itself (e.g. balanceOf reverting), not by the
+            // RPC: the injected Analyzer only propagates reverts raised by token calls.
+            // Report it as a Bad verdict so callers stop retrying the token indefinitely.
+            Err(e) if e.is_execution_reverted() => {
+                return Ok((
+                    TokenQuality::bad(format!("Token analysis simulation reverted: {e}")),
+                    None,
+                    None,
+                ))
+            }
+            Err(e) => return Err(format!("eth_call with state overrides failed: {e}")),
+        };
 
         let returns = analyzeCall::abi_decode_returns(raw.as_ref())
             .map_err(|e| format!("Failed to decode Analyzer return value: {e}"))?;
@@ -193,20 +206,32 @@ impl EthCallDetector {
             .checked_sub(r.balanceBeforeIn)
             .ok_or("settlement balance underflow after successful transfer in")?;
 
-        let fees = calculate_fee(
-            amount,
-            middle_amount,
-            r.balanceBeforeIn,
-            r.balanceAfterIn,
-            r.recipientBefore,
-            r.recipientAfter,
-        )
-        .map_err(|e| format!("Failed to calculate transfer fee: {e}"))?;
+        // A U256 overflow in the fee maths is token state (a balance near U256::MAX), not an RPC
+        // fault. Both transfers ran, so gas is known; the fee is not.
+        let fees = match calculate_fee_bps(
+            ObservedTransfer {
+                sent: amount,
+                balance_before: r.balanceBeforeIn,
+                balance_after: r.balanceAfterIn,
+            },
+            ObservedTransfer {
+                sent: middle_amount,
+                balance_before: r.recipientBefore,
+                balance_after: r.recipientAfter,
+            },
+        ) {
+            Ok(fees) => fees,
+            Err(e) => {
+                return Ok((
+                    TokenQuality::bad(format!("Failed to calculate transfer fee: {e}")),
+                    Some(gas_per_transfer),
+                    None,
+                ))
+            }
+        };
 
-        let computed_balance_after_in = r
-            .balanceBeforeIn
-            .checked_add(amount)
-            .ok_or("settlement balance overflow when checking transfer in")?;
+        // Safe: calculate_fee_bps already checked this sum for overflow.
+        let computed_balance_after_in = r.balanceBeforeIn + amount;
         if r.balanceAfterIn != computed_balance_after_in {
             return Ok((
                 TokenQuality::bad(format!(
@@ -232,10 +257,8 @@ impl EthCallDetector {
             ));
         }
 
-        let computed_recipient_after = r
-            .recipientBefore
-            .checked_add(middle_amount)
-            .ok_or("recipient balance overflow when checking transfer out")?;
+        // Safe: calculate_fee_bps already checked this sum for overflow.
+        let computed_recipient_after = r.recipientBefore + middle_amount;
         if r.recipientAfter != computed_recipient_after {
             return Ok((
                 TokenQuality::bad(format!(
@@ -263,7 +286,7 @@ impl EthCallDetector {
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::Arc};
+    use std::{collections::HashMap, str::FromStr, sync::Arc};
 
     use alloy::primitives::{address, Address};
     use tycho_common::models::token::{TokenOwnerStore, TokenQuality};
@@ -352,12 +375,89 @@ mod tests {
         assert_eq!(tax, Some(U256::from(100_u64)));
     }
 
+    #[test]
+    fn handle_response_fee_on_transfer_with_settlement_balance() {
+        // Settlement already holds 50_000 when the 1% fee token credits it with 990_000.
+        let amount = U256::from(1_000_000_u64);
+        let mut r = good_return(amount);
+        r.balanceBeforeIn = U256::from(50_000_u64);
+        r.balanceAfterIn = U256::from(1_040_000_u64);
+        r.balanceAfterOut = U256::from(50_000_u64);
+        r.recipientAfter = U256::from(990_000_u64);
+        let (quality, gas, tax) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
+        assert!(gas.is_some());
+        assert_eq!(tax, Some(U256::from(100_u64)));
+    }
+
+    #[test]
+    fn handle_response_fee_overflow_is_bad() {
+        let amount = U256::from(1_000_000_u64);
+        let mut r = good_return(amount);
+        r.balanceBeforeIn = U256::MAX;
+        r.balanceAfterIn = U256::MAX;
+        let (quality, gas, tax) = EthCallDetector::handle_response(r, amount, Address::ZERO)
+            .expect("a balance near U256::MAX must yield a Bad verdict, not an error");
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
+        assert_eq!(gas, Some(U256::from(27_500_u64)));
+        assert!(tax.is_none());
+    }
+
+    #[test]
+    fn handle_response_credits_more_than_sent_is_bad() {
+        let amount = U256::from(1_000_000_u64);
+        let mut r = good_return(amount);
+        r.balanceAfterIn = amount + U256::from(1_u64);
+        r.recipientAfter = amount + U256::from(1_u64);
+        let (quality, gas, tax) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
+        assert_eq!(gas, Some(U256::from(27_500_u64)));
+        assert_eq!(tax, Some(U256::ZERO));
+    }
+
     impl TestFixture {
         pub(crate) fn create_ethcall_detector(&self) -> EthCallDetector {
             let rpc = self.create_rpc_client(false);
             let finder = TokenOwnerStore::new(TOKEN_HOLDERS.clone());
             EthCallDetector::new(&rpc, Arc::new(finder), COWSWAP_SETTLEMENT)
         }
+    }
+
+    #[tokio::test]
+    async fn detect_impl_maps_execution_revert_to_bad() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"jsonrpc":"2.0","id":0,"error":{"code":3,"message":"execution reverted","data":"0x"}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let rpc = EthereumRpcClient::new(&server.url()).expect("mock rpc client");
+        let token = Bytes::from_str("e172e9b6cfbeeb5593bdce3f077356fdb33af904").unwrap();
+        let holder = Bytes::from_str("000000000004444c5dc75cb358380d2e3de08a90").unwrap();
+        let finder = TokenOwnerStore::new(HashMap::from([(
+            token.clone(),
+            (holder, U256::from(1_000_000_u64).to_bytes()),
+        )]));
+        let detector = EthCallDetector::new(&rpc, Arc::new(finder), COWSWAP_SETTLEMENT);
+
+        let (quality, gas, tax) = detector
+            .analyze(token, BlockTag::Latest)
+            .await
+            .expect("a reverting simulation must yield a Bad verdict, not an error");
+
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
+        assert!(gas.is_none());
+        assert!(tax.is_none());
+        mock.assert_async().await;
     }
 
     #[tokio::test]

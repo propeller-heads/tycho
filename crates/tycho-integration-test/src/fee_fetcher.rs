@@ -1,4 +1,4 @@
-//! One-shot reader for the TychoRouter's on-chain router fee on output.
+//! One-shot reader for the TychoRouterV3's on-chain router fee on output.
 //!
 //! The integration test backs the router fee out of the simulated amount out before comparing it
 //! against the on-chain executed amount. Rather than hard-coding that fee, this module reads it
@@ -21,7 +21,7 @@ sol! {
     }
 
     interface IFeeCalculator {
-        function MAX_FEE_BPS() external view returns (uint32);
+        function MAX_BPS() external view returns (uint32);
         function getRouterFeeOnOutput() external view returns (uint32);
     }
 }
@@ -49,7 +49,7 @@ impl RouterFeeOnOutput {
 /// Reads the default router fee on output from the on-chain FeeCalculator.
 ///
 /// Resolves the FeeCalculator address from `router_address` (`getFeeCalculator`), then reads its
-/// precision scale (`MAX_FEE_BPS`) and the default fee on output (`getRouterFeeOnOutput`). The
+/// precision scale (`MAX_BPS`) and the default fee on output (`getRouterFeeOnOutput`). The
 /// integration test simulates swaps with no client fee and no per-client override, so the default
 /// fee is the rate the router applies on-chain.
 ///
@@ -75,17 +75,17 @@ pub async fn fetch_router_fee_on_output(
     .await?;
 
     let denominator = u64::from(
-        eth_call::<IFeeCalculator::MAX_FEE_BPSCall>(
+        eth_call::<IFeeCalculator::MAX_BPSCall>(
             provider,
             fee_calculator,
-            "MAX_FEE_BPS",
-            IFeeCalculator::MAX_FEE_BPSCall {}.abi_encode(),
+            "MAX_BPS",
+            IFeeCalculator::MAX_BPSCall {}.abi_encode(),
         )
         .await?,
     );
     if denominator == 0 {
         return Err(miette!(
-            "FeeCalculator {fee_calculator} reported a zero MAX_FEE_BPS precision scale"
+            "FeeCalculator {fee_calculator} reported a zero MAX_BPS precision scale"
         ));
     }
 

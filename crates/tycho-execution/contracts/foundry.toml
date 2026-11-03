@@ -10,7 +10,15 @@ via_ir = true
 # (protocols/testing/fixtures) are reproducible across Foundry versions.
 solc = '0.8.33'
 bytecode_hash = 'none'
-fs_permissions = [{ access = "read", path = "./test/assets" }, { access = "write", path = "./test" }]
+fs_permissions = [
+    { access = "read", path = "./test/assets" },
+    { access = "write", path = "./test" },
+    # `test/RuntimeBytecodeFixtures.sol` reads the constructor arguments the executors deploy
+    # with; the test checks the runtime bytecode fixtures protocol-testing plants and
+    # `script/WriteRuntimeBytecodeFixtures.s.sol` writes them.
+    { access = "read", path = "../config/executor_deployments.json" },
+    { access = "read-write", path = "../../../protocols/testing/fixtures" },
+]
 
 [profile.production]
 src = 'src'
@@ -23,7 +31,11 @@ via_ir = true
 
 [rpc_endpoints]
 mainnet = "${RPC_URL}"
+# Chain names from config/executor_deployments.json double as aliases, so the fixtures can fork
+# the chain an executor is deployed on by that name.
+ethereum = "${RPC_URL}"
 base = "${BASE_RPC_URL}"
+robinhood = "${ROBINHOOD_RPC_URL}"
 arbitrum = "${ARBITRUM_RPC_URL}"
 polygon = "${POLYGON_RPC_URL}"
 bsc = "${BSC_RPC_URL}"

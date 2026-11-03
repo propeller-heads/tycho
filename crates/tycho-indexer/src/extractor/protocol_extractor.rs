@@ -42,7 +42,7 @@ use crate::{
         chain_state::ChainState,
         models::BlockChanges,
         protocol_cache::{ProtocolDataCache, ProtocolMemoryCache},
-        reorg_buffer::ReorgBuffer,
+        reorg_buffer::{PurgeOutcome, ReorgBuffer},
         BlockUpdateWithCursor, ExtractionError, Extractor, ExtractorExtension, ExtractorMsg,
     },
     pb::sf::substreams::{
@@ -60,7 +60,7 @@ pub struct Inner {
     first_message_processed: bool,
 }
 
-type BatchCommitHandle = tracing::instrument::Instrumented<JoinHandle<Result<(), ExtractionError>>>;
+type BatchCommitHandle = JoinHandle<Result<(), ExtractionError>>;
 
 #[derive(Default)]
 struct GatewayInner<G> {
@@ -115,6 +115,18 @@ where
         dci_plugin: Option<E>,
     ) -> Result<Self, ExtractionError> {
         let dci_plugin = dci_plugin.map(|plugin| Arc::new(Mutex::new(plugin)));
+
+        // Register both label sets at zero so the first miss registers as a rise for
+        // increase(); a series born at a nonzero value looks flat and no alert fires.
+        for component_known in ["true", "false"] {
+            counter!(
+                "extractor_revert_attr_miss",
+                "extractor" => name.to_string(),
+                "chain" => chain.to_string(),
+                "component_known" => component_known,
+            )
+            .increment(0);
+        }
 
         // check if this extractor has state
         let res = match gateway.get_cursor().await {
@@ -217,6 +229,38 @@ where
         };
         buffer_guard.replace(updated);
         Ok(())
+    }
+
+    /// Returns the ids among `ids` with no component creation in the reorg buffer history
+    /// and no component row in the DB.
+    ///
+    /// The protocol cache is not consulted: it keeps creations that a revert undid, so it would
+    /// label a reverted ghost as known.
+    async fn find_unknown_components(
+        &self,
+        reorg_buffer: &ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>,
+        ids: impl IntoIterator<Item = ComponentId>,
+    ) -> Result<HashSet<ComponentId>, ExtractionError> {
+        let mut unknown = reorg_buffer.missing_components(ids.into_iter().collect());
+        if unknown.is_empty() {
+            return Ok(unknown);
+        }
+        let in_db: HashSet<ComponentId> = self
+            .gateway
+            .inner
+            .get_protocol_components(
+                &unknown
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<&str>>(),
+            )
+            .await
+            .map_err(ExtractionError::Storage)?
+            .into_iter()
+            .map(|component| component.id)
+            .collect();
+        unknown.retain(|id| !in_db.contains(id));
+        Ok(unknown)
     }
 
     async fn is_first_message(&self) -> bool {
@@ -723,8 +767,17 @@ where
             )));
         }
 
+        let flushed_block_height = self
+            .gateway
+            .inner
+            .flushed_block_height()
+            .await;
         let blocks_to_commit = {
             let mut reorg_buffer = self.reorg_buffer.lock().await;
+
+            if let Some(height) = flushed_block_height {
+                reorg_buffer.release_committed(height);
+            }
 
             reorg_buffer
                 .insert_block(BlockUpdateWithCursor::new(msg.clone(), cursor.clone()))
@@ -734,7 +787,7 @@ where
                 self.gateway.commit_batch_size
             {
                 reorg_buffer
-                    .drain_blocks_until(final_block_height)
+                    .drain_into_committing(final_block_height)
                     .map_err(ExtractionError::Storage)?
             } else {
                 Vec::new()
@@ -753,9 +806,7 @@ where
             let (extractor_name, chain) = (self.name.clone(), self.chain);
 
             if let Some(db_commit_handle_to_join) = commit_handle_guard.take() {
-                let needs_await = !db_commit_handle_to_join
-                    .inner()
-                    .is_finished();
+                let needs_await = !db_commit_handle_to_join.is_finished();
                 let now = chrono::Utc::now().naive_utc();
 
                 let result = db_commit_handle_to_join
@@ -782,31 +833,10 @@ where
                 }
             }
 
-            let new_handle = tokio::spawn(async move {
-                let now = std::time::Instant::now();
-
-                let mut it = blocks_to_commit.iter().peekable();
-                while let Some(block) = it.next() {
-                    let force_db_commit = if is_syncing { false } else { it.peek().is_none() };
-
-                    gateway
-                        .advance(block.block_update(), block.cursor(), force_db_commit)
-                        .await
-                        .map_err(ExtractionError::Storage)?;
-                }
-
-                let mut committed_hieght_guard = committed_block_height.lock().await;
-                *committed_hieght_guard = Some(last_block_height);
-
-                trace!(batch_size, block_height = last_block_height, extractor_id = extractor_name, chain = %chain, "CommitTaskCompleted");
-
-                histogram!(
-                    "database_commit_duration_ms", "chain" => chain.to_string(), "extractor" => extractor_name
-                )
-                .record(now.elapsed().as_millis() as f64);
-
-                Ok(())
-            });
+            // Detached from the caller because the commit outlives the block that queued it;
+            // the caller is recorded as a follows-from link instead. The span wraps the task
+            // body, not its `JoinHandle` -- instrumenting the handle would only cover the
+            // await and leave every gateway call inside the task without a parent.
             let commit_span = info_span!(
                 parent: None,
                 "commit_blocks_task",
@@ -816,7 +846,38 @@ where
                 chain = %self.chain,
             );
             commit_span.follows_from(tracing::Span::current().id());
-            let new_handle = new_handle.instrument(commit_span);
+
+            let new_handle = tokio::spawn(
+                async move {
+                    let now = std::time::Instant::now();
+
+                    let mut it = blocks_to_commit.iter().peekable();
+                    while let Some(block) = it.next() {
+                        let force_db_commit =
+                            if is_syncing { false } else { it.peek().is_none() };
+
+                        gateway
+                            .advance(block.block_update(), block.cursor(), force_db_commit)
+                            .await
+                            .map_err(ExtractionError::Storage)?;
+                    }
+
+                    if let Some(flushed) = gateway.flushed_block_height().await {
+                        let mut guard = committed_block_height.lock().await;
+                        *guard = Some(guard.map_or(flushed, |current| current.max(flushed)));
+                    }
+
+                    trace!(batch_size, block_height = last_block_height, extractor_id = extractor_name, chain = %chain, "CommitTaskCompleted");
+
+                    histogram!(
+                        "database_commit_duration_ms", "chain" => chain.to_string(), "extractor" => extractor_name
+                    )
+                    .record(now.elapsed().as_millis() as f64);
+
+                    Ok(())
+                }
+                .instrument(commit_span),
+            );
 
             *commit_handle_guard = Some(new_handle);
 
@@ -852,6 +913,42 @@ where
         }
         Ok(Some(Arc::new(changes)))
     }
+}
+
+/// Revert class of one (component, attribute) pair, decided by its event history inside
+/// the reverted range. The first event picks the variant: a creation means the attr did
+/// not exist before the range (`CreatedInRange`), anything else means it did
+/// (`ExistedBefore`).
+enum AttrRevert {
+    /// A prior value exists: restore it from the buffer, then the DB.
+    ExistedBefore,
+    /// No prior value: revert as a deletion when still alive at the end of the range,
+    /// otherwise revert to nothing.
+    CreatedInRange { alive: bool },
+}
+
+/// One event on a (component, attribute) pair, in chronological order.
+enum AttrEvent {
+    Created,
+    Updated,
+    Deleted,
+}
+
+fn classify<'a>(
+    map: &mut HashMap<(&'a String, &'a String), AttrRevert>,
+    key: (&'a String, &'a String),
+    event: AttrEvent,
+) {
+    map.entry(key)
+        .and_modify(|class| {
+            if let AttrRevert::CreatedInRange { alive } = class {
+                *alive = !matches!(event, AttrEvent::Deleted);
+            }
+        })
+        .or_insert(match event {
+            AttrEvent::Created => AttrRevert::CreatedInRange { alive: true },
+            AttrEvent::Updated | AttrEvent::Deleted => AttrRevert::ExistedBefore,
+        });
 }
 
 #[async_trait]
@@ -1115,7 +1212,12 @@ where
             return Ok(None);
         }
 
-        // Send revert to DCI plugin
+        // Send revert to DCI plugin.
+        // DCI reverts are hash-only: they have no height fallback and would fail on the
+        // hash-miss paths handled below. Safe today because DCI cannot run on
+        // partial-block chains (its block-layer validation needs parent-hash linkage,
+        // which ephemeral partial hashes break), so a DCI extractor never reaches those
+        // paths. Revisit when DCI supports a flashblocks chain (e.g. Base).
         if let Some(dci_plugin) = &self.dci_plugin {
             dci_plugin
                 .lock()
@@ -1126,19 +1228,78 @@ where
 
         let mut reorg_buffer = self.reorg_buffer.lock().await;
 
-        // Purge the reorg buffer
-        let mut reverted_state = reorg_buffer
-            .purge(block_hash)
-            .map_err(|e| ExtractionError::ReorgBufferError(e.to_string()))?;
+        // Purge the reorg buffer. Hash match is authoritative; height is the fallback for
+        // a target we sealed under a stale hash or have not sealed yet (still streaming
+        // as partials).
+        let mut reverted_state = match reorg_buffer
+            .purge_to(&block_hash, block_ref.number)
+            .map_err(|e| ExtractionError::ReorgBufferError(e.to_string()))?
+        {
+            PurgeOutcome::HashMatch(purged) => purged,
+            PurgeOutcome::HeightMatch(purged) => {
+                warn!(
+                    target_number = block_ref.number,
+                    "Revert target hash not in reorg buffer; purged from the target height inclusive"
+                );
+                counter!(
+                    "extractor_revert_hash_miss",
+                    "extractor" => self.name.clone(),
+                    "chain" => self.chain.to_string(),
+                    "resolution" => "height_purge",
+                )
+                .increment(1);
+                purged
+            }
+            PurgeOutcome::TargetAhead => {
+                // A target above the sealed buffer is only legitimate when it names the
+                // block currently streaming as partials (flashblocks). Anything else
+                // violates the stream's history invariant and must stay fatal.
+                let pending_partial = self
+                    .partial_block_buffer
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|partial| (partial.block.number, partial.partial_block_index));
+                let partial_index = match pending_partial {
+                    Some((number, index)) if number == block_ref.number => index,
+                    _ => {
+                        return Err(ExtractionError::ReorgBufferError(format!(
+                            "Could not find block with id `{}`! Revert target {} is above the sealed buffer with no pending partial at that height (pending partial: {:?})",
+                            block_hash, block_ref.number, pending_partial,
+                        )))
+                    }
+                };
+                warn!(
+                    target_number = block_ref.number,
+                    ?partial_index,
+                    "Revert target hash not in reorg buffer; target is streaming as partials, nothing to purge"
+                );
+                counter!(
+                    "extractor_revert_hash_miss",
+                    "extractor" => self.name.clone(),
+                    "chain" => self.chain.to_string(),
+                    "resolution" => "target_ahead",
+                )
+                .increment(1);
+                Vec::new()
+            }
+        };
 
-        // Purge partial block buffer
-        let partial_block = self
-            .partial_block_buffer
-            .lock()
-            .await
-            .take();
+        // Drop pending partials only above the revert target. Partials at the target
+        // height are the valid, still-incomplete prefix of the last valid block.
+        let dropped_partial = {
+            let mut buffer_guard = self.partial_block_buffer.lock().await;
+            if buffer_guard
+                .as_ref()
+                .is_some_and(|partial| partial.block.number > block_ref.number)
+            {
+                buffer_guard.take()
+            } else {
+                None
+            }
+        };
         let mut revert_partial_block_index = None;
-        if let Some(partial) = partial_block {
+        if let Some(partial) = dropped_partial {
             // If we have not reverted any full blocks and the partial block buffer is not empty,
             // mark it as a partial revert to avoid sending to full block subscribers.
             if reverted_state.is_empty() {
@@ -1148,6 +1309,16 @@ where
             // The partial block's cursor should be the current cursor
             let cursor = self.get_cursor().await;
             reverted_state.push(BlockUpdateWithCursor::new(partial, cursor));
+        }
+
+        if reverted_state.is_empty() {
+            // Nothing sealed or pending was invalidated: the undo targets the block we
+            // are still streaming, or the buffer head itself. Advance the cursor and
+            // continue; the parent-hash check on the next insert stays as the safety net.
+            info!("Nothing to revert; all buffered state is at or below the revert target");
+            self.update_cursor(inp.last_valid_cursor)
+                .await;
+            return Ok(None);
         }
 
         // Handle created and deleted components
@@ -1312,70 +1483,49 @@ where
                     acc
                 });
 
-        // Handle reverted protocol state
+        // Handle reverted protocol state.
+        // One chronological pass (blocks oldest → newest, txs in index order) classifies
+        // every touched (component, attribute) pair — see `AttrRevert`.
+        let mut reverted_attrs: HashMap<(&String, &String), AttrRevert> = HashMap::new();
+        for block_msg in reverted_state.iter() {
+            for update in block_msg
+                .block_update()
+                .txs_with_update
+                .iter()
+            {
+                for (c_id, delta) in update.state_updates.iter() {
+                    if reverted_components_creations.contains_key(c_id) {
+                        continue;
+                    }
+                    for attr in delta.created_attributes.iter() {
+                        if delta.deleted_attributes.contains(attr) {
+                            // Both sets hold the attr: malformed module output, the order
+                            // is lost in the same-tx merge. Restoring a prior value is the
+                            // safe read, so classify it as an update.
+                            classify(&mut reverted_attrs, (c_id, attr), AttrEvent::Updated);
+                        } else {
+                            classify(&mut reverted_attrs, (c_id, attr), AttrEvent::Created);
+                        }
+                    }
+                    for attr in delta.updated_attributes.keys() {
+                        if !delta.created_attributes.contains(attr) {
+                            classify(&mut reverted_attrs, (c_id, attr), AttrEvent::Updated);
+                        }
+                    }
+                    for attr in delta.deleted_attributes.iter() {
+                        if !delta.created_attributes.contains(attr) {
+                            classify(&mut reverted_attrs, (c_id, attr), AttrEvent::Deleted);
+                        }
+                    }
+                }
+            }
+        }
 
-        // First pass: collect attributes first introduced with ChangeType::Creation across the
-        // entire reverted range. These have no prior state and must be deleted on revert — no
-        // buffer or DB lookup is needed or possible for them.
-        let reverted_created_attrs: HashMap<String, HashSet<String>> = reverted_state
+        let reverted_protocol_state_keys_vec: Vec<(&String, &String)> = reverted_attrs
             .iter()
-            .flat_map(|block_msg| {
-                block_msg
-                    .block_update()
-                    .txs_with_update
-                    .iter()
-                    .flat_map(|update| {
-                        update
-                            .state_updates
-                            .iter()
-                            .filter(|(c_id, _)| !reverted_components_creations.contains_key(*c_id))
-                            .flat_map(|(c_id, delta)| {
-                                delta
-                                    .created_attributes
-                                    .iter()
-                                    .map(move |attr| (c_id.clone(), attr.clone()))
-                            })
-                    })
-            })
-            .fold(HashMap::new(), |mut acc, (c_id, attr)| {
-                acc.entry(c_id)
-                    .or_default()
-                    .insert(attr);
-                acc
-            });
-
-        // Second pass: build the lookup key set, excluding creation attributes (no prior state).
-        let reverted_protocol_state_keys: HashSet<_> = reverted_state
-            .iter()
-            .flat_map(|block_msg| {
-                block_msg
-                    .block_update()
-                    .txs_with_update
-                    .iter()
-                    .flat_map(|update| {
-                        update
-                            .state_updates
-                            .iter()
-                            .filter(|(c_id, _)| !reverted_components_creations.contains_key(*c_id))
-                            .flat_map(|(c_id, delta)| {
-                                delta
-                                    .updated_attributes
-                                    .keys()
-                                    .filter(|attr| {
-                                        !reverted_created_attrs
-                                            .get(c_id.as_str())
-                                            .is_some_and(|created| created.contains(*attr))
-                                    })
-                                    .chain(delta.deleted_attributes.iter())
-                                    .map(move |key| (c_id, key))
-                            })
-                    })
-            })
+            .filter(|(_, class)| matches!(class, AttrRevert::ExistedBefore))
+            .map(|(&key, _)| key)
             .collect();
-
-        let reverted_protocol_state_keys_vec = reverted_protocol_state_keys
-            .into_iter()
-            .collect::<Vec<_>>();
 
         trace!("Reverted state keys {:?}", &reverted_protocol_state_keys_vec);
 
@@ -1407,35 +1557,66 @@ where
             .await
             .map_err(ExtractionError::Storage)?;
 
-        let missing_components_states_map: Vec<(ProtocolComponentState, Vec<String>)> = missing_map
-            .into_iter()
-            .map(|(component_id, keys)| {
-                let state = missing_components_states
-                    .iter()
-                    .find(|comp| comp.component_id == component_id)
-                    .cloned()
-                    .ok_or(ExtractionError::Storage(StorageError::NotFound(
-                        "Component".to_owned(),
-                        component_id.to_string(),
-                    )))?;
-                Ok((state, keys))
-            })
-            .collect::<Result<Vec<_>, ExtractionError>>()?;
-
-        let mut not_found: HashMap<_, HashSet<_>> = HashMap::new();
+        let mut not_found: HashMap<String, HashSet<String>> = HashMap::new();
         let mut db_states: HashMap<(String, String), Bytes> = HashMap::new();
 
-        for (state, keys) in missing_components_states_map {
+        let states_by_id: HashMap<&str, &ProtocolComponentState> = missing_components_states
+            .iter()
+            .map(|state| (state.component_id.as_str(), state))
+            .collect();
+
+        // Misses below mean an upstream module emitted an Update/Deletion for an
+        // attribute that never had a Creation, or a malformed delta held the attribute in
+        // both sets and it never existed before the range. Either way no prior value
+        // exists and the revert deletes it. Substreams output is external input — a miss
+        // is a data-quality signal, not a reason to kill the extractor.
+        for (component_id, keys) in missing_map {
+            let state = states_by_id
+                .get(component_id.as_str())
+                .copied();
             for key in keys {
-                if let Some(value) = state.attributes.get(&key) {
-                    db_states.insert((state.component_id.clone(), key.clone()), value.clone());
-                } else {
-                    not_found
-                        .entry(state.component_id.clone())
-                        .or_default()
-                        .insert(key);
+                if let Some(value) = state.and_then(|s| s.attributes.get(&key)) {
+                    db_states.insert((component_id.clone(), key), value.clone());
+                    continue;
                 }
+                not_found
+                    .entry(component_id.clone())
+                    .or_default()
+                    .insert(key);
             }
+        }
+
+        let unknown_components = self
+            .find_unknown_components(&reorg_buffer, not_found.keys().cloned())
+            .await?;
+
+        // Both count per attribute. An attribute miss belongs to a known component. A
+        // component miss belongs to an unknown component.
+        let (component_misses, attr_misses): (Vec<_>, Vec<_>) = not_found
+            .iter()
+            .map(|(id, keys)| (id.as_str(), keys.len()))
+            .partition(|(id, _)| unknown_components.contains(*id));
+        if !not_found.is_empty() {
+            warn!(
+                ?attr_misses,
+                ?component_misses,
+                "Attributes with no prior state in buffer or DB during revert; \
+                 reverting them as deletions"
+            );
+        }
+        for (misses, component_known) in [(attr_misses, "true"), (component_misses, "false")] {
+            counter!(
+                "extractor_revert_attr_miss",
+                "extractor" => self.name.clone(),
+                "chain" => self.chain.to_string(),
+                "component_known" => component_known,
+            )
+            .increment(
+                misses
+                    .iter()
+                    .map(|(_, n)| *n as u64)
+                    .sum(),
+            );
         }
 
         let empty = HashSet::<String>::new();
@@ -1468,15 +1649,19 @@ where
                 });
         }
 
-        // Revert ChangeType::Creation attributes by emitting deletions — they had no prior state.
-        for (c_id, created_keys) in reverted_created_attrs {
+        // Revert the attributes born inside the range that survived it by emitting
+        // deletions — they have no prior state to restore.
+        for (&(c_id, attr), class) in reverted_attrs.iter() {
+            if !matches!(class, AttrRevert::CreatedInRange { alive: true }) {
+                continue;
+            }
             state_deltas
                 .entry(c_id.clone())
                 .or_insert_with(|| {
-                    ProtocolComponentStateDelta::new(&c_id, HashMap::new(), HashSet::new())
+                    ProtocolComponentStateDelta::new(c_id, HashMap::new(), HashSet::new())
                 })
                 .deleted_attributes
-                .extend(created_keys);
+                .insert(attr.clone());
         }
 
         // Handle component balance changes
@@ -1637,6 +1822,10 @@ pub trait ExtractorGateway: Send + Sync {
         force_commit: bool,
     ) -> Result<(), StorageError>;
 
+    /// Returns the height of the newest block whose staged writes reached the store, or
+    /// `None` when nothing has been flushed since startup.
+    async fn flushed_block_height(&self) -> Option<u64>;
+
     /// Returns the current state of the protocol components identified by `component_ids`.
     ///
     /// Only components that exist in the store are returned: unknown ids are silently omitted
@@ -1649,6 +1838,19 @@ pub trait ExtractorGateway: Send + Sync {
         &self,
         component_ids: &[&'a str],
     ) -> Result<Vec<ProtocolComponentState>, StorageError>;
+
+    /// Returns the protocol components identified by `component_ids`.
+    ///
+    /// Only components that exist in the store are returned: unknown ids are silently omitted
+    /// rather than producing an error, so the result may be shorter than `component_ids` (and
+    /// empty if none are found).
+    ///
+    /// # Errors
+    /// Returns a [`StorageError`] only on an underlying store failure, never for missing ids.
+    async fn get_protocol_components<'a>(
+        &self,
+        component_ids: &[&'a str],
+    ) -> Result<Vec<ProtocolComponent>, StorageError>;
 
     /// Returns the contracts at the given `addresses`, including their storage slots.
     ///
@@ -1977,6 +2179,11 @@ impl ExtractorGateway for ExtractorPgGateway {
             .await
     }
 
+    async fn flushed_block_height(&self) -> Option<u64> {
+        self.state_gateway
+            .flushed_block_height()
+    }
+
     async fn get_protocol_states<'a>(
         &self,
         component_ids: &[&'a str],
@@ -1985,6 +2192,17 @@ impl ExtractorGateway for ExtractorPgGateway {
             .get_protocol_states(&self.chain, None, None, Some(component_ids), false, None)
             .await
             .map(|state_data| state_data.entity)
+    }
+
+    /// Component ids are unique per chain, so the protocol system is left unconstrained.
+    async fn get_protocol_components<'a>(
+        &self,
+        component_ids: &[&'a str],
+    ) -> Result<Vec<ProtocolComponent>, StorageError> {
+        self.state_gateway
+            .get_protocol_components(&self.chain, None, Some(component_ids), None, None)
+            .await
+            .map(|component_data| component_data.entity)
     }
 
     async fn get_contracts(&self, addresses: &[Address]) -> Result<Vec<Account>, StorageError> {
@@ -2017,12 +2235,17 @@ impl ExtractorGateway for ExtractorPgGateway {
 mod test {
     use std::{
         sync::{
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicU64, AtomicUsize, Ordering},
             Arc,
         },
         thread::sleep,
     };
 
+    use ::tycho_protobuf::pb::tycho::evm::v1::{
+        Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
+        ProtocolComponent as PbProtocolComponent, ProtocolType as PbProtocolType,
+        TransactionChanges,
+    };
     use float_eq::assert_float_eq;
     use futures03::FutureExt;
     use mockall::mock;
@@ -2051,14 +2274,15 @@ mod test {
 
     const EXTRACTOR_NAME: &str = "TestExtractor";
     const TEST_PROTOCOL: &str = "TestProtocol";
-    async fn create_extractor_with_batch_size(
+    async fn create_extractor_with_chain_and_batch_size(
         gw: MockExtractorGateway,
         batch_size: usize,
+        chain: Chain,
     ) -> ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>
     {
         let protocol_types = HashMap::from([("pt_1".to_string(), ProtocolType::default())]);
         let protocol_cache = ProtocolMemoryCache::new(
-            Chain::Ethereum,
+            chain,
             chrono::Duration::seconds(900),
             Arc::new(MockGateway::new()),
         );
@@ -2070,7 +2294,7 @@ mod test {
             gw,
             batch_size,
             EXTRACTOR_NAME,
-            Chain::Ethereum,
+            chain,
             ChainState::default(),
             TEST_PROTOCOL.to_string(),
             protocol_cache,
@@ -2081,6 +2305,14 @@ mod test {
         )
         .await
         .expect("Failed to create extractor")
+    }
+
+    async fn create_extractor_with_batch_size(
+        gw: MockExtractorGateway,
+        batch_size: usize,
+    ) -> ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>
+    {
+        create_extractor_with_chain_and_batch_size(gw, batch_size, Chain::Ethereum).await
     }
 
     async fn create_extractor(
@@ -2123,6 +2355,8 @@ mod test {
         gw.expect_advance()
             .times(1)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
         gw.expect_get_block()
             .times(1)
             .returning(|_| Ok(Block::default()));
@@ -2185,6 +2419,8 @@ mod test {
                 call_count_clone.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             });
+        gw.expect_flushed_block_height()
+            .returning(|| None);
 
         let commit_batch_size = 2;
         let extractor = create_extractor_with_batch_size(gw, commit_batch_size).await;
@@ -2203,7 +2439,7 @@ mod test {
             let guard = ex.gateway.commit_handle.lock().await;
             guard
                 .as_ref()
-                .is_some_and(|h| !h.inner().is_finished())
+                .is_some_and(|h| !h.is_finished())
         };
         let commit_task_is_none = async |ex: &ProtocolExtractor<_, _, _>| -> bool {
             ex.gateway
@@ -2308,6 +2544,86 @@ mod test {
         assert_eq!(call_count.load(Ordering::SeqCst), 4, "second commit should be counted");
     }
 
+    /// Syncs blocks 1-3 with batch size 2, so block 3 drains blocks 1 and 2 into a commit task.
+    /// The gateway flushes the writes of blocks up to `flush_through` only. Returns the
+    /// `db_committed_block_height` that block 4 reports after the commit task finished.
+    async fn db_committed_after_drain(flush_through: u64) -> Option<u64> {
+        let flushed = Arc::new(AtomicU64::new(0));
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        let flushed_writer = flushed.clone();
+        gw.expect_advance()
+            .times(2)
+            .returning(move |changes, _, _| {
+                if changes.block.number <= flush_through {
+                    flushed_writer.fetch_max(changes.block.number, Ordering::SeqCst);
+                }
+                Ok(())
+            });
+        let flushed_reader = flushed.clone();
+        gw.expect_flushed_block_height()
+            .returning(move || {
+                let height = flushed_reader.load(Ordering::SeqCst);
+                (height > 0).then_some(height)
+            });
+        let extractor = create_extractor_with_batch_size(gw, 2).await;
+        let scoped = |n: u64| {
+            pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(n)),
+                    ..Default::default()
+                },
+                Some(&format!("cursor@{n}")),
+                Some(n),
+            )
+        };
+
+        for n in 1..=3 {
+            extractor
+                .handle_tick_scoped_data(scoped(n))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let commit_task = extractor
+            .gateway
+            .commit_handle
+            .lock()
+            .await
+            .take()
+            .expect("block 3 must start a commit task");
+        commit_task.await.unwrap().unwrap();
+
+        extractor
+            .handle_tick_scoped_data(scoped(4))
+            .await
+            .unwrap()
+            .unwrap()
+            .db_committed_block_height
+    }
+
+    #[tokio::test]
+    async fn test_unflushed_drained_blocks_are_not_reported_as_committed() {
+        assert_eq!(
+            db_committed_after_drain(0).await,
+            Some(0),
+            "before the first flush, the stored cursor block is the committed height"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flushed_height_is_reported_as_committed() {
+        assert_eq!(db_committed_after_drain(1).await, Some(1));
+    }
+
     #[tokio::test]
     async fn test_handle_tick_scoped_data_unknown_message_type() {
         let mut gw = MockExtractorGateway::new();
@@ -2405,6 +2721,8 @@ mod test {
         gw.expect_advance()
             .times(1)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
         gw.expect_get_block()
             .times(1)
             .returning(|_| Ok(Block::default()));
@@ -2475,6 +2793,67 @@ mod test {
                 .timestamp_subsec_micros(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn arc_same_timestamp_blocks_are_broadcast_and_persisted_in_number_order() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        let persisted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let persisted_by_mock = Arc::clone(&persisted);
+        gw.expect_advance()
+            .times(2)
+            .returning(move |changes, _, _| {
+                persisted_by_mock
+                    .lock()
+                    .unwrap()
+                    .push(changes.block.number);
+                Ok(())
+            });
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+
+        let extractor = create_extractor_with_chain_and_batch_size(gw, 1, Chain::Arc).await;
+        let timestamp = pb_fixtures::pb_blocks(1).ts;
+        let mut broadcast = Vec::new();
+
+        for number in 1..=3 {
+            let mut block = pb_fixtures::pb_blocks(number);
+            block.ts = timestamp;
+            let message = extractor
+                .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                    tycho_pb::BlockChanges { block: Some(block), ..Default::default() },
+                    Some(format!("cursor@{number}").as_str()),
+                    Some(number),
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(message.chain, Chain::Arc);
+            broadcast.push(message.block.number);
+        }
+
+        if let Some(handle) = extractor
+            .gateway
+            .commit_handle
+            .lock()
+            .await
+            .take()
+        {
+            handle.await.unwrap().unwrap();
+        }
+
+        assert_eq!(broadcast, vec![1, 2, 3]);
+        assert_eq!(*persisted.lock().unwrap(), vec![1, 2]);
+        assert_eq!(extractor.get_cursor().await, "cursor@3");
     }
 
     fn token_prices() -> HashMap<Bytes, f64> {
@@ -2892,6 +3271,8 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
 
         let extractor = create_extractor(gw).await;
 
@@ -3034,6 +3415,8 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
 
         let extractor = create_extractor(gw).await;
 
@@ -3078,10 +3461,15 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
-        // Revert lookups: contracts, protocol states, component balances, account balances.
+        // Revert lookups: contracts, protocol states, protocol components, component
+        // balances, account balances.
+        gw.expect_flushed_block_height()
+            .returning(|| None);
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_protocol_states()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_protocol_components()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_components_balances()
             .returning(|_| Ok(HashMap::new()));
@@ -3189,9 +3577,13 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_protocol_states()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_protocol_components()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_components_balances()
             .returning(|_| Ok(HashMap::new()));
@@ -3291,17 +3683,120 @@ mod test {
         }
     }
 
-    // Tests that reverting a partial block containing a brand-new attribute on a non-finalized
-    // component does not crash. Prior to the fix, the code errored with "Could not find Component"
-    // because the component was non-finalized (absent from DB) and the attribute had no prior
-    // value in the remaining buffer. The expected behavior is to emit a deletion for the attribute.
-    #[tokio::test]
-    async fn test_revert_new_attribute_on_non_finalized_component() {
-        use ::tycho_protobuf::pb::tycho::evm::v1::{
-            Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
-            ProtocolComponent as PbProtocolComponent, ProtocolType, TransactionChanges,
-        };
+    type TestExtractor =
+        ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>;
 
+    async fn full_block(
+        extractor: &TestExtractor,
+        block: u64,
+        finality: u64,
+        txs: Vec<TransactionChanges>,
+    ) {
+        let cursor = format!("cursor@{block}");
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(block)),
+                    changes: txs,
+                    ..Default::default()
+                },
+                Some(cursor.as_str()),
+                Some(finality),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    async fn partial_block(
+        extractor: &TestExtractor,
+        block: u64,
+        partial_index: u32,
+        finality: u64,
+        txs: Vec<TransactionChanges>,
+    ) {
+        let cursor = format!("cursor@{block}_p{partial_index}");
+        let mut partial = pb_fixtures::pb_block_scoped_data(
+            PbBlockChanges {
+                block: Some(pb_fixtures::pb_blocks(block)),
+                changes: txs,
+                ..Default::default()
+            },
+            Some(cursor.as_str()),
+            Some(finality),
+        );
+        partial.partial_index = Some(partial_index);
+        partial.is_partial = true;
+        extractor
+            .handle_tick_scoped_data(partial)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    fn component_creation_tx(
+        block: u64,
+        index: u64,
+        component: &str,
+        attrs: &[(&str, u64, PbChangeType)],
+    ) -> TransactionChanges {
+        TransactionChanges {
+            tx: Some(pb_fixtures::pb_transactions(block, index)),
+            component_changes: vec![PbProtocolComponent {
+                id: component.to_string(),
+                change: PbChangeType::Creation.into(),
+                protocol_type: Some(PbProtocolType {
+                    name: "pt_1".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            entity_changes: vec![EntityChanges {
+                component_id: component.to_string(),
+                attributes: attrs
+                    .iter()
+                    .map(|(name, value, change)| Attribute {
+                        name: name.to_string(),
+                        value: Bytes::from(*value).lpad(32, 0).to_vec(),
+                        change: (*change).into(),
+                    })
+                    .collect(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn entity_change_tx(
+        block: u64,
+        index: u64,
+        component: &str,
+        attr: &str,
+        value: u64,
+        change: PbChangeType,
+    ) -> TransactionChanges {
+        TransactionChanges {
+            tx: Some(pb_fixtures::pb_transactions(block, index)),
+            entity_changes: vec![EntityChanges {
+                component_id: component.to_string(),
+                attributes: vec![Attribute {
+                    name: attr.to_string(),
+                    value: Bytes::from(value).lpad(32, 0).to_vec(),
+                    change: change.into(),
+                }],
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn undo_to(n: u64) -> BlockUndoSignal {
+        BlockUndoSignal {
+            last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", n), number: n }),
+            last_valid_cursor: format!("cursor@{n}"),
+        }
+    }
+
+    /// Gateway mock for revert tests that reach the previous-value lookups.
+    fn revert_test_gateway() -> MockExtractorGateway {
         let mut gw = MockExtractorGateway::new();
         gw.expect_ensure_protocol_types()
             .times(1)
@@ -3315,22 +3810,243 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
-        // Component is non-finalized: not in DB.
         gw.expect_get_protocol_states()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_protocol_components()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_components_balances()
             .returning(|_| Ok(HashMap::new()));
         gw.expect_get_account_balances()
             .returning(|_| Ok(HashMap::new()));
+        gw
+    }
 
-        let extractor = create_extractor(gw).await;
+    /// Gateway mock for reverts that must return before any lookup. Lookup expectations
+    /// are omitted on purpose: mockall panics if the early return is missed.
+    fn no_lookup_gateway() -> MockExtractorGateway {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        gw
+    }
 
-        // Block 1: empty anchor.
+    #[tokio::test]
+    async fn test_revert_hash_miss_purges_from_target_height() {
+        // Design rule 2: the undo names height 3 under a hash we never sealed. Our copy
+        // of height 3 is stale — purge it inclusively and revert to block 2.
+        let extractor = create_extractor_with_batch_size(revert_test_gateway(), 1).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges { block: Some(pb_fixtures::pb_blocks(1)), ..Default::default() },
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_full_block_with_data(2, 1))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_full_block_with_data(3, 1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let revert_msg = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef {
+                    id: format!("0x{:0>64x}", 0xdead_u64),
+                    number: 3,
+                }),
+                last_valid_cursor: "cursor@undo".into(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(revert_msg.revert);
+        assert_eq!(
+            revert_msg.block.number, 2,
+            "revert must land on the block below the stale height"
+        );
+        assert_eq!(revert_msg.partial_block_index, None);
+        assert_eq!(
+            extractor
+                .reorg_buffer
+                .lock()
+                .await
+                .count_blocks_before(u64::MAX),
+            2,
+            "block 3 must be purged inclusively"
+        );
+        assert_eq!(extractor.get_cursor().await, "cursor@undo");
+    }
+
+    #[tokio::test]
+    async fn test_revert_target_ahead_keeps_partial_and_continues() {
+        // Design rule 3 + partial retention: the undo names the height currently pending
+        // in the partial block buffer. Nothing sealed is invalid; the partials are the
+        // valid prefix of the last valid block and must survive.
+        let extractor = create_extractor(no_lookup_gateway()).await;
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_partial_block_with_data(2, 0))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef {
+                    id: format!("0x{:0>64x}", 0xdead_u64),
+                    number: 2,
+                }),
+                last_valid_cursor: "cursor@undo".into(),
+            })
+            .await
+            .unwrap();
+
+        assert!(result.is_none(), "nothing was invalidated, no revert message");
+        assert_eq!(
+            extractor
+                .partial_block_buffer
+                .lock()
+                .await
+                .as_ref()
+                .and_then(|p| p.partial_block_index),
+            Some(0),
+            "partials at the target height must be kept"
+        );
+        assert_eq!(
+            extractor
+                .reorg_buffer
+                .lock()
+                .await
+                .count_blocks_before(u64::MAX),
+            1
+        );
+        assert_eq!(extractor.get_cursor().await, "cursor@undo");
+    }
+
+    #[tokio::test]
+    async fn test_revert_burst_second_undo_names_restreamed_block() {
+        // Design burst sequence: undo #1 purges sealed block 3 by hash; the new fork's
+        // block 3 re-streams as partials; undo #2 names re-streamed block 3 by its sealed
+        // hash, which only exists as pending partials.
+        let extractor = create_extractor_with_batch_size(revert_test_gateway(), 1).await;
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_full_block_with_data(2, 1))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_full_block_with_data(3, 1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Undo #1: hash match on block 2, purges sealed block 3.
+        extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 2_u64), number: 2 }),
+                last_valid_cursor: "cursor@2".into(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The new fork's block 3 re-streams as partials.
+        extractor
+            .handle_tick_scoped_data(make_partial_block_with_data(3, 0))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Undo #2 names re-streamed block 3 by a sealed hash we never saw.
+        let result = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef {
+                    id: format!("0x{:0>64x}", 0xbeef_u64),
+                    number: 3,
+                }),
+                last_valid_cursor: "cursor@undo2".into(),
+            })
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
+        assert!(
+            extractor
+                .partial_block_buffer
+                .lock()
+                .await
+                .is_some(),
+            "re-streamed partials must survive the second undo"
+        );
+        assert_eq!(
+            extractor
+                .reorg_buffer
+                .lock()
+                .await
+                .count_blocks_before(u64::MAX),
+            2
+        );
+        assert_eq!(extractor.get_cursor().await, "cursor@undo2");
+    }
+
+    #[tokio::test]
+    async fn test_revert_below_buffer_stays_fatal() {
+        // Design rule 4: a target below the oldest buffered block is a reorg past
+        // finality and must keep crashing the extractor.
+        let extractor = create_extractor(no_lookup_gateway()).await;
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
                 Some("cursor@1"),
                 Some(1),
             ))
@@ -3338,89 +4054,250 @@ mod test {
             .unwrap()
             .unwrap();
 
-        // Block 2: create `pool_x` with initial attributes. Non-finalized (stays in buffer).
+        let result = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef {
+                    id: format!("0x{:0>64x}", 0xdead_u64),
+                    number: 0,
+                }),
+                last_valid_cursor: "cursor@undo".into(),
+            })
+            .await;
+
+        assert!(matches!(result, Err(ExtractionError::ReorgBufferError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_revert_target_ahead_without_partial_is_fatal() {
+        // A target above the sealed buffer is only legitimate when that exact height is
+        // pending in the partial block buffer. With no partial at all it violates the
+        // stream's history invariant and must stay fatal.
+        let extractor = create_extractor(no_lookup_gateway()).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges {
-                    block: Some(pb_fixtures::pb_blocks(2)),
-                    changes: vec![TransactionChanges {
-                        tx: Some(pb_fixtures::pb_transactions(2, 0)),
-                        component_changes: vec![PbProtocolComponent {
-                            id: "pool_x".to_string(),
-                            change: PbChangeType::Creation.into(),
-                            protocol_type: Some(ProtocolType {
-                                name: "pt_1".to_string(),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }],
-                        entity_changes: vec![EntityChanges {
-                            component_id: "pool_x".to_string(),
-                            attributes: vec![
-                                Attribute {
-                                    name: "sqrt_price_x96".to_string(),
-                                    value: Bytes::from(1000_u64)
-                                        .lpad(32, 0)
-                                        .to_vec(),
-                                    change: PbChangeType::Creation.into(),
-                                },
-                                Attribute {
-                                    name: "tick".to_string(),
-                                    value: Bytes::from(100_u64)
-                                        .lpad(32, 0)
-                                        .to_vec(),
-                                    change: PbChangeType::Creation.into(),
-                                },
-                            ],
-                        }],
-                        ..Default::default()
-                    }],
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
-                Some("cursor@2"),
+                Some("cursor@1"),
                 Some(1),
             ))
             .await
             .unwrap()
             .unwrap();
 
-        // Partial block 3: first-ever tick attribute on `pool_x` (ChangeType::Creation).
-        let mut partial = pb_fixtures::pb_block_scoped_data(
-            PbBlockChanges {
-                block: Some(pb_fixtures::pb_blocks(3)),
-                changes: vec![TransactionChanges {
-                    tx: Some(pb_fixtures::pb_transactions(3, 0)),
-                    entity_changes: vec![EntityChanges {
-                        component_id: "pool_x".to_string(),
-                        attributes: vec![Attribute {
-                            name: "ticks/100/net-liquidity".to_string(),
-                            value: Bytes::from(5000_u64)
-                                .lpad(32, 0)
-                                .to_vec(),
-                            change: PbChangeType::Creation.into(),
-                        }],
-                    }],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            Some("cursor@3_p0"),
-            Some(1),
+        let result = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef {
+                    id: format!("0x{:0>64x}", 0xdead_u64),
+                    number: 3,
+                }),
+                last_valid_cursor: "cursor@undo".into(),
+            })
+            .await;
+
+        assert!(matches!(result, Err(ExtractionError::ReorgBufferError(_))));
+        assert_eq!(
+            extractor
+                .reorg_buffer
+                .lock()
+                .await
+                .count_blocks_before(u64::MAX),
+            1
         );
-        partial.partial_index = Some(0);
-        partial.is_partial = true;
+        assert_eq!(
+            extractor.get_cursor().await,
+            "cursor@1",
+            "cursor must not advance on a fatal revert"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_target_ahead_with_wrong_height_partial_is_fatal() {
+        // A pending partial only legitimizes a target above the sealed buffer when its
+        // height matches the target exactly.
+        let extractor = create_extractor(no_lookup_gateway()).await;
         extractor
-            .handle_tick_scoped_data(partial)
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_partial_block_with_data(2, 0))
             .await
             .unwrap()
             .unwrap();
 
+        let result = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef {
+                    id: format!("0x{:0>64x}", 0xdead_u64),
+                    number: 3,
+                }),
+                last_valid_cursor: "cursor@undo".into(),
+            })
+            .await;
+
+        assert!(matches!(result, Err(ExtractionError::ReorgBufferError(_))));
+        assert!(
+            extractor
+                .partial_block_buffer
+                .lock()
+                .await
+                .is_some(),
+            "a fatal revert must not consume the pending partial"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_hash_miss_at_oldest_height_is_fatal() {
+        // A hash miss at the oldest buffered height has no in-buffer predecessor left to
+        // anchor the revert message. It must fail before mutating the buffer instead of
+        // dying on "Reorg buffer is empty after purge" with the buffer already emptied.
+        let extractor = create_extractor_with_batch_size(revert_test_gateway(), 1).await;
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_full_block_with_data(2, 1))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_full_block_with_data(3, 1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef {
+                    id: format!("0x{:0>64x}", 0xdead_u64),
+                    number: 1,
+                }),
+                last_valid_cursor: "cursor@undo".into(),
+            })
+            .await;
+
+        assert!(matches!(result, Err(ExtractionError::ReorgBufferError(_))));
+        assert_eq!(
+            extractor
+                .reorg_buffer
+                .lock()
+                .await
+                .count_blocks_before(u64::MAX),
+            3,
+            "a fatal miss must not mutate the buffer"
+        );
+        assert_eq!(
+            extractor.get_cursor().await,
+            "cursor@3",
+            "cursor must not advance on a fatal revert"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_to_buffer_head_without_partial_is_noop() {
+        // Hash match on the buffer head with nothing after it and no pending partial.
+        // Today this dies with "Reorg buffer is empty after purge"; it must be a no-op.
+        let extractor = create_extractor(no_lookup_gateway()).await;
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 1_u64), number: 1 }),
+                last_valid_cursor: "cursor@undo".into(),
+            })
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
+        assert_eq!(
+            extractor
+                .reorg_buffer
+                .lock()
+                .await
+                .count_blocks_before(u64::MAX),
+            1
+        );
+        assert_eq!(extractor.get_cursor().await, "cursor@undo");
+    }
+
+    // Tests that reverting a partial block containing a brand-new attribute on a non-finalized
+    // component does not crash. Prior to the fix, the code errored with "Could not find Component"
+    // because the component was non-finalized (absent from DB) and the attribute had no prior
+    // value in the remaining buffer. The expected behavior is to emit a deletion for the attribute.
+    #[tokio::test]
+    async fn test_revert_new_attribute_on_non_finalized_component() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+
+        // Block 1: empty anchor.
+        full_block(&extractor, 1, 1, vec![]).await;
+
+        // Block 2: create `pool_x` with initial attributes. Non-finalized (stays in buffer).
+        full_block(
+            &extractor,
+            2,
+            1,
+            vec![component_creation_tx(
+                2,
+                0,
+                "pool_x",
+                &[
+                    ("sqrt_price_x96", 1000, PbChangeType::Creation),
+                    ("tick", 100, PbChangeType::Creation),
+                ],
+            )],
+        )
+        .await;
+
+        // Partial block 3: first-ever tick attribute on `pool_x` (ChangeType::Creation).
+        partial_block(
+            &extractor,
+            3,
+            0,
+            1,
+            vec![entity_change_tx(
+                3,
+                0,
+                "pool_x",
+                "ticks/100/net-liquidity",
+                5000,
+                PbChangeType::Creation,
+            )],
+        )
+        .await;
+
         // Revert to block 2 — partial block 3 is reverted.
         let revert_msg = extractor
-            .handle_revert(BlockUndoSignal {
-                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 2_u64), number: 2 }),
-                last_valid_cursor: "cursor@2".into(),
-            })
+            .handle_revert(undo_to(2))
             .await
             .expect("handle_revert should not error for non-finalized component with new attr")
             .expect("handle_revert should return a revert message");
@@ -3446,6 +4323,992 @@ mod test {
             "Expected no updated_attributes for pool_x, got: {:?}",
             pool_x_delta.updated_attributes
         );
+    }
+
+    #[tokio::test]
+    async fn test_revert_attr_created_and_deleted_in_range() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+
+        // Block 1: empty anchor.
+        full_block(&extractor, 1, 1, vec![]).await;
+
+        // Block 2: create `pool_x`. Non-finalized: in the buffer, absent from the DB.
+        full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_x", &[])]).await;
+
+        // Partial block 3: tx 0 mints a fresh tick (Creation), tx 1 burns it (Deletion) —
+        // the JIT-liquidity pattern from the production crashes. The attr is already absent
+        // downstream, so the range reverts to nothing for it.
+        partial_block(
+            &extractor,
+            3,
+            0,
+            1,
+            vec![
+                entity_change_tx(
+                    3,
+                    0,
+                    "pool_x",
+                    "ticks/100/net-liquidity",
+                    5000,
+                    PbChangeType::Creation,
+                ),
+                entity_change_tx(
+                    3,
+                    1,
+                    "pool_x",
+                    "ticks/100/net-liquidity",
+                    0,
+                    PbChangeType::Deletion,
+                ),
+            ],
+        )
+        .await;
+
+        // Revert to block 2 — partial block 3 is reverted.
+        let revert_msg = extractor
+            .handle_revert(undo_to(2))
+            .await
+            .expect("revert must not error when the attr was created and deleted in range")
+            .expect("revert must produce a message");
+
+        assert!(revert_msg.revert);
+        // The attr was born and died inside the range: it is already absent downstream,
+        // so the revert must not re-announce a deletion for it.
+        if let Some(pool_x_delta) = revert_msg.state_deltas.get("pool_x") {
+            assert!(
+                !pool_x_delta
+                    .deleted_attributes
+                    .contains("ticks/100/net-liquidity"),
+                "attr created and deleted in range must not revert as a deletion, got: {:?}",
+                pool_x_delta.deleted_attributes
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_revert_same_tx_create_delete_without_history_deletes() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+
+        // Block 1: empty anchor.
+        full_block(&extractor, 1, 1, vec![]).await;
+        // Block 2: create `pool_x`. Non-finalized: in the buffer, absent from the DB.
+        full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_x", &[])]).await;
+
+        // Partial block 3: ONE delta holds the attr in both created and deleted —
+        // malformed module output. It goes through the lookup like a pre-existing attr,
+        // misses, and reverts as a deletion.
+        partial_block(
+            &extractor,
+            3,
+            0,
+            1,
+            vec![TransactionChanges {
+                tx: Some(pb_fixtures::pb_transactions(3, 0)),
+                entity_changes: vec![EntityChanges {
+                    component_id: "pool_x".to_string(),
+                    attributes: vec![
+                        Attribute {
+                            name: "ticks/100/net-liquidity".to_string(),
+                            value: Bytes::from(5000_u64)
+                                .lpad(32, 0)
+                                .to_vec(),
+                            change: PbChangeType::Creation.into(),
+                        },
+                        Attribute {
+                            name: "ticks/100/net-liquidity".to_string(),
+                            value: Bytes::from(0_u64).lpad(32, 0).to_vec(),
+                            change: PbChangeType::Deletion.into(),
+                        },
+                    ],
+                }],
+                ..Default::default()
+            }],
+        )
+        .await;
+
+        let revert_msg = extractor
+            .handle_revert(undo_to(2))
+            .await
+            .expect("revert must not error")
+            .expect("revert must produce a message");
+
+        let delta = revert_msg
+            .state_deltas
+            .get("pool_x")
+            .expect("state_deltas should contain pool_x");
+        assert!(
+            delta
+                .deleted_attributes
+                .contains("ticks/100/net-liquidity"),
+            "malformed both-sets attr with no prior value must revert as a deletion, got: {:?}",
+            delta.deleted_attributes
+        );
+        assert!(delta.updated_attributes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_revert_attr_born_died_reborn_in_range_deletes() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+
+        // Block 1: empty anchor.
+        full_block(&extractor, 1, 1, vec![]).await;
+        // Block 2: create `pool_x`. Non-finalized: in the buffer, absent from the DB.
+        full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_x", &[])]).await;
+
+        // Partial block 3: mint a fresh tick, burn it, mint it again. The attr survives
+        // the range, so the revert must delete it.
+        partial_block(
+            &extractor,
+            3,
+            0,
+            1,
+            vec![
+                entity_change_tx(
+                    3,
+                    0,
+                    "pool_x",
+                    "ticks/100/net-liquidity",
+                    5000,
+                    PbChangeType::Creation,
+                ),
+                entity_change_tx(
+                    3,
+                    1,
+                    "pool_x",
+                    "ticks/100/net-liquidity",
+                    0,
+                    PbChangeType::Deletion,
+                ),
+                entity_change_tx(
+                    3,
+                    2,
+                    "pool_x",
+                    "ticks/100/net-liquidity",
+                    7000,
+                    PbChangeType::Creation,
+                ),
+            ],
+        )
+        .await;
+
+        let revert_msg = extractor
+            .handle_revert(undo_to(2))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let pool_x_delta = revert_msg
+            .state_deltas
+            .get("pool_x")
+            .expect("state_deltas should contain pool_x");
+        assert!(
+            pool_x_delta
+                .deleted_attributes
+                .contains("ticks/100/net-liquidity"),
+            "attr alive at the end of the range must revert as a deletion, got: {:?}",
+            pool_x_delta.deleted_attributes
+        );
+        assert!(pool_x_delta
+            .updated_attributes
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_revert_recreated_attr_restores_prior_value() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+
+        // Block 1: create `pool_r` with `tick` = 100. Finality 1 keeps it in the buffer.
+        full_block(
+            &extractor,
+            1,
+            1,
+            vec![component_creation_tx(1, 0, "pool_r", &[("tick", 100, PbChangeType::Creation)])],
+        )
+        .await;
+        // Block 2: delete `tick`. Block 3: re-create it with a new value.
+        full_block(
+            &extractor,
+            2,
+            1,
+            vec![entity_change_tx(2, 0, "pool_r", "tick", 0, PbChangeType::Deletion)],
+        )
+        .await;
+        full_block(
+            &extractor,
+            3,
+            1,
+            vec![entity_change_tx(3, 0, "pool_r", "tick", 300, PbChangeType::Creation)],
+        )
+        .await;
+
+        // `tick` was deleted then re-created inside the reverted range, but it existed
+        // before the range, so its original value must come back.
+        let revert_msg = extractor
+            .handle_revert(undo_to(1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let delta = revert_msg
+            .state_deltas
+            .get("pool_r")
+            .expect("state_deltas should contain pool_r");
+        assert_eq!(
+            delta.updated_attributes.get("tick"),
+            Some(&Bytes::from(100_u64).lpad(32, 0)),
+            "revert must restore the pre-range value, not delete the attribute"
+        );
+        assert!(
+            !delta
+                .deleted_attributes
+                .contains("tick"),
+            "tick must not be reverted as a deletion, got: {:?}",
+            delta.deleted_attributes
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_same_tx_delete_then_recreate_restores_prior_value() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+
+        // Block 1: create `pool_r` with `tick` = 100. Finality 1 keeps it in the buffer.
+        full_block(
+            &extractor,
+            1,
+            1,
+            vec![component_creation_tx(1, 0, "pool_r", &[("tick", 100, PbChangeType::Creation)])],
+        )
+        .await;
+        // Block 2: ONE tx deletes `tick` and re-creates it. The conversion layer merges
+        // the two events into a delta holding the attr in every set at once.
+        full_block(
+            &extractor,
+            2,
+            1,
+            vec![TransactionChanges {
+                tx: Some(pb_fixtures::pb_transactions(2, 0)),
+                entity_changes: vec![EntityChanges {
+                    component_id: "pool_r".to_string(),
+                    attributes: vec![
+                        Attribute {
+                            name: "tick".to_string(),
+                            value: Bytes::from(0_u64).lpad(32, 0).to_vec(),
+                            change: PbChangeType::Deletion.into(),
+                        },
+                        Attribute {
+                            name: "tick".to_string(),
+                            value: Bytes::from(300_u64)
+                                .lpad(32, 0)
+                                .to_vec(),
+                            change: PbChangeType::Creation.into(),
+                        },
+                    ],
+                }],
+                ..Default::default()
+            }],
+        )
+        .await;
+
+        let revert_msg = extractor
+            .handle_revert(undo_to(1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let delta = revert_msg
+            .state_deltas
+            .get("pool_r")
+            .expect("state_deltas should contain pool_r");
+        assert_eq!(
+            delta.updated_attributes.get("tick"),
+            Some(&Bytes::from(100_u64).lpad(32, 0)),
+            "revert must restore the pre-range value for a same-tx delete-then-recreate"
+        );
+        assert!(
+            !delta
+                .deleted_attributes
+                .contains("tick"),
+            "tick has a pre-range value and must not revert as a deletion"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_deleted_attr_with_history_restores_value() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+
+        // Block 1: empty anchor.
+        full_block(&extractor, 1, 1, vec![]).await;
+
+        // Block 2: create `pool_x` with attribute `fee` = 100. Stays in the buffer.
+        full_block(
+            &extractor,
+            2,
+            1,
+            vec![component_creation_tx(2, 0, "pool_x", &[("fee", 100, PbChangeType::Creation)])],
+        )
+        .await;
+
+        // Partial block 3: delete `fee`. Its creation is OUTSIDE the reverted range, so the
+        // revert must restore the previous value from the buffer.
+        partial_block(
+            &extractor,
+            3,
+            0,
+            1,
+            vec![entity_change_tx(3, 0, "pool_x", "fee", 0, PbChangeType::Deletion)],
+        )
+        .await;
+
+        let revert_msg = extractor
+            .handle_revert(undo_to(2))
+            .await
+            .expect("revert must not error")
+            .expect("revert must produce a message");
+
+        assert!(revert_msg.revert);
+        let pool_x_delta = revert_msg
+            .state_deltas
+            .get("pool_x")
+            .expect("state_deltas should contain pool_x");
+        assert_eq!(
+            pool_x_delta
+                .updated_attributes
+                .get("fee"),
+            Some(&Bytes::from(100_u64).lpad(32, 0)),
+            "Expected fee restored to its pre-revert value from the buffer"
+        );
+        assert!(
+            !pool_x_delta
+                .deleted_attributes
+                .contains("fee"),
+            "fee has history and must not be deleted, got: {:?}",
+            pool_x_delta.deleted_attributes
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_update_attr_without_history_deletes() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+
+        // Block 1: empty anchor.
+        full_block(&extractor, 1, 1, vec![]).await;
+
+        // Block 2: create `pool_x` without attributes. Non-finalized.
+        full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_x", &[])]).await;
+
+        // Partial block 3: first touch of the attribute, mis-marked as Update instead of
+        // Creation. No history in buffer or DB.
+        partial_block(
+            &extractor,
+            3,
+            0,
+            1,
+            vec![entity_change_tx(3, 0, "pool_x", "mis_marked", 7, PbChangeType::Update)],
+        )
+        .await;
+
+        let revert_msg = extractor
+            .handle_revert(undo_to(2))
+            .await
+            .expect("revert must not error when the component has no rows in the DB")
+            .expect("revert must produce a message");
+
+        assert!(revert_msg.revert);
+        let pool_x_delta = revert_msg
+            .state_deltas
+            .get("pool_x")
+            .expect("state_deltas should contain pool_x");
+        assert!(
+            pool_x_delta
+                .deleted_attributes
+                .contains("mis_marked"),
+            "Expected mis_marked in deleted_attributes, got: {:?}",
+            pool_x_delta.deleted_attributes
+        );
+        assert!(
+            pool_x_delta
+                .updated_attributes
+                .is_empty(),
+            "Expected no updated_attributes for pool_x, got: {:?}",
+            pool_x_delta.updated_attributes
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_attr_on_component_absent_everywhere_deletes() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+
+        // Block 1: empty anchor.
+        full_block(&extractor, 1, 1, vec![]).await;
+
+        // Block 2 (full block): attribute update on `pool_ghost`, a component that was never
+        // created in the buffer and has no DB rows.
+        full_block(
+            &extractor,
+            2,
+            1,
+            vec![entity_change_tx(2, 0, "pool_ghost", "reserve", 42, PbChangeType::Update)],
+        )
+        .await;
+
+        // Revert to block 1 — sealed block 2 is reverted.
+        let revert_msg = extractor
+            .handle_revert(undo_to(1))
+            .await
+            .expect("revert must not error when the component is absent everywhere")
+            .expect("revert must produce a message");
+
+        assert!(revert_msg.revert);
+        let ghost_delta = revert_msg
+            .state_deltas
+            .get("pool_ghost")
+            .expect("state_deltas should contain pool_ghost");
+        assert!(
+            ghost_delta
+                .deleted_attributes
+                .contains("reserve"),
+            "Expected reserve in deleted_attributes, got: {:?}",
+            ghost_delta.deleted_attributes
+        );
+        assert!(
+            ghost_delta
+                .updated_attributes
+                .is_empty(),
+            "a value must not be both restored and deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_attr_miss_component_lookup_error_fails_revert() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        gw.expect_advance()
+            .times(0)
+            .returning(|_, _, _| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        gw.expect_get_contracts()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_protocol_states()
+            .returning(|_| Ok(Vec::new()));
+        // The component table lookup is the only call that fails.
+        gw.expect_get_protocol_components()
+            .returning(|_| Err(StorageError::Unexpected("connection reset".to_string())));
+        let extractor = create_extractor(gw).await;
+
+        full_block(&extractor, 1, 1, vec![]).await;
+        // `pool_ghost` has no creation anywhere, so the revert reaches the component table.
+        full_block(
+            &extractor,
+            2,
+            1,
+            vec![entity_change_tx(2, 0, "pool_ghost", "reserve", 42, PbChangeType::Update)],
+        )
+        .await;
+
+        let err = extractor
+            .handle_revert(undo_to(1))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ExtractionError::Storage(StorageError::Unexpected(_))),
+            "a component table failure must abort the revert, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_resolves_prior_value_from_retained_blocks() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        gw.expect_advance()
+            .returning(|_, _, _| Ok(()));
+        // The write never lands: retention must keep the drained block reachable.
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        gw.expect_get_contracts()
+            .returning(|_| Ok(Vec::new()));
+        // The prior value must come from memory: a non-empty DB lookup means the
+        // retained block was not searched.
+        gw.expect_get_protocol_states()
+            .returning(|component_ids| {
+                assert!(
+                    component_ids.is_empty(),
+                    "buffer lookup must not miss, got DB lookup for: {component_ids:?}"
+                );
+                Ok(Vec::new())
+            });
+        gw.expect_get_protocol_components()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_components_balances()
+            .returning(|_| Ok(HashMap::new()));
+        gw.expect_get_account_balances()
+            .returning(|_| Ok(HashMap::new()));
+
+        let extractor = create_extractor(gw).await;
+
+        // Block 1: create `pool_x` with `tick` = 100.
+        full_block(
+            &extractor,
+            1,
+            1,
+            vec![component_creation_tx(1, 0, "pool_x", &[("tick", 100, PbChangeType::Creation)])],
+        )
+        .await;
+        // Block 2: finality 2 drains block 1 into the committing section.
+        full_block(&extractor, 2, 2, vec![]).await;
+        // Block 3: update `tick`. Finality stays 2, so block 2 stays buffered.
+        full_block(
+            &extractor,
+            3,
+            2,
+            vec![entity_change_tx(3, 0, "pool_x", "tick", 200, PbChangeType::Update)],
+        )
+        .await;
+
+        // Revert to block 2. `tick`'s prior value only exists in the retained block 1.
+        let revert_msg = extractor
+            .handle_revert(undo_to(2))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let pool_x_delta = revert_msg
+            .state_deltas
+            .get("pool_x")
+            .expect("state_deltas should contain pool_x");
+        assert_eq!(
+            pool_x_delta
+                .updated_attributes
+                .get("tick"),
+            Some(&Bytes::from(100_u64).lpad(32, 0)),
+            "revert must restore the prior value from the retained block"
+        );
+        assert!(pool_x_delta
+            .deleted_attributes
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_tick_path_releases_flushed_blocks() {
+        let flushed = Arc::new(AtomicU64::new(0));
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        let flushed_writer = flushed.clone();
+        gw.expect_advance()
+            .returning(move |changes, _, _| {
+                flushed_writer.fetch_max(changes.block.number, Ordering::SeqCst);
+                Ok(())
+            });
+        let flushed_reader = flushed.clone();
+        gw.expect_flushed_block_height()
+            .returning(move || {
+                let height = flushed_reader.load(Ordering::SeqCst);
+                (height > 0).then_some(height)
+            });
+        gw.expect_get_contracts()
+            .returning(|_| Ok(Vec::new()));
+        // The released block must no longer serve the lookup: the prior value comes
+        // from the DB, which reports a different value than the buffer held.
+        gw.expect_get_protocol_states()
+            .times(1)
+            .returning(|component_ids| {
+                assert_eq!(
+                    component_ids.to_vec(),
+                    vec!["pool_x"],
+                    "lookup must fall through to the DB"
+                );
+                Ok(vec![ProtocolComponentState::new(
+                    "pool_x",
+                    HashMap::from([("tick".to_string(), Bytes::from(999_u64).lpad(32, 0))]),
+                    HashMap::new(),
+                )])
+            });
+        gw.expect_get_components_balances()
+            .returning(|_| Ok(HashMap::new()));
+        gw.expect_get_account_balances()
+            .returning(|_| Ok(HashMap::new()));
+
+        let extractor = create_extractor(gw).await;
+
+        // Block 1: create `pool_x` with `tick` = 100.
+        full_block(
+            &extractor,
+            1,
+            1,
+            vec![component_creation_tx(1, 0, "pool_x", &[("tick", 100, PbChangeType::Creation)])],
+        )
+        .await;
+        // Block 2: finality 2 drains block 1 into the committing section and spawns
+        // its commit task.
+        full_block(&extractor, 2, 2, vec![]).await;
+        // Block 3: finality 3 drains block 2; that drain awaits block 1's commit task
+        // first, so block 1's write has provably landed after this call.
+        full_block(&extractor, 3, 3, vec![]).await;
+        // Block 4: the tick path reads the flushed height (≥ 1) and releases block 1.
+        full_block(
+            &extractor,
+            4,
+            3,
+            vec![entity_change_tx(4, 0, "pool_x", "tick", 200, PbChangeType::Update)],
+        )
+        .await;
+
+        // Revert to block 3: `tick`'s prior value lived only in released block 1, so
+        // the lookup must miss the buffer and restore the DB value.
+        let revert_msg = extractor
+            .handle_revert(undo_to(3))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let delta = revert_msg
+            .state_deltas
+            .get("pool_x")
+            .expect("state_deltas should contain pool_x");
+        assert_eq!(
+            delta.updated_attributes.get("tick"),
+            Some(&Bytes::from(999_u64).lpad(32, 0)),
+            "the released block must not serve the lookup"
+        );
+    }
+
+    fn snapshot_to_map(
+        snapshot: metrics_util::debugging::Snapshot,
+    ) -> HashMap<
+        (metrics_util::MetricKind, String, std::collections::BTreeMap<String, String>),
+        metrics_util::debugging::DebugValue,
+    > {
+        snapshot
+            .into_vec()
+            .into_iter()
+            .map(|(ck, _unit, _desc, value)| {
+                let name = ck.key().name().to_string();
+                let labels = ck
+                    .key()
+                    .labels()
+                    .map(|l| (l.key().to_string(), l.value().to_string()))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+
+                ((ck.kind(), name, labels), value)
+            })
+            .collect()
+    }
+
+    fn counter_value(
+        map: &HashMap<
+            (metrics_util::MetricKind, String, std::collections::BTreeMap<String, String>),
+            metrics_util::debugging::DebugValue,
+        >,
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> u64 {
+        let labels_map = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        match map.get(&(metrics_util::MetricKind::Counter, name.to_owned(), labels_map)) {
+            Some(metrics_util::debugging::DebugValue::Counter(value)) => *value,
+            _ => 0,
+        }
+    }
+
+    // `metrics::with_local_recorder` takes a sync closure, so this test cannot use
+    // #[tokio::test]; it drives its own current-thread runtime instead.
+    #[test]
+    fn test_revert_attr_miss_counter() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let mut gw = MockExtractorGateway::new();
+                gw.expect_ensure_protocol_types()
+                    .times(1)
+                    .returning(|_| Ok(()));
+                gw.expect_get_cursor()
+                    .times(1)
+                    .returning(|| Ok(("cursor".into(), Bytes::default())));
+                gw.expect_get_block()
+                    .times(1)
+                    .returning(|_| Ok(Block::default()));
+                gw.expect_advance()
+                    .times(0)
+                    .returning(|_, _, _| Ok(()));
+                gw.expect_flushed_block_height()
+                    .returning(|| None);
+                gw.expect_get_contracts()
+                    .returning(|_| Ok(Vec::new()));
+                gw.expect_get_protocol_states()
+                    .returning(|_| {
+                        Ok(vec![ProtocolComponentState::new(
+                            "pool_w",
+                            HashMap::from([("other".to_string(), Bytes::from(1_u64).lpad(32, 0))]),
+                            HashMap::new(),
+                        )])
+                    });
+                // pool_y is answered by the buffer; the rest reach the component table, where
+                // pool_w and pool_z exist and pool_ghost does not.
+                gw.expect_get_protocol_components()
+                    .returning(|component_ids| {
+                        let mut ids = component_ids.to_vec();
+                        ids.sort();
+                        assert_eq!(ids, vec!["pool_ghost", "pool_w", "pool_z"]);
+                        Ok(["pool_w", "pool_z"]
+                            .into_iter()
+                            .map(|id| ProtocolComponent {
+                                id: id.to_string(),
+                                ..Default::default()
+                            })
+                            .collect())
+                    });
+                gw.expect_get_components_balances()
+                    .returning(|_| Ok(HashMap::new()));
+                gw.expect_get_account_balances()
+                    .returning(|_| Ok(HashMap::new()));
+
+                let extractor = create_extractor(gw).await;
+
+                // Empty anchor, then a zero-attribute creation that stays buffered.
+                full_block(&extractor, 1, 1, vec![]).await;
+                full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_y", &[])])
+                    .await;
+                // fee: pool_y has a buffered creation but no attrs and no DB rows → "true".
+                // gone: pool_w has DB state rows, but not this attribute → "true".
+                // depth: pool_z has a component row but no state rows → "true".
+                // rate: pool_ghost was never created anywhere → "false".
+                full_block(
+                    &extractor,
+                    3,
+                    1,
+                    vec![
+                        entity_change_tx(3, 0, "pool_y", "fee", 30, PbChangeType::Update),
+                        entity_change_tx(3, 1, "pool_ghost", "rate", 7, PbChangeType::Update),
+                        entity_change_tx(3, 2, "pool_w", "gone", 9, PbChangeType::Update),
+                        entity_change_tx(3, 3, "pool_z", "depth", 5, PbChangeType::Update),
+                    ],
+                )
+                .await;
+
+                extractor
+                    .handle_revert(undo_to(2))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            })
+        });
+
+        let map = snapshot_to_map(snapshotter.snapshot());
+        assert_eq!(
+            counter_value(
+                &map,
+                "extractor_revert_attr_miss",
+                &[
+                    ("extractor", EXTRACTOR_NAME),
+                    ("chain", "ethereum"),
+                    ("component_known", "false")
+                ],
+            ),
+            1,
+            "only pool_ghost exists neither in the buffer nor in the DB"
+        );
+        assert_eq!(
+            counter_value(
+                &map,
+                "extractor_revert_attr_miss",
+                &[
+                    ("extractor", EXTRACTOR_NAME),
+                    ("chain", "ethereum"),
+                    ("component_known", "true")
+                ],
+            ),
+            3,
+            "pool_y (buffered creation), pool_w (state rows) and pool_z (component row) are known"
+        );
+    }
+
+    // `metrics::with_local_recorder` takes a sync closure, so this test cannot use
+    // #[tokio::test]; it drives its own current-thread runtime instead.
+    #[test]
+    fn test_revert_attr_miss_on_retained_creation_is_component_known() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let mut gw = MockExtractorGateway::new();
+                gw.expect_ensure_protocol_types()
+                    .times(1)
+                    .returning(|_| Ok(()));
+                gw.expect_get_cursor()
+                    .times(1)
+                    .returning(|| Ok(("cursor".into(), Bytes::default())));
+                gw.expect_get_block()
+                    .times(1)
+                    .returning(|_| Ok(Block::default()));
+                gw.expect_advance()
+                    .returning(|_, _, _| Ok(()));
+                // The write never lands: the creation stays reachable in the committing
+                // section.
+                gw.expect_flushed_block_height()
+                    .returning(|| None);
+                gw.expect_get_contracts()
+                    .returning(|_| Ok(Vec::new()));
+                gw.expect_get_protocol_states()
+                    .returning(|_| Ok(Vec::new()));
+                // The buffer answers the only candidate, so the DB is never asked.
+                gw.expect_get_protocol_components()
+                    .times(0)
+                    .returning(|_| Ok(Vec::new()));
+                gw.expect_get_components_balances()
+                    .returning(|_| Ok(HashMap::new()));
+                gw.expect_get_account_balances()
+                    .returning(|_| Ok(HashMap::new()));
+
+                let extractor = create_extractor(gw).await;
+
+                // Block 1: create `pool_x` without attributes.
+                full_block(&extractor, 1, 1, vec![component_creation_tx(1, 0, "pool_x", &[])])
+                    .await;
+                // Block 2: finality 2 drains block 1 into the committing section.
+                full_block(&extractor, 2, 2, vec![]).await;
+                // Block 3: the attribute gets its first-ever value, mis-marked as an
+                // Update. Finality stays 2, so block 2 stays buffered.
+                full_block(
+                    &extractor,
+                    3,
+                    2,
+                    vec![entity_change_tx(
+                        3,
+                        0,
+                        "pool_x",
+                        "protocol_fees",
+                        500,
+                        PbChangeType::Update,
+                    )],
+                )
+                .await;
+
+                extractor
+                    .handle_revert(undo_to(2))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            })
+        });
+
+        let map = snapshot_to_map(snapshotter.snapshot());
+        assert_eq!(
+            counter_value(
+                &map,
+                "extractor_revert_attr_miss",
+                &[
+                    ("extractor", EXTRACTOR_NAME),
+                    ("chain", "ethereum"),
+                    ("component_known", "true")
+                ],
+            ),
+            1,
+            "a creation drained but not yet flushed must count as a known component"
+        );
+        assert_eq!(
+            counter_value(
+                &map,
+                "extractor_revert_attr_miss",
+                &[
+                    ("extractor", EXTRACTOR_NAME),
+                    ("chain", "ethereum"),
+                    ("component_known", "false")
+                ],
+            ),
+            0,
+            "a creation in the committing section is not a component miss"
+        );
+    }
+
+    // `metrics::with_local_recorder` takes a sync closure, so this test cannot use
+    // #[tokio::test]; it drives its own current-thread runtime instead.
+    #[test]
+    fn test_revert_attr_miss_counter_registered_at_start() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let mut gw = MockExtractorGateway::new();
+                gw.expect_ensure_protocol_types()
+                    .times(1)
+                    .returning(|_| Ok(()));
+                gw.expect_get_cursor()
+                    .times(1)
+                    .returning(|| Ok(("cursor".into(), Bytes::default())));
+                gw.expect_get_block()
+                    .times(1)
+                    .returning(|_| Ok(Block::default()));
+
+                let _extractor = create_extractor(gw).await;
+            })
+        });
+
+        let map = snapshot_to_map(snapshotter.snapshot());
+        for component_known in ["true", "false"] {
+            let labels = std::collections::BTreeMap::from([
+                ("extractor".to_string(), EXTRACTOR_NAME.to_string()),
+                ("chain".to_string(), "ethereum".to_string()),
+                ("component_known".to_string(), component_known.to_string()),
+            ]);
+            assert!(
+                map.contains_key(&(
+                    metrics_util::MetricKind::Counter,
+                    "extractor_revert_attr_miss".to_string(),
+                    labels,
+                )),
+                "series with component_known={component_known} must exist at startup; \
+                 a series born on the first miss looks flat to increase() and no alert fires"
+            );
+        }
     }
 }
 
@@ -4138,7 +6001,7 @@ mod test_serial_db {
                             token: Bytes::from_str(USDC_ADDRESS).unwrap(),
                             balance: Bytes::from("0x00000001"),
                             balance_float: 1.0,
-                            modify_tx: Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000000").unwrap(),
+                            modify_tx: Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000002711").unwrap(),
                             component_id: "pc_1".to_string(),
                         }),
                         (Bytes::from_str(WETH_ADDRESS).unwrap(), ComponentBalance {
@@ -4330,7 +6193,7 @@ mod test_serial_db {
                             token: Bytes::from_str(WETH_ADDRESS).unwrap(),
                             balance: Bytes::from("0x00000001"),
                             balance_float: 1.0,
-                            modify_tx: Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000000").unwrap(),
+                            modify_tx: Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000002711").unwrap(),
                             component_id: "pc_1".to_string(),
                         }),
                     ])),
@@ -4340,7 +6203,7 @@ mod test_serial_db {
                         (Bytes::from_str(WETH_ADDRESS).unwrap(), AccountBalance {
                         token: Bytes::from_str(WETH_ADDRESS).unwrap(),
                         balance: Bytes::from("0x00000001"),
-                        modify_tx:Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000000").unwrap(),
+                        modify_tx:Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000002711").unwrap(),
                         account: account1.clone(),
                         }),
                         (Bytes::from_str(USDC_ADDRESS).unwrap(), AccountBalance {

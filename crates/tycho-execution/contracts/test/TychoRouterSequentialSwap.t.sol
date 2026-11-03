@@ -1,10 +1,10 @@
 pragma solidity ^0.8.26;
 
 import {
-    TychoRouter,
+    TychoRouterV3,
     ClientFeeParams,
     TychoRouter__NegativeSlippage
-} from "@src/TychoRouter.sol";
+} from "@src/TychoRouterV3.sol";
 import "./TychoRouterTestSetup.sol";
 
 contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
@@ -50,7 +50,8 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             USDC_ADDR,
-            1000_000000, // min amount,
+            1000_000000, // expected amount out
+            1000_000000 * 9800 / 10000, // min amount out
             ALICE,
             noClientFee(),
             permitSingle,
@@ -85,7 +86,8 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             USDC_ADDR,
-            1000_000000, // min amount
+            1000_000000, // expected amount out
+            1000_000000 * 9800 / 10000, // min amount out
             ALICE,
             noClientFee(),
             pleEncode(swaps)
@@ -110,7 +112,8 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             USDC_ADDR,
-            1000_000000, // min amount
+            1000_000000, // expected amount out
+            1000_000000 * 9800 / 10000, // min amount out
             tychoRouterAddr, // output goes to vault
             noClientFee(),
             pleEncode(swaps)
@@ -133,12 +136,13 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
         IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
 
         bytes[] memory swaps = _getSequentialSwaps();
-        vm.expectRevert(TychoRouter__UndefinedMinAmountOut.selector);
+        vm.expectRevert(TychoRouter__AmountOutZero.selector);
         tychoRouter.sequentialSwap(
             amountIn,
             WETH_ADDR,
             USDC_ADDR,
-            0, // min amount
+            0, // expected amount out
+            0, // min amount out
             ALICE,
             noClientFee(),
             pleEncode(swaps)
@@ -150,7 +154,14 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
 
         vm.expectRevert(TychoRouter__ZeroInput.selector);
         tychoRouter.sequentialSwap(
-            0, WETH_ADDR, USDC_ADDR, 1, ALICE, noClientFee(), pleEncode(swaps)
+            0,
+            WETH_ADDR,
+            USDC_ADDR,
+            1,
+            1,
+            ALICE,
+            noClientFee(),
+            pleEncode(swaps)
         );
     }
 
@@ -168,7 +179,8 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             USDC_ADDR,
-            0, // min amount
+            0, // expected amount out
+            0, // min amount out
             ALICE,
             noClientFee(),
             pleEncode(swaps)
@@ -201,6 +213,7 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
+            minAmountOut,
             minAmountOut,
             ALICE,
             noClientFee(),
@@ -407,6 +420,7 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             amountIn,
             ETH_ADDR, // tokenIn = native ETH
             WETH_ADDR,
+            1, // expected amount out
             1, // min amount out
             ALICE,
             noClientFee(),

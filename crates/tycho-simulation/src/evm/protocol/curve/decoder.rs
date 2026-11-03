@@ -7,7 +7,10 @@ use tycho_common::{models::token::Token, Bytes};
 use crate::{
     evm::{
         engine_db::{create_engine, SHARED_TYCHO_DB},
-        protocol::curve::{state::CurveState, variant, vm},
+        protocol::{
+            curve::{adapter::build_pool, state::CurveState, variant, vm},
+            vm::utils::load_stateless_contracts,
+        },
     },
     protocol::{
         errors::InvalidSnapshotError,
@@ -63,7 +66,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for CurveState {
 
         // Load proxy/implementation contracts so getter delegatecalls resolve (persists into the
         // shared DB for later delta_transition rebuilds).
-        vm::load_stateless_contracts(&engine, &value.state.attributes).await?;
+        load_stateless_contracts(&engine, &value.state.attributes).await?;
 
         let pool_alloy = AlloyAddress::from_slice(pool_address.as_ref());
         // Ensure the pool's actual MATH() contract is loaded — the indexed math address can be
@@ -77,9 +80,17 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for CurveState {
             coins.len(),
             &engine,
         )?;
-        let pool = vm::decode_from_vm(&engine, &pool_alloy, resolved, &decimals)?;
-
-        Ok(CurveState::new(pool_address, coins, decimals, resolved, pool))
+        let raw = vm::read_raw_pool_state(
+            &engine,
+            &pool_alloy,
+            resolved,
+            &decimals,
+            &Default::default(),
+        )?;
+        let pool = build_pool(&raw).map_err(|e| {
+            InvalidSnapshotError::ValueError(format!("curve build_pool failed: {e}"))
+        })?;
+        Ok(CurveState::new(pool_address, coins, decimals, resolved, pool, raw.admin_fee))
     }
 }
 

@@ -102,12 +102,16 @@ impl EkuboPool for BasePool {
         self.state.liquidity = liquidity;
     }
 
-    fn quote(&self, token_amount: TokenAmount) -> Result<EkuboPoolQuote, SimulationError> {
+    fn quote(
+        &self,
+        token_amount: TokenAmount,
+        sqrt_ratio_limit: Option<U256>,
+    ) -> Result<EkuboPoolQuote, SimulationError> {
         let quote = self
             .imp
             .quote(QuoteParams {
                 token_amount,
-                sqrt_ratio_limit: None,
+                sqrt_ratio_limit,
                 override_state: Some(self.state),
                 meta: (),
             })
@@ -138,13 +142,13 @@ impl EkuboPool for BasePool {
         updated_attributes: HashMap<String, Bytes>,
         deleted_attributes: HashSet<String>,
     ) -> Result<(), TransitionError> {
-        let active_tick_update = updated_attributes
-            .get("tick")
-            .and_then(|updated_tick| {
-                let updated_tick = updated_tick.clone().into();
-
+        let active_tick_update = match updated_attributes.get("tick") {
+            Some(updated_tick) => {
+                let updated_tick = i32::try_from(updated_tick.clone())?;
                 (self.active_tick != Some(updated_tick)).then_some(updated_tick)
-            });
+            }
+            None => None,
+        };
 
         let changed_ticks = ticks_from_attributes(
             updated_attributes.into_iter().chain(

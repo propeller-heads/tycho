@@ -9,8 +9,8 @@ use mockall::mock;
 use tycho_common::{
     models::{
         blockchain::{
-            Block, EntryPoint, EntryPointWithTracingParams, TracedEntryPoint, TracingParams,
-            TracingResult, Transaction,
+            Block, BlockAggregatedChanges, EntryPoint, EntryPointWithTracingParams,
+            TracedEntryPoint, TracedEntryPoints, TracingParams, TracingResult, Transaction,
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
@@ -151,6 +151,24 @@ mock! {
                             HashMap<EntryPointId, HashMap<TracingParams, TracingResult>>,
                             StorageError,
                         >,
+                    > + ::core::marker::Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait;
+
+        #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+        fn get_traced_entry_points_by_component<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            filter: EntryPointFilter,
+            pagination_params: Option<&'life1 PaginationParams>,
+        ) -> ::core::pin::Pin<
+            Box<
+                dyn ::core::future::Future<
+                        Output = Result<WithTotal<TracedEntryPoints>, StorageError>,
                     > + ::core::marker::Send
                     + 'async_trait,
             >,
@@ -677,6 +695,46 @@ pub fn block(version: u64) -> Block {
         Bytes::from(version - 1).lpad(32, 0),
         ts + Duration::from_secs(version * 12),
     )
+}
+
+/// Aggregated changes for one full block with no deltas.
+#[cfg(test)]
+pub fn aggregated_changes(
+    extractor: &str,
+    number: u64,
+    finalized: u64,
+    committed: Option<u64>,
+) -> BlockAggregatedChanges {
+    BlockAggregatedChanges {
+        extractor: extractor.to_string(),
+        block: block(number),
+        finalized_block_height: finalized,
+        db_committed_block_height: committed,
+        ..Default::default()
+    }
+}
+
+/// A state delta that sets attribute `x` of `component_id` to `value`.
+#[cfg(test)]
+pub fn state_delta(component_id: &str, value: u64) -> ProtocolComponentStateDelta {
+    ProtocolComponentStateDelta {
+        component_id: component_id.to_string(),
+        updated_attributes: HashMap::from([("x".to_string(), Bytes::from(value))]),
+        deleted_attributes: HashSet::new(),
+        ..Default::default()
+    }
+}
+
+/// `m` with a state delta setting attribute `x` of `component_id` to `value`.
+#[cfg(test)]
+pub fn with_state_delta(
+    mut m: BlockAggregatedChanges,
+    component_id: &str,
+    value: u64,
+) -> BlockAggregatedChanges {
+    m.state_deltas
+        .insert(component_id.to_string(), state_delta(component_id, value));
+    m
 }
 
 #[cfg(test)]

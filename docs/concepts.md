@@ -159,7 +159,7 @@ Tycho offers two approaches for simulating protocol operations:
 
 The Solution represents a complete pathway for moving tokens through one or more protocols to fulfil a trade. It bridges the gap between finding the best trade route and actually executing it on-chain.
 
-Solutions can represent single-hop swaps, sequential multi-hop trades, or split routes where a token amount is distributed across multiple pools. See more about Solutions [here](for-solvers/execution/encoding/#solution-struct).
+Solutions can represent single-hop swaps, sequential multi-hop trades, or split routes where a token amount is distributed across multiple pools. See more about Solutions [here](for-solvers/execution/encoding/#models).
 
 ### Strategy
 

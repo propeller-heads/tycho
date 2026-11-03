@@ -1,6 +1,6 @@
 # Vault
 
-The TychoRouter V3 includes an integrated <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/contracts/src/Vault.sol" target="_blank" rel="noopener noreferrer">vault</a> built on the <a href="https://eips.ethereum.org/EIPS/eip-6909" target="_blank" rel="noopener noreferrer">ERC6909</a> multi-token standard. This replaces the "direct transfer" pattern from V2, where tokens sent to the router risked being lost.
+The TychoRouterV3 includes an integrated <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/contracts/src/Vault.sol" target="_blank" rel="noopener noreferrer">vault</a> built on the <a href="https://eips.ethereum.org/EIPS/eip-6909" target="_blank" rel="noopener noreferrer">ERC6909</a> multi-token standard. This replaces the "direct transfer" pattern from V2, where tokens sent to the router risked being lost.
 
 ## How It Works
 
@@ -29,11 +29,11 @@ router.deposit{value: amount}(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE, amount
 router.withdraw(tokenAddress, amount);
 ```
 
-Tokens in the vault can be used for swaps by setting `user_transfer_type: UseVaultsFunds` in the [Solution](encoding/#solution-struct). They can be withdrawn at any time.
+Tokens in the vault can be used for swaps by setting `user_transfer_type: UseVaultsFunds` in the [Solution](encoding/#models). They can be withdrawn at any time.
 
 ## Crediting Output to the Vault
 
-By default, output tokens are sent to the receiver address after a swap. If you set the receiver to the TychoRouter address, the output tokens are credited to the caller's vault balance instead of transferred out.
+By default, output tokens are sent to the receiver address after a swap. If you set the receiver to the TychoRouterV3 address, the output tokens are credited to the caller's vault balance instead of transferred out.
 
 This works with all swap types — single, sequential, and split — and with both wallet-funded and vault-funded swaps.
 

@@ -56,7 +56,10 @@ fn main() {
         weth.clone(),
         usdc.clone(),
         BigUint::from_str("1_000000000000000000").expect("Failed to create amount"),
-        BigUint::from(1u64),
+        // amount out from simulation; in production, use the actual simulated result
+        BigUint::from_str("2000_000000").expect("Failed to create amount"),
+        // min amount out; 2% below the quote
+        BigUint::from_str("1960_000000").expect("Failed to create amount"),
         vec![simple_swap],
     );
 

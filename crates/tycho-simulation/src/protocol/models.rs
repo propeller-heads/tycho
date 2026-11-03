@@ -38,6 +38,20 @@ use tycho_common::{
 
 use crate::evm::override_stream::OverrideSnapshot;
 
+/// What a quote may assume about the swap's position within its execution block, for protocols
+/// whose pricing depends on that position.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockPositionAssumption {
+    /// No assumption: price the swap for the least favourable position it could take, so the
+    /// output is never over-quoted. Loses fills where a better position would in fact have held.
+    #[default]
+    WorstCase,
+    /// Bet the swap lands before any other on the same pool. Better quotes wherever the protocol
+    /// favours that position; a lost bet surfaces as reverts or negative slippage at execution
+    /// time. Enable only if the submission path can realistically win that race.
+    First,
+}
+
 /// Context struct containing attributes for decoders
 ///
 /// This struct can be extended to include additional attributes for other decoders in the future
@@ -45,16 +59,50 @@ use crate::evm::override_stream::OverrideSnapshot;
 pub struct DecoderContext {
     pub adapter_path: Option<String>,
     pub vm_traces: Option<bool>,
+    /// What quotes may assume about the swap's position within its execution block.
+    ///
+    /// Only consumed by protocols that price the first swap of a block differently (currently
+    /// `aerodrome_slipstreams`). Once the pool has been touched in the execution block, position
+    /// is a known fact and the assumption has no effect.
+    pub block_position: BlockPositionAssumption,
     /// Live per-block VM state override channel, wired into the pool at construction time.
     ///
     /// Set internally by the decoder from its registered override providers; not part of the
     /// public API. External consumers never set this — overrides are fully handled by the library.
     pub(crate) live_override: Option<watch::Receiver<OverrideSnapshot>>,
+    /// Chain the decoded components live on.
+    ///
+    /// Stamped by [`TychoStreamDecoder`](crate::evm::decoder::TychoStreamDecoder) at registration,
+    /// so it is `None` only for a context that never went through a decoder. Decoders whose
+    /// behaviour depends on the chain (currently the Uniswap V4 hook handler registry) reject the
+    /// snapshot when it is `None` rather than assume one.
+    pub chain: Option<Chain>,
 }
 
 impl DecoderContext {
     pub fn new() -> Self {
-        Self { adapter_path: None, vm_traces: None, live_override: None }
+        Self {
+            adapter_path: None,
+            vm_traces: None,
+            block_position: BlockPositionAssumption::default(),
+            live_override: None,
+            chain: None,
+        }
+    }
+
+    /// Declares the chain the decoded components live on.
+    ///
+    /// Registering the context with a
+    /// [`TychoStreamDecoder`](crate::evm::decoder::TychoStreamDecoder) overrides whatever is
+    /// set here with the decoder's own chain.
+    pub fn chain(mut self, chain: Chain) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+
+    pub fn block_position_assumption(mut self, assumption: BlockPositionAssumption) -> Self {
+        self.block_position = assumption;
+        self
     }
 
     pub fn vm_adapter_path<S: Into<String>>(mut self, path: S) -> Self {
@@ -182,7 +230,7 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Update {
-    pub block_number_or_timestamp: u64,
+    pub block_number: u64,
     /// True when this update is for a partial (pre-confirmation) block, false for full blocks.
     #[serde(default)]
     pub is_partial: bool,
@@ -206,7 +254,7 @@ impl Update {
         new_pairs: HashMap<String, ProtocolComponent>,
     ) -> Self {
         Update {
-            block_number_or_timestamp: block_number,
+            block_number,
             is_partial: false,
             sync_states: HashMap::new(),
             states,

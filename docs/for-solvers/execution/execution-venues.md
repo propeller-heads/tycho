@@ -30,24 +30,24 @@ To solve with the Tycho Router you only need one custom interaction where:
 
 ## Uniswap X
 
-To help you fill Uniswap X orders using Tycho, we provide an example <a href="https://github.com/propeller-heads/tycho-execution/blob/main/foundry/src/uniswap_x/UniswapXFiller.sol" target="_blank" rel="noopener noreferrer">`UniswapXFiller`</a> contract. This contract is a starting point — you should adapt it to fit your use case.
+To help you fill Uniswap X orders using Tycho, we provide an example <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/contracts/src/uniswap_x/UniswapXFiller.sol" target="_blank" rel="noopener noreferrer">`UniswapXFiller`</a> contract. This contract is a starting point — you should adapt it to fit your use case.
 
 The example contract:
 
 * Inherits from `IReactorCallback` and implements `execute` and `reactorCallback`
-* Calls the `TychoRouter` from `reactorCallback` to execute swaps
-* Uses standard token approvals to allow `TychoRouter` to pull funds; you can replace this with Permit2 easily (you need to change the encoding accordingly though).
+* Calls the `TychoRouterV3` from `reactorCallback` to execute swaps
+* Uses standard token approvals to allow `TychoRouterV3` to pull funds; you can replace this with Permit2 easily (you need to change the encoding accordingly though).
 * Approves the UniswapX Reactor contract to transfer tokens out after execution
 * Only supports solving one order at a time; you can extend it to support batching by implementing `executeBatch` and updating `reactorCallback`
 * Can safely hold tokens. The Uniswap X Reactor only transfers out the required amount. If your solution is more efficient, any surplus stays in the filler contract
 
-See how to encode the `callbackData` for `TychoRouter` <a href="https://github.com/propeller-heads/tycho-execution/tree/main/examples/uniswapx-encoding-example" target="_blank" rel="noopener noreferrer">here</a>.
+See how to encode the `callbackData` for `TychoRouterV3` <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-execution/examples/uniswapx-encoding-example" target="_blank" rel="noopener noreferrer">here</a>.
 
 <details>
 
 <summary>How to deploy the Uniswap X Filler</summary>
 
-The current <a href="https://github.com/propeller-heads/tycho-execution/blob/main/foundry/scripts/deploy-uniswap-x-filler.js" target="_blank" rel="noopener noreferrer">script</a> deploys a Uniswap X filler and verifies it in the corresponding blockchain explorer.
+The current <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/contracts/scripts/deploy-uniswap-x-filler.js" target="_blank" rel="noopener noreferrer">script</a> deploys a Uniswap X filler and verifies it in the corresponding blockchain explorer.
 
 Make sure to run `unset HISTFILE` in your terminal before setting the private key. This will prevent the private key from being stored in the shell history.
 

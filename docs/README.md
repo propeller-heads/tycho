@@ -50,6 +50,8 @@ If you don't have an RPC URL, here are some public ones for <a href="https://eth
 
 The `PRIVATE_KEY` environment variable is unnecessary if you want to run the quickstart without simulation or execution.
 
+On Arc, pass `--sell-token` explicitly. No default sell token is configured for Arc.
+
 ### What it does
 
 The quickstart fetches all protocol states. Then it returns the best amount out (best price) for a given token pair (by default, 10 USDC to WETH).
@@ -168,27 +170,22 @@ After choosing the best swap, you can use Tycho Execution to encode it.
 
 #### a. Create a solution object
 
-Now you know the best protocol component (i.e., pool), you can compute a minimum amount out. And you can put the swap into the expected input format for your encoder.
+Now you know the best protocol component (i.e., pool), you can put the swap into the expected input format for your encoder.
 
-The minimum amount out is a very important parameter to set in Tycho Execution. The value acts as a guardrail and protects your funds during execution against MEV. This quickstart accepts a slippage of 0.25% over the simulated amount out.
-
-```rust
-let slippage = 0.0025; // 0.25% slippage
-let bps = BigUint::from(10_000u32);
-let slippage_percent = BigUint::from((slippage * 10000.0) as u32);
-let multiplier = &bps - slippage_percent;
-let min_amount_out = (expected_amount * &multiplier) / &bps;
-```
+The `Solution` carries two values that set your slippage protection. `expected_amount_out` is the output your simulation quoted, and `min_amount_out` is the smallest output you will accept. The router receives them as `expectedAmountOut` and `minAmountOut`, the two guardrails that protect your funds from MEV during execution. This quickstart sets `min_amount_out` 0.25% below the quote.
 
 {% hint style="warning" %}
-For maximum security, you should determine the minimum amount from a **third-party source.**
+For maximum security, determine the quoted amount from a **third-party source.** The router only requires `minAmountOut` to be non-zero and no greater than `expectedAmountOut`; it sets no lower bound, so your slippage protection is only as good as the `min_amount_out` you compute. A `min_amount_out` derived from a bad quote can sit far below the fair output and leave you exposed.
 {% endhint %}
 
-After this, you can create the Swap and Solution objects. For more info about the `Swap` and `Solution` models, see [here](for-solvers/execution/encoding/#solution-struct).
+You can now create the Swap and Solution objects. For more info about the `Swap` and `Solution` models, see [here](for-solvers/execution/encoding/#models).
 
 ```rust
 let simple_swap =
-    Swap::new(component, sell_token.clone(), buy_token.clone());
+    Swap::new(component, sell_token.clone(), buy_token.clone(), gas_usage);
+
+// 0.25% below the quote
+let min_amount_out = &expected_amount * BigUint::from(9975u64) / BigUint::from(10_000u64);
 
 // Then we create a solution object with the previous swap
 let solution = Solution::new(
@@ -197,10 +194,19 @@ let solution = Solution::new(
     sell_token.address,
     buy_token.address,
     sell_amount,
-    min_amount_out,
+    expected_amount, // the simulated output
+    min_amount_out,  // the smallest acceptable output
     vec![simple_swap],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
+```
+
+The quickstart's `encode_tycho_router_call` helper reads both router arguments straight off the
+solution:
+
+```rust
+let amount_out = biguint_to_u256(solution.expected_amount_out()); // -> expectedAmountOut
+let min_amount_out = biguint_to_u256(solution.min_amount_out());  // -> minAmountOut
 ```
 
 #### b. Encode solution
@@ -241,7 +247,7 @@ let tx = encode_tycho_router_call(
 These functions are only examples intended for use within the quickstart.\
 **Do not use them in production.** You must write your own logic to:
 
-* Control parameters like `minAmountOut` and `receiver`.
+* Control parameters like `expectedAmountOut`, `minAmountOut` and `receiver`.
 * Sign the permit2 object safely and correctly.
 
 This gives you full control over execution. And it protects you from MEV and slippage risks.
@@ -249,10 +255,10 @@ This gives you full control over execution. And it protects you from MEV and sli
 
 ### 6. Simulate or execute the best swap
 
-This step allows you to test or perform real transactions based on the best available swap options. For this step, you need to pass your wallet's private key in the run command. Handle it securely and never expose it publicly.
+This step allows you to test or perform real transactions based on the best available swap options. It needs the `PRIVATE_KEY` environment variable from [Run the Quickstart](./#run-the-quickstart) — the quickstart skips simulation and execution without it. Handle that key securely and never expose it publicly.
 
 ```bash
-cargo run --release --example quickstart -- --swapper-pk $PK
+cargo run --release --example quickstart
 ```
 
 When you provide your private key, the quickstart will check your token balances and display them before showing you options:

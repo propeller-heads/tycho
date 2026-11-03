@@ -6,13 +6,14 @@ results. Exits after `--max-blocks` blocks, or runs indefinitely.
 
 ## Running
 
-Requires three env vars (can be set in `.claude/settings.local.json`):
+Env vars (can be set in `.claude/settings.local.json`):
 
 | Variable | Purpose |
 |---|---|
-| `TYCHO_URL` | WebSocket endpoint of the Tycho server |
-| `TYCHO_API_KEY` | Auth key (`sampletoken` works against local dev instances) |
-| `RPC_URL` | Ethereum-compatible JSON-RPC endpoint for on-chain validation |
+| `TYCHO_URL` | WebSocket endpoint of the Tycho server (required) |
+| `RPC_URL` | Ethereum-compatible JSON-RPC endpoint for on-chain validation (required) |
+| `TYCHO_API_KEY` | Auth key; defaults to `sampletoken`, which works against local dev instances |
+| `TYCHO_NO_TLS` | Set to `true` to talk plain HTTP/WS (same as `--no-tls`) |
 
 Both the token loader and the protocol stream default to TLS (`https`/`wss`). Pass `--no-tls`
 (or set `TYCHO_NO_TLS=true`) when pointing at a local dev instance served over plain HTTP.
@@ -25,27 +26,72 @@ cargo run -p tycho-integration-test -- \
   --tvl-threshold 100
 ```
 
-Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`, `--disable-execution`,
-`--protocols uniswap_v2,curve`, `--max-blocks 100`, `--parallel-simulations 5`,
-`--always-test-components <id,...>`.
+Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`, `--disable-pamm`,
+`--rfq-all-pairs`, `--disable-price-level-stream`, `--disable-execution`,
+`--protocols uniswap_v2,curve`,
+`--protocol-tvl-thresholds lunarbase=10` (replaces `--tvl-threshold` for the named protocols;
+each one must be enabled),
+`--max-blocks 100`, `--parallel-simulations 5`, `--always-test-components <id,...>`,
+`--price-level-stream-block-interval 1`, `--price-level-stream-stale-threshold-secs 10`,
+`--test-every-n-updates 10`, `--bypass-executor-timelock`.
+
+`--bypass-executor-timelock` writes `executorsActivationTimestamp = 1` for every executor of the
+chain into the execution simulation's state overrides, so an executor that is unapproved or still
+inside its activation timelock (`Dispatcher.DELAY_EXECUTOR_ACTIVATION`, 1 day) does not make
+`Dispatcher._validateExecutor` revert. The
+router keeps its deployed bytecode, and only the read-only simulation call is affected. It cannot
+help an executor that has no bytecode deployed. Off by default so that a missing activation still
+shows up as a failure.
 
 ## Module Structure
 
 - **`main.rs`**: CLI (`Cli` struct), top-level orchestration loop — subscribes to Tycho,
-  dispatches blocks to stream processors, calls `poll_rpc_for_block` for on-chain comparison
+  dispatches blocks to stream processors, tests every Nth protocol update
+  (`--test-every-n-updates`, alias `--test-every-n-blocks`), calls `poll_rpc_for_block`
+  (every-update mode, and sampled mode under `--partial-blocks`) or `await_target_block`
+  (sampled mode without `--partial-blocks`, fetches the sampled block by number) for on-chain
+  comparison
 - **`stream_processor/`**:
   - `protocol_stream_processor.rs`: Handles on-chain protocol updates — applies deltas to
     `ProtocolSim` instances, runs `get_amount_out` simulations, validates via RPC execution
-  - `rfq_stream_processor.rs`: Handles RFQ protocol updates — fetches live quotes, compares
-    against simulation
+  - `book_stream_processor.rs`: Handles the off-chain book feeds (the RFQ venues and Metric) —
+    fetches live quotes, compares against simulation
+  - `price_level_stream_processor.rs`: Handles Titan pAMM price level stream updates (Ethereum
+    only) — emits one sampled update per `--price-level-stream-block-interval` blocks, holding a
+    chosen block's latest snapshot back until the stream moves to the next block (least drift to
+    the finalized block), samples pair states, validates `get_limits` / `get_amount_out`. Marks
+    the served venues stale in metrics when no Titan message arrives within
+    `--price-level-stream-stale-threshold-secs`. The stream keeps its simulation overrides on, so
+    each state carries the account state Titan priced its quote on. Every swap of a state takes
+    those accounts as its own `TychoExecutionInput::account_overwrites` (balances, nonces and
+    storage), and is simulated before the quoted block, as a consumer tests a quote: on the
+    quoted block's parent, with that block's number and timestamp
+    (`simulate_swap_transaction_before_block`). The stream runs with
+    `without_fallback_router()`, so venues are served under `pricelevelstream:*` and execute
+    directly on the venue, resolving through the single `pricelevelstream` entry in
+    `executor_addresses.json` — not under the stream's default `fallback:*`, whose
+    `TychoFallbackRouter` needs `user_data` naming a fallback pool the test cannot supply. A swap
+    whose state carries no overrides is counted per protocol by
+    `tycho_integration_price_level_simulation_overrides_missing_total`; when the venue's freshness
+    guard then reverts (`StaleUpdate`, or `FeedStalled` for Metric) the swap counts as a stale
+    quote (`tycho_integration_execution_stale_quotes_total`) instead of a revert. With overrides,
+    the same revert counts as a revert: the overrides did not work. The stream's own
+    `price_level_stream_*` series are served on the same metrics port
 - **`statistics.rs`**: `TestStatistics` + `ProtocolStatistics` — per-protocol counters for
   simulation success/failure, execution reverts, slippage, `get_limits` / `get_amount_out` calls
 - **`metrics.rs`**: Prometheus metrics (served on `--metrics-port`, default 9898)
+- **`fee_fetcher.rs`**: One-shot start-up read of the router fee on output from the deployed
+  FeeCalculator, so the test backs the current fee out of the simulated amount instead of
+  hard-coding it
+- **`grafana/pamm-simulation-quality.json`**: Grafana dashboard (VictoriaMetrics datasource) for
+  the price level swaps this service checks and the stream's own `price_level_stream_*` series.
+  Its `job` variable also lists Fynd's jobs, which fill the stream rows. Import it by hand
 
 ## What it validates
 
 For each block update, for a random sample of components (up to `--max-simulations`):
 1. `ProtocolSim::get_amount_out` — checks the simulation returns a non-zero output
 2. `ProtocolSim::get_limits` — checks token limits are non-zero
-3. Encodes a swap via `tycho-execution` and simulates it via RPC (`eth_call`) — checks it doesn't
-   revert and that on-chain output is within slippage tolerance of simulated output
+3. Encodes a swap via `tycho-execution` and simulates it via RPC (`debug_traceCall` with balance
+   and allowance overrides) — checks it doesn't revert and that on-chain output is within
+   slippage tolerance of simulated output

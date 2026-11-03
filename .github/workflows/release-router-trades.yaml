@@ -1,0 +1,71 @@
+name: Release Router Trades Substreams
+
+# Builds one .spkg per chain and uploads it to S3. The sink containers fetch the package they are
+# pinned to, so this workflow — not the image build — is what changes what runs in production.
+#
+# A release needs the version in tycho-router-trades/Cargo.toml bumped, merged, and a matching
+# `tycho-router-trades-<semver>` tag on that commit; release.sh refuses a mismatch and S3 refuses
+# a key that already exists. Without such a tag the run publishes a `pre.<sha>` package, which may
+# be overwritten and is meant for testing.
+#
+# Pin the resulting key per chain in helm-configuration:
+#   helmwave/dev/values/tycho/router-trades/router-trades.yml -> spkgs.<chain>
+on:
+  workflow_dispatch:
+    inputs:
+      chains:
+        required: false
+        description: "Space-separated chains to release, e.g. 'ethereum bsc'. Empty releases all."
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-router-trades-spkg:
+    name: Release router trades packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+          submodules: false
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1  # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
+        with:
+          cache-on-failure: true
+          workspaces: crates/tycho-execution/substreams
+
+      - name: Install Substreams CLI
+        run: |
+          LINK=$(curl -s https://api.github.com/repos/streamingfast/substreams/releases/latest \
+            | awk "/download.url.*linux_$(uname -m)/ {print \$2}" | sed 's/"//g')
+          curl -L "$LINK" | tar zxf - -C /usr/local/bin
+          chmod +x /usr/local/bin/substreams
+          substreams --version
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a  # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.ROLE_TO_ASSUME }}
+          audience: sts.amazonaws.com
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Build and release the packages
+        working-directory: crates/tycho-execution/substreams
+        env:
+          CHAINS: ${{ inputs.chains }}
+        run: |
+          # shellcheck disable=SC2086  # the input is a space-separated chain list on purpose
+          ./release.sh $CHAINS

@@ -13,7 +13,7 @@ in [schema.rs](./src/postgres/schema.rs).
 
 Below is the Entity Relationship (ER) diagram illustrating the tables used for this project:
 
-[![Entity Relation Diagram](../assets/tycho_db_er.png)](https://drive.google.com/file/d/1IQvdsfwRtg-AqtLuJjyGM2s6bqJGuciK/view?usp=sharing)
+[![Entity Relation Diagram](../../docs/assets/tycho_db_er.png)](https://drive.google.com/file/d/1IQvdsfwRtg-AqtLuJjyGM2s6bqJGuciK/view?usp=sharing)
 
 ### Gateways
 

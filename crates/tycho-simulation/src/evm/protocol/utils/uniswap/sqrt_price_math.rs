@@ -9,7 +9,7 @@ use crate::evm::protocol::{
         div_mod_u256, safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256, sqrt_u256,
     },
     u256_num::{biguint_to_u256, u256_to_f64},
-    utils::solidity_math::{mul_div, mul_div_rounding_up},
+    utils::solidity_math::{mul_div, mul_div_q96_rounding_up, mul_div_rounding_up},
 };
 
 const Q96: U256 = U256::from_limbs([0, 4294967296, 0, 0]);
@@ -67,12 +67,9 @@ pub(crate) fn get_amount1_delta(
 ) -> Result<U256, SimulationError> {
     let (sqrt_ratio_a, sqrt_ratio_b) = maybe_flip_ratios(a, b);
     if round_up {
-        mul_div_rounding_up(U256::from(liquidity), sqrt_ratio_b - sqrt_ratio_a, Q96)
+        mul_div_q96_rounding_up(U256::from(liquidity), sqrt_ratio_b - sqrt_ratio_a)
     } else {
-        safe_div_u256(
-            safe_mul_u256(U256::from(liquidity), safe_sub_u256(sqrt_ratio_b, sqrt_ratio_a)?)?,
-            Q96,
-        )
+        Ok(safe_mul_u256(U256::from(liquidity), safe_sub_u256(sqrt_ratio_b, sqrt_ratio_a)?)? >> 96)
     }
 }
 
@@ -124,9 +121,9 @@ fn get_next_sqrt_price_from_amount0_rounding_up(
     }
     let numerator1 = U256::from(liquidity) << RESOLUTION;
 
+    // `amount != 0`, so `checked_mul` fails exactly when the Solidity divide-back check does.
     if add {
-        let (product, _) = amount.overflowing_mul(sqrt_price);
-        if product / amount == sqrt_price {
+        if let Some(product) = amount.checked_mul(sqrt_price) {
             // No overflow case: liquidity * sqrtPX96 / (liquidity +- amount * sqrtPX96)
             let denominator = safe_add_u256(numerator1, product)?;
             if denominator >= numerator1 {
@@ -136,12 +133,14 @@ fn get_next_sqrt_price_from_amount0_rounding_up(
         // Overflow: liquidity / (liquidity / sqrtPX96 +- amount)
         div_rounding_up(numerator1, safe_add_u256(safe_div_u256(numerator1, sqrt_price)?, amount)?)
     } else {
-        let (product, _) = amount.overflowing_mul(sqrt_price);
-        if safe_div_u256(product, amount)? != sqrt_price || numerator1 <= product {
+        let Some(product) = amount
+            .checked_mul(sqrt_price)
+            .filter(|product| numerator1 > *product)
+        else {
             return Err(SimulationError::FatalError(
                 "sqrt_price_math: overflow in get_next_sqrt_price_from_amount0".to_string(),
             ));
-        }
+        };
         let denominator = safe_sub_u256(numerator1, product)?;
         // No overflow case: liquidity * sqrtPX96 / (liquidity +- amount * sqrtPX96)
         mul_div_rounding_up(numerator1, sqrt_price, denominator)

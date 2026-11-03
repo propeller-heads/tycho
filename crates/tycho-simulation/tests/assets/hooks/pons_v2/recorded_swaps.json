@@ -1,0 +1,368 @@
+{
+  "description": "Recorded Pons V2 MemeHook swaps on Robinhood chain 4663, hook 0xe5e702641ea86f4ae6cc3cdaed2b886f976be044, PoolManager 0x8366a39cc670b4001a1121b8f6a443a643e40951. Each record pairs a swap with the immediately preceding swap on the same pool, whose Swap log carries the post-swap state and therefore the pre-state of the recorded swap. Every pool holds a single full-range position at ticks -887200/887200 and never changed liquidity, so no ModifyLiquidity sits between the two swaps. amount0/amount1 are the principal BalanceDelta from the PoolManager Swap log, which v4-core emits before the hook's afterSwap delta is applied, so they are exactly the delta passed to _afterSwap. Each record's `swap.exact_input` is DERIVED, not observed: the PoolManager Swap log does not say whether a swap was exact input or exact output. The sign of amount0 gives zero_for_one, the HookFeeCollected currency gives specifiedIsCurrency0 (currency1 means true), and `specifiedIsCurrency0 == ((amountSpecified < 0) == zeroForOne)` from pons.sol:458 then fixes exact_input. That relation is pinned independently of this fixture by the four after_swap_charges_the_unspecified_leg unit cases, which assert it directly against the contract formula in both directions for both exactness modes. All six records here came out exact input, which is what routers do. Each record also carries the pool's single full-range position under `position`, read from raw/modify_liquidity_logs.json, so the tick list can be rebuilt from this file alone; its liquidity equals pre_state.liquidity in every record, because the position is the pool's only one and no recorded swap crosses a tick.",
+  "raw_responses": [
+    "raw/fix_poolA_hookfees.json",
+    "raw/fix_poolA_swaps.json",
+    "raw/fix_poolB_hookfees.json",
+    "raw/fix_poolB_swaps.json",
+    "raw/fix_poolC_hookfees.json",
+    "raw/fix_poolC_swaps.json",
+    "raw/initialize_logs.json",
+    "raw/modify_liquidity_hookless_logs.json",
+    "raw/modify_liquidity_logs.json",
+    "raw/receipts/0x0135cadf98d5e329b21d9671d75ee69e85841a5cfe616dcc8127f8002c462657.json",
+    "raw/receipts/0x0efab9a955837f949ef5cbdb77542004c62535cb334dda68644b65b4633ba0d6.json",
+    "raw/receipts/0x52f0a3388a827879c5a8adba8ffc3b2266ae61c563f41599ee2b26b922d4fa7c.json",
+    "raw/receipts/0x5464d7f0abf57e344b1b53e701cd5fc00b94baf6b48ae2d167d363d81094ec81.json",
+    "raw/receipts/0x6d42ebc6db30f00112b78edc89115874456a8ad28a23499b2913c45427f5bce7.json",
+    "raw/receipts/0x718af773406e9b7f36526ad1e0faa49278e44a151e08c5aafa954b5e0029ad89.json",
+    "raw/receipts/0x94c6e1128cb9895f716ee7d777a39b8bd2484fe03ff1d53805fc341c8cdd7bd0.json",
+    "raw/receipts/0xc5583da8d91cc15505d9d364e49918466e67f5553545e675f856464c08879eea.json",
+    "raw/receipts/0xd1281ceeb655bc0bd6a62550f65d6c39388c57721c0c20ee470f36ce20b6ae74.json",
+    "raw/receipts/0xd304447403b8f22fda6dbdac36ccfa48718476283df94d66a8c6432a3ef03705.json",
+    "raw/receipts/0xd85d22e141421292b380c7ad64c86229f7faf267d752a2c22f50628431188710.json",
+    "raw/receipts/0xe3e9e8829344a886ceb10c84758d20e16c14a8378b93454a0fec8554a9a0f6a3.json",
+    "raw/receipts/0xeac37b06afa6e2fc649a30bb4992056445eea86d68c35b6908fb1c25d06ec3e1.json",
+    "raw/storage_4f247225_word0.json",
+    "raw/storage_4f247225_word4.json",
+    "raw/storage_63959eb6_word0.json",
+    "raw/storage_63959eb6_word4.json",
+    "raw/storage_9730c341_word0.json",
+    "raw/storage_9730c341_word4.json"
+  ],
+  "swaps": [
+    {
+      "label": "poolA_zero_for_one_exact_input",
+      "pool_id": "0x4f2472256176c0f63ee9a8dd66e6d39a8b351649daa6f28e241e7304f64429dc",
+      "currency0": "0x0000000000000000000000000000000000000000",
+      "currency1": "0xe47a6c4f082f6a2b49d20eaca35f8d4583651f4d",
+      "tick_spacing": 200,
+      "pool_key_lp_fee": 0,
+      "hook_fee_bps": 100,
+      "creator_tax_bps": 150,
+      "pre_state": {
+        "sqrt_price_x96": "312878761792805422316031431804436",
+        "liquidity": "29277002188455995649502",
+        "tick": 165633,
+        "block_number": 69017930,
+        "transaction_hash": "0x0fb319898fd88a234149cb69a188f6ccb3e66f59e2fa3475077d2b9648482d1b"
+      },
+      "swap": {
+        "zero_for_one": true,
+        "exact_input": true,
+        "amount0": "-39600000000000000",
+        "amount1": "614291585889479996975483",
+        "lp_fee": 0,
+        "sqrt_price_x96": "311216392357413321590733285193018",
+        "liquidity": "29277002188455995649502",
+        "tick": 165526,
+        "block_number": 69017932,
+        "transaction_hash": "0x1a8f1c5f7b30112bd2518544efd21d3bda9d9b5cc70d0e4b390c3519223d28e9"
+      },
+      "hook_fee": {
+        "fee_currency": "0xe47a6c4f082f6a2b49d20eaca35f8d4583651f4d",
+        "unspecified_amount": "614291585889479996975483",
+        "fee_amount": "6142915858894799969754",
+        "tax_amount": "9214373788342199954632"
+      },
+      "position": {
+        "tick_lower": -887200,
+        "tick_upper": 887200,
+        "liquidity": "29277002188455995649502",
+        "block_number": 68994525,
+        "transaction_hash": "0x81cb95941672e55173ba69f8b01e21594f8cc99a6b5fb9bff436014d075948c0"
+      }
+    },
+    {
+      "label": "poolA_one_for_zero_exact_input",
+      "pool_id": "0x4f2472256176c0f63ee9a8dd66e6d39a8b351649daa6f28e241e7304f64429dc",
+      "currency0": "0x0000000000000000000000000000000000000000",
+      "currency1": "0xe47a6c4f082f6a2b49d20eaca35f8d4583651f4d",
+      "tick_spacing": 200,
+      "pool_key_lp_fee": 0,
+      "hook_fee_bps": 100,
+      "creator_tax_bps": 150,
+      "pre_state": {
+        "sqrt_price_x96": "310904132204043314393464698635043",
+        "liquidity": "29277002188455995649502",
+        "tick": 165506,
+        "block_number": 69017936,
+        "transaction_hash": "0xe7059e513dae38ded7e654b7c0180f95372dd639fa9776b8f4329f0076ecd471"
+      },
+      "swap": {
+        "zero_for_one": false,
+        "exact_input": true,
+        "amount0": "53401937440950838",
+        "amount1": "-828267442203738706154743",
+        "lp_fee": 0,
+        "sqrt_price_x96": "313145553886966398519580166890189",
+        "liquidity": "29277002188455995649502",
+        "tick": 165650,
+        "block_number": 69017937,
+        "transaction_hash": "0x6d91415c2314534d81ae7e98958c63d855abbdf4768709a796d3db882713f30b"
+      },
+      "hook_fee": {
+        "fee_currency": "0x0000000000000000000000000000000000000000",
+        "unspecified_amount": "53401937440950838",
+        "fee_amount": "534019374409508",
+        "tax_amount": "801029061614262"
+      },
+      "position": {
+        "tick_lower": -887200,
+        "tick_upper": 887200,
+        "liquidity": "29277002188455995649502",
+        "block_number": 68994525,
+        "transaction_hash": "0x81cb95941672e55173ba69f8b01e21594f8cc99a6b5fb9bff436014d075948c0"
+      }
+    },
+    {
+      "label": "poolB_zero_for_one_exact_input",
+      "pool_id": "0x63959eb624e4772ae15ad22c8667cae2aa94e40dbee14d8a3b5123129cd5094d",
+      "currency0": "0x56910d4409f3a0c78c64dd8d0545ff0705389870",
+      "currency1": "0xff65994c92bcba83c3231a78a0aa73b68cab8d16",
+      "tick_spacing": 200,
+      "pool_key_lp_fee": 0,
+      "hook_fee_bps": 100,
+      "creator_tax_bps": 0,
+      "pre_state": {
+        "sqrt_price_x96": "1804765276890993552154450933641",
+        "liquidity": "8062439005001053456534025",
+        "tick": 62520,
+        "block_number": 69017934,
+        "transaction_hash": "0x7bb55107c6b097f8cb3eb74a3464ef75605b1c3f7d50b1c72b15a24df46df99b"
+      },
+      "swap": {
+        "zero_for_one": true,
+        "exact_input": true,
+        "amount0": "-119916899871129922087",
+        "amount1": "62203605784820687783652",
+        "lp_fee": 0,
+        "sqrt_price_x96": "1804154013055690606780087247404",
+        "liquidity": "8062439005001053456534025",
+        "tick": 62513,
+        "block_number": 69017936,
+        "transaction_hash": "0xd74fc89d713543e1c43f98446647778c19910259fbcbed34d31fcf851076d3a7"
+      },
+      "hook_fee": {
+        "fee_currency": "0xff65994c92bcba83c3231a78a0aa73b68cab8d16",
+        "unspecified_amount": "62203605784820687783652",
+        "fee_amount": "622036057848206877836",
+        "tax_amount": "0"
+      },
+      "position": {
+        "tick_lower": -887200,
+        "tick_upper": 887200,
+        "liquidity": "8062439005001053456534025",
+        "block_number": 69006139,
+        "transaction_hash": "0x46be414aec83fa6b53ee3dbe9c7177634910f269302e61b7cf20071909ce7467"
+      }
+    },
+    {
+      "label": "poolB_one_for_zero_exact_input",
+      "pool_id": "0x63959eb624e4772ae15ad22c8667cae2aa94e40dbee14d8a3b5123129cd5094d",
+      "currency0": "0x56910d4409f3a0c78c64dd8d0545ff0705389870",
+      "currency1": "0xff65994c92bcba83c3231a78a0aa73b68cab8d16",
+      "tick_spacing": 200,
+      "pool_key_lp_fee": 0,
+      "hook_fee_bps": 100,
+      "creator_tax_bps": 0,
+      "pre_state": {
+        "sqrt_price_x96": "1790861546793475972170797624461",
+        "liquidity": "8062439005001053456534025",
+        "tick": 62365,
+        "block_number": 69017984,
+        "transaction_hash": "0x822141e702db9597aa7ea42e342294d69ac2262ad0ad7264550d23a0bd901bc7"
+      },
+      "swap": {
+        "zero_for_one": false,
+        "exact_input": true,
+        "amount0": "533160319685442828554",
+        "amount1": "-272817566180409586940704",
+        "lp_fee": 0,
+        "sqrt_price_x96": "1793542476777154618641740294949",
+        "liquidity": "8062439005001053456534025",
+        "tick": 62395,
+        "block_number": 69017996,
+        "transaction_hash": "0x9afd45c4b8381ca20debbba7f0ade6c9b85fe426fc7c956fc3e4f9ccff272bc4"
+      },
+      "hook_fee": {
+        "fee_currency": "0x56910d4409f3a0c78c64dd8d0545ff0705389870",
+        "unspecified_amount": "533160319685442828554",
+        "fee_amount": "5331603196854428285",
+        "tax_amount": "0"
+      },
+      "position": {
+        "tick_lower": -887200,
+        "tick_upper": 887200,
+        "liquidity": "8062439005001053456534025",
+        "block_number": 69006139,
+        "transaction_hash": "0x46be414aec83fa6b53ee3dbe9c7177634910f269302e61b7cf20071909ce7467"
+      }
+    },
+    {
+      "label": "poolC_zero_for_one_exact_input",
+      "pool_id": "0x9730c34153933ce84105b134ab1ac58ebcd0dc0fb8880455caf937ab4aa4a6cf",
+      "currency0": "0x3b23dbc6ea737563ef97abef60a639db53de9e26",
+      "currency1": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+      "tick_spacing": 200,
+      "pool_key_lp_fee": 0,
+      "hook_fee_bps": 100,
+      "creator_tax_bps": 200,
+      "pre_state": {
+        "sqrt_price_x96": "418371306624393110485",
+        "liquidity": "1284920396452114422",
+        "tick": -381204,
+        "block_number": 69017930,
+        "transaction_hash": "0x42615c6fea288c61c8746657f34f77e3c867f3e00ccf3990e28252e1f703c015"
+      },
+      "swap": {
+        "zero_for_one": true,
+        "exact_input": true,
+        "amount0": "-5722053488992518409638691",
+        "amount1": "155891349",
+        "lp_fee": 0,
+        "sqrt_price_x96": "408759049522253127139",
+        "liquidity": "1284920396452114422",
+        "tick": -381669,
+        "block_number": 69017939,
+        "transaction_hash": "0x521c51dff22d26e18c1fe8280dc362fa98027abe6fa6df2817882f06f4a26aee"
+      },
+      "hook_fee": {
+        "fee_currency": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+        "unspecified_amount": "155891349",
+        "fee_amount": "1558913",
+        "tax_amount": "3117826"
+      },
+      "position": {
+        "tick_lower": -887200,
+        "tick_upper": 887200,
+        "liquidity": "1284920396452114422",
+        "block_number": 69014866,
+        "transaction_hash": "0x511a14d25ad040d057433d4fb7b18dd33e14cad9e77b81a36c97e650f9488066"
+      }
+    },
+    {
+      "label": "poolC_one_for_zero_exact_input",
+      "pool_id": "0x9730c34153933ce84105b134ab1ac58ebcd0dc0fb8880455caf937ab4aa4a6cf",
+      "currency0": "0x3b23dbc6ea737563ef97abef60a639db53de9e26",
+      "currency1": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+      "tick_spacing": 200,
+      "pool_key_lp_fee": 0,
+      "hook_fee_bps": 100,
+      "creator_tax_bps": 200,
+      "pre_state": {
+        "sqrt_price_x96": "408759049522253127139",
+        "liquidity": "1284920396452114422",
+        "tick": -381669,
+        "block_number": 69017939,
+        "transaction_hash": "0x521c51dff22d26e18c1fe8280dc362fa98027abe6fa6df2817882f06f4a26aee"
+      },
+      "swap": {
+        "zero_for_one": false,
+        "exact_input": true,
+        "amount0": "654601806612609994294659",
+        "amount1": "-17470116",
+        "lp_fee": 0,
+        "sqrt_price_x96": "409836256478740748207",
+        "liquidity": "1284920396452114422",
+        "tick": -381616,
+        "block_number": 69017947,
+        "transaction_hash": "0x493f8e0cc3d0a7603ba3965bc8312d5a42ca45a3791a45c7c0fcdf50b6f66679"
+      },
+      "hook_fee": {
+        "fee_currency": "0x3b23dbc6ea737563ef97abef60a639db53de9e26",
+        "unspecified_amount": "654601806612609994294659",
+        "fee_amount": "6546018066126099942946",
+        "tax_amount": "13092036132252199885893"
+      },
+      "position": {
+        "tick_lower": -887200,
+        "tick_upper": 887200,
+        "liquidity": "1284920396452114422",
+        "block_number": 69014866,
+        "transaction_hash": "0x511a14d25ad040d057433d4fb7b18dd33e14cad9e77b81a36c97e650f9488066"
+      }
+    }
+  ],
+  "source": {
+    "chain_id": 4663,
+    "rpc": "https://rpc.mainnet.chain.robinhood.com",
+    "head_block": 69018230,
+    "hook": "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044",
+    "pool_manager": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+    "launches_mapping_slot": 10,
+    "note": "raw/ holds the unedited JSON-RPC responses every field here was read from. raw/storage_<pool>_word{0,4}.json are eth_getStorageAt reads of launches[poolId] at keccak256(poolId || uint256(10)); word 0 carries `registered` in its lowest byte and word 4 carries creatorTaxBps at byte offset 20 and hookFeeBps at byte offset 26, counted from the low end. Those reads are what hook_fee_bps and creator_tax_bps below were confirmed against."
+  },
+  "gas_evidence": {
+    "method": "Whole-transaction gasUsed differenced between single-swap transactions entering through the same router 0x8876789976decbfcbbbe364623c63652db8c0904 on two pools with native currency0 and tick spacing 200, each holding one full-range position. The public RPC has no debug_*/trace_*, so the callback cannot be metered alone.",
+    "pons_pool": "0x4f2472256176c0f63ee9a8dd66e6d39a8b351649daa6f28e241e7304f64429dc",
+    "hookless_pool": "0xdc0ca34ef5e253ede4774d68c2c65b89318601ec6c9bc19012ae8e948fbc9227",
+    "pons": [
+      {
+        "tx": "0xd85d22e141421292b380c7ad64c86229f7faf267d752a2c22f50628431188710",
+        "direction": "one_for_zero",
+        "gas_used": 141842
+      },
+      {
+        "tx": "0x5464d7f0abf57e344b1b53e701cd5fc00b94baf6b48ae2d167d363d81094ec81",
+        "direction": "one_for_zero",
+        "gas_used": 141718
+      },
+      {
+        "tx": "0x0efab9a955837f949ef5cbdb77542004c62535cb334dda68644b65b4633ba0d6",
+        "direction": "zero_for_one",
+        "gas_used": 156309
+      },
+      {
+        "tx": "0x0135cadf98d5e329b21d9671d75ee69e85841a5cfe616dcc8127f8002c462657",
+        "direction": "zero_for_one",
+        "gas_used": 156237
+      },
+      {
+        "tx": "0xd1281ceeb655bc0bd6a62550f65d6c39388c57721c0c20ee470f36ce20b6ae74",
+        "direction": "zero_for_one",
+        "gas_used": 139053
+      }
+    ],
+    "hookless": [
+      {
+        "tx": "0x6d42ebc6db30f00112b78edc89115874456a8ad28a23499b2913c45427f5bce7",
+        "direction": "one_for_zero",
+        "gas_used": 104596
+      },
+      {
+        "tx": "0xd304447403b8f22fda6dbdac36ccfa48718476283df94d66a8c6432a3ef03705",
+        "direction": "one_for_zero",
+        "gas_used": 110104
+      },
+      {
+        "tx": "0x52f0a3388a827879c5a8adba8ffc3b2266ae61c563f41599ee2b26b922d4fa7c",
+        "direction": "zero_for_one",
+        "gas_used": 99486
+      },
+      {
+        "tx": "0xeac37b06afa6e2fc649a30bb4992056445eea86d68c35b6908fb1c25d06ec3e1",
+        "direction": "zero_for_one",
+        "gas_used": 99454
+      }
+    ],
+    "largest_difference": 56855,
+    "chosen_constant": 60000,
+    "cold_accrual_probe": {
+      "outcome": "Not isolatable. The first HookFeeCollected for a (pool, currency) writes pendingFees and pendingCreatorTax from zero, worth up to 17,100 gas per slot, but every first-accrual transaction found was a multi-swap router bundle with no comparable hookless counterpart.",
+      "receipts": [
+        "0x718af773406e9b7f36526ad1e0faa49278e44a151e08c5aafa954b5e0029ad89",
+        "0xc5583da8d91cc15505d9d364e49918466e67f5553545e675f856464c08879eea",
+        "0xe3e9e8829344a886ceb10c84758d20e16c14a8378b93454a0fec8554a9a0f6a3",
+        "0x94c6e1128cb9895f716ee7d777a39b8bd2484fe03ff1d53805fc341c8cdd7bd0"
+      ]
+    },
+    "tick_crossing_check": {
+      "pons_modify_liquidity": "raw/modify_liquidity_logs.json",
+      "hookless_modify_liquidity": "raw/modify_liquidity_hookless_logs.json",
+      "note": "Each compared pool has exactly one ModifyLiquidity event, in its own creation block, opening a full-range position at ticks -887200/887200. Every gas-evidence receipt reports that same whole liquidity in its Swap log, so no measured swap crossed a tick.",
+      "pons_pool_liquidity": "29277002188455995649502",
+      "hookless_pool_liquidity": "33133081655650444492657"
+    }
+  }
+}

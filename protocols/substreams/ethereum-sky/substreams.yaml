@@ -1,0 +1,77 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_sky"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+  excludePaths:
+    - google
+    - sf/substreams
+    - tycho
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_sky.wasm
+
+network: mainnet
+
+modules:
+  - name: map_protocol_components
+    kind: map
+    initialBlock: &start_block 20283666
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_components
+    kind: store
+    initialBlock: *start_block
+    updatePolicy: set_if_not_exists
+    valueType: int64
+    inputs:
+      - map: map_protocol_components
+
+  - name: map_relative_balances
+    kind: map
+    initialBlock: *start_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_components
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_component_balances
+    kind: store
+    initialBlock: *start_block
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_relative_balances
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: *start_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_components
+      - store: store_component_balances
+        mode: deltas
+      - map: map_relative_balances
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_protocol_components: &config "psm=0xf6e72db5454dd049d0788e411b06cfaf16853042&psm_creation_block=20283666&psm_creation_tx=0x61e5d04f14d1fea9c505fb4dc9b6cf6e97bc83f2076b53cb7e92d0a2e88b6bbd&pocket=0x37305b1cd40574e4c5ce33f8e8306be057fd7341&wrapper=0xa188eec8f81263234da3622a406892f3d630f98c&wrapper_creation_block=20668728&wrapper_creation_tx=0x43ddae74123936f6737b78fcf785547f7f6b7b27e280fe7fbf98c81b3c018585&converter=0x3225737a9bbb6473cb4a45b7244aca2befdb276a&converter_creation_block=20663734&converter_creation_tx=0xb63d6f4cfb9945130ab32d914aaaafbad956be3718176771467b4154f9afab61&vat=0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b&dai_join=0x9759a6ac90977b93b58547b4a71c78317f391a28&usds_join=0x3c0f895007ca717aa01c8693e59df1e8c3777feb&dai=0x6b175474e89094c44da98b954eedeac495271d0f&usdc=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48&usds=0xdc035d45d973e3ec169d2276ddab16f1e407384f"
+  map_relative_balances: *config
+  map_protocol_changes: *config

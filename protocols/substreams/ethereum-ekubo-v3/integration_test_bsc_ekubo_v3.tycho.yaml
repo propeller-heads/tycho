@@ -1,0 +1,23 @@
+substreams_yaml_path: ./bsc-ekubo-v3.yaml
+protocol_system: "ekubo_v3"
+skip_balance_check: true # Ekubo follows a singleton design, pool balances are held in one contract
+protocol_type_names:
+  - "ekubo_v3_pool"
+# No SignedExclusiveSwap pool exists on BSC yet, so `is_exclusive` tagging is not covered here.
+tests:
+  - name: base_concentrated
+    start_block: 121338776
+    stop_block: 121338776
+    expected_components:
+      - id: "0x0b2beb013e7685f17c9cb9687da871b2aba4fc51ff3bdfff4cf1a9c2d0b6c856"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x55d398326f99059ff775485246999027b3197955"
+        static_attributes:
+          token0: "0x0000000000000000000000000000000000000000"
+          token1: "0x55d398326f99059ff775485246999027b3197955"
+          extension: "0x0000000000000000000000000000000000000000"
+          fee: "0x0020c49ba5e353f8"
+          pool_type_config: "0x8000137c"
+        creation_tx: "0x9d41b3a2bbba7288d159351e0438296d26bf2a59f6b2607b3e58a89418496c45"
+        skip_execution: true # No ekubo_v3 executor is deployed on BSC yet

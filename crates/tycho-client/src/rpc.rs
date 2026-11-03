@@ -147,6 +147,11 @@ use crate::{
 /// Suggested concurrency level for RPC clients.
 pub const RPC_CLIENT_CONCURRENCY: usize = 4;
 
+/// Default number of contracts per `/contract_state` request. A few large contracts can hold most
+/// of a protocol's storage, so smaller requests let the server build them and the client decode
+/// them in parallel.
+pub const CONTRACT_STATE_CHUNK_SIZE: usize = 100;
+
 /// Parameters for [`RPCClient::get_contract_state`].
 #[derive(Clone, PartialEq, Debug)]
 pub struct ContractStateParams {
@@ -782,7 +787,8 @@ pub trait RPCClient: Send + Sync {
 
     /// Retrieves a snapshot of contract state for a set of contract IDs.
     ///
-    /// If `chunk_size` is `None`, it defaults to the maximum page size.
+    /// If `chunk_size` is `None`, it defaults to [`CONTRACT_STATE_CHUNK_SIZE`], capped at the
+    /// maximum page size.
     async fn get_contract_state_paginated(
         &self,
         params: ContractStatePaginatedParams,
@@ -793,9 +799,11 @@ pub trait RPCClient: Send + Sync {
         let mut sorted_ids = params.contract_ids;
         sorted_ids.sort();
 
+        let max_page_size = StateRequestBody::effective_max_page_size(self.compression()) as usize;
         let chunk_size = params
             .chunk_size
-            .unwrap_or(StateRequestBody::effective_max_page_size(self.compression()) as usize);
+            .unwrap_or(CONTRACT_STATE_CHUNK_SIZE)
+            .min(max_page_size);
 
         let mut tasks = Vec::new();
         for chunk in sorted_ids.chunks(chunk_size) {
@@ -849,23 +857,25 @@ pub trait RPCClient: Send + Sync {
 
         let semaphore = Arc::new(Semaphore::new(concurrency));
 
-        let chunk_size = chunk_size.unwrap_or(
-            ProtocolComponentsRequestBody::effective_max_page_size(self.compression()) as usize,
-        );
+        let max_page_size =
+            ProtocolComponentsRequestBody::effective_max_page_size(self.compression()) as usize;
+        let chunk_size = chunk_size
+            .unwrap_or(max_page_size)
+            .min(max_page_size);
 
         // If a set of component IDs is specified, the maximum return size is already known,
         // allowing us to pre-compute the number of requests to be made.
         match component_ids {
             Some(ids) => {
+                // The server pages within the requested ids, so every chunk is page 0.
                 let tasks: Vec<_> =
                     ids.chunks(chunk_size)
-                        .enumerate()
-                        .map(|(index, chunk)| {
+                        .map(|chunk| {
                             let sem = semaphore.clone();
                             let mut base =
                                 ProtocolComponentsParams::new(chain, protocol_system.as_str())
                                     .with_component_ids(chunk.to_vec())
-                                    .with_pagination(index as i64, chunk_size as i64);
+                                    .with_pagination(0, chunk_size as i64);
                             if let Some(tvl) = tvl_gt {
                                 base = base.with_tvl_gt(tvl);
                             }
@@ -953,12 +963,12 @@ pub trait RPCClient: Send + Sync {
     ) -> Result<Vec<ProtocolComponentState>, RPCError> {
         let semaphore = Arc::new(Semaphore::new(params.concurrency));
 
-        let chunk_size =
-            params
-                .chunk_size
-                .unwrap_or(
-                    ProtocolStateRequestBody::effective_max_page_size(self.compression()) as usize
-                );
+        let max_page_size =
+            ProtocolStateRequestBody::effective_max_page_size(self.compression()) as usize;
+        let chunk_size = params
+            .chunk_size
+            .unwrap_or(max_page_size)
+            .min(max_page_size);
 
         let tasks: Vec<_> = params
             .protocol_ids
@@ -994,9 +1004,11 @@ pub trait RPCClient: Send + Sync {
     ///
     /// If `chunk_size` is `None`, it defaults to the maximum page size.
     async fn get_all_tokens(&self, params: AllTokensParams) -> Result<Vec<Token>, RPCError> {
+        let max_page_size = TokensRequestBody::effective_max_page_size(self.compression()) as usize;
         let chunk_size = params
             .chunk_size
-            .unwrap_or(TokensRequestBody::effective_max_page_size(self.compression()) as usize);
+            .unwrap_or(max_page_size)
+            .min(max_page_size);
 
         let semaphore = Arc::new(Semaphore::new(params.concurrency));
 
@@ -1072,23 +1084,23 @@ pub trait RPCClient: Send + Sync {
     ) -> Result<HashMap<String, f64>, RPCError> {
         let semaphore = Arc::new(Semaphore::new(params.concurrency));
 
-        let chunk_size =
-            params
-                .chunk_size
-                .unwrap_or(
-                    ComponentTvlRequestBody::effective_max_page_size(self.compression()) as usize
-                );
+        let max_page_size =
+            ComponentTvlRequestBody::effective_max_page_size(self.compression()) as usize;
+        let chunk_size = params
+            .chunk_size
+            .unwrap_or(max_page_size)
+            .min(max_page_size);
 
         match params.component_ids {
             Some(ids) => {
+                // The server pages within the requested ids, so every chunk is page 0.
                 let tasks: Vec<_> =
                     ids.chunks(chunk_size)
-                        .enumerate()
-                        .map(|(index, chunk)| {
+                        .map(|chunk| {
                             let sem = semaphore.clone();
                             let mut p = ComponentTvlParams::new(params.chain)
                                 .with_component_ids(chunk.to_vec())
-                                .with_pagination(index as i64, chunk_size as i64);
+                                .with_pagination(0, chunk_size as i64);
                             if let Some(ref ps) = params.protocol_system {
                                 p = p.with_protocol_system(ps.as_str());
                             }
@@ -1186,9 +1198,11 @@ pub trait RPCClient: Send + Sync {
 
         let semaphore = Arc::new(Semaphore::new(concurrency));
 
-        let chunk_size = chunk_size.unwrap_or(
-            TracedEntryPointRequestBody::effective_max_page_size(self.compression()) as usize,
-        );
+        let max_page_size =
+            TracedEntryPointRequestBody::effective_max_page_size(self.compression()) as usize;
+        let chunk_size = chunk_size
+            .unwrap_or(max_page_size)
+            .min(max_page_size);
 
         let tasks: Vec<_> = component_ids
             .chunks(chunk_size)
@@ -1531,21 +1545,23 @@ impl RPCClient for HttpRPCClient {
             return Ok(Page::new(vec![], 0, 0, 0));
         }
 
-        let dto_response = serde_json::from_str::<StateRequestResponse>(&body)
-            .map_err(|err| RPCError::from_parse_error(err, &body))?;
-        trace!(?dto_response, "Received contract_state response from Tycho server");
+        // Decoding a large response takes seconds of CPU: run it on the blocking pool, so the
+        // runtime stays responsive and concurrent requests decode in parallel.
+        let (data, pagination) = tokio::task::spawn_blocking(move || {
+            let dto_response = serde_json::from_str::<StateRequestResponse>(&body)
+                .map_err(|err| RPCError::from_parse_error(err, &body))?;
+            trace!(?dto_response, "Received contract_state response from Tycho server");
 
-        let data: Vec<Account> = dto_response
-            .accounts
-            .into_iter()
-            .map(Account::from)
-            .collect();
-        Ok(Page::new(
-            data,
-            dto_response.pagination.total,
-            dto_response.pagination.page,
-            dto_response.pagination.page_size,
-        ))
+            let data: Vec<Account> = dto_response
+                .accounts
+                .into_iter()
+                .map(Account::from)
+                .collect();
+            Ok::<_, RPCError>((data, dto_response.pagination))
+        })
+        .await
+        .map_err(|err| RPCError::Fatal(format!("Decoding contract_state failed: {err}")))??;
+        Ok(Page::new(data, pagination.total, pagination.page, pagination.page_size))
     }
 
     async fn get_protocol_components(
@@ -2116,6 +2132,170 @@ mod tests {
             hex::decode("5c06b7c5b3d910fd33bc2229846f9ddaf91d584d9b196e16636901ac3a77077e")
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_contract_state_paginated_requests_default_sized_chunks() {
+        let mut server = Server::new_async().await;
+        let full_chunks = server
+            .mock("POST", "/v1/contract_state")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "pagination": {"page": 0, "page_size": 100}
+            })))
+            .expect(3)
+            .with_body(GET_CONTRACT_STATE_RESP)
+            .create_async()
+            .await;
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+        let ids: Vec<Bytes> = (0..250u16)
+            .map(|i| Bytes::from(i.to_be_bytes()))
+            .collect();
+
+        let accounts = client
+            .get_contract_state_paginated(
+                ContractStatePaginatedParams::new(Chain::Ethereum, "", RPC_CLIENT_CONCURRENCY)
+                    .with_contract_ids(ids),
+            )
+            .await
+            .expect("get state");
+
+        full_chunks.assert();
+        assert_eq!(accounts.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_protocol_components_paginated_requests_every_id_chunk_as_page_zero() {
+        let mut server = Server::new_async().await;
+        let chunks = server
+            .mock("POST", "/v1/protocol_components")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "pagination": {"page": 0, "page_size": 100}
+            })))
+            .expect(3)
+            .with_body(r#"{"protocol_components": [], "pagination": {"page": 0, "page_size": 100, "total": 0}}"#)
+            .create_async()
+            .await;
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+        let ids: Vec<String> = (0..250)
+            .map(|i| format!("component_{i}"))
+            .collect();
+
+        client
+            .get_protocol_components_paginated(
+                ProtocolComponentsPaginatedParams::new(
+                    Chain::Ethereum,
+                    "uniswap_v2",
+                    RPC_CLIENT_CONCURRENCY,
+                )
+                .with_component_ids(ids)
+                .with_chunk_size(100),
+            )
+            .await
+            .expect("get components");
+
+        chunks.assert();
+    }
+
+    #[tokio::test]
+    async fn test_get_component_tvl_paginated_requests_every_id_chunk_as_page_zero() {
+        let mut server = Server::new_async().await;
+        let chunks = server
+            .mock("POST", "/v1/component_tvl")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "pagination": {"page": 0, "page_size": 100}
+            })))
+            .expect(3)
+            .with_body(r#"{"tvl": {}, "pagination": {"page": 0, "page_size": 100, "total": 0}}"#)
+            .create_async()
+            .await;
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+        let ids: Vec<String> = (0..250)
+            .map(|i| format!("component_{i}"))
+            .collect();
+
+        client
+            .get_component_tvl_paginated(
+                ComponentTvlPaginatedParams::new(Chain::Ethereum, RPC_CLIENT_CONCURRENCY)
+                    .with_component_ids(ids)
+                    .with_chunk_size(100),
+            )
+            .await
+            .expect("get component tvl");
+
+        chunks.assert();
+    }
+
+    #[tokio::test]
+    async fn test_get_protocol_components_paginated_clamps_chunk_size_to_max_page_size() {
+        let mut server = Server::new_async().await;
+        let max = ProtocolComponentsRequestBody::MAX_PAGE_SIZE_COMPRESSED;
+        let chunks = server
+            .mock("POST", "/v1/protocol_components")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "pagination": {"page": 0, "page_size": max}
+            })))
+            .expect(2)
+            .with_body(format!(
+                r#"{{"protocol_components": [], "pagination": {{"page": 0, "page_size": {max}, "total": 0}}}}"#
+            ))
+            .create_async()
+            .await;
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+        let ids: Vec<String> = (0..max + 1)
+            .map(|i| format!("component_{i}"))
+            .collect();
+
+        client
+            .get_protocol_components_paginated(
+                ProtocolComponentsPaginatedParams::new(
+                    Chain::Ethereum,
+                    "uniswap_v2",
+                    RPC_CLIENT_CONCURRENCY,
+                )
+                .with_component_ids(ids)
+                .with_chunk_size(max as usize * 2),
+            )
+            .await
+            .expect("get components");
+
+        chunks.assert();
+    }
+
+    #[tokio::test]
+    async fn test_get_component_tvl_paginated_clamps_chunk_size_to_max_page_size() {
+        let mut server = Server::new_async().await;
+        let max = ComponentTvlRequestBody::MAX_PAGE_SIZE_COMPRESSED;
+        let chunks = server
+            .mock("POST", "/v1/component_tvl")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "pagination": {"page": 0, "page_size": max}
+            })))
+            .expect(2)
+            .with_body(format!(
+                r#"{{"tvl": {{}}, "pagination": {{"page": 0, "page_size": {max}, "total": 0}}}}"#
+            ))
+            .create_async()
+            .await;
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+        let ids: Vec<String> = (0..max + 1)
+            .map(|i| format!("component_{i}"))
+            .collect();
+
+        client
+            .get_component_tvl_paginated(
+                ComponentTvlPaginatedParams::new(Chain::Ethereum, RPC_CLIENT_CONCURRENCY)
+                    .with_component_ids(ids)
+                    .with_chunk_size(max as usize * 2),
+            )
+            .await
+            .expect("get component tvl");
+
+        chunks.assert();
     }
 
     #[tokio::test]

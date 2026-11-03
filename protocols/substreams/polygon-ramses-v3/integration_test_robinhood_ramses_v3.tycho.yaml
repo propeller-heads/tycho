@@ -1,0 +1,26 @@
+substreams_yaml_path: ./robinhood-ramses-v3.yaml
+protocol_system: "ramses_v3"
+protocol_type_names:
+  - "ramses_v3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # WETH / COST, the busiest pool Ramses V3 opened on Robinhood Chain.
+  - name: test_weth_cost_pool
+    # PoolCreated, Initialize and the first Mint all land in the creation transaction.
+    start_block: 52907861
+    # Stop once Swap, Burn, and Collect have all been emitted at least once:
+    #   Swap:    block 52908455
+    #   Burn:    block 52911521
+    #   Collect: block 52911521
+    stop_block: 52911521
+    expected_components:
+      - id: "0x009c0a025ae15204b1a76ad409b73e6bc7456486"
+        tokens:
+          - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" # WETH
+          - "0x4EA005168D7F09a7A0Ba9D1DEf21a479950E44C2" # COST
+        static_attributes:
+          tick_spacing: "0x05"
+        creation_tx: "0x6686d039720f56d0a5f7c48da9e68158eb41b57867e7a5ebf6179748c3b4e13d"
+        skip_simulation: false

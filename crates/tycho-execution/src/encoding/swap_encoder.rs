@@ -43,6 +43,13 @@ pub trait SwapEncoder: Sync + Send {
     /// Returns the address of the protocol-specific executor contract.
     fn executor_address(&self) -> &Bytes;
 
+    /// Whether `encode_swap` blocks on a network round trip, like an RFQ signed-quote request.
+    ///
+    /// Callers use this to decide whether to encode swaps on separate OS threads.
+    fn blocks_on_quote(&self) -> bool {
+        false
+    }
+
     /// Creates a cloned instance of the swap encoder.
     ///
     /// This allows the encoder to be cloned when it is being used as a `Box<dyn SwapEncoder>`.

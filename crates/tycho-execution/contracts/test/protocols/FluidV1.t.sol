@@ -1,7 +1,8 @@
 pragma solidity ^0.8.26;
 
 import "../TychoRouterTestSetup.sol";
-import {FluidV1Executor, IFluidV1Dex} from "@src/executors/FluidV1Executor.sol";
+import {FluidV1Executor} from "@src/executors/FluidV1Executor.sol";
+import {IFluidV1Dex} from "@interfaces/IFluidV1Dex.sol";
 import {Constants} from "../Constants.sol";
 import "forge-std/Test.sol";
 
@@ -268,7 +269,7 @@ contract TychoRouterForFluidV1Test is TychoRouterTestSetup {
 
         vm.prank(ALICE);
         uint256 amountOut = tychoRouter.singleSwap{value: amountIn}(
-            amountIn, ETH_ADDR, address(ezETH), 1, ALICE, noClientFee(), swap
+            amountIn, ETH_ADDR, address(ezETH), 1, 1, ALICE, noClientFee(), swap
         );
 
         assertGt(amountOut, 0);

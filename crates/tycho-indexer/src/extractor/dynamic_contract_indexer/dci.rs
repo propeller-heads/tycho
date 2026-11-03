@@ -399,6 +399,7 @@ where
 
             let mut new_account_addr_to_slots: HashMap<Address, HashSet<StoreKey>> = HashMap::new();
             let mut new_account_addr_to_tx: HashMap<Address, &Transaction> = HashMap::new();
+            let mut refetched_accounts: HashSet<Address> = HashSet::new();
 
             for (tx, traced_entrypoints) in tx_to_traced_entrypoint {
                 for traced_entrypoint in traced_entrypoints.iter() {
@@ -435,6 +436,9 @@ where
                         if is_new_account ||
                             (!new_slots.is_empty() && self.should_skip_full_indexing(account))
                         {
+                            if !is_new_account {
+                                refetched_accounts.insert(account.clone());
+                            }
                             // Only add new slots to new_account_addr_to_slots (might be empty for
                             // new accounts)
                             new_account_addr_to_slots
@@ -534,13 +538,27 @@ where
 
             // Update the block changes
             for (account, tx) in new_account_addr_to_tx.into_iter() {
-                let account_delta = new_accounts
+                let mut account_delta = new_accounts
                     .remove(&account)
                     .ok_or_else(|| {
                         ExtractionError::Unknown(format!(
                             "Account {account} not found in the result. All accounts in request should have a result"
                         ))
                     })?;
+
+                // The account extractor labels every result a creation, but a tracked account
+                // only gains slots here.
+                if refetched_accounts.contains(&account) {
+                    let code = account_delta.code().clone();
+                    account_delta = AccountDelta::new(
+                        account_delta.chain,
+                        account_delta.address,
+                        account_delta.slots,
+                        account_delta.balance,
+                        code,
+                        ChangeType::Update,
+                    );
+                }
 
                 match block_changes
                     .txs_with_update
@@ -2792,9 +2810,9 @@ mod tests {
                             Chain::Ethereum,
                             token_address,
                             HashMap::new(),
-                            None,
-                            None,
-                            ChangeType::Update,
+                            Some(Bytes::from(0_u8).lpad(32, 0)),
+                            Some(Bytes::from("0x6000")),
+                            ChangeType::Creation,
                         ),
                     )]))
                 }
@@ -2826,6 +2844,15 @@ mod tests {
         // Verify the update was processed
         assert!(!block_changes.txs_with_update.is_empty());
         assert!(!block_changes.trace_results.is_empty());
+        let token_deltas: Vec<_> = block_changes
+            .txs_with_update
+            .iter()
+            .filter_map(|tx| tx.account_deltas.get(&token_address))
+            .collect();
+        assert!(!token_deltas.is_empty());
+        assert!(token_deltas
+            .iter()
+            .all(|delta| delta.change_type() == ChangeType::Update));
     }
 
     #[tokio::test]
@@ -2884,9 +2911,9 @@ mod tests {
                             Chain::Ethereum,
                             new_account,
                             HashMap::new(),
-                            None,
-                            None,
-                            ChangeType::Update,
+                            Some(Bytes::from(0_u8).lpad(32, 0)),
+                            Some(Bytes::from("0x6000")),
+                            ChangeType::Creation,
                         ),
                     )]))
                 }
@@ -2913,6 +2940,10 @@ mod tests {
             .account_deltas
             .contains_key(&new_account));
         assert!(!block_changes.trace_results.is_empty());
+        assert_eq!(
+            block_changes.txs_with_update[0].account_deltas[&new_account].change_type(),
+            ChangeType::Creation
+        );
     }
 
     #[tokio::test]

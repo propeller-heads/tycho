@@ -44,6 +44,10 @@ const FACTORY_VARIANTS: &[(AlloyAddress, CurveVariant)] = &[
     (CRYPTO_POOL_FACTORY, CurveVariant::TwoCryptoV1),
     (CRYPTO_SWAP_NG_FACTORY, CurveVariant::StableSwapNG),
     (STABLESWAP_FACTORY, CurveVariant::StableSwapNG),
+    // This factory deploys plain pools and metapools, but only its plain-pool branch is live in
+    // the substreams, and plain pools are the base template. Should the metapool branch be
+    // enabled, its pools need `StableSwapMeta` and this entry becomes wrong for them: the factory
+    // table is consulted before the probing that is the only source of `StableSwapMeta`.
     (META_POOL_FACTORY, CurveVariant::StableSwapV2),
     (TRICRYPTO_FACTORY, CurveVariant::TriCryptoNG),
 ];

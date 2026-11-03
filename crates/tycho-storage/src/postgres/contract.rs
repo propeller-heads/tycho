@@ -790,6 +790,17 @@ impl PostgresGateway {
         Ok(account)
     }
 
+    /// Retrieve contracts, optionally filtered by address and paginated.
+    ///
+    /// Pagination is applied to the accounts matching `ids` (or, if `ids` is None, to all accounts
+    /// that have code at `version`), ordered by their database id. Balances, code and slots are
+    /// only read for the accounts on the returned page. Callers must therefore pass the full
+    /// address list in `ids` and let this method cut the page - pre-slicing `ids` while also
+    /// passing `pagination_params` would apply the offset twice.
+    ///
+    /// The returned `total` is the number of accounts matching the filters at `version`, so the
+    /// caller can tell how many pages exist. Note that on the `ids` path an account that has no
+    /// code at `version` is counted but not returned.
     #[instrument(level = Level::DEBUG, skip(self, ids, conn))]
     pub async fn get_contracts(
         &self,
@@ -859,15 +870,21 @@ impl PostgresGateway {
                 .collect::<Vec<_>>()
         };
 
-        let mut all_balances = self
-            .get_account_balances(chain, ids, version, true, conn)
-            .await?;
-
-        // take all ids and query both code and storage
+        // Everything below must be restricted to the accounts on this page. Passing the request's
+        // `ids` here instead would read the whole chain's balances and slots on every page, since
+        // a full snapshot request has `ids = None`.
         let account_ids = accounts
             .iter()
             .map(|a| a.id)
             .collect::<HashSet<_>>();
+        let page_addresses = accounts
+            .iter()
+            .map(|a| a.address.clone())
+            .collect::<Vec<_>>();
+
+        let mut all_balances = self
+            .get_account_balances(chain, Some(&page_addresses), version, true, conn)
+            .await?;
 
         let codes = {
             use schema::contract_code::dsl::*;
@@ -921,7 +938,7 @@ impl PostgresGateway {
 
         let slots = if include_slots {
             Some(
-                self.get_contract_slots(chain, ids, version, conn)
+                self.get_contract_slots(chain, Some(&page_addresses), version, conn)
                     .await?,
             )
         } else {
@@ -2223,6 +2240,38 @@ mod test {
         assert!(result.entity.len() <= 1);
         assert_eq!(result.total, Some(exp_total));
         assert_eq!(result.entity, exp);
+    }
+
+    /// Walks all pages of a full snapshot request. Each page must carry the balances and slots of
+    /// its own accounts only, and the total must stay the number of matching accounts.
+    #[tokio::test]
+    async fn test_get_contracts_pages_cover_all_accounts() {
+        let mut conn = setup_db().await;
+        setup_data(&mut conn).await;
+        let gw = EVMGateway::from_connection(&mut conn).await;
+
+        let mut pages = Vec::new();
+        for page in 0..3 {
+            let result = gw
+                .get_contracts(
+                    &Chain::Ethereum,
+                    None,
+                    None,
+                    true,
+                    Some(&PaginationParams { page, page_size: 1 }),
+                    &mut conn,
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(result.total, Some(2));
+            pages.push(result.entity);
+        }
+
+        // c2 is deleted at the latest version, so only c0 and c1 are returned.
+        assert_eq!(pages[0], vec![account_c0(2)]);
+        assert_eq!(pages[1], vec![account_c1(2)]);
+        assert_eq!(pages[2], Vec::<Account>::new());
     }
 
     #[tokio::test]

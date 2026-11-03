@@ -12,11 +12,11 @@ authors = [
     { name = "Propeller Heads" }
 ]
 requires-python = ">=3.9"
-license = { text = "MIT License" }
+license = { text = "Fynd License 1.1 (https://github.com/propeller-heads/tycho/blob/main/LICENSE.md)" }
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
     "Operating System :: OS Independent"
 ]
 dependencies = [

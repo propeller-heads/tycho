@@ -28,10 +28,16 @@ use tycho_common::{
 use crate::{
     extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
     services::{
-        cache::RpcCache,
+        cache::{RpcCache, RpcCacheKind},
         deltas_buffer::{PendingDeltasBuffer, PendingDeltasError},
         middleware::{
-            PlanRestrictions, PlansConfig, RequestPaginationValidation, ValidateRestrictions,
+            compress_state_response, PlanRestrictions, PlansConfig, RequestPaginationValidation,
+            ValidateRestrictions,
+        },
+        off_worker::{CacheReply, OffWorker},
+        state::{
+            service::{EntityCacheSetup, FallbackReason, StateService, StateServiceError},
+            shadow::{self, Endpoint, SampledRequest, Shadow},
         },
     },
 };
@@ -52,6 +58,9 @@ pub enum RpcError {
 
     #[error("Page size must be less than or equal to {0}.")]
     Pagination(usize),
+
+    #[error("Page must be at least 0 and page size at least 1, got page {page} and page size {page_size}.")]
+    InvalidPagination { page: i64, page_size: i64 },
 
     #[error("Unknown error: {0}")]
     Unknown(String),
@@ -74,6 +83,7 @@ impl ResponseError for RpcError {
             RpcError::Connection(_) => StatusCode::INTERNAL_SERVER_ERROR,
             RpcError::DeltasError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             RpcError::Pagination(_) => StatusCode::BAD_REQUEST,
+            RpcError::InvalidPagination { .. } => StatusCode::BAD_REQUEST,
             RpcError::Unknown(_) => StatusCode::INTERNAL_SERVER_ERROR,
             RpcError::PlanRestrictionViolation(_) => StatusCode::BAD_REQUEST,
         }
@@ -87,10 +97,21 @@ impl ResponseError for RpcError {
             RpcError::DeltasError(e) => HttpResponse::InternalServerError().body(e.to_string()),
             RpcError::Pagination(e) => HttpResponse::BadRequest()
                 .body(format!("Page size must be less than or equal to {e}.")),
+            RpcError::InvalidPagination { .. } => HttpResponse::BadRequest().body(self.to_string()),
             RpcError::Unknown(e) => HttpResponse::InternalServerError().body(e.to_string()),
             RpcError::PlanRestrictionViolation(e) => HttpResponse::BadRequest().body(e.to_owned()),
         }
     }
+}
+
+/// A state endpoint's answer: built by the entity cache, or read through the database path.
+#[derive(Debug)]
+enum StateAnswer<D> {
+    /// The entity cache's answer, written to JSON from views over the cache entries. It never
+    /// enters a response cache.
+    EntityCache(HttpResponse),
+    /// The database path's answer, shared with the response cache.
+    Db(Arc<D>),
 }
 
 pub struct RpcHandler<G, T> {
@@ -99,7 +120,6 @@ pub struct RpcHandler<G, T> {
     // it potentially could make this slow. We should consider refactoring this and maybe use
     // generics
     pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
-    token_cache: RpcCache<dto::TokensRequestBody, dto::TokensRequestResponse>,
     contract_storage_cache: RpcCache<dto::StateRequestBody, dto::StateRequestResponse>,
     protocol_state_cache:
         RpcCache<dto::ProtocolStateRequestBody, dto::ProtocolStateRequestResponse>,
@@ -114,6 +134,10 @@ pub struct RpcHandler<G, T> {
     /// `protocol_systems` response so clients can skip entrypoint requests for non-DCI protocols.
     dci_protocols: Vec<String>,
     protocol_systems: Vec<String>,
+    /// Which path answers state requests. `Off` without extractors.
+    state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
+    /// Builds and serializes large state responses off the request workers.
+    off_worker: OffWorker,
 }
 
 impl<G, T> RpcHandler<G, T>
@@ -132,12 +156,6 @@ where
         const ONE_MB: u64 = 1_024 * 1_024;
         const HUNDRED_MB: u64 = ONE_MB * 100;
         const ONE_GB: u64 = ONE_MB * 1_024;
-
-        let token_cache = RpcCache::<dto::TokensRequestBody, dto::TokensRequestResponse>::new(
-            "token",
-            ONE_GB,
-            7 * 60,
-        );
 
         // Create contract storage cache with a weigher to limit memory usage
         let contract_storage_cache =
@@ -165,7 +183,6 @@ where
         Self {
             db_gateway,
             pending_deltas,
-            token_cache,
             contract_storage_cache,
             protocol_state_cache,
             component_cache,
@@ -174,6 +191,52 @@ where
             plans_config,
             dci_protocols,
             protocol_systems,
+            state_service: EntityCacheSetup::Off,
+            off_worker: OffWorker::new(),
+        }
+    }
+
+    /// Turns the given response caches off. A request to an endpoint whose cache is off always
+    /// runs the full path and stores nothing.
+    pub(crate) fn with_disabled_caches(mut self, kinds: &[RpcCacheKind]) -> Self {
+        for kind in kinds {
+            match kind {
+                RpcCacheKind::ContractStorage => self.contract_storage_cache.disable(),
+                RpcCacheKind::ProtocolState => self.protocol_state_cache.disable(),
+                RpcCacheKind::ProtocolComponents => self.component_cache.disable(),
+                RpcCacheKind::TracedEntryPoints => self.traced_entry_point_cache.disable(),
+            }
+        }
+        self
+    }
+
+    /// Sets which path answers the state endpoints.
+    pub(crate) fn with_state_service(
+        mut self,
+        state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
+    ) -> Self {
+        if matches!(state_service, EntityCacheSetup::Serve(_)) {
+            register_db_path_counters();
+        }
+        self.state_service = state_service;
+        self
+    }
+
+    /// The state service, when it answers requests itself: `serve` mode only.
+    fn serving_state_service(&self) -> Option<Arc<StateService>> {
+        match &self.state_service {
+            EntityCacheSetup::Serve(service) => Some(Arc::clone(service)),
+            EntityCacheSetup::Shadow(_) | EntityCacheSetup::Off => None,
+        }
+    }
+
+    /// The shadow comparison, when `shadow` compares `request`.
+    fn sampling_shadow(&self, request: &impl std::hash::Hash) -> Option<&Shadow> {
+        match &self.state_service {
+            EntityCacheSetup::Shadow(shadow) if shadow.samples(request) => Some(shadow),
+            EntityCacheSetup::Shadow(_) | EntityCacheSetup::Serve(_) | EntityCacheSetup::Off => {
+                None
+            }
         }
     }
 
@@ -236,11 +299,13 @@ where
         Ok(dto::VersionParam { timestamp: Some(ts), block: version.block.clone() })
     }
 
+    /// Answers `/contract_state`. In `serve`, the entity cache answers first, and the response
+    /// cache keeps only database answers.
     #[instrument(skip(self, request))]
     async fn get_contract_state(
         &self,
         request: &dto::StateRequestBody,
-    ) -> Result<Arc<dto::StateRequestResponse>, RpcError> {
+    ) -> Result<StateAnswer<dto::StateRequestResponse>, RpcError> {
         if let Some(ref contract_ids) = request.contract_ids {
             info!(
                 n_contract_ids = contract_ids.len(),
@@ -251,12 +316,68 @@ where
         } else {
             info!("Getting contract state (all contracts)");
         }
+        if let Some(service) = self.serving_state_service() {
+            // The service cannot answer without ids; skip the off-worker permit.
+            if request.contract_ids.is_none() {
+                count_db_path(Endpoint::ContractState, FallbackReason::NoIds);
+            } else {
+                let cache_request = request.clone();
+                let answer = self
+                    .off_worker
+                    .view_json(Endpoint::ContractState, move || {
+                        service.contract_state_view(&cache_request)
+                    })
+                    .await?;
+                match answer {
+                    CacheReply::Answered(response) => return Ok(StateAnswer::EntityCache(response)),
+                    CacheReply::Fallback(reason) => count_db_path(Endpoint::ContractState, reason),
+                }
+            }
+        }
         self.contract_storage_cache
             .get(request.clone(), |r| async {
-                self.get_contract_state_inner(r)
+                self.get_contract_state_from_db(r)
                     .await
                     .map(|res| (res, true))
             })
+            .await
+            .map(StateAnswer::Db)
+    }
+
+    /// Answers from the database path. In `shadow`, a sampled request also runs the cache path to
+    /// compare it; the client still gets the database answer.
+    async fn get_contract_state_from_db(
+        &self,
+        request: dto::StateRequestBody,
+    ) -> Result<dto::StateRequestResponse, RpcError> {
+        if let Some(shadow) = self.sampling_shadow(&request) {
+            let sampled = SampledRequest {
+                endpoint: Endpoint::ContractState,
+                protocol_system: &request.protocol_system,
+                version: &request.version,
+                id_count: request
+                    .contract_ids
+                    .as_ref()
+                    .map_or(0, Vec::len),
+            };
+            return shadow
+                .run(
+                    sampled,
+                    self.get_contract_state_inner(request.clone()),
+                    |service| service.contract_state(&request),
+                    |service, db, cache| {
+                        shadow::compare_contract_state(db, cache, |address| {
+                            service.unsaved_elsewhere(
+                                &request.protocol_system,
+                                &request.version,
+                                address,
+                            )
+                        })
+                    },
+                )
+                .await;
+        }
+        self.get_contract_state_inner(request)
             .await
     }
 
@@ -291,6 +412,11 @@ where
             );
         }
 
+        // When addresses are given, the slice above already is the page, so the db must not
+        // paginate again - its offset would be applied a second time and skip the whole page.
+        // Without addresses the db owns pagination and also reports the total page count.
+        let db_pagination = if paginated_addrs.is_some() { None } else { Some(&pagination_params) };
+
         // Get the contract states from the database
         let account_data = self
             .db_gateway
@@ -299,7 +425,7 @@ where
                 paginated_addrs.as_deref(),
                 Some(&db_version),
                 true,
-                Some(&pagination_params),
+                db_pagination,
             )
             .await
             .map_err(|err| {
@@ -455,11 +581,13 @@ where
         }
     }
 
+    /// Answers `/protocol_state`. In `serve`, the entity cache answers first, and the response
+    /// cache keeps only database answers.
     #[instrument(skip(self, request))]
     async fn get_protocol_state(
         &self,
         request: &dto::ProtocolStateRequestBody,
-    ) -> Result<Arc<dto::ProtocolStateRequestResponse>, RpcError> {
+    ) -> Result<StateAnswer<dto::ProtocolStateRequestResponse>, RpcError> {
         if let Some(ref component_ids) = request.protocol_ids {
             info!(
                 n_component_ids = component_ids.len(),
@@ -470,12 +598,62 @@ where
         } else {
             info!("Getting protocol state (all protocols)");
         }
+        if let Some(service) = self.serving_state_service() {
+            // The service cannot answer without ids; skip the off-worker permit.
+            if request.protocol_ids.is_none() {
+                count_db_path(Endpoint::ProtocolState, FallbackReason::NoIds);
+            } else {
+                let cache_request = request.clone();
+                let answer = self
+                    .off_worker
+                    .view_json(Endpoint::ProtocolState, move || {
+                        service.protocol_state_view(&cache_request)
+                    })
+                    .await?;
+                match answer {
+                    CacheReply::Answered(response) => return Ok(StateAnswer::EntityCache(response)),
+                    CacheReply::Fallback(reason) => count_db_path(Endpoint::ProtocolState, reason),
+                }
+            }
+        }
         self.protocol_state_cache
             .get(request.clone(), |r| async {
-                self.get_protocol_state_inner(r)
+                self.get_protocol_state_from_db(r)
                     .await
                     .map(|res| (res, true))
             })
+            .await
+            .map(StateAnswer::Db)
+    }
+
+    /// Answers from the database path. In `shadow`, a sampled request also runs the cache path to
+    /// compare it; the client still gets the database answer.
+    async fn get_protocol_state_from_db(
+        &self,
+        request: dto::ProtocolStateRequestBody,
+    ) -> Result<dto::ProtocolStateRequestResponse, RpcError> {
+        if let Some(shadow) = self.sampling_shadow(&request) {
+            let sampled = SampledRequest {
+                endpoint: Endpoint::ProtocolState,
+                protocol_system: &request.protocol_system,
+                version: &request.version,
+                id_count: request
+                    .protocol_ids
+                    .as_ref()
+                    .map_or(0, Vec::len),
+            };
+            return shadow
+                .run(
+                    sampled,
+                    self.get_protocol_state_inner(request.clone()),
+                    |service| service.protocol_state(&request),
+                    |_, db, cache| {
+                        shadow::compare_protocol_state(request.include_balances, db, cache)
+                    },
+                )
+                .await;
+        }
+        self.get_protocol_state_inner(request)
             .await
     }
 
@@ -520,8 +698,7 @@ where
                 };
                 let protocol_components = self
                     .get_protocol_components_inner(req)
-                    .await
-                    .expect("Failed to get protocol component IDs");
+                    .await?;
                 let total_components = protocol_components.pagination.total;
                 (
                     protocol_components
@@ -672,21 +849,16 @@ where
         &self,
         request: &dto::TokensRequestBody,
     ) -> Result<Arc<dto::TokensRequestResponse>, RpcError> {
+        // Unlike the other endpoints there is no response cache here: the storage
+        // layer answers token queries from memory, so a response cache would only
+        // add staleness.
         let response = self
-            .token_cache
-            .get(request.clone(), |r: dto::TokensRequestBody| async {
-                self.get_tokens_inner(r)
-                    .await
-                    .map(|res| {
-                        let last_page = res.pagination.total_pages() - 1;
-                        (res, request.pagination.page < last_page)
-                    })
-            })
+            .get_tokens_inner(request.clone())
             .await?;
 
-        trace!(n_tokens_received=?response.tokens.len(), "Retrieved tokens from DB");
+        trace!(n_tokens_received=?response.tokens.len(), "Retrieved tokens");
 
-        Ok(response)
+        Ok(Arc::new(response))
     }
 
     async fn get_tokens_inner(
@@ -951,40 +1123,9 @@ where
             component_ids: paginated_component_ids,
         };
 
-        let entry_points_tracing_params_data = self
-            .db_gateway
-            .get_entry_points_tracing_params(filter, Some(&pagination_params))
-            .await
-            .map_err(|err| {
-                error!(error = %err, "Error while getting entry points with tracing params.");
-                err
-            })?;
-
-        trace!(
-            entry_points_tracing_params = ?entry_points_tracing_params_data,
-            "Retrieved entry points with tracing params from database."
-        );
-
-        // Flatten the ID lists, throwing away component ids, to avoid making duplicate db calls
-        // when getting traced entry points.
-        let entry_point_ids: HashSet<EntryPointId> = entry_points_tracing_params_data
-            .entity
-            .values()
-            .flat_map(|entry_points_with_tracing_params| {
-                entry_points_with_tracing_params
-                    .iter()
-                    .map(|entry_point| {
-                        entry_point
-                            .entry_point
-                            .external_id
-                            .clone()
-                    })
-            })
-            .collect();
-
         let traced_entry_points = self
             .db_gateway
-            .get_traced_entry_points(&entry_point_ids)
+            .get_traced_entry_points_by_component(filter, Some(&pagination_params))
             .await
             .map_err(|err| {
                 error!(error = %err, "Error while getting traced entry points.");
@@ -996,45 +1137,26 @@ where
             "Retrieved traced entry points from database."
         );
 
-        let mut traced_entry_points_by_component = HashMap::new();
-
-        for (component_id, entry_points_set) in entry_points_tracing_params_data.entity {
-            let mut pairs = Vec::with_capacity(entry_points_set.len());
-
-            for entry_point_with_params in entry_points_set {
-                let entry_point_id = entry_point_with_params
-                    .entry_point
-                    .external_id
-                    .as_str();
-                let tracing_param = &entry_point_with_params.params;
-
-                if let Some(results_for_entry_point) = traced_entry_points.get(entry_point_id) {
-                    if let Some(result_for_param) = results_for_entry_point.get(tracing_param) {
-                        pairs.push((
-                            entry_point_with_params.into(),
-                            result_for_param.clone().into(),
-                        ));
-                    } else {
-                        warn!(
-                            %entry_point_id,
-                            %tracing_param,
-                            "No tracing results found for entry point with params."
-                        );
-                    }
-                } else {
-                    warn!(?entry_point_id, "No tracing results found for entry point.");
-                }
-            }
-
-            traced_entry_points_by_component.insert(component_id, pairs);
-        }
+        let traced_entry_points_by_component = traced_entry_points
+            .entity
+            .into_iter()
+            .map(|(component_id, pairs)| {
+                let pairs = pairs
+                    .into_iter()
+                    .map(|(entry_point_with_params, result)| {
+                        (entry_point_with_params.into(), result.into())
+                    })
+                    .collect();
+                (component_id, pairs)
+            })
+            .collect();
 
         Ok(dto::TracedEntryPointRequestResponse {
             traced_entry_points: traced_entry_points_by_component,
             pagination: PaginationResponse::new(
                 request.pagination.page,
                 request.pagination.page_size,
-                entry_points_tracing_params_data
+                traced_entry_points
                     .total
                     .unwrap_or_default(),
             ),
@@ -1130,6 +1252,47 @@ where
     }
 }
 
+/// The response to a state service failure: the body the database path returns for the same
+/// failure.
+impl From<StateServiceError> for RpcError {
+    fn from(err: StateServiceError) -> Self {
+        match err {
+            // A fallback goes to the database path before any conversion, so this arm does not run.
+            StateServiceError::Fallback(reason) => {
+                RpcError::Unknown(format!("Unhandled entity cache fallback: {reason:?}"))
+            }
+            StateServiceError::InvalidVersion(reason) => RpcError::Parse(reason),
+            StateServiceError::VersionAboveTip(version) => RpcError::Storage(
+                StorageError::NotFound("Version".to_string(), format!("{version:?}")),
+            ),
+            StateServiceError::ContractNotFound(address) => RpcError::Storage(
+                StorageError::NotFound("Contract".to_string(), address.to_string()),
+            ),
+            StateServiceError::LockPoisoned { system, reason } => {
+                PendingDeltasError::LockError(system, reason).into()
+            }
+            StateServiceError::WindowRead(err) => PendingDeltasError::from(err).into(),
+        }
+    }
+}
+
+/// Counts a state request the entity cache handed to the database path.
+fn count_db_path(endpoint: Endpoint, reason: FallbackReason) {
+    metrics::counter!("db_path_requests", "endpoint" => endpoint.label(), "reason" => reason.as_str())
+        .increment(1);
+}
+
+/// Registers every `db_path_requests` series at zero. Alerts read the first value of a new series
+/// as growth, so a series that first appears on its first fallback would fire them.
+fn register_db_path_counters() {
+    for endpoint in Endpoint::ALL {
+        for reason in FallbackReason::ALL {
+            metrics::counter!("db_path_requests", "endpoint" => endpoint.label(), "reason" => reason.as_str())
+                .increment(0);
+        }
+    }
+}
+
 /// Retrieve contract states
 ///
 /// This endpoint retrieves the state of contracts within a specific execution environment. If no
@@ -1173,18 +1336,23 @@ pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
     }
 
     // Call the handler to get the state
-    let response = handler
-        .into_inner()
-        .get_contract_state(&body)
-        .await;
+    let handler = handler.into_inner();
+    let response = handler.get_contract_state(&body).await;
 
-    match response {
-        Ok(state) => Ok(HttpResponse::Ok().json(state)),
+    let response = match response {
+        Ok(StateAnswer::EntityCache(response)) => Ok(response),
+        Ok(StateAnswer::Db(state)) => {
+            handler
+                .off_worker
+                .json(Endpoint::ContractState, state)
+                .await
+        }
         Err(err) => {
             error!(error = %err, ?body, "Error while getting contract state.");
             Err(err)
         }
-    }
+    }?;
+    compress_state_response(&req, response).await
 }
 
 /// Retrieve tokens
@@ -1312,18 +1480,23 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
     }
 
     // Call the handler to get protocol states
-    let response = handler
-        .into_inner()
-        .get_protocol_state(&body)
-        .await;
+    let handler = handler.into_inner();
+    let response = handler.get_protocol_state(&body).await;
 
-    match response {
-        Ok(state) => Ok(HttpResponse::Ok().json(state)),
+    let response = match response {
+        Ok(StateAnswer::EntityCache(response)) => Ok(response),
+        Ok(StateAnswer::Db(state)) => {
+            handler
+                .off_worker
+                .json(Endpoint::ProtocolState, state)
+                .await
+        }
         Err(err) => {
             error!(error = %err, ?body, "Error while getting protocol states.");
             Err(err)
         }
-    }
+    }?;
+    compress_state_response(&req, response).await
 }
 
 /// Retrieve protocol systems
@@ -1515,26 +1688,29 @@ pub async fn health() -> Result<HttpResponse, RpcError> {
 // reliably when it is placed on the macro invocation itself.
 #[allow(clippy::extra_unused_lifetimes)]
 mod tests {
-    use std::{collections::HashMap, env, str::FromStr};
+    use std::{collections::HashMap, env, str::FromStr, sync::Mutex};
 
     use actix_web::{test, App};
     use chrono::{NaiveDateTime, TimeDelta};
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
     use mockall::{mock, predicate::eq};
     use rstest::rstest;
     use tycho_common::{
         dto, keccak256,
         models::{
-            blockchain,
             blockchain::{
                 AddressStorageLocation, EntryPoint, EntryPointWithTracingParams, RPCTracerParams,
                 TracingParams, TracingResult,
             },
-            contract::Account,
+            contract::{Account, AccountBalance, AccountDelta},
             protocol::{ProtocolComponent, ProtocolComponentState},
             token::Token,
             ChangeType,
         },
-        storage::WithTotal,
+        storage::{
+            AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StateSnapshot, WithTotal,
+            WriteTimestamp,
+        },
         traits::MockEntryPointTracer,
     };
     use tycho_ethereum::{
@@ -1542,7 +1718,15 @@ mod tests {
     };
 
     use super::*;
-    use crate::testing::{evm_contract_slots, MockGateway};
+    use crate::{
+        extractor::models::fixtures,
+        services::state::{
+            cache::EntityCache,
+            shadow::{testing::moved_comparisons, Sampler},
+            window::{new_windows, DeltaWindow, FoldSink, WindowConfig},
+        },
+        testing::{self, evm_contract_slots, MockGateway},
+    };
 
     const WETH: &str = "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
@@ -1776,6 +1960,996 @@ mod tests {
         assert_eq!(state.accounts.len(), 2);
         assert_eq!(state.accounts[0], expected.into());
         assert_eq!(state.accounts[1], buf_expected.into());
+        assert_eq!(state.pagination.total, 2);
+    }
+
+    /// In serve mode a request without ids is answered by the database path, which lists every
+    /// contract; the cache serves explicit ids only.
+    #[tokio::test]
+    async fn test_get_contract_state_without_ids_uses_the_database_in_serve_mode() {
+        let account = Account::new(
+            Chain::Ethereum,
+            Bytes::from(1u64).lpad(20, 0),
+            "account".to_owned(),
+            evm_contract_slots([(0, 2)]),
+            Bytes::from(101u8).lpad(32, 0),
+            HashMap::new(),
+            Bytes::from("C0C0C0"),
+            Bytes::zero(32),
+            Bytes::zero(32),
+            Bytes::zero(32),
+            None,
+        );
+        let mut gw = MockGateway::new();
+        let mock_response = Ok(WithTotal { entity: vec![account.clone()], total: Some(1) });
+        gw.expect_get_contracts()
+            .return_once(|_, _, _, _, _| Box::pin(async move { mock_response }));
+        let service = StateService::new(
+            new_windows(["uniswap_v2"], WindowConfig::default()),
+            Arc::new(EntityCache::new()),
+        );
+        let req_handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        )
+        .with_state_service(EntityCacheSetup::Serve(Arc::new(service)));
+
+        let request = dto::StateRequestBody {
+            contract_ids: None,
+            protocol_system: "uniswap_v2".to_string(),
+            version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::default(),
+        };
+        let answer = req_handler
+            .get_contract_state(&request)
+            .await
+            .unwrap();
+
+        let StateAnswer::Db(state) = answer else {
+            panic!("a request without ids must be answered by the database path: {answer:?}");
+        };
+        assert_eq!(state.accounts, vec![account.into()]);
+        assert_eq!(state.pagination.total, 1);
+    }
+
+    /// Which path answers a state request, by entity cache mode.
+    #[derive(Clone, Copy, Debug)]
+    enum CacheMode {
+        Serve,
+        Shadow,
+    }
+
+    /// A handler whose state service holds one `ex` window with blocks 5 and 6: account
+    /// `0x..01` and component `c1` are created in block 5. The cache starts empty. Without
+    /// expectations, `gw` panics on any database call.
+    fn state_routing_handler(
+        gw: MockGateway,
+        mode: CacheMode,
+    ) -> RpcHandler<MockGateway, MockEntryPointTracer> {
+        let windows = new_windows(["ex"], WindowConfig::default());
+        let address = Bytes::from(1u64).lpad(20, 0);
+        for n in 5..=6 {
+            let mut block = testing::aggregated_changes("ex", n, n, Some(n));
+            let change = if n == 5 { ChangeType::Creation } else { ChangeType::Update };
+            block.account_deltas.insert(
+                address.clone(),
+                AccountDelta::new(
+                    Chain::Ethereum,
+                    address.clone(),
+                    fixtures::optional_slots([(1, n)]),
+                    Some(Bytes::from(n)),
+                    Some(Bytes::from("0x6000")),
+                    change,
+                ),
+            );
+            let block = testing::with_state_delta(block, "c1", n);
+            windows["ex"]
+                .lock()
+                .unwrap()
+                .insert(&Arc::new(block))
+                .unwrap();
+        }
+        let service = Arc::new(StateService::new(windows, Arc::new(EntityCache::new())));
+        let setup = match mode {
+            CacheMode::Serve => EntityCacheSetup::Serve(service),
+            CacheMode::Shadow => EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(0.0))),
+        };
+        RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        )
+        .with_state_service(setup)
+    }
+
+    /// A request without ids lists the component ids first; a failure there keeps its status.
+    #[tokio::test]
+    async fn test_get_protocol_state_without_ids_keeps_the_component_lookup_error() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_components()
+            .return_once(|_, _, _, _, _| {
+                Box::pin(async {
+                    Err(StorageError::NotFound("ProtocolComponent".to_string(), "ex".to_string()))
+                })
+            });
+        let handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+
+        let result = handler
+            .get_protocol_state_inner(dto::ProtocolStateRequestBody {
+                protocol_ids: None,
+                protocol_system: "ex".to_string(),
+                chain: dto::Chain::Ethereum,
+                include_balances: true,
+                version: dto::VersionParam::at_block(dto::Chain::Ethereum, 1),
+                pagination: dto::PaginationParams::new(0, 100),
+            })
+            .await;
+
+        assert!(matches!(result, Err(RpcError::Storage(StorageError::NotFound(..)))), "{result:?}");
+    }
+
+    fn shadow_account() -> Account {
+        Account::new(
+            Chain::Ethereum,
+            Bytes::from(1u64).lpad(20, 0),
+            "account".to_owned(),
+            evm_contract_slots([(0, 2)]),
+            Bytes::from(101u8).lpad(32, 0),
+            HashMap::new(),
+            Bytes::from("C0C0C0"),
+            Bytes::zero(32),
+            Bytes::zero(32),
+            Bytes::zero(32),
+            None,
+        )
+    }
+
+    fn shadow_handler(
+        gw: MockGateway,
+        windows: HashMap<String, Arc<Mutex<DeltaWindow>>>,
+        cache: Arc<EntityCache>,
+        rate: f64,
+    ) -> RpcHandler<MockGateway, MockEntryPointTracer> {
+        let service = Arc::new(StateService::new(windows, cache));
+        RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        )
+        .with_state_service(EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(rate))))
+    }
+
+    fn uniswap_v2_windows() -> HashMap<String, Arc<Mutex<DeltaWindow>>> {
+        new_windows(["uniswap_v2"], WindowConfig::default())
+    }
+
+    fn shadow_request(protocol_system: &str, ids: Option<Vec<Bytes>>) -> dto::StateRequestBody {
+        dto::StateRequestBody {
+            contract_ids: ids,
+            protocol_system: protocol_system.to_string(),
+            version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::default(),
+        }
+    }
+
+    fn gateway_returning(account: Account) -> MockGateway {
+        let mut gw = MockGateway::new();
+        let response = Ok(WithTotal { entity: vec![account], total: Some(1) });
+        gw.expect_get_contracts()
+            .return_once(|_, _, _, _, _| Box::pin(async move { response }));
+        gw
+    }
+
+    #[rstest]
+    #[case::shadow_sampled(EntityCacheSetup::Shadow(()), 1.0, true)]
+    #[case::shadow_at_rate_zero(EntityCacheSetup::Shadow(()), 0.0, false)]
+    #[case::serve(EntityCacheSetup::Serve(()), 1.0, false)]
+    #[case::off(EntityCacheSetup::Off, 1.0, false)]
+    #[tokio::test]
+    async fn test_sampling_shadow_samples_only_in_shadow_mode(
+        #[case] mode: EntityCacheSetup<()>,
+        #[case] rate: f64,
+        #[case] expected: bool,
+    ) {
+        let service =
+            Arc::new(StateService::new(uniswap_v2_windows(), Arc::new(EntityCache::new())));
+        let state_service = match mode {
+            EntityCacheSetup::Off => EntityCacheSetup::Off,
+            EntityCacheSetup::Shadow(()) => {
+                EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(rate)))
+            }
+            EntityCacheSetup::Serve(()) => EntityCacheSetup::Serve(service),
+        };
+        let handler = RpcHandler::new(
+            MockGateway::new(),
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        )
+        .with_state_service(state_service);
+
+        let request = shadow_request("uniswap_v2", Some(vec![Bytes::from(1u64).lpad(20, 0)]));
+
+        assert_eq!(
+            handler
+                .sampling_shadow(&request)
+                .is_some(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_returns_the_database_answer_when_the_cache_path_falls_back() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let account = shadow_account();
+        let handler = shadow_handler(
+            gateway_returning(account.clone()),
+            uniswap_v2_windows(),
+            Arc::new(EntityCache::new()),
+            1.0,
+        );
+        // No window for this system: the cache path falls back to the database path.
+        let request = shadow_request("curve", Some(vec![account.address.clone()]));
+
+        let answer = handler
+            .get_contract_state_from_db(request)
+            .await;
+
+        assert_eq!(answer.unwrap().accounts, vec![account.into()]);
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), "fallback".to_string(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_discards_a_comparison_that_straddled_a_fold() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let account = shadow_account();
+        let cache = Arc::new(EntityCache::new());
+        let folding = cache.clone();
+        let mut gw = MockGateway::new();
+        let response = Ok(WithTotal { entity: vec![account.clone()], total: Some(1) });
+        // The fold lands while the database path runs, between the two token reads.
+        gw.expect_get_contracts()
+            .return_once(move |_, _, _, _, _| {
+                folding
+                    .fold(&crate::testing::aggregated_changes("uniswap_v2", 7, 7, Some(7)))
+                    .unwrap();
+                Box::pin(async move { response })
+            });
+        let handler = shadow_handler(gw, uniswap_v2_windows(), cache, 1.0);
+        let request = shadow_request("uniswap_v2", Some(vec![account.address.clone()]));
+
+        let answer = handler
+            .get_contract_state_from_db(request)
+            .await;
+
+        assert_eq!(answer.unwrap().accounts, vec![account.into()]);
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), "discarded".to_string(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_counts_a_request_without_ids_as_a_fallback() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let account = shadow_account();
+        let handler = shadow_handler(
+            gateway_returning(account.clone()),
+            uniswap_v2_windows(),
+            Arc::new(EntityCache::new()),
+            1.0,
+        );
+
+        let answer = handler
+            .get_contract_state_from_db(shadow_request("uniswap_v2", None))
+            .await
+            .unwrap();
+
+        assert_eq!(answer.accounts, vec![account.into()]);
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), "fallback".to_string(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_returns_the_database_error() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let mut gw = MockGateway::new();
+        gw.expect_get_contracts()
+            .return_once(|_, _, _, _, _| {
+                Box::pin(async move { Err(StorageError::Unexpected("db down".to_string())) })
+            });
+        let address = Bytes::from(1u64).lpad(20, 0);
+        // The window holds the account, so the cache path answers.
+        let mut block = testing::aggregated_changes("uniswap_v2", 1, 0, None);
+        block.account_deltas.insert(
+            address.clone(),
+            AccountDelta::new(
+                Chain::Ethereum,
+                address.clone(),
+                fixtures::optional_slots([(1, 7)]),
+                Some(Bytes::from(100u64)),
+                Some(Bytes::from("0x6000")),
+                ChangeType::Creation,
+            ),
+        );
+        let windows = uniswap_v2_windows();
+        windows["uniswap_v2"]
+            .lock()
+            .unwrap()
+            .insert(&Arc::new(block))
+            .unwrap();
+        let handler = shadow_handler(gw, windows, Arc::new(EntityCache::new()), 1.0);
+        let request = shadow_request("uniswap_v2", Some(vec![address]));
+
+        let answer = handler
+            .get_contract_state_from_db(request)
+            .await;
+
+        // `off` returns the gateway error as `RpcError::Storage`; shadow must return the same.
+        assert!(matches!(answer, Err(RpcError::Storage(_))), "{answer:?}");
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), "db_failed".to_string(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_returns_the_database_answer_for_protocol_state() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let state = ProtocolComponentState::new("c1", HashMap::new(), HashMap::new());
+        let mut gw = MockGateway::new();
+        let response = Ok(WithTotal { entity: vec![state.clone()], total: Some(1) });
+        gw.expect_get_protocol_states()
+            .return_once(|_, _, _, _, _, _| Box::pin(async move { response }));
+        let handler = shadow_handler(gw, uniswap_v2_windows(), Arc::new(EntityCache::new()), 1.0);
+        let request = dto::ProtocolStateRequestBody {
+            protocol_ids: Some(vec!["c1".to_string()]),
+            protocol_system: "curve".to_string(),
+            ..Default::default()
+        };
+
+        let answer = handler
+            .get_protocol_state_from_db(request)
+            .await;
+
+        assert_eq!(answer.unwrap().states, vec![state.into()]);
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("protocol_state".to_string(), "fallback".to_string(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_matches_an_account_both_paths_hold() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let address = Bytes::from(1u64).lpad(20, 0);
+        let delta = AccountDelta::new(
+            Chain::Ethereum,
+            address.clone(),
+            fixtures::optional_slots([(1, 7)]),
+            Some(Bytes::from(100u64)),
+            Some(Bytes::from("0x6000")),
+            ChangeType::Creation,
+        );
+        let mut block = testing::aggregated_changes("uniswap_v2", 1, 0, None);
+        block
+            .account_deltas
+            .insert(address.clone(), delta.clone());
+        let windows = uniswap_v2_windows();
+        windows["uniswap_v2"]
+            .lock()
+            .unwrap()
+            .insert(&Arc::new(block))
+            .unwrap();
+        let handler = shadow_handler(
+            gateway_returning(delta.into_account_without_tx()),
+            windows,
+            Arc::new(EntityCache::new()),
+            1.0,
+        );
+
+        handler
+            .get_contract_state_from_db(shadow_request("uniswap_v2", Some(vec![address])))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), "match".to_string(), 1)]
+        );
+    }
+
+    /// Block 1 of `uniswap_v2` creates the account and block 2 of `other` changes its slot. The
+    /// database path does not apply block 2, so the answers differ. Whether `other` saved block 2
+    /// decides the outcome.
+    #[rstest]
+    #[case::unsaved(None, "known_mismatch")]
+    #[case::saved(Some(2), "mismatch")]
+    #[tokio::test]
+    async fn test_shadow_classifies_another_extractors_account_change(
+        #[case] other_committed: Option<u64>,
+        #[case] expected: &str,
+    ) {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let address = Bytes::from(1u64).lpad(20, 0);
+        let creation = AccountDelta::new(
+            Chain::Ethereum,
+            address.clone(),
+            fixtures::optional_slots([(1, 7)]),
+            Some(Bytes::from(100u64)),
+            Some(Bytes::from("0x6000")),
+            ChangeType::Creation,
+        );
+        let update = AccountDelta::new(
+            Chain::Ethereum,
+            address.clone(),
+            fixtures::optional_slots([(1, 9)]),
+            None,
+            None,
+            ChangeType::Update,
+        );
+        let mut own_1 = testing::aggregated_changes("uniswap_v2", 1, 0, None);
+        own_1
+            .account_deltas
+            .insert(address.clone(), creation.clone());
+        // Block 2 of `uniswap_v2` moves the version up to block 2, so block 2 of `other` is at
+        // or below it.
+        let own_2 = testing::aggregated_changes("uniswap_v2", 2, 0, None);
+        let mut other_2 = testing::aggregated_changes("other", 2, 2, other_committed);
+        other_2
+            .account_deltas
+            .insert(address.clone(), update);
+        let windows = new_windows(["uniswap_v2", "other"], WindowConfig::default());
+        for (system, block) in [("uniswap_v2", own_1), ("uniswap_v2", own_2), ("other", other_2)] {
+            windows[system]
+                .lock()
+                .unwrap()
+                .insert(&Arc::new(block))
+                .unwrap();
+        }
+        let handler = shadow_handler(
+            gateway_returning(creation.into_account_without_tx()),
+            windows,
+            Arc::new(EntityCache::new()),
+            1.0,
+        );
+
+        handler
+            .get_contract_state_from_db(shadow_request("uniswap_v2", Some(vec![address])))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), expected.to_string(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_matches_a_component_both_paths_hold() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let mut block = testing::with_state_delta(
+            testing::aggregated_changes("uniswap_v2", 1, 0, None),
+            "c1",
+            7,
+        );
+        block.new_protocol_components.insert(
+            "c1".to_string(),
+            ProtocolComponent {
+                id: "c1".to_string(),
+                protocol_system: "uniswap_v2".to_string(),
+                ..Default::default()
+            },
+        );
+        let windows = uniswap_v2_windows();
+        windows["uniswap_v2"]
+            .lock()
+            .unwrap()
+            .insert(&Arc::new(block))
+            .unwrap();
+        let state = ProtocolComponentState::new(
+            "c1",
+            HashMap::from([("x".to_string(), Bytes::from(7u64))]),
+            HashMap::new(),
+        );
+        let mut gw = MockGateway::new();
+        let response = Ok(WithTotal { entity: vec![state], total: Some(1) });
+        gw.expect_get_protocol_states()
+            .return_once(|_, _, _, _, _, _| Box::pin(async move { response }));
+        let handler = shadow_handler(gw, windows, Arc::new(EntityCache::new()), 1.0);
+        let request = dto::ProtocolStateRequestBody {
+            protocol_ids: Some(vec!["c1".to_string()]),
+            protocol_system: "uniswap_v2".to_string(),
+            version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
+            ..Default::default()
+        };
+
+        handler
+            .get_protocol_state_from_db(request)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("protocol_state".to_string(), "match".to_string(), 1)]
+        );
+    }
+
+    /// A state service failure gets the body the database path returns for the same failure.
+    #[tokio::test]
+    async fn test_state_service_version_above_tip_keeps_the_database_path_body() {
+        let err = StateServiceError::VersionAboveTip(BlockOrTimestamp::Block(
+            BlockIdentifier::Number((Chain::Ethereum, 6)),
+        ));
+
+        assert_eq!(
+            RpcError::from(err).to_string(),
+            "Failed to get storage: Could not find Version with id `Block(Number((Ethereum, 6)))`!"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_service_contract_not_found_keeps_the_database_path_body() {
+        let err = StateServiceError::ContractNotFound(Bytes::from(4u64).lpad(20, 0));
+
+        assert_eq!(
+            RpcError::from(err).to_string(),
+            "Failed to get storage: Could not find Contract with id \
+             `0x0000000000000000000000000000000000000004`!"
+        );
+    }
+
+    /// A serve answer from the entity cache does not enter the response cache. A database answer
+    /// does.
+    #[rstest]
+    #[case::serve_in_window(CacheMode::Serve, 6, 0)]
+    #[case::serve_below_window(CacheMode::Serve, 1, 1)]
+    #[case::shadow(CacheMode::Shadow, 6, 1)]
+    #[tokio::test]
+    async fn test_get_contract_state_routes_by_cache_mode_and_version(
+        #[case] mode: CacheMode,
+        #[case] block: u64,
+        #[case] db_calls: usize,
+    ) {
+        let mut gw = MockGateway::new();
+        gw.expect_get_contracts()
+            .times(db_calls)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        let handler = state_routing_handler(gw, mode);
+
+        let request = dto::StateRequestBody {
+            contract_ids: Some(vec![Bytes::from(1u64).lpad(20, 0)]),
+            protocol_system: "ex".to_string(),
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, block),
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::new(0, 100),
+        };
+
+        let result = handler
+            .get_contract_state(&request)
+            .await;
+
+        let from_cache = matches!(result.unwrap(), StateAnswer::EntityCache(_));
+        assert_eq!(from_cache, db_calls == 0);
+        assert_eq!(
+            handler
+                .contract_storage_cache
+                .contains(&request),
+            !from_cache
+        );
+    }
+
+    /// An address the cache cannot build fails in serve mode, and the database is not asked.
+    #[tokio::test]
+    async fn test_get_contract_state_returns_the_service_error_in_serve_mode() {
+        let handler = state_routing_handler(MockGateway::new(), CacheMode::Serve);
+
+        let request = dto::StateRequestBody {
+            contract_ids: Some(vec![Bytes::from(2u64).lpad(20, 0)]),
+            protocol_system: "ex".to_string(),
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, 6),
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::new(0, 100),
+        };
+
+        let result = handler
+            .get_contract_state(&request)
+            .await;
+
+        assert!(
+            matches!(result, Err(RpcError::Storage(StorageError::NotFound(ref kind, _))) if kind == "Contract"),
+            "{result:?}"
+        );
+    }
+
+    /// A serve answer from the entity cache does not enter the response cache. A database answer
+    /// does.
+    #[rstest]
+    #[case::serve_in_window(CacheMode::Serve, 6, 0)]
+    #[case::serve_below_window(CacheMode::Serve, 1, 1)]
+    #[case::shadow(CacheMode::Shadow, 6, 1)]
+    #[tokio::test]
+    async fn test_get_protocol_state_routes_by_cache_mode_and_version(
+        #[case] mode: CacheMode,
+        #[case] block: u64,
+        #[case] db_calls: usize,
+    ) {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_states()
+            .times(db_calls)
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        let handler = state_routing_handler(gw, mode);
+
+        let request = dto::ProtocolStateRequestBody {
+            protocol_ids: Some(vec!["c1".to_string()]),
+            protocol_system: "ex".to_string(),
+            chain: dto::Chain::Ethereum,
+            include_balances: true,
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, block),
+            pagination: dto::PaginationParams::new(0, 100),
+        };
+
+        let result = handler
+            .get_protocol_state(&request)
+            .await;
+
+        let from_cache = matches!(result.unwrap(), StateAnswer::EntityCache(_));
+        assert_eq!(from_cache, db_calls == 0);
+        assert_eq!(
+            handler
+                .protocol_state_cache
+                .contains(&request),
+            !from_cache
+        );
+    }
+
+    /// The `db_path_requests` counters that moved since the last snapshot, as
+    /// `(endpoint, reason, count)`, sorted.
+    fn moved_db_path_requests(snapshotter: &Snapshotter) -> Vec<(String, String, u64)> {
+        let mut moved: Vec<_> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| key.key().name() == "db_path_requests")
+            .filter_map(|(key, _, _, value)| {
+                let DebugValue::Counter(count) = value else { return None };
+                let label = |name: &str| {
+                    key.key()
+                        .labels()
+                        .find(|l| l.key() == name)
+                        .map(|l| l.value().to_string())
+                        .unwrap_or_default()
+                };
+                (count > 0).then(|| (label("endpoint"), label("reason"), count))
+            })
+            .collect();
+        moved.sort();
+        moved
+    }
+
+    /// A request below the window counts each time, also when the response cache answers it; a
+    /// request the entity cache answers counts nothing.
+    #[tokio::test]
+    async fn test_serve_counts_every_request_it_hands_to_the_database_path() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let mut gw = MockGateway::new();
+        gw.expect_get_contracts()
+            .times(2)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        let handler = state_routing_handler(gw, CacheMode::Serve);
+        let request = |block| dto::StateRequestBody {
+            contract_ids: Some(vec![Bytes::from(1u64).lpad(20, 0)]),
+            protocol_system: "ex".to_string(),
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, block),
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::new(0, 100),
+        };
+
+        for _ in 0..2 {
+            handler
+                .get_contract_state(&request(1))
+                .await
+                .unwrap();
+        }
+        let mut no_ids = request(1);
+        no_ids.contract_ids = None;
+        handler
+            .get_contract_state(&no_ids)
+            .await
+            .unwrap();
+        let below_window = moved_db_path_requests(&snapshotter);
+        handler
+            .get_contract_state(&request(6))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            below_window,
+            vec![
+                ("contract_state".to_string(), "below_window".to_string(), 2),
+                ("contract_state".to_string(), "no_ids".to_string(), 1),
+            ]
+        );
+        assert_eq!(moved_db_path_requests(&snapshotter), vec![]);
+    }
+
+    fn word(n: u64) -> Bytes {
+        Bytes::from(n).lpad(32, 0)
+    }
+
+    /// Account `0x..01` as the startup load reads it, with a title and distinct transaction
+    /// hashes.
+    fn loaded_account() -> Account {
+        let address = Bytes::from(1u64).lpad(20, 0);
+        let token = Bytes::from(9u64).lpad(20, 0);
+        let code = Bytes::from("0x6000");
+        Account::new(
+            Chain::Ethereum,
+            address.clone(),
+            "loaded".to_string(),
+            HashMap::from([(word(1), word(1)), (word(2), word(2))]),
+            Bytes::from(4u64),
+            HashMap::from([(
+                token.clone(),
+                AccountBalance::new(address, token, Bytes::from(5u64), word(24)),
+            )]),
+            code.clone(),
+            keccak256(&code).into(),
+            word(21),
+            word(22),
+            Some(word(23)),
+        )
+    }
+
+    /// Component `c1` as the startup load reads it.
+    fn loaded_component() -> ProtocolComponentState {
+        ProtocolComponentState::new(
+            "c1",
+            HashMap::from([
+                ("x".to_string(), Bytes::from(1u64)),
+                ("y".to_string(), Bytes::from(2u64)),
+            ]),
+            HashMap::from([(Bytes::from(9u64).lpad(20, 0), Bytes::from(5u64))]),
+        )
+    }
+
+    /// A `serve` handler whose cache holds [`loaded_account`] and [`loaded_component`] from block
+    /// 4. The `ex` window then sets slot 1, the native balance and attribute `x` to `n` in blocks 5
+    /// and 6. The gateway panics on any database call, so only a cache answer passes.
+    fn loaded_cache_handler() -> RpcHandler<MockGateway, MockEntryPointTracer> {
+        let account = loaded_account();
+        let at = WriteTimestamp::from(&testing::block(4));
+        let cache = EntityCache::from_snapshot(StateSnapshot {
+            accounts: vec![AccountSnapshot {
+                written_at: AccountWriteTimestamps::uniform(&account, at),
+                account,
+            }],
+            components: vec![ComponentSnapshot {
+                system: "ex".to_string(),
+                state: loaded_component(),
+                updated_at: at,
+            }],
+        });
+        let windows = new_windows(["ex"], WindowConfig::default());
+        let address = Bytes::from(1u64).lpad(20, 0);
+        for n in 5..=6 {
+            let mut block = testing::aggregated_changes("ex", n, n, Some(n));
+            block.account_deltas.insert(
+                address.clone(),
+                AccountDelta::new(
+                    Chain::Ethereum,
+                    address.clone(),
+                    fixtures::optional_slots([(1, n)]),
+                    Some(Bytes::from(n)),
+                    None,
+                    ChangeType::Update,
+                ),
+            );
+            let block = testing::with_state_delta(block, "c1", n);
+            windows["ex"]
+                .lock()
+                .unwrap()
+                .insert(&Arc::new(block))
+                .unwrap();
+        }
+        let service = StateService::new(windows, Arc::new(cache));
+        RpcHandler::new(
+            MockGateway::new(),
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        )
+        .with_state_service(EntityCacheSetup::Serve(Arc::new(service)))
+    }
+
+    #[actix_web::test]
+    async fn test_contract_state_cache_answer_is_the_json_of_the_dto() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(loaded_cache_handler()))
+                .route(
+                    "/v1/contract_state",
+                    web::post().to(contract_state::<MockGateway, MockEntryPointTracer>),
+                ),
+        )
+        .await;
+        let mut account = loaded_account();
+        account.slots.insert(word(1), word(6));
+        account.native_balance = Bytes::from(6u64);
+        let expected = dto::StateRequestResponse::new(
+            vec![account.into()],
+            PaginationResponse::new(0, 100, 1),
+        );
+        let request = test::TestRequest::post()
+            .uri("/v1/contract_state")
+            .set_json(dto::StateRequestBody {
+                contract_ids: Some(vec![Bytes::from(1u64).lpad(20, 0)]),
+                protocol_system: "ex".to_string(),
+                version: dto::VersionParam::at_block(dto::Chain::Ethereum, 6),
+                chain: dto::Chain::Ethereum,
+                pagination: dto::PaginationParams::new(0, 100),
+            })
+            .to_request();
+
+        let body: serde_json::Value = test::call_and_read_body_json(&app, request).await;
+
+        assert_eq!(body, serde_json::to_value(&expected).unwrap());
+    }
+
+    #[actix_web::test]
+    async fn test_protocol_state_cache_answer_is_the_json_of_the_dto() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(loaded_cache_handler()))
+                .route(
+                    "/v1/protocol_state",
+                    web::post().to(protocol_state::<MockGateway, MockEntryPointTracer>),
+                ),
+        )
+        .await;
+        let mut state = loaded_component();
+        state
+            .attributes
+            .insert("x".to_string(), Bytes::from(6u64));
+        let expected = dto::ProtocolStateRequestResponse::new(
+            vec![state.into()],
+            PaginationResponse::new(0, 100, 1),
+        );
+        let request = test::TestRequest::post()
+            .uri("/v1/protocol_state")
+            .set_json(dto::ProtocolStateRequestBody {
+                protocol_ids: Some(vec!["c1".to_string()]),
+                protocol_system: "ex".to_string(),
+                chain: dto::Chain::Ethereum,
+                include_balances: true,
+                version: dto::VersionParam::at_block(dto::Chain::Ethereum, 6),
+                pagination: dto::PaginationParams::new(0, 100),
+            })
+            .to_request();
+
+        let body: serde_json::Value = test::call_and_read_body_json(&app, request).await;
+
+        assert_eq!(body, serde_json::to_value(&expected).unwrap());
+    }
+
+    /// The requested address list is sliced to the page before the db call, so the db must not
+    /// apply the offset a second time - doing so skipped every account on pages after the first.
+    #[tokio::test]
+    async fn test_get_contract_state_second_page() {
+        let first_page_addr = Bytes::from_str("6B175474E89094C44Da98b954EedeAC495271d0F").unwrap();
+        let second_page_addr = Bytes::from_str("388C818CA8B9251b393131C08a736A67ccB19297").unwrap();
+        let expected = Account::new(
+            Chain::Ethereum,
+            second_page_addr.clone(),
+            "account1".to_owned(),
+            evm_contract_slots([(0, 2)]),
+            Bytes::from(101u8).lpad(32, 0),
+            HashMap::new(),
+            Bytes::from("C1C1C1"),
+            Bytes::zero(32),
+            Bytes::zero(32),
+            Bytes::zero(32),
+            None,
+        );
+
+        // The address and pagination arguments the gateway was called with.
+        type ObservedArgs = Option<(Option<Vec<Bytes>>, Option<PaginationParams>)>;
+
+        let mut gw = MockGateway::new();
+        let observed_args: Arc<Mutex<ObservedArgs>> = Arc::new(Mutex::new(None));
+        let args_writer = observed_args.clone();
+        let response = expected.clone();
+        gw.expect_get_contracts()
+            .return_once(move |_, addresses, _, _, pagination| {
+                *args_writer.lock().unwrap() =
+                    Some((addresses.map(|a| a.to_vec()), pagination.cloned()));
+                Box::pin(async move { Ok(WithTotal { entity: vec![response], total: Some(1) }) })
+            });
+
+        let req_handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+
+        let request = dto::StateRequestBody {
+            contract_ids: Some(vec![first_page_addr, second_page_addr.clone()]),
+            protocol_system: "uniswap_v2".to_string(),
+            version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 1, page_size: 1 },
+        };
+        let state = req_handler
+            .get_contract_state_inner(request)
+            .await
+            .unwrap();
+
+        let (addresses, pagination) = observed_args
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("get_contracts was not called");
+        assert_eq!(addresses, Some(vec![second_page_addr]));
+        assert_eq!(pagination, None);
+
+        assert_eq!(state.accounts.len(), 1);
+        assert_eq!(state.accounts[0], expected.into());
+        // Paging is over the requested address list, so the total is its length.
         assert_eq!(state.pagination.total, 2);
     }
 
@@ -2236,28 +3410,20 @@ mod tests {
         // Gateway responses
         // At this point, the component ids have already been paginated, so they are not
         // queried from the gateway unless they are on page 1
-        let params_to_trace_result = HashMap::from([
-            (tracing_params_a.clone(), trace_result_a.clone()),
-            (tracing_params_b.clone(), trace_result_b.clone()),
-        ]);
-        let expected_entry_points_with_params = HashMap::from([(
+        let gateway_traced_entry_points = HashMap::from([(
             component_id_a.clone(),
-            HashSet::from([entry_point_with_params_a.clone(), entry_point_with_params_b.clone()]),
+            vec![
+                (entry_point_with_params_a.clone(), trace_result_a.clone()),
+                (entry_point_with_params_b.clone(), trace_result_b.clone()),
+            ],
         )]);
-
-        let expected_trace_results =
-            HashMap::from([(entry_point_id_a.clone(), params_to_trace_result)]);
 
         let mut gw = MockGateway::new();
 
-        let mock_get_entry_points_response =
-            Ok(WithTotal { entity: expected_entry_points_with_params.clone(), total: Some(2) });
-        gw.expect_get_entry_points_tracing_params()
-            .return_once(|_, _| Box::pin(async move { mock_get_entry_points_response }));
-
-        let mock_traced_entry_points_response = Ok(expected_trace_results.clone());
-        gw.expect_get_traced_entry_points()
-            .return_once(|_| Box::pin(async move { mock_traced_entry_points_response }));
+        let mock_traced_entry_points_response =
+            Ok(WithTotal { entity: gateway_traced_entry_points, total: Some(2) });
+        gw.expect_get_traced_entry_points_by_component()
+            .return_once(|_, _| Box::pin(async move { mock_traced_entry_points_response }));
 
         let req_handler = RpcHandler::new(
             gw,
@@ -2394,119 +3560,6 @@ mod tests {
         );
     }
     #[test]
-    async fn test_get_traced_entry_points_missing_result() {
-        // We attempt to fetch results for one component, where one tracing params  does not have a
-        // matching result. This param should not be included in the final response.
-
-        let component_id_a = "component_a".to_string();
-
-        let entry_point_id_a = "entrypoint_a".to_string();
-        let entry_point_a = EntryPoint {
-            external_id: entry_point_id_a.clone(),
-            target: Bytes::from("0x0000000000000000000000000000000000000001"),
-            signature: "sig()".to_string(),
-        };
-        let tracing_params_a = TracingParams::RPCTracer(RPCTracerParams {
-            caller: Some(Bytes::from("0x000000000000000000000000000000000000000a")),
-            calldata: Bytes::from("0x000000000000000000000000000000000000000b"),
-            state_overrides: None,
-            prune_addresses: None,
-        });
-        let tracing_params_b = TracingParams::RPCTracer(RPCTracerParams {
-            caller: Some(Bytes::from("0x000000000000000000000000000000000000000b")),
-            calldata: Bytes::from("0x000000000000000000000000000000000000000c"),
-            state_overrides: None,
-            prune_addresses: None,
-        });
-        let entry_point_with_params_a = EntryPointWithTracingParams {
-            entry_point: entry_point_a.clone(),
-            params: tracing_params_a.clone(),
-        };
-        let entry_point_with_params_b = EntryPointWithTracingParams {
-            entry_point: entry_point_a.clone(),
-            params: tracing_params_b.clone(),
-        };
-        let trace_result_a = TracingResult {
-            retriggers: HashSet::from([(
-                Bytes::from("0x00000000000000000000000000000000000000aa"),
-                blockchain::AddressStorageLocation::new(
-                    Bytes::from("0x0000000000000000000000000000000000000aaa"),
-                    0,
-                ),
-            )]),
-            accessed_slots: HashMap::from([(
-                Bytes::from("0x0000000000000000000000000000000000aaaa"),
-                HashSet::from([Bytes::from("0x0000000000000000000000000000000000aaaa")]),
-            )]),
-        };
-
-        // Gateway responses
-        // At this point, the component ids have already been paginated, so they are not
-        // queried from the gateway unless they are on page 1
-        let params_to_trace_result =
-            HashMap::from([(tracing_params_a.clone(), trace_result_a.clone())]);
-        let expected_entry_points_with_params = HashMap::from([(
-            component_id_a.clone(),
-            HashSet::from([entry_point_with_params_a.clone(), entry_point_with_params_b.clone()]),
-        )]);
-
-        let expected_trace_results =
-            HashMap::from([(entry_point_id_a.clone(), params_to_trace_result)]);
-
-        let mut gw = MockGateway::new();
-
-        let mock_get_entry_points_response =
-            Ok(WithTotal { entity: expected_entry_points_with_params.clone(), total: Some(2) });
-        gw.expect_get_entry_points_tracing_params()
-            .return_once(|_, _| Box::pin(async move { mock_get_entry_points_response }));
-
-        let mock_traced_entry_points_response = Ok(expected_trace_results.clone());
-        gw.expect_get_traced_entry_points()
-            .return_once(|_| Box::pin(async move { mock_traced_entry_points_response }));
-
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
-
-        let request = dto::TracedEntryPointRequestBody {
-            chain: dto::Chain::Ethereum,
-            protocol_system: "uniswap_v2".to_string(),
-            component_ids: Some(vec![component_id_a.clone()]),
-            pagination: dto::PaginationParams { page: 0, page_size: 1 },
-        };
-
-        let mut traced_entry_points = req_handler
-            .get_traced_entry_points(&request)
-            .await
-            .unwrap()
-            .as_ref()
-            .clone();
-
-        let expected_rpc_result = HashMap::from([(
-            component_id_a.clone(),
-            vec![(
-                dto::EntryPointWithTracingParams::from(entry_point_with_params_a.clone()),
-                dto::TracingResult::from(trace_result_a.clone()),
-            )],
-        )]);
-
-        assert_eq!(
-            traced_entry_points
-                .traced_entry_points
-                .get_mut(&component_id_a)
-                .unwrap(),
-            expected_rpc_result
-                .get(&component_id_a)
-                .unwrap(),
-        );
-    }
-
-    #[test]
     async fn test_msg() {
         // Define the contract address and endpoint
         let endpoint = "http://127.0.0.1:4242/v1/ethereum/contract_state";
@@ -2536,10 +3589,15 @@ mod tests {
             Token::new(&(WETH.parse().unwrap()), "WETH", 18, 0, &[], Chain::Ethereum, 100),
         ];
         let mut gw = MockGateway::new();
-        let mock_response = Ok(WithTotal { entity: expected.clone(), total: Some(3) });
-        // ensure the gateway is only accessed once - the second request should hit cache
+        // No response cache on this endpoint: every request reaches the gateway,
+        // which serves token queries from its own in-memory store.
+        let mock_entity = expected.clone();
         gw.expect_get_tokens()
-            .return_once(|_, _, _, _, _| Box::pin(async move { mock_response }));
+            .times(2)
+            .returning(move |_, _, _, _, _| {
+                let response = Ok(WithTotal { entity: mock_entity.clone(), total: Some(3) });
+                Box::pin(async move { response })
+            });
         let req_handler = RpcHandler::new(
             gw,
             None,
@@ -2574,7 +3632,7 @@ mod tests {
         assert_eq!(tokens.pagination.total, 3);
         assert_eq!(tokens.pagination.total_pages(), 2);
 
-        // Second request (should hit cache and not increase gateway access count)
+        // Second request goes to the gateway again
 
         let tokens = req_handler
             .get_tokens(&request)
@@ -2584,6 +3642,44 @@ mod tests {
         assert_eq!(tokens.tokens.len(), 2);
         assert_eq!(tokens.tokens[0].symbol, "USDC");
         assert_eq!(tokens.tokens[1].symbol, "WETH");
+    }
+
+    #[tokio::test]
+    async fn test_disabled_cache_sends_every_request_to_the_gateway() {
+        let mut gw = MockGateway::new();
+        // The component cache is off: both identical requests reach the gateway.
+        gw.expect_get_protocol_components()
+            .times(2)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        let req_handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        )
+        .with_disabled_caches(&[RpcCacheKind::ProtocolComponents]);
+
+        let request = dto::ProtocolComponentsRequestBody {
+            protocol_system: "uniswap_v2".to_string(),
+            component_ids: None,
+            tvl_gt: None,
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 0, page_size: 10 },
+        };
+
+        for _ in 0..2 {
+            let components = req_handler
+                .get_protocol_components(&request)
+                .await
+                .unwrap();
+            assert!(components
+                .protocol_components
+                .is_empty());
+        }
     }
 
     #[tokio::test]

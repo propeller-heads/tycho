@@ -23,11 +23,12 @@
   * [Contract Addresses](for-solvers/execution/contract-addresses.md)
   * [Execution Venues](for-solvers/execution/execution-venues.md)
   * [Vault](for-solvers/execution/vault.md)
-  * [Migration Guide: V2 to V3](for-solvers/execution/migration-guide-v2-to-v3.md)
+  * [Migration Guide](for-solvers/execution/migration-guide-v2-to-v3.md)
 * [Hosted Endpoints](for-solvers/hosted-endpoints.md)
 * [Self-Hosted EVM Chain](for-solvers/self-hosted-evm-chain.md)
 * [Supported Protocols](for-solvers/supported-protocols.md)
-* [Request for Quote Protocols](for-solvers/request-for-quote-protocols.md)
+* [Off-Chain Priced Venues](for-solvers/request-for-quote-protocols.md)
+* [pAMM Price Level Stream](for-solvers/price-level-stream.md)
 
 ## For DEXs
 
@@ -53,5 +54,5 @@
   * [Execution](for-dexs/protocol-integration/execution/README.md)
     * [Code Architecture](for-dexs/protocol-integration/execution/code-architecture.md)
   * [Testing](for-dexs/protocol-integration/3.-testing.md)
-  * [Request for Quote Protocols](for-dexs/protocol-integration/request-for-quote-protocols.md)
+  * [Off-Chain Priced Venues](for-dexs/protocol-integration/request-for-quote-protocols.md)
   * [Contributing guidelines](for-dexs/protocol-integration/contributing-guidelines.md)

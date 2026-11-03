@@ -2,6 +2,7 @@
 name = "tycho-integration-test"
 version.workspace = true
 edition.workspace = true
+license-file.workspace = true
 
 [dependencies]
 actix-web = "4.11.0"
@@ -17,6 +18,7 @@ num-bigint = { workspace = true }
 num-traits = { workspace = true }
 rand = "0.9.2"
 tokio = { workspace = true, features = ["signal"] }
+chrono = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tycho-client = { workspace = true }
@@ -24,3 +26,6 @@ tycho-common = { workspace = true }
 tycho-execution = { workspace = true }
 tycho-simulation = { workspace = true, features = ["evm"] }
 tycho-test = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }

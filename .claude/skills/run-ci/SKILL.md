@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash(cargo:*), Bash(diesel:*), Bash(psql:*), Bash(bash .claude/scripts/run-nextest.sh:*), Bash(printenv:*), Bash(git diff:*), Bash(git branch:*), Bash(git status:*), Bash(git log:*), Read
-description: "Run the full CI pipeline locally to catch failures before pushing. Use this skill before creating a PR, before pushing commits, or whenever you want to verify that CI will pass. Also use it when the user says 'run ci', 'check ci', 'run tests', 'lint', or 'will ci pass'."
+description: "Run the full CI pipeline locally. Use this skill when opening or updating a PR, when a change is workspace-wide (Cargo.toml/Cargo.lock, DTO/RPC types, DB migrations, broad refactor), or when the user says 'run ci', 'check ci', 'full ci', or 'will ci pass'. Do NOT use it for routine commits and pushes — those only need a format run and the tests covering the change."
 user-invocable: true
 ---
 
@@ -8,6 +8,9 @@ user-invocable: true
 
 Run the same checks that GitHub Actions CI runs, locally, to catch failures before they hit the
 remote pipeline. The canonical commands live in `.github/workflows/ci-rust.yaml`.
+
+This is the wide, slow check. For a routine commit or push, run `cargo +nightly fmt --all` and the
+tests covering the change instead (see `.claude/knowledge/version_control.md`).
 
 ## Environment
 
@@ -84,12 +87,22 @@ checks run). Otherwise, map changed file patterns to check categories:
 
 | File pattern | Category |
 |---|---|
-| `crates/tycho-*/src/**/*.rs`, `Cargo.toml`, `Cargo.lock` | `rust` |
+| `crates/tycho-*/src/**/*.rs`, `protocols/testing/**`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | `rust` |
 | `crates/tycho-client-py/**` | `python` |
+| `crates/tycho-execution/contracts/**`, `protocols/adapter-integration/evm/**`, `crates/tycho-simulation/token-proxy-contracts/**` | `solidity` |
+| `protocols/substreams/**` | `substreams` |
 | `.github/workflows/**` | `ci` (always run full) |
+
+The `rust` patterns mirror the `changes` job filter in `ci-rust.yaml`; the `solidity` patterns
+mirror `ci-foundry.yaml`; `substreams` mirrors `ci-substreams.yaml`.
 
 If only `python` files changed, skip Rust format/clippy/tests entirely and only run Python checks.
 If only `rust` files changed, skip Python checks. If both changed (or `ci`), run everything.
+
+`solidity` and `substreams` are **not covered by this skill** — it runs the Rust pipeline only.
+When either is in scope, say so in the report and point at the workflow that covers it
+(`ci-foundry.yaml` / `ci-substreams.yaml`, plus `ci-rust-evm.yaml`, `ci-router-trades.yaml`, and
+`security.yaml`), so the user knows what is still unverified.
 
 Report the detected scope before proceeding: `Scope: rust`, `Scope: python`, `Scope: rust + python`,
 or `Scope: full`.
@@ -98,8 +111,12 @@ or `Scope: full`.
 
 Run formatting first because it modifies source files that all subsequent checks depend on.
 
+CI runs `cargo +nightly-2026-06-28 fmt --all --check` (see `ci-rust.yaml` — the pinned nightly is
+the source of truth; if it has moved, use the workflow's value). Locally, write the fixes instead
+of just checking:
+
 ```bash
-cargo +nightly fmt --all
+cargo +nightly-2026-06-28 fmt --all
 ```
 
 Check `git diff --stat -- '*.rs'` and report whether any files were reformatted.
@@ -108,8 +125,11 @@ Check `git diff --stat -- '*.rs'` and report whether any files were reformatted.
 
 Run clippy next. If clippy fails, tests won't compile either, so there's no point running them.
 
+Same pinned nightly as Phase 1, and `-D warnings` — CI fails on any warning, so omitting it hides
+failures:
+
 ```bash
-cargo clippy --workspace --all-targets --all-features
+cargo +nightly-2026-06-28 clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Report pass/fail. If there are warnings or errors, list them.
@@ -152,6 +172,20 @@ bash .claude/scripts/run-nextest.sh serial-db --include-ignored  # RPC_URL set
 
 Report pass/fail with test count summary. If DB is not available, skip entirely.
 
+#### Docs and no-default-features build (parallel)
+
+Two further CI gates (`ci-rust.yaml`) that neither clippy nor the test runs cover:
+
+```bash
+cargo doc --workspace --no-deps --all-features --locked
+```
+```bash
+cargo check --workspace --no-default-features --locked
+```
+
+Report pass/fail for each. `cargo doc` catches broken intra-doc links; the no-default-features
+check catches code that only compiles with a default feature enabled.
+
 ## Report
 
 After all steps complete, provide a summary table. Combine results from both test runs (unit +
@@ -171,6 +205,8 @@ tests run in the other phase.
 | Format   | pass/fail/skipped | files reformatted or clean           |
 | Clippy   | pass/fail/skipped | warning/error count                  |
 | Tests    | pass/fail/skipped | X passed, Y failed, Z skipped        |
+| Docs     | pass/fail/skipped | `cargo doc` warnings/errors          |
+| No-default-features | pass/fail/skipped | `cargo check` errors      |
 
 If clippy failed, mark tests as "skipped (clippy failed)".
 

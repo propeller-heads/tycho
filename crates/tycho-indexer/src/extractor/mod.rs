@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use deepsize::DeepSizeOf;
@@ -10,7 +13,7 @@ use tycho_common::{
         blockchain::{Block, BlockAggregatedChanges, BlockScoped},
         contract::AccountBalance,
         protocol::ComponentBalance,
-        Address, BlockHash, ExtractorIdentity, MergeError,
+        Address, BlockHash, ComponentId, ExtractorIdentity, MergeError,
     },
     storage::StorageError,
     Bytes,
@@ -33,12 +36,14 @@ use crate::{
 
 pub mod chain_state;
 mod dynamic_contract_indexer;
+pub mod factory;
 pub mod models;
 pub mod post_processors;
 pub mod protocol_cache;
 pub mod protocol_extractor;
 pub mod reorg_buffer;
 pub mod runner;
+pub mod supervisor;
 pub mod token_analysis_cron;
 mod u256_num;
 
@@ -77,6 +82,28 @@ pub enum ExtractionError {
     DCICacheError(#[from] DCICacheError),
 }
 
+impl ExtractionError {
+    /// Returns a static label for each variant, used as a Prometheus metric label.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::Setup(_) => "setup",
+            Self::DecodeError(_) => "decode",
+            Self::ProtobufError(_) => "protobuf",
+            Self::Empty => "empty",
+            Self::Unknown(_) => "unknown",
+            Self::Storage(_) => "storage",
+            Self::SubstreamsError(_) => "substreams",
+            Self::ServiceError(_) => "service",
+            Self::MergeError(_) => "merge",
+            Self::ReorgBufferError(_) => "reorg_buffer",
+            Self::PartialBlockBufferError(_) => "partial_block_buffer",
+            Self::TracingError(_) => "tracing",
+            Self::AccountExtractionError(_) => "account_extraction",
+            Self::DCICacheError(_) => "dci_cache",
+        }
+    }
+}
+
 impl From<tycho_protobuf::error::DecodeError> for ExtractionError {
     fn from(e: tycho_protobuf::error::DecodeError) -> Self {
         match e {
@@ -95,6 +122,18 @@ pub enum RPCError {
 }
 
 pub type ExtractorMsg = Arc<BlockAggregatedChanges>;
+
+/// Messages delivered to extractor subscribers over their subscription channel.
+///
+/// Every subscriber (`PendingDeltas`, WebSocket clients, ...) receives the same commands and
+/// decides for itself how to react to a restart. Sending `ExtractorRestarted` on the same
+/// channel as `Block` messages gives an ordering guarantee: it always arrives after every
+/// `Block` message the runner sent before it stopped.
+#[derive(Clone)]
+pub enum DeltaCommand {
+    Block(ExtractorMsg),
+    ExtractorRestarted(String),
+}
 
 #[automock]
 #[async_trait]
@@ -227,5 +266,10 @@ where
     ) -> HashMap<(AccountStateIdType, AccountStateKeyType), AccountStateValueType> {
         self.block_update
             .get_filtered_account_state_update(keys)
+    }
+
+    fn get_filtered_protocol_components(&self, ids: &HashSet<ComponentId>) -> HashSet<ComponentId> {
+        self.block_update
+            .get_filtered_protocol_components(ids)
     }
 }

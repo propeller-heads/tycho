@@ -134,16 +134,7 @@ where
     let data = call.abi_encode();
     let to = AlloyAddress::from_bytes(pool);
 
-    let params = SimulationParameters {
-        caller,
-        to,
-        data,
-        value: U256::ZERO,
-        overrides,
-        gas_limit: None,
-        transient_storage: None,
-        block_overrides: None,
-    };
+    let params = SimulationParameters { caller, to, data, overrides, ..Default::default() };
 
     let res = vm_engine
         .simulate(&params)

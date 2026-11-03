@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
@@ -105,9 +105,9 @@ contract NativeWrapExecutor is IExecutor {
 
         outputToRouter = true;
         // Since unwrapping withdraws the funds from the msg.sender, the user's funds need to be sent to the
-        // TychoRouter initially. This does not require an actual approval since our
+        // TychoRouterV3 initially. This does not require an actual approval since our
         // router is interacting directly with the token contract.
-        // We use msg.sender (the TychoRouter) instead of address(this) because
+        // We use msg.sender (the TychoRouterV3) instead of address(this) because
         // getTransferData is called via staticcall.
         receiver = msg.sender;
     }

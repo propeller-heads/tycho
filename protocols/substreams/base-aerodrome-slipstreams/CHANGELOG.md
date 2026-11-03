@@ -1,5 +1,68 @@
 # Changelog
 
+## v0.1.5
+
+### Added
+
+- Index UP V3 on Robinhood Chain via a second manifest, `robinhood-up-v3.yaml` (factory
+  `0x1ac9dB4a2608ba45D6127B1737949b51Bb54B7F3`, swap fee module
+  `0xa8Bdc945bE050E451C97f935d7c0D6B0087cF94c`, initial block 6,184,096). UP's factory and pool are
+  Aerodrome Slipstream `CLFactory`/`CLPool` verbatim: identical event signatures, identical pool
+  storage layout, `uniswapV3SwapCallback`. Its fee module's runtime bytecode differs from the Base
+  deployments only in the `factory` immutable and in one event name, handled below.
+- Decode `SetCustomFee(address,uint24)` as a base-fee update alongside `CustomFeeSet`. The two
+  events carry the same arguments and meaning; UP's fee module emits the former.
+
+### Changed
+
+- Read the emitted protocol type from the new `protocol_type_name` module parameter instead of
+  hardcoding `aerodrome_slipstreams_pool`, so each deployment this package indexes is registered
+  under its own protocol system. The Base manifest passes `aerodrome_slipstreams_pool`, so its
+  output is unchanged.
+- Take the block below which no configured fee module can have emitted an event from the new
+  optional `first_dynamic_fee_module_block` parameter, so each deployment declares its own floor
+  and blocks below it are skipped without walking their logs. The Base manifest passes 44,221,569
+  and the Robinhood one 49,409,694, each the deployment block of that chain's earliest configured
+  module. Omitting the parameter scans every block, which costs time but never changes the emitted
+  state.
+
+### Deployment notes
+
+- Base output is byte-identical, but the added parameter and the removed block floor change every
+  module hash. Do not redeploy on Base: it would back-process from initial block 13,843,704 for no
+  change in indexed state.
+- Robinhood back-processes from block 6,184,096.
+
+## v0.1.4
+
+### Added
+
+- Index the third Slipstream factory `0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef` (deployed at
+  block 44,394,724) and its dynamic swap fee module
+  `0x87D8f999BBa9343E8099552426775B51C338E8CB` (block 44,394,736). Both reuse the
+  second-generation code: the factory differs only in its `poolImplementation` immutable, the pool
+  implementation only in its metadata hash, and the fee module only in its `factory` immutable. Pool
+  discovery, storage slot decoding, balance tracking, and the fee module ABI are unchanged.
+
+### Changed
+
+- Key the tick spacing fee store by factory (`{factory}:tick_spacing_{tick_spacing}`) and carry the
+  emitting factory on `TickSpacingFee`. Under the previous global key, a `TickSpacingEnabled` event
+  from one factory overwrote another factory's fee for the same tick spacing. The three deployed
+  factories currently agree on every enabled tick spacing, so no indexed `default_fee` changes.
+- Skip a pool whose factory has no stored fee for its tick spacing instead of panicking. A factory
+  enables a tick spacing before it can create a pool on it, so a module started at the package's
+  initial block always has the fee; a module started later — an initial-block override, as the
+  range test runner uses — previously killed the stream with a deterministic wasm panic.
+
+### Deployment notes
+
+- The added parameters change every module hash, including modules that take no parameters, so the
+  package back-processes from initial block 13,843,704.
+- Components are only emitted on their `PoolCreated` block. An extractor whose cursor is already
+  past block 44,394,724 will pick up new pools of the third factory but not the ones it created
+  before that cursor.
+
 ## v0.1.3
 
 ### Changed

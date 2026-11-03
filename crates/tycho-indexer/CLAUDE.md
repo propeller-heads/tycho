@@ -6,16 +6,18 @@ serves it over HTTP/WebSocket.
 ## Module Map
 
 ```
-main.rs                     CLI entry point; account initialisation; extractor startup
+main.rs                     CLI entry point; account initialisation; extractor startup; Pyroscope CPU (and, with jemalloc heap profiling on, memory) profiling when PYROSCOPE_SERVER_URL is set
 cli.rs                      Command definitions: Index, Run, AnalyzeTokens, Rpc
 ot.rs                       OpenTelemetry tracing configuration
 testing.rs                  Test utilities
 
 extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
-  runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control
+  runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control; waits for internal subscribers (`PendingDeltas`) but removes a websocket client whose channel is full, counted in `extractor_slow_clients_removed_total` (registered at zero)
+  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero)
+  factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
-  models.rs                 BlockChanges, BlockAggregatedChanges, TxWithChanges
+  models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
   protocol_cache.rs         ProtocolMemoryCache — in-process token/component metadata cache
   chain_state.rs            ChainState — tracks current tip and finality horizon
   u256_num.rs               U256 numeric utilities
@@ -40,14 +42,24 @@ extractor/
 services/
   mod.rs                    ServicesBuilder — wires extractors, gateway, and server together
   rpc.rs                    HTTP endpoints: state snapshots, component queries
+  off_worker.rs             OffWorker — builds and serializes large state responses on the blocking pool, bounded per endpoint and step
   ws.rs                     WebSocket broadcaster — emits BlockAggregatedChanges per block
-  deltas_buffer.rs          PendingDeltasBuffer — pending-block state for RPC consistency
+  deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor
+  state/
+    window.rs               DeltaWindow — fixed-depth block window; retention, fold-on-eviction
+    cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::load builds it from one StateSnapshotGateway read at startup
+    service.rs              StateService — answers contract/protocol state from cache ⊕ window, or names a FallbackReason; EntityCacheSetup (the routing itself is in rpc.rs)
+    shadow.rs               Shadow mode — samples state requests, runs the cache path next to the DB path, compares the normalized answers, records metrics
+    cache/view.rs           AccountView / ComponentView — views of cache entries plus window changes;
+                            state answers serialize from them without copying the entries
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
   access_control.rs         API-key authentication middleware
+  client_metadata.rs        Parses the X-Tycho-Client-Metadata header into allowlisted Prometheus labels
+  debug.rs                  heap_profile handler behind the `jemalloc` feature
   middleware/
     plan_restrictions.rs    Per-user API limits via X-User-Plan header (plans.yaml)
-    compression.rs          Zstd response compression
+    compression.rs          Zstd response compression: the middleware (level 3), and level 1 for state responses
     metrics.rs              RPC request metrics
     pagination.rs           Request pagination validation
 
@@ -62,7 +74,9 @@ extension `E`. It is the single point that turns raw Substreams messages into ty
 
 ### Normal (full-block) path
 
-1. Deserialize `BlockScopedData` → `BlockChanges` (tx-level state/balance deltas).
+1. Deserialize `BlockScopedData` → `BlockChanges` (tx-level state/balance deltas) via
+   `tycho-protobuf`'s `TryFromMessage` conversions; its `DecodeError` converts into
+   `ExtractionError`.
 2. Run post-processor if configured.
 3. Call `E::process_block_update()` (DCI — see below).
 4. Fetch metadata for any new token addresses via `T` (ERC-20 symbol / decimals over RPC).
@@ -91,15 +105,44 @@ When no DCI is configured the call is a no-op.
 
 ### Revert handling
 
-On `BlockUndoSignal(target_hash)` from Substreams:
+On `BlockUndoSignal(target_hash, target_number)` from Substreams:
 
-1. `ReorgBuffer::purge(target_hash)` removes all buffered blocks after the common ancestor.
-2. A `BlockAggregatedChanges` with `revert = true` is broadcast.
-3. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted state
-   is always on the canonical chain.
+1. `ReorgBuffer::purge_to(target_hash, target_number)` removes invalidated blocks. A hash
+   match purges strictly after the target; when the hash is absent, a buffered target height
+   purges from that height inclusive (stale copy). A hash miss is fatal when the
+   target is below the buffer, at the buffer's oldest block (no predecessor left to
+   anchor the revert), or above the buffer without a pending partial at exactly that height
+   (the flashblocks case — the only legitimate target-ahead shape). Nonfatal hash-miss
+   fallbacks log a warning and increment `extractor_revert_hash_miss`.
+2. Pending partials are dropped only when above the target height; partials at the target
+   height are the still-valid prefix of the last valid block and are kept.
+3. Previous attribute values are restored from the buffer, then the DB. The buffer keeps
+   drained blocks in a committing section until `CachedGateway` reports their write
+   flushed, so lookups cover every block whose write has not landed and a DB miss proves
+   that no prior state exists — the revert never waits on the commit task. Attributes
+   first created inside the reverted range revert as deletions when they survive the
+   range, and revert to nothing otherwise. A delta that holds an attribute as both
+   created and deleted is malformed module output, so it goes through the lookup like a
+   pre-existing attribute. Attributes with no prior value anywhere revert as deletions,
+   emit one summary warning, and increment `extractor_revert_attr_miss` per attribute; its
+   `component_known` label says whether the component is known anywhere: a
+   `TxWithChanges.protocol_components` entry in buffer history or a row in the
+   `protocol_component` table. `false` means an upstream module emitted state for a
+   component Tycho never saw created. The extractor registers both label sets at zero at
+   startup so the first miss is visible to `increase()`. Any hit means an upstream module
+   emitted an Update or Deletion for an attribute that never had a Creation.
+4. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
+   a `BlockAggregatedChanges` with `revert = true` is broadcast.
+5. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted
+   state is always on the canonical chain.
 
-`PendingDeltasBuffer` (RPC side) mirrors this: it uses its own `ReorgBuffer` and discards
-non-canonical pending blocks on the same broadcast.
+`PendingDeltas` (RPC side) mirrors this through its per-extractor `DeltaWindow`, using the
+strict hash-only `purge` on the block named by the broadcast revert message. A revert to a block
+below `min(finalized, db_committed)`, a revert to an unknown hash, or a block that does not
+extend the window's chain is an error that ends the pump and the process: only the extractor's
+replay can refill the window. On `ExtractorRestarted` the pump folds the window's committed
+blocks into the sink and clears it; the restarted extractor replays everything above its
+database cursor.
 
 ## Persistence
 
@@ -111,6 +154,10 @@ components → state → entry points → cursor). Every mutable row is versione
 **Trigger:** `ReorgBuffer::drain_blocks_until(finalized_height)` — blocks are only committed once
 they are provably behind the finality horizon.
 
+Drained blocks stay in the buffer's committing section (shared with the commit task via
+`Arc`) until `CachedGateway::flushed_block_height` passes them, so revert lookups can
+still see them while their write is in flight.
+
 ## Why extractor messages must be broadcast to the RPC service
 
 HTTP snapshot endpoints must reflect the latest state, including blocks not yet committed to DB.
@@ -119,21 +166,71 @@ clients). When an RPC query arrives, the handler fetches the DB snapshot then ap
 pending deltas on top, giving a consistent view up to the chain tip. Without this feed the RPC
 would lag by however many blocks remain in `ReorgBuffer` awaiting finalization.
 
-`db_committed_block_height` on each message tells `PendingDeltasBuffer` when a block has been
-written; it auto-drains those blocks so memory usage stays bounded.
+`db_committed_block_height` on each message is the height whose writes reached Postgres
+(`CachedGateway::flushed_block_height`), not the last drained block: during catch-up the gateway
+holds the tail of a drained batch in memory until the next flush. It is one of the three
+watermarks bounding retention.
+Each extractor's `DeltaWindow` (`services/state/window.rs`) keeps a block until it is at or below
+`min(finalized, db_committed, tip - depth)`, then folds it into a `FoldSink` and evicts it.
+Committed blocks are therefore retained and served, so window contents and DB rows overlap by up
+to `depth` blocks: readers that merge both sides must bound window reads by `db_committed + 1`.
+Depth and fold batching come from `--delta-window-depth` (default 128) and
+`--delta-window-fold-batch` (default 1).
+Metrics, labelled by `extractor`: `delta_window_fold_duration_ms` (summary, one sample per
+folded block), `delta_window_blocks` and `delta_window_tip_block` (gauges, set after every insert
+and every restart clear; an empty window reports 0 blocks and keeps its last tip).
+
+With `--entity-cache-mode shadow|serve`, `main.rs` builds the `EntityCache` from one database
+snapshot after the extractors are built and before the server starts (`EntityCache::load` in
+`services/state/cache.rs`), and hands it to the services. The windows fold into it, under the
+window lock. A failed load is a setup error and ends the process. `off` (the default) skips the
+load, and the windows fold into `DiscardSink`.
+A fold copies an entry that a reader still holds. Two metrics count these copies, labelled by
+`entity`: `entity_cache_shared_copies_total` (counter, one per copy) and
+`entity_cache_shared_copy_duration_ms` (histogram, the time of each copy).
+
+In `serve`, `RpcHandler` (`services/rpc.rs`) asks the `StateService` (`services/state/service.rs`)
+first for `/contract_state` and `/protocol_state`. The service answers from the cache plus the
+window changes up to the requested version, without reading the database. A `/contract_state` or
+`/protocol_state` answer is made of views (`services/state/cache/view.rs`). The service builds
+them from the cached entries and the window changes, without copying the entries. The JSON is
+written from the views. A large answer drops its views while it waits for a serialize permit
+(`services/off_worker.rs`) and builds them again in the serialize job. The answer does not enter
+the response caches, which keep only database answers. A request the service cannot answer comes
+back as a `FallbackReason`, and the handler answers it from the database path and counts it in
+`db_path_requests{endpoint, reason}`.
+`shadow` answers every request from the database path.
+
+In `shadow`, a sampled `/contract_state` or `/protocol_state` request runs the database path (the
+client's answer), then `StateService`, and `services/state/shadow.rs` compares the two.
+It erases the known differences from both answers and requires the rest to be equal. On a
+mismatch it logs one warning with up to 20 diffs (`entity.field.key: db=… cache=…`).
+A `/contract_state` comparison where every differing account has an unsaved change in another
+extractor's window, at or below the version, counts as `known_mismatch` and logs its diffs at
+`debug`, not as a warning: the cache path applies that change, the database path does not.
+A comparison is discarded when it straddles a change: the window generation or the cache fold
+count moved during it.
+`--entity-cache-shadow-sample-rate` (default 0.0) sets the share. Metrics:
+`entity_cache_shadow_comparisons_total{endpoint,outcome}`,
+`entity_cache_shadow_duration_seconds{endpoint}`, `entity_cache_shadow_sample_rate`.
 
 ## Connections
 
 ```
-ExtractorRunner (runner.rs)
-  ├─ SubstreamsStream (substreams/) → ProtocolExtractor (protocol_extractor.rs)
-  │    ├─ ReorgBuffer (reorg_buffer.rs) → CachedGateway → DB
-  │    ├─ ProtocolMemoryCache (protocol_cache.rs)
-  │    └─ DCIPlugin (dynamic_contract_indexer/) [optional]
-  └─ broadcast Arc<BlockAggregatedChanges>
-       ├─ WsService (services/ws.rs) → WebSocket clients
-       └─ PendingDeltasBuffer (services/deltas_buffer.rs)
-            └─ RpcHandlers (services/rpc.rs) → HTTP responses
+ExtractorSupervisor (supervisor.rs) — rebuilds the runner via ExtractorFactory (factory.rs) on failure
+  └─ ExtractorRunner (runner.rs)
+       ├─ SubstreamsStream (substreams/) → ProtocolExtractor (protocol_extractor.rs)
+       │    ├─ ReorgBuffer (reorg_buffer.rs) → CachedGateway → DB
+       │    ├─ ProtocolMemoryCache (protocol_cache.rs)
+       │    └─ DCIPlugin (dynamic_contract_indexer/) [optional]
+       └─ broadcast DeltaCommand (Block | ExtractorRestarted)
+            ├─ WsService (services/ws.rs) → WebSocket clients
+            └─ PendingDeltas (services/deltas_buffer.rs)
+                 └─ DeltaWindow per extractor (services/state/window.rs)
+                      ├─ folds into EntityCache (services/state/cache.rs) [shadow|serve], else DiscardSink
+                      ├─ StateService (services/state/service.rs) ← EntityCache [serve]
+                      └─ RpcHandlers (services/rpc.rs) → HTTP responses
+                           (state endpoints: StateService first, database path on a fallback)
 ```
 
 ## Client Sync
@@ -156,4 +253,8 @@ All POST under `/{version_prefix}/` (default `/v1/`), except where noted.
 | `/protocol_systems` | List available protocol systems |
 | `/component_tvl` | Component TVL estimates |
 | `/health` | GET — health check |
-| `/ws/` | GET — WebSocket upgrade for delta subscriptions |
+| `/ws` | GET — WebSocket upgrade for delta subscriptions (exact match; `/ws/` 404s) |
+
+Registered outside the version prefix: `GET /docs/{...}` (Swagger UI, schema at
+`/api-docs/openapi.json`) and `GET /debug/pprof/heap` (API-key gated, behind the `jemalloc`
+feature).

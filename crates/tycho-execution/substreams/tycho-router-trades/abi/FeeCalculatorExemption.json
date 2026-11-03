@@ -1,0 +1,1 @@
+[{"type":"event","anonymous":false,"name":"PositiveSlippageExemptionSet","inputs":[{"name":"client","type":"address","indexed":true,"internalType":"address"},{"name":"exempt","type":"bool","indexed":false,"internalType":"bool"}]}]

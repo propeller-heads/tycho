@@ -7,7 +7,7 @@ pub mod attrs {
     pub const LATEST_UPDATE_BLOCK: &str = "latest_update_block";
     pub const RESERVE_X: &str = "reserve_x";
     pub const RESERVE_Y: &str = "reserve_y";
-    pub const CONCENTRATION_K: &str = "concentration_k";
+    pub const MAX_PUNISHMENT_X24: &str = "max_punishment_x24";
     pub const BLOCK_DELAY: &str = "block_delay";
     pub const PAUSED: &str = "paused";
 }

@@ -72,7 +72,16 @@ where
         let selector = "price(bytes32,address,address,uint256[])";
 
         let res = self
-            .call(selector, args, overwrites, caller, U256::from(0u64), None, block_overrides)?
+            .call(
+                selector,
+                args,
+                overwrites,
+                caller,
+                U256::from(0u64),
+                None,
+                block_overrides,
+                None,
+            )?
             .return_value;
 
         let decoded: PriceReturn = PriceReturn::abi_decode(&res).map_err(|e| {
@@ -97,8 +106,16 @@ where
         let args = (string_to_bytes32(pair_id)?, sell_token, buy_token, is_buy, amount);
         let selector = "swap(bytes32,address,address,uint8,uint256)";
 
-        let res =
-            self.call(selector, args, overwrites, None, U256::from(0u64), None, block_overrides)?;
+        let res = self.call(
+            selector,
+            args,
+            overwrites,
+            None,
+            U256::from(0u64),
+            None,
+            block_overrides,
+            None,
+        )?;
 
         let decoded: SwapReturn = SwapReturn::abi_decode(&res.return_value).map_err(|_| {
             SimulationError::FatalError(format!(
@@ -134,7 +151,7 @@ where
         let selector = "getLimits(bytes32,address,address)";
 
         let res = self
-            .call(selector, args, overwrites, None, U256::from(0u64), None, block_overrides)?
+            .call(selector, args, overwrites, None, U256::from(0u64), None, block_overrides, None)?
             .return_value;
 
         let decoded: LimitsReturn = LimitsReturn::abi_decode(&res).map_err(|e| {
@@ -156,7 +173,7 @@ where
         let selector = "getCapabilities(bytes32,address,address)";
 
         let res = self
-            .call(selector, args, None, None, U256::from(0u64), None, None)?
+            .call(selector, args, None, None, U256::from(0u64), None, None, None)?
             .return_value;
         let decoded: CapabilitiesReturn = CapabilitiesReturn::abi_decode(&res).map_err(|e| {
             SimulationError::FatalError(format!(
@@ -178,7 +195,7 @@ where
         let selector = "minGasUsage()";
 
         let res = self
-            .call(selector, args, None, None, U256::from(0u64), None, None)?
+            .call(selector, args, None, None, U256::from(0u64), None, None, None)?
             .return_value;
 
         let decoded: MinGasUsageReturn = MinGasUsageReturn::abi_decode(&res).map_err(|e| {

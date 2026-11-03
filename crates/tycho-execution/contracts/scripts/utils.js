@@ -1,8 +1,350 @@
 const {ethers} = require("hardhat");
+const hre = require("hardhat");
 const Safe = require('@safe-global/protocol-kit').default;
 const {EthersAdapter} = require('@safe-global/protocol-kit');
 const {default: SafeApiKit} = require("@safe-global/api-kit");
+const fs = require("fs");
+const path = require("path");
 const roles = require("./roles.json");
+
+// Chains whose explorer is a Blockscout instance rather than an Etherscan one.
+// Verification goes through Blockscout's native v2 API because hardhat-verify
+// and forge verify-contract cannot set a browser User-Agent, and the instance
+// sits behind Cloudflare (see USER_AGENT). No API key is required.
+const BLOCKSCOUT_NETWORKS = {
+    robinhood: {
+        chainId: 4663,
+        apiBase: "https://robinhoodchain.blockscout.com/api/v2",
+        browserUrl: "https://robinhoodchain.blockscout.com/",
+    },
+};
+
+// Chains whose explorer reads verification from Sourcify. Arcscan exposes an
+// Etherscan-shaped verifysourcecode route, but it reports "Pass - Verified"
+// without the verification ever reaching Sourcify, so the explorer keeps
+// showing the contract as unverified. Submitting to Sourcify directly is what
+// the explorer page actually reflects.
+const SOURCIFY_NETWORKS = {
+    arc: {
+        chainId: 5042,
+        browserUrl: "https://arc-scan.org/",
+    },
+};
+
+const SOURCIFY_API = "https://sourcify.dev/server/v2";
+
+// Cloudflare answers 403 to requests carrying a curl or node User-Agent.
+const USER_AGENT =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+async function blockscoutGet(url) {
+    const res = await fetch(url, {
+        headers: {"user-agent": USER_AGENT, accept: "application/json"},
+    });
+    // Cloudflare answers with an HTML challenge page rather than JSON.
+    const text = await res.text();
+    try {
+        return {ok: res.ok, body: JSON.parse(text)};
+    } catch {
+        return {ok: false, body: null};
+    }
+}
+
+function artifactPath(contractsDir, contractFqn, extension) {
+    const [sourceName, contractName] = contractFqn.split(":");
+    return path.join(
+        contractsDir,
+        "artifacts",
+        sourceName,
+        `${contractName}${extension}`
+    );
+}
+
+/** ABI-encode constructor arguments using the artifact's own input types. */
+function encodeConstructorArgs(contractsDir, contractFqn, constructorArgs) {
+    const artifact = JSON.parse(
+        fs.readFileSync(artifactPath(contractsDir, contractFqn, ".json"), "utf8")
+    );
+    const constructor = artifact.abi.find(
+        (entry) => entry.type === "constructor"
+    );
+    const types = (constructor?.inputs || []).map((input) => input.type);
+    return ethers.utils.defaultAbiCoder
+        .encode(types, constructorArgs)
+        .replace(/^0x/, "");
+}
+
+/**
+ * Load the exact standard JSON input that produced the deployed artifact.
+ *
+ * The contract's .dbg.json names its build-info file, so this always matches
+ * the compile the deployment bytecode came from. Do not search build-info by
+ * contract name: `IFeeCalculator.sol` and `FeeCalculator.sol` both match a
+ * suffix test, and stale build-info files from earlier compiles linger.
+ */
+function getHardhatStandardJsonInput(contractsDir, contractFqn) {
+    const dbgPath = artifactPath(contractsDir, contractFqn, ".dbg.json");
+    if (!fs.existsSync(dbgPath)) {
+        throw new Error(
+            `No Hardhat artifact at ${dbgPath}. ` +
+            "Run `npx hardhat compile` first."
+        );
+    }
+
+    const {buildInfo} = JSON.parse(fs.readFileSync(dbgPath, "utf8"));
+    const buildInfoPath = path.resolve(path.dirname(dbgPath), buildInfo);
+    const info = JSON.parse(fs.readFileSync(buildInfoPath, "utf8"));
+
+    return {
+        standardJson: JSON.stringify(info.input),
+        compilerVersion: `v${info.solcLongVersion}`,
+    };
+}
+
+/**
+ * Blockscout's verification endpoints answer HTTP 500 for any address it does
+ * not hold as a contract, so check the two reasons that happens up front.
+ *
+ * @returns {boolean} whether Blockscout already holds the contract as verified.
+ *     Submitting again for such an address is rejected, and deploy scripts are
+ *     meant to be re-runnable.
+ */
+async function checkVerifiable(config, address) {
+    if ((await ethers.provider.getCode(address)) === "0x") {
+        throw new Error(
+            `No contract deployed at ${address}. The address is derived from ` +
+            "the current artifact bytecode, so a recompile since deployment " +
+            "moves it. Check out the deployed commit and recompile."
+        );
+    }
+
+    const {ok, body} = await blockscoutGet(
+        `${config.apiBase}/addresses/${address}`
+    );
+    if (ok && body.is_contract === false) {
+        throw new Error(
+            `Blockscout has not indexed ${address} as a contract yet, and it ` +
+            "rejects verification for unknown addresses. CREATE2 deployments " +
+            "reach Blockscout through internal transactions, which this " +
+            "instance indexes behind the chain head. Check " +
+            `${config.browserUrl}address/${address} and retry once the ` +
+            "contract creation shows up."
+        );
+    }
+
+    return ok && body.is_verified === true;
+}
+
+/**
+ * Wait for the submitted verification to land.
+ *
+ * `is_verified` is the only signal available: Blockscout's v2 smart-contract
+ * response carries no verification status field, and it pushes the outcome of a
+ * submission over a websocket rather than over HTTP. A rejected verification is
+ * therefore indistinguishable from a slow queue, and surfaces as this timeout.
+ */
+async function pollBlockscoutVerification(config, address) {
+    const url = `${config.apiBase}/smart-contracts/${address}`;
+
+    for (let attempt = 0; attempt < 30; attempt++) {
+        const {ok, body} = await blockscoutGet(url);
+        if (ok && body.is_verified) {
+            return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+    throw new Error(
+        "Timed out waiting for Blockscout verification. It reports the reason " +
+        "for a rejected submission only in its UI: see " +
+        `${config.browserUrl}address/${address}#code`
+    );
+}
+
+/**
+ * Verify on a Blockscout instance via its native v2 standard-input API.
+ * Compiler settings come from the artifact's own build-info, so they match the
+ * deployment by construction.
+ */
+async function verifyOnBlockscout({network, address, contractFqn, constructorArgs}) {
+    const config = BLOCKSCOUT_NETWORKS[network];
+    if (!config) {
+        throw new Error(`No Blockscout config for network "${network}"`);
+    }
+
+    console.log(`Verifying on Blockscout (chain ${config.chainId})...`);
+    if (await checkVerifiable(config, address)) {
+        console.log(`Already verified: ${config.browserUrl}address/${address}#code`);
+        return;
+    }
+
+    const contractsDir = path.resolve(__dirname, "..");
+    const constructorArgsHex = encodeConstructorArgs(
+        contractsDir,
+        contractFqn,
+        constructorArgs
+    );
+
+    const {standardJson, compilerVersion} = getHardhatStandardJsonInput(
+        contractsDir,
+        contractFqn
+    );
+
+    const form = new FormData();
+    form.append("compiler_version", compilerVersion);
+    form.append("contract_name", contractFqn.split(":")[1]);
+    form.append(
+        "files[0]",
+        new Blob([standardJson], {type: "application/json"}),
+        "standard-input.json"
+    );
+    form.append("autodetect_constructor_args", "false");
+    form.append("constructor_args", constructorArgsHex);
+    form.append("license_type", "none");
+
+    const verifyUrl =
+        `${config.apiBase}/smart-contracts/${address}` +
+        "/verification/via/standard-input";
+    const res = await fetch(verifyUrl, {
+        method: "POST",
+        headers: {"user-agent": USER_AGENT, accept: "application/json"},
+        body: form,
+    });
+    const body = await res.text();
+    if (!res.ok) {
+        throw new Error(
+            `HTTP ${res.status} from ${verifyUrl}: ${body.slice(0, 500)}`
+        );
+    }
+
+    console.log(`Verification submitted: ${body.trim()}`);
+    await pollBlockscoutVerification(config, address);
+    console.log(`Verified: ${config.browserUrl}address/${address}#code`);
+}
+
+/**
+ * Read a contract's Sourcify match. Returns null when Sourcify has no record.
+ */
+async function sourcifyMatch(chainId, address) {
+    const res = await fetch(`${SOURCIFY_API}/contract/${chainId}/${address}`);
+    if (res.status === 404) {
+        return null;
+    }
+    if (!res.ok) {
+        throw new Error(`HTTP ${res.status} from Sourcify contract lookup`);
+    }
+    return (await res.json()).match;
+}
+
+/**
+ * Wait for a Sourcify verification job to finish.
+ *
+ * Sourcify compiles the submitted standard JSON and compares it with the
+ * on-chain bytecode; a job ends either with a match or with an error that
+ * names the reason.
+ */
+async function pollSourcifyVerification(verificationId) {
+    const url = `${SOURCIFY_API}/verify/${verificationId}`;
+    for (let attempt = 0; attempt < 60; attempt++) {
+        const res = await fetch(url);
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status} polling Sourcify job ${verificationId}`);
+        }
+        const job = await res.json();
+        if (job.isJobCompleted) {
+            if (job.error) {
+                throw new Error(
+                    `Sourcify rejected the verification: ${JSON.stringify(job.error)}`
+                );
+            }
+            return job.contract.match;
+        }
+        await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+    throw new Error(`Timed out waiting for Sourcify job ${verificationId}`);
+}
+
+/**
+ * Verify on Sourcify with the standard JSON input from the artifact's own
+ * build-info, so compiler settings match the deployment by construction.
+ * Sourcify needs no constructor arguments: it matches the runtime bytecode.
+ */
+async function verifyOnSourcify({network, address, contractFqn}) {
+    const config = SOURCIFY_NETWORKS[network];
+    if (!config) {
+        throw new Error(`No Sourcify config for network "${network}"`);
+    }
+
+    console.log(`Verifying on Sourcify (chain ${config.chainId})...`);
+    const existing = await sourcifyMatch(config.chainId, address);
+    if (existing) {
+        console.log(
+            `Already verified (${existing}): ${config.browserUrl}address/${address}#code`
+        );
+        return;
+    }
+
+    const contractsDir = path.resolve(__dirname, "..");
+    const {standardJson, compilerVersion} = getHardhatStandardJsonInput(
+        contractsDir,
+        contractFqn
+    );
+
+    const res = await fetch(
+        `${SOURCIFY_API}/verify/${config.chainId}/${address}`,
+        {
+            method: "POST",
+            headers: {"content-type": "application/json"},
+            body: JSON.stringify({
+                stdJsonInput: JSON.parse(standardJson),
+                compilerVersion,
+                contractIdentifier: contractFqn,
+            }),
+        }
+    );
+    const body = await res.json();
+    if (!res.ok) {
+        throw new Error(
+            `HTTP ${res.status} from Sourcify: ${JSON.stringify(body).slice(0, 500)}`
+        );
+    }
+
+    console.log(`Verification submitted: job ${body.verificationId}`);
+    const match = await pollSourcifyVerification(body.verificationId);
+    console.log(`Verified (${match}): ${config.browserUrl}address/${address}#code`);
+}
+
+/**
+ * Verify on whichever explorer the network uses: Blockscout's native v2 API for
+ * Blockscout chains, Sourcify for chains whose explorer reads from it,
+ * hardhat-verify's Etherscan flow everywhere else.
+ *
+ * @param {string} network Hardhat network name
+ * @param {string} address Deployed contract address
+ * @param {string} contractFqn Source path and contract name, `src/X.sol:X`.
+ *     Used by the Blockscout path; hardhat-verify detects it from the bytecode.
+ * @param {Array} constructorArgs Constructor arguments, in declaration order
+ */
+async function verifyOnExplorer({network, address, contractFqn, constructorArgs}) {
+    if (BLOCKSCOUT_NETWORKS[network]) {
+        await verifyOnBlockscout({
+            network,
+            address,
+            contractFqn,
+            constructorArgs,
+        });
+        return;
+    }
+    if (SOURCIFY_NETWORKS[network]) {
+        await verifyOnSourcify({network, address, contractFqn});
+        return;
+    }
+
+    await hre.run("verify:verify", {
+        address,
+        constructorArguments: constructorArgs,
+    });
+}
 
 const txServiceUrls = {
     ethereum: "https://safe-transaction-mainnet.safe.global",
@@ -73,7 +415,83 @@ async function proposeTransaction(safeAddress, txData, signer, methodName) {
     return safeTxHash;
 }
 
+// Deterministic Deployment Proxy
+// More info: https://getfoundry.sh/guides/deterministic-deployments-using-create2/
+const CREATE2_FACTORY = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
+
+/**
+ * Deploys `contractName` through the CREATE2 factory, then verifies it on
+ * Tenderly and on the network's block explorer.
+ *
+ * The address is derived from the bytecode and the constructor arguments, so an
+ * existing contract there is this exact build. The deployment is then skipped,
+ * which makes the script re-runnable when verification has to be retried.
+ *
+ * @returns the contract's address.
+ */
+async function deployCreate2({contractName, contractFqn, args, network}) {
+    const [deployer] = await ethers.getSigners();
+    console.log(`Deploying with account: ${deployer.address}`);
+    console.log(
+        `Account balance: ${ethers.utils.formatEther(await deployer.getBalance())} ETH`
+    );
+    console.log(`Using CREATE2 factory at: ${CREATE2_FACTORY}`);
+
+    const factory = await ethers.getContractFactory(contractName);
+    const bytecode = factory.getDeployTransaction(...args).data;
+    const salt = ethers.utils.id(`${contractName}-${network}`);
+    const address = ethers.utils.getCreate2Address(
+        CREATE2_FACTORY,
+        salt,
+        ethers.utils.keccak256(bytecode)
+    );
+    console.log(`${contractName} will be deployed to: ${address}`);
+
+    const deployed = (await ethers.provider.getCode(address)) !== "0x";
+    if (deployed) {
+        console.log(`${contractName} already deployed, skipping deployment`);
+    } else {
+        const tx = await deployer.sendTransaction({
+            to: CREATE2_FACTORY,
+            data: ethers.utils.concat([salt, bytecode]),
+            gasLimit: 3_000_000,
+        });
+        await tx.wait();
+        console.log(`${contractName} deployed to: ${address}`);
+    }
+
+    try {
+        await hre.tenderly.verify({name: contractName, address});
+        console.log("Contract verified successfully on Tenderly");
+    } catch (error) {
+        console.error("Error during contract verification:", error);
+    }
+
+    if (!deployed) {
+        console.log("Waiting for 1 minute before verifying the contract...");
+        await new Promise((resolve) => setTimeout(resolve, 60000));
+    }
+
+    try {
+        await verifyOnExplorer({
+            network,
+            address,
+            contractFqn,
+            constructorArgs: args,
+        });
+        console.log(
+            `${contractName} verified successfully on blockchain explorer!`
+        );
+    } catch (error) {
+        console.error(`Error during blockchain explorer verification:`, error);
+    }
+
+    return address;
+}
+
 module.exports = {
+    deployCreate2,
     proposeOrSendTransaction,
-    resolveRolesNetwork
+    resolveRolesNetwork,
+    verifyOnExplorer,
 }

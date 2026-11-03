@@ -40,9 +40,13 @@ pub enum Executor {
     UniswapV2,
     UniswapV3,
     NativeWrap,
+    /// Also models `AeroBasicExecutor`, which inherits `AerodromeV1Executor` and only changes how
+    /// the requested output amount is priced.
     AerodromeV1,
     LiquidityParty,
     LunarBase,
+    PropAMM,
+    TychoSubsidizing,
 }
 
 /// Return value of [Executor::get_transfer_data]
@@ -63,7 +67,7 @@ pub struct CallbackTransferData {
 
 impl Executor {
     /// Array containing all [Executor]s.
-    pub const VARIANTS: [Executor; 11] = [
+    pub const VARIANTS: [Executor; 13] = [
         Executor::Curve,
         Executor::ERC4626,
         Executor::FluidV1,
@@ -75,6 +79,8 @@ impl Executor {
         Executor::AerodromeV1,
         Executor::LiquidityParty,
         Executor::LunarBase,
+        Executor::PropAMM,
+        Executor::TychoSubsidizing,
     ];
 
     /// <https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/interfaces/IExecutor.sol#L41>
@@ -334,6 +340,30 @@ impl Executor {
                     )?,
                     output_to_router: false,
                 })
+            }
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
+            Self::PropAMM => Ok(TransferData {
+                transfer_type: TransferType::Transfer,
+                receiver: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                    // trying more variants might find some very obscure bugs
+                    // in the future but slows down simulation a lot
+                    // and currently is ignored anyway
+                    Address::SENDER_CONTROLLED,
+                )?,
+                token_in: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 20, end: 40 },
+                    Address::POSSIBLY_ERC20_AND_NATIVE,
+                )?,
+                token_out: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 40, end: 60 },
+                    Address::POSSIBLY_ERC20_AND_NATIVE,
+                )?,
+                output_to_router: false,
+            }),
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/TychoSubsidizingExecutor.sol
+            Self::TychoSubsidizing => {
+                subsidizing_inner(params, swap_index)?.get_transfer_data(params, _state, swap_index)
             }
         }
     }
@@ -623,6 +653,34 @@ impl Executor {
                 // the actual swap logic doesn't matter
                 Ok(())
             }
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
+            Self::PropAMM => {
+                let pamm = params.request(
+                    ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                    // trying more variants might find some very obscure bugs
+                    // in the future but slows down simulation a lot
+                    // and currently is ignored anyway
+                    Address::SENDER_CONTROLLED,
+                )?;
+                if pamm.is_sender_controlled() {
+                    // if the sender controls the pAMM,
+                    // the actual swap logic doesn't matter
+                    Ok(())
+                } else {
+                    Err(Error::Ignore {
+                        reason: "price level stream pAMM not sender controlled. not low hanging fruit. would require simulating real pAMM".into(),
+                    })
+                }
+            }
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/TychoSubsidizingExecutor.sol
+            // The subsidy payer is not modeled: it pays from its own balance.
+            Self::TychoSubsidizing => {
+                let inner = subsidizing_inner(params, swap_index)?;
+                state.tstore("currently_swapping_executor", inner);
+                inner.swap(params, state, vault, log, amount, _receiver, swap_index)?;
+                state.tdelete("currently_swapping_executor");
+                Ok(())
+            }
         }
     }
 
@@ -658,6 +716,10 @@ impl Executor {
             Self::AerodromeV1 => unimplemented!(),
             Self::LiquidityParty => unimplemented!(),
             Self::LunarBase => unimplemented!(),
+            Self::PropAMM => unimplemented!(),
+            Self::TychoSubsidizing => {
+                unimplemented!("TychoSubsidizing points the callback slot at its inner executor")
+            }
         }
     }
 
@@ -685,6 +747,12 @@ impl Executor {
             Self::AerodromeV1 => unimplemented!("AerodromeV1 doesn't use callbacks"),
             Self::LiquidityParty => unimplemented!("LiquidityParty doesn't use callbacks"),
             Self::LunarBase => unimplemented!("LunarBase doesn't use callbacks"),
+            Self::PropAMM => {
+                unimplemented!("PropAMM doesn't use callbacks")
+            }
+            Self::TychoSubsidizing => {
+                unimplemented!("TychoSubsidizing points the callback slot at its inner executor")
+            }
         }
     }
 
@@ -745,6 +813,31 @@ impl Executor {
             )?,
             // https://github.com/propeller-heads/tycho-indexer/blob/ae386ce3a9decbf8d73dab474e80a3d3785f02ef/crates/tycho-execution/contracts/src/executors/LunarBaseExecutor.sol#L37
             Self::LunarBase => Address::Router,
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
+            Self::PropAMM => params.request(
+                ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                // trying more variants might find some very obscure bugs
+                // in the future but slows down simulation a lot
+                // and currently is ignored anyway
+                Address::SENDER_CONTROLLED,
+            )?,
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/TychoSubsidizingExecutor.sol
+            Self::TychoSubsidizing => subsidizing_inner(params, swap_index)?
+                .funds_expected_address(params, _state, swap_index)?,
         })
     }
+}
+
+/// The inner executor the caller names in a [Executor::TychoSubsidizing] swap's data. The
+/// executor rejects itself as its inner executor, and the model only has approved executors.
+///
+/// The contract maps its own address back to the router. The model needs no mapping: its inner
+/// executors already report the router.
+fn subsidizing_inner(params: &Params, swap_index: u8) -> Result<Executor, Error> {
+    Ok(params.request(
+        ParamKey::SwapIndexed { prefix: "subsidizing_inner_executor", swap_index },
+        Executor::VARIANTS
+            .into_iter()
+            .filter(|executor| *executor != Executor::TychoSubsidizing),
+    )?)
 }

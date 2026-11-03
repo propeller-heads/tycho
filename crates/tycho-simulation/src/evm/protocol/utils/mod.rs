@@ -16,7 +16,7 @@ pub fn add_fee_markup(amount: f64, fee: f64) -> f64 {
 ///
 /// Checks the length of the `Bytes` before attempting to convert, and returns a `SimulationError`
 /// if not 20 bytes long.
-pub(crate) fn bytes_to_address(address: &Bytes) -> Result<Address, SimulationError> {
+pub fn bytes_to_address(address: &Bytes) -> Result<Address, SimulationError> {
     if address.len() == 20 {
         Ok(Address::from_slice(address))
     } else {

@@ -204,6 +204,7 @@ mod tests {
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
             router_address: Some(Bytes::default()),
+            origin: None,
         };
 
         let encoder = EkuboV3SwapEncoder::new(Bytes::default(), Chain::Ethereum, None).unwrap();
@@ -263,6 +264,7 @@ mod tests {
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
             router_address: Some(Bytes::default()),
+            origin: None,
         };
 
         let encoder = EkuboV3SwapEncoder::new(Bytes::default(), Chain::Ethereum, None).unwrap();
@@ -307,10 +309,11 @@ mod tests {
         let usdc = Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
         let usdt = Bytes::from("0xdAC17F958D2ee523a2206206994597C13D831ec7");
 
-        // Must match SIGNED_EXCLUSIVE_SWAP_ADDRESS in EkuboV3Executor.sol.
-        let extension_hex = "0x5519ed5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
+        // Must match the `signedExclusiveSwap` the executor was deployed with
+        // (EKUBO_V3_SIGNED_EXCLUSIVE_SWAP in contracts/test/Constants.sol).
+        let extension_hex = "0x55b703eed01b35641963da2fb2e14885993605a3";
         let extension_addr =
-            Address::from_str("0x5519ed5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e").unwrap();
+            Address::from_str("0x55b703eed01b35641963da2fb2e14885993605a3").unwrap();
 
         // Concentrated pool, tick_spacing = 100 (0x80000064).
         let pool_type_config = 0x8000_0064_u32;
@@ -421,6 +424,7 @@ mod tests {
             group_token_in: usdc.clone(),
             group_token_out: usdt.clone(),
             router_address: Some(Bytes::default()),
+            origin: None,
         };
 
         let encoder = EkuboV3SwapEncoder::new(Bytes::default(), Chain::Ethereum, None).unwrap();
@@ -444,6 +448,7 @@ mod tests {
             group_token_in: group_token_in.clone(),
             group_token_out: group_token_out.clone(),
             router_address: Some(Bytes::default()),
+            origin: None,
         };
 
         let first_swap = Swap::new(

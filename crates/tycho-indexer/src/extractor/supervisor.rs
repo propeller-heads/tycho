@@ -1,0 +1,407 @@
+use std::{collections::HashMap, sync::Arc, time::Duration};
+
+use tokio::sync::{
+    mpsc::{self, Receiver, Sender},
+    oneshot, Mutex,
+};
+use tokio_retry::strategy::ExponentialBackoff;
+use tracing::{error, info, warn};
+use tycho_common::models::ExtractorIdentity;
+
+pub use crate::extractor::factory::{DCIType, ExtractorConfig, ProtocolTypeConfig};
+use crate::extractor::{
+    factory::ExtractorFactory,
+    runner::{
+        slow_client_removals, ControlMessage, Delivery, ExtractorHandle, Subscriber,
+        SubscriberKind, SubscriptionsMap,
+    },
+    DeltaCommand, ExtractionError,
+};
+
+/// Buffer size of the control channel between `ExtractorHandle`s and the supervisor.
+const CONTROL_CHANNEL_SIZE: usize = 128;
+/// Upper bound for the restart backoff delay.
+const MAX_RESTART_BACKOFF: Duration = Duration::from_secs(4 * 60 * 60);
+/// Minimum run duration after which a failure is treated as a fresh incident rather than a
+/// continuation of the previous one, resetting the restart count and backoff.
+const HEALTHY_RUN_THRESHOLD: Duration = Duration::from_secs(10 * 60);
+
+/// Exponential backoff for restarts: 60s, 120s, 240s, ... capped at [`MAX_RESTART_BACKOFF`].
+fn restart_backoff() -> ExponentialBackoff {
+    ExponentialBackoff::from_millis(2)
+        .factor(30_000)
+        .max_delay(MAX_RESTART_BACKOFF)
+}
+
+/// Registers the counter at zero. A series born at one looks flat to `increase()` on Prometheus,
+/// so the first restart would raise no alert.
+fn restart_counter(id: &ExtractorIdentity) -> metrics::Counter {
+    let restarts = metrics::counter!(
+        "extractor_restarts_total",
+        "extractor" => id.name.clone(),
+        "chain" => id.chain.to_string()
+    );
+    restarts.increment(0);
+    restarts
+}
+
+/// Long-lived per-extractor task that owns the factory and manages restart lifecycle.
+///
+/// The supervisor:
+/// - Builds an extractor and runner via its factory.
+/// - Runs the runner and waits for it to exit.
+/// - On failure: sends `DeltaCommand::ExtractorRestarted` to all subscribers, applies exponential
+///   backoff, then rebuilds from scratch. Each subscriber decides how to handle the restart.
+/// - Counts every rebuild in `extractor_restarts_total`, registered at zero when supervision
+///   starts.
+/// - Forwards `ControlMessage::Subscribe` from the `ExtractorHandle` to the subscription map.
+/// - Forwards `ControlMessage::Stop` by signalling the runner's stop channel.
+pub struct ExtractorSupervisor {
+    factory: ExtractorFactory,
+    ctrl_tx: Sender<ControlMessage>,
+    control_rx: Receiver<ControlMessage>,
+    subscriptions: Arc<Mutex<SubscriptionsMap>>,
+    id: ExtractorIdentity,
+    max_restarts: Option<u32>,
+    next_subscriber_id: u64,
+}
+
+impl ExtractorSupervisor {
+    pub fn new(factory: ExtractorFactory) -> Self {
+        let id = factory.extractor_id();
+        let max_restarts: Option<u32> = factory.config.max_restarts;
+        let (ctrl_tx, control_rx) = mpsc::channel(CONTROL_CHANNEL_SIZE);
+        Self {
+            factory,
+            ctrl_tx,
+            control_rx,
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            id,
+            max_restarts,
+            next_subscriber_id: 0,
+        }
+    }
+
+    /// Registers an in-process subscriber.
+    ///
+    /// The subscriber receives every [`DeltaCommand`] the extractor emits, across restarts: the
+    /// extractor waits for room in its channel. External subscribers joining at runtime go through
+    /// [`MessageSender::subscribe`](crate::extractor::runner::MessageSender::subscribe) on an
+    /// [`ExtractorHandle`] instead; they are removed when their channel is full.
+    pub async fn add_subscriber(&mut self, sender: Sender<DeltaCommand>) {
+        self.insert_subscriber(sender, SubscriberKind::Internal)
+            .await;
+    }
+
+    async fn insert_subscriber(&mut self, sender: Sender<DeltaCommand>, kind: SubscriberKind) {
+        let subscriber_id = self.next_subscriber_id;
+        self.next_subscriber_id += 1;
+        info!(extractor = %self.id, subscriber_id, ?kind, "New extractor subscription");
+        self.subscriptions
+            .lock()
+            .await
+            .insert(subscriber_id, Subscriber { sender, kind });
+    }
+
+    /// Returns an [`ExtractorHandle`] that can be used to subscribe or stop this extractor.
+    pub fn handle(&self) -> ExtractorHandle {
+        ExtractorHandle::new(self.id.clone(), self.ctrl_tx.clone())
+    }
+
+    /// Runs the supervision loop. Returns `Ok` when the extractor exited gracefully or was
+    /// stopped via `ControlMessage::Stop`.
+    ///
+    /// Returns `Err` only in exceptional situations that cannot be recovered from inside the
+    /// process, and callers are expected to treat it as fatal:
+    /// - The runner could not be rebuilt after a failure. Rebuilding only touches external state,
+    ///   so this means the database was unreachable while reading back the cursor, last block, or
+    ///   DCI entry points, or the spkg file on disk is missing or corrupted. An invalid
+    ///   configuration fails the first build the same way, aborting startup.
+    /// - `max_restarts` consecutive failures were exhausted.
+    ///
+    /// In both cases a process restart is the safest recovery: it rebuilds from a clean
+    /// slate, and it avoids indefinitely serving the dead extractor's stale pending deltas
+    /// over RPC. A future improvement could instead retry transient build failures in place
+    /// and reserve `Err` for deterministic configuration errors.
+    pub async fn run(mut self) -> Result<(), ExtractionError> {
+        let mut restart_count: u32 = 0;
+        let mut backoff_strategy = restart_backoff();
+        let restarts = restart_counter(&self.id);
+
+        loop {
+            let (stop_tx, stop_rx) = oneshot::channel();
+            let runner = match self
+                .factory
+                .build_runner(self.subscriptions.clone(), stop_rx)
+                .await
+            {
+                Ok(r) => r,
+                Err(err) => {
+                    error!(extractor = %self.id, error = %err, "Failed to build extractor");
+                    metrics::counter!(
+                        "extractor_restart_failed",
+                        "extractor" => self.id.name.clone()
+                    )
+                    .increment(1);
+                    return Err(err);
+                }
+            };
+
+            let run_started = tokio::time::Instant::now();
+            let mut run_handle = runner.run();
+
+            // Drive the runner, handling control messages in parallel.
+            let runner_result = loop {
+                tokio::select! {
+                    result = &mut run_handle => {
+                        break result;
+                    }
+                    Some(ctrl) = self.control_rx.recv() => {
+                        match ctrl {
+                            ControlMessage::Stop => {
+                                info!(extractor = %self.id, "Stop signal received by supervisor");
+                                let _ = stop_tx.send(());
+                                let result = run_handle.await;
+                                return match result {
+                                    Ok(Ok(())) => Ok(()),
+                                    Ok(Err(e)) => Err(e),
+                                    Err(join_err) => Err(ExtractionError::Unknown(
+                                        format!("Runner panicked: {join_err}")
+                                    )),
+                                };
+                            }
+                            ControlMessage::Subscribe { sender, subscription_id, user_identity } => {
+                                self
+                                    .insert_subscriber(
+                                        sender,
+                                        SubscriberKind::Client { subscription_id, user_identity },
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            };
+
+            // Runner exited — classify the result.
+            match runner_result {
+                Ok(Ok(())) => {
+                    info!(extractor = %self.id, "Extractor exited gracefully");
+                    metrics::counter!(
+                        "extractor_stopped",
+                        "extractor" => self.id.name.clone(),
+                        "reason" => "graceful"
+                    )
+                    .increment(1);
+                    return Ok(());
+                }
+                Ok(Err(ref err)) => {
+                    error!(
+                        extractor = %self.id,
+                        error = %err,
+                        restart_count,
+                        "Extractor failed"
+                    );
+                    metrics::counter!(
+                        "extractor_stopped",
+                        "extractor" => self.id.name.clone(),
+                        "reason" => err.variant_name()
+                    )
+                    .increment(1);
+                }
+                Err(ref join_err) => {
+                    error!(
+                        extractor = %self.id,
+                        error = %join_err,
+                        "Extractor task panicked"
+                    );
+                    metrics::counter!(
+                        "extractor_stopped",
+                        "extractor" => self.id.name.clone(),
+                        "reason" => "panic"
+                    )
+                    .increment(1);
+                }
+            }
+
+            // A run that lasted well past startup proves the previous failures were not
+            // consecutive, so the failure counting starts afresh. Without this, sporadic
+            // failures accumulate over the process lifetime: the backoff ratchets up to its
+            // cap and `max_restarts` eventually stops a healthy extractor for good.
+            if run_started.elapsed() >= HEALTHY_RUN_THRESHOLD {
+                info!(
+                    extractor = %self.id,
+                    run_duration = ?run_started.elapsed(),
+                    restart_count,
+                    "Healthy run detected — resetting restart count and backoff"
+                );
+                restart_count = 0;
+                backoff_strategy = restart_backoff();
+            }
+
+            if self
+                .max_restarts
+                .is_some_and(|max| restart_count >= max)
+            {
+                error!(
+                    extractor = %self.id,
+                    max_restarts = ?self.max_restarts,
+                    "Extractor permanently stopped — restart limit reached"
+                );
+                metrics::counter!(
+                    "extractor_permanently_stopped",
+                    "extractor" => self.id.name.clone()
+                )
+                .increment(1);
+                return runner_result
+                    .map_err(|e| ExtractionError::Unknown(format!("Runner panicked: {e}")))?;
+            }
+
+            // Notify all subscribers of the restart. Sent on the same channels as block
+            // messages, so it is guaranteed to arrive after all blocks the runner emitted
+            // before failing. Each subscriber decides how to react: `PendingDeltas` folds its
+            // committed blocks and clears its window, the WS service ends the affected client
+            // subscriptions.
+            {
+                let mut subs = self.subscriptions.lock().await;
+                let mut removed = Vec::new();
+                for (&subscriber_id, subscriber) in subs.iter() {
+                    match subscriber
+                        .deliver(DeltaCommand::ExtractorRestarted(self.id.name.clone()))
+                        .await
+                    {
+                        Delivery::Sent => {}
+                        Delivery::Closed => {
+                            info!(
+                                extractor = %self.id,
+                                subscriber_id,
+                                kind = ?subscriber.kind,
+                                "Removed a closed subscriber during restart"
+                            );
+                            removed.push(subscriber_id);
+                        }
+                        Delivery::Full => {
+                            warn!(
+                                extractor = %self.id,
+                                subscriber_id,
+                                kind = ?subscriber.kind,
+                                "Removed a client subscriber whose channel is full during restart"
+                            );
+                            slow_client_removals(&self.id).increment(1);
+                            removed.push(subscriber_id);
+                        }
+                    }
+                }
+                for subscriber_id in removed {
+                    subs.remove(&subscriber_id);
+                }
+            }
+
+            let backoff = backoff_strategy
+                .next()
+                .expect("backoff strategy is infinite");
+            warn!(
+                extractor = %self.id,
+                ?backoff,
+                restart_count,
+                "Waiting for backoff before restarting extractor"
+            );
+            // Keep servicing control messages while waiting: a `Stop` must not have to sit
+            // out a backoff of up to `MAX_RESTART_BACKOFF`, and new subscribers registered
+            // now take effect on the next run.
+            let deadline = tokio::time::Instant::now() + backoff;
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(deadline) => break,
+                    Some(ctrl) = self.control_rx.recv() => {
+                        match ctrl {
+                            ControlMessage::Stop => {
+                                info!(
+                                    extractor = %self.id,
+                                    "Stop signal received during restart backoff"
+                                );
+                                return Ok(());
+                            }
+                            ControlMessage::Subscribe { sender, subscription_id, user_identity } => {
+                                self
+                                    .insert_subscriber(
+                                        sender,
+                                        SubscriberKind::Client { subscription_id, user_identity },
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+            warn!(
+                extractor = %self.id,
+                ?backoff,
+                restart_count,
+                "Restarting extractor after backoff"
+            );
+            restart_count += 1;
+            restarts.increment(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use metrics_util::{
+        debugging::{DebugValue, DebuggingRecorder, Snapshotter},
+        MetricKind,
+    };
+    use tycho_common::models::Chain;
+
+    use super::*;
+
+    fn restarts_series(snapshotter: &Snapshotter) -> Vec<(BTreeMap<String, String>, u64)> {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| {
+                key.kind() == MetricKind::Counter && key.key().name() == "extractor_restarts_total"
+            })
+            .map(|(key, _, _, value)| {
+                let labels = key
+                    .key()
+                    .labels()
+                    .map(|l| (l.key().to_string(), l.value().to_string()))
+                    .collect();
+                let DebugValue::Counter(count) = value else {
+                    panic!("extractor_restarts_total must be a counter");
+                };
+                (labels, count)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn restart_counter_exists_at_zero_and_counts_restarts() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let id = ExtractorIdentity::new(Chain::Ethereum, "uniswap_v2");
+        let labels = BTreeMap::from([
+            ("extractor".to_string(), "uniswap_v2".to_string()),
+            ("chain".to_string(), "ethereum".to_string()),
+        ]);
+
+        metrics::with_local_recorder(&recorder, || {
+            let restarts = restart_counter(&id);
+            assert_eq!(
+                restarts_series(&snapshotter),
+                vec![(labels.clone(), 0)],
+                "the series must exist at zero before the first restart"
+            );
+
+            restarts.increment(1);
+            restarts.increment(1);
+        });
+
+        assert_eq!(restarts_series(&snapshotter), vec![(labels, 2)]);
+    }
+}

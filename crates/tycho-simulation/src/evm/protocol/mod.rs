@@ -1,16 +1,21 @@
+pub mod aero_basic;
 pub mod aerodrome_slipstreams;
 pub mod aerodrome_v1;
+pub mod balancer_v3;
+pub mod biconomy;
 mod clmm;
 pub mod cowamm;
 mod cpmm;
 pub mod curve;
 pub mod ekubo;
+mod ekubo_common;
 pub mod ekubo_v3;
 pub mod erc4626;
 pub mod etherfi;
 pub mod filters;
 pub mod fluid;
 pub mod fluid_v2;
+pub mod lido_v4;
 pub mod lunarbase;
 pub mod native_wrapper;
 pub mod pancakeswap_v2;
@@ -18,6 +23,7 @@ pub mod ramses_v3;
 pub mod ring_swap_v2;
 pub mod rocketpool;
 pub mod safe_math;
+pub mod sky;
 pub mod u256_num;
 pub mod uniswap_v2;
 pub mod uniswap_v3;
@@ -25,7 +31,6 @@ pub mod uniswap_v4;
 pub mod utils;
 pub mod velodrome_slipstreams;
 pub mod vm;
-
 #[cfg(test)]
 mod test_utils {
     use std::collections::HashMap;

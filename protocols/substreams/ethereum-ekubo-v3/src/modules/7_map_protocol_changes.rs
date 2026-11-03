@@ -260,6 +260,11 @@ fn maybe_attribute_updates(ev: Event, timestamp: u64) -> Option<Vec<Attribute>> 
             value: timestamp.to_be_bytes().to_vec(),
             change: ChangeType::Update.into(),
         }]),
+        Event::SwapFeeUpdated(ev) => Some(vec![Attribute {
+            name: "swap_fee".to_string(),
+            value: ev.swap_fee,
+            change: ChangeType::Update.into(),
+        }]),
         _ => None,
     }
 }

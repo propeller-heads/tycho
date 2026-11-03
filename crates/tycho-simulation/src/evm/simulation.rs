@@ -16,6 +16,7 @@ use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use strum_macros::Display;
 use tokio::runtime::{Handle, Runtime};
 use tracing::debug;
+use tycho_common::models::contract::AccountDelta;
 
 use super::{
     account_storage::StateUpdate,
@@ -97,13 +98,21 @@ where
         // db, the db is simply a reference wrapper. To avoid lifetimes leaking we don't let the evm
         // struct outlive this scope.
 
-        // We protect the state from being consumed.
-        let overrides = params
-            .overrides
-            .clone()
-            .unwrap_or_default();
-
-        let db_ref = OverriddenSimulationDB { inner_db: &self.state, overrides: &overrides };
+        // Borrowed, not cloned: an override map can hold every storage slot a pending block
+        // touched, and this runs once per pool.
+        let no_storage_overrides = HashMap::new();
+        let no_balance_overrides = HashMap::new();
+        let db_ref = OverriddenSimulationDB {
+            inner_db: &self.state,
+            overrides: params
+                .overrides
+                .as_ref()
+                .unwrap_or(&no_storage_overrides),
+            native_balance_overrides: params
+                .native_balance_overrides
+                .as_ref()
+                .unwrap_or(&no_balance_overrides),
+        };
 
         let tx_env = TxEnv {
             caller: params.caller,
@@ -378,7 +387,7 @@ fn interpret_evm_success(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 /// Data needed to invoke a transaction simulation
 pub struct SimulationParameters {
     /// Address of the sending account
@@ -399,12 +408,215 @@ pub struct SimulationParameters {
     pub transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
     /// Per-call block context overrides.
     pub block_overrides: Option<BlockEnvOverrides>,
+    /// Native balance overrides. Same per-call scoping as `overrides`.
+    pub native_balance_overrides: Option<HashMap<Address, U256>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BlockEnvOverrides {
     pub number: Option<u64>,
     pub timestamp: Option<u64>,
+}
+
+/// State a view call runs against, overriding what the engine's database holds.
+///
+/// `Default` means no overrides, so a call reads the engine's confirmed state.
+#[derive(Debug, Clone, Default)]
+pub struct PendingOverrides {
+    pub storage: Option<HashMap<Address, HashMap<U256, U256>>>,
+    pub native_balances: Option<HashMap<Address, U256>>,
+    pub block: Option<BlockEnvOverrides>,
+}
+
+impl PendingOverrides {
+    /// The state `accounts` would leave behind, under the `block` environment.
+    ///
+    /// Only the accounts given appear, so every slot they did not write keeps its confirmed
+    /// value. A cleared slot is stored as `None` and reads back as zero, which is what the EVM
+    /// would see. Values shorter than 32 bytes are left-padded, which is how the indexer stores
+    /// slots and balances with leading zeros trimmed.
+    pub fn from_account_deltas(
+        accounts: &HashMap<tycho_common::Bytes, AccountDelta>,
+        block: Option<BlockEnvOverrides>,
+    ) -> Self {
+        let mut storage: HashMap<Address, HashMap<U256, U256>> = HashMap::new();
+        let mut native_balances: HashMap<Address, U256> = HashMap::new();
+        for (address, delta) in accounts {
+            if address.len() != 20 {
+                continue;
+            }
+            let address = Address::from_slice(address.as_ref());
+            let slots: HashMap<U256, U256> = delta
+                .slots
+                .iter()
+                .map(|(slot, value)| {
+                    (
+                        U256::from_be_slice(slot.as_ref()),
+                        value
+                            .as_ref()
+                            .map_or(U256::ZERO, |v| U256::from_be_slice(v.as_ref())),
+                    )
+                })
+                .collect();
+            if !slots.is_empty() {
+                storage.insert(address, slots);
+            }
+            if let Some(balance) = &delta.balance {
+                native_balances.insert(address, U256::from_be_slice(balance.as_ref()));
+            }
+        }
+        PendingOverrides {
+            storage: (!storage.is_empty()).then_some(storage),
+            native_balances: (!native_balances.is_empty()).then_some(native_balances),
+            block,
+        }
+    }
+
+    /// Parameters for a `data` view call to `to` from the zero address, under these overrides.
+    ///
+    /// Clones the override maps, which `SimulationParameters` owns. Callers that issue many
+    /// calls per pending block pay that clone per call.
+    pub fn view_call(&self, to: Address, data: Vec<u8>) -> SimulationParameters {
+        SimulationParameters {
+            caller: Address::ZERO,
+            to,
+            data,
+            overrides: self.storage.clone(),
+            native_balance_overrides: self.native_balances.clone(),
+            block_overrides: self.block.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod pending_overrides_tests {
+    use std::collections::HashMap;
+
+    use alloy::primitives::{Address, U256};
+    use tycho_common::{
+        models::{contract::AccountDelta, Chain, ChangeType},
+        Bytes,
+    };
+
+    use super::{BlockEnvOverrides, PendingOverrides};
+
+    fn account_delta(
+        address: [u8; 20],
+        slots: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        balance: Option<Vec<u8>>,
+    ) -> (Bytes, AccountDelta) {
+        let address = Bytes::from(address.to_vec());
+        (
+            address.clone(),
+            AccountDelta::new(
+                Chain::Ethereum,
+                address,
+                slots
+                    .into_iter()
+                    .map(|(slot, value)| (Bytes::from(slot), value.map(Bytes::from)))
+                    .collect(),
+                balance.map(Bytes::from),
+                None,
+                ChangeType::Update,
+            ),
+        )
+    }
+
+    #[test]
+    fn test_slots_and_balances_reach_the_overrides() {
+        let account = [0xaau8; 20];
+        let block = BlockEnvOverrides { number: Some(3), timestamp: Some(4) };
+        let overrides = PendingOverrides::from_account_deltas(
+            &HashMap::from([account_delta(
+                account,
+                vec![(vec![3], Some(vec![7]))],
+                Some(vec![0x0d, 0xe0]),
+            )]),
+            Some(block.clone()),
+        );
+
+        let address = Address::from_slice(&account);
+        assert_eq!(
+            overrides
+                .storage
+                .as_ref()
+                .and_then(|s| s.get(&address))
+                .and_then(|slots| slots.get(&U256::from(3))),
+            Some(&U256::from(7)),
+            "a written slot must be overridden"
+        );
+        assert_eq!(
+            overrides
+                .native_balances
+                .as_ref()
+                .and_then(|b| b.get(&address)),
+            Some(&U256::from(0x0de0)),
+            "a native balance must be overridden"
+        );
+        assert_eq!(overrides.block, Some(block));
+    }
+
+    #[test]
+    fn test_cleared_slot_reads_as_zero() {
+        let account = [0xbbu8; 20];
+        let overrides = PendingOverrides::from_account_deltas(
+            &HashMap::from([account_delta(account, vec![(vec![1], None)], None)]),
+            None,
+        );
+
+        assert_eq!(
+            overrides
+                .storage
+                .as_ref()
+                .and_then(|s| s.get(&Address::from_slice(&account)))
+                .and_then(|slots| slots.get(&U256::from(1))),
+            Some(&U256::ZERO),
+            "a cleared slot must override to zero, not vanish"
+        );
+        assert!(overrides.native_balances.is_none());
+    }
+
+    #[test]
+    fn test_no_accounts_means_no_overrides() {
+        let overrides = PendingOverrides::from_account_deltas(&HashMap::new(), None);
+        assert!(overrides.storage.is_none());
+        assert!(overrides.native_balances.is_none());
+        assert!(overrides.block.is_none());
+    }
+
+    /// Every override a caller sets must reach the parameters, or a pool would silently be
+    /// priced against confirmed state.
+    #[test]
+    fn test_view_call_carries_every_override() {
+        let account = Address::repeat_byte(7);
+        let overrides = PendingOverrides {
+            storage: Some(HashMap::from([(account, HashMap::from([(U256::ZERO, U256::from(1))]))])),
+            native_balances: Some(HashMap::from([(account, U256::from(2))])),
+            block: Some(BlockEnvOverrides { number: Some(3), timestamp: Some(4) }),
+        };
+
+        let params = overrides.view_call(account, vec![0xab]);
+
+        assert_eq!(params.overrides, overrides.storage);
+        assert_eq!(params.native_balance_overrides, overrides.native_balances);
+        assert_eq!(params.block_overrides, overrides.block);
+        assert_eq!(params.caller, Address::ZERO, "A view call must not impersonate an account.");
+        assert_eq!(params.to, account);
+        assert_eq!(params.data, vec![0xab]);
+        assert_eq!(params.value, U256::ZERO, "A view call must not transfer value.");
+    }
+
+    #[test]
+    fn test_default_view_call_overrides_nothing() {
+        let params = PendingOverrides::default().view_call(Address::ZERO, Vec::new());
+
+        assert!(params.overrides.is_none());
+        assert!(params
+            .native_balance_overrides
+            .is_none());
+        assert!(params.block_overrides.is_none());
+    }
 }
 
 #[cfg(test)]
@@ -429,6 +641,7 @@ mod tests {
     use crate::evm::engine_db::{
         engine_db_interface::EngineDatabaseInterface,
         simulation_db::{EVMProvider, SimulationDB},
+        tycho_db::PreCachedDB,
         utils::{get_client, get_runtime},
     };
 
@@ -606,7 +819,7 @@ mod tests {
 
     #[test]
     fn test_simulate_applies_block_env_overrides() -> Result<(), Box<dyn Error>> {
-        let mut state = new_state();
+        let state = PreCachedDB::new()?;
         let contract = Address::from_str("0x0000000000000000000000000000000000001234")?;
         // Minimal runtime bytecode equivalent to the following Solidity contract:
         //
@@ -629,17 +842,18 @@ mod tests {
         let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
         state.init_account(contract, account, None, true)?;
         state.init_account(Address::ZERO, AccountInfo::default(), None, true)?;
-        state.set_block(Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }));
+        state.update(
+            Vec::new(),
+            Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }),
+        )?;
 
         let sim_params = SimulationParameters {
             caller: Address::ZERO,
             to: contract,
             data: Vec::new(),
             value: U256::ZERO,
-            overrides: None,
-            gas_limit: None,
-            transient_storage: None,
             block_overrides: Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) }),
+            ..Default::default()
         };
 
         let engine = SimulationEngine::new(state, false);
@@ -648,6 +862,41 @@ mod tests {
             .expect("simulation should apply block env overrides");
 
         assert_eq!(U256::from_be_slice(result.result.as_ref()), U256::from(123));
+        Ok(())
+    }
+
+    #[test]
+    fn test_simulate_applies_native_balance_overrides() -> Result<(), Box<dyn Error>> {
+        let state = PreCachedDB::new()?;
+        let contract = Address::from_str("0x0000000000000000000000000000000000001234")?;
+        let bytecode = Bytecode::new_raw(Bytes::from_static(&[
+            0x47, // SELFBALANCE
+            0x60, 0x00, // PUSH1 0
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 32
+            0x60, 0x00, // PUSH1 0
+            0xf3, // RETURN
+        ]));
+        let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
+        state.init_account(contract, account, None, true)?;
+        state.init_account(Address::ZERO, AccountInfo::default(), None, true)?;
+        state.update(
+            Vec::new(),
+            Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }),
+        )?;
+        let expected_balance = U256::from(4_200_000_000_000_000_000u64);
+        let sim_params = SimulationParameters {
+            caller: Address::ZERO,
+            to: contract,
+            native_balance_overrides: Some(HashMap::from([(contract, expected_balance)])),
+            ..Default::default()
+        };
+
+        let result = SimulationEngine::new(state, false)
+            .simulate(&sim_params)
+            .expect("simulation should apply the native balance override");
+
+        assert_eq!(U256::from_be_slice(result.result.as_ref()), expected_balance);
         Ok(())
     }
 
@@ -688,16 +937,8 @@ mod tests {
         };
 
         // Simulation parameters
-        let sim_params = SimulationParameters {
-            caller,
-            to: router_addr,
-            data: encoded,
-            value: U256::from(0u64),
-            overrides: None,
-            gas_limit: None,
-            transient_storage: None,
-            block_overrides: None,
-        };
+        let sim_params =
+            SimulationParameters { caller, to: router_addr, data: encoded, ..Default::default() };
         let mut eng = SimulationEngine::new(state, true);
 
         let block = BlockHeader {
@@ -834,11 +1075,8 @@ mod tests {
             to: usdt_address,
             // to: Address::from(deployed_contract_address),
             data: calldata,
-            value: U256::from(0u64),
             overrides: Some(overrides),
-            gas_limit: None,
-            transient_storage: None,
-            block_overrides: None,
+            ..Default::default()
         };
 
         let mut eng = SimulationEngine::new(state, false);

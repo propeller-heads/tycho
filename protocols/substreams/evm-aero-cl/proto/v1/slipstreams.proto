@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package tycho.evm.aerodrome;
+
+message Pool {
+  bytes address = 1;
+  bytes token0 = 2;
+  bytes token1 = 3;
+  bytes created_tx_hash = 4;
+}
+
+// A tick spacing and the fee the emitting factory charges for it.
+message TickSpacingFee {
+    int32 tick_spacing = 1;
+    uint64 fee = 2;
+    bytes factory = 3;
+}
+
+// A group of TickSpacingFee
+message TickSpacingFees {
+    repeated TickSpacingFee tick_spacing_fees = 1;
+}

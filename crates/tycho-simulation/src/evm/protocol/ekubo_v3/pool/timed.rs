@@ -47,15 +47,18 @@ pub fn finish_transition(
         updated_attributes
             .remove("rate_token0")
             .or_else(|| updated_attributes.remove("token0_sale_rate"))
-            .map(u128::from),
+            .map(u128::try_from)
+            .transpose()?,
         updated_attributes
             .remove("rate_token1")
             .or_else(|| updated_attributes.remove("token1_sale_rate"))
-            .map(u128::from),
+            .map(u128::try_from)
+            .transpose()?,
         updated_attributes
             .remove("last_time")
             .or_else(|| updated_attributes.remove("last_execution_time"))
-            .map(u64::from),
+            .map(u64::try_from)
+            .transpose()?,
     );
 
     let first_active_delta_idx =

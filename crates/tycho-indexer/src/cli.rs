@@ -1,11 +1,14 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{builder::TypedValueParser as _, Args, Parser, Subcommand, ValueEnum};
 use tycho_common::{models::Chain, Bytes};
 use tycho_ethereum::rpc::{
     config::{RPCBatchingConfig, RPCRetryConfig},
     EthereumRpcClient,
 };
 
-use crate::extractor::ExtractionError;
+use crate::{
+    extractor::ExtractionError,
+    services::{EntityCacheMode, RpcCacheKind, WindowConfig},
+};
 
 /// Tycho Indexer using Substreams
 ///
@@ -39,7 +42,7 @@ pub enum Command {
     /// Starts a job to analyze stored tokens for tax and gas cost.
     AnalyzeTokens(AnalyzeTokenArgs),
     /// Starts Tycho RPC only. No extractors.
-    Rpc,
+    Rpc(RpcServerArgs),
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -57,6 +60,57 @@ pub struct GlobalArgs {
     /// Batch size for the database inserts
     #[clap(long, default_value = "0")]
     pub database_insert_batch_size: usize,
+
+    /// Minimum number of blocks each extractor's delta window retains in memory
+    #[clap(
+        long,
+        env,
+        default_value_t = WindowConfig::default().depth,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub delta_window_depth: u64,
+
+    /// Number of retired blocks the delta window collects before it folds them out in one batch
+    #[clap(
+        long,
+        env,
+        default_value_t = WindowConfig::default().min_fold_batch,
+        value_parser = clap::value_parser!(u64).range(1..).try_map(usize::try_from)
+    )]
+    pub delta_window_fold_batch: usize,
+
+    /// Which path answers `/contract_state` and `/protocol_state`: `off` reads the database;
+    /// `shadow` serves the database answer and, on a sample of requests set by
+    /// `--entity-cache-shadow-sample-rate`, compares it with the entity cache answer; `serve`
+    /// serves the entity cache answer and reads the database for versions the cache cannot
+    /// rebuild and for requests without ids. The `rpc` command has no entity cache and always
+    /// runs as `off`.
+    #[clap(long, env = "ENTITY_CACHE_MODE", value_enum, default_value_t = EntityCacheMode::Off)]
+    pub entity_cache_mode: EntityCacheMode,
+
+    /// Share of state requests that `shadow` also answers from the entity cache and compares,
+    /// from 0.0 to 1.0. Clients always get the database answer. Other modes ignore it.
+    #[clap(long, env = "ENTITY_CACHE_SHADOW_SAMPLE_RATE", default_value_t = 0.0, value_parser = parse_sample_rate)]
+    pub entity_cache_shadow_sample_rate: f64,
+
+    /// RPC response caches to turn off, comma-separated: `contract_storage`, `protocol_state`,
+    /// `protocol_components`, `traced_entry_points`. A request to an endpoint whose cache is off
+    /// always runs the full path. Blank entries are ignored, so an empty value keeps every
+    /// cache on (the default).
+    #[clap(
+        long,
+        env = "DISABLED_RPC_CACHES",
+        default_value = "",
+        hide_default_value = true,
+        value_parser = parse_disabled_rpc_caches
+    )]
+    pub disabled_rpc_caches: DisabledRpcCaches,
+
+    /// Count and page `/protocol_components` requests by protocol system from an in-memory index
+    /// of component ids and TVLs, instead of SQL. Postgres then loads only the components on the
+    /// requested page. On by default; `false` serves these requests entirely from SQL.
+    #[clap(long, env = "COMPONENT_INDEX", default_value_t = true, action = clap::ArgAction::Set)]
+    pub component_index: bool,
 
     /// Name of the s3 bucket used to retrieve spkgs
     #[clap(env = "TYCHO_S3_BUCKET", long, default_value = "repo.propellerheads-propellerheads")]
@@ -82,6 +136,48 @@ pub struct GlobalArgs {
     /// RPC configuration (URL and retry settings)
     #[command(flatten)]
     pub rpc: RPCArgs,
+}
+
+/// The caches named by `--disabled-rpc-caches`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DisabledRpcCaches(pub Vec<RpcCacheKind>);
+
+/// Parses a comma-separated list of cache names. Blank entries are ignored, so an empty value
+/// names no cache.
+fn parse_disabled_rpc_caches(value: &str) -> Result<DisabledRpcCaches, String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            RpcCacheKind::from_str(name, false).map_err(|_| {
+                let valid: Vec<String> = RpcCacheKind::value_variants()
+                    .iter()
+                    .filter_map(|kind| {
+                        Some(
+                            kind.to_possible_value()?
+                                .get_name()
+                                .to_string(),
+                        )
+                    })
+                    .collect();
+                format!("unknown RPC cache '{name}', expected one of: {}", valid.join(", "))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(DisabledRpcCaches)
+}
+
+/// Parses a share from 0.0 to 1.0. Rejects NaN.
+fn parse_sample_rate(value: &str) -> Result<f64, String> {
+    let rate: f64 = value
+        .parse()
+        .map_err(|err| format!("`{value}` is not a number: {err}"))?;
+    if (0.0..=1.0).contains(&rate) {
+        Ok(rate)
+    } else {
+        Err(format!("must be from 0.0 to 1.0, got {rate}"))
+    }
 }
 
 /// RPC configuration arguments (url, retry settings, and potentially others, such as batching)
@@ -264,6 +360,17 @@ impl RunSpkgArgs {
     }
 }
 
+#[derive(Args, Debug, Clone, PartialEq)]
+pub struct RpcServerArgs {
+    /// The blockchain the database is dedicated to
+    #[clap(long, default_value = "ethereum")]
+    pub chain: String,
+
+    /// Custom chains configuration file
+    #[clap(long, env = "TYCHO_CHAINS_CONFIG", default_value = "./chains.yaml")]
+    pub chain_config: String,
+}
+
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzeTokenArgs {
     /// Blockchain to execute analysis for.
@@ -283,10 +390,19 @@ pub struct AnalyzeTokenArgs {
     /// should be at least `concurrency * update_batch_size`.
     #[clap(long)]
     pub fetch_batch_size: usize,
+    /// Also re-analyze quality-5 tokens that traded within this many days. Quality 5 is
+    /// the analysis floor and is otherwise never revisited; a recently traded token gets
+    /// a recovery pass because its behavior may have changed after listing (e.g. launch
+    /// transfer restrictions lifted). Set to 0 to disable; a large value re-checks every
+    /// quality-5 token with active liquidity (backfill).
+    #[clap(long, default_value_t = 1)]
+    pub recovery_lookback_days: u32,
 }
 
 #[cfg(test)]
 mod cli_tests {
+    use rstest::rstest;
+
     use super::*;
 
     #[tokio::test]
@@ -322,6 +438,12 @@ mod cli_tests {
                 endpoint_url: "http://example.com".to_string(),
                 database_url: "my_db".to_string(),
                 database_insert_batch_size: 256,
+                delta_window_depth: 128,
+                delta_window_fold_batch: 1,
+                entity_cache_mode: EntityCacheMode::Off,
+                entity_cache_shadow_sample_rate: 0.0,
+                disabled_rpc_caches: DisabledRpcCaches::default(),
+                component_index: true,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,
@@ -360,6 +482,152 @@ mod cli_tests {
         assert_eq!(cli, expected_args);
     }
 
+    fn args_with_delta_window(depth: &'static str, fold_batch: &'static str) -> Vec<&'static str> {
+        vec![
+            "tycho-indexer",
+            "--endpoint",
+            "http://example.com",
+            "--database-url",
+            "my_db",
+            "--rpc-url",
+            "http://example.com",
+            "--rpc-max-retries",
+            "10",
+            "--rpc-initial-backoff-ms",
+            "200",
+            "--rpc-max-backoff-ms",
+            "10000",
+            "--delta-window-depth",
+            depth,
+            "--delta-window-fold-batch",
+            fold_batch,
+            "index",
+            "--extractors-config",
+            "/opt/extractors.yaml",
+            "--api_token",
+            "your_api_token",
+            "--enable-partial-blocks",
+        ]
+    }
+
+    #[test]
+    fn test_arg_parsing_delta_window_flags() {
+        let cli = Cli::try_parse_from(args_with_delta_window("64", "4")).expect("parse errored");
+
+        assert_eq!(cli.global_args.delta_window_depth, 64);
+        assert_eq!(cli.global_args.delta_window_fold_batch, 4);
+    }
+
+    #[test]
+    fn test_arg_parsing_rejects_zero_delta_window_flags() {
+        assert!(Cli::try_parse_from(args_with_delta_window("0", "1")).is_err());
+        assert!(Cli::try_parse_from(args_with_delta_window("128", "0")).is_err());
+    }
+
+    #[rstest]
+    #[case::off("off", EntityCacheMode::Off)]
+    #[case::shadow("shadow", EntityCacheMode::Shadow)]
+    #[case::serve("serve", EntityCacheMode::Serve)]
+    fn test_arg_parsing_entity_cache_mode(
+        #[case] value: &'static str,
+        #[case] expected: EntityCacheMode,
+    ) {
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--entity-cache-mode", value]);
+
+        let cli = Cli::try_parse_from(args).expect("parse errored");
+
+        assert_eq!(cli.global_args.entity_cache_mode, expected);
+    }
+
+    #[rstest]
+    #[case::empty("", vec![])]
+    #[case::one("protocol_state", vec![RpcCacheKind::ProtocolState])]
+    #[case::two(
+        "contract_storage,traced_entry_points",
+        vec![RpcCacheKind::ContractStorage, RpcCacheKind::TracedEntryPoints]
+    )]
+    #[case::blank_entries_and_spaces(" protocol_components , ,", vec![RpcCacheKind::ProtocolComponents])]
+    fn test_arg_parsing_disabled_rpc_caches(
+        #[case] value: &'static str,
+        #[case] expected: Vec<RpcCacheKind>,
+    ) {
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--disabled-rpc-caches", value]);
+
+        let cli = Cli::try_parse_from(args).expect("parse errored");
+
+        assert_eq!(cli.global_args.disabled_rpc_caches, DisabledRpcCaches(expected));
+    }
+
+    #[test]
+    fn test_arg_parsing_rejects_unknown_rpc_cache() {
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--disabled-rpc-caches", "tokens"]);
+
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+
+    #[test]
+    fn test_arg_parsing_component_index_is_on_by_default() {
+        let default =
+            Cli::try_parse_from(args_with_delta_window("128", "1")).expect("parse errored");
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--component-index", "false"]);
+        let disabled = Cli::try_parse_from(args).expect("parse errored");
+
+        assert!(default.global_args.component_index);
+        assert!(!disabled.global_args.component_index);
+    }
+
+    #[test]
+    fn test_arg_parsing_rejects_unknown_entity_cache_mode() {
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--entity-cache-mode", "on"]);
+
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+
+    #[rstest]
+    #[case::none("0.0", 0.0)]
+    #[case::share("0.25", 0.25)]
+    #[case::all("1.0", 1.0)]
+    fn test_arg_parsing_shadow_sample_rate(#[case] value: &'static str, #[case] expected: f64) {
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--entity-cache-shadow-sample-rate", value]);
+
+        let cli = Cli::try_parse_from(args).expect("parse errored");
+
+        assert_eq!(
+            cli.global_args
+                .entity_cache_shadow_sample_rate,
+            expected
+        );
+    }
+
+    #[test]
+    fn test_arg_parsing_shadow_sample_rate_defaults_to_zero() {
+        let cli = Cli::try_parse_from(args_with_delta_window("128", "1")).expect("parse errored");
+
+        assert_eq!(
+            cli.global_args
+                .entity_cache_shadow_sample_rate,
+            0.0
+        );
+    }
+
+    #[rstest]
+    #[case::negative("-0.1")]
+    #[case::above_one("1.5")]
+    #[case::not_a_number("NaN")]
+    #[case::text("often")]
+    fn test_arg_parsing_rejects_a_bad_shadow_sample_rate(#[case] value: &'static str) {
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--entity-cache-shadow-sample-rate", value]);
+
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+
     #[tokio::test]
     async fn test_arg_parsing_index_cmd() {
         let cli = Cli::try_parse_from(vec![
@@ -390,6 +658,12 @@ mod cli_tests {
                 endpoint_url: "http://example.com".to_string(),
                 database_url: "my_db".to_string(),
                 database_insert_batch_size: 0,
+                delta_window_depth: 128,
+                delta_window_fold_batch: 1,
+                entity_cache_mode: EntityCacheMode::Off,
+                entity_cache_shadow_sample_rate: 0.0,
+                disabled_rpc_caches: DisabledRpcCaches::default(),
+                component_index: true,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,

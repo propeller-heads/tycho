@@ -1,10 +1,8 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
-import {IFeeCalculator} from "@interfaces/IFeeCalculator.sol";
-import {FeeRecipient} from "../lib/FeeStructs.sol";
 import {TransferManager} from "./TransferManager.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
@@ -19,6 +17,12 @@ error Dispatcher__UnsupportedSingleHopCycle(address token);
 error Dispatcher__ExecutorAlreadyExists(address executor);
 error Dispatcher__SwapReverted(address executor);
 error Dispatcher__CallbackReverted(address executor);
+
+// keccak256("Dispatcher#CURRENTLY_SWAPPING_EXECUTOR_SLOT")
+// Shared with TychoSubsidizingExecutor, which points the router's fallback at
+// its inner executor.
+uint256 constant CURRENTLY_SWAPPING_EXECUTOR_SLOT =
+    0x098a7a3b47801589e8cdf9ec791b93ad44273246946c32ef1fc4dbe45390c80e;
 
 /**
  * @title Dispatcher - Dispatch execution to external contracts
@@ -36,9 +40,6 @@ contract Dispatcher is TransferManager {
 
     mapping(address => uint256) public executorsActivationTimestamp;
 
-    // keccak256("Dispatcher#CURRENTLY_SWAPPING_EXECUTOR_SLOT")
-    uint256 private constant _CURRENTLY_SWAPPING_EXECUTOR_SLOT =
-        0x098a7a3b47801589e8cdf9ec791b93ad44273246946c32ef1fc4dbe45390c80e;
     // keccak256("Dispatcher#IS_SPLIT_SWAP_SLOT")
     uint256 private constant _IS_SPLIT_SWAP_SLOT =
         0x7b3c4e5f6a8d9e0f1c2b3a4d5e6f7c8d9e0f1c2b3a4d5e6f7c8d9e0f1c2b3a4d;
@@ -52,7 +53,7 @@ contract Dispatcher is TransferManager {
     uint256 private constant _SWAP_INPUT_TOKEN_SLOT =
         0x0c22c14aba48b0e26e3b58475c66f358c352532122e537c32e8184c0159e6e10;
 
-    uint256 public constant DELAY_EXECUTOR_ACTIVATION = 3 days;
+    uint256 public constant DELAY_EXECUTOR_ACTIVATION = 1 days;
 
     event ExecutorSet(address indexed executor, uint256 timelockExpiresAt);
     event ExecutorRemoved(address indexed executor);
@@ -103,7 +104,7 @@ contract Dispatcher is TransferManager {
         _validateExecutor(executor);
 
         assembly {
-            tstore(_CURRENTLY_SWAPPING_EXECUTOR_SLOT, executor)
+            tstore(CURRENTLY_SWAPPING_EXECUTOR_SLOT, executor)
             tstore(_IS_FIRST_SWAP_SLOT, isFirstSwap)
             tstore(_IS_SPLIT_SWAP_SLOT, isSplitSwap)
             tstore(_SWAP_INPUT_AMOUNT_SLOT, amount)
@@ -154,7 +155,7 @@ contract Dispatcher is TransferManager {
 
         // Clear transient storage in case no callback was performed
         assembly {
-            tstore(_CURRENTLY_SWAPPING_EXECUTOR_SLOT, 0)
+            tstore(CURRENTLY_SWAPPING_EXECUTOR_SLOT, 0)
             tstore(_IS_FIRST_SWAP_SLOT, 0)
             tstore(_IS_SPLIT_SWAP_SLOT, 0)
             tstore(_SWAP_INPUT_AMOUNT_SLOT, 0)
@@ -204,7 +205,7 @@ contract Dispatcher is TransferManager {
         uint256 amount;
         address tokenIn;
         assembly {
-            executor := tload(_CURRENTLY_SWAPPING_EXECUTOR_SLOT)
+            executor := tload(CURRENTLY_SWAPPING_EXECUTOR_SLOT)
             isFirstSwap := tload(_IS_FIRST_SWAP_SLOT)
             isSplitSwap := tload(_IS_SPLIT_SWAP_SLOT)
             amount := tload(_SWAP_INPUT_AMOUNT_SLOT)
@@ -250,7 +251,7 @@ contract Dispatcher is TransferManager {
 
         // to prevent multiple callbacks
         assembly {
-            tstore(_CURRENTLY_SWAPPING_EXECUTOR_SLOT, 0)
+            tstore(CURRENTLY_SWAPPING_EXECUTOR_SLOT, 0)
             tstore(_IS_FIRST_SWAP_SLOT, 0)
             tstore(_IS_SPLIT_SWAP_SLOT, 0)
         }
@@ -284,29 +285,5 @@ contract Dispatcher is TransferManager {
         if (block.timestamp < activationTimestamp) {
             revert Dispatcher__ExecutorIsTimelocked(executor);
         }
-    }
-
-    function _callGetEffectiveRouterFeeOnOutput(
-        address feeCalculator,
-        address client
-    ) internal view returns (uint16 routerFeeOnOutputBps) {
-        // slither-disable-next-line calls-loop
-        routerFeeOnOutputBps =
-            IFeeCalculator(feeCalculator).getEffectiveRouterFeeOnOutput(client);
-    }
-
-    function _callCalculateFee(
-        address feeCalculator,
-        uint256 amountIn,
-        uint16 clientFeeBps,
-        address client
-    )
-        internal
-        view
-        returns (uint256 amountOut, FeeRecipient[] memory feeRecipients)
-    {
-        // slither-disable-next-line calls-loop
-        (amountOut, feeRecipients) = IFeeCalculator(feeCalculator)
-            .calculateFee(amountIn, client, clientFeeBps);
     }
 }

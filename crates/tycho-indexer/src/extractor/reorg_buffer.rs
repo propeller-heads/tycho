@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
 
 use chrono::NaiveDateTime;
 use deepsize::DeepSizeOf;
@@ -21,10 +24,17 @@ pub enum BlockNumberOrTimestamp {
 }
 
 impl BlockNumberOrTimestamp {
-    fn greater_than(&self, other: &Block) -> bool {
+    pub(crate) fn greater_than(&self, other: &Block) -> bool {
         match self {
             BlockNumberOrTimestamp::Number(n) => n > &other.number,
             BlockNumberOrTimestamp::Timestamp(ts) => ts > &other.ts,
+        }
+    }
+
+    pub(crate) fn less_than(&self, other: &Block) -> bool {
+        match self {
+            BlockNumberOrTimestamp::Number(n) => n < &other.number,
+            BlockNumberOrTimestamp::Timestamp(ts) => ts < &other.ts,
         }
     }
 }
@@ -48,6 +58,9 @@ impl TryFrom<BlockOrTimestamp> for BlockNumberOrTimestamp {
     }
 }
 
+// TODO: rename ReorgBuffer. `DeltaWindow` also keeps committed blocks here for serving, so this is
+// a contiguous chain segment with revert purge, not a buffer of blocks awaiting persistence.
+
 /// Buffer that holds blocks awaiting persistence to the database so extractors can batch commits
 /// and efficiently handle chain reorganisations (reorg) without requiring database rollbacks.
 ///
@@ -55,13 +68,31 @@ impl TryFrom<BlockOrTimestamp> for BlockNumberOrTimestamp {
 /// they are drained to the database.
 ///
 /// In case of a chain reorg, we can just purge this buffer up to the common ancestor block.
+///
+/// Drained blocks can be retained in a second, non-revertable section until their database
+/// write lands (see [`ReorgBuffer::drain_into_committing`]). State lookups read both sections,
+/// so a lookup miss means the value can only be in the database.
 #[derive(DeepSizeOf)]
 pub(crate) struct ReorgBuffer<B>
 where
     B: BlockScoped + DeepSizeOf,
 {
     block_messages: VecDeque<B>,
+    committing_blocks: VecDeque<Arc<B>>,
     strict: bool,
+}
+
+/// Result of a height-aware purge. Hash match is authoritative; height is a fallback.
+#[derive(Debug)]
+pub(crate) enum PurgeOutcome<B> {
+    /// Target hash found; purged every block strictly after it.
+    HashMatch(Vec<B>),
+    /// Hash not found but a block at the target height was buffered — our copy of that
+    /// height is stale or forked. Purged from that height inclusive.
+    HeightMatch(Vec<B>),
+    /// Hash not found and the target height is above the newest buffered block (or the
+    /// buffer is empty). Nothing sealed is invalid; nothing purged.
+    TargetAhead,
 }
 
 /// The commitment status of a block or block-scoped data with the DB.
@@ -80,7 +111,7 @@ where
     B: BlockScoped + std::fmt::Debug + DeepSizeOf,
 {
     pub(crate) fn new() -> Self {
-        Self { block_messages: VecDeque::new(), strict: false }
+        Self { block_messages: VecDeque::new(), committing_blocks: VecDeque::new(), strict: false }
     }
 
     /// Inserts a new block into the buffer. Ensures the new block is the expected next block,
@@ -139,6 +170,47 @@ where
         }
     }
 
+    /// Drains blocks up to (excluding) `drain_upto_block_height` into the committing
+    /// section, which keeps them reachable by the state lookups until their database
+    /// write lands, and returns them for the commit task. A
+    /// [`ReorgBuffer::release_committed`] call with a flushed height drops them.
+    pub fn drain_into_committing(
+        &mut self,
+        drain_upto_block_height: u64,
+    ) -> Result<Vec<Arc<B>>, StorageError> {
+        let drained: Vec<Arc<B>> = self
+            .drain_blocks_until(drain_upto_block_height)?
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        self.committing_blocks
+            .extend(drained.iter().cloned());
+        Ok(drained)
+    }
+
+    /// Drops every retained block at or below `flushed_block_height`: their writes
+    /// reached the store, so the database covers them from here on.
+    pub fn release_committed(&mut self, flushed_block_height: u64) {
+        while self
+            .committing_blocks
+            .front()
+            .is_some_and(|b| b.block().number <= flushed_block_height)
+        {
+            self.committing_blocks.pop_front();
+        }
+    }
+
+    /// Iterates the buffered history newest to oldest: buffered blocks first, then
+    /// retained committing blocks.
+    fn history(&self) -> impl Iterator<Item = &B> + '_ {
+        self.block_messages.iter().rev().chain(
+            self.committing_blocks
+                .iter()
+                .rev()
+                .map(|block| block.as_ref()),
+        )
+    }
+
     fn find_index<F: Fn(&B) -> bool>(&self, predicate: F) -> Option<usize> {
         for (index, block_message) in self.block_messages.iter().enumerate() {
             if predicate(block_message) {
@@ -176,6 +248,97 @@ where
         } else {
             Err(StorageError::NotFound("block".into(), target_hash.to_string()))
         }
+    }
+
+    /// Purges blocks invalidated by a revert targeting the given block.
+    ///
+    /// A hash match purges strictly after the matched block. When the hash is absent the
+    /// target height decides: a buffered height purges from that height inclusive, a height
+    /// above the buffer purges nothing. Errors when the target is below the oldest buffered
+    /// block (a reorg past finality) or at the oldest buffered block — an inclusive purge
+    /// there would empty the buffer, leaving no predecessor to anchor a revert message.
+    pub fn purge_to(
+        &mut self,
+        target_hash: &Bytes,
+        target_number: u64,
+    ) -> Result<PurgeOutcome<B>, StorageError> {
+        debug!(
+            "Purging reorg buffer... Target hash {} height {}",
+            target_hash.to_string(),
+            target_number
+        );
+
+        if let Some(idx) = self.find_index(|b| &b.block().hash == target_hash) {
+            let purged = self
+                .block_messages
+                .split_off(idx + 1)
+                .into();
+            trace!(?purged, "ReorgBuffer purged blocks");
+            return Ok(PurgeOutcome::HashMatch(purged));
+        }
+
+        if self
+            .block_messages
+            .back()
+            .is_none_or(|b| target_number > b.block().number)
+        {
+            return Ok(PurgeOutcome::TargetAhead);
+        }
+
+        let oldest = self
+            .block_messages
+            .front()
+            .map(|b| b.block().number);
+
+        // A height match needs an in-buffer predecessor (idx >= 1) to anchor the revert
+        // message. Otherwise the target is at or below the oldest buffered block — a reorg
+        // past the revertable window, which is fatal.
+        let idx = self.find_index(|b| b.block().number == target_number);
+        let Some(idx) = idx.filter(|&i| i > 0) else {
+            error!(
+                ?target_hash,
+                target_number,
+                ?oldest,
+                "Revert target at or below the oldest buffered block; no predecessor to anchor the revert"
+            );
+            return Err(StorageError::NotFound("block".into(), target_hash.to_string()));
+        };
+        let purged = self
+            .block_messages
+            .split_off(idx)
+            .into();
+        trace!(?purged, "ReorgBuffer purged blocks from stale height");
+        Ok(PurgeOutcome::HeightMatch(purged))
+    }
+
+    /// The oldest buffered message, or `None` if the buffer is empty.
+    pub fn oldest(&self) -> Option<&B> {
+        self.block_messages.front()
+    }
+
+    /// The newest buffered message, or `None` if the buffer is empty.
+    pub fn newest(&self) -> Option<&B> {
+        self.block_messages.back()
+    }
+
+    /// The buffered message for block `number`, or `None` if that block is not buffered.
+    /// Buffered blocks are contiguous, so this is an index lookup.
+    pub fn block_at(&self, number: u64) -> Option<&B> {
+        let first = self.oldest()?.block().number;
+        let index = usize::try_from(number.checked_sub(first)?).ok()?;
+        let msg = self.block_messages.get(index)?;
+        let found = msg.block().number;
+        if found != number {
+            error!(
+                number,
+                found,
+                first,
+                len = self.block_messages.len(),
+                "ReorgBuffer is not contiguous: index lookup landed on a different block"
+            );
+            return None;
+        }
+        Some(msg)
     }
 
     /// Returns an `Option` containing the most recent block in the buffer or `None` if the buffer
@@ -261,6 +424,9 @@ where
     }
 
     /// Retrieves [CommitStatus] for a block, returns None if the buffer is empty.
+    // The RPC side now answers from `DeltaWindow::commit_status`. Kept with its tests, which pin
+    // the buffer-bound behaviour the window deliberately diverges from.
+    #[allow(dead_code)]
     pub fn get_commit_status(&self, version: BlockNumberOrTimestamp) -> Option<CommitStatus> {
         let first_block = self.block_messages.front();
         let last_block = self.block_messages.back();
@@ -317,6 +483,9 @@ pub(crate) trait StateUpdateBufferEntry: std::fmt::Debug {
         &self,
         keys: Vec<(&Address, &Address)>,
     ) -> HashMap<(Address, Address), AccountBalance>;
+
+    /// Returns the ids among `ids` whose component creation this block holds.
+    fn get_filtered_protocol_components(&self, ids: &HashSet<ComponentId>) -> HashSet<ComponentId>;
 }
 
 impl<B> ReorgBuffer<B>
@@ -341,7 +510,7 @@ where
                     .map(|&(c_id, attr)| (c_id.clone(), attr.clone())),
             );
 
-        for block_message in self.block_messages.iter().rev() {
+        for block_message in self.history() {
             if remaining_keys.is_empty() {
                 break;
             }
@@ -361,6 +530,23 @@ where
         (res, remaining_keys.into_iter().collect())
     }
 
+    /// Returns the ids among `ids` with no component creation in the buffered blocks,
+    /// live and committing sections included.
+    pub fn missing_components(&self, ids: HashSet<ComponentId>) -> HashSet<ComponentId> {
+        let mut missing = ids;
+
+        for block_message in self.history() {
+            if missing.is_empty() {
+                break;
+            }
+            for id in block_message.get_filtered_protocol_components(&missing) {
+                missing.remove(&id);
+            }
+        }
+
+        missing
+    }
+
     /// Looks up buffered account state updates for the provided keys. Returns a map of updates and
     /// a list of keys for which updates were not found in the buffered blocks.
     #[allow(clippy::mutable_key_type, clippy::type_complexity)]
@@ -378,7 +564,7 @@ where
                     .map(|&(c_id, attr)| (c_id.clone(), attr.clone())),
             );
 
-        for block_message in self.block_messages.iter().rev() {
+        for block_message in self.history() {
             if remaining_keys.is_empty() {
                 break;
             }
@@ -412,7 +598,7 @@ where
             .map(|(c_id, token)| (c_id.to_string(), token.to_owned().to_owned()))
             .collect();
 
-        for block_message in self.block_messages.iter().rev() {
+        for block_message in self.history() {
             if remaning_keys.is_empty() {
                 break;
             }
@@ -450,7 +636,7 @@ where
             .map(|(account, token)| (account.to_owned().to_owned(), token.to_owned().to_owned()))
             .collect::<HashSet<_>>();
 
-        for block_message in self.block_messages.iter().rev() {
+        for block_message in self.history() {
             if remaning_keys.is_empty() {
                 break;
             }
@@ -481,9 +667,9 @@ mod test {
 
     use rstest::rstest;
     use tycho_common::models::{
-        blockchain::{Transaction, TxWithChanges},
-        protocol::ProtocolComponentStateDelta,
-        Chain,
+        blockchain::{BlockAggregatedChanges, Transaction, TxWithChanges},
+        protocol::{ProtocolComponent, ProtocolComponentStateDelta},
+        Chain, ChangeType,
     };
 
     use super::*;
@@ -696,6 +882,51 @@ mod test {
             _ => panic!("block entity version not implemented"),
         }
     }
+    fn numbered_buffer(
+        range: std::ops::RangeInclusive<u64>,
+    ) -> ReorgBuffer<BlockAggregatedChanges> {
+        let mut buffer = ReorgBuffer::new();
+        for n in range {
+            buffer
+                .insert_block(BlockAggregatedChanges {
+                    block: testing::block(n),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        buffer
+    }
+
+    #[test]
+    fn oldest_and_newest_are_the_buffer_ends() {
+        let empty: ReorgBuffer<BlockAggregatedChanges> = ReorgBuffer::new();
+        assert!(empty.oldest().is_none() && empty.newest().is_none());
+
+        let buffer = numbered_buffer(4..=6);
+
+        assert_eq!(buffer.oldest().map(|b| b.block.number), Some(4));
+        assert_eq!(buffer.newest().map(|b| b.block.number), Some(6));
+    }
+
+    #[rstest]
+    #[case::first(4, Some(4))]
+    #[case::middle(5, Some(5))]
+    #[case::below(3, None)]
+    #[case::above(7, None)]
+    fn block_at_finds_a_buffered_block_by_number(
+        #[case] number: u64,
+        #[case] expected: Option<u64>,
+    ) {
+        let buffer = numbered_buffer(4..=6);
+
+        assert_eq!(
+            buffer
+                .block_at(number)
+                .map(|b| b.block.number),
+            expected
+        );
+    }
+
     #[test]
     fn test_reorg_buffer_state_lookup() {
         let mut reorg_buffer = ReorgBuffer::new();
@@ -876,6 +1107,131 @@ mod test {
     }
 
     #[test]
+    fn test_lookup_reads_retained_committing_blocks() {
+        let mut reorg_buffer = ReorgBuffer::new();
+        reorg_buffer
+            .insert_block(get_block_changes(1))
+            .unwrap();
+        reorg_buffer
+            .insert_block(get_block_changes(2))
+            .unwrap();
+        reorg_buffer
+            .insert_block(get_block_changes(3))
+            .unwrap();
+
+        let drained = reorg_buffer
+            .drain_into_committing(3)
+            .unwrap();
+        assert_eq!(drained.len(), 2);
+
+        let state1 = "State1".to_string();
+        let new = "new".to_string();
+        let reserve = "reserve".to_string();
+
+        // `reserve` only exists in retained block 1; `new` was updated in retained
+        // block 2, which must win over block 1 (newest-first within the section).
+        let (res, missing) =
+            reorg_buffer.lookup_protocol_state(&[(&state1, &new), (&state1, &reserve)]);
+        assert!(missing.is_empty());
+        assert_eq!(
+            res.get(&(state1.clone(), new.clone())),
+            Some(&Bytes::from(2_u64.to_be_bytes().to_vec()))
+        );
+        assert_eq!(
+            res.get(&(state1.clone(), reserve.clone())),
+            Some(&Bytes::from(10_u64.to_be_bytes().to_vec()))
+        );
+
+        // Balances resolve through the same history.
+        let balance2 = "Balance2".to_string();
+        let dai = Bytes::from_str(DAI_ADDRESS).unwrap();
+        let (res, missing) = reorg_buffer.lookup_component_balances(&[(&balance2, &dai)]);
+        assert!(missing.is_empty());
+        assert_eq!(res.len(), 1);
+
+        // Retained blocks are not part of the revertable window.
+        assert_eq!(reorg_buffer.count_blocks_before(10), 1);
+
+        // A partial release keeps block 2 reachable: `new` still resolves from it,
+        // `reserve` now misses.
+        reorg_buffer.release_committed(1);
+        let (res, missing) =
+            reorg_buffer.lookup_protocol_state(&[(&state1, &new), (&state1, &reserve)]);
+        assert_eq!(missing.len(), 1);
+        assert!(missing
+            .iter()
+            .any(|(c, a)| c == "State1" && a == "reserve"));
+        assert_eq!(
+            res.get(&(state1.clone(), new.clone())),
+            Some(&Bytes::from(2_u64.to_be_bytes().to_vec()))
+        );
+
+        // Releasing up to block 2 drops the rest; the lookups now miss.
+        reorg_buffer.release_committed(2);
+        let (res, missing) =
+            reorg_buffer.lookup_protocol_state(&[(&state1, &new), (&state1, &reserve)]);
+        assert!(res.is_empty());
+        assert_eq!(missing.len(), 2);
+    }
+
+    /// The `get_block_changes` fixtures carry no protocol components, so component lookups
+    /// need blocks built here.
+    fn component_creation_block(number: u64, component_id: &str) -> BlockChanges {
+        BlockChanges::new(
+            "test".to_string(),
+            Chain::Ethereum,
+            testing::block(number),
+            0,
+            false,
+            vec![TxWithChanges {
+                protocol_components: HashMap::from([(
+                    component_id.to_string(),
+                    ProtocolComponent {
+                        id: component_id.to_string(),
+                        change: ChangeType::Creation,
+                        ..Default::default()
+                    },
+                )]),
+                tx: transaction(),
+                ..Default::default()
+            }],
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn test_missing_components_reads_live_and_committing_blocks() {
+        let mut reorg_buffer = ReorgBuffer::new();
+        reorg_buffer
+            .insert_block(component_creation_block(1, "c1"))
+            .unwrap();
+        reorg_buffer
+            .insert_block(get_block_changes(2))
+            .unwrap();
+        reorg_buffer
+            .insert_block(component_creation_block(3, "c3"))
+            .unwrap();
+
+        // Blocks 1 and 2 move to the committing section, block 3 stays live.
+        reorg_buffer
+            .drain_into_committing(3)
+            .unwrap();
+
+        let c1 = "c1".to_string();
+        let c3 = "c3".to_string();
+        let ghost = "ghost".to_string();
+        let ids = HashSet::from([c1.clone(), c3.clone(), ghost.clone()]);
+
+        let missing = reorg_buffer.missing_components(ids.clone());
+        assert_eq!(missing, HashSet::from([ghost.clone()]));
+
+        // Releasing block 1 drops its creation from the history.
+        reorg_buffer.release_committed(2);
+        let missing = reorg_buffer.missing_components(ids);
+        assert_eq!(missing, HashSet::from([c1, ghost]));
+    }
+
+    #[test]
     fn test_count_blocks_before() {
         let mut reorg_buffer = ReorgBuffer::new();
         reorg_buffer
@@ -921,6 +1277,47 @@ mod test {
     }
 
     #[test]
+    fn arc_same_timestamp_blocks_enter_persistence_in_number_order() {
+        let timestamp = "2020-01-01T00:00:00"
+            .parse::<NaiveDateTime>()
+            .unwrap();
+        let mut reorg_buffer = ReorgBuffer::new();
+        for number in 40..=42 {
+            reorg_buffer
+                .insert_block(BlockAggregatedChanges {
+                    chain: Chain::Arc,
+                    block: Block::new(
+                        number,
+                        Chain::Arc,
+                        Bytes::from(number).lpad(32, 0),
+                        Bytes::from(number - 1).lpad(32, 0),
+                        timestamp,
+                    ),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        let drained = reorg_buffer
+            .drain_into_committing(42)
+            .unwrap();
+
+        assert_eq!(
+            drained
+                .iter()
+                .map(|entry| entry.block.number)
+                .collect::<Vec<_>>(),
+            vec![40, 41]
+        );
+        assert_eq!(
+            reorg_buffer
+                .newest()
+                .map(|entry| entry.block.number),
+            Some(42)
+        );
+    }
+
+    #[test]
     fn test_purge() {
         let mut reorg_buffer = ReorgBuffer::new();
         reorg_buffer
@@ -952,6 +1349,119 @@ mod test {
         );
 
         assert!(unknown.is_err());
+    }
+
+    fn filled_buffer() -> ReorgBuffer<BlockChanges> {
+        let mut reorg_buffer = ReorgBuffer::new();
+        for version in 1..=3 {
+            reorg_buffer
+                .insert_block(get_block_changes(version))
+                .unwrap();
+        }
+        reorg_buffer
+    }
+
+    fn unknown_hash() -> Bytes {
+        Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000999")
+            .unwrap()
+    }
+
+    #[test]
+    fn test_purge_to_hash_match_purges_after_target() {
+        let mut reorg_buffer = filled_buffer();
+
+        let outcome = reorg_buffer
+            .purge_to(
+                &Bytes::from_str(
+                    "0x0000000000000000000000000000000000000000000000000000000000000001",
+                )
+                .unwrap(),
+                1,
+            )
+            .unwrap();
+
+        let PurgeOutcome::HashMatch(purged) = outcome else { panic!("expected HashMatch") };
+        assert_eq!(purged, vec![get_block_changes(2), get_block_changes(3)]);
+        assert_eq!(reorg_buffer.block_messages.len(), 1);
+    }
+
+    #[test]
+    fn test_purge_to_hash_match_wins_over_height() {
+        // Height 2 with the real hash of block 2: the hash match keeps block 2
+        // (exclusive purge). A height fallback would wrongly purge it too.
+        let mut reorg_buffer = filled_buffer();
+
+        let outcome = reorg_buffer
+            .purge_to(
+                &Bytes::from_str(
+                    "0x0000000000000000000000000000000000000000000000000000000000000002",
+                )
+                .unwrap(),
+                2,
+            )
+            .unwrap();
+
+        let PurgeOutcome::HashMatch(purged) = outcome else { panic!("expected HashMatch") };
+        assert_eq!(purged, vec![get_block_changes(3)]);
+        assert_eq!(reorg_buffer.block_messages.len(), 2);
+    }
+
+    #[test]
+    fn test_purge_to_height_match_purges_inclusive() {
+        let mut reorg_buffer = filled_buffer();
+
+        let outcome = reorg_buffer
+            .purge_to(&unknown_hash(), 2)
+            .unwrap();
+
+        let PurgeOutcome::HeightMatch(purged) = outcome else { panic!("expected HeightMatch") };
+        assert_eq!(purged, vec![get_block_changes(2), get_block_changes(3)]);
+        assert_eq!(reorg_buffer.block_messages.len(), 1);
+    }
+
+    #[test]
+    fn test_purge_to_target_ahead_purges_nothing() {
+        let mut reorg_buffer = filled_buffer();
+
+        let outcome = reorg_buffer
+            .purge_to(&unknown_hash(), 4)
+            .unwrap();
+
+        assert!(matches!(outcome, PurgeOutcome::TargetAhead));
+        assert_eq!(reorg_buffer.block_messages.len(), 3);
+    }
+
+    #[test]
+    fn test_purge_to_empty_buffer_is_target_ahead() {
+        let mut reorg_buffer = ReorgBuffer::<BlockChanges>::new();
+
+        let outcome = reorg_buffer
+            .purge_to(&unknown_hash(), 5)
+            .unwrap();
+
+        assert!(matches!(outcome, PurgeOutcome::TargetAhead));
+    }
+
+    #[test]
+    fn test_purge_to_below_oldest_errors() {
+        let mut reorg_buffer = filled_buffer();
+
+        let result = reorg_buffer.purge_to(&unknown_hash(), 0);
+
+        assert!(matches!(result, Err(StorageError::NotFound(_, _))));
+        assert_eq!(reorg_buffer.block_messages.len(), 3, "a fatal miss must not mutate");
+    }
+
+    #[test]
+    fn test_purge_to_height_match_at_oldest_errors() {
+        // An inclusive purge at the oldest buffered height would empty the buffer,
+        // leaving no in-buffer predecessor to anchor the revert message.
+        let mut reorg_buffer = filled_buffer();
+
+        let result = reorg_buffer.purge_to(&unknown_hash(), 1);
+
+        assert!(matches!(result, Err(StorageError::NotFound(_, _))));
+        assert_eq!(reorg_buffer.block_messages.len(), 3, "a fatal miss must not mutate");
     }
 
     #[test]
@@ -1038,8 +1548,13 @@ mod test {
         assert_eq!(res, exp);
     }
 
+    // The `committed_oldest_no` case pins current behavior: the oldest buffered block
+    // reports `Committed` although it is still only buffered (the oldest buffered block is
+    // `db_committed + 1`). `services::state::window::DeltaWindow::commit_status` documents this
+    // off-by-one and deliberately diverges from it.
     #[rstest]
     #[case::committed_no(BlockNumberOrTimestamp::Number(0), CommitStatus::Committed)]
+    #[case::committed_oldest_no(BlockNumberOrTimestamp::Number(1), CommitStatus::Committed)]
     #[case::committed_ts(
         BlockNumberOrTimestamp::Timestamp("2020-01-01T00:00:00".parse().unwrap()),
         CommitStatus::Committed

@@ -77,6 +77,13 @@ contract Constants is
     address PAUSER = makeAddr("pauser");
     address UNPAUSER = makeAddr("unpauser");
 
+    // Sky
+    address SKY_LITE_PSM = address(0xf6e72Db5454dd049d0788e411b06CfAF16853042);
+    address SKY_USDS_PSM_WRAPPER =
+        address(0xA188EEC8F81263234dA3622A406892F3D630f98c);
+    address SKY_DAI_USDS_CONVERTER =
+        address(0x3225737a9Bbb6473CB4a45b7244ACa2BeFdB276A);
+
     // Assets
     address ETH_ADDR = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
     address WETH_ADDR = address(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
@@ -87,6 +94,7 @@ contract Constants is
     address INCH_ADDR = address(0x111111111117dC0aa78b770fA6A738034120C302);
     address USDE_ADDR = address(0x4c9EDD5852cd905f086C759E8383e09bff1E68B3);
     address USDT_ADDR = address(0xdAC17F958D2ee523a2206206994597C13D831ec7);
+    address USDS_ADDR = address(0xdC035D45d973E3EC169d2276DDab16f1e407384F);
     address PEPE_ADDR = address(0x6982508145454Ce325dDbE47a25d4ec3d2311933);
     address STETH_ADDR = address(0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84);
     address RETH_ADDR = address(0xae78736Cd615f374D3085123A210448E74Fc6393);
@@ -208,11 +216,16 @@ contract Constants is
     // Fluid liquidity contract on mainnet
     address FLUIDV1_LIQUIDITY = 0x52Aa899454998Be5b000Ad077a46Bbe360F4e497;
 
+    // Ekubo V3 SignedExclusiveSwap extension on mainnet
+    address EKUBO_V3_SIGNED_EXCLUSIVE_SWAP =
+        0x55b703eED01b35641963da2FB2E14885993605A3;
+
+    // Eden Network's view quoter for Uniswap V3 pools, used by TychoFallbackRouter
+    address UNISWAP_V3_STATIC_QUOTER =
+        0xc80f61d1bdAbD8f5285117e1558fDDf8C64870FE;
+
     // FermiSwap
     address FERMI_SWAPPER = 0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e;
-
-    // Metric oracle (Base)
-    address METRIC_ORACLE = 0x681E908B8ab57c49C74D770F369754CCC3E1ae09;
 
     // BopAMM (Bebop on-chain PMM)
     address BOPAMM_SETTLEMENT = 0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca;
@@ -228,9 +241,19 @@ contract Constants is
     address ANGSTROM_HOOK = 0x0000000aa232009084Bd71A5797d089AA4Edfad4;
 
     // Liquorice
-    address LIQUORICE_SETTLEMENT = 0x0448633eb8B0A42EfED924C42069E0DcF08fb552;
+    address LIQUORICE_SETTLEMENT = 0x43Dcd6586e6209eE7235A21bDC4aa301E5Bc44e8;
     address LIQUORICE_BALANCE_MANAGER =
-        0xb87bAE43a665EB5943A5642F81B26666bC9E5C95;
+        0x56B4720e40dF52C560E520238E34e9C33d57E593;
+
+    // Native Relay V6 routers
+    address NATIVE_ROUTER_V6_ETHEREUM =
+        0x4777A6B3A9A889ABfd4C7666Bdd2a7AB633293be;
+    address NATIVE_ROUTER_V6_BASE = 0x9706D3fff42571305Fc201F996ADC0e768d72911;
+    address NATIVE_ROUTER_V6_ARBITRUM =
+        0x0183D055c77310aF03dCB397eFAA7E9cfB6dB59b;
+    address NATIVE_ROUTER_V6_BSC = 0x1fDED89D98CBeADd96a109D28689c2638025dad3;
+    address NATIVE_ROUTER_V6_ROBINHOOD =
+        0x4Df7557734B382EB542BEa6c74786D398DF4CC19;
 
     // Etherfi
     address EETH_ADDR = 0x35fA164735182de50811E8e2E824cFb9B6118ac2;

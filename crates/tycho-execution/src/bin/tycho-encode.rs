@@ -8,7 +8,7 @@ use tycho_common::{hex_bytes::Bytes, models::Chain};
 use tycho_execution::encoding::{
     errors::EncodingError,
     evm::{
-        encoder_builders::{TychoExecutorEncoderBuilder, TychoRouterEncoderBuilder},
+        encoder_builders::TychoRouterEncoderBuilder,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
     },
     models::{Solution, UserTransferType},
@@ -62,8 +62,6 @@ pub struct Cli {
 pub enum Commands {
     /// Use Tycho router encoding
     TychoRouter,
-    /// Use direct execution encoding
-    TychoExecutor,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -101,13 +99,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             builder.build()?
         }
-        Commands::TychoExecutor => {
-            let swap_encoder_registry =
-                SwapEncoderRegistry::new(chain).add_default_encoders(None)?;
-            TychoExecutorEncoderBuilder::new()
-                .swap_encoder_registry(swap_encoder_registry)
-                .build()?
-        }
     };
 
     let encoded_solutions = encoder.encode_solutions(vec![solution])?;
@@ -116,6 +107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "interacting_with": format!("0x{}", hex::encode(encoded_solutions[0].interacting_with())),
         "function_signature": encoded_solutions[0].function_signature(),
         "n_tokens": encoded_solutions[0].n_tokens().to_string(),
+        "subsidy_signing_hash": encoded_solutions[0].subsidy_signing_hash(),
+        "subsidy_signature_offset_in_swaps": encoded_solutions[0].subsidy_signature_offset_in_swaps(),
     });
     // Output the encoded result as JSON to stdout
     println!(

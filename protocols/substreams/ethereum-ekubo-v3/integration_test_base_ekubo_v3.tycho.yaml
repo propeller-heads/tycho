@@ -1,0 +1,58 @@
+substreams_yaml_path: ./base-ekubo-v3.yaml
+protocol_system: "ekubo_v3"
+skip_balance_check: true # Ekubo follows a singleton design, pool balances are held in one contract
+protocol_type_names:
+  - "ekubo_v3_pool"
+# No SignedExclusiveSwap pool exists on Base yet, so `is_exclusive` tagging is not covered here.
+tests:
+  - name: base_concentrated
+    start_block: 46030942
+    stop_block: 46030942
+    expected_components:
+      - id: "0x1ecab4787d2728e8a420fa08f182b596ce84f8052f4410ba4c8826c9508f0ad5"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        static_attributes:
+          token0: "0x0000000000000000000000000000000000000000"
+          token1: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+          extension: "0x0000000000000000000000000000000000000000"
+          fee: "0x0020c49ba5e353f7"
+          pool_type_config: "0x800003e8"
+        creation_tx: "0x959ac3a17bc64152a678572778d97e8ba7a5fa55dc5aa565607d7a19d80f3ac2"
+        skip_execution: true # No ekubo_v3 executor is deployed on Base yet
+
+  - name: twamm_new
+    start_block: 50364868
+    stop_block: 50364868
+    expected_components:
+      - id: "0x74bb7f41708267c73525056667da082cf2bc5976afeacbb701483fcd9f47c883"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        static_attributes:
+          token0: "0x0000000000000000000000000000000000000000"
+          token1: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+          extension: "0xd47f1b1edcfeabb08f6ebd8fc337c27e636c75ba"
+          fee: "0x0020c49ba5e353f7"
+          pool_type_config: "0x00000000"
+        creation_tx: "0xa2c5574966d274f038bd71222ced0496b6c54255ee221f35da21fe445a48c0c4"
+        skip_simulation: true # The only TWAMM pool on Base never received liquidity
+        skip_execution: true # No ekubo_v3 executor is deployed on Base yet
+
+  - name: mev_capture
+    start_block: 51462695
+    stop_block: 51462695
+    expected_components:
+      - id: "0xed48965db367633f31f9ee74aa5e320f5068c6a8944512bca0ca32f0fbcb38fb"
+        tokens:
+          - "0x53f39e5c53ee40bbc3da97c3b47bd2968d110a8d"
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        static_attributes:
+          token0: "0x53f39e5c53ee40bbc3da97c3b47bd2968d110a8d"
+          token1: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+          extension: "0x5555ff9ff2757500bf4ee020dcfd0210cffa41be"
+          fee: "0x028f5c28f5c28f5c"
+          pool_type_config: "0x80004d5a"
+        creation_tx: "0x1961cae81c3fe05f0f6ac9095bd18f6fea6d382a3cb8537caafd796c98a27944"
+        skip_execution: true # No ekubo_v3 executor is deployed on Base yet
