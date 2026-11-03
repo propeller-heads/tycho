@@ -9,10 +9,11 @@ use crate::encoding::{
             BEBOP_FALLBACK_PROTOCOL_SYSTEM, DEFAULT_EXECUTORS_JSON, FALLBACK_KEY, FALLBACK_PREFIX,
             HASHFLOW_FALLBACK_PROTOCOL_SYSTEM, LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
             METRIC_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
-            PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX, PROTOCOL_SPECIFIC_CONFIG,
-            SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, UNISWAP_V2_FORKS,
-            UNISWAP_V3_FORKS,
+            NATIVE_WRAPPER_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX,
+            PROTOCOL_SPECIFIC_CONFIG, SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS,
+            SUBSIDY_KEY, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
         },
+        subsidy::SubsidyEncoder,
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
             balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder,
@@ -48,11 +49,12 @@ pub struct SwapEncoderRegistry {
     chain: Chain,
     /// A hashmap containing the protocol system as a key and the `SwapEncoder` as a value.
     encoders: HashMap<String, Box<dyn SwapEncoder>>,
+    subsidy_encoder: Option<SubsidyEncoder>,
 }
 
 impl SwapEncoderRegistry {
     pub fn new(chain: Chain) -> Self {
-        Self { chain, encoders: HashMap::new() }
+        Self { chain, encoders: HashMap::new(), subsidy_encoder: None }
     }
 
     /// Creates a new registry pre-populated with all default encoders for the given chain.
@@ -74,32 +76,55 @@ impl SwapEncoderRegistry {
         let config: HashMap<Chain, HashMap<String, String>> = serde_json::from_str(&config_str)?;
         let executors = config
             .get(&self.chain)
-            .ok_or(EncodingError::FatalError("No executors found for chain".to_string()))?;
+            .ok_or_else(|| EncodingError::FatalError("No executors found for chain".to_string()))?;
 
         let protocol_specific_config: HashMap<Chain, HashMap<String, HashMap<String, String>>> =
             serde_json::from_str(PROTOCOL_SPECIFIC_CONFIG)?;
         let protocol_specific_config = protocol_specific_config
             .get(&self.chain)
-            .ok_or(EncodingError::FatalError(
-                "No protocol specific config found for chain".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError("No protocol specific config found for chain".to_string())
+            })?;
         for (protocol, executor_address) in executors {
-            let encoder = self.create_encoder(
-                protocol,
-                Bytes::from_str(executor_address).map_err(|_| {
-                    EncodingError::FatalError(format!(
-                        "Invalid executor address for protocol {}",
-                        protocol
-                    ))
-                })?,
-                protocol_specific_config
-                    .get(protocol)
-                    .cloned(),
-            )?;
+            let executor_address = Bytes::from_str(executor_address).map_err(|e| {
+                EncodingError::FatalError(format!(
+                    "Invalid executor address for protocol {}: {e}",
+                    protocol
+                ))
+            })?;
+            let config = protocol_specific_config.get(protocol);
+            if protocol == SUBSIDY_KEY {
+                self.subsidy_encoder =
+                    Some(SubsidyEncoder::from_config(executor_address, self.chain, config)?);
+                continue;
+            }
+            let encoder = self.create_encoder(protocol, executor_address, config.cloned())?;
             self.encoders
                 .insert(protocol.to_string(), encoder);
         }
         Ok(self)
+    }
+
+    /// Sets the subsidizing executor and the subsidy payer, replacing the configured ones.
+    pub fn register_subsidy_contracts(
+        mut self,
+        executor_address: Bytes,
+        payer_address: Bytes,
+    ) -> Self {
+        self.subsidy_encoder =
+            Some(SubsidyEncoder::new(executor_address, payer_address, self.chain));
+        self
+    }
+
+    pub(crate) fn get_subsidy_encoder(&self) -> Result<&SubsidyEncoder, EncodingError> {
+        self.subsidy_encoder
+            .as_ref()
+            .ok_or_else(|| {
+                EncodingError::FatalError(format!(
+                    "No subsidizing executor is configured for {}",
+                    self.chain
+                ))
+            })
     }
 
     /// Adds an encoder to the registry, replacing any existing encoder for the same protocol.
@@ -122,7 +147,10 @@ impl SwapEncoderRegistry {
     ///
     /// `pancakeswap_infinity_cl_hooks` resolves to the `pancakeswap_infinity_cl` encoder the same
     /// way: one Infinity executor serves hooked and hookless CL pools alike.
-    #[allow(clippy::borrowed_box)]
+    #[expect(
+        clippy::borrowed_box,
+        reason = "public API; returning Option<&dyn SwapEncoder> is a breaking change"
+    )]
     pub fn get_encoder(&self, protocol_system: &str) -> Option<&Box<dyn SwapEncoder>> {
         if let Some(encoder) = self.encoders.get(protocol_system) {
             return Some(encoder);
@@ -173,7 +201,8 @@ impl SwapEncoderRegistry {
             "ring_swap_v2" => {
                 Ok(Box::new(RingSwapV2SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "aerodrome_v1" => {
+            // AERO basic pools take Aerodrome V1 calldata; only their executor differs.
+            "aerodrome_v1" | "aero_basic" => {
                 Ok(Box::new(AerodromeV1SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "vm:balancer_v2" => {
@@ -249,7 +278,7 @@ impl SwapEncoderRegistry {
             "lunarbase" => {
                 Ok(Box::new(LunarBaseSwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "native_wrapper" => {
+            NATIVE_WRAPPER_PROTOCOL_SYSTEM => {
                 Ok(Box::new(WrapSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "etherfi" => {
@@ -261,6 +290,11 @@ impl SwapEncoderRegistry {
             // protocol-specific `pricelevelstream:{protocol}` entries override it per
             // protocol.
             pls if pls == PRICE_LEVEL_STREAM_KEY || pls.starts_with(PRICE_LEVEL_STREAM_PREFIX) => {
+                Ok(Box::new(PropAMMSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            // The Biconomy venue on Base implements the same IPropAMM interface, indexed natively
+            // instead of through the price level stream.
+            "biconomy" => {
                 Ok(Box::new(PropAMMSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "lido_v4" => {
@@ -453,6 +487,21 @@ mod tests {
             .get_encoder("pancakeswap_infinity_cl_hooks")
             .expect("a hooked Infinity CL pool must resolve to the Infinity encoder");
         assert_eq!(hooks.executor_address(), &Bytes::from_str(executor).unwrap());
+    }
+
+    #[test]
+    fn test_registry_configured_with_subsidizing_executor_without_payer() {
+        let executors =
+            r#"{"ethereum": {"subsidy": "0x1111111111111111111111111111111111111111"}}"#;
+
+        let result = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(Some(executors.to_string()));
+
+        assert!(
+            matches!(result, Err(EncodingError::FatalError(ref message)) if message.contains("payer_address")),
+            "{:?}",
+            result.err()
+        );
     }
 
     /// A registry configured with `uniswap_v4_hooks` alone — what the integration-test harness

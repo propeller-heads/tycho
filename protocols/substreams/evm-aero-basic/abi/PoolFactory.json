@@ -1,0 +1,14 @@
+[
+  {"type":"event","name":"PoolCreated","anonymous":false,"inputs":[
+    {"name":"token0","type":"address","indexed":true},
+    {"name":"token1","type":"address","indexed":true},
+    {"name":"pool","type":"address","indexed":false},
+    {"name":"poolIndex","type":"uint256","indexed":false}]},
+  {"type":"event","name":"SetDefaultFee","anonymous":false,"inputs":[
+    {"name":"fee","type":"uint256","indexed":false}]},
+  {"type":"event","name":"SetFeeModule","anonymous":false,"inputs":[
+    {"name":"feeModule","type":"address","indexed":true},
+    {"name":"gasLimit","type":"uint32","indexed":false}]},
+  {"type":"event","name":"SetPauseState","anonymous":false,"inputs":[
+    {"name":"state","type":"bool","indexed":true}]}
+]

@@ -1,6 +1,8 @@
+pub mod aero_basic;
 pub mod aerodrome_slipstreams;
 pub mod aerodrome_v1;
 pub mod balancer_v3;
+pub mod biconomy;
 mod clmm;
 pub mod cowamm;
 mod cpmm;

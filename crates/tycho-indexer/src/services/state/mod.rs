@@ -1,8 +1,9 @@
 //! In-memory serving of state requests.
 //!
 //! This module holds the block window ([`window`]), the entity cache ([`cache`]) it folds into,
-//! and the service that answers state requests from both ([`service`]). Locking is described in
-//! the [`cache`] module doc; the read order in the [`service`] module doc.
+//! the service that answers state requests from both ([`service`]), and the views those answers
+//! are written from ([`view`]). Locking is described in the [`cache`] module doc; the read order
+//! in the [`service`] module doc.
 //!
 //! # How a state request is served
 //!
@@ -16,10 +17,11 @@
 //! Deletions folded into the cache are always below the window floor by then, so a below-window
 //! read never misses them.
 
-pub(crate) mod cache;
-pub(crate) mod service;
-pub(crate) mod shadow;
-pub(crate) mod window;
+pub mod cache;
+pub mod service;
+pub mod shadow;
+pub use cache::view;
+pub mod window;
 
 /// Which path answers `/contract_state` and `/protocol_state`. Set per deployment with
 /// `ENTITY_CACHE_MODE`.

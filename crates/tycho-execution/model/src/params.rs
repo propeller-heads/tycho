@@ -184,7 +184,9 @@ impl TryInto<Address> for ParamValue {
     fn try_into(self) -> Result<Address, Self::Error> {
         match self {
             Self::Address(address) => Ok(address),
-            _ => Err(TryFromParamError),
+            Self::String(_) | Self::Bool(_) | Self::I64(_) | Self::Executor(_) => {
+                Err(TryFromParamError)
+            }
         }
     }
 }
@@ -194,7 +196,9 @@ impl TryInto<bool> for ParamValue {
     fn try_into(self) -> Result<bool, Self::Error> {
         match self {
             Self::Bool(boolean) => Ok(boolean),
-            _ => Err(TryFromParamError),
+            Self::String(_) | Self::Address(_) | Self::I64(_) | Self::Executor(_) => {
+                Err(TryFromParamError)
+            }
         }
     }
 }
@@ -204,7 +208,9 @@ impl TryInto<i64> for ParamValue {
     fn try_into(self) -> Result<i64, Self::Error> {
         match self {
             Self::I64(number) => Ok(number),
-            _ => Err(TryFromParamError),
+            Self::String(_) | Self::Address(_) | Self::Bool(_) | Self::Executor(_) => {
+                Err(TryFromParamError)
+            }
         }
     }
 }
@@ -214,7 +220,11 @@ impl TryInto<&'static str> for ParamValue {
     fn try_into(self) -> Result<&'static str, Self::Error> {
         match self {
             Self::String(Cow::Borrowed(x)) => Ok(x),
-            _ => Err(TryFromParamError),
+            Self::String(_) |
+            Self::Address(_) |
+            Self::Bool(_) |
+            Self::I64(_) |
+            Self::Executor(_) => Err(TryFromParamError),
         }
     }
 }
@@ -224,7 +234,9 @@ impl TryInto<Executor> for ParamValue {
     fn try_into(self) -> Result<Executor, Self::Error> {
         match self {
             Self::Executor(x) => Ok(x),
-            _ => Err(TryFromParamError),
+            Self::String(_) | Self::Address(_) | Self::Bool(_) | Self::I64(_) => {
+                Err(TryFromParamError)
+            }
         }
     }
 }

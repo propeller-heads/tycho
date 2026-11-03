@@ -2,7 +2,7 @@ specVersion: v0.1.0
 package:
   name: "bsc_ekubo_v3"
   description: "Ekubo V3 indexing on BNB Smart Chain"
-  version: v0.2.5
+  version: v0.2.6
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-ekubo-v3"
 
 protobuf:

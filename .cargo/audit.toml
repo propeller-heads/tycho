@@ -1,5 +1,7 @@
 [advisories]
-# rustls-webpki 0.101.7 is locked by tonic 0.9; fix requires tonic 0.11+ (prost 0.11 -> 0.12).
+# RUSTSEC-2026-0098, RUSTSEC-2026-0099, RUSTSEC-2026-0104: rustls-webpki 0.101.7, pulled in by
+# rustls 0.21 (tonic 0.9 and aws-sdk-s3's legacy rustls feature). Only patched in
+# rustls-webpki >= 0.103.12; tonic 0.11 still uses 0.102, so the fix needs tonic 0.12+ (prost 0.13).
 # RUSTSEC-2025-0055: tracing-subscriber ^0.2 log poisoning via ANSI escapes
 # Dep chain: tycho-simulation <- revm <- ark-bn254 <- ark-r1cs-std <- ark-relations <- tracing-subscriber ^0.2
 # We need ark to update their dependencies to fix this.
@@ -9,15 +11,19 @@
 # RUSTSEC-2026-0346, RUSTSEC-2026-0349: rustls session secrets in Debug, ServerHello downgrade
 # Only patched in rustls >= 0.23.46 (which we use). The 0.21.x line has no fix and is pulled in
 # by tonic 0.9 (tokio-rustls 0.24) and aws-sdk-s3's legacy rustls feature.
-# RUSTSEC-2026-0367, RUSTSEC-2026-0368, RUSTSEC-2026-0369: zip extraction (SUID/SGID bits,
-# symlink targets, permissions through symlinks). Only patched in zip >= 9.0.0. zip 0.6.6 is a
-# build-dependency of utoipa-swagger-ui 6.0.0, whose build script extracts the Swagger UI archive
-# bundled in the crate itself. The latest utoipa-swagger-ui (10.0.1) still requires zip ^8.6.
+# RUSTSEC-2026-0367, RUSTSEC-2026-0368, RUSTSEC-2026-0369, RUSTSEC-2026-0429: zip extraction
+# (SUID/SGID bits, symlink targets, permissions through symlinks, abort on oversized symlink
+# entries). Only patched in zip >= 9.0.0. zip 0.6.6 is a build-dependency of utoipa-swagger-ui
+# 6.0.0, whose build script extracts the Swagger UI archive bundled in the crate itself with its
+# own loop, not ZipArchive::extract. utoipa-swagger-ui 10.0.2 moves to zip ^9.0 but requires
+# utoipa ^6 (we are on 4.2).
 # RUSTSEC-2026-0382: rustls-webpki may accept distrusted intermediates. Only patched in
 # rustls-webpki >= 0.103.16 (which we use). The 0.101.x line has no fix and is pulled in by
 # rustls 0.21 (tonic 0.9 and aws-sdk-s3's legacy rustls feature).
+# RUSTSEC-2026-0387: crypto-bigint timing variability. Only patched in crypto-bigint >= 0.7.6.
+# The 0.4.x and 0.5.x lines have no fix and are pulled in by aws-sigv4 (aws-sdk-s3, aws-config)
+# and elliptic-curve 0.12/0.13 (alloy-signer). The latest aws-sigv4 still requires ^0.5.
 ignore = [
-    "RUSTSEC-2026-0049",
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
@@ -28,5 +34,7 @@ ignore = [
     "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
+    "RUSTSEC-2026-0429",
     "RUSTSEC-2026-0382",
+    "RUSTSEC-2026-0387",
 ]

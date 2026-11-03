@@ -11,6 +11,7 @@ const executorDeployments = require("../../config/executor_deployments.json");
 // don't want to deploy.
 const deploy_protocols = {
     "ethereum": [
+        "aero_basic",
         "uniswap_v2",
         "ring_swap_v2",
         "pancakeswap_v2",
@@ -42,8 +43,11 @@ const deploy_protocols = {
         "fallback:rfq:metric",
         "fallback:rfq:bebop",
         "fallback:rfq:hashflow",
+        "fallback:rfq:native",
+        "fallback:rfq:liquorice",
     ],
     "base": [
+        "aero_basic",
         "uniswap_v2",
         "uniswap_v3",
         "uniswap_v4",
@@ -53,11 +57,13 @@ const deploy_protocols = {
         "aerodrome_v1",
         "native_wrapper",
         "lunarbase",
+        "biconomy",
         "rfq:metric",
         "rfq:native",
         "fallback",
         "fallback:rfq:metric",
         "fallback:rfq:bebop",
+        "fallback:rfq:native",
         "pancakeswap_infinity_cl",
     ],
     "unichain": [
@@ -69,6 +75,7 @@ const deploy_protocols = {
         "native_wrapper",
     ],
     "arbitrum": [
+        "aero_basic",
         "uniswap_v2",
         "uniswap_v3",
         "uniswap_v4",
@@ -76,6 +83,7 @@ const deploy_protocols = {
         "rfq:metric",
         "rfq:native",
         "fallback:rfq:metric",
+        "fallback:rfq:native",
     ],
     "polygon": [
         "uniswap_v2",
@@ -97,6 +105,7 @@ const deploy_protocols = {
         "rfq:metric",
         "rfq:native",
         "fallback:rfq:metric",
+        "fallback:rfq:native",
         "lunarbase",
     ],
     "plasma": [
@@ -106,6 +115,7 @@ const deploy_protocols = {
         "native_wrapper",
     ],
     "robinhood": [
+        "aero_basic",
         "uniswap_v2",
         "uniswap_v3",
         "uniswap_v4",
@@ -115,8 +125,10 @@ const deploy_protocols = {
         "rfq:metric",
         "rfq:native",
         "fallback:rfq:metric",
+        "fallback:rfq:native",
     ],
     "arc": [
+        "aero_basic",
         "uniswap_v2",
         "uniswap_v3",
         "uniswap_v4",

@@ -10,7 +10,9 @@ pub mod encoder_builders;
 mod encoding_utils;
 pub mod gas_estimator;
 mod group_swaps;
+pub use group_swaps::{group_swaps, SwapGroup};
 pub mod strategy_encoder;
+pub(crate) mod subsidy;
 pub mod swap_encoder;
 #[cfg(feature = "test-utils")]
 pub mod testing_utils;

@@ -1,5 +1,3 @@
-#![allow(dead_code)] // TODO: Remove this when the detector is used
-
 use tracing::{debug, instrument};
 use tycho_common::models::Address;
 

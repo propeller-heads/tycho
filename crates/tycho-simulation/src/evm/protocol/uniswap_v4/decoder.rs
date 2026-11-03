@@ -61,7 +61,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
             .ok_or_else(|| InvalidSnapshotError::MissingAttribute("liquidity".to_string()))?
             .clone();
 
-        let liquidity = u128::from(liq);
+        let liquidity = u128::try_from(liq)?;
 
         let sqrt_price = U256::from_be_slice(
             snapshot
@@ -71,16 +71,16 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                 .ok_or_else(|| InvalidSnapshotError::MissingAttribute("sqrt_price".to_string()))?,
         );
 
-        let lp_fee = u32::from(
+        let lp_fee = u32::try_from(
             snapshot
                 .component
                 .static_attributes
                 .get("key_lp_fee")
                 .ok_or_else(|| InvalidSnapshotError::MissingAttribute("key_lp_fee".to_string()))?
                 .clone(),
-        );
+        )?;
 
-        let zero2one_protocol_fee = u32::from(
+        let zero2one_protocol_fee = u32::try_from(
             snapshot
                 .state
                 .attributes
@@ -89,8 +89,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                     InvalidSnapshotError::MissingAttribute("protocol_fees/zero2one".to_string())
                 })?
                 .clone(),
-        );
-        let one2zero_protocol_fee = u32::from(
+        )?;
+        let one2zero_protocol_fee = u32::try_from(
             snapshot
                 .state
                 .attributes
@@ -99,19 +99,19 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                     InvalidSnapshotError::MissingAttribute("protocol_fees/one2zero".to_string())
                 })?
                 .clone(),
-        );
+        )?;
 
         let fees: UniswapV4Fees =
             UniswapV4Fees::new(zero2one_protocol_fee, one2zero_protocol_fee, lp_fee);
 
-        let tick_spacing: i32 = i32::from(
+        let tick_spacing: i32 = i32::try_from(
             snapshot
                 .component
                 .static_attributes
                 .get("tick_spacing")
                 .ok_or_else(|| InvalidSnapshotError::MissingAttribute("tick_spacing".to_string()))?
                 .clone(),
-        );
+        )?;
 
         let tick = i24_be_bytes_to_i32(
             snapshot
@@ -133,7 +133,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                             .parse::<i32>()
                             .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
                             .and_then(|tick_index| {
-                                TickInfo::new(tick_index, i128::from(value.clone())).map_err(
+                                TickInfo::new(tick_index, i128::try_from(value.clone())?).map_err(
                                     |err| InvalidSnapshotError::ValueError(err.to_string()),
                                 )
                             }),
@@ -265,7 +265,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
 /// is the pool at the end of the block that created it, and the sibling `_sources.json` names the
 /// log or storage read each of its fields was taken from.
 #[cfg(test)]
-pub(crate) mod pons_fixture {
+pub mod pons_fixture {
     use std::{collections::HashMap, fs, path::Path, str::FromStr};
 
     use num_bigint::BigUint;
@@ -281,20 +281,19 @@ pub(crate) mod pons_fixture {
         models::{DecoderContext, TryFromWithBlock},
     };
 
-    pub(crate) const POOL_ID: &str =
-        "0xc96847cc43f7595aafcbc1c99d335cb91be7ce1107524c87030f48a716a5f289";
+    pub const POOL_ID: &str = "0xc96847cc43f7595aafcbc1c99d335cb91be7ce1107524c87030f48a716a5f289";
     const XLG_ADDRESS: &str = "0xab5983fe30f186055095305c862b0e097dab3b52";
     const NVDA_ADDRESS: &str = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec";
 
     /// The terms `registerPool` froze for this pool, read out of `launches[poolId]`.
-    pub(crate) const HOOK_FEE_BPS: u32 = 100;
-    pub(crate) const CREATOR_TAX_BPS: u32 = 100;
+    pub const HOOK_FEE_BPS: u32 = 100;
+    pub const CREATOR_TAX_BPS: u32 = 100;
 
     /// The block the pool was created in, and its timestamp.
     const BLOCK_NUMBER: u64 = 58_759_099;
     const BLOCK_TIMESTAMP: u64 = 1_788_978_331;
 
-    pub(crate) fn snapshot() -> ComponentWithState {
+    pub fn snapshot() -> ComponentWithState {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/assets/decoder/uniswap_v4_pons_snapshot_robinhood.json");
         let raw =
@@ -307,7 +306,7 @@ pub(crate) mod pons_fixture {
     /// The same pool with everything the hook contributes stripped off the wire, which is what a
     /// pool of this shape looks like with no hook at all. Its quotes are the core swap math the
     /// hook's cut is measured against.
-    pub(crate) fn hookless_snapshot() -> ComponentWithState {
+    pub fn hookless_snapshot() -> ComponentWithState {
         let mut snapshot = snapshot();
         snapshot.component.protocol_system = "uniswap_v4".to_string();
         for attribute in ["hooks", "hook_identifier", "pons_hook_fee_bps", "pons_creator_tax_bps"] {
@@ -320,7 +319,7 @@ pub(crate) mod pons_fixture {
     }
 
     /// The same pool behind an address no native handler is registered for on any chain.
-    pub(crate) fn unknown_hook_snapshot() -> ComponentWithState {
+    pub fn unknown_hook_snapshot() -> ComponentWithState {
         let mut snapshot = snapshot();
         snapshot
             .component
@@ -347,22 +346,22 @@ pub(crate) mod pons_fixture {
 
     /// `currency0` of the pool: the lower of the two addresses, so a swap out of it is
     /// zero-for-one.
-    pub(crate) fn xlg() -> Token {
+    pub fn xlg() -> Token {
         token(XLG_ADDRESS, "XLG")
     }
 
-    pub(crate) fn nvda() -> Token {
+    pub fn nvda() -> Token {
         token(NVDA_ADDRESS, "NVDA")
     }
 
-    pub(crate) fn tokens() -> HashMap<Bytes, Token> {
+    pub fn tokens() -> HashMap<Bytes, Token> {
         [xlg(), nvda()]
             .into_iter()
             .map(|token| (token.address.clone(), token))
             .collect()
     }
 
-    pub(crate) fn header() -> BlockHeader {
+    pub fn header() -> BlockHeader {
         BlockHeader {
             number: BLOCK_NUMBER,
             hash: Bytes::from([1u8; 32]),
@@ -375,7 +374,7 @@ pub(crate) mod pons_fixture {
 
     /// Decodes `snapshot` as a component of `chain`, the way a decoder registered for that chain
     /// would.
-    pub(crate) async fn decode_on(
+    pub async fn decode_on(
         snapshot: ComponentWithState,
         chain: Chain,
     ) -> Result<UniswapV4State, InvalidSnapshotError> {
@@ -394,7 +393,7 @@ pub(crate) mod pons_fixture {
     /// Trade sizes are taken as fractions of this rather than of `get_limits`. A full-range
     /// position can absorb an unbounded amount of one side while giving up a bounded amount of
     /// the other, so even a millionth of the limit on the `currency0` side drains the pool.
-    pub(crate) fn reserve(token: &Token) -> BigUint {
+    pub fn reserve(token: &Token) -> BigUint {
         let snapshot = snapshot();
         let balance = snapshot
             .state
@@ -406,7 +405,7 @@ pub(crate) mod pons_fixture {
 
     /// What is left of a `core` output once the hook has taken its fee and its tax, each floored
     /// on its own exactly as `_afterSwap` computes them.
-    pub(crate) fn net_of_hook_take(core: &BigUint) -> BigUint {
+    pub fn net_of_hook_take(core: &BigUint) -> BigUint {
         let denominator = BigUint::from(10_000u32);
         let fee = core * BigUint::from(HOOK_FEE_BPS) / &denominator;
         let tax = core * BigUint::from(CREATOR_TAX_BPS) / &denominator;
@@ -553,7 +552,8 @@ mod tests {
             (
                 "liquidity".to_string(),
                 Bytes::from(
-                    (liquidity as u128)
+                    u128::try_from(liquidity)
+                        .unwrap()
                         .to_be_bytes()
                         .to_vec(),
                 ),
@@ -582,7 +582,7 @@ mod tests {
     fn reference_hookless_state() -> UniswapV4State {
         let liquidity = 1_000_000_000_000_000_000_i128;
         UniswapV4State::new(
-            liquidity as u128,
+            u128::try_from(liquidity).unwrap(),
             U256::from(79228162514264337593543950336_u128),
             UniswapV4Fees::new(0, 0, 500),
             0,
@@ -962,6 +962,26 @@ mod tests {
             panic!("a 19-byte hooks attribute must not decode");
         };
         assert!(message.contains("hooks"), "{message}");
+    }
+
+    /// A `liquidity` attribute longer than a `u128` is a bad snapshot, not a panic: the stream
+    /// decoder logs the component and skips it, and every other pool keeps decoding.
+    #[tokio::test]
+    async fn oversized_liquidity_attribute_is_rejected_without_panicking() {
+        let mut snapshot = hookless_snapshot_with_hook(ZERO_HOOK);
+        let address_sized = Bytes::from(vec![0x11_u8; 20]);
+        snapshot
+            .state
+            .attributes
+            .insert("liquidity".to_string(), address_sized.clone());
+
+        let result = decode_with_chain(snapshot, Some(Chain::Ethereum)).await;
+
+        let Err(InvalidSnapshotError::ValueError(message)) = result else {
+            panic!("a 20-byte liquidity attribute must not decode");
+        };
+        assert!(message.contains(&address_sized.to_string()), "{message}");
+        assert!(message.contains("u128"), "{message}");
     }
 
     #[tokio::test]

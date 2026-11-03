@@ -30,7 +30,6 @@ const BEBOP_API_HOST: &str = "api.bebop.xyz";
 #[derive(derive_more::Debug)]
 pub struct BebopClient {
     quote_endpoint: String,
-    pricing_ws_endpoint: String,
     // key header for authentication
     #[debug(skip)]
     key: String,
@@ -55,23 +54,26 @@ pub struct QuoteOrigin {
     pub source: Option<String>,
 }
 
-impl BebopClient {
-    /// A client for Bebop's public API on `chain`, whose quote and pricing endpoints share the
-    /// chain's own path.
-    pub fn new(
-        chain: BebopSupportedChain,
-        key: String,
-        quote_timeout: Duration,
-        origin: QuoteOrigin,
-    ) -> Self {
-        let chain_path = format!("{BEBOP_API_HOST}/pmm/{}/v3", chain.as_str());
-        BebopClient {
-            quote_endpoint: format!("https://{chain_path}/quote"),
-            pricing_ws_endpoint: format!("wss://{chain_path}/pricing?format=protobuf"),
+/// The path every endpoint Bebop serves `chain` under hangs off.
+fn chain_path(chain: BebopSupportedChain) -> String {
+    format!("{BEBOP_API_HOST}/pmm/{}/v3", chain.as_str())
+}
+
+/// Opens Bebop's pricing WebSocket on one chain. It never requests a quote, so it carries no
+/// quote timeout or origin. `Debug` output omits the API key.
+#[derive(derive_more::Debug, Clone)]
+pub struct BebopPricingClient {
+    pricing_ws_endpoint: String,
+    #[debug(skip)]
+    key: String,
+}
+
+impl BebopPricingClient {
+    /// A client for the pricing WebSocket of `chain`, authenticated with `key`.
+    pub fn new(chain: BebopSupportedChain, key: String) -> Self {
+        BebopPricingClient {
+            pricing_ws_endpoint: format!("wss://{}/pricing?format=protobuf", chain_path(chain)),
             key,
-            quote_timeout,
-            origin,
-            http: Client::new(),
         }
     }
 
@@ -84,6 +86,25 @@ impl BebopClient {
         ClientRequestBuilder::new(Uri::from_str(&self.pricing_ws_endpoint)?)
             .with_header("Authorization", format!("Bearer {}", self.key))
             .into_client_request()
+    }
+}
+
+impl BebopClient {
+    /// A client for Bebop's public API on `chain`, whose quote endpoint sits on the chain's own
+    /// path.
+    pub fn new(
+        chain: BebopSupportedChain,
+        key: String,
+        quote_timeout: Duration,
+        origin: QuoteOrigin,
+    ) -> Self {
+        BebopClient {
+            quote_endpoint: format!("https://{}/quote", chain_path(chain)),
+            key,
+            quote_timeout,
+            origin,
+            http: Client::new(),
+        }
     }
 
     #[instrument(
@@ -187,9 +208,8 @@ impl BebopClient {
                     )));
                     if attempt < MAX_RETRIES - 1 {
                         continue;
-                    } else {
-                        return Err(last_error.unwrap());
                     }
+                    return Err(last_error.unwrap());
                 }
                 Err(_) => {
                     return Err(RFQError::ConnectionError(format!(
@@ -213,9 +233,8 @@ impl BebopClient {
                     if attempt < MAX_RETRIES - 1 {
                         sleep(Duration::from_millis(100)).await;
                         continue;
-                    } else {
-                        return Err(last_error.unwrap());
                     }
+                    return Err(last_error.unwrap());
                 }
             };
 
@@ -253,15 +272,15 @@ impl BebopClient {
                     BebopOrderToSign::Single(ref single) => SignedQuote {
                         base_token: params.token_in.clone(),
                         quote_token: params.token_out.clone(),
-                        amount_in: BigUint::from_str(&single.taker_amount).map_err(|_| {
+                        amount_in: BigUint::from_str(&single.taker_amount).map_err(|e| {
                             RFQError::ParsingError(format!(
-                                "Failed to parse amount in string: {}",
+                                "Failed to parse amount in string: {} ({e})",
                                 single.taker_amount
                             ))
                         })?,
-                        amount_out: BigUint::from_str(&single.maker_amount).map_err(|_| {
+                        amount_out: BigUint::from_str(&single.maker_amount).map_err(|e| {
                             RFQError::ParsingError(format!(
-                                "Failed to parse amount out string: {}",
+                                "Failed to parse amount out string: {} ({e})",
                                 single.maker_amount
                             ))
                         })?,
@@ -641,7 +660,10 @@ mod tests {
             RFQError::ConnectionError(msg) => {
                 assert!(msg.contains("timed out"), "Expected timeout error, got: {}", msg);
             }
-            _ => panic!("Expected ConnectionError, got: {:?}", err),
+            RFQError::ParsingError(_) |
+            RFQError::FatalError(_) |
+            RFQError::InvalidInput(_) |
+            RFQError::QuoteNotFound(_) => panic!("Expected ConnectionError, got: {:?}", err),
         }
         assert!(
             elapsed.as_millis() >= 200 && elapsed.as_millis() < 400,
@@ -742,10 +764,12 @@ mod tests {
             Duration::from_secs(30),
             QuoteOrigin::default(),
         );
+        let pricing_client =
+            BebopPricingClient::new(BebopSupportedChain::Base, "secret_key".to_string());
 
         assert_eq!(client.quote_endpoint, "https://api.bebop.xyz/pmm/base/v3/quote");
         assert_eq!(
-            client.pricing_ws_endpoint,
+            pricing_client.pricing_ws_endpoint,
             "wss://api.bebop.xyz/pmm/base/v3/pricing?format=protobuf"
         );
     }

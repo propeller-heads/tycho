@@ -163,8 +163,8 @@ mod tests {
         Bytes::from(hex!("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").to_vec())
     }
 
-    fn token_with_gas(address: Bytes, gas: u64) -> Token {
-        Token::new(&address, "", 0, 0, &[Some(gas)], Default::default(), 100)
+    fn token_with_gas(address: &Bytes, gas: u64) -> Token {
+        Token::new(address, "", 0, 0, &[Some(gas)], Default::default(), 100)
     }
 
     #[test]
@@ -188,7 +188,7 @@ mod tests {
 
         let swap_wbtc_usdc = Swap::new(
             ProtocolComponent { protocol_system: "uniswap_v4".to_string(), ..Default::default() },
-            default_token(wbtc.clone()),
+            default_token(wbtc),
             default_token(usdc.clone()),
             BigUint::from(220_000u64),
         );
@@ -264,7 +264,7 @@ mod tests {
 
         let swap_dai_usdc = Swap::new(
             ProtocolComponent { protocol_system: "uniswap_v4".to_string(), ..Default::default() },
-            default_token(dai.clone()),
+            default_token(dai),
             default_token(usdc.clone()),
             BigUint::from(250_000u64),
         );
@@ -281,7 +281,7 @@ mod tests {
             vec![
                 SwapGroup {
                     swaps: vec![swap_wbtc_weth],
-                    token_in: wbtc.clone(),
+                    token_in: wbtc,
                     token_out: weth.clone(),
                     protocol_system: "uniswap_v4".to_string(),
                     split: 0f64,
@@ -337,7 +337,7 @@ mod tests {
                 protocol_system: "vm:balancer_v3".to_string(),
                 ..Default::default()
             },
-            default_token(wbtc.clone()),
+            default_token(wbtc),
             default_token(usdc.clone()),
             BigUint::from(220_000u64),
         );
@@ -349,7 +349,7 @@ mod tests {
         );
         let swap_dai_usdc = Swap::new(
             ProtocolComponent { protocol_system: "uniswap_v4".to_string(), ..Default::default() },
-            default_token(dai.clone()),
+            default_token(dai),
             default_token(usdc.clone()),
             BigUint::from(250_000u64),
         );
@@ -513,7 +513,7 @@ mod tests {
         );
         let swap_weth_dai = Swap::new(
             ProtocolComponent { protocol_system: "uniswap_v4".to_string(), ..Default::default() },
-            default_token(weth.clone()),
+            default_token(weth),
             default_token(dai.clone()),
             BigUint::from(250_000u64),
         );
@@ -574,7 +574,7 @@ mod tests {
                 protocol_system: "uniswap_v4_hooks".to_string(),
                 ..Default::default()
             },
-            default_token(wbtc.clone()),
+            default_token(wbtc),
             default_token(usdc.clone()),
             BigUint::ZERO,
         );
@@ -585,14 +585,14 @@ mod tests {
             default_token(dai.clone()),
             BigUint::ZERO,
         );
-        let swaps = vec![swap_weth_wbtc.clone(), swap_wbtc_usdc.clone(), swap_usdc_dai.clone()];
+        let swaps = vec![swap_weth_wbtc, swap_wbtc_usdc, swap_usdc_dai];
         let grouped_swaps = group_swaps(&swaps);
 
         assert_eq!(grouped_swaps.len(), 2);
         // First group should contain both uniswap_v4 and uniswap_v4_hooks swaps
         assert_eq!(grouped_swaps[0].swaps.len(), 2);
         assert_eq!(grouped_swaps[0].token_in, weth);
-        assert_eq!(grouped_swaps[0].token_out, usdc.clone());
+        assert_eq!(grouped_swaps[0].token_out, usdc);
         // The protocol_system should be from the first swap in the group
         assert_eq!(grouped_swaps[0].protocol_system, "uniswap_v4");
 
@@ -607,17 +607,17 @@ mod tests {
     fn test_group_swaps_estimated_gas() {
         //   WETH ──(USV4)──> WBTC ──(USV4)──> USDC ──(USV4)──> DAI
 
-        let weth = token_with_gas(weth(), 10);
+        let weth = token_with_gas(&weth(), 10);
         let wbtc = token_with_gas(
-            Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap(),
+            &Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap(),
             20,
         );
         let usdc = token_with_gas(
-            Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
+            &Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
             30,
         );
         let dai = token_with_gas(
-            Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap(),
+            &Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap(),
             40,
         );
 
@@ -654,9 +654,9 @@ mod tests {
     fn test_group_swaps_estimated_gas_single_swap_group() {
         // A single-swap group has no batching benefit, so its estimated_gas equals the
         // swap's own estimated_gas with no subtraction.
-        let weth = token_with_gas(weth(), 10);
+        let weth = token_with_gas(&weth(), 10);
         let usdc = token_with_gas(
-            Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
+            &Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
             30,
         );
 
@@ -678,13 +678,13 @@ mod tests {
         // If the per-swap gas estimates are smaller than the transfer costs we need to
         // subtract, the result should saturate to zero rather than underflow.
         // This should never happen though!!
-        let weth = token_with_gas(weth(), 10_000);
+        let weth = token_with_gas(&weth(), 10_000);
         let wbtc = token_with_gas(
-            Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap(),
+            &Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap(),
             10_000,
         );
         let usdc = token_with_gas(
-            Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
+            &Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
             10_000,
         );
 

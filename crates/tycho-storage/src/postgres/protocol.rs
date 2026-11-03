@@ -1,4 +1,7 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeSet, HashMap, HashSet},
+};
 
 use chrono::{NaiveDateTime, Utc};
 use diesel::{
@@ -7,6 +10,7 @@ use diesel::{
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use itertools::Itertools;
+use num_bigint::BigUint;
 use tracing::{debug_span, error, instrument, trace, warn, Instrument, Level};
 use tycho_common::{
     models::{
@@ -23,8 +27,8 @@ use tycho_common::{
 };
 
 use super::{
-    maybe_lookup_block_ts, maybe_lookup_version_ts, orm, schema, storage_error_from_diesel,
-    truncate_to_byte_limit,
+    convert_int, count_to_i64, maybe_lookup_block_ts, maybe_lookup_version_ts, orm, page_window,
+    schema, storage_error_from_diesel, truncate_to_byte_limit,
     versioning::{apply_partitioned_versioning, VersioningEntry},
     PostgresError, PostgresGateway, WithOrdinal, WithTxHash, MAX_TS, MAX_VERSION_TS,
 };
@@ -45,9 +49,8 @@ impl PostgresGateway {
     ///
     /// ## Returns:
     /// - A Result containing a vector of `ProtocolState`, otherwise, it will return a StorageError.
-    #[instrument(level = Level::DEBUG, skip(self, balances, states_result))]
+    #[instrument(level = Level::DEBUG, skip(balances, states_result))]
     fn _decode_protocol_states(
-        &self,
         mut balances: HashMap<ComponentId, HashMap<Address, ComponentBalance>>,
         states_result: Result<Vec<(orm::ProtocolState, ComponentId)>, diesel::result::Error>,
         context: &str,
@@ -164,7 +167,8 @@ impl PostgresGateway {
             (&self.component_index, &system, ids)
         {
             let system_id = self.get_protocol_system_id(system_name)?;
-            if let Some(page) = component_index.query(chain, system_id, min_tvl, pagination_params)
+            if let Some(page) =
+                component_index.query(chain, system_id, min_tvl, pagination_params)?
             {
                 let components = self
                     .get_protocol_components_by_db_ids(chain, &page.ids, conn)
@@ -397,8 +401,10 @@ impl PostgresGateway {
                     .unwrap_or_default();
 
                 let static_attributes: HashMap<String, StoreVal> = if let Some(v) = pc.attributes {
-                    serde_json::from_value(v).map_err(|_| {
-                        StorageError::DecodeError("Failed to decode static attributes.".to_string())
+                    serde_json::from_value(v).map_err(|e| {
+                        StorageError::DecodeError(format!(
+                            "Failed to decode static attributes: {e}"
+                        ))
                     })?
                 } else {
                     Default::default()
@@ -409,16 +415,18 @@ impl PostgresGateway {
                     &ps,
                     protocol_type_names_by_id
                         .get(&pc.protocol_type_id)
-                        .ok_or(PostgresError(StorageError::NotFound(
-                            "ProtocolType".into(),
-                            pc.protocol_type_id.to_string(),
-                        )))?,
+                        .ok_or_else(|| {
+                            PostgresError(StorageError::NotFound(
+                                "ProtocolType".into(),
+                                pc.protocol_type_id.to_string(),
+                            ))
+                        })?,
                     *chain,
                     tokens_by_pc,
                     contracts_by_pc,
                     static_attributes,
                     ChangeType::Creation,
-                    tx_hash.unwrap_or(Bytes::from(&[0; 32])),
+                    tx_hash.unwrap_or_else(|| Bytes::from(&[0; 32])),
                     pc.created_at,
                 ))
             })
@@ -444,8 +452,7 @@ impl PostgresGateway {
             .into_iter()
             .collect();
 
-        let mut res: HashMap<Address, (String, Bytes)> = HashMap::new();
-        schema::protocol_component::table
+        let rows = schema::protocol_component::table
             .inner_join(schema::protocol_component_holds_token::table)
             .inner_join(schema::component_balance::table)
             .select((
@@ -459,23 +466,9 @@ impl PostgresGateway {
             .filter(schema::component_balance::token_id.eq_any(token_ids.keys()))
             .get_results::<(i64, String, Bytes)>(conn)
             .await
-            .map_err(PostgresError::from)?
-            .into_iter()
-            .for_each(|(tid, cid, bal)| {
-                if let Some(address) = token_ids.get(&tid) {
-                    res.entry(address.clone())
-                        .and_modify(|v| {
-                            // Bytes uses lexicographical order which in case lengths
-                            // are equal, is equivalent to big-endian numerical order.
-                            if v.1.len() == bal.len() && v.1 < bal {
-                                *v = (cid.clone(), bal.clone());
-                            }
-                        })
-                        .or_insert_with(|| (cid, bal));
-                }
-            });
+            .map_err(PostgresError::from)?;
 
-        Ok(res)
+        Ok(largest_balance_per_token(rows, &token_ids))
     }
 
     pub async fn add_protocol_components(
@@ -507,7 +500,7 @@ impl PostgresGateway {
         for pc in new {
             let txh = tx_hash_id_mapping
                 .get::<TxHash>(&pc.creation_tx.clone())
-                .ok_or(StorageError::DecodeError("TxHash not found".to_string()))?;
+                .ok_or_else(|| StorageError::DecodeError("TxHash not found".to_string()))?;
 
             let new_pc = orm::NewProtocolComponent::new(
                 &pc.id,
@@ -572,28 +565,21 @@ impl PostgresGateway {
             .flat_map(|pc| pc.tokens.iter().cloned())
             .collect();
 
-        let pc_tokens_map = filtered_new_protocol_components
-            .iter()
-            .flat_map(|pc| {
-                let pc_id = protocol_db_id_map
+        let mut pc_tokens_map: Vec<(i64, Address, i16)> = Vec::new();
+        for pc in &filtered_new_protocol_components {
+            let pc_id = protocol_db_id_map
                     .get(&(pc.id.clone(), pc.protocol_system.clone(), pc.chain))
-                    .unwrap_or_else(|| {
-                        //Because we just inserted the protocol systems, there should not be any missing.
-                        // However, trying to handle this via Results is needlessly difficult, because you
-                        // can not use flat_map on a Result.
-                        panic!(
-                            "Could not find Protocol Component with ID: {}, Protocol System: {}, Chain: {}",
-                            pc.id, pc.protocol_system, pc.chain
-                        )
-                    });
-                pc.tokens
-                    .clone()
-                    .into_iter()
-                    .enumerate()
-                    .map(move |(idx, add)| (*pc_id, add, idx as i16))
-                    .collect::<Vec<(i64, Address, i16)>>()
-            })
-            .collect::<Vec<(i64, Address, i16)>>();
+                .unwrap_or_else(|| {
+                    // The protocol systems were inserted just before, so none can be missing.
+                    panic!(
+                        "Could not find Protocol Component with ID: {}, Protocol System: {}, Chain: {}",
+                        pc.id, pc.protocol_system, pc.chain
+                    )
+                });
+            for (idx, add) in pc.tokens.iter().enumerate() {
+                pc_tokens_map.push((*pc_id, add.clone(), convert_int(idx, "token index")?));
+            }
+        }
 
         let token_addr_count = token_addresses.len();
         let token_add_by_id: HashMap<Address, i64> = async {
@@ -619,7 +605,9 @@ impl PostgresGateway {
             .map(|(pc_id, t_address, token_idx)| {
                 let t_id = token_add_by_id
                     .get(t_address)
-                    .ok_or(StorageError::NotFound("Token".to_string(), t_address.to_string()))?;
+                    .ok_or_else(|| {
+                        StorageError::NotFound("Token".to_string(), t_address.to_string())
+                    })?;
                 Ok(orm::NewProtocolComponentHoldsToken {
                     protocol_component_id: *pc_id,
                     token_id: *t_id,
@@ -690,7 +678,9 @@ impl PostgresGateway {
             .map(|(pc_id, t_address)| {
                 let t_id = contract_add_by_id
                     .get(t_address)
-                    .ok_or(StorageError::NotFound("Account".to_string(), t_address.to_string()))?;
+                    .ok_or_else(|| {
+                        StorageError::NotFound("Account".to_string(), t_address.to_string())
+                    })?;
                 Ok(orm::NewProtocolComponentHoldsContract {
                     protocol_component_id: *pc_id,
                     contract_code_id: *t_id,
@@ -779,7 +769,7 @@ impl PostgresGateway {
     }
 
     // Gets all protocol states from the db filtered by chain, component ids and/or protocol system.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "one argument per query filter")]
     #[instrument(level = Level::DEBUG, skip(self, ids, conn))]
     pub async fn get_protocol_states(
         &self,
@@ -816,7 +806,7 @@ impl PostgresGateway {
                     conn,
                 )
                 .await;
-                let protocol_states = self._decode_protocol_states(
+                let protocol_states = Self::_decode_protocol_states(
                     balances,
                     state_data.entity,
                     system.to_string().as_str(),
@@ -832,7 +822,7 @@ impl PostgresGateway {
                     conn,
                 )
                 .await;
-                let protocol_states = self._decode_protocol_states(
+                let protocol_states = Self::_decode_protocol_states(
                     balances,
                     state_data.entity,
                     ids.join(",").as_str(),
@@ -843,7 +833,7 @@ impl PostgresGateway {
                 let state_data =
                     orm::ProtocolState::by_chain(&chain_db_id, version_ts, pagination_params, conn)
                         .await;
-                let protocol_states = self._decode_protocol_states(
+                let protocol_states = Self::_decode_protocol_states(
                     balances,
                     state_data.entity,
                     chain.to_string().as_str(),
@@ -894,22 +884,23 @@ impl PostgresGateway {
 
         let mut state_data = Vec::new();
         for state in new {
-            let tx = state
-                .tx
-                .as_ref()
-                .ok_or(StorageError::Unexpected(
+            let tx = state.tx.as_ref().ok_or_else(|| {
+                StorageError::Unexpected(
                     "Could not reference tx in ProtocolStateDelta object".to_string(),
-                ))?;
+                )
+            })?;
             let (tx_id, tx_index, tx_ts) = txns
                 .get(tx)
-                .ok_or(StorageError::NotFound("Tx id".to_string(), tx.to_string()))?;
+                .ok_or_else(|| StorageError::NotFound("Tx id".to_string(), tx.to_string()))?;
 
             let component_db_id = *components
                 .get(&state.component_id)
-                .ok_or(StorageError::NotFound(
-                    "Component id".to_string(),
-                    state.component_id.to_string(),
-                ))?;
+                .ok_or_else(|| {
+                    StorageError::NotFound(
+                        "Component id".to_string(),
+                        state.component_id.to_string(),
+                    )
+                })?;
 
             state_data.extend(
                 state
@@ -1110,23 +1101,8 @@ impl PostgresGateway {
 
         let tokens: Vec<Token> = results
             .into_iter()
-            .map(|(orm_token, address_)| {
-                let gas_usage: Vec<_> = orm_token
-                    .gas
-                    .iter()
-                    .map(|u| u.map(|g| g as u64))
-                    .collect();
-                Token::new(
-                    &address_,
-                    orm_token.symbol.as_str(),
-                    orm_token.decimals as u32,
-                    orm_token.tax as u64,
-                    gas_usage.as_slice(),
-                    chain,
-                    orm_token.quality as u32,
-                )
-            })
-            .collect();
+            .map(|(orm_token, address_)| orm_token.to_model(&address_, chain))
+            .collect::<Result<_, _>>()?;
 
         Ok(WithTotal { entity: tokens, total: Some(count) })
     }
@@ -1209,7 +1185,7 @@ impl PostgresGateway {
                     .get(&account_key)
                     .expect("Account ID not found");
 
-                let mut new_token = orm::NewToken::from_token(account_id, token);
+                let mut new_token = orm::NewToken::from_token(account_id, token)?;
                 new_token.symbol = truncate_to_byte_limit(&token.symbol, 255);
                 Ok(new_token)
             })
@@ -1235,7 +1211,7 @@ impl PostgresGateway {
         .await?;
 
         if let Some(token_cache) = &self.token_cache {
-            token_cache.add_tokens(tokens);
+            token_cache.add_tokens(tokens)?;
         }
 
         Ok(())
@@ -1270,18 +1246,14 @@ impl PostgresGateway {
         async {
             for t in tokens.iter() {
                 if let Some(db_id) = address_to_db_id.get(&t.address) {
-                    let gas_val = t
-                        .gas
-                        .iter()
-                        .map(|v| v.map(|g| g as i64))
-                        .collect::<Vec<_>>();
+                    let db_token = orm::NewToken::from_token(*db_id, t)?;
                     diesel::update(schema::token::table)
                         .set((
                             symbol.eq(&t.symbol),
-                            decimals.eq(t.decimals as i32),
-                            tax.eq(t.tax as i64),
-                            quality.eq(t.quality as i32),
-                            gas.eq(gas_val),
+                            decimals.eq(db_token.decimals),
+                            tax.eq(db_token.tax),
+                            quality.eq(db_token.quality),
+                            gas.eq(db_token.gas),
                         ))
                         .filter(id.eq(db_id))
                         .execute(conn)
@@ -1304,7 +1276,7 @@ impl PostgresGateway {
                 .filter(|t| address_to_db_id.contains_key(&t.address))
                 .cloned()
                 .collect();
-            token_cache.upsert_tokens(&updated);
+            token_cache.upsert_tokens(&updated)?;
         }
 
         Ok(())
@@ -1970,12 +1942,13 @@ impl PostgresGateway {
             .sorted()
             .collect();
 
-        let total = all_protocol_systems.len() as i64;
+        let total = count_to_i64(all_protocol_systems.len());
         let paginated_protocol_systems = if let Some(params) = pagination_params {
+            let (offset, limit) = page_window(params)?;
             all_protocol_systems
                 .into_iter()
-                .skip(params.offset() as usize)
-                .take(params.page_size as usize)
+                .skip(offset)
+                .take(limit)
                 .collect()
         } else {
             all_protocol_systems
@@ -2051,6 +2024,34 @@ impl PostgresGateway {
 
         Ok(WithTotal { entity: result, total: Some(count) })
     }
+}
+
+/// Keeps, per token, the component with the largest balance. Rows are `(token_id, component_id,
+/// balance)`. On a tie the first row stays. Rows whose token id is not in `token_ids` are ignored.
+fn largest_balance_per_token(
+    rows: impl IntoIterator<Item = (i64, ComponentId, Bytes)>,
+    token_ids: &HashMap<i64, Address>,
+) -> HashMap<Address, (ComponentId, Bytes)> {
+    let mut largest: HashMap<Address, (ComponentId, Bytes)> = HashMap::new();
+    for (token_id, component_id, balance) in rows {
+        let Some(token) = token_ids.get(&token_id) else {
+            continue;
+        };
+        let replace = match largest.get(token) {
+            Some((_, current)) => compare_balances(&balance, current) == Ordering::Greater,
+            None => true,
+        };
+        if replace {
+            largest.insert(token.clone(), (component_id, balance));
+        }
+    }
+    largest
+}
+
+/// Compares two balances by numeric value. Balances are big-endian unsigned integers stored with
+/// varying lengths and leading zeros, so a plain byte comparison would rank `0xfe` above `0x00ff`.
+fn compare_balances(a: &Bytes, b: &Bytes) -> Ordering {
+    BigUint::from_bytes_be(a).cmp(&BigUint::from_bytes_be(b))
 }
 
 #[cfg(test)]
@@ -3860,6 +3861,54 @@ mod test {
         assert_eq!(res, exp);
     }
 
+    const USDTB: &str = "0xc139190f447e929f090edeb554d95abb8b18ac1c";
+
+    #[rstest]
+    #[case::short_row_last(&[
+        ("hooks", "0x000000000000000000000000000000000000000000000470a6f46c608baff22b"),
+        ("curve", "0x08c7be39eaf21f5b7efb68"),
+        ("v3", "0x029c07c98d"),
+    ])]
+    #[case::short_row_first(&[
+        ("v3", "0x029c07c98d"),
+        ("curve", "0x08c7be39eaf21f5b7efb68"),
+        ("hooks", "0x000000000000000000000000000000000000000000000470a6f46c608baff22b"),
+    ])]
+    fn test_largest_balance_per_token_compares_numerically(#[case] rows: &[(&str, &str)]) {
+        let token = Bytes::from(USDTB);
+        let token_ids = HashMap::from([(1_i64, token.clone())]);
+        let rows = rows
+            .iter()
+            .map(|(component_id, balance)| {
+                (1_i64, component_id.to_string(), Bytes::from(*balance))
+            });
+
+        let res = largest_balance_per_token(rows, &token_ids);
+
+        assert_eq!(
+            res,
+            HashMap::from([(
+                token,
+                ("curve".to_string(), Bytes::from("0x08c7be39eaf21f5b7efb68"))
+            )])
+        );
+    }
+
+    #[test]
+    fn test_largest_balance_per_token_keeps_first_on_equal_value() {
+        let token = Bytes::from(USDTB);
+        let token_ids = HashMap::from([(1_i64, token.clone())]);
+        let rows = vec![
+            (1_i64, "first".to_string(), Bytes::from("0x00ff")),
+            (1_i64, "second".to_string(), Bytes::from("0xff")),
+            (2_i64, "unknown_token".to_string(), Bytes::from("0xffff")),
+        ];
+
+        let res = largest_balance_per_token(rows, &token_ids);
+
+        assert_eq!(res, HashMap::from([(token, ("first".to_string(), Bytes::from("0x00ff")))]));
+    }
+
     #[tokio::test]
     async fn test_get_token_prices() {
         let mut conn = setup_db().await;
@@ -4095,7 +4144,7 @@ mod test {
             .await
             .expect("retrieving protocol systems failed!");
 
-        assert_eq!(res.total, Some(exp.len() as i64));
+        assert_eq!(res.total, Some(i64::try_from(exp.len()).unwrap()));
         assert_eq!(
             res.entity
                 .into_iter()
@@ -4120,7 +4169,7 @@ mod test {
             .await
             .expect("retrieving protocol systems failed!");
 
-        assert_eq!(res.total, Some(all.len() as i64));
+        assert_eq!(res.total, Some(i64::try_from(all.len()).unwrap()));
         assert_eq!(res.entity.iter().collect_vec(), exp);
     }
 

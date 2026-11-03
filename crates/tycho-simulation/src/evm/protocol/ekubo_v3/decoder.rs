@@ -137,7 +137,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
 
         let liquidity = attribute(&state_attrs, "liquidity")?
             .clone()
-            .into();
+            .try_into()?;
 
         let sqrt_ratio = U256::try_from_be_slice(&attribute(&state_attrs, "sqrt_ratio")?[..])
             .ok_or_else(|| InvalidSnapshotError::ValueError("invalid pool price".to_string()))?;
@@ -150,7 +150,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
         > {
             let tick = attribute(state_attrs, "tick")?
                 .clone()
-                .into();
+                .try_into()?;
 
             let mut ticks = ticks_from_attributes(
                 state_attrs
@@ -356,7 +356,7 @@ fn extension_type_from_attributes_or_address(
     // Backward compat: use extension_id attribute if present (legacy format).
     // A value of 0 means unset — fall through to address-based detection.
     if let Some(extension_id) = static_attrs.get("extension_id") {
-        match i32::from(extension_id.clone()) {
+        match i32::try_from(extension_id.clone())? {
             0 => {}
             1 => return Ok(ExtensionType::NoSwapCallPoints),
             2 => return Ok(ExtensionType::Oracle),
@@ -401,15 +401,15 @@ fn timed_state_details(
 ) -> Result<TimedStateDetails, InvalidSnapshotError> {
     let last_time = attribute_with_fallback(&attrs, "last_time", "last_execution_time")?
         .clone()
-        .into();
+        .try_into()?;
 
     Ok(TimedStateDetails {
         rate_token0: attribute_with_fallback(&attrs, "rate_token0", "token0_sale_rate")?
             .clone()
-            .into(),
+            .try_into()?,
         rate_token1: attribute_with_fallback(&attrs, "rate_token1", "token1_sale_rate")?
             .clone()
-            .into(),
+            .try_into()?,
         last_time,
         rate_deltas: rate_deltas_from_attributes(
             attrs

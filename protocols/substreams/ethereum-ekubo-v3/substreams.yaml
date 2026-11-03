@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "ethereum_ekubo_v3"
-  version: v0.2.5
+  version: v0.2.6
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-ekubo-v3"
 
 protobuf:
@@ -34,7 +34,7 @@ networks:
 # `-p map_events=ve33_address=0x... -p map_components=ve33_address=0x...`.
 params:
   map_events: ""
-  map_components: "signed_exclusive_swap_address=0x55b703eED01b35641963da2FB2E14885993605A3"
+  map_components: "signed_exclusive_swap_address=0x550CFe1292d0D9c0d28f232b3F42Edb4439B1D09"
 
 modules:
   # Stage 1

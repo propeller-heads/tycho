@@ -164,13 +164,13 @@ pub const PAMM_ADDRESS_ALIASES: &[(&str, &str)] = &[
     // pAMM swap event at all — while its swaps go to the router 0x99ab7c1c…, the address
     // `default_served_pamms` registers it under.
     //
-    // Metric streams a second key, 0x30a88bf8…, which also names 0x99ab7c1c… among the addresses
-    // it priced and quotes the same pairs from a different pricing instance. It is deliberately
-    // left unaliased: canonicalizing both onto one venue would give every shared pair two books
-    // per frame, and the duplicate rule keeps the last in stream order rather than the better
-    // price, so the served quote would swing arbitrarily between two makers. Its books are
-    // skipped and counted under `unregistered_pamm_entries_total` instead. Alias it only once
-    // there is a rule for choosing between two books of one pair.
+    // Metric's router also reads the state of a second quote address, 0x30a88bf8…, which streams
+    // no books of its own (2026-10-21) but lists 0x99ab7c1c… in its quote stream entries'
+    // `pricedAddresses`. It is deliberately left unaliased. The overrides path merges its entries
+    // into Metric's own through `pricedAddresses`; aliased, they would count as Metric's own
+    // entries and replace rather than complete them. And any book it streamed in future would
+    // become a second book of the same pair, where the duplicate rule keeps the last in stream
+    // order rather than the better price.
     ("0xe844701934d9c6085b292e428f41b911cc0b3872", "0x99ab7c1c5eab47801f7937075998527a550fba8a"),
 ];
 

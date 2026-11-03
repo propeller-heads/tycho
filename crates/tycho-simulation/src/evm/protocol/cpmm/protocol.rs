@@ -23,7 +23,7 @@ use crate::{
 };
 
 pub fn cpmm_try_from_with_header(
-    snapshot: ComponentWithState,
+    snapshot: &ComponentWithState,
 ) -> Result<(U256, U256), InvalidSnapshotError> {
     let reserve0 = U256::from_be_slice(
         snapshot
@@ -95,8 +95,8 @@ pub fn cpmm_get_amount_out(
 /// the actual price impact to be slightly less than 90%. For typical fees (0.25%-0.3%), the
 /// actual price impact is approximately 89.9% instead of exactly 90%.
 pub fn cpmm_get_limits(
-    sell_token: Bytes,
-    buy_token: Bytes,
+    sell_token: &Bytes,
+    buy_token: &Bytes,
     reserve0: U256,
     reserve1: U256,
     fee_bps: u32,
@@ -126,7 +126,7 @@ pub fn cpmm_get_limits(
 }
 
 pub fn cpmm_delta_transition(
-    delta: ProtocolStateDelta,
+    delta: &ProtocolStateDelta,
     reserve0_mut: &mut U256,
     reserve1_mut: &mut U256,
 ) -> Result<(), TransitionError> {
@@ -150,6 +150,7 @@ pub fn cpmm_delta_transition(
 }
 
 /// Represents a protocol fee as a numerator and precision.
+#[derive(Clone, Copy)]
 pub struct ProtocolFee {
     pub numerator: U256,
     pub precision: U256,

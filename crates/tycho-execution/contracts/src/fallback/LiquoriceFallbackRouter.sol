@@ -9,6 +9,10 @@ import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 import {TychoFallbackRouter} from "./TychoFallbackRouter.sol";
+import {
+    LIQUORICE_SETTLE_SELECTOR,
+    LIQUORICE_SETTLE_SINGLE_SELECTOR
+} from "../../lib/LiquoriceSelectors.sol";
 
 error LiquoriceFallbackRouter__AddressZero();
 error LiquoriceFallbackRouter__InvalidDataLength(uint256 length);
@@ -23,9 +27,6 @@ error LiquoriceFallbackRouter__InvalidSelector(bytes4 selector);
 contract LiquoriceFallbackRouter is TychoFallbackRouter {
     using SafeERC20 for IERC20;
     using Address for address;
-
-    bytes4 private constant _SETTLE_SINGLE_SELECTOR = 0x9935c868;
-    bytes4 private constant _SETTLE_SELECTOR = 0xcba673a7;
 
     address public immutable liquoriceSettlement;
     /// @notice Pulls the input for the settlement.
@@ -66,8 +67,10 @@ contract LiquoriceFallbackRouter is TychoFallbackRouter {
             revert LiquoriceFallbackRouter__InvalidDataLength(settlementCalldata.length);
         }
         bytes4 selector = bytes4(settlementCalldata[0:4]);
-        if (selector != _SETTLE_SINGLE_SELECTOR && selector != _SETTLE_SELECTOR)
-        {
+        if (
+            selector != LIQUORICE_SETTLE_SINGLE_SELECTOR
+                && selector != LIQUORICE_SETTLE_SELECTOR
+        ) {
             revert LiquoriceFallbackRouter__InvalidSelector(selector);
         }
         _swap(swap_, liquoriceSettlement, settlementCalldata, fallbackSwap);

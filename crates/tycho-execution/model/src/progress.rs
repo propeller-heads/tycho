@@ -14,7 +14,7 @@ use std::{
 /// Exits when `is_running` is set to `false`.
 /// Main thread will set `is_running` to `false` as soon
 /// as all worker threads have finished.
-pub fn progress_thread(counters: Counters, is_running: Arc<AtomicBool>) {
+pub fn progress_thread(counters: &Counters, is_running: &AtomicBool) {
     let instant_start = std::time::Instant::now();
     while is_running.load(Ordering::Relaxed) {
         {

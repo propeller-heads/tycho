@@ -91,7 +91,7 @@ pub(crate) fn insert_state_attribute_update(
 ///
 /// * `Ok(())` if the operation succeeds
 /// * `Err(MergeError)` if merging with existing deltas fails
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn insert_state_attribute_deletion(
     txs_with_update: &mut Vec<TxWithChanges>,
     component_id: &ComponentId,
@@ -150,7 +150,7 @@ impl StateUpdateBufferEntry for BlockChanges {
                     .filter(|(attr, _)| keys_set.contains(&(component_id, attr)))
                 {
                     res.entry((component_id.clone(), attr.clone()))
-                        .or_insert(val.clone());
+                        .or_insert_with(|| val.clone());
                 }
             }
         }
@@ -158,7 +158,6 @@ impl StateUpdateBufferEntry for BlockChanges {
         res
     }
 
-    #[allow(clippy::mutable_key_type)]
     fn get_filtered_account_state_update(
         &self,
         keys: Vec<(&AccountStateIdType, &AccountStateKeyType)>,
@@ -174,7 +173,7 @@ impl StateUpdateBufferEntry for BlockChanges {
                     .filter(|(slot, _)| keys_set.contains(&(address, *slot)))
                 {
                     res.entry((address.clone(), slot.clone()))
-                        .or_insert(val.clone().unwrap_or_default());
+                        .or_insert_with(|| val.clone().unwrap_or_default());
                 }
             }
         }
@@ -182,7 +181,7 @@ impl StateUpdateBufferEntry for BlockChanges {
         res
     }
 
-    #[allow(clippy::mutable_key_type)] // Clippy thinks that tuple with Bytes are a mutable type.
+    // Clippy thinks that tuple with Bytes are a mutable type.
     fn get_filtered_component_balance_update(
         &self,
         keys: Vec<(&ComponentId, &Address)>,
@@ -199,7 +198,7 @@ impl StateUpdateBufferEntry for BlockChanges {
                     .filter(|(token, _)| keys_set.contains(&(component_id, token)))
                 {
                     res.entry((component_id.clone(), token.clone()))
-                        .or_insert(value.clone());
+                        .or_insert_with(|| value.clone());
                 }
             }
         }
@@ -207,7 +206,7 @@ impl StateUpdateBufferEntry for BlockChanges {
         res
     }
 
-    #[allow(clippy::mutable_key_type)] // Clippy thinks that tuple with Bytes are a mutable type.
+    // Clippy thinks that tuple with Bytes are a mutable type.
     fn get_filtered_account_balance_update(
         &self,
         keys: Vec<(&Address, &Address)>,
@@ -224,7 +223,7 @@ impl StateUpdateBufferEntry for BlockChanges {
                     .filter(|(token, _)| keys_set.contains(&(account, token)))
                 {
                     res.entry((account.clone(), token.clone()))
-                        .or_insert(value.clone());
+                        .or_insert_with(|| value.clone());
                 }
             }
         }
@@ -386,7 +385,7 @@ pub mod fixtures {
                             (
                                 token.clone(),
                                 AccountBalance {
-                                    token: token.clone(),
+                                    token,
                                     balance: Bytes::from(500_u64).lpad(32, 0),
                                     modify_tx: tx.hash.clone(),
                                     account: contract.clone(),
@@ -471,7 +470,7 @@ pub mod fixtures {
                         HashMap::from([(
                             token.clone(),
                             AccountBalance {
-                                token: token.clone(),
+                                token,
                                 balance: Bytes::from(700_u64).lpad(32, 0),
                                 modify_tx: tx.hash,
                                 account: contract,
@@ -579,7 +578,6 @@ mod test {
             (&contract, &missing_slot),
         ];
 
-        #[allow(clippy::mutable_key_type)]
         let filtered = block_changes.get_filtered_account_state_update(keys);
 
         assert_eq!(
@@ -643,7 +641,6 @@ mod test {
             (&missing_component, &token),
         ];
 
-        #[allow(clippy::mutable_key_type)]
         let filtered = block_changes.get_filtered_component_balance_update(keys);
 
         assert_eq!(
@@ -653,7 +650,7 @@ mod test {
                     (c_id.clone(), token.clone()),
                     // token in both txs: tx1 balance (1000) wins over tx0 balance (800)
                     ComponentBalance {
-                        token: token.clone(),
+                        token,
                         balance: Bytes::from(1000_u64).lpad(32, 0),
                         balance_float: 1000.0,
                         modify_tx: "0x02".parse().unwrap(),
@@ -668,7 +665,7 @@ mod test {
                         balance: Bytes::from(300_u64).lpad(32, 0),
                         balance_float: 300.0,
                         modify_tx: "0x01".parse().unwrap(),
-                        component_id: c_id.clone(),
+                        component_id: c_id,
                     }
                 ),
             ])
@@ -692,7 +689,6 @@ mod test {
             (&missing_account, &token),
         ];
 
-        #[allow(clippy::mutable_key_type)]
         let filtered = block_changes.get_filtered_account_balance_update(keys);
 
         assert_eq!(
@@ -702,7 +698,7 @@ mod test {
                     (contract.clone(), token.clone()),
                     // token in both txs: tx1 balance (700) wins over tx0 balance (500)
                     AccountBalance {
-                        token: token.clone(),
+                        token,
                         balance: Bytes::from(700_u64).lpad(32, 0),
                         modify_tx: "0x02".parse().unwrap(),
                         account: contract.clone(),
@@ -715,7 +711,7 @@ mod test {
                         token: token2,
                         balance: Bytes::from(150_u64).lpad(32, 0),
                         modify_tx: "0x01".parse().unwrap(),
-                        account: contract.clone(),
+                        account: contract,
                     }
                 ),
             ])
@@ -1049,7 +1045,7 @@ mod test {
         other_block.partial_block_index = Some(1);
 
         other_block.extractor =
-            extractor_override.unwrap_or(original_partial_block.extractor.clone());
+            extractor_override.unwrap_or_else(|| original_partial_block.extractor.clone());
         other_block.chain = chain_override.unwrap_or(original_partial_block.chain);
         other_block.block.number =
             block_num_override.unwrap_or(original_partial_block.block.number);
@@ -1085,7 +1081,7 @@ mod test {
         let partial = partial_block_changes(0);
         let duplicate = partial_block_changes(0);
 
-        let result = partial.clone().merge_partial(duplicate);
+        let result = partial.merge_partial(duplicate);
         assert!(matches!(result, Err(MergeError::InvalidState(_))));
     }
 
@@ -1180,17 +1176,17 @@ mod test {
         if first_idx == 0 {
             first
                 .new_tokens
-                .insert(shared_token_addr.clone(), early_token.clone());
+                .insert(shared_token_addr.clone(), early_token);
             second
                 .new_tokens
-                .insert(shared_token_addr.clone(), late_token.clone());
+                .insert(shared_token_addr.clone(), late_token);
         } else {
             first
                 .new_tokens
-                .insert(shared_token_addr.clone(), late_token.clone());
+                .insert(shared_token_addr.clone(), late_token);
             second
                 .new_tokens
-                .insert(shared_token_addr.clone(), early_token.clone());
+                .insert(shared_token_addr.clone(), early_token);
         }
 
         let result = first.merge_partial(second).unwrap();

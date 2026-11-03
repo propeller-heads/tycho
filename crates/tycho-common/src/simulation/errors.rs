@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::simulation::protocol_sim::GetAmountOutResult;
+use crate::{hex_bytes::IntegerFromBytesError, simulation::protocol_sim::GetAmountOutResult};
 
 /// Represents the outer-level, user-facing errors of the tycho-simulation package.
 ///
@@ -33,5 +33,11 @@ pub enum TransitionError {
 impl From<SimulationError> for TransitionError {
     fn from(error: SimulationError) -> Self {
         TransitionError::SimulationError(error)
+    }
+}
+
+impl From<IntegerFromBytesError> for TransitionError {
+    fn from(error: IntegerFromBytesError) -> Self {
+        TransitionError::DecodeError(error.to_string())
     }
 }

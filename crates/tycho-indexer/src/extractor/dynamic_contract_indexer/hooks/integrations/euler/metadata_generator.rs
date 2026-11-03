@@ -155,17 +155,10 @@ impl MetadataRequestGenerator for EulerMetadataGenerator {
             "euler".to_string(),
             format!("euler_balance_{target}"),
             component.id.clone(),
-            MetadataRequestType::ComponentBalance { token_addresses: component.tokens.clone() },
+            MetadataRequestType::ComponentBalance,
             Box::new(balance_transport),
         ));
         Ok(requests)
-    }
-
-    fn supported_metadata_types(&self) -> Vec<MetadataRequestType> {
-        vec![
-            MetadataRequestType::ComponentBalance { token_addresses: vec![] },
-            MetadataRequestType::Limits { token_pair: vec![] },
-        ]
     }
 }
 
@@ -179,7 +172,7 @@ impl MetadataResponseParser for EulerMetadataResponseParser {
         response: &Value,
     ) -> Result<MetadataValue, MetadataError> {
         match &request.request_type() {
-            MetadataRequestType::ComponentBalance { .. } => {
+            MetadataRequestType::ComponentBalance => {
                 if component.tokens.len() < 2 {
                     return Err(MetadataError::MissingData(
                         "component must have at least 2 tokens".to_string(),
@@ -192,7 +185,12 @@ impl MetadataResponseParser for EulerMetadataResponseParser {
                 let token_0 = &sorted_tokens[0];
                 let token_1 = &sorted_tokens[1];
 
-                let res_string = serde_json::from_value::<String>(response.clone()).unwrap();
+                let res_string =
+                    serde_json::from_value::<String>(response.clone()).map_err(|e| {
+                        MetadataError::GenerationFailed(format!(
+                            "Balance response is not a string: {e}"
+                        ))
+                    })?;
                 let res_str = res_string
                     .strip_prefix("0x")
                     .unwrap_or(&res_string);
@@ -215,11 +213,13 @@ impl MetadataResponseParser for EulerMetadataResponseParser {
                 let res = MetadataValue::Balances(balances);
                 Ok(res)
             }
-            MetadataRequestType::Tvl => {
-                Err(MetadataError::GenerationFailed("Tvl is not supported for Euler".to_string()))
-            }
             MetadataRequestType::Limits { token_pair } => {
-                let res_string = serde_json::from_value::<String>(response.clone()).unwrap();
+                let res_string =
+                    serde_json::from_value::<String>(response.clone()).map_err(|e| {
+                        MetadataError::GenerationFailed(format!(
+                            "Limits response is not a string: {e}"
+                        ))
+                    })?;
                 let res_str = res_string
                     .strip_prefix("0x")
                     .unwrap_or(&res_string);
@@ -229,7 +229,9 @@ impl MetadataResponseParser for EulerMetadataResponseParser {
                         .transport()
                         .as_any()
                         .downcast_ref::<RpcTransport>()
-                        .ok_or(MetadataError::UnknownError("Not RpcTransport".to_string()))?;
+                        .ok_or_else(|| {
+                            MetadataError::UnknownError("Not RpcTransport".to_string())
+                        })?;
 
                     let params = &request.params()[0];
 
@@ -238,9 +240,9 @@ impl MetadataResponseParser for EulerMetadataResponseParser {
                         .get("hooks")
                         .expect("Hooks attribute not found");
 
-                    let calldata = params["data"]
-                        .as_str()
-                        .ok_or(MetadataError::UnknownError("calldata not found".to_string()))?;
+                    let calldata = params["data"].as_str().ok_or_else(|| {
+                        MetadataError::UnknownError("calldata not found".to_string())
+                    })?;
 
                     Ok(EntryPointWithTracingParams {
                         entry_point: EntryPoint {
@@ -339,10 +341,7 @@ mod tests {
 
         // Balance request
         assert_eq!(requests[0].component_id(), &component.id);
-        assert_eq!(
-            requests[0].request_type(),
-            &MetadataRequestType::ComponentBalance { token_addresses: component.tokens.clone() }
-        );
+        assert_eq!(requests[0].request_type(), &MetadataRequestType::ComponentBalance);
         assert_eq!(
             requests[0].request_id(),
             "euler_balance_0x000000000000000000000000000000000000beef"
@@ -431,10 +430,7 @@ mod tests {
 
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].component_id(), &component.id);
-        assert_eq!(
-            requests[0].request_type(),
-            &MetadataRequestType::ComponentBalance { token_addresses: component.tokens.clone() }
-        );
+        assert_eq!(requests[0].request_type(), &MetadataRequestType::ComponentBalance);
         assert_eq!(
             requests[0].request_id(),
             &"euler_balance_0x000000000000000000000000000000000000beef".to_string()
@@ -444,20 +440,6 @@ mod tests {
             requests[0].transport().deduplication_id(),
             "eth_call_[{\"data\":\"0x0902f1ac\",\"to\":\"0x000000000000000000000000000000000000beef\"},\"0x3039\"]".to_string()
         );
-    }
-
-    #[test]
-    fn test_supported_metadata_types() {
-        let generator =
-            EulerMetadataGenerator::new("https://eth-mainnet.alchemyapi.io/v2/test".to_string());
-        let supported_types = generator.supported_metadata_types();
-
-        let expected_types = vec![
-            MetadataRequestType::ComponentBalance { token_addresses: vec![] },
-            MetadataRequestType::Limits { token_pair: vec![] },
-        ];
-
-        assert_eq!(supported_types, expected_types);
     }
 
     #[tokio::test]
@@ -827,7 +809,7 @@ mod tests {
                 .expect("Request ID should be present in the request map");
 
             match &request.request_type() {
-                MetadataRequestType::ComponentBalance { .. } => {
+                MetadataRequestType::ComponentBalance => {
                     if let Ok(result_value) = result {
                         let parsed_result =
                             parser.parse_response(&component, request, &result_value);
@@ -851,7 +833,6 @@ mod tests {
                         println!("Limits request failed: {:?}", result);
                     }
                 }
-                _ => {}
             }
         }
 
@@ -872,7 +853,7 @@ mod tests {
         let different_id = "0x1111111111111111111111111111111111111111".to_string();
 
         let component = ProtocolComponent {
-            id: different_id.clone(), // Different from hooks address
+            id: different_id, // Different from hooks address
             protocol_system: "euler_swap".to_string(),
             protocol_type_name: "swap".to_string(),
             chain: Chain::Ethereum,

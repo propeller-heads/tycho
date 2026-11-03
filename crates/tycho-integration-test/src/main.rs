@@ -1,6 +1,5 @@
 mod fee_fetcher;
 mod metrics;
-mod oracle_overrides;
 mod statistics;
 mod stream_processor;
 
@@ -14,9 +13,9 @@ use std::{
 
 use alloy::{
     eips::BlockNumberOrTag,
-    primitives::Address,
+    primitives::{map::AddressHashMap, Address},
     providers::Provider,
-    rpc::types::{Block, BlockId},
+    rpc::types::{state::AccountOverride, Block, BlockId},
 };
 use clap::Parser;
 use dotenv::dotenv;
@@ -37,6 +36,7 @@ use tycho_execution::encoding::evm::{
 use tycho_simulation::{
     book::{decode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE},
     evm::protocol::cowamm::constants::PROTOCOL_SYSTEM as COWAMM_PROTOCOL_SYSTEM,
+    price_level_stream::state::PriceLevelStreamState,
     protocol::models::ProtocolComponent,
     rfq::protocols::hashflow::state::{HashflowAllPairsState, HashflowState},
     tycho_common::models::{chain_config::TvlThresholdTier, token::Token, Chain},
@@ -44,9 +44,9 @@ use tycho_simulation::{
 };
 use tycho_test::{
     execution::{
-        encoding::encode_swap,
+        encoding::{encode_swap, pamm_account_overwrites},
         models::{RouterOverwritesData, TychoExecutionInput, TychoExecutionResult},
-        simulate_swap_transaction, tenderly,
+        simulate_swap_transaction, simulate_swap_transaction_before_block, tenderly,
     },
     is_block_not_found,
     token_prices::{cap_amount_to_eth_value, load_token_prices},
@@ -55,7 +55,6 @@ use tycho_test::{
 
 use crate::{
     fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
-    oracle_overrides::{override_protocol, titan_providers, BlockOverrides, OracleOverrides},
     statistics::TestStatistics,
     stream_processor::{
         book_stream_processor::BookStreamProcessor,
@@ -66,6 +65,10 @@ use crate::{
 };
 
 #[derive(Parser, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent command-line switches, not mutually exclusive states"
+)]
 struct Cli {
     /// The TVL threshold in native token units to filter the graph by.
     /// Defaults to a chain-appropriate value targeting ~$200K USD equivalent (Medium tier).
@@ -328,9 +331,17 @@ fn hashflow_min_amount_in(
 }
 
 #[tokio::main]
+#[expect(
+    clippy::unwrap_in_result,
+    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
+)]
 async fn main() -> miette::Result<()> {
     miette::set_hook(Box::new(|_| Box::new(NarratableReportHandler::new())))?;
-    dotenv().ok();
+    match dotenv() {
+        Ok(_) => {}
+        Err(e) if e.not_found() => {}
+        Err(e) => return Err(miette::miette!("Failed to load .env file: {e}")),
+    }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
@@ -471,16 +482,8 @@ async fn run(cli: Cli) -> miette::Result<()> {
     let mut rfq_handle = None;
     let mut price_level_handle = None;
 
-    // One Titan connection serves both the indexed pAMM pools and the execution overrides. The
-    // price level stream only runs on Ethereum, so off it the providers are only worth opening
-    // for the pools.
-    let overrides_wanted =
-        chain == Chain::Ethereum && !cli.disable_price_level_stream && !cli.disable_execution;
-    let override_providers =
-        if !cli.disable_onchain || overrides_wanted { titan_providers() } else { HashMap::new() };
-
     if !cli.disable_onchain {
-        if let Ok(protocol_stream_processor) = ProtocolStreamProcessor::new(
+        let protocol_stream_processor = ProtocolStreamProcessor::new(
             chain,
             cli.tycho_url.clone(),
             cli.tycho_api_key.clone(),
@@ -489,15 +492,13 @@ async fn run(cli: Cli) -> miette::Result<()> {
             cli.protocols.clone(),
             cli.partial_blocks,
             cli.no_tls,
-        ) {
-            protocol_handle = Some(
-                protocol_stream_processor
-                    .with_protocol_tvl_thresholds(cli.protocol_tvl_thresholds.clone())
-                    .with_override_providers(override_providers.clone())
-                    .run_stream(&all_tokens, protocol_tx)
-                    .await?,
-            );
-        }
+        );
+        protocol_handle = Some(
+            protocol_stream_processor
+                .with_protocol_tvl_thresholds(cli.protocol_tvl_thresholds.clone())
+                .run_stream(&all_tokens, protocol_tx)
+                .await?,
+        );
     }
     if !cli.disable_rfq || !cli.disable_pamm {
         let book_stream_processor = BookStreamProcessor::new(
@@ -532,13 +533,6 @@ async fn run(cli: Cli) -> miette::Result<()> {
             debug!(?chain, "The Titan pAMM price level stream only serves Ethereum; not starting");
         }
     }
-
-    // Without the overrides the venue reverts `StaleUpdate()`.
-    let oracle_overrides = if price_level_handle.is_some() && !cli.disable_execution {
-        OracleOverrides::spawn(&override_providers).map(Arc::new)
-    } else {
-        None
-    };
 
     let tycho_state = Arc::new(RwLock::new(TychoState::default()));
     // Only collect statistics when max_blocks is set; avoids unbounded growth for indefinite runs
@@ -692,7 +686,6 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let tycho_state = tycho_state.clone();
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
-                        let oracle_overrides = oracle_overrides.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
                         let permit = protocol_semaphore
                             .clone()
@@ -701,7 +694,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire protocol permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, oracle_overrides, &update, router_overwrites_data).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -731,7 +724,6 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let tycho_state = tycho_state.clone();
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
-                        let oracle_overrides = oracle_overrides.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
                         let permit = rfq_semaphore
                             .clone()
@@ -740,7 +732,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire book permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, oracle_overrides, &update, router_overwrites_data).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -775,7 +767,6 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let tycho_state = tycho_state.clone();
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
-                        let oracle_overrides = oracle_overrides.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
                         let permit = price_level_semaphore
                             .clone()
@@ -784,7 +775,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire price level stream permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, oracle_overrides, &update, router_overwrites_data).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -938,7 +929,7 @@ async fn poll_rpc_for_block(
     poll_interval: Duration,
 ) -> miette::Result<BlockPollResult> {
     for attempt in 0..max_attempts {
-        let block = match rpc_tools
+        let Some(block) = rpc_tools
             .provider
             .get_block_by_number(block_tag)
             .await
@@ -946,19 +937,16 @@ async fn poll_rpc_for_block(
             .wrap_err("Failed to fetch block")
             .ok()
             .flatten()
-        {
-            Some(b) => b,
-            None => {
-                warn!(
-                    "Failed to retrieve {block_tag} block (attempt {}/{})",
-                    attempt + 1,
-                    max_attempts
-                );
-                if attempt < max_attempts - 1 {
-                    tokio::time::sleep(poll_interval).await;
-                }
-                continue;
+        else {
+            warn!(
+                "Failed to retrieve {block_tag} block (attempt {}/{})",
+                attempt + 1,
+                max_attempts
+            );
+            if attempt < max_attempts - 1 {
+                tokio::time::sleep(poll_interval).await;
             }
+            continue;
         };
 
         let rpc_block = block.header.number;
@@ -1037,7 +1025,10 @@ fn create_router_overwrites_data(chain: Chain) -> miette::Result<RouterOverwrite
     Ok(RouterOverwritesData { executors, ..Default::default() })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bundles the shared run state and the per-update inputs of one stream update"
+)]
 async fn process_update(
     cli: Arc<Cli>,
     chain: Chain,
@@ -1046,7 +1037,6 @@ async fn process_update(
     statistics: Option<Arc<RwLock<TestStatistics>>>,
     token_prices: SharedTokenPrices,
     router_fee: RouterFeeOnOutput,
-    oracle_overrides: Option<Arc<OracleOverrides>>,
     update: &StreamUpdate,
     router_overwrites_data: RouterOverwritesData,
 ) -> miette::Result<()> {
@@ -1245,8 +1235,9 @@ async fn process_update(
             }
         }
         StreamUpdatePayload::PriceLevelStream(pls_update) => {
-            // The quotes target the block Titan was building, so execution is simulated at
-            // exactly that block: the overrides carry its timestamp.
+            // The quotes target the block Titan was building. Execution is simulated as of
+            // before that block, on its parent with its number and timestamp, so the block is
+            // fetched once mined for its parent hash and timestamp.
             let target_block = pls_update.block_number;
             let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
             // RPC failures propagate instead of counting as a miss: the miss metric means "the
@@ -1447,34 +1438,43 @@ async fn process_update(
         return Ok(());
     }
 
-    // Titan publishes overrides per block, so only price level stream updates take them.
-    let oracle_overwrites = match &update.payload {
-        StreamUpdatePayload::PriceLevelStream(_) => {
-            let overrides = oracle_overrides
-                .as_ref()
-                .and_then(|overrides| overrides.for_block(block.header.number));
-            record_oracle_override_misses(
-                &block_execution_info,
-                overrides.as_ref(),
-                block.number(),
-            );
-            overrides.map(BlockOverrides::into_storage)
-        }
-        StreamUpdatePayload::Protocol(_) | StreamUpdatePayload::Book { .. } => None,
-    };
-
-    let results = match simulate_swap_transaction(
-        &rpc_tools,
-        block_execution_info.clone(),
-        &block,
-        router_overwrites_data,
-        oracle_overwrites,
-    )
-    .await
-    {
-        Ok(results) => results,
-        Err((e, _, _)) => return Err(e),
-    };
+    // A price level quote prices the block Titan was building, and its swaps carry the account
+    // state the quote was priced on (`account_overwrites`) whenever the stream attached one. So
+    // they are simulated the way a consumer tests the quote before that block exists: on the
+    // quoted block's parent, with the quoted block's number and timestamp. Every other swap, a
+    // pinned component's say, is simulated on the block's own state.
+    let (before_block, after_block): (HashMap<_, _>, HashMap<_, _>) = block_execution_info
+        .clone()
+        .into_iter()
+        .partition(|(_, info)| simulates_before_block(&info.protocol_system));
+    record_swaps_without_simulation_overrides(&before_block);
+    let mut results = HashMap::new();
+    if !before_block.is_empty() {
+        results.extend(
+            simulate_swap_transaction_before_block(
+                &rpc_tools,
+                before_block,
+                &block,
+                router_overwrites_data.clone(),
+                None,
+            )
+            .await
+            .map_err(|(e, _, _)| e)?,
+        );
+    }
+    if !after_block.is_empty() {
+        results.extend(
+            simulate_swap_transaction(
+                &rpc_tools,
+                after_block,
+                &block,
+                router_overwrites_data,
+                None,
+            )
+            .await
+            .map_err(|(e, _, _)| e)?,
+        );
+    }
 
     let mut n_reverts = 0;
     let mut n_failures = 0;
@@ -1489,16 +1489,22 @@ async fn process_update(
         }
         .clone();
 
-        // A `StaleUpdate()` revert is an expected outcome, not an integration failure, so it
-        // is recorded separately from the revert metrics.
+        // A stale quote is an expected outcome, not an integration failure, so it is recorded
+        // apart from the revert metrics.
         if let Some(pamm) = pamm_venue(&execution_info.protocol_system) {
             if let TychoExecutionResult::Revert { reason, .. } = result {
-                if is_oracle_stale_revert(pamm, reason) {
+                if is_stale_quote(
+                    pamm,
+                    reason,
+                    execution_info
+                        .account_overwrites
+                        .is_some(),
+                ) {
                     debug!(
                         block = block.number(),
                         protocol = %execution_info.protocol_system,
-                        "pAMM price feed not fresh for the quoted block (block not built by \
-                         Titan or update missing); skipping execution comparison"
+                        "pAMM swap without simulation overrides hit the venue's freshness guard; \
+                         skipping execution comparison"
                     );
                     metrics::record_execution_stale_quote(&execution_info.protocol_system);
                     continue;
@@ -1530,13 +1536,13 @@ async fn process_update(
         process_execution_result(
             simulation_id,
             result,
-            execution_info.clone(),
-            state_str,
-            (*block).clone(),
+            &execution_info,
+            &state_str,
+            &block,
             chain.id().to_string(),
             &mut n_reverts,
             &mut n_failures,
-            statistics.clone(),
+            statistics.as_ref(),
             router_fee,
         );
 
@@ -1558,7 +1564,10 @@ async fn process_update(
     Ok(())
 }
 
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::type_complexity,
+    reason = "returns (state id, component, state) triples consumed once by the caller"
+)]
 fn select_components_to_process(
     update: &StreamUpdate,
     tycho_state: &Arc<RwLock<TychoState>>,
@@ -1652,35 +1661,31 @@ fn select_components_to_process(
         // update, which carries the per-protocol sync states.
         if let StreamUpdatePayload::Protocol(protocol_update) = &update.payload {
             for (protocol, component_ids) in &current_state.component_ids_by_protocol {
-                let protocol_sync_state = protocol_update
+                if let Some(SynchronizerState::Ready(_)) = protocol_update
                     .sync_states
-                    .get(protocol);
-                match protocol_sync_state {
-                    None => continue,
-                    Some(SynchronizerState::Ready(_)) => {
-                        let available_ids: Vec<_> = component_ids
-                            .iter()
-                            .filter(|id| {
-                                !protocol_update
-                                    .states
-                                    .keys()
-                                    .contains(id) &&
-                                    !all_selected_ids.contains(id)
-                            })
-                            .cloned()
-                            .collect();
+                    .get(protocol)
+                {
+                    let available_ids: Vec<_> = component_ids
+                        .iter()
+                        .filter(|id| {
+                            !protocol_update
+                                .states
+                                .keys()
+                                .contains(id) &&
+                                !all_selected_ids.contains(id)
+                        })
+                        .cloned()
+                        .collect();
 
-                        let protocol_selected_ids: Vec<_> = available_ids
-                            .choose_multiple(
-                                &mut rand::rng(),
-                                (cli.max_simulations_stale as usize).min(available_ids.len()),
-                            )
-                            .cloned()
-                            .collect();
+                    let protocol_selected_ids: Vec<_> = available_ids
+                        .choose_multiple(
+                            &mut rand::rng(),
+                            (cli.max_simulations_stale as usize).min(available_ids.len()),
+                        )
+                        .cloned()
+                        .collect();
 
-                        all_selected_ids.extend(protocol_selected_ids);
-                    }
-                    _ => continue,
+                    all_selected_ids.extend(protocol_selected_ids);
                 }
             }
         }
@@ -1721,7 +1726,10 @@ fn select_components_to_process(
 )]
 /// Simulates a swap in each of the component's directions, at most `max_swap_directions` of
 /// them where the component advertises a set of its own.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bundles the component, its state and the shared run state of one validation"
+)]
 async fn process_state(
     simulation_id: &str,
     chain: Chain,
@@ -1760,6 +1768,7 @@ async fn process_state(
             .map(|perm| (perm[0].clone(), perm[1].clone()))
             .collect(),
     };
+    let account_overwrites = simulation_overwrites(state.as_ref());
     let mut execution_infos = HashMap::new();
     for (i, (token_in, token_out)) in swap_directions.iter().enumerate() {
         debug!(
@@ -1933,6 +1942,7 @@ async fn process_state(
                 token_in: token_in.address.to_string(),
                 token_out: token_out.address.to_string(),
                 estimated_gas: transaction.estimated_gas().clone(),
+                account_overwrites: account_overwrites.clone(),
             },
         );
     }
@@ -1955,17 +1965,20 @@ async fn process_state(
         component_id = %execution_info.component_id,
     )
 )]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bundles the execution outcome with the counters and statistics it updates"
+)]
 fn process_execution_result(
     simulation_id: &String,
     result: &TychoExecutionResult,
-    execution_info: TychoExecutionInput,
-    state_str: String,
-    block: Block,
+    execution_info: &TychoExecutionInput,
+    state_str: &str,
+    block: &Block,
     chain_id: String,
     n_reverts: &mut i32,
     n_failures: &mut i32,
-    statistics: Option<Arc<RwLock<TestStatistics>>>,
+    statistics: Option<&Arc<RwLock<TestStatistics>>>,
     router_fee: RouterFeeOnOutput,
 ) {
     match result {
@@ -1996,25 +2009,28 @@ fn process_execution_result(
             // expected
             let slippage = if amount_out >= &simulated_amount_out_without_fee {
                 let diff = amount_out - &simulated_amount_out_without_fee;
-                ((diff.clone() * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
+                ((diff * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
                     .to_f64()
                     .unwrap_or(0.0) /
                     100.0
             } else {
                 let diff = &simulated_amount_out_without_fee - amount_out;
-                -((diff.clone() * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
+                -((diff * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
                     .to_f64()
                     .unwrap_or(0.0) /
                     100.0
             };
 
             // Generate Tenderly URL for debugging with state overrides
-            let overrides =
-                tenderly::TenderlySimParams { network: Some(chain_id), ..Default::default() };
+            let overrides = tenderly::TenderlySimParams {
+                network: Some(chain_id),
+                block: tenderly_block(execution_info, block),
+                ..Default::default()
+            };
             let tenderly_url = tenderly::build_tenderly_url(
                 &overrides,
                 Some(&execution_info.transaction),
-                Some(&block),
+                Some(block),
                 Address::from_slice(&execution_info.solution.sender()[..20]),
             );
 
@@ -2072,7 +2088,7 @@ fn process_execution_result(
             }
 
             // Record slippage in statistics
-            if let Some(ref stats) = statistics {
+            if let Some(stats) = statistics {
                 let mut stats = stats
                     .write()
                     .expect("Failed to get write lock for statistics (record slippage)");
@@ -2096,12 +2112,15 @@ fn process_execution_result(
             let error_name = extract_error_name(revert_reason);
 
             // Generate Tenderly URL for debugging without state overrides
-            let overrides =
-                tenderly::TenderlySimParams { network: Some(chain_id), ..Default::default() };
+            let overrides = tenderly::TenderlySimParams {
+                network: Some(chain_id),
+                block: tenderly_block(execution_info, block),
+                ..Default::default()
+            };
             let tenderly_url = tenderly::build_tenderly_url(
                 &overrides,
                 Some(&execution_info.transaction),
-                Some(&block),
+                Some(block),
                 Address::from_slice(&execution_info.solution.sender()[..20]),
             );
 
@@ -2188,47 +2207,48 @@ fn pamm_venue(protocol_system: &str) -> Option<&str> {
     protocol_system.strip_prefix(PRICE_LEVEL_STREAM_PREFIX)
 }
 
-/// Counts, per protocol system, the pAMM swaps about to be simulated without the overrides their
-/// own venue needs.
-///
-/// Split in two so a gap Titan could close is not confused with a venue it never serves: a venue
-/// whose protocol published nothing for this block counts as a miss, one Titan's override stream
-/// carries no channel for counts as unserved. Either swap runs against the venue's mined state,
+/// Whether a swap of `protocol_system` is simulated before the block it is tested at, on the
+/// block's parent: true for a price level stream venue, whose quote prices a block not built yet.
+fn simulates_before_block(protocol_system: &str) -> bool {
+    pamm_venue(protocol_system).is_some()
+}
+
+/// The block a Tenderly link replays a swap of `block` in. `None` keeps the link's default, the
+/// block after `block`, which matches a simulation on `block`'s own state. A swap simulated before
+/// `block` replays in `block` itself, on its parent's state.
+fn tenderly_block(info: &TychoExecutionInput, block: &Block) -> Option<String> {
+    simulates_before_block(&info.protocol_system).then(|| block.header.number.to_string())
+}
+
+/// Counts the pAMM swaps about to be simulated without simulation overrides, per protocol system:
+/// the stream attached none to their quote's state, so they run against the venue's mined state,
 /// where its freshness guard may reject the quote as stale.
-fn record_oracle_override_misses(
+fn record_swaps_without_simulation_overrides(
     execution_info: &HashMap<String, TychoExecutionInput>,
-    overrides: Option<&BlockOverrides>,
-    block: u64,
 ) {
-    let mut missing: HashSet<&str> = HashSet::new();
-    let mut unserved: HashSet<&str> = HashSet::new();
     for info in execution_info.values() {
-        let Some(venue) = pamm_venue(&info.protocol_system) else {
-            continue;
-        };
-        match override_protocol(venue) {
-            Some(protocol) => {
-                if !overrides.is_some_and(|overrides| overrides.covers(protocol)) {
-                    missing.insert(&info.protocol_system);
-                }
-            }
-            None => {
-                unserved.insert(&info.protocol_system);
-            }
+        if pamm_venue(&info.protocol_system).is_some() && info.account_overwrites.is_none() {
+            metrics::record_price_level_simulation_overrides_missing(&info.protocol_system);
         }
     }
+}
 
-    for protocol in missing {
-        debug!(
-            block,
-            protocol, "Titan published no state overrides for the venue at the quoted block"
-        );
-        metrics::record_price_level_oracle_override_miss(protocol);
-    }
-    for protocol in unserved {
-        debug!(block, protocol, "Titan's state override stream serves no channel for the venue");
-        metrics::record_price_level_oracle_override_unserved(protocol);
-    }
+/// The account overwrites a state's swaps are simulated with: for a price level stream state, the
+/// account state Titan priced its quote on. `None` for any other state, and for a price level
+/// stream state that carries no simulation overrides.
+fn simulation_overwrites(state: &dyn ProtocolSim) -> Option<AddressHashMap<AccountOverride>> {
+    let overrides = state
+        .as_any()
+        .downcast_ref::<PriceLevelStreamState>()?
+        .simulation_overrides()?;
+    Some(pamm_account_overwrites(overrides))
+}
+
+/// Whether a pAMM swap's revert is a stale quote: a freshness-guard revert of a swap simulated
+/// without its quote's account state, which meets the venue's mined price. With the account
+/// state, the same revert means the overrides did not work, so it is a real failure.
+fn is_stale_quote(pamm: &str, reason: &str, simulated_with_overrides: bool) -> bool {
+    !simulated_with_overrides && is_oracle_stale_revert(pamm, reason)
 }
 
 /// Returns whether a revert reason is the freshness guard of `pamm`: `StaleUpdate()` for every
@@ -2306,8 +2326,8 @@ mod tests {
     use tycho_simulation::tycho_common::models::Chain;
 
     use super::{
-        book_swap_directions, is_oracle_stale_revert, pamm_venue, sample_swap_directions,
-        should_fetch_block_by_number, Cli, TychoState,
+        book_swap_directions, is_oracle_stale_revert, is_stale_quote, pamm_venue,
+        sample_swap_directions, should_fetch_block_by_number, Cli, TychoState,
     };
 
     #[rstest]
@@ -2349,6 +2369,22 @@ mod tests {
     #[case::feed_stalled_on_non_metric_pamm("fermiswap", "execution reverted: FeedStalled()")]
     fn other_reverts_stay_real_failures(#[case] pamm: &str, #[case] reason: &str) {
         assert!(!is_oracle_stale_revert(pamm, reason));
+    }
+
+    /// A freshness-guard revert is a stale quote only when the swap ran without its quote's
+    /// account state; with it, the overrides did not work.
+    #[rstest]
+    #[case::without_overrides(false, true)]
+    #[case::with_overrides(true, false)]
+    fn a_stale_guard_revert_is_a_stale_quote_only_without_overrides(
+        #[case] simulated_with_overrides: bool,
+        #[case] stale_quote: bool,
+    ) {
+        let reason = "execution reverted: StaleUpdate()";
+
+        let is_stale = is_stale_quote("fermiswap", reason, simulated_with_overrides);
+
+        assert_eq!(is_stale, stale_quote);
     }
 
     #[test]

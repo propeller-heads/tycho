@@ -77,9 +77,13 @@ pub struct HashflowPriceLevelsResponse {
     pub error: Option<HashflowError>,
 }
 
+/// One market maker's price levels for a [`HashflowPair`]: the quantities of the base token it
+/// sells, each at a price in the quote token.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HashflowMarketMakerLevels {
+    /// The pair the levels price.
     pub pair: HashflowPair,
+    /// Base token quantities, each at a price in quote token per base token.
     #[serde(with = "hashflow_levels")]
     pub levels: Levels,
 }
@@ -118,11 +122,14 @@ mod hashflow_levels {
     }
 }
 
+/// The token a market maker sells and the token it prices it in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HashflowPair {
+    /// The token the maker sells.
     #[serde(deserialize_with = "evm_address::deserialize")]
     pub base_token: Bytes,
+    /// The token the maker prices it in.
     #[serde(deserialize_with = "evm_address::deserialize")]
     pub quote_token: Bytes,
 }
@@ -190,8 +197,8 @@ pub struct HashflowRFQOptions {
 pub struct HashflowQuoteResponse {
     pub status: String,
     pub error: Option<HashflowError>,
-    rfq_id: String,
-    internal_rfq_ids: Option<Vec<String>>,
+    pub rfq_id: String,
+    pub internal_rfq_ids: Option<Vec<String>>,
     pub quotes: Option<Vec<HashflowQuote>>,
 }
 
@@ -265,6 +272,16 @@ pub struct HashflowQuoteData {
     pub quote_expiry: u64,
     pub nonce: u64,
     pub external_account: Option<Bytes>,
+}
+
+/// Every market maker's price levels as one Hashflow poll returned them, keyed by maker name.
+///
+/// The serde form follows the venue API models, so the writer and the reader must run the same
+/// tycho-simulation version.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HashflowPrices {
+    /// Each maker's levels, one entry per pair the maker prices.
+    pub levels_by_maker: HashMap<String, Vec<HashflowMarketMakerLevels>>,
 }
 
 #[cfg(test)]

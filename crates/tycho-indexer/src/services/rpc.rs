@@ -24,6 +24,7 @@ use tycho_common::{
     traits::EntryPointTracer,
     Bytes,
 };
+use tycho_storage::postgres::{count_to_i64, page_window};
 
 use crate::{
     extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
@@ -31,9 +32,10 @@ use crate::{
         cache::{RpcCache, RpcCacheKind},
         deltas_buffer::{PendingDeltasBuffer, PendingDeltasError},
         middleware::{
-            PlanRestrictions, PlansConfig, RequestPaginationValidation, ValidateRestrictions,
+            compress_state_response, PlanRestrictions, PlansConfig, RequestPaginationValidation,
+            ValidateRestrictions,
         },
-        off_worker::OffWorker,
+        off_worker::{CacheReply, OffWorker},
         state::{
             service::{EntityCacheSetup, FallbackReason, StateService, StateServiceError},
             shadow::{self, Endpoint, SampledRequest, Shadow},
@@ -56,7 +58,7 @@ pub enum RpcError {
     DeltasError(#[from] PendingDeltasError),
 
     #[error("Page size must be less than or equal to {0}.")]
-    Pagination(usize),
+    Pagination(i64),
 
     #[error("Page must be at least 0 and page size at least 1, got page {page} and page size {page_size}.")]
     InvalidPagination { page: i64, page_size: i64 },
@@ -103,6 +105,16 @@ impl ResponseError for RpcError {
     }
 }
 
+/// A state endpoint's answer: built by the entity cache, or read through the database path.
+#[derive(Debug)]
+enum StateAnswer<D> {
+    /// The entity cache's answer, written to JSON from views over the cache entries. It never
+    /// enters a response cache.
+    EntityCache(HttpResponse),
+    /// The database path's answer, shared with the response cache.
+    Db(Arc<D>),
+}
+
 pub struct RpcHandler<G, T> {
     db_gateway: G,
     // TODO: remove use of Arc. It was introduced for ease of testing this deltas buffer, however
@@ -116,7 +128,6 @@ pub struct RpcHandler<G, T> {
         RpcCache<dto::ProtocolComponentsRequestBody, dto::ProtocolComponentRequestResponse>,
     traced_entry_point_cache:
         RpcCache<dto::TracedEntryPointRequestBody, dto::TracedEntryPointRequestResponse>,
-    #[allow(dead_code)]
     tracer: T,
     plans_config: PlansConfig,
     /// Protocol systems that use Dynamic Contract Indexing (DCI). Included in the
@@ -265,10 +276,10 @@ where
                         Box::new(move |b: &BlockAggregatedChanges| b.block.hash == hash)
                     }
                     BlockIdentifier::Number((_, no)) => {
-                        let no = *no as u64;
+                        let no = u64::try_from(*no).ok()?;
                         Box::new(move |b: &BlockAggregatedChanges| b.block.number == no)
                     }
-                    _ => return None,
+                    BlockIdentifier::Latest(_) => return None,
                 };
                 pending
                     .search_block(&predicate, protocol_system)
@@ -288,11 +299,13 @@ where
         Ok(dto::VersionParam { timestamp: Some(ts), block: version.block.clone() })
     }
 
+    /// Answers `/contract_state`. In `serve`, the entity cache answers first, and the response
+    /// cache keeps only database answers.
     #[instrument(skip(self, request))]
     async fn get_contract_state(
         &self,
         request: &dto::StateRequestBody,
-    ) -> Result<Arc<dto::StateRequestResponse>, RpcError> {
+    ) -> Result<StateAnswer<dto::StateRequestResponse>, RpcError> {
         if let Some(ref contract_ids) = request.contract_ids {
             info!(
                 n_contract_ids = contract_ids.len(),
@@ -303,36 +316,40 @@ where
         } else {
             info!("Getting contract state (all contracts)");
         }
+        if let Some(service) = self.serving_state_service() {
+            // The service cannot answer without ids; skip the off-worker permit.
+            if request.contract_ids.is_none() {
+                count_db_path(Endpoint::ContractState, FallbackReason::NoIds);
+            } else {
+                let cache_request = request.clone();
+                let answer = self
+                    .off_worker
+                    .view_json(Endpoint::ContractState, move || {
+                        service.contract_state_view(&cache_request)
+                    })
+                    .await?;
+                match answer {
+                    CacheReply::Answered(response) => return Ok(StateAnswer::EntityCache(response)),
+                    CacheReply::Fallback(reason) => count_db_path(Endpoint::ContractState, reason),
+                }
+            }
+        }
         self.contract_storage_cache
             .get(request.clone(), |r| async {
-                self.get_contract_state_routed(r)
+                self.get_contract_state_from_db(r)
                     .await
                     .map(|res| (res, true))
             })
             .await
+            .map(StateAnswer::Db)
     }
 
-    /// Answers from the entity cache when it serves and can serve this request, otherwise from
-    /// the database path. In `shadow`, a sampled request also runs the cache path to compare it;
-    /// the client still gets the database answer.
-    async fn get_contract_state_routed(
+    /// Answers from the database path. In `shadow`, a sampled request also runs the cache path to
+    /// compare it; the client still gets the database answer.
+    async fn get_contract_state_from_db(
         &self,
         request: dto::StateRequestBody,
     ) -> Result<dto::StateRequestResponse, RpcError> {
-        if let Some(service) = self.serving_state_service() {
-            let cache_request = request.clone();
-            let answer = self
-                .off_worker
-                .build(Endpoint::ContractState, move || service.contract_state(&cache_request))
-                .await?;
-            match answer {
-                Ok(response) => return Ok(response),
-                Err(StateServiceError::Fallback(reason)) => {
-                    count_db_path(Endpoint::ContractState, reason)
-                }
-                Err(err) => return Err(err.into()),
-            }
-        }
         if let Some(shadow) = self.sampling_shadow(&request) {
             let sampled = SampledRequest {
                 endpoint: Endpoint::ContractState,
@@ -375,6 +392,7 @@ where
             .await?;
 
         let pagination_params: PaginationParams = (&request.pagination).into();
+        let (page_offset, page_limit) = page_window(&pagination_params)?;
 
         // Get the contract IDs from the request
         let addresses = request.contract_ids.clone();
@@ -388,8 +406,8 @@ where
             paginated_addrs = Some(
                 addrs
                     .iter()
-                    .skip(pagination_params.offset() as usize)
-                    .take(pagination_params.page_size as usize)
+                    .skip(page_offset)
+                    .take(page_limit)
                     .cloned()
                     .collect(),
             );
@@ -431,7 +449,7 @@ where
         let total = match addresses {
             Some(adrs) => {
                 // If contract addresses are specified, the total count is the number of addresses
-                adrs.len() as i64
+                count_to_i64(adrs.len())
             }
             None => account_data.total.unwrap_or_default(), /* TODO: handle case where contract
                                                              * addresses are not specified */
@@ -466,7 +484,9 @@ where
     ) -> Result<(Version, Option<BlockNumberOrTimestamp>), RpcError> {
         let ordered_version = match request_version {
             BlockOrTimestamp::Block(BlockIdentifier::Number((_, no))) => {
-                BlockNumberOrTimestamp::Number(*no as u64)
+                BlockNumberOrTimestamp::Number(u64::try_from(*no).map_err(|_overflow| {
+                    RpcError::Parse(format!("Block number {no} is negative"))
+                })?)
             }
             BlockOrTimestamp::Block(BlockIdentifier::Hash(hash)) => {
                 let block_number = if let Some(block_number) = self
@@ -564,11 +584,13 @@ where
         }
     }
 
+    /// Answers `/protocol_state`. In `serve`, the entity cache answers first, and the response
+    /// cache keeps only database answers.
     #[instrument(skip(self, request))]
     async fn get_protocol_state(
         &self,
         request: &dto::ProtocolStateRequestBody,
-    ) -> Result<Arc<dto::ProtocolStateRequestResponse>, RpcError> {
+    ) -> Result<StateAnswer<dto::ProtocolStateRequestResponse>, RpcError> {
         if let Some(ref component_ids) = request.protocol_ids {
             info!(
                 n_component_ids = component_ids.len(),
@@ -579,36 +601,40 @@ where
         } else {
             info!("Getting protocol state (all protocols)");
         }
+        if let Some(service) = self.serving_state_service() {
+            // The service cannot answer without ids; skip the off-worker permit.
+            if request.protocol_ids.is_none() {
+                count_db_path(Endpoint::ProtocolState, FallbackReason::NoIds);
+            } else {
+                let cache_request = request.clone();
+                let answer = self
+                    .off_worker
+                    .view_json(Endpoint::ProtocolState, move || {
+                        service.protocol_state_view(&cache_request)
+                    })
+                    .await?;
+                match answer {
+                    CacheReply::Answered(response) => return Ok(StateAnswer::EntityCache(response)),
+                    CacheReply::Fallback(reason) => count_db_path(Endpoint::ProtocolState, reason),
+                }
+            }
+        }
         self.protocol_state_cache
             .get(request.clone(), |r| async {
-                self.get_protocol_state_routed(r)
+                self.get_protocol_state_from_db(r)
                     .await
                     .map(|res| (res, true))
             })
             .await
+            .map(StateAnswer::Db)
     }
 
-    /// Answers from the entity cache when it serves and can serve this request, otherwise from
-    /// the database path. In `shadow`, a sampled request also runs the cache path to compare it;
-    /// the client still gets the database answer.
-    async fn get_protocol_state_routed(
+    /// Answers from the database path. In `shadow`, a sampled request also runs the cache path to
+    /// compare it; the client still gets the database answer.
+    async fn get_protocol_state_from_db(
         &self,
         request: dto::ProtocolStateRequestBody,
     ) -> Result<dto::ProtocolStateRequestResponse, RpcError> {
-        if let Some(service) = self.serving_state_service() {
-            let cache_request = request.clone();
-            let answer = self
-                .off_worker
-                .build(Endpoint::ProtocolState, move || service.protocol_state(&cache_request))
-                .await?;
-            match answer {
-                Ok(response) => return Ok(response),
-                Err(StateServiceError::Fallback(reason)) => {
-                    count_db_path(Endpoint::ProtocolState, reason)
-                }
-                Err(err) => return Err(err.into()),
-            }
-        }
         if let Some(shadow) = self.sampling_shadow(&request) {
             let sampled = SampledRequest {
                 endpoint: Endpoint::ProtocolState,
@@ -645,6 +671,7 @@ where
             .await?;
 
         let pagination_params: PaginationParams = (&request.pagination).into();
+        let (page_offset, page_limit) = page_window(&pagination_params)?;
 
         // Get the protocol IDs from the request
         let protocol_ids = request.protocol_ids.clone();
@@ -659,11 +686,11 @@ where
         let (paginated_ids, total): (Vec<String>, i64) = match ids {
             Some(ids) => (
                 ids.iter()
-                    .skip(pagination_params.offset() as usize)
-                    .take(pagination_params.page_size as usize)
+                    .skip(page_offset)
+                    .take(page_limit)
                     .map(|s| s.to_string())
                     .collect(),
-                ids.len() as i64,
+                count_to_i64(ids.len()),
             ),
             None => {
                 let req = dto::ProtocolComponentsRequestBody {
@@ -753,11 +780,10 @@ where
                 .collect(),
             None => self.protocol_systems.iter().collect(),
         };
-        let total = filtered.len() as i64;
+        let total = count_to_i64(filtered.len());
         let page = request.pagination.page;
         let page_size = request.pagination.page_size;
-        let skip = (page * page_size) as usize;
-        let take = page_size as usize;
+        let (skip, take) = page_window(&PaginationParams::new(page, page_size))?;
         let systems: Vec<String> = filtered
             .into_iter()
             .skip(skip)
@@ -861,7 +887,7 @@ where
         let n_days_ago = if let Some(days) = traded_n_days_ago {
             i64::try_from(days)
                 .map(|days| Some(Utc::now().naive_utc() - Duration::days(days)))
-                .map_err(|_| RpcError::Parse("traded_n_days_ago is too big.".to_string()))?
+                .map_err(|e| RpcError::Parse(format!("traded_n_days_ago is too big: {e}")))?
         } else {
             None
         };
@@ -919,12 +945,12 @@ where
                         // If component ids were specified, check if we have all requested
                         // components are in the response (should cache)
                         if let Some(component_ids) = &request.component_ids {
-                            let all_found = component_ids.len() == res.pagination.total as usize;
+                            let all_found =
+                                count_to_i64(component_ids.len()) == res.pagination.total;
                             if all_found {
                                 return (res, true);
-                            } else {
-                                return (res, false);
                             }
+                            return (res, false);
                         }
                         // Otherwise check if request is for the last page (shouldn't cache)
                         let last_page = res.pagination.total_pages() - 1;
@@ -964,16 +990,15 @@ where
                 .map(|comp| comp.id.as_str())
                 .collect();
 
-            let total = buffered_components.len() as i64;
+            let n_buffered = buffered_components.len();
+            let total = count_to_i64(n_buffered);
+            let (page_offset, page_limit) = page_window(&pagination_params)?;
 
             if requested_ids.len() == fetched_ids.len() {
                 let response_components: Vec<dto::ProtocolComponent> = buffered_components
                     .into_iter()
-                    .skip(
-                        ((pagination_params.page * pagination_params.page_size) as usize)
-                            .min(total as usize),
-                    )
-                    .take(pagination_params.page_size as usize)
+                    .skip(page_offset.min(n_buffered))
+                    .take(page_limit)
                     .map(dto::ProtocolComponent::from)
                     .collect();
 
@@ -1001,7 +1026,8 @@ where
         {
             Ok(component_data) => {
                 let db_total = component_data.total.unwrap_or_default();
-                let total = db_total + buffered_components.len() as i64;
+                let total = db_total + count_to_i64(buffered_components.len());
+                let (_, page_limit) = page_window(&pagination_params)?;
                 let mut components = component_data.entity;
 
                 // Handle adding buffered components to the response
@@ -1011,12 +1037,13 @@ where
                     // buffered data only
                     components = buffered_components
                         .into_iter()
-                        .skip(buffer_offset as usize)
-                        .take(pagination_params.page_size as usize)
+                        .skip(usize::try_from(buffer_offset).map_err(|_overflow| {
+                            RpcError::Unknown(format!("Buffer offset {buffer_offset} is too large"))
+                        })?)
+                        .take(page_limit)
                         .collect();
                 } else {
-                    let remaining_capacity =
-                        pagination_params.page_size as usize - components.len();
+                    let remaining_capacity = page_limit - components.len();
                     if remaining_capacity > 0 {
                         // The db response does not fill a page - add buffered components to the
                         // response
@@ -1080,6 +1107,7 @@ where
         request: dto::TracedEntryPointRequestBody,
     ) -> Result<dto::TracedEntryPointRequestResponse, RpcError> {
         let pagination_params: PaginationParams = (&request.pagination).into();
+        let (page_offset, page_limit) = page_window(&pagination_params)?;
 
         // For consistency, we pre-apply pagination to the component ids to ensure it's
         // predetermined which components will appear on which page.
@@ -1088,8 +1116,8 @@ where
             paginated_component_ids = Some(
                 component_ids
                     .iter()
-                    .skip(pagination_params.offset() as usize)
-                    .take(pagination_params.page_size as usize)
+                    .skip(page_offset)
+                    .take(page_limit)
                     .cloned()
                     .collect(),
             );
@@ -1140,7 +1168,6 @@ where
         })
     }
 
-    #[allow(dead_code)]
     async fn add_entry_points(
         &self,
         request: &dto::AddEntryPointRequestBody,
@@ -1234,7 +1261,7 @@ where
 impl From<StateServiceError> for RpcError {
     fn from(err: StateServiceError) -> Self {
         match err {
-            // The routing match answers a fallback from the database path before converting.
+            // A fallback goes to the database path before any conversion, so this arm does not run.
             StateServiceError::Fallback(reason) => {
                 RpcError::Unknown(format!("Unhandled entity cache fallback: {reason:?}"))
             }
@@ -1249,7 +1276,6 @@ impl From<StateServiceError> for RpcError {
                 PendingDeltasError::LockError(system, reason).into()
             }
             StateServiceError::WindowRead(err) => PendingDeltasError::from(err).into(),
-            StateServiceError::Merge(err) => PendingDeltasError::from(err).into(),
         }
     }
 }
@@ -1317,8 +1343,9 @@ pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
     let handler = handler.into_inner();
     let response = handler.get_contract_state(&body).await;
 
-    match response {
-        Ok(state) => {
+    let response = match response {
+        Ok(StateAnswer::EntityCache(response)) => Ok(response),
+        Ok(StateAnswer::Db(state)) => {
             handler
                 .off_worker
                 .json(Endpoint::ContractState, state)
@@ -1328,7 +1355,8 @@ pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
             error!(error = %err, ?body, "Error while getting contract state.");
             Err(err)
         }
-    }
+    }?;
+    compress_state_response(&req, response).await
 }
 
 /// Retrieve tokens
@@ -1459,8 +1487,9 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
     let handler = handler.into_inner();
     let response = handler.get_protocol_state(&body).await;
 
-    match response {
-        Ok(state) => {
+    let response = match response {
+        Ok(StateAnswer::EntityCache(response)) => Ok(response),
+        Ok(StateAnswer::Db(state)) => {
             handler
                 .off_worker
                 .json(Endpoint::ProtocolState, state)
@@ -1470,7 +1499,8 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
             error!(error = %err, ?body, "Error while getting protocol states.");
             Err(err)
         }
-    }
+    }?;
+    compress_state_response(&req, response).await
 }
 
 /// Retrieve protocol systems
@@ -1660,13 +1690,12 @@ pub async fn health() -> Result<HttpResponse, RpcError> {
 // elision, so the mocked trait methods need explicit lifetime parameters.
 // The allow is on the module because Clippy does not apply this lint allow
 // reliably when it is placed on the macro invocation itself.
-#[allow(clippy::extra_unused_lifetimes)]
 mod tests {
     use std::{collections::HashMap, env, str::FromStr, sync::Mutex};
 
     use actix_web::{test, App};
     use chrono::{NaiveDateTime, TimeDelta};
-    use metrics_util::debugging::DebuggingRecorder;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
     use mockall::{mock, predicate::eq};
     use rstest::rstest;
     use tycho_common::{
@@ -1676,12 +1705,15 @@ mod tests {
                 AddressStorageLocation, EntryPoint, EntryPointWithTracingParams, RPCTracerParams,
                 TracingParams, TracingResult,
             },
-            contract::{Account, AccountDelta},
+            contract::{Account, AccountBalance, AccountDelta},
             protocol::{ProtocolComponent, ProtocolComponentState},
             token::Token,
             ChangeType,
         },
-        storage::WithTotal,
+        storage::{
+            AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StateSnapshot, WithTotal,
+            WriteTimestamp,
+        },
         traits::MockEntryPointTracer,
     };
     use tycho_ethereum::{
@@ -1702,46 +1734,55 @@ mod tests {
     const WETH: &str = "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
-    mock! {
-        pub PendingDeltas {}
+    #[expect(
+        clippy::ref_option_ref,
+        reason = "mockall's expectation API takes each argument by reference, so an Option<&T> parameter becomes &Option<&T>"
+    )]
+    mod pending_deltas_mock {
+        use super::*;
 
-        impl PendingDeltasBuffer for PendingDeltas {
-            fn merge_native_states<'a>(
-                &self,
-                protocol_ids: Option<&'a [&'a str]>,
-                db_states: &mut Vec<ProtocolComponentState>,
-                version: Option<BlockNumberOrTimestamp>,
-                protocol_system: &'a str,
-            ) -> Result<(), PendingDeltasError>;
+        mock! {
+            pub PendingDeltas {}
 
-            fn update_vm_states<'a>(
-                &self,
-                addresses: Option<&'a [Bytes]>,
-                db_states: &mut Vec<Account>,
-                version: Option<BlockNumberOrTimestamp>,
-                protocol_system: &'a str,
-            ) -> Result<(), PendingDeltasError>;
+            impl PendingDeltasBuffer for PendingDeltas {
+                fn merge_native_states<'a>(
+                    &self,
+                    protocol_ids: Option<&'a [&'a str]>,
+                    db_states: &mut Vec<ProtocolComponentState>,
+                    version: Option<BlockNumberOrTimestamp>,
+                    protocol_system: &'a str,
+                ) -> Result<(), PendingDeltasError>;
 
-            fn get_new_components<'a>(
-                &self,
-                ids: Option<&'a [&'a str]>,
-                protocol_system: &'a str,
-                min_tvl: Option<f64>,
-            ) -> Result<Vec<ProtocolComponent>, PendingDeltasError>;
+                fn update_vm_states<'a>(
+                    &self,
+                    addresses: Option<&'a [Bytes]>,
+                    db_states: &mut Vec<Account>,
+                    version: Option<BlockNumberOrTimestamp>,
+                    protocol_system: &'a str,
+                ) -> Result<(), PendingDeltasError>;
 
-            fn get_block_commit_status<'a>(
-                &self,
-                version: BlockNumberOrTimestamp,
-                protocol_system: &'a str,
-            ) -> Result<Option<CommitStatus>, PendingDeltasError>;
+                fn get_new_components<'a>(
+                    &self,
+                    ids: Option<&'a [&'a str]>,
+                    protocol_system: &'a str,
+                    min_tvl: Option<f64>,
+                ) -> Result<Vec<ProtocolComponent>, PendingDeltasError>;
 
-            fn search_block<'a>(
-                &self,
-                f: &dyn Fn(&BlockAggregatedChanges) -> bool,
-                protocol_system: &'a str,
-            ) -> Result<Option<BlockAggregatedChanges>, PendingDeltasError>;
+                fn get_block_commit_status<'a>(
+                    &self,
+                    version: BlockNumberOrTimestamp,
+                    protocol_system: &'a str,
+                ) -> Result<Option<CommitStatus>, PendingDeltasError>;
+
+                fn search_block<'a>(
+                    &self,
+                    f: &dyn Fn(&BlockAggregatedChanges) -> bool,
+                    protocol_system: &'a str,
+                ) -> Result<Option<BlockAggregatedChanges>, PendingDeltasError>;
+            }
         }
     }
+    use pending_deltas_mock::MockPendingDeltas;
 
     #[test]
     async fn test_validate_version_priority() {
@@ -1820,11 +1861,13 @@ mod tests {
             .version
             .timestamp
             .unwrap()
+            .and_utc()
             .timestamp_millis() -
             result
                 .version
                 .timestamp
                 .unwrap()
+                .and_utc()
                 .timestamp_millis();
 
         // Allowing a small time delta (1 second)
@@ -1976,11 +2019,14 @@ mod tests {
             chain: dto::Chain::Ethereum,
             pagination: dto::PaginationParams::default(),
         };
-        let state = req_handler
-            .get_contract_state_routed(request)
+        let answer = req_handler
+            .get_contract_state(&request)
             .await
             .unwrap();
 
+        let StateAnswer::Db(state) = answer else {
+            panic!("a request without ids must be answered by the database path: {answer:?}");
+        };
         assert_eq!(state.accounts, vec![account.into()]);
         assert_eq!(state.pagination.total, 1);
     }
@@ -2183,7 +2229,7 @@ mod tests {
         let request = shadow_request("curve", Some(vec![account.address.clone()]));
 
         let answer = handler
-            .get_contract_state_routed(request)
+            .get_contract_state_from_db(request)
             .await;
 
         assert_eq!(answer.unwrap().accounts, vec![account.into()]);
@@ -2215,7 +2261,7 @@ mod tests {
         let request = shadow_request("uniswap_v2", Some(vec![account.address.clone()]));
 
         let answer = handler
-            .get_contract_state_routed(request)
+            .get_contract_state_from_db(request)
             .await;
 
         assert_eq!(answer.unwrap().accounts, vec![account.into()]);
@@ -2239,7 +2285,7 @@ mod tests {
         );
 
         let answer = handler
-            .get_contract_state_routed(shadow_request("uniswap_v2", None))
+            .get_contract_state_from_db(shadow_request("uniswap_v2", None))
             .await
             .unwrap();
 
@@ -2284,7 +2330,7 @@ mod tests {
         let request = shadow_request("uniswap_v2", Some(vec![address]));
 
         let answer = handler
-            .get_contract_state_routed(request)
+            .get_contract_state_from_db(request)
             .await;
 
         // `off` returns the gateway error as `RpcError::Storage`; shadow must return the same.
@@ -2313,7 +2359,7 @@ mod tests {
         };
 
         let answer = handler
-            .get_protocol_state_routed(request)
+            .get_protocol_state_from_db(request)
             .await;
 
         assert_eq!(answer.unwrap().states, vec![state.into()]);
@@ -2355,7 +2401,7 @@ mod tests {
         );
 
         handler
-            .get_contract_state_routed(shadow_request("uniswap_v2", Some(vec![address])))
+            .get_contract_state_from_db(shadow_request("uniswap_v2", Some(vec![address])))
             .await
             .unwrap();
 
@@ -2423,7 +2469,7 @@ mod tests {
         );
 
         handler
-            .get_contract_state_routed(shadow_request("uniswap_v2", Some(vec![address])))
+            .get_contract_state_from_db(shadow_request("uniswap_v2", Some(vec![address])))
             .await
             .unwrap();
 
@@ -2475,7 +2521,7 @@ mod tests {
         };
 
         handler
-            .get_protocol_state_routed(request)
+            .get_protocol_state_from_db(request)
             .await
             .unwrap();
 
@@ -2509,6 +2555,8 @@ mod tests {
         );
     }
 
+    /// A serve answer from the entity cache does not enter the response cache. A database answer
+    /// does.
     #[rstest]
     #[case::serve_in_window(CacheMode::Serve, 6, 0)]
     #[case::serve_below_window(CacheMode::Serve, 1, 1)]
@@ -2527,17 +2575,26 @@ mod tests {
             });
         let handler = state_routing_handler(gw, mode);
 
+        let request = dto::StateRequestBody {
+            contract_ids: Some(vec![Bytes::from(1u64).lpad(20, 0)]),
+            protocol_system: "ex".to_string(),
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, block),
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::new(0, 100),
+        };
+
         let result = handler
-            .get_contract_state_routed(dto::StateRequestBody {
-                contract_ids: Some(vec![Bytes::from(1u64).lpad(20, 0)]),
-                protocol_system: "ex".to_string(),
-                version: dto::VersionParam::at_block(dto::Chain::Ethereum, block),
-                chain: dto::Chain::Ethereum,
-                pagination: dto::PaginationParams::new(0, 100),
-            })
+            .get_contract_state(&request)
             .await;
 
-        assert!(result.is_ok(), "{result:?}");
+        let from_cache = matches!(result.unwrap(), StateAnswer::EntityCache(_));
+        assert_eq!(from_cache, db_calls == 0);
+        assert_eq!(
+            handler
+                .contract_storage_cache
+                .contains(&request),
+            !from_cache
+        );
     }
 
     /// An address the cache cannot build fails in serve mode, and the database is not asked.
@@ -2545,14 +2602,16 @@ mod tests {
     async fn test_get_contract_state_returns_the_service_error_in_serve_mode() {
         let handler = state_routing_handler(MockGateway::new(), CacheMode::Serve);
 
+        let request = dto::StateRequestBody {
+            contract_ids: Some(vec![Bytes::from(2u64).lpad(20, 0)]),
+            protocol_system: "ex".to_string(),
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, 6),
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::new(0, 100),
+        };
+
         let result = handler
-            .get_contract_state_routed(dto::StateRequestBody {
-                contract_ids: Some(vec![Bytes::from(2u64).lpad(20, 0)]),
-                protocol_system: "ex".to_string(),
-                version: dto::VersionParam::at_block(dto::Chain::Ethereum, 6),
-                chain: dto::Chain::Ethereum,
-                pagination: dto::PaginationParams::new(0, 100),
-            })
+            .get_contract_state(&request)
             .await;
 
         assert!(
@@ -2561,6 +2620,8 @@ mod tests {
         );
     }
 
+    /// A serve answer from the entity cache does not enter the response cache. A database answer
+    /// does.
     #[rstest]
     #[case::serve_in_window(CacheMode::Serve, 6, 0)]
     #[case::serve_below_window(CacheMode::Serve, 1, 1)]
@@ -2579,18 +2640,262 @@ mod tests {
             });
         let handler = state_routing_handler(gw, mode);
 
+        let request = dto::ProtocolStateRequestBody {
+            protocol_ids: Some(vec!["c1".to_string()]),
+            protocol_system: "ex".to_string(),
+            chain: dto::Chain::Ethereum,
+            include_balances: true,
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, block),
+            pagination: dto::PaginationParams::new(0, 100),
+        };
+
         let result = handler
-            .get_protocol_state_routed(dto::ProtocolStateRequestBody {
+            .get_protocol_state(&request)
+            .await;
+
+        let from_cache = matches!(result.unwrap(), StateAnswer::EntityCache(_));
+        assert_eq!(from_cache, db_calls == 0);
+        assert_eq!(
+            handler
+                .protocol_state_cache
+                .contains(&request),
+            !from_cache
+        );
+    }
+
+    /// The `db_path_requests` counters that moved since the last snapshot, as
+    /// `(endpoint, reason, count)`, sorted.
+    fn moved_db_path_requests(snapshotter: &Snapshotter) -> Vec<(String, String, u64)> {
+        let mut moved: Vec<_> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| key.key().name() == "db_path_requests")
+            .filter_map(|(key, _, _, value)| {
+                let DebugValue::Counter(count) = value else { return None };
+                let label = |name: &str| {
+                    key.key()
+                        .labels()
+                        .find(|l| l.key() == name)
+                        .map(|l| l.value().to_string())
+                        .unwrap_or_default()
+                };
+                (count > 0).then(|| (label("endpoint"), label("reason"), count))
+            })
+            .collect();
+        moved.sort();
+        moved
+    }
+
+    /// A request below the window counts each time, also when the response cache answers it; a
+    /// request the entity cache answers counts nothing.
+    #[tokio::test]
+    async fn test_serve_counts_every_request_it_hands_to_the_database_path() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let mut gw = MockGateway::new();
+        gw.expect_get_contracts()
+            .times(2)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        let handler = state_routing_handler(gw, CacheMode::Serve);
+        let request = |block| dto::StateRequestBody {
+            contract_ids: Some(vec![Bytes::from(1u64).lpad(20, 0)]),
+            protocol_system: "ex".to_string(),
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, block),
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::new(0, 100),
+        };
+
+        for _ in 0..2 {
+            handler
+                .get_contract_state(&request(1))
+                .await
+                .unwrap();
+        }
+        let mut no_ids = request(1);
+        no_ids.contract_ids = None;
+        handler
+            .get_contract_state(&no_ids)
+            .await
+            .unwrap();
+        let below_window = moved_db_path_requests(&snapshotter);
+        handler
+            .get_contract_state(&request(6))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            below_window,
+            vec![
+                ("contract_state".to_string(), "below_window".to_string(), 2),
+                ("contract_state".to_string(), "no_ids".to_string(), 1),
+            ]
+        );
+        assert_eq!(moved_db_path_requests(&snapshotter), vec![]);
+    }
+
+    fn word(n: u64) -> Bytes {
+        Bytes::from(n).lpad(32, 0)
+    }
+
+    /// Account `0x..01` as the startup load reads it, with a title and distinct transaction
+    /// hashes.
+    fn loaded_account() -> Account {
+        let address = Bytes::from(1u64).lpad(20, 0);
+        let token = Bytes::from(9u64).lpad(20, 0);
+        let code = Bytes::from("0x6000");
+        Account::new(
+            Chain::Ethereum,
+            address.clone(),
+            "loaded".to_string(),
+            HashMap::from([(word(1), word(1)), (word(2), word(2))]),
+            Bytes::from(4u64),
+            HashMap::from([(
+                token.clone(),
+                AccountBalance::new(address, token, Bytes::from(5u64), word(24)),
+            )]),
+            code.clone(),
+            keccak256(&code).into(),
+            word(21),
+            word(22),
+            Some(word(23)),
+        )
+    }
+
+    /// Component `c1` as the startup load reads it.
+    fn loaded_component() -> ProtocolComponentState {
+        ProtocolComponentState::new(
+            "c1",
+            HashMap::from([
+                ("x".to_string(), Bytes::from(1u64)),
+                ("y".to_string(), Bytes::from(2u64)),
+            ]),
+            HashMap::from([(Bytes::from(9u64).lpad(20, 0), Bytes::from(5u64))]),
+        )
+    }
+
+    /// A `serve` handler whose cache holds [`loaded_account`] and [`loaded_component`] from block
+    /// 4. The `ex` window then sets slot 1, the native balance and attribute `x` to `n` in blocks 5
+    /// and 6. The gateway panics on any database call, so only a cache answer passes.
+    fn loaded_cache_handler() -> RpcHandler<MockGateway, MockEntryPointTracer> {
+        let account = loaded_account();
+        let at = WriteTimestamp::from(&testing::block(4));
+        let cache = EntityCache::from_snapshot(StateSnapshot {
+            accounts: vec![AccountSnapshot {
+                written_at: AccountWriteTimestamps::uniform(&account, at),
+                account,
+            }],
+            components: vec![ComponentSnapshot {
+                system: "ex".to_string(),
+                state: loaded_component(),
+                updated_at: at,
+            }],
+        });
+        let windows = new_windows(["ex"], WindowConfig::default());
+        let address = Bytes::from(1u64).lpad(20, 0);
+        for n in 5..=6 {
+            let mut block = testing::aggregated_changes("ex", n, n, Some(n));
+            block.account_deltas.insert(
+                address.clone(),
+                AccountDelta::new(
+                    Chain::Ethereum,
+                    address.clone(),
+                    fixtures::optional_slots([(1, n)]),
+                    Some(Bytes::from(n)),
+                    None,
+                    ChangeType::Update,
+                ),
+            );
+            let block = testing::with_state_delta(block, "c1", n);
+            windows["ex"]
+                .lock()
+                .unwrap()
+                .insert(&Arc::new(block))
+                .unwrap();
+        }
+        let service = StateService::new(windows, Arc::new(cache));
+        RpcHandler::new(
+            MockGateway::new(),
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        )
+        .with_state_service(EntityCacheSetup::Serve(Arc::new(service)))
+    }
+
+    #[actix_web::test]
+    async fn test_contract_state_cache_answer_is_the_json_of_the_dto() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(loaded_cache_handler()))
+                .route(
+                    "/v1/contract_state",
+                    web::post().to(contract_state::<MockGateway, MockEntryPointTracer>),
+                ),
+        )
+        .await;
+        let mut account = loaded_account();
+        account.slots.insert(word(1), word(6));
+        account.native_balance = Bytes::from(6u64);
+        let expected = dto::StateRequestResponse::new(
+            vec![account.into()],
+            PaginationResponse::new(0, 100, 1),
+        );
+        let request = test::TestRequest::post()
+            .uri("/v1/contract_state")
+            .set_json(dto::StateRequestBody {
+                contract_ids: Some(vec![Bytes::from(1u64).lpad(20, 0)]),
+                protocol_system: "ex".to_string(),
+                version: dto::VersionParam::at_block(dto::Chain::Ethereum, 6),
+                chain: dto::Chain::Ethereum,
+                pagination: dto::PaginationParams::new(0, 100),
+            })
+            .to_request();
+
+        let body: serde_json::Value = test::call_and_read_body_json(&app, request).await;
+
+        assert_eq!(body, serde_json::to_value(&expected).unwrap());
+    }
+
+    #[actix_web::test]
+    async fn test_protocol_state_cache_answer_is_the_json_of_the_dto() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(loaded_cache_handler()))
+                .route(
+                    "/v1/protocol_state",
+                    web::post().to(protocol_state::<MockGateway, MockEntryPointTracer>),
+                ),
+        )
+        .await;
+        let mut state = loaded_component();
+        state
+            .attributes
+            .insert("x".to_string(), Bytes::from(6u64));
+        let expected = dto::ProtocolStateRequestResponse::new(
+            vec![state.into()],
+            PaginationResponse::new(0, 100, 1),
+        );
+        let request = test::TestRequest::post()
+            .uri("/v1/protocol_state")
+            .set_json(dto::ProtocolStateRequestBody {
                 protocol_ids: Some(vec!["c1".to_string()]),
                 protocol_system: "ex".to_string(),
                 chain: dto::Chain::Ethereum,
                 include_balances: true,
-                version: dto::VersionParam::at_block(dto::Chain::Ethereum, block),
+                version: dto::VersionParam::at_block(dto::Chain::Ethereum, 6),
                 pagination: dto::PaginationParams::new(0, 100),
             })
-            .await;
+            .to_request();
 
-        assert!(result.is_ok(), "{result:?}");
+        let body: serde_json::Value = test::call_and_read_body_json(&app, request).await;
+
+        assert_eq!(body, serde_json::to_value(&expected).unwrap());
     }
 
     /// The requested address list is sliced to the page before the db call, so the db must not
@@ -2663,7 +2968,10 @@ mod tests {
     }
 
     /// Helper used to make tracing results comparisons deterministic.
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "test helper returning several parallel collections"
+    )]
     fn normalize_tracing_result(
         result: &dto::TracingResult,
     ) -> (Vec<(Bytes, dto::AddressStorageLocation)>, Vec<(Bytes, Vec<Bytes>)>) {
@@ -2697,7 +3005,10 @@ mod tests {
         });
     }
 
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "test helper returning several parallel collections"
+    )]
     fn get_add_entry_point_test_data(
         block_hash: Bytes,
         component_id: ComponentId,
@@ -2778,7 +3089,7 @@ mod tests {
             },
             TracedEntryPoint {
                 entry_point_with_params: entry_points_with_tracing_params[1].clone().into(),
-                detection_block_hash: block_hash.clone(),
+                detection_block_hash: block_hash,
                 tracing_result: TracingResult::new(
                     HashSet::from([
                         (
@@ -2823,7 +3134,7 @@ mod tests {
             ),
             (
                 entry_point_ids[1].clone(),
-                HashSet::from([(tracing_params[1].clone().into(), component_id.clone())]),
+                HashSet::from([(tracing_params[1].clone().into(), component_id)]),
             ),
         ]);
 
@@ -2930,7 +3241,6 @@ mod tests {
             )
             .return_once(move |_, _| {
                 tracing_results
-                    .clone()
                     .into_iter()
                     .map(Ok)
                     .collect()
@@ -2956,7 +3266,7 @@ mod tests {
             .unwrap();
 
         // Sort to make test deterministic
-        let mut traced_entry_points_response = response.traced_entry_points.clone();
+        let mut traced_entry_points_response = response.traced_entry_points;
         let traced_entry_points_for_component = traced_entry_points_response
             .get_mut(&component_id)
             .unwrap();
@@ -3030,7 +3340,7 @@ mod tests {
             .unwrap();
 
         // Sort to make test deterministic
-        let mut traced_entry_points_response = response.traced_entry_points.clone();
+        let mut traced_entry_points_response = response.traced_entry_points;
         let traced_entry_points_for_component = traced_entry_points_response
             .get_mut(&component_id)
             .unwrap();
@@ -3820,14 +4130,8 @@ plans:
         let config: PlansConfig = serde_yaml::from_str(yaml).unwrap();
 
         let gw_free = MockGateway::new();
-        let handler_free = RpcHandler::new(
-            gw_free,
-            None,
-            MockEntryPointTracer::new(),
-            config.clone(),
-            vec![],
-            vec![],
-        );
+        let handler_free =
+            RpcHandler::new(gw_free, None, MockEntryPointTracer::new(), config, vec![], vec![]);
 
         let restrictions = handler_free
             .resolve_plan_restrictions(

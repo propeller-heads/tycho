@@ -1,16 +1,16 @@
 use std::{collections::HashSet, future::Future, sync::Arc};
 
 use tokio::time::Duration;
-use tycho_common::Bytes;
+use tycho_common::{models::Chain, Bytes};
 
 use crate::{
     book::{BookFeedConfig, BookSnapshot, ReceivedAt},
     rfq::{
         constants::DEFAULT_QUOTE_TIMEOUT,
         protocols::bebop::{
-            client::{BebopClient, QuoteOrigin},
-            models::BebopSupportedChain,
-            source::BebopBookSource,
+            client::{BebopClient, BebopPricingClient, QuoteOrigin},
+            models::{BebopPrices, BebopSupportedChain},
+            source::{BebopBookAssembler, BebopBookSource, BebopPricesSource},
             FALLBACK_PROTOCOL_SYSTEM, PROTOCOL_SYSTEM,
         },
     },
@@ -29,16 +29,13 @@ pub struct BebopFeed {
     source: BebopBookSource,
 }
 
-/// Builds a [`BebopFeed`] from the shared [`BookFeedConfig`] and Bebop's API key.
+/// Builds a [`BebopFeed`] from the shared [`BookFeedConfig`] and Bebop's API key. The book
+/// settings are those of a [`BebopBookAssemblerBuilder`]; [`with_assembler`](Self::with_assembler)
+/// supplies a built assembler instead.
 pub struct BebopFeedBuilder {
-    protocol_system: &'static str,
-    book_config: BookFeedConfig,
-    usd_quote_tokens: Arc<HashSet<Bytes>>,
-    ws_key: String,
-    quote_timeout: Duration,
-    origin: QuoteOrigin,
+    assembler_builder: BebopBookAssemblerBuilder,
+    assembler: Option<BebopBookAssembler>,
     feed_config: WsFeedConfig,
-    all_pairs: bool,
 }
 
 impl BebopFeedBuilder {
@@ -48,15 +45,21 @@ impl BebopFeedBuilder {
         ws_key: String,
     ) -> Self {
         Self {
-            book_config,
-            usd_quote_tokens: usd_quote_tokens.into(),
-            ws_key,
-            quote_timeout: DEFAULT_QUOTE_TIMEOUT,
-            origin: QuoteOrigin::default(),
+            assembler_builder: BebopBookAssemblerBuilder::new(
+                book_config,
+                usd_quote_tokens,
+                ws_key,
+            ),
+            assembler: None,
             feed_config: Self::default_feed_config(),
-            protocol_system: PROTOCOL_SYSTEM,
-            all_pairs: false,
         }
+    }
+
+    /// Makes the feed's books with `assembler` instead of one built from this builder's book
+    /// settings, which are then unused.
+    pub fn with_assembler(mut self, assembler: BebopBookAssembler) -> Self {
+        self.assembler = Some(assembler);
+        self
     }
 
     /// Publishes Bebop as one component for every pair it prices, which a route may take a
@@ -65,13 +68,15 @@ impl BebopFeedBuilder {
     ///
     /// One component per pair otherwise, in each orientation Bebop publishes it.
     pub fn all_pairs(mut self) -> Self {
-        self.all_pairs = true;
+        self.assembler_builder = self.assembler_builder.all_pairs();
         self
     }
 
     /// Deadline for binding quote requests.
     pub fn quote_timeout(mut self, timeout: Duration) -> Self {
-        self.quote_timeout = timeout;
+        self.assembler_builder = self
+            .assembler_builder
+            .quote_timeout(timeout);
         self
     }
 
@@ -82,7 +87,9 @@ impl BebopFeedBuilder {
     /// one and refuse a request that leaves it out. See
     /// <https://docs.bebop.xyz/rfq-api/guides/best-practices#6-pass-origin-so-we-can-identify-legitimate-flow>.
     pub fn origin_address(mut self, origin_address: Bytes) -> Self {
-        self.origin.address = Some(origin_address);
+        self.assembler_builder = self
+            .assembler_builder
+            .origin_address(origin_address);
         self
     }
 
@@ -90,7 +97,9 @@ impl BebopFeedBuilder {
     /// sent as `origin_target` with binding quote requests. See
     /// [`origin_address`](Self::origin_address) for what Bebop does with it.
     pub fn origin_target(mut self, origin_target: Bytes) -> Self {
-        self.origin.target = Some(origin_target);
+        self.assembler_builder = self
+            .assembler_builder
+            .origin_target(origin_target);
         self
     }
 
@@ -98,7 +107,9 @@ impl BebopFeedBuilder {
     /// sent as `origin_source` with binding quote requests. See
     /// [`origin_address`](Self::origin_address) for what Bebop does with it.
     pub fn origin_source(mut self, origin_source: String) -> Self {
-        self.origin.source = Some(origin_source);
+        self.assembler_builder = self
+            .assembler_builder
+            .origin_source(origin_source);
         self
     }
 
@@ -124,7 +135,9 @@ impl BebopFeedBuilder {
     /// [`FALLBACK_PROTOCOL_SYSTEM`] rather than [`PROTOCOL_SYSTEM`], which is what selects
     /// the fallback encoder. Off by default.
     pub fn with_fallback_router(mut self) -> Self {
-        self.protocol_system = FALLBACK_PROTOCOL_SYSTEM;
+        self.assembler_builder = self
+            .assembler_builder
+            .with_fallback_router();
         self
     }
 
@@ -136,28 +149,164 @@ impl BebopFeedBuilder {
 
     /// Fails for chains Bebop does not serve.
     pub fn build(self) -> Result<BebopFeed, FeedError> {
+        let BebopPricesFeed { feed_config, source: prices } = BebopPricesFeedBuilder::new(
+            self.assembler_builder.book_config.chain,
+            self.assembler_builder.api_key.clone(),
+        )
+        .feed_config(self.feed_config)
+        .build()?;
+        let assembler = match self.assembler {
+            Some(assembler) => assembler,
+            None => self.assembler_builder.build()?,
+        };
+        Ok(BebopFeed { feed_config, source: BebopBookSource { prices, assembler } })
+    }
+}
+
+/// Builds a [`BebopBookAssembler`] from the book settings alone: the shared [`BookFeedConfig`],
+/// the USD quote tokens, the firm-quote client's API key, quote timeout and origin, and the
+/// component layout. Opens no connection and builds no pricing client; pass the result to
+/// [`BebopFeedBuilder::with_assembler`] or use it on its own with prices from a
+/// [`BebopPricesFeed`].
+pub struct BebopBookAssemblerBuilder {
+    protocol_system: &'static str,
+    book_config: BookFeedConfig,
+    usd_quote_tokens: Arc<HashSet<Bytes>>,
+    api_key: String,
+    quote_timeout: Duration,
+    origin: QuoteOrigin,
+    all_pairs: bool,
+}
+
+impl BebopBookAssemblerBuilder {
+    pub fn new(
+        book_config: BookFeedConfig,
+        usd_quote_tokens: impl Into<Arc<HashSet<Bytes>>>,
+        api_key: String,
+    ) -> Self {
+        Self {
+            protocol_system: PROTOCOL_SYSTEM,
+            book_config,
+            usd_quote_tokens: usd_quote_tokens.into(),
+            api_key,
+            quote_timeout: DEFAULT_QUOTE_TIMEOUT,
+            origin: QuoteOrigin::default(),
+            all_pairs: false,
+        }
+    }
+
+    /// See [`BebopFeedBuilder::all_pairs`].
+    pub fn all_pairs(mut self) -> Self {
+        self.all_pairs = true;
+        self
+    }
+
+    /// Deadline for binding quote requests.
+    pub fn quote_timeout(mut self, timeout: Duration) -> Self {
+        self.quote_timeout = timeout;
+        self
+    }
+
+    /// See [`BebopFeedBuilder::origin_address`].
+    pub fn origin_address(mut self, origin_address: Bytes) -> Self {
+        self.origin.address = Some(origin_address);
+        self
+    }
+
+    /// See [`BebopFeedBuilder::origin_target`].
+    pub fn origin_target(mut self, origin_target: Bytes) -> Self {
+        self.origin.target = Some(origin_target);
+        self
+    }
+
+    /// See [`BebopFeedBuilder::origin_source`].
+    pub fn origin_source(mut self, origin_source: String) -> Self {
+        self.origin.source = Some(origin_source);
+        self
+    }
+
+    /// See [`BebopFeedBuilder::with_fallback_router`].
+    pub fn with_fallback_router(mut self) -> Self {
+        self.protocol_system = FALLBACK_PROTOCOL_SYSTEM;
+        self
+    }
+
+    /// Fails for chains Bebop does not serve.
+    pub fn build(self) -> Result<BebopBookAssembler, FeedError> {
         let chain =
             BebopSupportedChain::try_from(self.book_config.chain).map_err(FeedError::Fatal)?;
-        Ok(BebopFeed {
-            feed_config: self.feed_config,
-            source: BebopBookSource {
-                protocol_system: self.protocol_system,
-                book_config: self.book_config,
-                usd_quote_tokens: self.usd_quote_tokens,
-                client: Arc::new(BebopClient::new(
-                    chain,
-                    self.ws_key,
-                    self.quote_timeout,
-                    self.origin,
-                )),
-                all_pairs: self.all_pairs,
-            },
+        Ok(BebopBookAssembler {
+            protocol_system: self.protocol_system,
+            book_config: self.book_config,
+            usd_quote_tokens: Arc::new(
+                self.usd_quote_tokens
+                    .iter()
+                    .cloned()
+                    .collect(),
+            ),
+            client: Arc::new(BebopClient::new(
+                chain,
+                self.api_key,
+                self.quote_timeout,
+                self.origin,
+            )),
+            all_pairs: self.all_pairs,
         })
     }
 }
 
 impl SnapshotFeed for BebopFeed {
     type Snapshot = BookSnapshot<ReceivedAt>;
+    type Error = FeedError;
+
+    fn run(
+        self,
+        publisher: Publisher<Self::Snapshot>,
+    ) -> impl Future<Output = Result<(), FeedError>> + Send + 'static {
+        run_ws_feed(self.feed_config, publisher, self.source)
+    }
+}
+
+/// Streams Bebop's pricing WebSocket and publishes each binary frame as [`BebopPrices`]; text
+/// frames are skipped. Requires only the chain and API key. [`BebopBookAssembler`] applies the
+/// token list and TVL floor. `Debug` output omits the API key.
+#[derive(Clone, Debug)]
+pub struct BebopPricesFeed {
+    feed_config: WsFeedConfig,
+    source: BebopPricesSource,
+}
+
+/// Builds a [`BebopPricesFeed`] from the chain and Bebop's API key.
+pub struct BebopPricesFeedBuilder {
+    chain: Chain,
+    ws_key: String,
+    feed_config: WsFeedConfig,
+}
+
+impl BebopPricesFeedBuilder {
+    /// The feed tuning starts from [`BebopFeedBuilder::default_feed_config`].
+    pub fn new(chain: Chain, ws_key: String) -> Self {
+        Self { chain, ws_key, feed_config: BebopFeedBuilder::default_feed_config() }
+    }
+
+    /// Tune the connection loop (timeouts, backoff, failure limit).
+    pub fn feed_config(mut self, feed_config: WsFeedConfig) -> Self {
+        self.feed_config = feed_config;
+        self
+    }
+
+    /// Fails with [`FeedError::Fatal`] for a chain Bebop does not serve.
+    pub fn build(self) -> Result<BebopPricesFeed, FeedError> {
+        let chain = BebopSupportedChain::try_from(self.chain).map_err(FeedError::Fatal)?;
+        Ok(BebopPricesFeed {
+            feed_config: self.feed_config,
+            source: BebopPricesSource::new(BebopPricingClient::new(chain, self.ws_key)),
+        })
+    }
+}
+
+impl SnapshotFeed for BebopPricesFeed {
+    type Snapshot = BebopPrices;
     type Error = FeedError;
 
     fn run(
@@ -179,7 +328,12 @@ mod tests {
 
     use super::*;
     use crate::{
-        book::{test_token_map, Book},
+        book::{
+            assert_same_books,
+            levels::{Levels, PriceLevel},
+            test_token_map, Book,
+        },
+        rfq::protocols::bebop::models::BebopBook,
         snapshot_feed::SnapshotFeed,
     };
 
@@ -295,6 +449,7 @@ mod tests {
         };
         let quote = feed
             .source
+            .assembler
             .client
             .request_binding_quote(&params)
             .await
@@ -369,6 +524,7 @@ mod tests {
         };
         let quote = feed
             .source
+            .assembler
             .client
             .request_binding_quote(&params)
             .await
@@ -418,5 +574,120 @@ mod tests {
             .unwrap_err();
 
         assert!(error.is_fatal(), "{error}");
+    }
+
+    #[test]
+    fn building_a_book_assembler_for_a_chain_bebop_does_not_serve_is_fatal() {
+        let config = BookFeedConfig {
+            chain: Chain::ZkSync,
+            tokens: Arc::new(HashMap::new()),
+            min_tvl_usd: 0.0,
+        };
+
+        let error = BebopBookAssemblerBuilder::new(config, HashSet::new(), "key".to_string())
+            .build()
+            .unwrap_err();
+
+        assert!(error.is_fatal(), "{error}");
+    }
+
+    fn weth_usdc_config() -> (BookFeedConfig, Arc<HashSet<Bytes>>, BebopPrices) {
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        let config = BookFeedConfig {
+            chain: Chain::Ethereum,
+            tokens: Arc::new(test_token_map(&[(&weth, "WETH", 18), (&usdc, "USDC", 6)])),
+            min_tvl_usd: 0.0,
+        };
+        let levels = |price| Levels::new(vec![PriceLevel { price, quantity: 1.0 }]).unwrap();
+        let prices = BebopPrices {
+            pairs: vec![BebopBook {
+                base: weth,
+                quote: usdc.clone(),
+                last_update_ts: 1752617378000,
+                bids: levels(3000.0),
+                asks: levels(3001.0),
+            }],
+        };
+        (config, Arc::new(HashSet::from([usdc])), prices)
+    }
+
+    /// An assembler built on its own makes the books the feed builder's own assembler makes from
+    /// the same settings.
+    #[test]
+    fn the_assembler_builder_makes_the_books_the_feed_builder_does() {
+        let (config, usd_quote_tokens, prices) = weth_usdc_config();
+        let feed = BebopFeedBuilder::new(config.clone(), usd_quote_tokens.clone(), "key".into())
+            .all_pairs()
+            .with_fallback_router()
+            .build()
+            .unwrap();
+        let assembler = BebopBookAssemblerBuilder::new(config, usd_quote_tokens, "key".into())
+            .all_pairs()
+            .with_fallback_router()
+            .build()
+            .unwrap();
+
+        let books = assembler.books(prices.clone());
+
+        assert_eq!(books.len(), 1);
+        assert_same_books(&books, &feed.source.assembler.books(prices));
+    }
+
+    #[test]
+    fn the_feed_makes_its_books_with_the_assembler_it_is_given() {
+        let (config, usd_quote_tokens, prices) = weth_usdc_config();
+        let assembler =
+            BebopBookAssemblerBuilder::new(config.clone(), usd_quote_tokens.clone(), "key".into())
+                .with_fallback_router()
+                .build()
+                .unwrap();
+
+        let feed = BebopFeedBuilder::new(config, usd_quote_tokens, "key".into())
+            .with_assembler(assembler.clone())
+            .build()
+            .unwrap();
+
+        assert_same_books(
+            &feed
+                .source
+                .assembler
+                .books(prices.clone()),
+            &assembler.books(prices),
+        );
+        assert_eq!(feed.source.assembler.protocol_system, FALLBACK_PROTOCOL_SYSTEM);
+    }
+
+    #[test]
+    fn the_prices_feed_refuses_a_chain_bebop_does_not_serve() {
+        let error = BebopPricesFeedBuilder::new(Chain::ZkSync, "key".to_string())
+            .build()
+            .unwrap_err();
+
+        assert!(error.is_fatal(), "{error}");
+    }
+
+    #[test]
+    fn the_prices_feed_runs_on_the_feed_tuning_it_is_given() {
+        let tuned = WsFeedConfig {
+            read_idle_timeout: Duration::from_secs(7),
+            ..BebopFeedBuilder::default_feed_config()
+        };
+
+        let feed = BebopPricesFeedBuilder::new(Chain::Ethereum, "key".to_string())
+            .feed_config(tuned)
+            .build()
+            .unwrap();
+
+        assert_eq!(feed.feed_config.read_idle_timeout, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn the_prices_feed_debug_output_omits_the_api_key() {
+        let feed = BebopPricesFeedBuilder::new(Chain::Ethereum, "secret_key".to_string())
+            .build()
+            .unwrap();
+
+        assert!(!format!("{feed:?}").contains("secret_key"));
     }
 }

@@ -616,6 +616,10 @@ impl ProtocolStreamBuilder {
     /// re-reads pool state from the VM database — an indexer registered for one still gets its
     /// balance and block-environment attributes applied, but every storage-derived value stays at
     /// the confirmed block, with no error.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn with_pending_indexer(
         mut self,
         extractor: &str,
@@ -684,12 +688,20 @@ impl ProtocolStreamBuilder {
                 }
 
                 // Publish the buffered message so the caller can peek before triggering.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the peek slot is optional; a send error only means the controller dropped its receiver"
+                )]
                 let _ = peek_tx.send(Some(msg.clone()));
 
                 // Block until the controller fires trigger_next_block(), or until it is dropped.
                 if trigger_rx.recv().await.is_none() {
                     // Controller dropped — forward the buffered message and drain the rest
                     // without gating, so the stream continues to its natural end.
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the peek slot is optional; a send error only means the controller dropped its receiver"
+                    )]
                     let _ = peek_tx.send(None);
                     if output_tx.send(msg).await.is_err() {
                         break;
@@ -707,6 +719,10 @@ impl ProtocolStreamBuilder {
                 }
 
                 // Clear the peek slot before decoding so callers see None between blocks.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the peek slot is optional; a send error only means the controller dropped its receiver"
+                )]
                 let _ = peek_tx.send(None);
 
                 if output_tx.send(msg).await.is_err() {
@@ -819,12 +835,14 @@ impl ProtocolStreamBuilder {
             };
 
         let stream = Box::pin(decode_stream.then({
-            let decoder = decoder.clone();
+            let decoder = decoder;
             move |msg| {
                 let decoder = decoder.clone();
                 let advance_tx = advance_tx.clone();
                 async move {
-                    let _ = advance_tx.send(msg.clone());
+                    if let Err(e) = advance_tx.send(msg.clone()) {
+                        warn!(error = %e, "Pending block processor is gone; block not forwarded");
+                    }
                     decoder.decode(&msg).await.map_err(|e| {
                         debug!(msg=?msg, "Decode error: {}", e);
                         e
@@ -883,7 +901,7 @@ impl ProtocolStreamBuilder {
             };
 
         let stream = Box::pin(decode_stream.then({
-            let decoder = decoder.clone();
+            let decoder = decoder;
             move |msg| {
                 let decoder = decoder.clone();
                 async move {

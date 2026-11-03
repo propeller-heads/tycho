@@ -38,8 +38,6 @@ const HASHFLOW_API_URL: &str = "https://api.hashflow.com";
 pub struct HashflowClient {
     chain_id: u64,
     quote_endpoint: String,
-    price_levels_endpoint: String,
-    market_makers_endpoint: String,
     #[debug(skip)]
     source: String,
     #[debug(skip)]
@@ -48,8 +46,32 @@ pub struct HashflowClient {
     http: Client,
 }
 
+/// Reads the price levels Hashflow's market makers quote on one chain. It never requests a
+/// quote, so it carries no quote timeout. `Debug` output omits the credentials.
+#[derive(derive_more::Debug, Clone)]
+pub struct HashflowLevelsClient {
+    chain_id: u64,
+    price_levels_endpoint: String,
+    market_makers_endpoint: String,
+    #[debug(skip)]
+    source: String,
+    #[debug(skip)]
+    auth_key: String,
+    http: Client,
+}
+
+/// The base of Hashflow's taker API endpoints on the deployment at `base_url`, or on the venue.
+fn taker_url(base_url: Option<&str>) -> String {
+    format!(
+        "{}/taker/v3",
+        base_url
+            .unwrap_or(HASHFLOW_API_URL)
+            .trim_end_matches('/')
+    )
+}
+
 impl HashflowClient {
-    /// A client for Hashflow's taker API, whose three endpoints share the version's own path.
+    /// A client for Hashflow's taker API, whose rfq endpoint sits on the version's own path.
     /// `base_url` points it somewhere else than the venue, which is how a test reaches a server
     /// of its own.
     pub fn new(
@@ -59,13 +81,9 @@ impl HashflowClient {
         auth_key: String,
         quote_timeout: Duration,
     ) -> Self {
-        let base_url = base_url.unwrap_or(HASHFLOW_API_URL);
-        let taker = format!("{}/taker/v3", base_url.trim_end_matches('/'));
         HashflowClient {
             chain_id,
-            quote_endpoint: format!("{taker}/rfq"),
-            price_levels_endpoint: format!("{taker}/price-levels"),
-            market_makers_endpoint: format!("{taker}/market-makers"),
+            quote_endpoint: format!("{}/rfq", taker_url(base_url)),
             source,
             auth_key,
             quote_timeout,
@@ -73,70 +91,11 @@ impl HashflowClient {
         }
     }
 
-    /// The query every book request carries: who is asking and about which chain.
-    fn chain_query(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("source", self.source.clone()),
-            ("baseChainType", "evm".to_string()),
-            ("baseChainId", self.chain_id.to_string()),
-        ]
-    }
-
-    /// The makers currently quoting on this chain.
-    pub async fn fetch_market_makers(&self) -> Result<Vec<String>, FeedError> {
-        let request = self
-            .http
-            .get(&self.market_makers_endpoint)
-            .query(&self.chain_query())
-            .header("accept", "application/json")
-            .header("Authorization", &self.auth_key);
-        let mm_response: HashflowMarketMakersResponse =
-            fetch_json(request, "Hashflow market makers", refuses_the_chain).await?;
-        debug!(
-            count = mm_response.market_makers.len(),
-            market_makers = ?mm_response.market_makers,
-            "fetched market makers"
-        );
-        Ok(mm_response.market_makers)
-    }
-
-    /// The price levels the given makers are quoting, keyed by maker name.
-    pub async fn fetch_price_levels(
-        &self,
-        market_makers: &[String],
-    ) -> Result<HashMap<String, Vec<HashflowMarketMakerLevels>>, FeedError> {
-        let mut query_params = self.chain_query();
-        // Add market makers as array parameters
-        for mm in market_makers {
-            query_params.push(("marketMakers[]", mm.clone()));
-        }
-        let request = self
-            .http
-            .get(&self.price_levels_endpoint)
-            .query(&query_params)
-            .header("accept", "application/json")
-            .header("Authorization", &self.auth_key);
-        let price_response: HashflowPriceLevelsResponse =
-            fetch_json(request, "Hashflow price levels", refuses_the_chain).await?;
-        if price_response.status != "success" {
-            let refuses_the_chain = price_response
-                .error
-                .as_ref()
-                .is_some_and(HashflowError::refuses_the_chain);
-            let error = match price_response.error {
-                Some(error) => error.to_string(),
-                None => "no error details".to_string(),
-            };
-            let message = format!("API returned error status: {error}");
-            return Err(if refuses_the_chain {
-                FeedError::Fatal(message)
-            } else {
-                FeedError::Connection(message)
-            });
-        }
-        price_response
-            .levels
-            .ok_or_else(|| FeedError::Parsing("API response missing levels".to_string()))
+    /// Sends this client's requests through `http`, so it can share a connection pool with
+    /// another client.
+    pub(super) fn with_http_client(mut self, http: Client) -> Self {
+        self.http = http;
+        self
     }
 
     /// Requests a signed quote from `market_maker` alone: the API does not fall back to another
@@ -212,9 +171,8 @@ impl HashflowClient {
                     if attempt < MAX_RETRIES - 1 {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
-                    } else {
-                        return Err(last_error.unwrap());
                     }
+                    return Err(last_error.unwrap());
                 }
                 Err(_) => {
                     return Err(RFQError::ConnectionError(format!(
@@ -236,9 +194,8 @@ impl HashflowClient {
                         if attempt < MAX_RETRIES - 1 {
                             tokio::time::sleep(Duration::from_millis(100)).await;
                             continue;
-                        } else {
-                            return Err(last_error.unwrap());
                         }
+                        return Err(last_error.unwrap());
                     }
                 };
                 // The venue answering a quote request at all means the request reached it,
@@ -251,9 +208,8 @@ impl HashflowClient {
                     warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, error = %err_msg, "returned non-200 status");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
-                } else {
-                    return Err(last_error.unwrap());
                 }
+                return Err(last_error.unwrap());
             }
 
             let quote_response = match response
@@ -269,9 +225,8 @@ impl HashflowClient {
                     if attempt < MAX_RETRIES - 1 {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
-                    } else {
-                        return Err(last_error.unwrap());
                     }
+                    return Err(last_error.unwrap());
                 }
             };
 
@@ -296,10 +251,10 @@ impl HashflowClient {
                         } else {
                             quote_attributes.insert(
                                 "external_account".to_string(),
-                                Bytes::from_str(&Address::ZERO.to_string()).map_err(|_| {
-                                    RFQError::ParsingError(
-                                        "Failed to parse zero address".to_string(),
-                                    )
+                                Bytes::from_str(&Address::ZERO.to_string()).map_err(|e| {
+                                    RFQError::ParsingError(format!(
+                                        "Failed to parse zero address: {e}"
+                                    ))
                                 })?,
                             );
                         }
@@ -315,9 +270,9 @@ impl HashflowClient {
                             Bytes::from(
                                 biguint_to_u256(
                                     &BigUint::from_str(&quote.quote_data.base_token_amount)
-                                        .map_err(|_| {
+                                        .map_err(|e| {
                                             RFQError::ParsingError(format!(
-                                                "Failed to parse base token amount: {}",
+                                                "Failed to parse base token amount: {} ({e})",
                                                 quote.quote_data.base_token_amount
                                             ))
                                         })?,
@@ -331,9 +286,9 @@ impl HashflowClient {
                             Bytes::from(
                                 biguint_to_u256(
                                     &BigUint::from_str(&quote.quote_data.quote_token_amount)
-                                        .map_err(|_| {
+                                        .map_err(|e| {
                                             RFQError::ParsingError(format!(
-                                                "Failed to parse quote token amount: {}",
+                                                "Failed to parse quote token amount: {} ({e})",
                                                 quote.quote_data.quote_token_amount
                                             ))
                                         })?,
@@ -365,28 +320,27 @@ impl HashflowClient {
                             base_token: params.token_in.clone(),
                             quote_token: params.token_out.clone(),
                             amount_in: BigUint::from_str(&quote.quote_data.base_token_amount)
-                                .map_err(|_| {
+                                .map_err(|e| {
                                     RFQError::ParsingError(format!(
-                                        "Failed to parse amount in string: {}",
+                                        "Failed to parse amount in string: {} ({e})",
                                         quote.quote_data.base_token_amount
                                     ))
                                 })?,
                             amount_out: BigUint::from_str(&quote.quote_data.quote_token_amount)
-                                .map_err(|_| {
+                                .map_err(|e| {
                                     RFQError::ParsingError(format!(
-                                        "Failed to parse amount out string: {}",
+                                        "Failed to parse amount out string: {} ({e})",
                                         quote.quote_data.quote_token_amount
                                     ))
                                 })?,
                             quote_attributes,
                         };
                         return Ok(signed_quote);
-                    } else {
-                        return Err(RFQError::QuoteNotFound(format!(
-                            "Hashflow quote not found for {} {} ->{}",
-                            params.amount_in, params.token_in, params.token_out,
-                        )));
                     }
+                    return Err(RFQError::QuoteNotFound(format!(
+                        "Hashflow quote not found for {} {} ->{}",
+                        params.amount_in, params.token_in, params.token_out,
+                    )));
                 }
                 "fail" => {
                     let Some(error) = quote_response.error else {
@@ -414,6 +368,95 @@ impl HashflowClient {
         Err(last_error.unwrap_or_else(|| {
             RFQError::ConnectionError("Hashflow quote request failed after retries".to_string())
         }))
+    }
+}
+
+impl HashflowLevelsClient {
+    /// A client for the market makers and price levels of Hashflow's taker API on `chain_id`.
+    /// `base_url` points it somewhere else than the venue, as for [`HashflowClient::new`].
+    pub fn new(base_url: Option<&str>, chain_id: u64, source: String, auth_key: String) -> Self {
+        let taker = taker_url(base_url);
+        HashflowLevelsClient {
+            chain_id,
+            price_levels_endpoint: format!("{taker}/price-levels"),
+            market_makers_endpoint: format!("{taker}/market-makers"),
+            source,
+            auth_key,
+            http: Client::new(),
+        }
+    }
+
+    /// Sends this client's requests through `http`, so it can share a connection pool with
+    /// another client.
+    pub(super) fn with_http_client(mut self, http: Client) -> Self {
+        self.http = http;
+        self
+    }
+
+    /// The query every book request carries: who is asking and about which chain.
+    fn chain_query(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("source", self.source.clone()),
+            ("baseChainType", "evm".to_string()),
+            ("baseChainId", self.chain_id.to_string()),
+        ]
+    }
+
+    /// The makers currently quoting on this chain.
+    pub async fn fetch_market_makers(&self) -> Result<Vec<String>, FeedError> {
+        let request = self
+            .http
+            .get(&self.market_makers_endpoint)
+            .query(&self.chain_query())
+            .header("accept", "application/json")
+            .header("Authorization", &self.auth_key);
+        let mm_response: HashflowMarketMakersResponse =
+            fetch_json(request, "Hashflow market makers", refuses_the_chain).await?;
+        debug!(
+            count = mm_response.market_makers.len(),
+            market_makers = ?mm_response.market_makers,
+            "fetched market makers"
+        );
+        Ok(mm_response.market_makers)
+    }
+
+    /// The price levels the given makers are quoting, keyed by maker name.
+    pub async fn fetch_price_levels(
+        &self,
+        market_makers: &[String],
+    ) -> Result<HashMap<String, Vec<HashflowMarketMakerLevels>>, FeedError> {
+        let mut query_params = self.chain_query();
+        // Add market makers as array parameters
+        for mm in market_makers {
+            query_params.push(("marketMakers[]", mm.clone()));
+        }
+        let request = self
+            .http
+            .get(&self.price_levels_endpoint)
+            .query(&query_params)
+            .header("accept", "application/json")
+            .header("Authorization", &self.auth_key);
+        let price_response: HashflowPriceLevelsResponse =
+            fetch_json(request, "Hashflow price levels", refuses_the_chain).await?;
+        if price_response.status != "success" {
+            let refuses_the_chain = price_response
+                .error
+                .as_ref()
+                .is_some_and(HashflowError::refuses_the_chain);
+            let error = match price_response.error {
+                Some(error) => error.to_string(),
+                None => "no error details".to_string(),
+            };
+            let message = format!("API returned error status: {error}");
+            return Err(if refuses_the_chain {
+                FeedError::Fatal(message)
+            } else {
+                FeedError::Connection(message)
+            });
+        }
+        price_response
+            .levels
+            .ok_or_else(|| FeedError::Parsing("API response missing levels".to_string()))
     }
 }
 
@@ -476,9 +519,9 @@ mod tests {
         (server, request_log)
     }
 
-    fn create_test_client(base_url: String, quote_timeout: Duration) -> HashflowClient {
+    fn create_test_client(base_url: &str, quote_timeout: Duration) -> HashflowClient {
         HashflowClient::new(
-            Some(&base_url),
+            Some(base_url),
             Chain::Ethereum.id(),
             "test_user".to_string(),
             "test_key".to_string(),
@@ -488,8 +531,7 @@ mod tests {
 
     #[test]
     fn debug_output_omits_credentials() {
-        let client =
-            create_test_client("https://hashflow.example".to_string(), Duration::from_secs(1));
+        let client = create_test_client("https://hashflow.example", Duration::from_secs(1));
         let rendered = format!("{client:?}");
 
         assert!(!rendered.contains("test_user"));
@@ -504,7 +546,7 @@ mod tests {
     async fn a_refused_status_leaves_the_component_quotable() {
         let server =
             spawn_http_server(|_| Some(("429 Too Many Requests", "slow down".to_string()))).await;
-        let client = create_test_client(server.url(), Duration::from_secs(1));
+        let client = create_test_client(&server.url(), Duration::from_secs(1));
 
         let error = client
             .request_binding_quote(&create_test_quote_params(), "mm1".to_string())
@@ -537,7 +579,7 @@ mod tests {
         // trader's shared nonce scope, so the client rejects it.
         let (server, _) =
             quote_server(Duration::ZERO, QUOTE_RESPONSE_WITHOUT_EFFECTIVE_TRADER).await;
-        let client = create_test_client(server.url(), Duration::from_secs(1));
+        let client = create_test_client(&server.url(), Duration::from_secs(1));
         let params = create_test_quote_params();
 
         let err = client
@@ -580,7 +622,7 @@ mod tests {
         #[case] says: &str,
     ) {
         let (server, _) = quote_server(Duration::ZERO, body).await;
-        let client = create_test_client(server.url(), Duration::from_secs(1));
+        let client = create_test_client(&server.url(), Duration::from_secs(1));
 
         let error = client
             .request_binding_quote(&create_test_quote_params(), "mm1".to_string())
@@ -603,7 +645,7 @@ mod tests {
         // The wire request carries the receiver as Hashflow's trader, a fresh random address as
         // the effectiveTrader — a new one per quote request — and the one maker it goes to.
         let (server, request_log) = quote_server(Duration::ZERO, QUOTE_RESPONSE).await;
-        let client = create_test_client(server.url(), Duration::from_secs(1));
+        let client = create_test_client(&server.url(), Duration::from_secs(1));
         let params = create_test_quote_params();
 
         let first_quote = client
@@ -650,7 +692,7 @@ mod tests {
         let (server, _) = quote_server(Duration::from_millis(500), QUOTE_RESPONSE).await;
 
         // Test 1: Client with short timeout (200ms) - should timeout
-        let client_short_timeout = create_test_client(server.url(), Duration::from_millis(200));
+        let client_short_timeout = create_test_client(&server.url(), Duration::from_millis(200));
         let params = create_test_quote_params();
 
         // This should timeout after 200ms
@@ -667,7 +709,10 @@ mod tests {
             RFQError::ConnectionError(msg) => {
                 assert!(msg.contains("timed out"), "Expected timeout error, got: {}", msg);
             }
-            _ => panic!("Expected ConnectionError, got: {:?}", err),
+            RFQError::ParsingError(_) |
+            RFQError::FatalError(_) |
+            RFQError::InvalidInput(_) |
+            RFQError::QuoteNotFound(_) => panic!("Expected ConnectionError, got: {:?}", err),
         }
         // Should have timed out around 200ms, definitely less than 400ms
         assert!(
@@ -679,7 +724,7 @@ mod tests {
         // Test 2: Client with long timeout (1 second) - should wait and receive response
         // Note: With retry logic, we may need multiple attempts if the response is malformed,
         // so we need a longer timeout to account for retries
-        let client_long_timeout = create_test_client(server.url(), Duration::from_secs(1));
+        let client_long_timeout = create_test_client(&server.url(), Duration::from_secs(1));
 
         // This should wait for the response (500ms)
         let result = client_long_timeout
@@ -709,7 +754,7 @@ mod tests {
         })
         .await;
 
-        let client = create_test_client(server.url(), Duration::from_secs(5));
+        let client = create_test_client(&server.url(), Duration::from_secs(5));
         let params = create_test_quote_params();
         let result = client
             .request_binding_quote(&params, "mm1".to_string())
@@ -748,12 +793,11 @@ mod tests {
         .await;
         let url = server.url();
         let chain_id = Chain::Arbitrum.id();
-        let client = HashflowClient::new(
+        let client = HashflowLevelsClient::new(
             Some(&url),
             chain_id,
             "test_user".to_string(),
             "test_key".to_string(),
-            Duration::from_secs(5),
         );
 
         let makers = client
@@ -780,16 +824,14 @@ mod tests {
     #[tokio::test]
     #[ignore = "hits Hashflow's live API; requires HASHFLOW_USER and HASHFLOW_KEY"]
     async fn live_hashflow_api_refuses_a_chain_it_does_not_price() {
+        #[expect(
+            clippy::unused_result_ok,
+            reason = "a missing .env file is fine; the variables may come from the environment"
+        )]
         dotenv().ok();
         let source = std::env::var("HASHFLOW_USER").expect("HASHFLOW_USER not set");
         let auth_key = std::env::var("HASHFLOW_KEY").expect("HASHFLOW_KEY not set");
-        let client = HashflowClient::new(
-            None,
-            Chain::Unichain.id(),
-            source,
-            auth_key,
-            Duration::from_secs(10),
-        );
+        let client = HashflowLevelsClient::new(None, Chain::Unichain.id(), source, auth_key);
 
         let error = client
             .fetch_market_makers()
@@ -817,12 +859,11 @@ mod tests {
     ) {
         let server = spawn_http_server(move |_| Some(("400 Bad Request", body.to_string()))).await;
         let url = server.url();
-        let client = HashflowClient::new(
+        let client = HashflowLevelsClient::new(
             Some(&url),
             Chain::Unichain.id(),
             "test_user".to_string(),
             "test_key".to_string(),
-            Duration::from_secs(5),
         );
 
         let error = client
@@ -851,12 +892,11 @@ mod tests {
     ) {
         let server = spawn_http_server(move |_| Some(("200 OK", body.to_string()))).await;
         let url = server.url();
-        let client = HashflowClient::new(
+        let client = HashflowLevelsClient::new(
             Some(&url),
             Chain::Unichain.id(),
             "test_user".to_string(),
             "test_key".to_string(),
-            Duration::from_secs(5),
         );
 
         let error = client

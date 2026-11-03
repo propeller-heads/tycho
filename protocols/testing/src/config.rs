@@ -32,7 +32,7 @@ impl ProtocolComponentExpectation {
 
         // Compare id (case-insensitive)
         if self.id.to_lowercase() != other.id.to_string().to_lowercase() {
-            let diff = self.format_diff("id", &self.id, &other.id.to_string(), colorize_output);
+            let diff = Self::format_diff("id", &self.id, &other.id.to_string(), colorize_output);
             diffs.push(format!("Field 'id' mismatch for {}:\n{}", self.id, diff));
         }
 
@@ -42,7 +42,7 @@ impl ProtocolComponentExpectation {
         if self_tokens_set != other_tokens_set {
             let self_tokens = format!("{:?}", self.tokens);
             let other_tokens = format!("{:?}", other.tokens);
-            let diff = self.format_diff("tokens", &self_tokens, &other_tokens, colorize_output);
+            let diff = Self::format_diff("tokens", &self_tokens, &other_tokens, colorize_output);
             diffs.push(format!("Field 'tokens' mismatch for {}:\n{}", self.id, diff));
         }
 
@@ -54,7 +54,7 @@ impl ProtocolComponentExpectation {
                     if value != other_value {
                         let self_value = format!("{value:?}");
                         let other_value = format!("{other_value:?}");
-                        let diff = self.format_diff(
+                        let diff = Self::format_diff(
                             "static_attributes",
                             &self_value,
                             &other_value,
@@ -78,7 +78,7 @@ impl ProtocolComponentExpectation {
         if self.creation_tx != other.creation_tx {
             let self_tx = format!("{}", self.creation_tx.clone());
             let other_tx = format!("{}", other.creation_tx.clone());
-            let diff = self.format_diff("creation_tx", &self_tx, &other_tx, colorize_output);
+            let diff = Self::format_diff("creation_tx", &self_tx, &other_tx, colorize_output);
             diffs.push(format!("Field 'creation_tx' mismatch for {}:\n{}", self.id, diff));
         }
 
@@ -88,7 +88,7 @@ impl ProtocolComponentExpectation {
             Some(diffs.join("\n"))
         }
     }
-    fn format_diff(&self, _field_name: &str, left: &str, right: &str, colorize: bool) -> String {
+    fn format_diff(_field_name: &str, left: &str, right: &str, colorize: bool) -> String {
         let diff = TextDiff::from_lines(left, right);
 
         let mut result = String::new();

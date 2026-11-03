@@ -1,9 +1,9 @@
-//! Turning streamed books into the directional quote ladders the stream serves.
+//! Turning streamed books into the directional quotes the stream serves.
 //!
 //! A book prices one pair in human units and names its two assets by address, so pricing it takes
 //! two steps: looking the addresses up in the consumer's tokens, which supply the decimals
-//! ([`resolve_book_tokens`]), and converting both sides of the book into base-unit ladders
-//! ([`ladders_for_book`]).
+//! ([`resolve_book_tokens`]), and converting both sides of the book into base-unit quotes
+//! ([`quotes_for_book`]).
 
 use std::collections::HashMap;
 
@@ -62,7 +62,7 @@ fn resolve_address<'book, 'tokens>(
 
 /// Why a whole book side was rejected.
 ///
-/// A corrupt side is rejected, never sanitized: the ladder interpolates between its knots, so
+/// A corrupt side is rejected, never sanitized: the state interpolates between its knots, so
 /// dropping the offending level would turn a broken price function into an invented usable one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SideRejection {
@@ -79,9 +79,9 @@ pub(super) enum SideRejection {
     ConflictingKnots,
 }
 
-/// One direction's quote ladder, or why the side it came from was rejected. An accepted side
-/// that carried no levels yields an empty ladder: that direction is simply unquotable.
-pub(super) type Ladder = Result<Vec<PriceLevelStreamQuote>, SideRejection>;
+/// One direction's quotes, or why the side they came from was rejected. An accepted side
+/// that carried no levels yields no quotes: that direction is simply unquotable.
+pub(super) type SideQuotes = Result<Vec<PriceLevelStreamQuote>, SideRejection>;
 
 /// Which of the book's tokens the levels of a side sell.
 #[derive(Debug, Clone, Copy)]
@@ -92,12 +92,12 @@ enum Side {
     Asks,
 }
 
-/// The quote ladders of `book` as `(token1 → token2, token2 → token1)`, in base units of the
+/// The quotes of `book` as `(token1 → token2, token2 → token1)`, in base units of the
 /// resolved tokens and in stream order.
 ///
 /// Reads `price` as the average execution price of the level's cumulative size, in `token2` per
-/// `token1`, and `cum_volume` as whole `token1`. The bids are therefore the ladder selling
-/// `token1` and the asks the ladder selling `token2`:
+/// `token1`, and `cum_volume` as whole `token1`. The bids are therefore the quotes selling
+/// `token1` and the asks the quotes selling `token2`:
 ///
 /// ```text
 /// bids: amount_in = round(cum_volume · 10^dec1), amount_out = round(price · cum_volume · 10^dec2)
@@ -107,15 +107,18 @@ enum Side {
 /// Amounts are rounded to the nearest base unit. Their precision is Titan's own, since Titan
 /// quantized both values to `f64` before sending them, and no tighter bound is claimed. The two
 /// sides are converted independently, so a rejected side never costs the other one.
-pub(super) fn ladders_for_book(
+pub(super) fn quotes_for_book(
     book: &TitanBook,
     token1: &Token,
     token2: &Token,
-) -> (Ladder, Ladder) {
-    (ladder(&book.bids, token1, token2, Side::Bids), ladder(&book.asks, token1, token2, Side::Asks))
+) -> (SideQuotes, SideQuotes) {
+    (
+        side_quotes(&book.bids, token1, token2, Side::Bids),
+        side_quotes(&book.asks, token1, token2, Side::Asks),
+    )
 }
 
-fn ladder(levels: &[TitanLevel], token1: &Token, token2: &Token, side: Side) -> Ladder {
+fn side_quotes(levels: &[TitanLevel], token1: &Token, token2: &Token, side: Side) -> SideQuotes {
     let mut quotes = Vec::with_capacity(levels.len());
     for level in levels {
         ensure_supported(level)?;
@@ -182,8 +185,11 @@ mod tests {
     use rstest::rstest;
 
     use super::{
-        super::test_support::{
-            captured_book, captured_books, symbol_address, token, NVDAX, PAMM, USDC, USDT, WBTC,
+        super::{
+            test_support::{
+                captured_book, captured_books, symbol_address, token, NVDAX, PAMM, USDC, USDT, WBTC,
+            },
+            titan::QuoteSequence,
         },
         *,
     };
@@ -248,12 +254,13 @@ mod tests {
             token2: "USDC".to_string(),
             token1_address: Bytes::from_str(WBTC).expect("token address"),
             token2_address: Bytes::from_str(USDC).expect("token address"),
+            calculated_from: QuoteSequence::Absent,
             asks,
             bids,
         }
     }
 
-    /// The ladder must be a usable price function: every knot a positive amount, strictly
+    /// The quotes must be a usable price function: every knot a positive amount, strictly
     /// increasing in `amount_in` and non-decreasing in `amount_out`.
     fn assert_usable(quotes: &[PriceLevelStreamQuote], label: &str) {
         for quote in quotes {
@@ -276,11 +283,12 @@ mod tests {
             token2: "USDC".to_string(),
             token1_address: Bytes::from_str(WBTC).expect("token address"),
             token2_address: Bytes::from_str(USDC).expect("token address"),
+            calculated_from: QuoteSequence::Absent,
             asks: vec![level(80801.55138978669, 0.00012376), level(80800.59272606572, 0.00021089)],
             bids: vec![level(80773.61600000001, 0.0005), level(80773.6106, 0.005)],
         };
 
-        let (sell_wbtc, sell_usdc) = ladders_for_book(&book, &wbtc(), &usdc());
+        let (sell_wbtc, sell_usdc) = quotes_for_book(&book, &wbtc(), &usdc());
 
         // bids: 0.0005 WBTC -> 40.386808 USDC (80773.616 · 0.0005), in base units.
         let sell_wbtc = sell_wbtc.expect("the bids convert");
@@ -296,7 +304,7 @@ mod tests {
     fn converts_the_captured_fermi_wbtc_usdc_book() {
         let book = captured_book("Fermi", "WBTC", "USDC");
 
-        let (sell_wbtc, sell_usdc) = ladders_for_book(&book, &wbtc(), &usdc());
+        let (sell_wbtc, sell_usdc) = quotes_for_book(&book, &wbtc(), &usdc());
 
         // bids[0]: 0.0005 WBTC at 81813.224 USDC -> 40.906612 USDC.
         let sell_wbtc = sell_wbtc.expect("the captured bids convert");
@@ -314,7 +322,7 @@ mod tests {
     fn converts_amounts_beyond_u64_exactly() {
         let book = captured_book("Fermi", "WETH", "USDC");
 
-        let (sell_weth, _) = ladders_for_book(&book, &weth(), &usdc());
+        let (sell_weth, _) = quotes_for_book(&book, &weth(), &usdc());
 
         let sell_weth = sell_weth.expect("the captured bids convert");
         let deepest = sell_weth
@@ -348,10 +356,10 @@ mod tests {
                 }
             };
 
-            let (sell_token1, sell_token2) = ladders_for_book(book, token1, token2);
+            let (sell_token1, sell_token2) = quotes_for_book(book, token1, token2);
 
-            for (side, ladder) in [("bids", sell_token1), ("asks", sell_token2)] {
-                let quotes = ladder
+            for (side, side_quotes) in [("bids", sell_token1), ("asks", sell_token2)] {
+                let quotes = side_quotes
                     .unwrap_or_else(|rejection| panic!("{pair} {side} rejected: {rejection:?}"));
                 assert_usable(&quotes, &format!("{pair} {side}"));
             }
@@ -363,14 +371,14 @@ mod tests {
         assert_eq!(converted, 29);
     }
 
-    /// A side the venue leaves empty converts to an empty ladder, leaving that one direction
+    /// A side the venue leaves empty converts to no quotes, leaving that one direction
     /// unquotable as a missing V1 pair direction did. Synthetic: every book of the capture is
     /// two-sided, and the parser accepts an empty side either way.
     #[test]
     fn an_empty_side_leaves_its_direction_unquotable() {
         let book = synthetic_book(vec![level(100_000.0, 1.0)], Vec::new());
 
-        let (sell_wbtc, sell_usdc) = ladders_for_book(&book, &wbtc(), &usdc());
+        let (sell_wbtc, sell_usdc) = quotes_for_book(&book, &wbtc(), &usdc());
 
         assert_eq!(sell_usdc, Ok(Vec::new()));
         assert_eq!(
@@ -406,7 +414,7 @@ mod tests {
         assert_eq!(token2.address, Bytes::from_str(USDC).expect("address"));
         // The asset at the streamed address supplies the decimals, so the impostor's 18 never
         // reach the amounts: 8 decimals of WBTC against 6 of USDC.
-        let (sell_wbtc, _) = ladders_for_book(&book, token1, token2);
+        let (sell_wbtc, _) = quotes_for_book(&book, token1, token2);
         let deepest = sell_wbtc.expect("the captured bids convert");
         assert_eq!(deepest[0].amount_in, BigUint::from(50_000u64));
     }
@@ -468,7 +476,7 @@ mod tests {
             vec![level(80801.55138978669, 0.00012376)],
         );
 
-        let (sell_wbtc, sell_usdc) = ladders_for_book(&book, &wbtc(), &usdc());
+        let (sell_wbtc, sell_usdc) = quotes_for_book(&book, &wbtc(), &usdc());
 
         assert_eq!(sell_wbtc, Err(SideRejection::UnsupportedLevel));
         assert_eq!(sell_usdc, Ok(vec![quote(10_000_000, 12_376)]));
@@ -479,12 +487,12 @@ mod tests {
     fn non_finite_amounts_drop_the_side() {
         let book = synthetic_book(vec![level(f64::MAX, 1.0)], Vec::new());
 
-        let (sell_wbtc, _) = ladders_for_book(&book, &wbtc(), &usdc());
+        let (sell_wbtc, _) = quotes_for_book(&book, &wbtc(), &usdc());
 
         assert_eq!(sell_wbtc, Err(SideRejection::NonFiniteAmount));
     }
 
-    /// Synthetic: a knot at a zero amount is not a quote, and the ladder interpolates across its
+    /// Synthetic: a knot at a zero amount is not a quote, and the state interpolates across its
     /// knots, so keeping the rest of the side would invent depth. The interior case is the
     /// zero-decimals counterexample from the design: dropping its middle knot instead would
     /// interpolate a fabricated output of 200 at an input of 2.
@@ -500,7 +508,7 @@ mod tests {
         let token1 = token(WBTC, "WBTC", decimals1);
         let token2 = token(USDC, "USDC", decimals2);
 
-        let (sell_token1, _) = ladders_for_book(&book, &token1, &token2);
+        let (sell_token1, _) = quotes_for_book(&book, &token1, &token2);
 
         assert_eq!(sell_token1, Err(SideRejection::ZeroAmount));
     }
@@ -513,7 +521,7 @@ mod tests {
         let token1 = token(WBTC, "WBTC", 0);
         let token2 = token(USDC, "USDC", 0);
 
-        let (sell_token1, _) = ladders_for_book(&book, &token1, &token2);
+        let (sell_token1, _) = quotes_for_book(&book, &token1, &token2);
 
         assert_eq!(sell_token1, Err(SideRejection::ConflictingKnots));
     }
@@ -525,7 +533,7 @@ mod tests {
         let book =
             synthetic_book(vec![level(80_773.616, 0.0005), level(80_773.616, 0.0005)], Vec::new());
 
-        let (sell_wbtc, _) = ladders_for_book(&book, &wbtc(), &usdc());
+        let (sell_wbtc, _) = quotes_for_book(&book, &wbtc(), &usdc());
 
         assert_eq!(sell_wbtc, Ok(vec![quote(50_000, 40_386_808), quote(50_000, 40_386_808)]));
     }

@@ -4,6 +4,12 @@ mod models;
 mod source;
 pub mod state;
 
+pub use feed::MetricBookAssemblerBuilder;
+pub use models::{MetricBidAskResponse, MetricMetadata, MetricPoolPrice, MetricPrices};
+pub use source::MetricBookAssembler;
+#[cfg(test)]
+mod test_support;
+
 /// Protocol system stamped on every component this integration emits.
 ///
 /// The `rfq:` prefix is what tycho-execution's encoder registry keys Metric's encoder on, so it

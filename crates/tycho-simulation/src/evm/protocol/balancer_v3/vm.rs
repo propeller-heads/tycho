@@ -34,7 +34,6 @@ use crate::evm::{
 };
 
 sol! {
-    #[allow(missing_docs)]
     struct LiquidityManagement {
         bool disableUnbalancedLiquidity;
         bool enableAddLiquidityCustom;
@@ -42,7 +41,6 @@ sol! {
         bool enableDonation;
     }
 
-    #[allow(missing_docs)]
     struct PoolConfig {
         LiquidityManagement liquidityManagement;
         uint256 staticSwapFeePercentage;
@@ -56,7 +54,6 @@ sol! {
         bool isPoolInRecoveryMode;
     }
 
-    #[allow(missing_docs)]
     struct WeightedPoolDynamicData {
         uint256[] balancesLiveScaled18;
         uint256[] tokenRates;
@@ -67,7 +64,6 @@ sol! {
         bool isPoolInRecoveryMode;
     }
 
-    #[allow(missing_docs)]
     struct StablePoolDynamicData {
         uint256[] balancesLiveScaled18;
         uint256[] tokenRates;
@@ -85,7 +81,6 @@ sol! {
         bool isPoolInRecoveryMode;
     }
 
-    #[allow(missing_docs)]
     struct ReClammPoolDynamicData {
         uint256[] balancesLiveScaled18;
         uint256[] tokenRates;
@@ -107,7 +102,6 @@ sol! {
         bool isPoolInRecoveryMode;
     }
 
-    #[allow(missing_docs)]
     struct QuantAmmPoolDynamicData {
         uint256[] balancesLiveScaled18;
         uint256[] tokenRates;
@@ -121,7 +115,6 @@ sol! {
         uint40 lastInteropTime;
     }
 
-    #[allow(missing_docs)]
     struct QuantAmmPoolImmutableData {
         address[] tokens;
         uint256 oracleStalenessThreshold;
@@ -134,7 +127,6 @@ sol! {
         uint256 maxTradeSizeRatio;
     }
 
-    #[allow(missing_docs)]
     interface IBalancerV3Pool {
         function getWeightedPoolDynamicData() external view returns (WeightedPoolDynamicData memory);
         function getMinTokenBalances() external view returns (uint256[] memory);
@@ -144,7 +136,6 @@ sol! {
         function getQuantAMMWeightedPoolImmutableData() external view returns (QuantAmmPoolImmutableData memory);
     }
 
-    #[allow(missing_docs)]
     struct HooksConfig {
         bool enableHookAdjustedAmounts;
         bool shouldCallBeforeInitialize;
@@ -159,7 +150,6 @@ sol! {
         address hooksContract;
     }
 
-    #[allow(missing_docs)]
     interface IBalancerV3Vault {
         function getPoolConfig(address pool) external view returns (PoolConfig memory);
         function getHooksConfig(address pool) external view returns (HooksConfig memory);
@@ -305,7 +295,7 @@ where
     // The factory a pool came from says nothing about its hooks: a StablePoolFactory pool can carry
     // a dynamic-fee hook, and quoting it as hookless yields amounts the Vault rejects.
     let hooks: HooksConfig =
-        call(engine, &VAULT, IBalancerV3Vault::getHooksConfigCall { pool: *pool })?;
+        call(engine, &VAULT, &IBalancerV3Vault::getHooksConfigCall { pool: *pool })?;
     if hooks.affects_swaps() {
         return Err(SimulationError::FatalError(format!(
             "balancer_v3 pool {pool} uses swap hook {:?}, which the native maths does not model",
@@ -324,7 +314,7 @@ where
     match pool_type {
         BalancerPoolType::Weighted => {
             let dynamic: WeightedPoolDynamicData =
-                call(engine, pool, IBalancerV3Pool::getWeightedPoolDynamicDataCall {})?;
+                call(engine, pool, &IBalancerV3Pool::getWeightedPoolDynamicDataCall {})?;
             // Weights are fixed in the pool's constructor and recorded at creation, so they come
             // from the component rather than from the immutable-data getter.
             let weights =
@@ -345,7 +335,7 @@ where
         }
         BalancerPoolType::Stable => {
             let dynamic: StablePoolDynamicData =
-                call(engine, pool, IBalancerV3Pool::getStablePoolDynamicDataCall {})?;
+                call(engine, pool, &IBalancerV3Pool::getStablePoolDynamicDataCall {})?;
             let base = base_state(
                 pool,
                 pool_type,
@@ -367,9 +357,9 @@ where
         }
         BalancerPoolType::QuantAmm => {
             let dynamic: QuantAmmPoolDynamicData =
-                call(engine, pool, IBalancerV3Pool::getQuantAMMWeightedPoolDynamicDataCall {})?;
+                call(engine, pool, &IBalancerV3Pool::getQuantAMMWeightedPoolDynamicDataCall {})?;
             let immutable: QuantAmmPoolImmutableData =
-                call(engine, pool, IBalancerV3Pool::getQuantAMMWeightedPoolImmutableDataCall {})?;
+                call(engine, pool, &IBalancerV3Pool::getQuantAMMWeightedPoolImmutableDataCall {})?;
             let mutable = quantamm_mutable(pool, &dynamic, block_timestamp)?;
             let base = base_state(
                 pool,
@@ -391,7 +381,7 @@ where
         }
         BalancerPoolType::Reclamm => {
             let dynamic: ReClammPoolDynamicData =
-                call(engine, pool, IBalancerV3Pool::getReClammPoolDynamicDataCall {})?;
+                call(engine, pool, &IBalancerV3Pool::getReClammPoolDynamicDataCall {})?;
             let mutable = reclamm_mutable(&dynamic, block_timestamp);
             let base = base_state(
                 pool,
@@ -432,7 +422,7 @@ where
     <D as EngineDatabaseInterface>::Error: Debug,
 {
     let config: PoolConfig =
-        call(engine, &VAULT, IBalancerV3Vault::getPoolConfigCall { pool: *pool })?;
+        call(engine, &VAULT, &IBalancerV3Vault::getPoolConfigCall { pool: *pool })?;
     if !config.isPoolInitialized {
         return Err(SimulationError::RecoverableError(format!(
             "balancer_v3 pool {pool} is not initialized"
@@ -476,7 +466,7 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    call::<D, _, _>(engine, pool, IBalancerV3Pool::getMinTokenBalancesCall {}).unwrap_or_default()
+    call::<D, _, _>(engine, pool, &IBalancerV3Pool::getMinTokenBalancesCall {}).unwrap_or_default()
 }
 
 /// Re-reads the storage-derived parts of a pool's state, keeping the immutable parts of
@@ -501,7 +491,7 @@ where
     match previous {
         PoolState::Weighted(prev) => {
             let dynamic: WeightedPoolDynamicData =
-                call(engine, pool, IBalancerV3Pool::getWeightedPoolDynamicDataCall {})?;
+                call(engine, pool, &IBalancerV3Pool::getWeightedPoolDynamicDataCall {})?;
             Ok(PoolState::Weighted(WeightedState::new(
                 refreshed_base(
                     &prev.base,
@@ -516,7 +506,7 @@ where
         }
         PoolState::Stable(prev) => {
             let dynamic: StablePoolDynamicData =
-                call(engine, pool, IBalancerV3Pool::getStablePoolDynamicDataCall {})?;
+                call(engine, pool, &IBalancerV3Pool::getStablePoolDynamicDataCall {})?;
             Ok(PoolState::Stable(StableState {
                 base: refreshed_base(
                     &prev.base,
@@ -531,7 +521,7 @@ where
         }
         PoolState::ReClammV2(prev) => {
             let dynamic: ReClammPoolDynamicData =
-                call(engine, pool, IBalancerV3Pool::getReClammPoolDynamicDataCall {})?;
+                call(engine, pool, &IBalancerV3Pool::getReClammPoolDynamicDataCall {})?;
             let mutable = reclamm_mutable(&dynamic, block_timestamp);
             Ok(PoolState::ReClammV2(ReClammV2State {
                 immutable: prev.immutable.clone(),
@@ -548,7 +538,7 @@ where
         }
         PoolState::QuantAmm(prev) => {
             let dynamic: QuantAmmPoolDynamicData =
-                call(engine, pool, IBalancerV3Pool::getQuantAMMWeightedPoolDynamicDataCall {})?;
+                call(engine, pool, &IBalancerV3Pool::getQuantAMMWeightedPoolDynamicDataCall {})?;
             // The weights and their interpolation window are re-read rather than kept: the pool's
             // rule engine rewrites them whenever it pushes a weight update.
             let mutable = quantamm_mutable(pool, &dynamic, block_timestamp)?;
@@ -567,7 +557,11 @@ where
         }
         // `PoolState` covers families this module never builds, so the maths library adding one
         // cannot reach here through a state it produced.
-        _ => Err(SimulationError::FatalError(format!(
+        PoolState::Base(_) |
+        PoolState::GyroECLP(_) |
+        PoolState::ReClamm(_) |
+        PoolState::LiquidityBootstrapping(_) |
+        PoolState::FixedPriceLBP(_) => Err(SimulationError::FatalError(format!(
             "balancer_v3 pool {pool} holds a state of a family this module does not build"
         ))),
     }
@@ -657,7 +651,7 @@ where
         return Ok(false);
     }
     let state: IBalancerV3Vault::getPoolPausedStateReturn =
-        call(engine, &VAULT, IBalancerV3Vault::getPoolPausedStateCall { pool: *pool })?;
+        call(engine, &VAULT, &IBalancerV3Vault::getPoolPausedStateCall { pool: *pool })?;
     Ok(state._0)
 }
 
@@ -720,7 +714,7 @@ fn refreshed_base(
 }
 
 /// Assembles the fields every pool family shares.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "one parameter per field of the shared pool state")]
 fn base_state(
     pool: &AlloyAddress,
     pool_type: BalancerPoolType,
@@ -755,7 +749,7 @@ fn params(to: AlloyAddress, data: Vec<u8>) -> SimulationParameters {
 fn call<D, C, R>(
     engine: &SimulationEngine<D>,
     to: &AlloyAddress,
-    sol_call: C,
+    sol_call: &C,
 ) -> Result<R, SimulationError>
 where
     D: EngineDatabaseInterface + Clone + Debug,

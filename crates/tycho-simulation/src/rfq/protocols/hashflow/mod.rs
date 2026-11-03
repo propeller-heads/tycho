@@ -4,6 +4,12 @@ mod models;
 mod source;
 pub mod state;
 
+pub use feed::HashflowBookAssemblerBuilder;
+pub use models::{HashflowMarketMakerLevels, HashflowPair, HashflowPrices};
+pub use source::HashflowBookAssembler;
+#[cfg(test)]
+mod test_support;
+
 /// Protocol system stamped on every component this integration emits.
 pub const PROTOCOL_SYSTEM: &str = "rfq:hashflow";
 

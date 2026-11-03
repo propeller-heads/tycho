@@ -23,6 +23,7 @@ hex.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true
 lru.workspace = true
+num-bigint.workspace = true
 metrics = "0.24"
 diesel-derive-enum = { version = "2.1.0", features = ["postgres"] }
 diesel_migrations = "2.1.0"
@@ -35,3 +36,6 @@ roaring.workspace = true
 pretty_assertions.workspace = true
 rstest.workspace = true
 test-log = { version = "0.2.14", features = ["trace"] }
+
+[lints]
+workspace = true
