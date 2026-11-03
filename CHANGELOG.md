@@ -1,3 +1,5 @@
+## [0.496.2](https://github.com/propeller-heads/tycho/compare/0.496.1...0.496.2) (2026-11-03)
+
 ## [0.496.1](https://github.com/propeller-heads/tycho/compare/0.496.0...0.496.1) (2026-11-02)
 
 
