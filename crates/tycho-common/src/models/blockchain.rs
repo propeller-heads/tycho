@@ -188,7 +188,10 @@ pub struct BlockTransactionDeltas<T> {
     pub deltas: Vec<TransactionDeltaGroup<T>>,
 }
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "named by the public BlockTransactionDeltas::deltas field but never constructed; removing it is a breaking change"
+)]
 pub struct TransactionDeltaGroup<T> {
     changes: T,
     protocol_component: HashMap<String, ProtocolComponent>,
@@ -220,7 +223,10 @@ pub struct BlockAggregatedChanges {
 }
 
 impl BlockAggregatedChanges {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         extractor: &str,
         chain: Chain,
@@ -313,8 +319,10 @@ impl BlockAggregatedChanges {
         for (k, v) in other.account_deltas {
             match self.account_deltas.entry(k) {
                 Entry::Occupied(mut e) => {
-                    // best-effort: ignore merge errors (address mismatch is a bug)
-                    let _ = e.get_mut().merge(v);
+                    // The entry is keyed by address, so a merge error is an address mismatch bug.
+                    if let Err(err) = e.get_mut().merge(v) {
+                        warn!("failed to merge account delta: {err}");
+                    }
                 }
                 Entry::Vacant(e) => {
                     e.insert(v);
@@ -325,7 +333,9 @@ impl BlockAggregatedChanges {
         for (k, v) in other.state_deltas {
             match self.state_deltas.entry(k) {
                 Entry::Occupied(mut e) => {
-                    let _ = e.get_mut().merge(v);
+                    if let Err(err) = e.get_mut().merge(v) {
+                        warn!("failed to merge protocol state delta: {err}");
+                    }
                 }
                 Entry::Vacant(e) => {
                     e.insert(v);
@@ -601,7 +611,10 @@ pub struct TxWithChanges {
 }
 
 impl TxWithChanges {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         tx: Transaction,
         protocol_components: HashMap<ComponentId, ProtocolComponent>,
@@ -1154,8 +1167,8 @@ impl BlockChanges {
         let first_state = iter.next().unwrap_or_default();
 
         let aggregated_changes = iter.try_fold(first_state, |mut acc_state, new_state| {
-            acc_state.merge(new_state.clone())?;
-            Ok::<_, MergeError>(acc_state.clone())
+            acc_state.merge(new_state)?;
+            Ok::<_, MergeError>(acc_state)
         })?;
 
         // Aggregate trace_results
@@ -1256,8 +1269,8 @@ impl BlockChanges {
         if self.extractor != other.extractor {
             return Err(MergeError::IdMismatch(
                 "partial blocks (extractor)".to_string(),
-                self.extractor.clone(),
-                other.extractor.clone(),
+                self.extractor,
+                other.extractor,
             ));
         }
 
@@ -1272,8 +1285,8 @@ impl BlockChanges {
         if self.block.number != other.block.number {
             return Err(MergeError::BlockMismatch(
                 "partial blocks".to_string(),
-                self.block.hash.clone(),
-                other.block.hash.clone(),
+                self.block.hash,
+                other.block.hash,
             ));
         }
 
@@ -1437,7 +1450,7 @@ pub mod fixtures {
                             (
                                 token.clone(),
                                 AccountBalance {
-                                    token: token.clone(),
+                                    token,
                                     balance: Bytes::from(500_u64).lpad(32, 0),
                                     modify_tx: tx.hash.clone(),
                                     account: contract.clone(),
@@ -1522,7 +1535,7 @@ pub mod fixtures {
                         HashMap::from([(
                             token.clone(),
                             AccountBalance {
-                                token: token.clone(),
+                                token,
                                 balance: Bytes::from(700_u64).lpad(32, 0),
                                 modify_tx: tx.hash,
                                 account: contract,
@@ -1734,7 +1747,7 @@ pub mod fixtures {
                 .accessed_slots
                 .get(&address2)
                 .unwrap(),
-            &HashSet::from([store_key1.clone(), store_key2.clone()])
+            &HashSet::from([store_key1, store_key2])
         );
     }
 
@@ -1790,9 +1803,9 @@ pub mod fixtures {
                 (address2.clone(), AddressStorageLocation::new(store_key2.clone(), 12)),
             ]),
             HashMap::from([
-                (address1.clone(), HashSet::from([store_key1.clone()])),
-                (address2.clone(), HashSet::from([store_key2.clone()])),
-                (address3.clone(), HashSet::from([store_key1.clone()])),
+                (address1, HashSet::from([store_key1.clone()])),
+                (address2, HashSet::from([store_key2])),
+                (address3, HashSet::from([store_key1])),
             ]),
         );
 

@@ -171,9 +171,8 @@ impl HashflowClient {
                     if attempt < MAX_RETRIES - 1 {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
-                    } else {
-                        return Err(last_error.unwrap());
                     }
+                    return Err(last_error.unwrap());
                 }
                 Err(_) => {
                     return Err(RFQError::ConnectionError(format!(
@@ -195,9 +194,8 @@ impl HashflowClient {
                         if attempt < MAX_RETRIES - 1 {
                             tokio::time::sleep(Duration::from_millis(100)).await;
                             continue;
-                        } else {
-                            return Err(last_error.unwrap());
                         }
+                        return Err(last_error.unwrap());
                     }
                 };
                 // The venue answering a quote request at all means the request reached it,
@@ -210,9 +208,8 @@ impl HashflowClient {
                     warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, error = %err_msg, "returned non-200 status");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
-                } else {
-                    return Err(last_error.unwrap());
                 }
+                return Err(last_error.unwrap());
             }
 
             let quote_response = match response
@@ -228,9 +225,8 @@ impl HashflowClient {
                     if attempt < MAX_RETRIES - 1 {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
-                    } else {
-                        return Err(last_error.unwrap());
                     }
+                    return Err(last_error.unwrap());
                 }
             };
 
@@ -255,10 +251,10 @@ impl HashflowClient {
                         } else {
                             quote_attributes.insert(
                                 "external_account".to_string(),
-                                Bytes::from_str(&Address::ZERO.to_string()).map_err(|_| {
-                                    RFQError::ParsingError(
-                                        "Failed to parse zero address".to_string(),
-                                    )
+                                Bytes::from_str(&Address::ZERO.to_string()).map_err(|e| {
+                                    RFQError::ParsingError(format!(
+                                        "Failed to parse zero address: {e}"
+                                    ))
                                 })?,
                             );
                         }
@@ -274,9 +270,9 @@ impl HashflowClient {
                             Bytes::from(
                                 biguint_to_u256(
                                     &BigUint::from_str(&quote.quote_data.base_token_amount)
-                                        .map_err(|_| {
+                                        .map_err(|e| {
                                             RFQError::ParsingError(format!(
-                                                "Failed to parse base token amount: {}",
+                                                "Failed to parse base token amount: {} ({e})",
                                                 quote.quote_data.base_token_amount
                                             ))
                                         })?,
@@ -290,9 +286,9 @@ impl HashflowClient {
                             Bytes::from(
                                 biguint_to_u256(
                                     &BigUint::from_str(&quote.quote_data.quote_token_amount)
-                                        .map_err(|_| {
+                                        .map_err(|e| {
                                             RFQError::ParsingError(format!(
-                                                "Failed to parse quote token amount: {}",
+                                                "Failed to parse quote token amount: {} ({e})",
                                                 quote.quote_data.quote_token_amount
                                             ))
                                         })?,
@@ -324,28 +320,27 @@ impl HashflowClient {
                             base_token: params.token_in.clone(),
                             quote_token: params.token_out.clone(),
                             amount_in: BigUint::from_str(&quote.quote_data.base_token_amount)
-                                .map_err(|_| {
+                                .map_err(|e| {
                                     RFQError::ParsingError(format!(
-                                        "Failed to parse amount in string: {}",
+                                        "Failed to parse amount in string: {} ({e})",
                                         quote.quote_data.base_token_amount
                                     ))
                                 })?,
                             amount_out: BigUint::from_str(&quote.quote_data.quote_token_amount)
-                                .map_err(|_| {
+                                .map_err(|e| {
                                     RFQError::ParsingError(format!(
-                                        "Failed to parse amount out string: {}",
+                                        "Failed to parse amount out string: {} ({e})",
                                         quote.quote_data.quote_token_amount
                                     ))
                                 })?,
                             quote_attributes,
                         };
                         return Ok(signed_quote);
-                    } else {
-                        return Err(RFQError::QuoteNotFound(format!(
-                            "Hashflow quote not found for {} {} ->{}",
-                            params.amount_in, params.token_in, params.token_out,
-                        )));
                     }
+                    return Err(RFQError::QuoteNotFound(format!(
+                        "Hashflow quote not found for {} {} ->{}",
+                        params.amount_in, params.token_in, params.token_out,
+                    )));
                 }
                 "fail" => {
                     let Some(error) = quote_response.error else {
@@ -524,9 +519,9 @@ mod tests {
         (server, request_log)
     }
 
-    fn create_test_client(base_url: String, quote_timeout: Duration) -> HashflowClient {
+    fn create_test_client(base_url: &str, quote_timeout: Duration) -> HashflowClient {
         HashflowClient::new(
-            Some(&base_url),
+            Some(base_url),
             Chain::Ethereum.id(),
             "test_user".to_string(),
             "test_key".to_string(),
@@ -536,8 +531,7 @@ mod tests {
 
     #[test]
     fn debug_output_omits_credentials() {
-        let client =
-            create_test_client("https://hashflow.example".to_string(), Duration::from_secs(1));
+        let client = create_test_client("https://hashflow.example", Duration::from_secs(1));
         let rendered = format!("{client:?}");
 
         assert!(!rendered.contains("test_user"));
@@ -552,7 +546,7 @@ mod tests {
     async fn a_refused_status_leaves_the_component_quotable() {
         let server =
             spawn_http_server(|_| Some(("429 Too Many Requests", "slow down".to_string()))).await;
-        let client = create_test_client(server.url(), Duration::from_secs(1));
+        let client = create_test_client(&server.url(), Duration::from_secs(1));
 
         let error = client
             .request_binding_quote(&create_test_quote_params(), "mm1".to_string())
@@ -585,7 +579,7 @@ mod tests {
         // trader's shared nonce scope, so the client rejects it.
         let (server, _) =
             quote_server(Duration::ZERO, QUOTE_RESPONSE_WITHOUT_EFFECTIVE_TRADER).await;
-        let client = create_test_client(server.url(), Duration::from_secs(1));
+        let client = create_test_client(&server.url(), Duration::from_secs(1));
         let params = create_test_quote_params();
 
         let err = client
@@ -628,7 +622,7 @@ mod tests {
         #[case] says: &str,
     ) {
         let (server, _) = quote_server(Duration::ZERO, body).await;
-        let client = create_test_client(server.url(), Duration::from_secs(1));
+        let client = create_test_client(&server.url(), Duration::from_secs(1));
 
         let error = client
             .request_binding_quote(&create_test_quote_params(), "mm1".to_string())
@@ -651,7 +645,7 @@ mod tests {
         // The wire request carries the receiver as Hashflow's trader, a fresh random address as
         // the effectiveTrader — a new one per quote request — and the one maker it goes to.
         let (server, request_log) = quote_server(Duration::ZERO, QUOTE_RESPONSE).await;
-        let client = create_test_client(server.url(), Duration::from_secs(1));
+        let client = create_test_client(&server.url(), Duration::from_secs(1));
         let params = create_test_quote_params();
 
         let first_quote = client
@@ -698,7 +692,7 @@ mod tests {
         let (server, _) = quote_server(Duration::from_millis(500), QUOTE_RESPONSE).await;
 
         // Test 1: Client with short timeout (200ms) - should timeout
-        let client_short_timeout = create_test_client(server.url(), Duration::from_millis(200));
+        let client_short_timeout = create_test_client(&server.url(), Duration::from_millis(200));
         let params = create_test_quote_params();
 
         // This should timeout after 200ms
@@ -715,7 +709,10 @@ mod tests {
             RFQError::ConnectionError(msg) => {
                 assert!(msg.contains("timed out"), "Expected timeout error, got: {}", msg);
             }
-            _ => panic!("Expected ConnectionError, got: {:?}", err),
+            RFQError::ParsingError(_) |
+            RFQError::FatalError(_) |
+            RFQError::InvalidInput(_) |
+            RFQError::QuoteNotFound(_) => panic!("Expected ConnectionError, got: {:?}", err),
         }
         // Should have timed out around 200ms, definitely less than 400ms
         assert!(
@@ -727,7 +724,7 @@ mod tests {
         // Test 2: Client with long timeout (1 second) - should wait and receive response
         // Note: With retry logic, we may need multiple attempts if the response is malformed,
         // so we need a longer timeout to account for retries
-        let client_long_timeout = create_test_client(server.url(), Duration::from_secs(1));
+        let client_long_timeout = create_test_client(&server.url(), Duration::from_secs(1));
 
         // This should wait for the response (500ms)
         let result = client_long_timeout
@@ -757,7 +754,7 @@ mod tests {
         })
         .await;
 
-        let client = create_test_client(server.url(), Duration::from_secs(5));
+        let client = create_test_client(&server.url(), Duration::from_secs(5));
         let params = create_test_quote_params();
         let result = client
             .request_binding_quote(&params, "mm1".to_string())
@@ -827,6 +824,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "hits Hashflow's live API; requires HASHFLOW_USER and HASHFLOW_KEY"]
     async fn live_hashflow_api_refuses_a_chain_it_does_not_price() {
+        #[expect(
+            clippy::unused_result_ok,
+            reason = "a missing .env file is fine; the variables may come from the environment"
+        )]
         dotenv().ok();
         let source = std::env::var("HASHFLOW_USER").expect("HASHFLOW_USER not set");
         let auth_key = std::env::var("HASHFLOW_KEY").expect("HASHFLOW_KEY not set");

@@ -35,11 +35,14 @@ impl Observation {
         // 2. tickCumulative (signed 56-bit)
         let tick_bits: u64 = ((value >> 32u32) & U256::from((1u64 << 56) - 1)).to::<u64>();
 
+        let tick_bits_signed = i64::try_from(tick_bits).map_err(|e| {
+            SimulationError::FatalError(format!("Observation tick bits {tick_bits}: {e}"))
+        })?;
         let tick_cumulative: i64 = if (tick_bits & (1 << 55)) != 0 {
             // 56-bit sign extend
-            (tick_bits as i64) - (1i64 << 56)
+            tick_bits_signed - (1i64 << 56)
         } else {
-            tick_bits as i64
+            tick_bits_signed
         };
 
         // 3. secondsPerLiquidityCumulativeX128 (160-bit)
@@ -60,7 +63,7 @@ impl Observation {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Observations {
+pub struct Observations {
     observations: Vec<Observation>,
 }
 
@@ -80,7 +83,9 @@ impl Observations {
     }
 
     pub fn upsert_observation(&mut self, index: i32, bytes: &[u8]) -> Result<(), SimulationError> {
-        let idx = index as usize;
+        let idx = usize::try_from(index).map_err(|e| {
+            SimulationError::FatalError(format!("Invalid observation index {index}: {e}"))
+        })?;
         if bytes.is_empty() {
             return if idx < self.observations.len() {
                 self.observations.remove(idx);
@@ -315,15 +320,14 @@ impl Observations {
             // we're in the middle
             let observation_time_delta = at_or_after
                 .block_timestamp
-                .wrapping_sub(before_or_at.block_timestamp)
-                as i64;
-            let target_delta = target.wrapping_sub(before_or_at.block_timestamp) as i64;
+                .wrapping_sub(before_or_at.block_timestamp);
+            let target_delta = target.wrapping_sub(before_or_at.block_timestamp);
 
             // `Oracle.observeSingle` divides before it multiplies; both truncate towards zero.
             let tick_cumulative = before_or_at.tick_cumulative +
                 (at_or_after.tick_cumulative - before_or_at.tick_cumulative) /
-                    observation_time_delta *
-                    target_delta;
+                    i64::from(observation_time_delta) *
+                    i64::from(target_delta);
 
             let seconds_per_liquidity_cumulative_x128 = {
                 let delta = safe_sub_u256(
@@ -331,8 +335,8 @@ impl Observations {
                     before_or_at.seconds_per_liquidity_cumulative_x128,
                 )?;
                 let scaled = safe_div_u256(
-                    safe_mul_u256(delta, U256::from(target_delta as u128))?,
-                    U256::from(observation_time_delta as u128),
+                    safe_mul_u256(delta, U256::from(target_delta))?,
+                    U256::from(observation_time_delta),
                 )?;
                 safe_add_u256(before_or_at.seconds_per_liquidity_cumulative_x128, scaled)?
             };
@@ -555,7 +559,7 @@ mod tests {
         let tick_encoded = if tick_cumulative < 0 {
             U256::from((1i128 << 56) + tick_cumulative as i128)
         } else {
-            U256::from(tick_cumulative as u64)
+            U256::from(u64::try_from(tick_cumulative).unwrap())
         };
         value |= tick_encoded << 32u32;
 

@@ -18,6 +18,7 @@ use tycho_simulation::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             aerodrome_v1::state::AerodromeV1State,
             balancer_v3::BalancerV3State,
+            biconomy::BiconomyState,
             cowamm::state::CowAMMState,
             curve::CurveState,
             ekubo::state::EkuboState,
@@ -123,7 +124,7 @@ pub struct ProtocolStreamProcessor {
 }
 
 impl ProtocolStreamProcessor {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "one argument per stream setting")]
     pub fn new(
         chain: Chain,
         tycho_url: String,
@@ -133,8 +134,8 @@ impl ProtocolStreamProcessor {
         protocols: Option<Vec<String>>,
         partial_blocks: bool,
         no_tls: bool,
-    ) -> miette::Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             chain,
             tycho_url,
             tycho_api_key,
@@ -144,7 +145,7 @@ impl ProtocolStreamProcessor {
             protocols,
             partial_blocks,
             no_tls,
-        })
+        }
     }
 
     /// Sets per-protocol TVL thresholds. Each one replaces the global threshold for its protocol
@@ -239,8 +240,7 @@ impl ProtocolStreamProcessor {
                 .unwrap_or(self.tvl_threshold);
             let tvl_filter =
                 ComponentFilter::with_tvl_range(threshold / self.tvl_buffer_ratio, threshold);
-            protocol_stream =
-                self.add_protocol_to_stream(protocol_stream, protocol, &tvl_filter)?;
+            protocol_stream = Self::add_protocol_to_stream(protocol_stream, protocol, &tvl_filter)?;
         }
         if self.partial_blocks {
             protocol_stream = protocol_stream.enable_partial_blocks();
@@ -306,6 +306,7 @@ impl ProtocolStreamProcessor {
                 "pancakeswap_infinity_cl".to_string(),
                 "aero_cl".to_string(),
                 "aero_basic".to_string(),
+                "biconomy".to_string(),
             ],
             Chain::Bsc => vec![
                 "uniswap_v2".to_string(),
@@ -364,13 +365,14 @@ impl ProtocolStreamProcessor {
                     "aero_basic".to_string(),
                 ]
             }
-            _ => vec![],
+            Chain::Starknet | Chain::ZkSync | Chain::Plasma | Chain::Arc | Chain::Custom(_) | _ => {
+                vec![]
+            }
         }
     }
 
     /// Add a specific protocol to the stream builder
     fn add_protocol_to_stream(
-        &self,
         mut stream: ProtocolStreamBuilder,
         protocol: &str,
         tvl_filter: &ComponentFilter,
@@ -543,6 +545,9 @@ impl ProtocolStreamProcessor {
             "lunarbase" => {
                 stream = stream.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None);
             }
+            "biconomy" => {
+                stream = stream.exchange::<BiconomyState>("biconomy", tvl_filter.clone(), None);
+            }
             "ring_swap_v2" => {
                 stream =
                     stream.exchange::<RingSwapV2State>("ring_swap_v2", tvl_filter.clone(), None);
@@ -574,7 +579,6 @@ mod tests {
             false,
             false,
         )
-        .unwrap()
     }
 
     #[test]

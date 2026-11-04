@@ -115,6 +115,14 @@ pub fn must_output_through_router(params: &Params, client_fee_bps: i64) -> Resul
     Ok(false)
 }
 
+/// Narrows an intermediate 128-bit fee amount to the `i64` fee type, reverting when it does not
+/// fit.
+fn fee_to_i64(amount: i128) -> Result<i64, Error> {
+    i64::try_from(amount).map_err(|_out_of_range| {
+        Error::revert(format!("_calculate_fee: fee amount {amount} overflows i64"))
+    })
+}
+
 /// Mirrors `FeeCalculator._calculateFee` in Solidity.
 ///
 /// Returns `(router_fee, client_fee)`: the total router fee (fee on output +
@@ -135,12 +143,13 @@ fn _calculate_fee(
 
     if client_fee_bps > 0 {
         let client_fee_numerator = fee_base as i128 * client_fee_bps as i128;
-        let total_client_fee = (client_fee_numerator / MAX_BPS as i128) as i64;
+        let total_client_fee = fee_to_i64(client_fee_numerator / MAX_BPS as i128)?;
 
         if fee_info.router_fee_on_client_fee_bps > 0 {
-            router_fee_on_client_fee = (client_fee_numerator *
-                fee_info.router_fee_on_client_fee_bps as i128 /
-                MAX_BPS_SQUARED as i128) as i64;
+            router_fee_on_client_fee = fee_to_i64(
+                client_fee_numerator * fee_info.router_fee_on_client_fee_bps as i128 /
+                    MAX_BPS_SQUARED as i128,
+            )?;
         }
 
         client_fee = checked_subtract(total_client_fee, router_fee_on_client_fee)?;
@@ -149,8 +158,9 @@ fn _calculate_fee(
     let mut router_fee = router_fee_on_client_fee;
 
     if fee_info.router_fee_on_output_bps > 0 {
-        router_fee +=
-            (fee_base as i128 * fee_info.router_fee_on_output_bps as i128 / MAX_BPS as i128) as i64;
+        router_fee += fee_to_i64(
+            fee_base as i128 * fee_info.router_fee_on_output_bps as i128 / MAX_BPS as i128,
+        )?;
     }
 
     Ok((router_fee, client_fee))

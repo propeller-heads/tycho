@@ -36,3 +36,6 @@ roaring.workspace = true
 pretty_assertions.workspace = true
 rstest.workspace = true
 test-log = { version = "0.2.14", features = ["trace"] }
+
+[lints]
+workspace = true

@@ -8,10 +8,9 @@ use tycho_common::{models::Chain, Bytes};
 
 use crate::encoding::errors::EncodingError;
 
-pub(crate) const DEFAULT_EXECUTORS_JSON: &str =
-    include_str!("../../../config/executor_addresses.json");
-pub(crate) const DEFAULT_ROUTERS_JSON: &str = include_str!("../../../config/router_addresses.json");
-pub(crate) const PROTOCOL_SPECIFIC_CONFIG: &str =
+pub const DEFAULT_EXECUTORS_JSON: &str = include_str!("../../../config/executor_addresses.json");
+pub const DEFAULT_ROUTERS_JSON: &str = include_str!("../../../config/router_addresses.json");
+pub const PROTOCOL_SPECIFIC_CONFIG: &str =
     include_str!("../../../config/protocol_specific_addresses.json");
 
 /// Default router addresses keyed by chain, parsed from `config/router_addresses.json`.
@@ -49,14 +48,13 @@ pub static ROUTER_ETH_ADDRESS: LazyLock<Bytes> = LazyLock::new(|| {
 pub const ANGSTROM_DEFAULT_BLOCKS_IN_FUTURE: u64 = 10;
 
 /// The endpoint serving Angstrom pool unlock attestations.
-pub(crate) const ANGSTROM_DEFAULT_API_URL: &str =
-    "https://attestations.angstrom.xyz/getAttestations";
+pub const ANGSTROM_DEFAULT_API_URL: &str = "https://attestations.angstrom.xyz/getAttestations";
 
 /// The size of a single Angstrom attestation, without its block number prefix.
 ///
 /// The Uniswap V4 executor rejects attestation data that is not a whole number of
 /// `8 + ANGSTROM_ATTESTATION_SIZE` byte entries.
-pub(crate) const ANGSTROM_ATTESTATION_SIZE: usize = 85;
+pub const ANGSTROM_ATTESTATION_SIZE: usize = 85;
 
 /// The shortest time Ethereum can take to produce a block, which both the refresh interval and
 /// the maximum window age derive from.
@@ -75,7 +73,7 @@ const ETHEREUM_MIN_BLOCK_TIME_SECS: u64 = 12;
 const ANGSTROM_ATTESTATION_REFRESHES_PER_BLOCK: u64 = 2;
 
 /// How long the background prefetcher waits between Angstrom attestation refreshes.
-pub(crate) const ANGSTROM_ATTESTATION_REFRESH_INTERVAL: Duration =
+pub const ANGSTROM_ATTESTATION_REFRESH_INTERVAL: Duration =
     Duration::from_secs(ETHEREUM_MIN_BLOCK_TIME_SECS / ANGSTROM_ATTESTATION_REFRESHES_PER_BLOCK);
 
 /// How many of the fetched window's blocks may elapse before the cache refetches while encoding.
@@ -91,7 +89,7 @@ const ANGSTROM_ATTESTATION_MAX_AGE_BLOCKS: u64 = 1;
 ///
 /// Only reached when the background refresh has stopped keeping up: a healthy refresher replaces
 /// the window every `ANGSTROM_ATTESTATION_REFRESH_INTERVAL`.
-pub(crate) const ANGSTROM_ATTESTATION_MAX_AGE: Duration =
+pub const ANGSTROM_ATTESTATION_MAX_AGE: Duration =
     Duration::from_secs(ETHEREUM_MIN_BLOCK_TIME_SECS * ANGSTROM_ATTESTATION_MAX_AGE_BLOCKS);
 
 /// How long a single request to the Angstrom API may take before it is aborted.
@@ -100,7 +98,7 @@ pub(crate) const ANGSTROM_ATTESTATION_MAX_AGE: Duration =
 /// refresh still replaces the window within `ANGSTROM_ATTESTATION_MAX_AGE` of the previous one
 /// (3s aborted + 6s sleep + at most 3s for the retry). The slowest read measured against the
 /// live API was 902ms, including DNS and TLS on a cold connection.
-pub(crate) const ANGSTROM_API_TIMEOUT: Duration =
+pub const ANGSTROM_API_TIMEOUT: Duration =
     Duration::from_secs(ANGSTROM_ATTESTATION_REFRESH_INTERVAL.as_secs() / 2);
 
 /// These protocols support the optimization of grouping swaps.
@@ -160,10 +158,10 @@ pub const FALLBACK_PREFIX: &str = "fallback:";
 pub const FALLBACK_KEY: &str = "fallback";
 
 /// Config key of `TychoSubsidizingExecutor` and of its `payer_address`.
-pub(crate) const SUBSIDY_KEY: &str = "subsidy";
+pub const SUBSIDY_KEY: &str = "subsidy";
 
 /// Protocol system of the native token wrap/unwrap.
-pub(crate) const NATIVE_WRAPPER_PROTOCOL_SYSTEM: &str = "native_wrapper";
+pub const NATIVE_WRAPPER_PROTOCOL_SYSTEM: &str = "native_wrapper";
 
 /// BaiBai components, and the static attributes naming the pair's base and quote token.
 pub const BAIBAI_PROTOCOL_SYSTEM: &str = "baibai";

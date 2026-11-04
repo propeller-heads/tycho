@@ -57,7 +57,7 @@ use crate::{
     fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
     statistics::TestStatistics,
     stream_processor::{
-        book_stream_processor::BookStreamProcessor,
+        book_stream_processor::{BookStreamProcessor, PammSelection, PammVenue, RfqSelection},
         price_level_stream_processor::PriceLevelStreamProcessor,
         protocol_stream_processor::{ProtocolStreamProcessor, ProtocolTvlThreshold},
         StreamUpdate, StreamUpdatePayload,
@@ -65,6 +65,10 @@ use crate::{
 };
 
 #[derive(Parser, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent command-line switches, not mutually exclusive states"
+)]
 struct Cli {
     /// The TVL threshold in native token units to filter the graph by.
     /// Defaults to a chain-appropriate value targeting ~$200K USD equivalent (Medium tier).
@@ -102,9 +106,16 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_rfq: bool,
 
-    /// Disable the pAMM book feeds (Metric; BaiBai on Base once its executor is configured)
+    /// Disable the pAMM book feeds
     #[arg(long, default_value_t = false)]
     disable_pamm: bool,
+
+    /// pAMM book feeds to run, comma-separated (e.g. metric). Replaces the default list
+    /// (metric). A listed venue missing its credentials, or whose feed fails to build, fails the
+    /// run; a default venue is skipped instead. A feed that builds but fails once it runs, for
+    /// example on a chain its venue does not serve, ends with a warning like any other feed.
+    #[arg(long, value_delimiter = ',', conflicts_with = "disable_pamm")]
+    pamm: Option<Vec<PammVenue>>,
 
     /// Publish each RFQ venue as one component for every pair it prices, which a route may
     /// take one quote from, rather than one component per pair. The number of directions
@@ -327,9 +338,17 @@ fn hashflow_min_amount_in(
 }
 
 #[tokio::main]
+#[expect(
+    clippy::unwrap_in_result,
+    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
+)]
 async fn main() -> miette::Result<()> {
     miette::set_hook(Box::new(|_| Box::new(NarratableReportHandler::new())))?;
-    dotenv().ok();
+    match dotenv() {
+        Ok(_) => {}
+        Err(e) if e.not_found() => {}
+        Err(e) => return Err(miette::miette!("Failed to load .env file: {e}")),
+    }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
@@ -463,15 +482,14 @@ async fn run(cli: Cli) -> miette::Result<()> {
     // processing cannot block protocol update consumption
     let (protocol_tx, mut protocol_rx) =
         tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
-    let (rfq_tx, mut rfq_rx) = tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
+    let (book_tx, mut book_rx) = tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
     let (price_level_tx, mut price_level_rx) =
         tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
     let mut protocol_handle = None;
-    let mut rfq_handle = None;
     let mut price_level_handle = None;
 
     if !cli.disable_onchain {
-        if let Ok(protocol_stream_processor) = ProtocolStreamProcessor::new(
+        let protocol_stream_processor = ProtocolStreamProcessor::new(
             chain,
             cli.tycho_url.clone(),
             cli.tycho_api_key.clone(),
@@ -480,33 +498,26 @@ async fn run(cli: Cli) -> miette::Result<()> {
             cli.protocols.clone(),
             cli.partial_blocks,
             cli.no_tls,
-        ) {
-            protocol_handle = Some(
-                protocol_stream_processor
-                    .with_protocol_tvl_thresholds(cli.protocol_tvl_thresholds.clone())
-                    .run_stream(&all_tokens, protocol_tx)
-                    .await?,
-            );
-        }
-    }
-    if !cli.disable_rfq || !cli.disable_pamm {
-        let book_stream_processor = BookStreamProcessor::new(
-            chain,
-            tvl_threshold,
-            cli.max_simulations as usize,
-            Duration::from_secs(cli.skip_messages_duration),
-            !cli.disable_rfq,
-            !cli.disable_pamm,
-            cli.rfq_all_pairs,
-            cli.rpc_url.clone(),
-        )
-        .unwrap_or_else(|e| panic!("Failed to create book stream processor: {e}"));
-        rfq_handle = Some(
-            book_stream_processor
-                .run_stream(Arc::clone(&all_tokens), rfq_tx)
+        );
+        protocol_handle = Some(
+            protocol_stream_processor
+                .with_protocol_tvl_thresholds(cli.protocol_tvl_thresholds.clone())
+                .run_stream(&all_tokens, protocol_tx)
                 .await?,
         );
     }
+    let book_stream_processor = BookStreamProcessor::new(
+        chain,
+        tvl_threshold,
+        cli.max_simulations as usize,
+        Duration::from_secs(cli.skip_messages_duration),
+        RfqSelection::from_cli(cli.disable_rfq, |name| std::env::var(name).ok()),
+        PammSelection::from_cli(cli.disable_pamm, cli.pamm.clone()),
+        cli.rfq_all_pairs,
+    );
+    let mut book_handle = book_stream_processor
+        .run_stream(Arc::clone(&all_tokens), book_tx)
+        .await?;
     if !cli.disable_price_level_stream {
         if let Some(price_level_stream_processor) = PriceLevelStreamProcessor::new(
             chain,
@@ -540,10 +551,10 @@ async fn run(cli: Cli) -> miette::Result<()> {
     }
     info!("Waiting for first protocol update...");
     let protocol_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
-    let rfq_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
+    let book_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let price_level_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let mut protocol_stream_open = true;
-    let mut book_stream_open = !cli.disable_rfq || !cli.disable_pamm;
+    let mut book_stream_open = book_handle.is_some();
     let mut price_level_stream_open = price_level_handle.is_some();
 
     // Staleness watchdog: if no protocol update arrives within stale_threshold_secs, mark all
@@ -586,13 +597,13 @@ async fn run(cli: Cli) -> miette::Result<()> {
 
             // Monitor book stream termination
             result = async {
-                if let Some(handle) = rfq_handle.as_mut() {
+                if let Some(handle) = book_handle.as_mut() {
                     handle.await
                 } else {
                     std::future::pending().await
                 }
-            }, if rfq_handle.is_some() => {
-                rfq_handle = None;
+            }, if book_handle.is_some() => {
+                book_handle = None;
                 match result {
                     Ok(()) => {
                         warn!("Book stream terminated");
@@ -698,7 +709,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
             }
 
             // Process book updates independently
-            update = rfq_rx.recv(), if book_stream_open => {
+            update = book_rx.recv(), if book_stream_open => {
                 match update {
                     Some(update) => {
                         let update = match update {
@@ -715,7 +726,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
-                        let permit = rfq_semaphore
+                        let permit = book_semaphore
                             .clone()
                             .acquire_owned()
                             .await
@@ -919,7 +930,7 @@ async fn poll_rpc_for_block(
     poll_interval: Duration,
 ) -> miette::Result<BlockPollResult> {
     for attempt in 0..max_attempts {
-        let block = match rpc_tools
+        let Some(block) = rpc_tools
             .provider
             .get_block_by_number(block_tag)
             .await
@@ -927,19 +938,16 @@ async fn poll_rpc_for_block(
             .wrap_err("Failed to fetch block")
             .ok()
             .flatten()
-        {
-            Some(b) => b,
-            None => {
-                warn!(
-                    "Failed to retrieve {block_tag} block (attempt {}/{})",
-                    attempt + 1,
-                    max_attempts
-                );
-                if attempt < max_attempts - 1 {
-                    tokio::time::sleep(poll_interval).await;
-                }
-                continue;
+        else {
+            warn!(
+                "Failed to retrieve {block_tag} block (attempt {}/{})",
+                attempt + 1,
+                max_attempts
+            );
+            if attempt < max_attempts - 1 {
+                tokio::time::sleep(poll_interval).await;
             }
+            continue;
         };
 
         let rpc_block = block.header.number;
@@ -1018,7 +1026,10 @@ fn create_router_overwrites_data(chain: Chain) -> miette::Result<RouterOverwrite
     Ok(RouterOverwritesData { executors, ..Default::default() })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bundles the shared run state and the per-update inputs of one stream update"
+)]
 async fn process_update(
     cli: Arc<Cli>,
     chain: Chain,
@@ -1526,13 +1537,13 @@ async fn process_update(
         process_execution_result(
             simulation_id,
             result,
-            execution_info.clone(),
-            state_str,
-            (*block).clone(),
+            &execution_info,
+            &state_str,
+            &block,
             chain.id().to_string(),
             &mut n_reverts,
             &mut n_failures,
-            statistics.clone(),
+            statistics.as_ref(),
             router_fee,
         );
 
@@ -1554,7 +1565,10 @@ async fn process_update(
     Ok(())
 }
 
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::type_complexity,
+    reason = "returns (state id, component, state) triples consumed once by the caller"
+)]
 fn select_components_to_process(
     update: &StreamUpdate,
     tycho_state: &Arc<RwLock<TychoState>>,
@@ -1648,35 +1662,31 @@ fn select_components_to_process(
         // update, which carries the per-protocol sync states.
         if let StreamUpdatePayload::Protocol(protocol_update) = &update.payload {
             for (protocol, component_ids) in &current_state.component_ids_by_protocol {
-                let protocol_sync_state = protocol_update
+                if let Some(SynchronizerState::Ready(_)) = protocol_update
                     .sync_states
-                    .get(protocol);
-                match protocol_sync_state {
-                    None => continue,
-                    Some(SynchronizerState::Ready(_)) => {
-                        let available_ids: Vec<_> = component_ids
-                            .iter()
-                            .filter(|id| {
-                                !protocol_update
-                                    .states
-                                    .keys()
-                                    .contains(id) &&
-                                    !all_selected_ids.contains(id)
-                            })
-                            .cloned()
-                            .collect();
+                    .get(protocol)
+                {
+                    let available_ids: Vec<_> = component_ids
+                        .iter()
+                        .filter(|id| {
+                            !protocol_update
+                                .states
+                                .keys()
+                                .contains(id) &&
+                                !all_selected_ids.contains(id)
+                        })
+                        .cloned()
+                        .collect();
 
-                        let protocol_selected_ids: Vec<_> = available_ids
-                            .choose_multiple(
-                                &mut rand::rng(),
-                                (cli.max_simulations_stale as usize).min(available_ids.len()),
-                            )
-                            .cloned()
-                            .collect();
+                    let protocol_selected_ids: Vec<_> = available_ids
+                        .choose_multiple(
+                            &mut rand::rng(),
+                            (cli.max_simulations_stale as usize).min(available_ids.len()),
+                        )
+                        .cloned()
+                        .collect();
 
-                        all_selected_ids.extend(protocol_selected_ids);
-                    }
-                    _ => continue,
+                    all_selected_ids.extend(protocol_selected_ids);
                 }
             }
         }
@@ -1717,7 +1727,10 @@ fn select_components_to_process(
 )]
 /// Simulates a swap in each of the component's directions, at most `max_swap_directions` of
 /// them where the component advertises a set of its own.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bundles the component, its state and the shared run state of one validation"
+)]
 async fn process_state(
     simulation_id: &str,
     chain: Chain,
@@ -1953,17 +1966,20 @@ async fn process_state(
         component_id = %execution_info.component_id,
     )
 )]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bundles the execution outcome with the counters and statistics it updates"
+)]
 fn process_execution_result(
     simulation_id: &String,
     result: &TychoExecutionResult,
-    execution_info: TychoExecutionInput,
-    state_str: String,
-    block: Block,
+    execution_info: &TychoExecutionInput,
+    state_str: &str,
+    block: &Block,
     chain_id: String,
     n_reverts: &mut i32,
     n_failures: &mut i32,
-    statistics: Option<Arc<RwLock<TestStatistics>>>,
+    statistics: Option<&Arc<RwLock<TestStatistics>>>,
     router_fee: RouterFeeOnOutput,
 ) {
     match result {
@@ -1994,13 +2010,13 @@ fn process_execution_result(
             // expected
             let slippage = if amount_out >= &simulated_amount_out_without_fee {
                 let diff = amount_out - &simulated_amount_out_without_fee;
-                ((diff.clone() * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
+                ((diff * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
                     .to_f64()
                     .unwrap_or(0.0) /
                     100.0
             } else {
                 let diff = &simulated_amount_out_without_fee - amount_out;
-                -((diff.clone() * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
+                -((diff * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
                     .to_f64()
                     .unwrap_or(0.0) /
                     100.0
@@ -2009,13 +2025,13 @@ fn process_execution_result(
             // Generate Tenderly URL for debugging with state overrides
             let overrides = tenderly::TenderlySimParams {
                 network: Some(chain_id),
-                block: tenderly_block(&execution_info, &block),
+                block: tenderly_block(execution_info, block),
                 ..Default::default()
             };
             let tenderly_url = tenderly::build_tenderly_url(
                 &overrides,
                 Some(&execution_info.transaction),
-                Some(&block),
+                Some(block),
                 Address::from_slice(&execution_info.solution.sender()[..20]),
             );
 
@@ -2073,7 +2089,7 @@ fn process_execution_result(
             }
 
             // Record slippage in statistics
-            if let Some(ref stats) = statistics {
+            if let Some(stats) = statistics {
                 let mut stats = stats
                     .write()
                     .expect("Failed to get write lock for statistics (record slippage)");
@@ -2099,13 +2115,13 @@ fn process_execution_result(
             // Generate Tenderly URL for debugging without state overrides
             let overrides = tenderly::TenderlySimParams {
                 network: Some(chain_id),
-                block: tenderly_block(&execution_info, &block),
+                block: tenderly_block(execution_info, block),
                 ..Default::default()
             };
             let tenderly_url = tenderly::build_tenderly_url(
                 &overrides,
                 Some(&execution_info.transaction),
-                Some(&block),
+                Some(block),
                 Address::from_slice(&execution_info.solution.sender()[..20]),
             );
 
@@ -2312,7 +2328,7 @@ mod tests {
 
     use super::{
         book_swap_directions, is_oracle_stale_revert, is_stale_quote, pamm_venue,
-        sample_swap_directions, should_fetch_block_by_number, Cli, TychoState,
+        sample_swap_directions, should_fetch_block_by_number, Cli, PammVenue, TychoState,
     };
 
     #[rstest]
@@ -2433,6 +2449,45 @@ mod tests {
             .map(|t| (t.protocol.as_str(), t.threshold))
             .collect();
         assert_eq!(parsed, [("lunarbase", 10.0), ("pancakeswap_infinity_cl", 3.0)]);
+    }
+
+    fn parse(extra: &[&str]) -> Result<Cli, clap::Error> {
+        let mut args = vec![
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+        ];
+        args.extend_from_slice(extra);
+        Cli::try_parse_from(args)
+    }
+
+    #[test]
+    fn pamm_defaults_to_none() {
+        assert_eq!(parse(&[]).unwrap().pamm, None);
+    }
+
+    #[test]
+    fn pamm_parses_comma_separated_venues() {
+        let cli = parse(&["--pamm", "metric,metric"]).unwrap();
+        assert_eq!(cli.pamm, Some(vec![PammVenue::Metric, PammVenue::Metric]));
+    }
+
+    #[test]
+    fn pamm_rejects_an_unknown_venue() {
+        let error = parse(&["--pamm", "metric,unknown"])
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn pamm_conflicts_with_disable_pamm() {
+        let error = parse(&["--pamm", "metric", "--disable-pamm"])
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

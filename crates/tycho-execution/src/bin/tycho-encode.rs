@@ -47,7 +47,7 @@ use tycho_execution::encoding::{
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    command: Commands,
     #[arg(short, long)]
     chain: Chain,
     #[arg(short, long)]

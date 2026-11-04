@@ -161,7 +161,17 @@ impl BebopBookAssembler {
             }
             // `last_update_ts` is milliseconds on the wire (Bebop's spec says seconds; 13-digit
             // values observed live).
-            let updated_at = DateTime::from_timestamp_millis(book.last_update_ts as i64);
+            let Some(updated_at) = i64::try_from(book.last_update_ts)
+                .ok()
+                .and_then(DateTime::from_timestamp_millis)
+            else {
+                warn!(
+                    %component_id,
+                    last_update_ts = book.last_update_ts,
+                    "skipping book, update timestamp out of range"
+                );
+                continue;
+            };
             let state = BebopState::new(
                 base_token.clone(),
                 quote_token.clone(),
@@ -169,7 +179,10 @@ impl BebopBookAssembler {
                 usd_per_quote_token,
                 Arc::clone(&self.client),
             );
-            collector.push(component_id, VenueBook { signer: Venue, updated_at, state });
+            collector.push(
+                component_id,
+                VenueBook { signer: Venue, updated_at: Some(updated_at), state },
+            );
         }
         collector.finish::<BebopAllPairsState>()
     }
@@ -477,10 +490,11 @@ mod tests {
                 &tokens[&usdc],
             )
             .unwrap();
+        // A hundred USDC the other way round is another direction, not more of the same swap.
         let second = swap.new_state.get_amount_out(
-            num_bigint::BigUint::from(10u64).pow(17),
-            &tokens[&weth],
+            num_bigint::BigUint::from(10u64).pow(8),
             &tokens[&usdc],
+            &tokens[&weth],
         );
         assert!(
             matches!(

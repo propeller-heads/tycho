@@ -52,7 +52,7 @@ fn main() {
     // Then we create a solution object with the previous swap
     let solution = Solution::new(
         user_address.clone(),
-        user_address.clone(),
+        user_address,
         weth.clone(),
         usdc.clone(),
         BigUint::from_str("1_000000000000000000").expect("Failed to create amount"),
@@ -111,7 +111,7 @@ fn main() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        default_token(weth.clone()),
+        default_token(weth),
         default_token(wbtc.clone()),
         BigUint::ZERO,
     );
@@ -122,7 +122,7 @@ fn main() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        default_token(dai.clone()),
+        default_token(dai),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -132,16 +132,12 @@ fn main() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        default_token(wbtc.clone()),
-        default_token(usdc.clone()),
+        default_token(wbtc),
+        default_token(usdc),
         BigUint::ZERO,
     );
-    let complex_solution = solution.clone().with_swaps(vec![
-        swap_weth_dai,
-        swap_weth_wbtc,
-        swap_dai_usdc,
-        swap_wbtc_usdc,
-    ]);
+    let complex_solution =
+        solution.with_swaps(vec![swap_weth_dai, swap_weth_wbtc, swap_dai_usdc, swap_wbtc_usdc]);
 
     // Encode the solution
     let complex_encoded_solution = encoder

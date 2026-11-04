@@ -37,7 +37,10 @@
 // MIT-licensed revision (tree of commit fb3b25c, identical to 518aac1; see ../LICENSE-curve-math).
 // Inlined so tycho-simulation carries no out-of-crates.io dependency. Kept close to upstream to
 // ease future diffing; lints are relaxed across the vendored tree.
-#![allow(dead_code, unused, clippy::all, clippy::pedantic)]
+#![expect(
+    clippy::pedantic,
+    reason = "vendored upstream code, kept close to upstream to ease diffing"
+)]
 
 mod detect;
 mod variant;

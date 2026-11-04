@@ -12,3 +12,5 @@
 @solady=lib/solady/src/
 @ekubo=lib/ekubo/
 @ekubo-v3=lib/ekubo-v3/src/
+forge-std/=lib/forge-std/src/
+solady/=lib/solady/src/

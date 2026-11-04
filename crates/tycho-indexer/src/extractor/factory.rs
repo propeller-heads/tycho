@@ -56,6 +56,7 @@ impl ProtocolTypeConfig {
 pub enum DCIType {
     /// RPC DCI plugin — uses the RPC endpoint to fetch account data.
     #[serde(rename = "rpc")]
+    #[expect(clippy::upper_case_acronyms, reason = "public API; renaming is a breaking change")]
     RPC,
     /// UniswapV4Hooks DCI plugin — wraps RPC DCI and generates hook entry points for tracing.
     UniswapV4Hooks { pool_manager_address: String },
@@ -63,16 +64,16 @@ pub enum DCIType {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ExtractorConfig {
-    name: String,
+    pub name: String,
     #[serde(deserialize_with = "deserialize_chain")]
-    chain: Chain,
-    implementation_type: ImplementationType,
-    sync_batch_size: usize,
-    start_block: i64,
-    stop_block: Option<i64>,
-    protocol_types: Vec<ProtocolTypeConfig>,
-    spkg: String,
-    module_name: String,
+    pub chain: Chain,
+    pub implementation_type: ImplementationType,
+    pub sync_batch_size: usize,
+    pub start_block: i64,
+    pub stop_block: Option<i64>,
+    pub protocol_types: Vec<ProtocolTypeConfig>,
+    pub spkg: String,
+    pub module_name: String,
     #[serde(default)]
     pub initialized_accounts: Vec<Bytes>,
     #[serde(default)]
@@ -80,13 +81,16 @@ pub struct ExtractorConfig {
     #[serde(default)]
     pub dci_plugin: Option<DCIType>,
     #[serde(default)]
-    post_processor: Option<String>,
+    pub post_processor: Option<String>,
     #[serde(default)]
-    pub(super) max_restarts: Option<u32>,
+    pub max_restarts: Option<u32>,
 }
 
 impl ExtractorConfig {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "constructor takes one argument per field of the extractor YAML config"
+    )]
     pub fn new(
         name: String,
         chain: Chain,
@@ -183,7 +187,10 @@ impl ExtractorFactory {
     /// must pass one shared, already populated instance to every factory on the chain instead
     /// of populating one per extractor. Both `chain_state` and the cache are reused across all
     /// subsequent restarts.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "wires every dependency of an extractor; the dependencies are distinct and owned by the caller"
+    )]
     pub async fn create(
         config: ExtractorConfig,
         endpoint_url: String,
@@ -205,7 +212,7 @@ impl ExtractorFactory {
         let chain_state = ChainState::new(
             chrono::Local::now().naive_utc(),
             block_number,
-            chain.block_time_secs() as i64,
+            chain.block_time_secs(),
         );
 
         Ok(Self {
@@ -381,7 +388,12 @@ impl ExtractorFactory {
             Some(spkg),
             self.config.module_name.clone(),
             start_block,
-            self.config.stop_block.unwrap_or(0) as u64,
+            u64::try_from(self.config.stop_block.unwrap_or(0)).map_err(|_overflow| {
+                ExtractionError::Setup(format!(
+                    "stop block {:?} must not be negative",
+                    self.config.stop_block
+                ))
+            })?,
             false, // final_block_only: not exposed in config, always false.
             extractor.get_id().to_string(),
             self.partial_blocks,
@@ -594,7 +606,7 @@ dci_plugin:
             DCIType::UniswapV4Hooks { pool_manager_address } => {
                 assert_eq!(pool_manager_address, "0x000000000004444c5dc75cB358380D2e3dE08A90");
             }
-            _ => panic!("Expected UniswapV4Hooks DCI plugin but got RPC"),
+            DCIType::RPC => panic!("Expected UniswapV4Hooks DCI plugin but got RPC"),
         }
     }
 }

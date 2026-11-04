@@ -87,8 +87,8 @@ impl Books {
 }
 
 impl Extend<Book> for Books {
-    fn extend<I: IntoIterator<Item = Book>>(&mut self, books: I) {
-        for book in books {
+    fn extend<I: IntoIterator<Item = Book>>(&mut self, iter: I) {
+        for book in iter {
             self.insert(book);
         }
     }
