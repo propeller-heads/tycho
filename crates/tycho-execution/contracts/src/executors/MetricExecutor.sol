@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
 import {TransferManager} from "../TransferManager.sol";
@@ -26,6 +27,10 @@ error MetricExecutor__AmountInTooLarge();
 error MetricExecutor__InvalidCallback();
 
 contract MetricExecutor is IExecutor, ICallback {
+    // One directive per slot type: Slither 0.11.6 can fail to analyse a
+    // contract that uses `using TransientSlot for *`.
+    using TransientSlot for bytes32;
+    using TransientSlot for TransientSlot.AddressSlot;
     uint256 private constant _DATA_LENGTH = 61;
     uint256 private constant _INT128_MAX = uint256(uint128(type(int128).max));
 
@@ -157,18 +162,10 @@ contract MetricExecutor is IExecutor, ICallback {
     }
 
     function _setCurrentPool(address pool) internal {
-        bytes32 slot = _CURRENT_METRIC_POOL_SLOT;
-        // slither-disable-next-line assembly
-        assembly {
-            tstore(slot, pool)
-        }
+        _CURRENT_METRIC_POOL_SLOT.asAddress().tstore(pool);
     }
 
     function _getCurrentPool() internal view returns (address pool) {
-        bytes32 slot = _CURRENT_METRIC_POOL_SLOT;
-        // slither-disable-next-line assembly
-        assembly {
-            pool := tload(slot)
-        }
+        pool = _CURRENT_METRIC_POOL_SLOT.asAddress().tload();
     }
 }

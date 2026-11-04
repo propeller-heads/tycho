@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
+import {LowLevelCall} from "@openzeppelin/contracts/utils/LowLevelCall.sol";
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ISubsidyPayer, Subsidy} from "@interfaces/ISubsidyPayer.sol";
 import {CURRENTLY_SWAPPING_EXECUTOR_SLOT, Dispatcher} from "../Dispatcher.sol";
@@ -20,6 +22,10 @@ error TychoSubsidizingExecutor__UnapprovedInnerExecutor(address executor);
  *      [signature: 65][innerExecutor: 20][innerData: ...]
  */
 contract TychoSubsidizingExecutor is IExecutor {
+    // One directive per slot type: Slither 0.11.6 can fail to analyse a
+    // contract that uses `using TransientSlot for *`.
+    using TransientSlot for bytes32;
+    using TransientSlot for TransientSlot.AddressSlot;
     ISubsidyPayer public immutable payer;
     address private immutable _self;
 
@@ -45,31 +51,20 @@ contract TychoSubsidizingExecutor is IExecutor {
         (,,, address tokenOut, bool outputToRouter) =
             inner.getTransferData(innerData);
 
-        // slither-disable-next-line assembly
-        assembly {
-            tstore(CURRENTLY_SWAPPING_EXECUTOR_SLOT, inner)
-        }
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.asAddress().tstore(address(inner));
 
         // The router approved the inner executor, and the Dispatcher sets
         // receiver.
-        // slither-disable-next-line controlled-delegatecall,low-level-calls,missing-zero-check
-        (bool success, bytes memory result) = address(inner)
-            .delegatecall(
+        if (!LowLevelCall.delegatecallNoReturn(
+                address(inner),
                 abi.encodeCall(IExecutor.swap, (amountIn, innerData, receiver))
-            );
-        if (!success) {
-            // slither-disable-next-line assembly
-            assembly {
-                revert(add(result, 0x20), mload(result))
-            }
+            )) {
+            LowLevelCall.bubbleRevert();
         }
 
         // The payer calls out to `subsidyReceiver`; nothing may reach the inner
         // executor through the router's fallback from there.
-        // slither-disable-next-line assembly
-        assembly {
-            tstore(CURRENTLY_SWAPPING_EXECUTOR_SLOT, 0)
-        }
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.asAddress().tstore(address(0));
 
         // Must equal the Dispatcher's measureAt in _callSwapOnExecutor, so the
         // Dispatcher counts the subsidy as hop output.

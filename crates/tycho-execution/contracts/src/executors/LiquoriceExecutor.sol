@@ -23,6 +23,7 @@ contract LiquoriceExecutor is IExecutor {
     // originalBaseTokenAmount (32) + minBaseTokenAmount (32) +
     // liquoriceCalldata selector (4)
     uint256 private constant _MIN_DATA_LENGTH = 112;
+    uint256 private constant _WORD_LEN = 32;
 
     using SafeERC20 for IERC20;
     using Address for address;
@@ -82,7 +83,7 @@ contract LiquoriceExecutor is IExecutor {
             uint32 partialFillOffset,
             uint256 originalBaseTokenAmount,
             uint256 minBaseTokenAmount,
-            bytes memory liquoriceCalldata
+            bytes calldata liquoriceCalldata
         ) = _decodeData(data);
 
         amountIn =
@@ -99,11 +100,13 @@ contract LiquoriceExecutor is IExecutor {
         // Modify the fill amount in the calldata if partial fill is
         // supported. If partialFillOffset is 0, partial fill is not
         // supported.
-        bytes memory finalCalldata = liquoriceCalldata;
+        bytes memory finalCalldata;
         if (partialFillOffset > 0 && originalBaseTokenAmount > amountIn) {
             finalCalldata = _modifyFilledTakerAmount(
                 liquoriceCalldata, amountIn, partialFillOffset
             );
+        } else {
+            finalCalldata = liquoriceCalldata;
         }
 
         uint256 ethValue = tokenIn == ETH_ADDRESS ? amountIn : 0;
@@ -122,7 +125,7 @@ contract LiquoriceExecutor is IExecutor {
             uint32 partialFillOffset,
             uint256 originalBaseTokenAmount,
             uint256 minBaseTokenAmount,
-            bytes memory liquoriceCalldata
+            bytes calldata liquoriceCalldata
         )
     {
         if (data.length < _MIN_DATA_LENGTH) {
@@ -157,7 +160,7 @@ contract LiquoriceExecutor is IExecutor {
     /// @param partialFillOffset The offset from Liquorice API indicating where the fill amount is located
     /// @return The modified calldata with updated fill amount
     function _modifyFilledTakerAmount(
-        bytes memory liquoriceCalldata,
+        bytes calldata liquoriceCalldata,
         uint256 givenAmount,
         uint32 partialFillOffset
     ) internal pure returns (bytes memory) {
@@ -165,14 +168,14 @@ contract LiquoriceExecutor is IExecutor {
         // Position = 4 bytes (selector) + offset bytes
         uint256 fillAmountPos = 4 + uint256(partialFillOffset);
 
-        // slither-disable-next-line assembly
-        assembly {
-            let dataPtr := add(liquoriceCalldata, 0x20)
-            let actualPos := add(dataPtr, fillAmountPos)
-            mstore(actualPos, givenAmount)
+        if (fillAmountPos + _WORD_LEN > liquoriceCalldata.length) {
+            revert LiquoriceExecutor__InvalidDataLength();
         }
-
-        return liquoriceCalldata;
+        return bytes.concat(
+            liquoriceCalldata[:fillAmountPos],
+            bytes32(givenAmount),
+            liquoriceCalldata[fillAmountPos + _WORD_LEN:]
+        );
     }
 
     function getTransferData(bytes calldata data)

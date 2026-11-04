@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
+import {LowLevelCall} from "@openzeppelin/contracts/utils/LowLevelCall.sol";
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
 import {TransferManager} from "./TransferManager.sol";
@@ -19,7 +21,7 @@ error Dispatcher__CallbackReverted(address executor);
 // keccak256("Dispatcher#CURRENTLY_SWAPPING_EXECUTOR_SLOT")
 // Shared with TychoSubsidizingExecutor, which points the router's fallback at
 // its inner executor.
-uint256 constant CURRENTLY_SWAPPING_EXECUTOR_SLOT =
+bytes32 constant CURRENTLY_SWAPPING_EXECUTOR_SLOT =
     0x098a7a3b47801589e8cdf9ec791b93ad44273246946c32ef1fc4dbe45390c80e;
 
 /**
@@ -34,21 +36,27 @@ uint256 constant CURRENTLY_SWAPPING_EXECUTOR_SLOT =
  *  an alternate selector is specified.
  */
 contract Dispatcher is TransferManager {
+    // One directive per slot type: Slither 0.11.6 can fail to analyse a
+    // contract that uses `using TransientSlot for *`.
+    using TransientSlot for bytes32;
+    using TransientSlot for TransientSlot.AddressSlot;
+    using TransientSlot for TransientSlot.BooleanSlot;
+    using TransientSlot for TransientSlot.Uint256Slot;
     using SafeERC20 for IERC20;
 
     mapping(address => uint256) public executorsActivationTimestamp;
 
     // keccak256("Dispatcher#IS_SPLIT_SWAP_SLOT")
-    uint256 private constant _IS_SPLIT_SWAP_SLOT =
+    bytes32 private constant _IS_SPLIT_SWAP_SLOT =
         0x7b3c4e5f6a8d9e0f1c2b3a4d5e6f7c8d9e0f1c2b3a4d5e6f7c8d9e0f1c2b3a4d;
     // keccak256("Dispatcher#IS_FIRST_SWAP_SLOT")
-    uint256 private constant _IS_FIRST_SWAP_SLOT =
+    bytes32 private constant _IS_FIRST_SWAP_SLOT =
         0x8c47a7e3f4c2e1b5a6d9f0e8c7b3a2d1e4f5c6b7a8d9e0f1c2b3a4d5e6f7c8d9;
     // keccak256("Dispatcher#SWAP_INPUT_AMOUNT_SLOT")
-    uint256 private constant _SWAP_INPUT_AMOUNT_SLOT =
+    bytes32 private constant _SWAP_INPUT_AMOUNT_SLOT =
         0xce9e2e8e50d57f2d688020ea7ab16e2039bcf4dc7175eba827e178586597bb39;
     // keccak256("Dispatcher#SWAP_INPUT_TOKEN_SLOT")
-    uint256 private constant _SWAP_INPUT_TOKEN_SLOT =
+    bytes32 private constant _SWAP_INPUT_TOKEN_SLOT =
         0x0c22c14aba48b0e26e3b58475c66f358c352532122e537c32e8184c0159e6e10;
 
     uint256 public constant DELAY_EXECUTOR_ACTIVATION = 1 days;
@@ -101,12 +109,10 @@ contract Dispatcher is TransferManager {
     ) internal returns (uint256 amountOut) {
         _validateExecutor(executor);
 
-        assembly {
-            tstore(CURRENTLY_SWAPPING_EXECUTOR_SLOT, executor)
-            tstore(_IS_FIRST_SWAP_SLOT, isFirstSwap)
-            tstore(_IS_SPLIT_SWAP_SLOT, isSplitSwap)
-            tstore(_SWAP_INPUT_AMOUNT_SLOT, amount)
-        }
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.asAddress().tstore(executor);
+        _IS_FIRST_SWAP_SLOT.asBoolean().tstore(isFirstSwap);
+        _IS_SPLIT_SWAP_SLOT.asBoolean().tstore(isSplitSwap);
+        _SWAP_INPUT_AMOUNT_SLOT.asUint256().tstore(amount);
 
         // slither-disable-next-line calls-loop
         (
@@ -125,9 +131,7 @@ contract Dispatcher is TransferManager {
 
         // Store tokenIn so it can be passed to getCallbackTransferData if a
         // callback occurs during the swap.
-        assembly {
-            tstore(_SWAP_INPUT_TOKEN_SLOT, tokenIn)
-        }
+        _SWAP_INPUT_TOKEN_SLOT.asAddress().tstore(tokenIn);
 
         // Measure output before _transfer so cyclic handling is uniform
         // across callback and direct-transfer types.
@@ -152,13 +156,11 @@ contract Dispatcher is TransferManager {
         );
 
         // Clear transient storage in case no callback was performed
-        assembly {
-            tstore(CURRENTLY_SWAPPING_EXECUTOR_SLOT, 0)
-            tstore(_IS_FIRST_SWAP_SLOT, 0)
-            tstore(_IS_SPLIT_SWAP_SLOT, 0)
-            tstore(_SWAP_INPUT_AMOUNT_SLOT, 0)
-            tstore(_SWAP_INPUT_TOKEN_SLOT, 0)
-        }
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.asAddress().tstore(address(0));
+        _IS_FIRST_SWAP_SLOT.asBoolean().tstore(false);
+        _IS_SPLIT_SWAP_SLOT.asBoolean().tstore(false);
+        _SWAP_INPUT_AMOUNT_SLOT.asUint256().tstore(0);
+        _SWAP_INPUT_TOKEN_SLOT.asAddress().tstore(address(0));
 
         // Revoke any lingering allowance the protocol didn't consume.
         if (transferType == TransferType.ProtocolWillDebit) {
@@ -192,7 +194,6 @@ contract Dispatcher is TransferManager {
         }
     }
 
-    // slither-disable-next-line assembly
     function _callHandleCallbackOnExecutor(bytes calldata data, address caller)
         internal
         returns (bytes memory)
@@ -202,13 +203,11 @@ contract Dispatcher is TransferManager {
         bool isSplitSwap;
         uint256 amount;
         address tokenIn;
-        assembly {
-            executor := tload(CURRENTLY_SWAPPING_EXECUTOR_SLOT)
-            isFirstSwap := tload(_IS_FIRST_SWAP_SLOT)
-            isSplitSwap := tload(_IS_SPLIT_SWAP_SLOT)
-            amount := tload(_SWAP_INPUT_AMOUNT_SLOT)
-            tokenIn := tload(_SWAP_INPUT_TOKEN_SLOT)
-        }
+        executor = CURRENTLY_SWAPPING_EXECUTOR_SLOT.asAddress().tload();
+        isFirstSwap = _IS_FIRST_SWAP_SLOT.asBoolean().tload();
+        isSplitSwap = _IS_SPLIT_SWAP_SLOT.asBoolean().tload();
+        amount = _SWAP_INPUT_AMOUNT_SLOT.asUint256().tload();
+        tokenIn = _SWAP_INPUT_TOKEN_SLOT.asAddress().tload();
 
         _validateExecutor(executor);
 
@@ -237,9 +236,7 @@ contract Dispatcher is TransferManager {
             }
             // Bubble the executor's revert payload byte-for-byte so callers
             // see the original Error(string)/Panic/custom-error
-            assembly {
-                revert(add(result, 0x20), mload(result))
-            }
+            LowLevelCall.bubbleRevert(result);
         }
 
         // Revoke any lingering allowance the protocol didn't consume.
@@ -248,11 +245,9 @@ contract Dispatcher is TransferManager {
         }
 
         // to prevent multiple callbacks
-        assembly {
-            tstore(CURRENTLY_SWAPPING_EXECUTOR_SLOT, 0)
-            tstore(_IS_FIRST_SWAP_SLOT, 0)
-            tstore(_IS_SPLIT_SWAP_SLOT, 0)
-        }
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.asAddress().tstore(address(0));
+        _IS_FIRST_SWAP_SLOT.asBoolean().tstore(false);
+        _IS_SPLIT_SWAP_SLOT.asBoolean().tstore(false);
 
         // The final callback result should not be ABI encoded. That is why we are decoding here.
         // ABI encoding is very gas expensive and we want to avoid it if possible.

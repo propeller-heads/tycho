@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {LibBytes} from "@solady/utils/LibBytes.sol";
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {
     ReentrancyGuardTransient
 } from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
@@ -69,6 +71,11 @@ abstract contract TychoFallbackRouter is
     ReentrancyGuardTransient,
     IUnlockCallback
 {
+    // One directive per slot type: Slither 0.11.6 can fail to analyse a
+    // contract that uses `using TransientSlot for *`.
+    using TransientSlot for bytes32;
+    using TransientSlot for TransientSlot.AddressSlot;
+    using TransientSlot for TransientSlot.Uint256Slot;
     using SafeERC20 for IERC20;
 
     /// @notice The protocols a fallback may use.
@@ -394,10 +401,7 @@ abstract contract TychoFallbackRouter is
         if (revertData.length != 36 || bytes4(revertData) != selector) {
             return 0;
         }
-        // slither-disable-next-line assembly
-        assembly {
-            amountOut := mload(add(revertData, 36))
-        }
+        amountOut = uint256(LibBytes.load(revertData, 4));
     }
 
     /// @dev Runs the tagged protocol, which pays or forwards to `swap_.receiver`. No output
@@ -740,12 +744,9 @@ abstract contract TychoFallbackRouter is
     function _setCallbackContext(address source, address token, uint256 amount)
         internal
     {
-        // slither-disable-next-line assembly
-        assembly {
-            tstore(_CALLBACK_SOURCE_SLOT, source)
-            tstore(_CALLBACK_TOKEN_SLOT, token)
-            tstore(_CALLBACK_AMOUNT_SLOT, amount)
-        }
+        _CALLBACK_SOURCE_SLOT.asAddress().tstore(source);
+        _CALLBACK_TOKEN_SLOT.asAddress().tstore(token);
+        _CALLBACK_AMOUNT_SLOT.asUint256().tstore(amount);
     }
 
     /// @dev Rejects a `msg.sender` that is not the stored source, and clears the context so one
@@ -755,15 +756,12 @@ abstract contract TychoFallbackRouter is
         returns (address token, uint256 amount)
     {
         address source;
-        // slither-disable-next-line assembly
-        assembly {
-            source := tload(_CALLBACK_SOURCE_SLOT)
-            token := tload(_CALLBACK_TOKEN_SLOT)
-            amount := tload(_CALLBACK_AMOUNT_SLOT)
-            tstore(_CALLBACK_SOURCE_SLOT, 0)
-            tstore(_CALLBACK_TOKEN_SLOT, 0)
-            tstore(_CALLBACK_AMOUNT_SLOT, 0)
-        }
+        source = _CALLBACK_SOURCE_SLOT.asAddress().tload();
+        token = _CALLBACK_TOKEN_SLOT.asAddress().tload();
+        amount = _CALLBACK_AMOUNT_SLOT.asUint256().tload();
+        _CALLBACK_SOURCE_SLOT.asAddress().tstore(address(0));
+        _CALLBACK_TOKEN_SLOT.asAddress().tstore(address(0));
+        _CALLBACK_AMOUNT_SLOT.asUint256().tstore(0);
         // An unset context has source == address(0), which no real sender matches.
         if (msg.sender != source) {
             revert TychoFallbackRouter__InvalidCallback();

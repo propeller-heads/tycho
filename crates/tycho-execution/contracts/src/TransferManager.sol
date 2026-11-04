@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {
     SafeERC20,
     IERC20
@@ -45,20 +46,26 @@ error TransferManager__UnknownTransferType();
  * swap entry (`_tstoreTransferFromInfo`) and consumed throughout the swap.
  */
 contract TransferManager is Vault {
+    // One directive per slot type: Slither 0.11.6 can fail to analyse a
+    // contract that uses `using TransientSlot for *`.
+    using TransientSlot for bytes32;
+    using TransientSlot for TransientSlot.AddressSlot;
+    using TransientSlot for TransientSlot.BooleanSlot;
+    using TransientSlot for TransientSlot.Uint256Slot;
     using SafeERC20 for IERC20;
 
     IAllowanceTransfer public immutable permit2;
     // keccak256("TransferManager#TOKEN_IN_SLOT")
-    uint256 private constant _TOKEN_IN_SLOT =
+    bytes32 private constant _TOKEN_IN_SLOT =
         0xaf58e9f1b0923d55d0ec6a57763d43cd9bb1d6bd8bad5ce9522fbe772c6ec42b;
     // keccak256("TransferManager#AMOUNT_ALLOWED_SLOT")
-    uint256 private constant _AMOUNT_ALLOWED_SLOT =
+    bytes32 private constant _AMOUNT_ALLOWED_SLOT =
         0x28d0e2684c9341fec58f816e0c375a4e51f9f34ec034a29c97467df00497c8d9;
     // keccak256("TransferManager#IS_PERMIT2_SLOT")
-    uint256 private constant _IS_PERMIT2_SLOT =
+    bytes32 private constant _IS_PERMIT2_SLOT =
         0xd847dc13274ab371f6244234290f56fa8650ec9dceff86e20efe1ddc141bdb03;
     // keccak256("TransferManager#SENDER_SLOT")
-    uint256 private constant _SENDER_SLOT =
+    bytes32 private constant _SENDER_SLOT =
         0x99298391997747e556e81b2d36d99151315b6c1b92e826ca8d37acad5fddaf70;
 
     constructor(address permit2_) {
@@ -79,7 +86,6 @@ contract TransferManager is Vault {
      * @dev This function is used to store the transfer information in the
      * contract's storage. This is done as the first step in the swap process in TychoRouterV3.
      */
-    // slither-disable-next-line assembly
     function _tstoreTransferFromInfo(
         address tokenIn,
         uint256 amountIn,
@@ -87,13 +93,11 @@ contract TransferManager is Vault {
         bool useVault
     ) internal {
         uint256 amountAllowed = useVault ? 0 : amountIn;
-        assembly {
-            tstore(_TOKEN_IN_SLOT, tokenIn)
-            tstore(_AMOUNT_ALLOWED_SLOT, amountAllowed)
-            tstore(_IS_PERMIT2_SLOT, isPermit2)
-            tstore(_SENDER_SLOT, caller())
-            tstore(_USE_VAULT_SLOT, useVault)
-        }
+        _TOKEN_IN_SLOT.asAddress().tstore(tokenIn);
+        _AMOUNT_ALLOWED_SLOT.asUint256().tstore(amountAllowed);
+        _IS_PERMIT2_SLOT.asBoolean().tstore(isPermit2);
+        _SENDER_SLOT.asAddress().tstore(msg.sender);
+        _USE_VAULT_SLOT.asBoolean().tstore(useVault);
     }
 
     /**
@@ -141,10 +145,7 @@ contract TransferManager is Vault {
 
         // Determine if we need to transfer from user wallet (first swap + not using vault)
         bool useVault;
-        // slither-disable-next-line assembly
-        assembly {
-            useVault := tload(_USE_VAULT_SLOT)
-        }
+        useVault = _USE_VAULT_SLOT.asBoolean().tload();
         bool needsTransferFromUser = isFirstSwap && !useVault;
 
         // Scenario 3 & 4: Protocol will debit tokens from router
@@ -236,13 +237,10 @@ contract TransferManager is Vault {
         address sender;
         bool isPermit2;
 
-        // slither-disable-next-line assembly
-        assembly {
-            tokenInStorage := tload(_TOKEN_IN_SLOT)
-            amountAllowed := tload(_AMOUNT_ALLOWED_SLOT)
-            sender := tload(_SENDER_SLOT)
-            isPermit2 := tload(_IS_PERMIT2_SLOT)
-        }
+        tokenInStorage = _TOKEN_IN_SLOT.asAddress().tload();
+        amountAllowed = _AMOUNT_ALLOWED_SLOT.asUint256().tload();
+        sender = _SENDER_SLOT.asAddress().tload();
+        isPermit2 = _IS_PERMIT2_SLOT.asBoolean().tload();
 
         if (amount > amountAllowed) {
             revert TransferManager__ExceededTransferFromAllowance(
@@ -255,9 +253,7 @@ contract TransferManager is Vault {
 
         // Update remaining allowance
         amountAllowed -= amount;
-        assembly {
-            tstore(_AMOUNT_ALLOWED_SLOT, amountAllowed)
-        }
+        _AMOUNT_ALLOWED_SLOT.asUint256().tstore(amountAllowed);
 
         uint256 balanceBefore = _balanceOf(token, receiver);
         // Perform the actual transfer

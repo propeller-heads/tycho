@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
 import {TransferManager} from "../TransferManager.sol";
@@ -12,6 +13,10 @@ error FluidV1Executor__InvalidDataLength();
 error FluidV1Executor__InvalidCallback();
 
 contract FluidV1Executor is IExecutor, ICallback {
+    // One directive per slot type: Slither 0.11.6 can fail to analyse a
+    // contract that uses `using TransientSlot for *`.
+    using TransientSlot for bytes32;
+    using TransientSlot for TransientSlot.AddressSlot;
     // keccak(FluidV1Executor#CURRENT_DEX)
     // stores current dex address
     bytes32 private constant _CURRENT_DEX_SLOT =
@@ -61,17 +66,11 @@ contract FluidV1Executor is IExecutor, ICallback {
 
     // Stores dex address in transient storage
     function _setCurrentDex(IFluidV1Dex dex) internal {
-        // slither-disable-next-line assembly
-        assembly {
-            tstore(_CURRENT_DEX_SLOT, dex)
-        }
+        _CURRENT_DEX_SLOT.asAddress().tstore(address(dex));
     }
 
     function _getCurrentDex() internal view returns (address dex) {
-        // slither-disable-next-line assembly
-        assembly {
-            dex := tload(_CURRENT_DEX_SLOT)
-        }
+        dex = _CURRENT_DEX_SLOT.asAddress().tload();
     }
 
     function _decodeData(bytes calldata data)

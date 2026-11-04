@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {LowLevelCall} from "@openzeppelin/contracts/utils/LowLevelCall.sol";
 import {
     SafeERC20,
     IERC20
@@ -117,14 +118,8 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
         // bytes directly and not ABI-encoded bytes
         bytes memory callData = abi.encodePacked(bytes4(0xf83d08ba), data);
 
-        // slither-disable-next-line low-level-calls
-        (bool success, bytes memory result) = address(_core).call(callData);
-
-        if (!success) {
-            // slither-disable-next-line assembly
-            assembly ("memory-safe") {
-                revert(add(result, 32), mload(result))
-            }
+        if (!LowLevelCall.callNoReturn(address(_core), callData)) {
+            LowLevelCall.bubbleRevert();
         }
     }
 
@@ -214,12 +209,8 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
         // slither-disable-next-line low-level-calls,calls-loop
         (bool success, bytes memory returnData) = address(_core).call(callData);
 
-        // Assembly is necessary to be able to revert with arbitrary bytes memory
         if (!success) {
-            // slither-disable-next-line assembly
-            assembly ("memory-safe") {
-                revert(add(returnData, 32), mload(returnData))
-            }
+            LowLevelCall.bubbleRevert(returnData);
         }
 
         return returnData;
@@ -235,14 +226,8 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
                 bytes16(amount)
             );
 
-            // slither-disable-next-line low-level-calls
-            (bool success, bytes memory result) = address(_core).call(callData);
-
-            if (!success) {
-                // slither-disable-next-line assembly
-                assembly ("memory-safe") {
-                    revert(add(result, 32), mload(result))
-                }
+            if (!LowLevelCall.callNoReturn(address(_core), callData)) {
+                LowLevelCall.bubbleRevert();
             }
         }
     }

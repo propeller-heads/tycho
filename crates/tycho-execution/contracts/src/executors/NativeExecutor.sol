@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {LibBytes} from "@solady/utils/LibBytes.sol";
 import {TransferManager} from "../TransferManager.sol";
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
@@ -135,18 +136,11 @@ contract NativeExecutor is IExecutor {
     }
 
     function _validateOverrideArguments(bytes memory payload) private pure {
-        uint256 actualSellerAmount;
-        uint256 actualMinOutputAmount;
         // _decodeData guarantees both fixed 32-byte override words fit in payload.
-        // slither-disable-next-line assembly
-        assembly ("memory-safe") {
-            actualSellerAmount := mload(
-                add(add(payload, 0x20), _ACTUAL_SELLER_AMOUNT_OFFSET)
-            )
-            actualMinOutputAmount := mload(
-                add(add(payload, 0x20), _ACTUAL_MIN_OUTPUT_AMOUNT_OFFSET)
-            )
-        }
+        uint256 actualSellerAmount =
+            uint256(LibBytes.load(payload, _ACTUAL_SELLER_AMOUNT_OFFSET));
+        uint256 actualMinOutputAmount =
+            uint256(LibBytes.load(payload, _ACTUAL_MIN_OUTPUT_AMOUNT_OFFSET));
 
         // actualSellerAmount and actualMinOutputAmount are the only tradeRFQT
         // arguments not covered by the maker's signature, so require both to be

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {Bytes} from "@openzeppelin/contracts/utils/Bytes.sol";
+import {LibBytes} from "@solady/utils/LibBytes.sol";
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
 import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
@@ -264,23 +266,13 @@ contract UniswapV4Executor is IExecutor, ICallback {
         for (uint256 i = 0; i < encodedPools.length; i++) {
             bytes memory poolData = encodedPools[i];
 
-            address intermediaryToken;
-            uint24 fee;
-            int24 tickSpacing;
-            address hook;
-            uint16 hookDataLength;
-
-            // slither-disable-next-line assembly
-            assembly {
-                let dataPtr := add(poolData, 0x20)
-                intermediaryToken := shr(96, mload(dataPtr))
-                fee := and(shr(232, mload(add(dataPtr, 20))), 0xffffff)
-                tickSpacing := and(shr(208, mload(add(dataPtr, 20))), 0xffffff)
-                hook := shr(96, mload(add(dataPtr, 26)))
-                hookDataLength := and(shr(240, mload(add(dataPtr, 46))), 0xffff)
-            }
-
-            intermediaryToken = _toV4Token(intermediaryToken);
+            address intermediaryToken =
+                _toV4Token(address(bytes20(LibBytes.load(poolData, 0))));
+            uint24 fee = uint24(bytes3(LibBytes.load(poolData, 20)));
+            int24 tickSpacing =
+                int24(uint24(bytes3(LibBytes.load(poolData, 23))));
+            address hook = address(bytes20(LibBytes.load(poolData, 26)));
+            uint16 hookDataLength = uint16(bytes2(LibBytes.load(poolData, 46)));
 
             if (poolData.length < _POOL_HEADER_LENGTH + hookDataLength) {
                 revert UniswapV4Executor__InvalidDataLength();
@@ -529,7 +521,6 @@ contract UniswapV4Executor is IExecutor, ICallback {
         returns (bytes memory)
     {
         uint256 totalLength = 93;
-        bytes memory attestation = new bytes(85);
 
         // Calculate number of attestations from data length
         if (attestationData.length % totalLength != 0) {
@@ -541,31 +532,17 @@ contract UniswapV4Executor is IExecutor, ICallback {
         for (uint256 i = 0; i < attestationCount; i++) {
             uint256 offset = i * totalLength;
 
-            // Assembly is used because attestationData is bytes memory
-            uint64 blockNumber;
-            // slither-disable-next-line assembly
-            assembly {
-                // Load block number (8 bytes) - shift right to get the first 8 bytes
-                blockNumber := shr(
-                    192,
-                    mload(add(add(attestationData, 0x20), offset))
-                )
-
-                // Copy attestation (85 bytes)
-                let src := add(add(attestationData, 0x20), add(offset, 8))
-                let dst := add(attestation, 0x20)
-
-                // Copy 85 bytes (2 full words + 21 bytes)
-                mstore(dst, mload(src)) // Copy first 32 bytes
-                mstore(add(dst, 0x20), mload(add(src, 0x20))) // Copy next 32 bytes
-                mstore(add(dst, 0x40), mload(add(src, 0x40))) // Copy remaining 21 bytes (loads 32, but we only need 21)
-            }
+            uint64 blockNumber =
+                uint64(bytes8(LibBytes.load(attestationData, offset)));
 
             // If we find the attestation for the current block, stop decoding early
             // and return the attestation.
             // slither-disable-next-line incorrect-equality
             if (blockNumber == block.number) {
-                return attestation;
+                return
+                    Bytes.slice(
+                        attestationData, offset + 8, offset + totalLength
+                    );
             }
         }
 

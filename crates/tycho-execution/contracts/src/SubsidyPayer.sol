@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {SafeTransferLib} from "@solady/utils/SafeTransferLib.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
@@ -295,23 +296,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         returns (uint256 tokenBalance)
     {
         if (token == ETH_ADDRESS) return address(this).balance;
-        bytes4 selector = IERC20.balanceOf.selector;
-        bool success;
-        uint256 returnSize;
-        // Assembly, because a Solidity call copies all return data into
-        // memory, and memory gas grows quadratically. Copying at most 32
-        // bytes means a token returning a huge payload cannot make `pay`
-        // spend its gas on that copy.
-        // slither-disable-next-line assembly
-        assembly ("memory-safe") {
-            let ptr := mload(0x40)
-            mstore(ptr, selector)
-            mstore(add(ptr, 0x04), address())
-            success := staticcall(gas(), token, ptr, 0x24, 0x00, 0x20)
-            returnSize := returndatasize()
-            tokenBalance := mload(0x00)
-        }
-        if (!success || returnSize < 32) return 0;
+        return SafeTransferLib.balanceOf(token, address(this));
     }
 
     /// @dev Sends `amount` of `token` to `to`; returns false instead of
