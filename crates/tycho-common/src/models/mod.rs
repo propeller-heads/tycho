@@ -457,8 +457,8 @@ impl Chain {
             (Chain::Plasma, TvlThresholdTier::Low) => 200_000.0,
             (Chain::Plasma, TvlThresholdTier::Medium) => 2_000_000.0,
 
-            // BSC (BNB ≈ $630): 32 BNB ≈ $20K, 320 BNB ≈ $200K
-            (Chain::Bsc, TvlThresholdTier::Low) => 32.0,
+            // BSC (BNB ≈ $630): 30 BNB ≈ $19K, 320 BNB ≈ $200K
+            (Chain::Bsc, TvlThresholdTier::Low) => 30.0,
             (Chain::Bsc, TvlThresholdTier::Medium) => 320.0,
 
             // Arc's native USDC is worth $1.
