@@ -69,20 +69,17 @@ In strict mode:
 
 - A key the runner does not read is an error that names it, so a misspelt `skip_exectuion` cannot
   pass silently. Legacy mode logs such keys as a warning.
-- Every skip states its reason. `skip_simulation` and `skip_execution` are `false` or an object;
-  a bare `true` is an error naming the flag and the component:
+- Every skip is written as its reason, a string. `true` gives no reason and `false` is the
+  default, so both are errors naming the flag and the component:
 
   ```yaml
-  skip_execution:
-    reason: "range predates Shanghai; the router needs PUSH0"
-    until: "re-record the range after block 17034870"   # optional
-    evidence: "<a revert trace, or a command and its output>"   # see below
+  skip_execution: "range predates Shanghai; the router needs PUSH0"
   ```
 
-  The object form also works in legacy mode, where a bare `true` stays valid.
+  A reason works in legacy mode too, where `true` and `false` stay valid. A trace, a command and
+  its output, or a ticket go in the reason, which the logs and the report show.
 - A missing executor deployment is not a reason to skip execution: the harness plants the
-  executor's runtime bytecode from `fixtures/`, so execution runs either way. When the protocol
-  has a fixture, `skip_execution` needs `evidence` showing why execution cannot be tested.
+  executor's runtime bytecode from `fixtures/`, so execution runs either way.
 - Every check of a test runs, and the test fails at the end listing every failed check, instead of
   stopping at the first. A check that needs the result of a failed one is reported as not run.
 - Every expected component's balances are checked, against where the component declares they are
@@ -134,8 +131,8 @@ sits in the PSM's pocket, and the USDS it can pay out is the PSM's DAI:
 - The comparison is exact, and a token without an indexed balance counts as zero.
 - A `tokens` entry for a token the component does not have fails the component.
 - A component whose id is not an address needs a holder.
-- The package-level `skip_balance_check` is an error in strict mode, whatever its reason; it can
-  be left out, as it defaults to `false` in both modes. A
+- The package-level `skip_balance_check` is an error in strict mode, whatever its value; leave
+  it out, as the check runs by default. A
   balance that is protocol accounting rather than a token balance (`totalPooledEther`, say) has
   no source to declare yet; such a package stays in legacy mode for now.
 
@@ -261,8 +258,10 @@ tolerance or not, so `measured` can be checked against a run.
 | `limits.past_limit` | strict: past a hard limit, the quote errors and the execution reverts |
 | `limits.max_output` | strict: the quote at the limit pays no more than the limit's max output |
 
-A skipped check is reported with its reason, per component for `skip_simulation` and
-`skip_execution`. In legacy mode the report ends at the first failed check of a test. `drift`
+A skipped check is reported with its reason, per component (by lowercase id) for
+`skip_simulation` and `skip_execution`. A test-wide `sim.ladder` or `exec.ladder` result covers
+only the components without a skip entry for it; when every component skips, the test-wide result
+is `skipped`. In legacy mode the report ends at the first failed check of a test. `drift`
 has one entry per test that executed anything: its largest `(executed - simulated) / executed`, in
 bps, negative when the simulation overquotes, and its largest `executed - simulated` in base units
 of the token out, which may come from another execution.

@@ -8,8 +8,7 @@ use std::{
 use colored::Colorize;
 use miette::{miette, IntoDiagnostic, WrapErr};
 use serde::{
-    de::{self, MapAccess, Visitor},
-    ser::SerializeMap,
+    de::{self, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
 };
 use similar::{ChangeTag, TextDiff};
@@ -88,48 +87,37 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
 
 /// A check a package turns off, and why.
 ///
-/// Written as `false`, as a bare `true`, or as an object with the reason:
+/// Written as the reason, a non-empty string:
 ///
 /// ```yaml
-/// skip_execution:
-///   reason: "range predates Shanghai; the router needs PUSH0"
-///   until: "re-record the range after block 17034870"
+/// skip_execution: "range predates Shanghai; the router needs PUSH0"
 /// ```
 ///
-/// A bare `true` gives no reason; strict mode rejects it. `evidence` is what shows the check cannot
-/// run, such as a revert trace or a command and its output; strict mode requires it where the
-/// reason alone cannot justify the skip.
+/// Legacy mode also accepts `true` and `false`. Strict mode rejects both: `true` gives no reason,
+/// and `false` is the default, so the key is left out.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Skip {
+    /// Not written: the check runs.
     #[default]
     No,
-    Yes {
-        reason: Option<String>,
-        until: Option<String>,
-        evidence: Option<String>,
-    },
+    /// `true` or `false`, legacy mode's form.
+    Bool(bool),
+    /// Skipped, for this reason.
+    Reason(String),
 }
 
 impl Skip {
     pub fn is_skipped(&self) -> bool {
-        matches!(self, Skip::Yes { .. })
+        matches!(self, Skip::Bool(true) | Skip::Reason(_))
     }
 
     /// Why the check is off, for logs and the report. `None` when it is not skipped.
     pub fn reason(&self) -> Option<&str> {
         match self {
-            Skip::No => None,
-            Skip::Yes { reason: Some(reason), .. } => Some(reason),
-            Skip::Yes { reason: None, .. } => Some("no reason given"),
+            Skip::No | Skip::Bool(false) => None,
+            Skip::Bool(true) => Some("no reason given"),
+            Skip::Reason(reason) => Some(reason),
         }
-    }
-
-    fn has_reason(&self) -> bool {
-        matches!(self, Skip::No | Skip::Yes { reason: Some(_), .. })
-    }
-
-    fn has_evidence(&self) -> bool {
-        matches!(self, Skip::Yes { evidence: Some(_), .. })
     }
 }
 
@@ -137,46 +125,22 @@ impl<'de> Deserialize<'de> for Skip {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct SkipVisitor;
 
-        impl<'de> Visitor<'de> for SkipVisitor {
+        impl Visitor<'_> for SkipVisitor {
             type Value = Skip;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter
-                    .write_str("`false`, `true`, or `{reason: ..., until: ..., evidence: ...}`")
+                formatter.write_str("the reason for the skip, as a string, or `true` or `false`")
             }
 
             fn visit_bool<E: de::Error>(self, v: bool) -> Result<Skip, E> {
-                Ok(if v {
-                    Skip::Yes { reason: None, until: None, evidence: None }
-                } else {
-                    Skip::No
-                })
+                Ok(Skip::Bool(v))
             }
 
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Skip, A::Error> {
-                let (mut reason, mut until, mut evidence) = (None, None, None);
-                while let Some(key) = map.next_key::<String>()? {
-                    let slot = match key.as_str() {
-                        "reason" => &mut reason,
-                        "until" => &mut until,
-                        "evidence" => &mut evidence,
-                        other => {
-                            return Err(de::Error::unknown_field(
-                                other,
-                                &["reason", "until", "evidence"],
-                            ))
-                        }
-                    };
-                    let value: String = map.next_value()?;
-                    if value.trim().is_empty() {
-                        return Err(de::Error::custom(format!("`{key}` of a skip is empty")));
-                    }
-                    *slot = Some(value);
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Skip, E> {
+                if v.trim().is_empty() {
+                    return Err(E::custom("the reason for a skip is empty"));
                 }
-                if reason.is_none() {
-                    return Err(de::Error::missing_field("reason"));
-                }
-                Ok(Skip::Yes { reason, until, evidence })
+                Ok(Skip::Reason(v.to_string()))
             }
         }
 
@@ -188,18 +152,8 @@ impl Serialize for Skip {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Skip::No => serializer.serialize_bool(false),
-            Skip::Yes { reason: None, until: None, evidence: None } => {
-                serializer.serialize_bool(true)
-            }
-            Skip::Yes { reason, until, evidence } => {
-                let mut map = serializer.serialize_map(None)?;
-                for (key, value) in [("reason", reason), ("until", until), ("evidence", evidence)] {
-                    if let Some(value) = value {
-                        map.serialize_entry(key, value)?;
-                    }
-                }
-                map.end()
-            }
+            Skip::Bool(skipped) => serializer.serialize_bool(*skipped),
+            Skip::Reason(reason) => serializer.serialize_str(reason),
         }
     }
 }
@@ -763,7 +717,7 @@ impl IntegrationTestsConfig {
     }
 
     /// Every skip in the configuration, with where it is written: `(location, flag, skip)`.
-    pub fn skips(&self) -> Vec<(String, &'static str, &Skip)> {
+    fn skips(&self) -> Vec<(String, &'static str, &Skip)> {
         let mut skips =
             vec![("package".to_string(), "skip_balance_check", &self.skip_balance_check)];
         for test in &self.tests {
@@ -776,21 +730,37 @@ impl IntegrationTestsConfig {
         skips
     }
 
-    /// Strict mode: every skip states its reason.
+    /// Strict mode: a skip is its reason, a string. `true` gives none, and `false` is the default.
     fn check_skips_have_reasons(&self, source: &str) -> miette::Result<()> {
-        let missing: Vec<String> = self
-            .skips()
-            .into_iter()
-            .filter(|(_, _, skip)| !skip.has_reason())
-            .map(|(location, flag, _)| format!("{flag} ({location})"))
-            .collect();
-        if missing.is_empty() {
+        let written = |value: bool| -> Vec<String> {
+            self.skips()
+                .into_iter()
+                .filter(|(_, _, skip)| **skip == Skip::Bool(value))
+                .map(|(location, flag, _)| format!("{flag} ({location})"))
+                .collect()
+        };
+        let mut problems = Vec::new();
+        let unexplained = written(true);
+        if !unexplained.is_empty() {
+            problems.push(format!(
+                "these are `true`, which gives no reason: {}. Write each skip as its reason, \
+                 `skip_execution: \"...\"`",
+                unexplained.join(", ")
+            ));
+        }
+        let redundant = written(false);
+        if !redundant.is_empty() {
+            problems.push(format!(
+                "these are `false`, which is the default: {}. Remove them",
+                redundant.join(", ")
+            ));
+        }
+        if problems.is_empty() {
             return Ok(());
         }
         Err(miette!(
-            "{source} declares `harness: strict`, where every skip needs a reason, but these are a \
-             bare `true`: {}. Write each as `{{reason: \"...\"}}`, or remove it.",
-            missing.join(", ")
+            "{source} declares `harness: strict`, where a skip is written as its reason: {}.",
+            problems.join("; ")
         ))
     }
 
@@ -806,19 +776,6 @@ impl IntegrationTestsConfig {
              component's balances are held with `balance_check: {{holder: \"attribute:NAME\" | \
              \"0x...\"}}` or `{{min_of: [self, ...]}}` where it is not the component's own address."
         ))
-    }
-
-    /// Strict mode: a `skip_execution` needs evidence when the harness has the protocol's executor
-    /// fixture, since the harness plants that bytecode and execution can run whether or not the
-    /// executor is deployed. Returns the components whose skip lacks it.
-    pub fn execution_skips_without_evidence(&self) -> Vec<String> {
-        self.skips()
-            .into_iter()
-            .filter(|(_, flag, skip)| {
-                *flag == "skip_execution" && skip.is_skipped() && !skip.has_evidence()
-            })
-            .map(|(location, _, _)| location)
-            .collect()
     }
 }
 
@@ -857,7 +814,6 @@ mod tests {
         format!(
             r#"{extra}
 substreams_yaml_path: ./substreams.yaml
-skip_balance_check: false
 protocol_type_names: ["foo_pool"]
 protocol_system: vm:foo
 tests:
@@ -903,7 +859,7 @@ tests:
     fn component_keys_reach_the_component() {
         let config = parse(&yaml(
             "harness: strict",
-            "        static_attributes: {fee: \"0x0bb8\"}\n        skip_simulation: {reason: \"r\"}\n        skip_execution: {reason: \"r\"}\n        limits: {kind: hard}",
+            "        static_attributes: {fee: \"0x0bb8\"}\n        skip_simulation: \"r\"\n        skip_execution: \"r\"\n        limits: {kind: hard}",
         ))
         .unwrap();
         assert_eq!(config.harness, Harness::Strict);
@@ -962,48 +918,57 @@ tests:
     }
 
     #[test]
-    fn a_skip_object_carries_its_reason_until_and_evidence() {
+    fn a_skip_is_its_reason() {
+        for harness in ["", STRICT_WITH_LIMITS] {
+            let config =
+                parse(&yaml(harness, "        skip_execution: \"no fork state\"")).unwrap();
+            let skip = &config.tests[0].expected_components[0].skip_execution;
+            assert_eq!(skip, &Skip::Reason("no fork state".to_string()));
+            assert!(skip.is_skipped());
+            assert_eq!(skip.reason(), Some("no fork state"));
+        }
+    }
+
+    #[test]
+    fn legacy_mode_accepts_true_and_false() {
         let config = parse(&yaml(
-            STRICT_WITH_LIMITS,
-            "        skip_execution: {reason: \"no fork state\", until: \"TICKET-1\", evidence: \"cast call reverts\"}",
+            "skip_balance_check: false",
+            "        skip_simulation: true\n        skip_execution: false",
         ))
         .unwrap();
-        let skip = &config.tests[0].expected_components[0].skip_execution;
-        assert_eq!(
-            skip,
-            &Skip::Yes {
-                reason: Some("no fork state".to_string()),
-                until: Some("TICKET-1".to_string()),
-                evidence: Some("cast call reverts".to_string()),
-            }
+        let component = &config.tests[0].expected_components[0];
+        assert!(component.skip_simulation.is_skipped());
+        assert_eq!(component.skip_simulation.reason(), Some("no reason given"));
+        assert!(!component.skip_execution.is_skipped());
+        assert_eq!(component.skip_execution.reason(), None);
+        assert_eq!(config.skip_balance_check.reason(), None);
+    }
+
+    #[test]
+    fn strict_mode_rejects_true_and_false_and_names_each_flag_and_component() {
+        let err = parse(&yaml(
+            "harness: strict\nskip_balance_check: true",
+            "        skip_simulation: true\n        skip_execution: false",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("`true`, which gives no reason: skip_balance_check (package)"),
+            "{err}"
         );
-        assert_eq!(skip.reason(), Some("no fork state"));
-    }
-
-    #[test]
-    fn legacy_mode_accepts_a_bare_skip() {
-        let config = parse(&yaml("", "        skip_simulation: true")).unwrap();
-        let skip = &config.tests[0].expected_components[0].skip_simulation;
-        assert!(skip.is_skipped());
-        assert_eq!(skip.reason(), Some("no reason given"));
-    }
-
-    #[test]
-    fn strict_mode_rejects_a_bare_skip_and_names_the_flag_and_component() {
-        let config = yaml("harness: strict", "        skip_simulation: true")
-            .replace("skip_balance_check: false", "skip_balance_check: true");
-        let err = parse(&config).unwrap_err().to_string();
-        assert!(err.contains("skip_balance_check (package)"), "{err}");
         assert!(err.contains("skip_simulation (test `test_foo`, component 0xAbC)"), "{err}");
+        assert!(
+            err.contains(
+                "`false`, which is the default: skip_execution (test `test_foo`, component 0xAbC)"
+            ),
+            "{err}"
+        );
     }
 
     #[test]
     fn strict_mode_rejects_a_balance_skip_even_with_a_reason() {
         let skipped = |harness: &str| {
-            yaml(harness, "").replace(
-                "skip_balance_check: false",
-                "skip_balance_check: {reason: \"held by the vault\"}",
-            )
+            yaml(&format!("{harness}\nskip_balance_check: \"held by the vault\""), "")
         };
         let err = parse(&skipped(STRICT_WITH_LIMITS))
             .unwrap_err()
@@ -1017,8 +982,7 @@ tests:
             .is_skipped());
 
         // Without the key, the check runs, so a strict package need not write `false`.
-        let omitted = yaml(STRICT_WITH_LIMITS, "").replace("skip_balance_check: false\n", "");
-        assert!(!parse(&omitted)
+        assert!(!parse(&yaml(STRICT_WITH_LIMITS, ""))
             .unwrap()
             .skip_balance_check
             .is_skipped());
@@ -1046,37 +1010,17 @@ tests:
     }
 
     #[test]
-    fn a_skip_object_needs_a_non_empty_reason_and_known_keys() {
+    fn a_skip_is_a_non_empty_string_or_a_bool() {
         for (component_extra, expected) in [
-            ("        skip_execution: {until: \"later\"}", "reason"),
-            ("        skip_execution: {reason: \"  \"}", "empty"),
-            ("        skip_execution: {reason: \"r\", because: \"x\"}", "because"),
+            ("        skip_execution: \"  \"", "empty"),
+            ("        skip_execution: {reason: \"r\"}", "the reason for the skip, as a string"),
+            ("        skip_execution: 3", "the reason for the skip, as a string"),
         ] {
             for harness in ["", "harness: strict"] {
                 let err = format!("{:?}", parse(&yaml(harness, component_extra)).unwrap_err());
                 assert!(err.contains(expected), "{component_extra} ({harness}): {err}");
             }
         }
-    }
-
-    #[test]
-    fn execution_skips_without_evidence_lists_each_component() {
-        let config =
-            parse(&yaml(STRICT_WITH_LIMITS, "        skip_execution: {reason: \"not deployed\"}"))
-                .unwrap();
-        assert_eq!(
-            config.execution_skips_without_evidence(),
-            vec!["test `test_foo`, component 0xAbC".to_string()]
-        );
-
-        let config = parse(&yaml(
-            STRICT_WITH_LIMITS,
-            "        skip_execution: {reason: \"r\", evidence: \"trace\"}",
-        ))
-        .unwrap();
-        assert!(config
-            .execution_skips_without_evidence()
-            .is_empty());
     }
 
     fn hard() -> Limits {

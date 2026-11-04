@@ -109,12 +109,6 @@ fn get_executor_bytecode_json(chain: Chain, protocol_system: &str) -> miette::Re
         })
 }
 
-/// Whether the harness has a runtime bytecode fixture for `protocol_system`'s executor on `chain`,
-/// which it plants at the executor address so execution runs without a deployment.
-pub fn has_executor_fixture(chain: Chain, protocol_system: &str) -> bool {
-    get_executor_bytecode_json(chain, protocol_system).is_ok()
-}
-
 /// Decode the `runtimeBytecode` field from a `*.runtime.json` fixture string.
 ///
 /// The `label` identifies the fixture in error messages (e.g. "router", "executor").

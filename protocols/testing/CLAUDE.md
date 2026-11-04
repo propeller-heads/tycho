@@ -28,8 +28,8 @@ Docker Compose is available for isolated runs — see `README.md`.
 ## Strict mode
 
 A test yaml can opt into `harness: strict`; without it the runner behaves as before. Strict mode
-rejects keys the runner does not read, requires a reason on every skip (and `evidence` on a
-`skip_execution` when the executor has a fixture), and reports every failed check of a test, not
+rejects keys the runner does not read, writes every skip as its reason (a string; `true` and
+`false` are errors), and reports every failed check of a test, not
 just the first. It is not required of any package yet, and new checks go into strict mode only.
 Strict mode checks every expected component's balances against its declared `balance_check`
 (`default` = `balanceOf(id)`, `{holder: attribute:NAME | 0x...}`, `{min_of: [...]}`, or per token
