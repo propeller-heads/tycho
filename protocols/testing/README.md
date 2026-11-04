@@ -69,20 +69,17 @@ In strict mode:
 
 - A key the runner does not read is an error that names it, so a misspelt `skip_exectuion` cannot
   pass silently. Legacy mode logs such keys as a warning.
-- Every skip states its reason. `skip_balance_check`, `skip_simulation` and `skip_execution` are
-  `false` or an object; a bare `true` is an error naming the flag and the component:
+- Every skip is written as its reason, a string. `true` gives no reason and `false` is the
+  default, so both are errors naming the flag and the component:
 
   ```yaml
-  skip_execution:
-    reason: "range predates Shanghai; the router needs PUSH0"
-    until: "re-record the range after block 17034870"   # optional
-    evidence: "<a revert trace, or a command and its output>"   # see below
+  skip_execution: "range predates Shanghai; the router needs PUSH0"
   ```
 
-  The object form also works in legacy mode, where a bare `true` stays valid.
+  A reason works in legacy mode too, where `true` and `false` stay valid. A trace, a command and
+  its output, or a ticket go in the reason, which the logs and the report show.
 - A missing executor deployment is not a reason to skip execution: the harness plants the
-  executor's runtime bytecode from `fixtures/`, so execution runs either way. When the protocol
-  has a fixture, `skip_execution` needs `evidence` showing why execution cannot be tested.
+  executor's runtime bytecode from `fixtures/`, so execution runs either way.
 - Every check of a test runs, and the test fails at the end listing every failed check, instead of
   stopping at the first. A check that needs the result of a failed one is reported as not run.
 - Every direction of every expected component declares what kind of limit `get_limits` reports,
@@ -174,8 +171,10 @@ none of these checks.
 | `limits.past_limit` | strict: past a hard limit, the quote errors and the execution reverts |
 | `limits.max_output` | strict: the quote at the limit pays no more than the limit's max output |
 
-A skipped check is reported with its reason, per component for `skip_simulation` and
-`skip_execution`. In legacy mode the report ends at the first failed check of a test.
+A skipped check is reported with its reason, per component (by lowercase id) for
+`skip_simulation` and `skip_execution`. A test-wide `sim.ladder` or `exec.ladder` result covers
+only the components without a skip entry for it; when every component skips, the test-wide result
+is `skipped`. In legacy mode the report ends at the first failed check of a test.
 
 ## How to Run with Docker
 
