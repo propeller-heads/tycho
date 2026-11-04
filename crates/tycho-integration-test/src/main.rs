@@ -111,8 +111,9 @@ struct Cli {
     disable_pamm: bool,
 
     /// pAMM book feeds to run, comma-separated (e.g. metric). Replaces the default list
-    /// (metric). A listed venue that cannot run, such as one missing its credentials, fails the
-    /// run; a default venue is skipped instead.
+    /// (metric). A listed venue missing its credentials, or whose feed fails to build, fails the
+    /// run; a default venue is skipped instead. A feed that builds but fails once it runs, for
+    /// example on a chain its venue does not serve, ends with a warning like any other feed.
     #[arg(long, value_delimiter = ',', conflicts_with = "disable_pamm")]
     pamm: Option<Vec<PammVenue>>,
 

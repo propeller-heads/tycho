@@ -64,7 +64,9 @@ impl PammVenue {
     /// The name `--pamm` takes for this venue.
     fn cli_name(self) -> String {
         self.to_possible_value()
-            .map_or_else(|| self.to_string(), |value| value.get_name().to_string())
+            .expect("no PammVenue is skipped on the command line")
+            .get_name()
+            .to_string()
     }
 }
 
@@ -104,13 +106,19 @@ impl RfqSelection {
             info!("Hashflow RFQ credentials found");
             credentials.insert(RfqVenue::Hashflow, (user, key));
         } else {
-            info!("Hashflow RFQ credentials not found. Expected environment variables: HASHFLOW_USER, HASHFLOW_KEY");
+            info!(
+                "Hashflow RFQ credentials not found. Expected environment variables: \
+                 HASHFLOW_USER, HASHFLOW_KEY"
+            );
         }
         if let (Some(user), Some(key)) = (secret("LIQUORICE_USER"), secret("LIQUORICE_KEY")) {
             info!("Liquorice RFQ credentials found");
             credentials.insert(RfqVenue::Liquorice, (user, key));
         } else {
-            info!("Liquorice RFQ credentials not found. Expected environment variables: LIQUORICE_USER, LIQUORICE_KEY");
+            info!(
+                "Liquorice RFQ credentials not found. Expected environment variables: \
+                 LIQUORICE_USER, LIQUORICE_KEY"
+            );
         }
         if let Some(key) = secret("NATIVE_API_KEY") {
             info!("Native RFQ credentials found");
@@ -123,7 +131,7 @@ impl RfqSelection {
         RfqSelection::Credentials(credentials)
     }
 
-    /// Why this selection may have added no feed, for the warning when no book feed runs.
+    /// Why this selection added no feed, for the warning when no book feed runs.
     fn why_empty(&self) -> &'static str {
         match self {
             RfqSelection::Disabled => "RFQ is disabled by --disable-rfq",
@@ -148,7 +156,7 @@ pub enum PammSelection {
 }
 
 impl PammSelection {
-    /// The selection `--disable-pamm` and `--pamm` describe. Clap rejects the two together.
+    /// The selection `--disable-pamm` and `--pamm` describe.
     pub fn from_cli(disable_pamm: bool, pamm: Option<Vec<PammVenue>>) -> Self {
         if disable_pamm {
             return PammSelection::Disabled;
@@ -165,12 +173,13 @@ impl PammSelection {
         PammSelection::Listed(venues)
     }
 
-    /// Why this selection may have added no feed, for the warning when no book feed runs.
-    fn why_empty(&self) -> &'static str {
+    /// Why this selection added no feed, for the warning when no book feed runs. `None` for
+    /// `--pamm`: a listed venue that cannot run fails the run instead.
+    fn why_empty(&self) -> Option<&'static str> {
         match self {
-            PammSelection::Disabled => "pAMM is disabled by --disable-pamm",
-            PammSelection::Defaults => "no default pAMM venue could run (see the log above)",
-            PammSelection::Listed(_) => "--pamm lists no venue",
+            PammSelection::Disabled => Some("pAMM is disabled by --disable-pamm"),
+            PammSelection::Defaults => Some("no default pAMM venue could run (see the log above)"),
+            PammSelection::Listed(_) => None,
         }
     }
 }
@@ -359,8 +368,13 @@ impl BookStreamProcessor {
                 (RfqSelection::Disabled, PammSelection::Disabled) => {
                     info!("Book feeds are disabled");
                 }
-                (rfq, pamm) => {
-                    warn!("No book feed is running: {}; {}", rfq.why_empty(), pamm.why_empty());
+                (
+                    RfqSelection::Disabled | RfqSelection::Credentials(_),
+                    PammSelection::Disabled | PammSelection::Defaults | PammSelection::Listed(_),
+                ) => {
+                    let mut reasons = vec![self.rfq.why_empty()];
+                    reasons.extend(self.pamm.why_empty());
+                    warn!("No book feed is running: {}", reasons.join("; "));
                 }
             }
             return Ok(None);
@@ -474,27 +488,32 @@ fn add_pamm_feeds(
     feeds: &mut BookFeedStreams,
     secret: impl Fn(&str) -> Option<String>,
 ) -> miette::Result<()> {
-    let (venues, listed) = match selection {
+    let (venues, on_failure) = match selection {
         PammSelection::Disabled => return Ok(()),
-        PammSelection::Defaults => (PammVenue::defaults(), false),
-        PammSelection::Listed(venues) => (venues.clone(), true),
+        PammSelection::Defaults => (PammVenue::defaults(), OnFailure::Skip),
+        PammSelection::Listed(venues) => (venues.clone(), OnFailure::FailRun),
     };
     for venue in venues {
         match venue {
             PammVenue::Metric => {
                 let Some(api_key) = secret("METRIC_API_KEY") else {
-                    if listed {
-                        return Err(miette!(
-                            "--pamm lists {}, but METRIC_API_KEY is not set. Set it, or drop {} \
-                             from --pamm.",
-                            venue.cli_name(),
-                            venue.cli_name()
-                        ));
+                    match on_failure {
+                        OnFailure::FailRun => {
+                            return Err(miette!(
+                                "--pamm lists {}, but METRIC_API_KEY is not set. Set it, or drop \
+                                 {} from --pamm.",
+                                venue.cli_name(),
+                                venue.cli_name()
+                            ));
+                        }
+                        OnFailure::Skip => {
+                            info!(
+                                "Metric credentials not found. Expected environment variable: \
+                                 METRIC_API_KEY"
+                            );
+                            continue;
+                        }
                     }
-                    info!(
-                        "Metric credentials not found. Expected environment variable: METRIC_API_KEY"
-                    );
-                    continue;
                 };
                 // Metric's own defaults already set its cadence and withdrawal age.
                 match MetricFeedBuilder::new(book_config.clone(), api_key).build() {
@@ -504,17 +523,27 @@ fn add_pamm_feeds(
                             .add(venue.to_string(), metric_feed)
                             .map_err(|_feed| miette!("The {venue} feed was added twice"))?;
                     }
-                    Err(e) if listed => {
-                        return Err(miette!(
-                            "Failed to build the {venue} feed that --pamm lists: {e}"
-                        ));
-                    }
-                    Err(e) => warn!("Failed to build Metric feed, skipping: {e}"),
+                    Err(e) => match on_failure {
+                        OnFailure::FailRun => {
+                            return Err(miette!(
+                                "Failed to build the {venue} feed that --pamm lists: {e}"
+                            ));
+                        }
+                        OnFailure::Skip => warn!("Failed to build Metric feed, skipping: {e}"),
+                    },
                 }
             }
         }
     }
     Ok(())
+}
+
+/// What a pAMM venue that cannot run does to the run.
+enum OnFailure {
+    /// A default venue: logged and skipped.
+    Skip,
+    /// A venue listed in `--pamm`: the run fails.
+    FailRun,
 }
 
 /// Hands one update to the harness. `false` once nobody is receiving, which is the processor's
@@ -591,13 +620,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_listed_venue_whose_feed_fails_to_build_fails_the_run() {
+        // Metric refuses an empty trading key when its feed is built.
         let error = added(&PammSelection::Listed(vec![PammVenue::Metric]), Some("")).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("trading key is empty"),
-            "{error}"
-        );
+        let message = error.to_string();
+        assert!(message.contains("--pamm"), "{message}");
+        assert!(message.contains(metric::PROTOCOL_SYSTEM), "{message}");
     }
 
     #[tokio::test]
@@ -652,6 +679,8 @@ mod tests {
         assert_eq!(venues, [bebop::PROTOCOL_SYSTEM, native::PROTOCOL_SYSTEM]);
     }
 
+    /// Runs the processor in the current-thread test runtime, which polls none of the spawned
+    /// feed tasks before the test ends, so no request leaves the machine.
     async fn run(rfq: RfqSelection, pamm: PammSelection) -> Option<JoinHandle<()>> {
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
         BookStreamProcessor::new(Chain::Base, 0.0, 1, Duration::ZERO, rfq, pamm, false)
@@ -666,8 +695,6 @@ mod tests {
         for (rfq, pamm) in [
             (RfqSelection::Disabled, PammSelection::Disabled),
             (no_credentials.clone(), PammSelection::Disabled),
-            (RfqSelection::Disabled, PammSelection::Listed(Vec::new())),
-            (no_credentials, PammSelection::Listed(Vec::new())),
         ] {
             assert!(run(rfq, pamm).await.is_none());
         }
