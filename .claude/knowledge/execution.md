@@ -218,7 +218,7 @@ Checked by: ast-grep `sol-executor-receive-unexplained`
 ### rust-model-mirrors-contract
 The Rust model of a contract (router, dispatcher, fee calculator, executors) mirrors the contract's current control flow step by step (the order of checks relative to balance finalisation, helper boundaries, named constants) and changes in the same PR as the contract.
 Why: A model that checks in a different order, or keeps a helper the contract has removed, explores states the chain never reaches and misses states it does.
-Spot: Contract changes under contracts/src with no matching change in crates/tycho-execution/model; a model check placed before or after a step that the Solidity orders differently; a model constant inlined where the contract has a named one; executor PRs changing `getTransferData`/`fundsExpectedAddress` without touching the model (from 520, C33).
+Spot: Contract changes under contracts/src with no matching change in crates/tycho-execution/model; a model check placed before or after a step that the Solidity orders differently; a model constant inlined where the contract has a named one; executor PRs changing `getTransferData`/`fundsExpectedAddress` without touching the model.
 Applies: solidity, rust
 
 ### security-model-models-the-guard
