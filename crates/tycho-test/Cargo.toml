@@ -12,6 +12,7 @@ alloy = { workspace = true, features = [
 ] }
 alloy-chains = "0.2.39"
 alloy-rpc-types-trace = "1.0.38"
+itertools = { workspace = true }
 async-trait = { workspace = true }
 colored = "3.0.0"
 futures = { workspace = true }

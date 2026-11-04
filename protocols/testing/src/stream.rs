@@ -11,17 +11,12 @@
 //!   ([`blocks_to_execute`]).
 //!
 //! After the stream, the streamed state must quote exactly as the snapshot at the stop block
-//! ([`quote_sheet`], [`sheet_differences`]), and [`Coverage`] says how much the range exercised.
+//! (`tycho_test::checks::sheet`), and [`Coverage`] says how much the range exercised.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use itertools::Itertools;
-use num_bigint::BigUint;
-use num_traits::Zero;
 use serde::Serialize;
-use tycho_simulation::tycho_common::models::token::Token;
-
-use crate::tvl_only::Quoter;
 
 /// The most blocks the stream runs simulation checks at.
 pub const MAX_SIMULATED_BLOCKS: u64 = 50;
@@ -226,86 +221,6 @@ impl Coverage {
     }
 }
 
-/// The fractions of a direction's max input the sheet quotes, in thousandths, as the ladder does.
-const LADDER: [u32; 3] = [1, 10, 100];
-
-/// Everything a state answers, by question: each direction's limits and spot price, and quotes at
-/// 0.1%, 1% and 10% of its max input after `sizing`, which caps it as the ladder does. Values are
-/// printed, so a sheet outlives the state, which a later decode may invalidate.
-pub fn quote_sheet<Q: Quoter + ?Sized>(
-    state: &Q,
-    tokens: &[Token],
-    sizing: impl Fn(&BigUint) -> BigUint,
-) -> BTreeMap<String, String> {
-    let show =
-        |result: Result<String, String>| result.unwrap_or_else(|e| format!("an error ({e})"));
-    let mut sheet = BTreeMap::new();
-    for pair in tokens.iter().permutations(2) {
-        let (token_in, token_out) = (pair[0], pair[1]);
-        let direction = format!("{} -> {}", token_in.symbol, token_out.symbol);
-        let limits = state.limits(token_in, token_out);
-        sheet.insert(
-            format!("{direction}: limits"),
-            show(
-                limits
-                    .clone()
-                    .map(|(input, output)| format!("max input {input}, max output {output}")),
-            ),
-        );
-        sheet.insert(
-            format!("{direction}: spot price"),
-            show(
-                state
-                    .spot_price(token_in, token_out)
-                    .map(|price| price.to_string()),
-            ),
-        );
-        let Ok((max_input, _)) = limits else {
-            continue;
-        };
-        let max_input = sizing(&max_input);
-        for thousandths in LADDER {
-            let amount_in = &max_input * thousandths / 1000u32;
-            if amount_in.is_zero() {
-                continue;
-            }
-            sheet.insert(
-                format!(
-                    "{direction}: the quote at {:.1}% of the limit",
-                    f64::from(thousandths) / 10.0
-                ),
-                show(
-                    state
-                        .amount_out(amount_in.clone(), token_in, token_out)
-                        .map(|out| format!("{out} for {amount_in} {}", token_in.symbol)),
-                ),
-            );
-        }
-    }
-    sheet
-}
-
-/// Every question `streamed` and `snapshot` answer differently, or only one of them answers.
-pub fn sheet_differences(
-    streamed: &BTreeMap<String, String>,
-    snapshot: &BTreeMap<String, String>,
-) -> Vec<String> {
-    streamed
-        .keys()
-        .chain(snapshot.keys())
-        .unique()
-        .sorted()
-        .filter_map(|question| match (streamed.get(question), snapshot.get(question)) {
-            (Some(a), Some(b)) if a == b => None,
-            (a, b) => Some(format!(
-                "{question}: streamed {}, snapshot {}",
-                a.map_or("nothing", String::as_str),
-                b.map_or("nothing", String::as_str)
-            )),
-        })
-        .collect()
-}
-
 /// How many times each component id occurs in `ids`, by lowercase id.
 pub fn count_by_component<'a>(ids: impl IntoIterator<Item = &'a str>) -> BTreeMap<String, u64> {
     let mut counts: HashMap<String, u64> = HashMap::new();
@@ -319,10 +234,6 @@ pub fn count_by_component<'a>(ids: impl IntoIterator<Item = &'a str>) -> BTreeMa
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
-    use tycho_simulation::tycho_common::{models::Chain, Bytes};
-
     use super::*;
 
     #[test]
@@ -413,81 +324,6 @@ mod tests {
                 "0xa: B -> A never quoted after a delta",
             ]
         );
-    }
-
-    fn token(address: &str, symbol: &str) -> Token {
-        Token::new(&Bytes::from_str(address).unwrap(), symbol, 18, 0, &[], Chain::Ethereum, 100)
-    }
-
-    /// A constant-product pool over fixed reserves; a zero reserve stops a direction.
-    struct Pool(u64, u64);
-
-    impl Quoter for Pool {
-        fn limits(&self, token_in: &Token, _: &Token) -> Result<(BigUint, BigUint), String> {
-            Ok(match token_in.symbol.as_str() {
-                "A" => (self.0.into(), self.1.into()),
-                _ => (self.1.into(), self.0.into()),
-            })
-        }
-        fn spot_price(&self, base: &Token, _: &Token) -> Result<f64, String> {
-            match base.symbol.as_str() {
-                "A" => Ok(self.1 as f64 / self.0 as f64),
-                _ => Err("no price".to_string()),
-            }
-        }
-        fn amount_out(
-            &self,
-            amount_in: BigUint,
-            token_in: &Token,
-            _: &Token,
-        ) -> Result<BigUint, String> {
-            let (reserve_in, reserve_out) = match token_in.symbol.as_str() {
-                "A" => (BigUint::from(self.0), BigUint::from(self.1)),
-                _ => (BigUint::from(self.1), BigUint::from(self.0)),
-            };
-            Ok(&reserve_out * &amount_in / (reserve_in + amount_in))
-        }
-    }
-
-    fn tokens() -> Vec<Token> {
-        vec![
-            token("0x00000000000000000000000000000000000000a1", "A"),
-            token("0x00000000000000000000000000000000000000b1", "B"),
-        ]
-    }
-
-    #[test]
-    fn a_sheet_answers_limits_spot_price_and_the_ladder_in_every_direction() {
-        let sheet = quote_sheet(&Pool(100_000, 200_000), &tokens(), BigUint::clone);
-        assert_eq!(sheet.len(), 10);
-        assert_eq!(sheet["A -> B: limits"], "max input 100000, max output 200000");
-        assert_eq!(sheet["A -> B: the quote at 1.0% of the limit"], "1980 for 1000 A");
-        assert_eq!(sheet["B -> A: spot price"], "an error (no price)");
-        // A direction with a zero limit is not quoted.
-        let one_way = quote_sheet(&Pool(100_000, 0), &tokens(), BigUint::clone);
-        assert_eq!(one_way["B -> A: limits"], "max input 0, max output 100000");
-        assert!(!one_way.contains_key("B -> A: the quote at 1.0% of the limit"));
-    }
-
-    #[test]
-    fn sheets_of_the_same_state_match_and_a_drifted_state_differs_by_question() {
-        let streamed = quote_sheet(&Pool(100_000, 200_000), &tokens(), BigUint::clone);
-        assert!(sheet_differences(&streamed, &streamed).is_empty());
-        // A delta applied twice: one reserve off.
-        let snapshot = quote_sheet(&Pool(100_000, 201_000), &tokens(), BigUint::clone);
-        let differences = sheet_differences(&streamed, &snapshot);
-        assert!(
-            differences.contains(
-                &"A -> B: limits: streamed max input 100000, max output 200000, snapshot max \
-                  input 100000, max output 201000"
-                    .to_string()
-            ),
-            "{differences:#?}"
-        );
-        let mut partial = snapshot.clone();
-        partial.remove("A -> B: spot price");
-        assert!(sheet_differences(&snapshot, &partial)
-            .contains(&"A -> B: spot price: streamed 2.01, snapshot nothing".to_string()));
     }
 
     #[test]

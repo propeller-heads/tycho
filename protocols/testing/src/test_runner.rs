@@ -48,6 +48,7 @@ use tycho_simulation::{
     },
 };
 use tycho_test::{
+    checks::sheet,
     execution::{
         encoding::{encode_swap, EXECUTOR_ADDRESS},
         models::{TychoExecutionInput, TychoExecutionResult},
@@ -67,7 +68,7 @@ use crate::{
     report::{CheckId, Checks, Report},
     rpc::RPCProvider,
     state_registry::{register_protocol, register_protocol_with_filter},
-    stream, tvl_only,
+    stream,
     tycho_rpc::TychoClient,
     tycho_runner::TychoRunner,
     utils::{build_spkg, extract_initial_block},
@@ -1147,7 +1148,7 @@ impl TestRunner {
         // Taken before the snapshot is decoded, which consumes it.
         let halved = (!tvl_only_ids.is_empty()).then(|| {
             let mut halved = snapshot.clone();
-            let changed = tvl_only::halve_balances(&mut halved, &tvl_only_ids);
+            let changed = tycho_test::checks::tvl_only::halve_balances(&mut halved, &tvl_only_ids);
             (halved, changed, all_tokens.clone())
         });
 
@@ -2288,7 +2289,12 @@ impl TestRunner {
         let Some(component) = update.new_pairs.get(key) else {
             return vec![format!("the update has no component {key}")];
         };
-        tvl_only::compare(original, quoted_halved, &component.tokens, executable_max_input)
+        tycho_test::checks::tvl_only::compare(
+            original,
+            quoted_halved,
+            &component.tokens,
+            executable_max_input,
+        )
     }
 
     /// Strict: indexes the test's range while streaming it. The indexer runs in the background,
@@ -2531,7 +2537,7 @@ impl TestRunner {
                     .iter()
                     .filter_map(|(id, state)| {
                         let component = components.get(id)?;
-                        let sheet = stream::quote_sheet(
+                        let sheet = sheet::quote_sheet(
                             state.as_ref(),
                             &component.tokens,
                             executable_max_input,
@@ -2676,11 +2682,11 @@ impl TestRunner {
                 continue;
             };
             let snapshot =
-                stream::quote_sheet(state.as_ref(), &component.tokens, executable_max_input);
+                sheet::quote_sheet(state.as_ref(), &component.tokens, executable_max_input);
             match sheets.get(&id) {
                 None => differences.push(format!("{id}: not in the stream")),
                 Some(streamed) => differences.extend(
-                    stream::sheet_differences(streamed, &snapshot)
+                    sheet::sheet_differences(streamed, &snapshot)
                         .into_iter()
                         .map(|difference| format!("{id}: {difference}")),
                 ),
