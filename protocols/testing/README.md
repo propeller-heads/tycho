@@ -134,8 +134,8 @@ every pool's funds, a view call returning a `uint` gives the amount, per token o
         # ETH: the protocol's pooled ether
         "0x0000000000000000000000000000000000000000": {call: {to: self, fn: "getTotalPooledEther()"}}
         # stETH, wstETH: traded, but the indexer tracks no balance for them
-        "0xae7ab96520de3a18e5e111b5eaab095312d7fe84": {unindexed: {reason: "only the pooled ether is tracked"}}
-        "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0": {unindexed: {reason: "only the pooled ether is tracked"}}
+        "0xae7ab96520de3a18e5e111b5eaab095312d7fe84": {unindexed: "only the pooled ether is tracked"}
+        "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0": {unindexed: "only the pooled ether is tracked"}
   - id: "0x3225737a9bbb6473cb4a45b7244aca2befdb276a"   # Sky DAI/USDS converter
     balance_check:
       tokens:

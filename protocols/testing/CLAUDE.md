@@ -34,7 +34,7 @@ just the first. It is not required of any package yet, and new checks go into st
 Strict mode checks every expected component's balances against its declared `balance_check`:
 `default` (`balanceOf(id)`), `{holder: attribute:NAME | 0x...}`, `{min_of: [...]}`, `{call: {to,
 fn, args, divide_by?}}`, or per token `{tokens: {0x<token>: {holder, token?} | {call} |
-{unindexed: {reason}}}}`, exactly unless the component declares `tvl_only: {bps?, wei?, cause,
+{unindexed: "<reason>"}}}`, exactly unless the component declares `tvl_only: {bps?, wei?, cause,
 measured}`, which the runner verifies by re-decoding with halved balances and requiring the same
 quotes (`balances.tvl_only`); it rejects `skip_balance_check`. Strict mode requires every direction of every expected component to declare its limit (`limits:
 {kind: hard | soft | under_cap}`, on the package or the component, for every direction or keyed

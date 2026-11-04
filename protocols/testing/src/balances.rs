@@ -444,19 +444,14 @@ impl<'de> Deserialize<'de> for BalanceCheck {
             };
             if source.contains_key("unindexed") {
                 let reason = match (keys(source).as_slice(), source.get("unindexed")) {
-                    ([only], Some(serde_yaml::Value::Mapping(entry)))
-                        if only == "unindexed" && keys(entry) == ["reason"] =>
-                    {
-                        entry
-                            .get("reason")
-                            .and_then(serde_yaml::Value::as_str)
-                            .filter(|reason| !reason.trim().is_empty())
+                    ([only], Some(serde_yaml::Value::String(reason))) if only == "unindexed" => {
+                        Some(reason).filter(|reason| !reason.trim().is_empty())
                     }
                     _ => None,
                 };
                 let Some(reason) = reason else {
                     return Err(de::Error::custom(format!(
-                        "{location}: write `{{unindexed: {{reason: \"...\"}}}}`, alone"
+                        "{location}: write `{{unindexed: \"<the reason>\"}}`, alone"
                     )));
                 };
                 sources.insert(address, TokenSource::Unindexed(reason.to_string()));
@@ -549,10 +544,8 @@ impl Serialize for BalanceCheck {
                             TokenSource::Held(source) => source_value(source),
                             TokenSource::Call(call) => call_value(call),
                             TokenSource::Unindexed(reason) => {
-                                let mut entry = serde_yaml::Mapping::new();
-                                entry.insert("reason".into(), reason.as_str().into());
                                 let mut map = serde_yaml::Mapping::new();
-                                map.insert("unindexed".into(), entry.into());
+                                map.insert("unindexed".into(), reason.as_str().into());
                                 map.into()
                             }
                         };
@@ -1128,7 +1121,7 @@ mod tests {
     #[test]
     fn an_unindexed_token_must_stay_unindexed() {
         let check = parse(&format!(
-            "{{tokens: {{\"{TOKEN_B}\": {{unindexed: {{reason: \"only the pooled ether is tracked\"}}}}}}}}"
+            "{{tokens: {{\"{TOKEN_B}\": {{unindexed: \"only the pooled ether is tracked\"}}}}}}"
         ))
         .unwrap();
         let mut fixture = Fixture::new();
@@ -1198,7 +1191,7 @@ mod tests {
             .insert(bytes(TOKEN_B), amount(3));
         let check = parse(&format!(
             "tokens: {{\"{TOKEN_A}\": {{call: {{to: self, fn: \"reserve()\"}}}}, \"{TOKEN_B}\": \
-             {{unindexed: {{reason: \"not tracked\"}}}}}}"
+             {{unindexed: \"not tracked\"}}}}"
         ))
         .unwrap();
         let on_chain = chain(&[]).returning(
@@ -1246,9 +1239,10 @@ mod tests {
     fn malformed_declarations_say_what_is_wrong() {
         for (yaml, problem) in [
             ("skip", "takes `default`"),
-            ("{tokens: {\"0x00000000000000000000000000000000000000a1\": {unindexed: true}}}", "write `{unindexed: {reason"),
-            ("{tokens: {\"0x00000000000000000000000000000000000000a1\": {unindexed: {reason: \" \"}}}}", "write `{unindexed: {reason"),
-            ("{tokens: {\"0x00000000000000000000000000000000000000a1\": {unindexed: {reason: r}, holder: self}}}", "write `{unindexed: {reason"),
+            ("{tokens: {\"0x00000000000000000000000000000000000000a1\": {unindexed: true}}}", "write `{unindexed: \"<the reason>\"}`"),
+            ("{tokens: {\"0x00000000000000000000000000000000000000a1\": {unindexed: \" \"}}}", "write `{unindexed: \"<the reason>\"}`"),
+            ("{tokens: {\"0x00000000000000000000000000000000000000a1\": {unindexed: {reason: r}}}}", "write `{unindexed: \"<the reason>\"}`"),
+            ("{tokens: {\"0x00000000000000000000000000000000000000a1\": {unindexed: r, holder: self}}}", "write `{unindexed: \"<the reason>\"}`"),
             ("{call: {to: self, fn: \"f()\"}, tokens: {}}", "`call` stands alone"),
             (&call("{to: self, fn: \"f()\"}, holder: self"), "`call` stands alone"),
             (&call("{to: self, fn: \"f(\"}"), "is not a function signature"),
