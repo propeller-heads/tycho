@@ -112,11 +112,11 @@ impl Checks {
     ) -> miette::Result<Option<T>> {
         match check() {
             Ok(value) => {
-                self.record(id, Outcome::Pass);
+                self.record(id, None, Outcome::Pass);
                 Ok(Some(value))
             }
             Err(e) => {
-                self.record(id, Outcome::Fail { detail: format!("{e:#}") });
+                self.record(id, None, Outcome::Fail { detail: format!("{e:#}") });
                 match self.harness {
                     Harness::Legacy => Err(e),
                     Harness::Strict => {
@@ -130,27 +130,23 @@ impl Checks {
 
     /// Records a check the package's configuration turned off.
     pub fn skip(&mut self, id: CheckId, reason: &str) {
-        self.record(id, Outcome::Skipped { reason: reason.to_string() });
+        self.record(id, None, Outcome::Skipped { reason: reason.to_string() });
     }
 
-    /// Records a check the package's configuration turned off for one component.
+    /// Records a check the package's configuration turned off for one component, by its lowercase
+    /// id, as the runner matches components.
     pub fn skip_component(&mut self, id: CheckId, component: &str, reason: &str) {
-        self.results.push(CheckResult {
-            test: self.test.clone(),
-            check: id,
-            component: Some(component.to_string()),
-            outcome: Outcome::Skipped { reason: reason.to_string() },
-        });
+        self.record(id, Some(component), Outcome::Skipped { reason: reason.to_string() });
     }
 
     /// Records a check that could not run because `prerequisite` failed.
     pub fn not_run(&mut self, id: CheckId, prerequisite: CheckId) {
-        self.record(id, Outcome::NotRun { reason: format!("{prerequisite} failed") });
+        self.record(id, None, Outcome::NotRun { reason: format!("{prerequisite} failed") });
     }
 
     /// Records a failure that happened outside [`Checks::run`], such as an indexing error.
     pub fn fail(&mut self, id: CheckId, error: &miette::Report) {
-        self.record(id, Outcome::Fail { detail: format!("{error:#}") });
+        self.record(id, None, Outcome::Fail { detail: format!("{error:#}") });
     }
 
     /// Ends the test: an error naming every failed check if any failed, `Ok` otherwise, and the
@@ -170,9 +166,13 @@ impl Checks {
         (outcome, self.results)
     }
 
-    fn record(&mut self, check: CheckId, outcome: Outcome) {
-        self.results
-            .push(CheckResult { test: self.test.clone(), check, component: None, outcome });
+    fn record(&mut self, check: CheckId, component: Option<&str>, outcome: Outcome) {
+        self.results.push(CheckResult {
+            test: self.test.clone(),
+            check,
+            component: component.map(str::to_lowercase),
+            outcome,
+        });
     }
 }
 
@@ -251,6 +251,16 @@ mod tests {
             outcomes[3],
             (CheckId::SimLadder, &Outcome::NotRun { reason: "decode failed".to_string() })
         );
+    }
+
+    #[test]
+    fn a_skipped_component_is_reported_by_its_lowercase_id() {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.skip_component(CheckId::ExecLadder, "0xAbC", "no fork state");
+        let (outcome, results) = checks.finish();
+        assert!(outcome.is_ok());
+        assert_eq!(results[0].component.as_deref(), Some("0xabc"));
+        assert_eq!(results[0].outcome, Outcome::Skipped { reason: "no fork state".to_string() });
     }
 
     #[test]

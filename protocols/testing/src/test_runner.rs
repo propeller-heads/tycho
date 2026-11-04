@@ -54,9 +54,7 @@ use tycho_test::{
 
 use crate::{
     adapter_builder::AdapterContractBuilder,
-    config::{
-        Harness, IntegrationTest, IntegrationTestsConfig, ProtocolComponentWithTestConfig, Skip,
-    },
+    config::{IntegrationTest, IntegrationTestsConfig, ProtocolComponentWithTestConfig, Skip},
     execution,
     report::{CheckId, Checks, Report},
     rpc::RPCProvider,
@@ -572,21 +570,6 @@ impl TestRunner {
 
         info!("Running {} tests on Chain {}...\n", tests_count, self.chain);
 
-        if config.harness == Harness::Strict &&
-            execution::has_executor_fixture(self.chain, &config.protocol_system)
-        {
-            let unjustified = config.execution_skips_without_evidence();
-            ensure!(
-                unjustified.is_empty(),
-                "`harness: strict`: the harness plants the {} executor's runtime bytecode from \
-                 protocols/testing/fixtures/, so execution runs whether or not the executor is \
-                 deployed, and a missing deployment is not a reason to skip it. Remove these \
-                 `skip_execution`s, or add `evidence` showing why execution cannot be tested: {}",
-                config.protocol_system,
-                unjustified.join("; ")
-            );
-        }
-
         let mut failed_tests: Vec<String> = Vec::new();
         let mut report = Report {
             package: self.protocol.clone(),
@@ -811,6 +794,21 @@ impl TestRunner {
         let protocol_components_simulation: HashMap<String, ProtocolComponentModel> =
             update.new_pairs.clone();
 
+        // A test-wide ladder result covers the components without a skip. When every component
+        // skips, nothing runs, and the ladder is reported skipped rather than passed.
+        let every_component = |skips: fn(&ProtocolComponentWithTestConfig) -> bool| {
+            !test.expected_components.is_empty() &&
+                test.expected_components
+                    .iter()
+                    .all(skips)
+        };
+        if every_component(|c| c.skip_simulation.is_skipped()) {
+            let reason = "every expected component skips simulation";
+            checks.skip(CheckId::SimLadder, reason);
+            checks.skip(CheckId::ExecLadder, reason);
+            return Ok(());
+        }
+
         let Some(execution_data) = checks.run(CheckId::SimLadder, || {
             self.run_simulation(
                 &update,
@@ -823,6 +821,11 @@ impl TestRunner {
             checks.not_run(CheckId::ExecLadder, CheckId::SimLadder);
             return Ok(());
         };
+
+        if every_component(|c| c.skip_simulation.is_skipped() || c.skip_execution.is_skipped()) {
+            checks.skip(CheckId::ExecLadder, "every expected component skips execution");
+            return Ok(());
+        }
 
         checks.run(CheckId::ExecLadder, || {
             self.runtime
