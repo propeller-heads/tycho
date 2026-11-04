@@ -20,7 +20,7 @@
 use std::{collections::HashMap, fmt, str::FromStr};
 
 use alloy::{
-    dyn_abi::{DynSolType, DynSolValue},
+    dyn_abi::{DynSolType, DynSolValue, FunctionExt},
     json_abi::Function,
 };
 use num_bigint::BigUint;
@@ -125,15 +125,19 @@ pub enum TokenSource {
 ///
 /// ```yaml
 /// call: {to: "0x<vat>", fn: "dai(address)", args: ["0x<join>"], divide_by: "1e27"}
+/// call: {to: "0x<vault>", fn: "info(bytes32) returns (address,uint256)", output: 1}
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Call {
     pub to: Holder,
-    /// The function's signature, `name(type,...)`.
+    /// The function's signature, `name(type,...)`, with `returns (type,...)` when it does not
+    /// return a single `uint256`.
     pub function: String,
     /// One per parameter: `self` (the component id), `token` (the token being checked),
     /// `attribute:NAME`, or a literal the parameter's type parses.
     pub args: Vec<String>,
+    /// The index of the declared output holding the amount, when it is not the first.
+    pub output: Option<usize>,
     /// Divides the result, rounding down, for accounting kept at a higher precision than the
     /// token's.
     pub divide_by: Option<BigUint>,
@@ -149,8 +153,9 @@ pub trait Chain {
 
 impl Call {
     fn parse(entry: CallEntry) -> Result<Self, String> {
-        let CallEntry { to, function, args, divide_by } = entry;
+        let CallEntry { to, function, args, output, divide_by } = entry;
         let parsed = parse_function(&function)?;
+        amount_output(&parsed, output).map_err(|e| format!("`{function}`: {e}"))?;
         let args: Vec<String> = args
             .into_iter()
             .map(|arg| match arg {
@@ -181,7 +186,7 @@ impl Call {
         let divide_by = divide_by
             .map(|divisor| parse_divisor(&divisor))
             .transpose()?;
-        Ok(Self { to, function, args, divide_by })
+        Ok(Self { to, function, args, output, divide_by })
     }
 
     /// The calldata for this component.
@@ -214,7 +219,8 @@ impl Call {
         Ok(Bytes::from(calldata))
     }
 
-    /// Reads the amount: the call's first return word, divided if declared.
+    /// Reads the amount: the declared output, or the single `uint256` a function without
+    /// declared outputs must return, divided if declared.
     fn read(
         &self,
         component: &Component<'_>,
@@ -223,10 +229,31 @@ impl Call {
     ) -> Result<BigUint, String> {
         let to = resolve(&self.to, component)?;
         let returned = chain.call(&to, &self.calldata(component, token)?)?;
-        if returned.len() < 32 {
-            return Err(format!("{self} returned {} bytes, not a uint", returned.len()));
-        }
-        let amount = BigUint::from_bytes_be(&returned[..32]);
+        let function = parse_function(&self.function)?;
+        let amount = match amount_output(&function, self.output)? {
+            None if returned.len() == 32 => BigUint::from_bytes_be(&returned),
+            None => {
+                return Err(format!(
+                    "{self} returned {} bytes, not a single uint256; declare its outputs as \
+                     `name(...) returns (...)`",
+                    returned.len()
+                ))
+            }
+            Some(index) => {
+                let values = function
+                    .abi_decode_output(&returned)
+                    .map_err(|e| format!("{self} returned data its outputs do not decode: {e}"))?;
+                match values.get(index) {
+                    Some(DynSolValue::Uint(amount, _)) => {
+                        BigUint::from_bytes_be(&amount.to_be_bytes::<32>())
+                    }
+                    Some(value) => {
+                        return Err(format!("{self} output {index} is {value:?}, not a uint"))
+                    }
+                    None => return Err(format!("{self} returned no output {index}")),
+                }
+            }
+        };
         Ok(match &self.divide_by {
             Some(divisor) => amount / divisor,
             None => amount,
@@ -242,6 +269,9 @@ impl fmt::Display for Call {
             .next()
             .unwrap_or_default();
         write!(f, "{}.{name}({})", self.to, self.args.join(", "))?;
+        if let Some(index) = self.output {
+            write!(f, "[{index}]")?;
+        }
         if let Some(divisor) = &self.divide_by {
             write!(f, " / {divisor}")?;
         }
@@ -249,11 +279,37 @@ impl fmt::Display for Call {
     }
 }
 
-/// Parses `name(type,...)` as a function returning a `uint256`.
+/// Parses `name(type,...)`, optionally followed by `returns (type,...)`.
 fn parse_function(signature: &str) -> Result<Function, String> {
     let function = Function::parse(signature)
         .map_err(|e| format!("`{signature}` is not a function signature: {e}"))?;
     Ok(function)
+}
+
+/// Which of `function`'s declared outputs holds the amount: `output`, or the first. `None` when
+/// the function declares no outputs, and so must return a single `uint256`. The output must be a
+/// `uint`: an `int` can be negative, and a dynamic type's first word is an offset, not an amount.
+fn amount_output(function: &Function, output: Option<usize>) -> Result<Option<usize>, String> {
+    if function.outputs.is_empty() {
+        return match output {
+            Some(_) => {
+                Err("`output` needs the outputs declared, as `name(...) returns (...)`".to_string())
+            }
+            None => Ok(None),
+        };
+    }
+    let index = output.unwrap_or(0);
+    let param = function
+        .outputs
+        .get(index)
+        .ok_or_else(|| {
+            format!("there is no output {index}: it declares {}", function.outputs.len())
+        })?;
+    match DynSolType::parse(&param.ty) {
+        Ok(DynSolType::Uint(_)) => Ok(Some(index)),
+        Ok(ty) => Err(format!("output {index} is `{ty}`, but the amount must be a uint")),
+        Err(e) => Err(format!("output {index}, type `{}`: {e}", param.ty)),
+    }
 }
 
 fn coerce(ty: &str, literal: &str) -> Result<DynSolValue, String> {
@@ -262,8 +318,32 @@ fn coerce(ty: &str, literal: &str) -> Result<DynSolValue, String> {
         .map_err(|e| format!("`{literal}` does not parse as `{ty}`: {e}"))
 }
 
-/// A divisor written as an integer or as `1eN`.
-fn parse_divisor(divisor: &str) -> Result<BigUint, String> {
+/// A divisor written as an integer or as `1eN`, quoted or not. Unquoted, yaml reads `1eN` as a
+/// float, which is taken only when it is a power of ten.
+fn parse_divisor(divisor: &serde_yaml::Value) -> Result<BigUint, String> {
+    match divisor {
+        serde_yaml::Value::String(divisor) => parse_divisor_str(divisor),
+        serde_yaml::Value::Number(number) => match (number.as_u64(), number.as_f64()) {
+            (Some(integer), _) => parse_divisor_str(&integer.to_string()),
+            (None, Some(float)) => {
+                let exponent = float.log10().round();
+                if (0.0..=77.0).contains(&exponent) && 10f64.powf(exponent) == float {
+                    parse_divisor_str(&format!("1e{exponent}"))
+                } else {
+                    Err(format!("`divide_by: {number}` is not an integer or `1eN`"))
+                }
+            }
+            (None, None) => Err(format!("`divide_by: {number}` is not an integer or `1eN`")),
+        },
+        serde_yaml::Value::Null |
+        serde_yaml::Value::Bool(_) |
+        serde_yaml::Value::Sequence(_) |
+        serde_yaml::Value::Mapping(_) |
+        serde_yaml::Value::Tagged(_) => Err("`divide_by` must be an integer or `1eN`".to_string()),
+    }
+}
+
+fn parse_divisor_str(divisor: &str) -> Result<BigUint, String> {
     let parsed = match divisor.strip_prefix("1e") {
         Some(exponent) => exponent
             .parse::<u32>()
@@ -288,7 +368,9 @@ struct CallEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     args: Vec<serde_yaml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    divide_by: Option<String>,
+    output: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    divide_by: Option<serde_yaml::Value>,
 }
 
 /// Where one token's indexed balance is read.
@@ -517,10 +599,11 @@ fn call_value(call: &Call) -> serde_yaml::Value {
             .iter()
             .map(|arg| arg.as_str().into())
             .collect(),
+        output: call.output,
         divide_by: call
             .divide_by
             .as_ref()
-            .map(BigUint::to_string),
+            .map(|divisor| divisor.to_string().into()),
     };
     let mut map = serde_yaml::Mapping::new();
     map.insert("call".into(), serde_yaml::to_value(entry).expect("a call entry serializes"));
@@ -762,10 +845,18 @@ mod tests {
     }
 
     impl Scripted {
-        fn returning(mut self, to: &str, calldata: Bytes, word: &BigUint) -> Self {
-            let mut returned = vec![0u8; 32];
-            let word = word.to_bytes_be();
-            returned[32 - word.len()..].copy_from_slice(&word);
+        fn returning(self, to: &str, calldata: Bytes, word: &BigUint) -> Self {
+            self.returning_words(to, calldata, std::slice::from_ref(word))
+        }
+
+        /// Returns `words`, each left-padded to 32 bytes.
+        fn returning_words(mut self, to: &str, calldata: Bytes, words: &[BigUint]) -> Self {
+            let mut returned = Vec::new();
+            for word in words {
+                let word = word.to_bytes_be();
+                returned.extend(vec![0u8; 32 - word.len()]);
+                returned.extend(word);
+            }
             self.calls
                 .insert((bytes(to), calldata), Bytes::from(returned));
             self
@@ -1078,13 +1169,13 @@ mod tests {
 
         // A bytes32 pool id, as a singleton vault takes it.
         let by_id = parse(&format!(
-            "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: \"{VAULT}\", fn: \"getPoolTokens(bytes32)\", args: [self]}}}}}}}}"
+            "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: \"{VAULT}\", fn: \"getPoolBalance(bytes32)\", args: [self]}}}}}}}}"
         ))
         .unwrap();
-        let get_pool_tokens =
-            "0xf94d466800000000000000000000000000000000000000000000000000000000000000aa";
+        let get_pool_balance =
+            "0x550e6ed100000000000000000000000000000000000000000000000000000000000000aa";
         assert!(fixture
-            .check(&by_id, &on_chain(VAULT, get_pool_tokens))
+            .check(&by_id, &on_chain(VAULT, get_pool_balance))
             .is_empty());
 
         let convert = "0x07a2d13a00000000000000000000000000000000000000000000000000000000000003e8";
@@ -1103,15 +1194,17 @@ mod tests {
     fn one_call_can_serve_every_token() {
         let mut fixture = Fixture::new();
         fixture.id = format!("0x{}aa", "00".repeat(31));
+        // It returns (cash, managed, lastChangeBlock, assetManager); the cash is the balance.
         let check = parse(&format!(
-            "{{call: {{to: \"{VAULT}\", fn: \"getPoolTokenInfo(bytes32,address)\", args: [self, token]}}}}"
+            "{{call: {{to: \"{VAULT}\", fn: \"getPoolTokenInfo(bytes32,address) returns (uint256,uint256,uint256,address)\", args: [self, token]}}}}"
         ))
         .unwrap();
         let pool_id = format!("{}aa", "00".repeat(31));
         let info = |token: &str| bytes(&format!("0xb05f8e48{pool_id}{:0>64}", &token[2..]));
+        let words = |cash: u32| [cash, 5, 21_000_000, 0xee].map(BigUint::from);
         let scripted = Scripted::default()
-            .returning(VAULT, info(TOKEN_A), &BigUint::from(100u32))
-            .returning(VAULT, info(TOKEN_B), &BigUint::from(200u32));
+            .returning_words(VAULT, info(TOKEN_A), &words(100))
+            .returning_words(VAULT, info(TOKEN_B), &words(200));
         let failures = fixture.check(&check, &scripted);
         assert!(failures.is_empty(), "{failures:?}");
         assert_eq!(parse(&serde_yaml::to_string(&check).unwrap()), Ok(check));
@@ -1161,7 +1254,91 @@ mod tests {
             .calls
             .insert((bytes(POOL), bytes("0x37cfdaca")), bytes("0x01"));
         let failures = fixture.check(&check, &short);
-        assert!(failures[0].contains("returned 1 bytes, not a uint"), "{failures:?}");
+        assert!(failures[0].contains("returned 1 bytes, not a single uint256"), "{failures:?}");
+
+        // Two words from a function declared without outputs: the first could be anything.
+        let two_words = Scripted::default().returning_words(
+            POOL,
+            bytes("0x37cfdaca"),
+            &[BigUint::from(1u32), BigUint::from(2u32)],
+        );
+        let failures = fixture.check(&check, &two_words);
+        assert!(failures[0].contains("returned 64 bytes, not a single uint256"), "{failures:?}");
+    }
+
+    #[test]
+    fn the_amount_is_the_declared_output() {
+        let mut fixture = Fixture::new();
+        fixture.tokens.truncate(1);
+        let calldata = bytes("0x370158ea");
+        let check = |output: &str| {
+            parse(&format!(
+                "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: self, fn: \"info() returns (address,uint256)\"{output}}}}}}}}}"
+            ))
+        };
+        let scripted = Scripted::default().returning_words(
+            POOL,
+            calldata,
+            &[BigUint::from(0xeeu32), BigUint::from(100u32)],
+        );
+
+        let second = check(", output: 1").unwrap();
+        assert!(fixture
+            .check(&second, &scripted)
+            .is_empty());
+        assert_eq!(parse(&serde_yaml::to_string(&second).unwrap()), Ok(second));
+
+        // Without `output`, the first output is read, and it is an address.
+        assert!(check("")
+            .unwrap_err()
+            .contains("output 0 is `address`, but the amount must be a uint"));
+        assert!(check(", output: 2")
+            .unwrap_err()
+            .contains("there is no output 2: it declares 2"));
+    }
+
+    #[test]
+    fn an_output_that_is_not_a_uint_is_rejected_at_load() {
+        let call = |function: &str| {
+            parse(&format!(
+                "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: self, fn: \"{function}\"}}}}}}}}"
+            ))
+        };
+        assert!(call("f() returns (int256)")
+            .unwrap_err()
+            .contains("output 0 is `int256`"));
+        // A dynamic output's first word is an offset, not an amount.
+        assert!(call("f() returns (uint256[])")
+            .unwrap_err()
+            .contains("output 0 is `uint256[]`"));
+        assert!(call("f() returns (uint128)").is_ok());
+        assert!(parse(&format!(
+            "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: self, fn: \"f()\", output: 1}}}}}}}}"
+        ))
+        .unwrap_err()
+        .contains("`output` needs the outputs declared"));
+    }
+
+    #[test]
+    fn divide_by_may_be_written_unquoted() {
+        let call = |divisor: &str| {
+            parse(&format!(
+                "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: self, fn: \"f()\", divide_by: {divisor}}}}}}}}}"
+            ))
+        };
+        let divisor = |check: BalanceCheck| {
+            let BalanceCheck::Tokens(tokens) = check else { panic!("not per token: {check:?}") };
+            let TokenSource::Call(call) = &tokens[&bytes(TOKEN_A)] else {
+                panic!("not a call: {tokens:?}")
+            };
+            call.divide_by.clone()
+        };
+        assert_eq!(divisor(call("1000000").unwrap()), Some(BigUint::from(1_000_000u32)));
+        assert_eq!(divisor(call("1e27").unwrap()), Some(BigUint::from(10u32).pow(27)));
+        assert_eq!(divisor(call("\"1e27\"").unwrap()), Some(BigUint::from(10u32).pow(27)));
+        assert!(call("1.5")
+            .unwrap_err()
+            .contains("is not an integer or `1eN`"));
     }
 
     #[test]
