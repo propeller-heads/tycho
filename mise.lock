@@ -50,51 +50,51 @@ url_api = "https://api.github.com/repos/bufbuild/buf/releases/assets/664187857"
 provenance = "minisign"
 
 [[tools.foundry]]
-version = "1.5.1"
+version = "1.9.0"
 backend = "aqua:foundry-rs/foundry"
-specifiers = ["1.5.1"]
+specifiers = ["1.9.0"]
 
 [tools.foundry."platforms.linux-arm64"]
-checksum = "sha256:cccf28bdf202289e837a9e21ed213b2b80dc1e806e12f1717bc98a44315c331e"
-checksum_source = "mise-versions"
-url = "https://github.com/foundry-rs/foundry/releases/download/v1.5.1/foundry_v1.5.1_linux_arm64.tar.gz"
-url_api = "https://api.github.com/repos/foundry-rs/foundry/releases/assets/330668571"
+checksum = "sha256:22d3060fa83515fb901690a2c59a5f552bd41c241886195b2159562fc4947abc"
+url = "https://github.com/foundry-rs/foundry/releases/download/v1.9.0/foundry_v1.9.0_linux_arm64.tar.gz"
+url_api = "https://api.github.com/repos/foundry-rs/foundry/releases/assets/703076398"
+provenance = "github-attestations"
 
 [tools.foundry."platforms.linux-arm64-musl"]
-checksum = "sha256:cccf28bdf202289e837a9e21ed213b2b80dc1e806e12f1717bc98a44315c331e"
-checksum_source = "mise-versions"
-url = "https://github.com/foundry-rs/foundry/releases/download/v1.5.1/foundry_v1.5.1_linux_arm64.tar.gz"
-url_api = "https://api.github.com/repos/foundry-rs/foundry/releases/assets/330668571"
+checksum = "sha256:22d3060fa83515fb901690a2c59a5f552bd41c241886195b2159562fc4947abc"
+url = "https://github.com/foundry-rs/foundry/releases/download/v1.9.0/foundry_v1.9.0_linux_arm64.tar.gz"
+url_api = "https://api.github.com/repos/foundry-rs/foundry/releases/assets/703076398"
+provenance = "github-attestations"
 
 [tools.foundry."platforms.linux-x64"]
-checksum = "sha256:73640b01bd9ed29fdb4965085099371f8cf0dbbec3e2086cf54564efc4dcfe88"
-checksum_source = "mise-versions"
-url = "https://github.com/foundry-rs/foundry/releases/download/v1.5.1/foundry_v1.5.1_linux_amd64.tar.gz"
-url_api = "https://api.github.com/repos/foundry-rs/foundry/releases/assets/330667427"
+checksum = "sha256:8d17599b42e3139f1a9c171be3798c4ed8e743ae17b84cc3435e57bf2a51ae99"
+url = "https://github.com/foundry-rs/foundry/releases/download/v1.9.0/foundry_v1.9.0_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/foundry-rs/foundry/releases/assets/703110190"
+provenance = "github-attestations"
 
 [tools.foundry."platforms.linux-x64-musl"]
-checksum = "sha256:73640b01bd9ed29fdb4965085099371f8cf0dbbec3e2086cf54564efc4dcfe88"
-checksum_source = "mise-versions"
-url = "https://github.com/foundry-rs/foundry/releases/download/v1.5.1/foundry_v1.5.1_linux_amd64.tar.gz"
-url_api = "https://api.github.com/repos/foundry-rs/foundry/releases/assets/330667427"
+checksum = "sha256:8d17599b42e3139f1a9c171be3798c4ed8e743ae17b84cc3435e57bf2a51ae99"
+url = "https://github.com/foundry-rs/foundry/releases/download/v1.9.0/foundry_v1.9.0_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/foundry-rs/foundry/releases/assets/703110190"
+provenance = "github-attestations"
 
 [tools.foundry."platforms.macos-arm64"]
-checksum = "sha256:b3bf1752be066e0877911721e0624058171c88fc5616e228937fe4620b41c40d"
-checksum_source = "mise-versions"
-url = "https://github.com/foundry-rs/foundry/releases/download/v1.5.1/foundry_v1.5.1_darwin_arm64.tar.gz"
-url_api = "https://api.github.com/repos/foundry-rs/foundry/releases/assets/330675455"
+checksum = "sha256:38f9af72b266c38ce2e4dfc659ae9cbd1f78c01b34738a76b6c4cb9610579426"
+url = "https://github.com/foundry-rs/foundry/releases/download/v1.9.0/foundry_v1.9.0_darwin_arm64.tar.gz"
+url_api = "https://api.github.com/repos/foundry-rs/foundry/releases/assets/703139445"
+provenance = "github-attestations"
 
 [tools.foundry."platforms.macos-x64"]
-checksum = "sha256:a416e79c26d32cd37316232f790b3a1bdeae4dfae09d82627d7a1ace4c281848"
-checksum_source = "mise-versions"
-url = "https://github.com/foundry-rs/foundry/releases/download/v1.5.1/foundry_v1.5.1_darwin_amd64.tar.gz"
-url_api = "https://api.github.com/repos/foundry-rs/foundry/releases/assets/330674276"
+checksum = "sha256:88f234f458652878499d9e363dea37eb06653a948dbe709adef8d8389e0a9025"
+url = "https://github.com/foundry-rs/foundry/releases/download/v1.9.0/foundry_v1.9.0_darwin_amd64.tar.gz"
+url_api = "https://api.github.com/repos/foundry-rs/foundry/releases/assets/703137034"
+provenance = "github-attestations"
 
 [tools.foundry."platforms.windows-x64"]
-checksum = "sha256:293fedd9ad45eb9d774008815dbda820bddd3c85cab3baf55a0be3775e86d5ae"
-checksum_source = "mise-versions"
-url = "https://github.com/foundry-rs/foundry/releases/download/v1.5.1/foundry_v1.5.1_win32_amd64.zip"
-url_api = "https://api.github.com/repos/foundry-rs/foundry/releases/assets/330668557"
+checksum = "sha256:2b02444d46c9218fe2e6be66015265ce131fe6b7c384e33e630b00f9a0bff072"
+url = "https://github.com/foundry-rs/foundry/releases/download/v1.9.0/foundry_v1.9.0_win32_amd64.zip"
+url_api = "https://api.github.com/repos/foundry-rs/foundry/releases/assets/703096483"
+provenance = "github-attestations"
 
 [[tools."github:LukeMathWalker/cargo-chef"]]
 version = "0.1.78"

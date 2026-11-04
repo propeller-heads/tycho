@@ -306,6 +306,7 @@ impl ProtocolStreamProcessor {
                 "pancakeswap_infinity_cl".to_string(),
                 "aero_cl".to_string(),
                 "aero_basic".to_string(),
+                "biconomy".to_string(),
             ],
             Chain::Bsc => vec![
                 "uniswap_v2".to_string(),
