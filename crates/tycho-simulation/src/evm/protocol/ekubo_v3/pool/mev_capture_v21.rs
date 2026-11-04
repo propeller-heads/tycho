@@ -1,15 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
 use ekubo_sdk::{
-    chain::evm::{EvmPoolKey, EvmTokenAmount},
+    chain::evm::{Evm, EvmPoolKey, EvmTokenAmount, EVM_MAX_TICK, EVM_MIN_TICK},
     math::tick::to_sqrt_ratio,
     quoting::{
-        pools::mev_capture_v21_main::{
-            MevCaptureV21MainAnchor, MevCaptureV21MainConfig, MevCaptureV21MainCoreState,
-            MevCaptureV21MainPool, MevCaptureV21MainPoolKey, MevCaptureV21MainPoolResources,
-            MevCaptureV21MainPoolState,
+        pools::{
+            concentrated::TickSpacing,
+            mev_capture_v21_main::{
+                MevCaptureV21MainAnchor, MevCaptureV21MainConfig, MevCaptureV21MainCoreState,
+                MevCaptureV21MainPool, MevCaptureV21MainPoolKey, MevCaptureV21MainPoolResources,
+                MevCaptureV21MainPoolState,
+            },
         },
-        types::{Pool, QuoteParams, Tick},
+        types::{Pool, Quote, QuoteParams, Tick},
     },
     U256,
 };
@@ -51,6 +54,20 @@ const GAS_COST_OF_ONE_TICK_CROSSED: u64 = 13_150;
 const GAS_COST_OF_ONE_FEE_ACCUMULATION: u64 = 7_950;
 const GAS_COST_OF_ONE_ANCHOR_UPDATE: u64 = 4_650;
 
+// The SDK emulates Core's tick bitmap, so a swap takes one step per bitmap word it searches, even
+// an empty one: in a sparse pool with a small tick spacing, the work is bounded by the tick range
+// instead of by the initialized ticks. Quotes therefore stop where a swap would have searched
+// `UNPAYABLE_BITMAP_WORDS` words, which no Ethereum transaction can pay for: Core reads each
+// searched word from its own storage slot, at least an access-list storage key (1,900 gas) plus a
+// warm read (100 gas), and EIP-7825 caps a transaction at 2^24 gas. Measured with forge on the
+// deployed configuration and tick spacing 1, an empty word costs 3.6k gas in a call toward the
+// anchor and 11.4k in the calls away from it, so the bound changes no executable swap.
+const TRANSACTION_GAS_LIMIT_CAP: i64 = 1 << 24;
+const MIN_GAS_PER_SEARCHED_BITMAP_WORD: i64 = 2_000;
+const UNPAYABLE_BITMAP_WORDS: i64 =
+    TRANSACTION_GAS_LIMIT_CAP / MIN_GAS_PER_SEARCHED_BITMAP_WORD + 1;
+const TICK_SPACINGS_PER_BITMAP_WORD: i64 = 256;
+
 /// A concentrated pool behind MEVCapture v2.1, quoted exactly with the SDK's
 /// [`MevCaptureV21MainPool`], which reproduces each Core call the extension makes in
 /// `Core.forward`.
@@ -58,7 +75,6 @@ const GAS_COST_OF_ONE_ANCHOR_UPDATE: u64 = 4_650;
 #[serde(try_from = "MevCaptureV21PoolRepr", into = "MevCaptureV21PoolRepr")]
 pub struct MevCaptureV21Pool {
     imp: MevCaptureV21MainPool,
-    config: MevCaptureV21MainConfig,
     state: MevCaptureV21MainPoolState,
     /// Whether this state results from a quote in the block being simulated, in which case the
     /// anchor's last update time is that block's timestamp.
@@ -89,7 +105,7 @@ impl From<MevCaptureV21Pool> for MevCaptureV21PoolRepr {
     fn from(pool: MevCaptureV21Pool) -> Self {
         Self {
             key: pool.imp.key(),
-            config: pool.config,
+            config: pool.imp.model().config(),
             state: pool.state,
             ticks: pool.imp.ticks().to_vec(),
             swapped_this_block: pool.swapped_this_block,
@@ -98,8 +114,9 @@ impl From<MevCaptureV21Pool> for MevCaptureV21PoolRepr {
 }
 
 impl MevCaptureV21Pool {
-    /// `config` is the extension's `getConfig`, `state.anchor` the pool's `getAnchor` and
-    /// `ticks` all initialized ticks, including those whose net liquidity delta is zero.
+    /// Builds the pool from the extension's `getConfig` (`config`), the pool's Core state and
+    /// `getAnchor` (`state`), and all its initialized ticks (`ticks`), including those whose net
+    /// liquidity delta is zero.
     pub fn new(
         key: MevCaptureV21MainPoolKey,
         config: MevCaptureV21MainConfig,
@@ -110,15 +127,9 @@ impl MevCaptureV21Pool {
             imp: MevCaptureV21MainPool::new(key, config, state, ticks).map_err(|err| {
                 InvalidSnapshotError::ValueError(format!("creating MEVCapture v2.1 pool: {err}"))
             })?,
-            config,
             state,
             swapped_this_block: false,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn sdk_pool(&self) -> &MevCaptureV21MainPool {
-        &self.imp
     }
 
     fn timestamp(&self) -> Result<u32, SimulationError> {
@@ -127,16 +138,72 @@ impl MevCaptureV21Pool {
             self.swapped_this_block,
             u64::from(self.state.anchor.last_update_time),
         )
-        .map(|timestamp| timestamp as u32)
+        .map(|timestamp| (timestamp & 0xFFFF_FFFF) as u32)
+    }
+
+    /// The sqrt ratio that no executable swap in the given direction reaches: moving the price
+    /// there searches at least [`UNPAYABLE_BITMAP_WORDS`] bitmap words.
+    fn unreachable_sqrt_ratio(&self, increasing: bool) -> Result<U256, SimulationError> {
+        let TickSpacing(spacing) = self.imp.key().config.pool_type_config;
+        let distance = UNPAYABLE_BITMAP_WORDS * TICK_SPACINGS_PER_BITMAP_WORD * i64::from(spacing);
+        let tick = i64::from(self.state.core.tick);
+        let tick = if increasing { tick + distance } else { tick - distance };
+        let tick = tick.clamp(i64::from(EVM_MIN_TICK), i64::from(EVM_MAX_TICK));
+        let tick = i32::try_from(tick).map_err(|err| {
+            SimulationError::FatalError(format!("tick {tick} clamped to the tick range: {err}"))
+        })?;
+        to_sqrt_ratio::<Evm>(tick).ok_or_else(|| {
+            SimulationError::FatalError(format!("no sqrt ratio for tick {tick} in the tick range"))
+        })
+    }
+
+    /// Quotes with the SDK, stopping at [`Self::unreachable_sqrt_ratio`] unless `sqrt_ratio_limit`
+    /// is nearer.
+    fn sdk_quote(
+        &self,
+        token_amount: EvmTokenAmount,
+        sqrt_ratio_limit: Option<U256>,
+    ) -> Result<Quote<MevCaptureV21MainPoolResources, MevCaptureV21MainPoolState>, SimulationError>
+    {
+        let key = self.imp.key();
+        // A token outside the pair is left to the SDK to reject.
+        let sqrt_ratio_limit =
+            if token_amount.token == key.token0 || token_amount.token == key.token1 {
+                let increasing = (token_amount.token == key.token1) != (token_amount.amount < 0);
+                let bound = self.unreachable_sqrt_ratio(increasing)?;
+                Some(sqrt_ratio_limit.map_or(bound, |limit| {
+                    if increasing {
+                        limit.min(bound)
+                    } else {
+                        limit.max(bound)
+                    }
+                }))
+            } else {
+                sqrt_ratio_limit
+            };
+
+        self.imp
+            .quote(QuoteParams {
+                token_amount,
+                sqrt_ratio_limit,
+                override_state: Some(self.state),
+                meta: u64::from(self.timestamp()?),
+            })
+            .map_err(|err| SimulationError::RecoverableError(format!("quoting error: {err}")))
     }
 
     fn rebuild(&mut self, ticks: Vec<Tick>) -> Result<(), TransitionError> {
-        self.imp = MevCaptureV21MainPool::new(self.imp.key(), self.config, self.state, ticks)
-            .map_err(|err| {
-                TransitionError::SimulationError(SimulationError::RecoverableError(format!(
-                    "reinstantiate MEVCapture v2.1 pool: {err}"
-                )))
-            })?;
+        self.imp = MevCaptureV21MainPool::new(
+            self.imp.key(),
+            self.imp.model().config(),
+            self.state,
+            ticks,
+        )
+        .map_err(|err| {
+            TransitionError::SimulationError(SimulationError::RecoverableError(format!(
+                "reinstantiate MEVCapture v2.1 pool: {err}"
+            )))
+        })?;
         Ok(())
     }
 }
@@ -163,15 +230,7 @@ impl EkuboPool for MevCaptureV21Pool {
         token_amount: EvmTokenAmount,
         sqrt_ratio_limit: Option<U256>,
     ) -> Result<EkuboPoolQuote, SimulationError> {
-        let quote = self
-            .imp
-            .quote(QuoteParams {
-                token_amount,
-                sqrt_ratio_limit,
-                override_state: Some(self.state),
-                meta: u64::from(self.timestamp()?),
-            })
-            .map_err(|err| SimulationError::RecoverableError(format!("quoting error: {err}")))?;
+        let quote = self.sdk_quote(token_amount, sqrt_ratio_limit)?;
 
         Ok(EkuboPoolQuote {
             consumed_amount: quote.consumed_amount,
@@ -179,7 +238,6 @@ impl EkuboPool for MevCaptureV21Pool {
             gas: gas_costs(quote.execution_resources),
             new_state: Self {
                 imp: self.imp.clone(),
-                config: self.config,
                 state: quote.state_after,
                 swapped_this_block: true,
             }
@@ -192,16 +250,16 @@ impl EkuboPool for MevCaptureV21Pool {
         let ticks = self.imp.ticks();
         let sqrt_ratio = self.sqrt_ratio();
 
+        // There is no liquidity beyond the furthest initialized tick.
         let tick_limit = if token_in == key.token0 { ticks.first() } else { ticks.last() };
         let sqrt_ratio_limit = match tick_limit {
             None => sqrt_ratio,
             Some(tick) => {
-                let limit =
-                    to_sqrt_ratio::<ekubo_sdk::chain::evm::Evm>(tick.index).ok_or_else(|| {
-                        SimulationError::FatalError(
-                            "sqrt_ratio should be computable from tick index".to_string(),
-                        )
-                    })?;
+                let limit = to_sqrt_ratio::<Evm>(tick.index).ok_or_else(|| {
+                    SimulationError::FatalError(
+                        "sqrt_ratio should be computable from tick index".to_string(),
+                    )
+                })?;
                 if token_in == key.token0 {
                     limit.min(sqrt_ratio)
                 } else {
@@ -212,15 +270,10 @@ impl EkuboPool for MevCaptureV21Pool {
 
         // The extension rejects amounts whose Core deltas overflow, so probe with the largest
         // amount Core accepts and let the price limit stop the swap.
-        let quote = self
-            .imp
-            .quote(QuoteParams {
-                token_amount: EvmTokenAmount { token: token_in, amount: i128::MAX },
-                sqrt_ratio_limit: Some(sqrt_ratio_limit),
-                override_state: Some(self.state),
-                meta: u64::from(self.timestamp()?),
-            })
-            .map_err(|err| SimulationError::RecoverableError(format!("quoting error: {err}")))?;
+        let quote = self.sdk_quote(
+            EvmTokenAmount { token: token_in, amount: i128::MAX },
+            Some(sqrt_ratio_limit),
+        )?;
 
         Ok(quote.consumed_amount.max(0))
     }
@@ -278,35 +331,26 @@ impl PartialEq for MevCaptureV21Pool {
     fn eq(&self, other: &Self) -> bool {
         self.imp.key() == other.imp.key() &&
             self.imp.ticks() == other.imp.ticks() &&
-            self.config == other.config &&
-            self.state == other.state
+            self.imp.model().config() == other.imp.model().config() &&
+            self.state == other.state &&
+            self.swapped_this_block == other.swapped_this_block
     }
 }
 
-/// Decodes the extension's packed per-pool state word (`MEVCaptureV21PoolState`).
+/// Decodes the extension's packed per-pool state word (`MEVCaptureV21PoolState`), which may have
+/// its leading zero bytes trimmed.
 pub fn anchor_from_bytes(bytes: &[u8]) -> Result<MevCaptureV21MainAnchor, String> {
-    if bytes.len() > 32 {
-        return Err(format!("anchor state is {} bytes long", bytes.len()));
-    }
-    let mut word = [0u8; 32];
-    word[32 - bytes.len()..].copy_from_slice(bytes);
-
-    let u32_at = |offset: usize| {
-        u32::from_be_bytes(
-            word[offset..offset + 4]
-                .try_into()
-                .unwrap(),
-        )
-    };
+    let word = U256::try_from_be_slice(bytes)
+        .ok_or_else(|| format!("anchor state is {} bytes long", bytes.len()))?;
 
     Ok(MevCaptureV21MainAnchor {
-        last_update_time: u32_at(0),
-        l_ref_time: u32_at(4),
-        last_pos_time: u32_at(8),
-        l_ref_bits: word[12],
-        snap_bits: word[13],
-        l_ref_raise_time: u32_at(14),
-        anchor_x16: i64::from_be_bytes(word[24..32].try_into().unwrap()),
+        last_update_time: (word >> 224_usize).wrapping_to::<u32>(),
+        l_ref_time: (word >> 192_usize).wrapping_to::<u32>(),
+        last_pos_time: (word >> 160_usize).wrapping_to::<u32>(),
+        l_ref_bits: (word >> 152_usize).wrapping_to::<u8>(),
+        snap_bits: (word >> 144_usize).wrapping_to::<u8>(),
+        l_ref_raise_time: (word >> 112_usize).wrapping_to::<u32>(),
+        anchor_x16: word.wrapping_to::<i64>(),
     })
 }
 
@@ -345,30 +389,32 @@ fn gas_costs(
 pub fn config_from_attributes(
     attrs: &HashMap<String, Bytes>,
 ) -> Result<MevCaptureV21MainConfig, InvalidSnapshotError> {
-    fn get(attrs: &HashMap<String, Bytes>, key: &str) -> Result<u64, InvalidSnapshotError> {
+    fn field<T>(attrs: &HashMap<String, Bytes>, key: &str) -> Result<T, InvalidSnapshotError>
+    where
+        T: TryFrom<u64>,
+        T::Error: std::fmt::Display,
+    {
         let bytes = attrs
             .get(key)
             .ok_or_else(|| InvalidSnapshotError::MissingAttribute(key.to_string()))?;
-        if bytes.len() > 8 {
-            return Err(InvalidSnapshotError::ValueError(format!("{key} is too long")));
-        }
-        Ok(bytes
-            .iter()
-            .fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte)))
-    }
-    fn narrow<T: TryFrom<u64>>(value: u64, key: &str) -> Result<T, InvalidSnapshotError> {
-        T::try_from(value)
-            .map_err(|_| InvalidSnapshotError::ValueError(format!("{key} is out of range")))
+        let value = U256::try_from_be_slice(&bytes[..])
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| {
+                InvalidSnapshotError::ValueError(format!("{key} {bytes} does not fit in 64 bits"))
+            })?;
+        T::try_from(value).map_err(|err| {
+            InvalidSnapshotError::ValueError(format!("{key} {value} is out of range: {err}"))
+        })
     }
 
     Ok(MevCaptureV21MainConfig {
-        half_life: narrow(get(attrs, "half_life")?, "half_life")?,
-        slope_k: narrow(get(attrs, "slope_k")?, "slope_k")?,
-        segment_exp: narrow(get(attrs, "segment_exp")?, "segment_exp")?,
-        j_lin: narrow(get(attrs, "j_lin")?, "j_lin")?,
-        max_fee: get(attrs, "max_fee")?,
-        clamp_ticks: narrow(get(attrs, "clamp_ticks")?, "clamp_ticks")?,
-        m_gate: narrow(get(attrs, "m_gate")?, "m_gate")?,
+        half_life: field(attrs, "half_life")?,
+        slope_k: field(attrs, "slope_k")?,
+        segment_exp: field(attrs, "segment_exp")?,
+        j_lin: field(attrs, "j_lin")?,
+        max_fee: field(attrs, "max_fee")?,
+        clamp_ticks: field(attrs, "clamp_ticks")?,
+        m_gate: field(attrs, "m_gate")?,
     })
 }
 
@@ -380,12 +426,9 @@ mod tests {
     use ekubo_sdk::{
         chain::evm::EvmPoolTypeConfig,
         quoting::{
-            pools::{
-                concentrated::TickSpacing,
-                mev_capture_v21_main::{
-                    sqrt_ratio_from_raw, sqrt_ratio_to_raw, MevCaptureV21MainCallKind,
-                    MevCaptureV21MainSwapParams,
-                },
+            pools::mev_capture_v21_main::{
+                sqrt_ratio_from_raw, sqrt_ratio_to_raw, MevCaptureV21MainCallKind,
+                MevCaptureV21MainSwapParams,
             },
             types::{PoolConfig, PoolKey},
         },
@@ -406,16 +449,29 @@ mod tests {
 
     const TOKEN0: Address = address!("0x0000000000000000000000000000000000000001");
     const TOKEN1: Address = address!("0x0000000000000000000000000000000000000002");
+    /// Tick spacing of most contract-traced vectors.
     const S: i32 = 4096;
+    /// Liquidity of most of their positions.
     const L66: i128 = 1 << 66;
+    /// `getConfig` of the deployed extension.
+    const DEPLOYED_CONFIG: MevCaptureV21MainConfig = MevCaptureV21MainConfig {
+        half_life: 120,
+        slope_k: 4,
+        segment_exp: 0,
+        j_lin: 16,
+        max_fee: 1 << 63,
+        clamp_ticks: 2500,
+        m_gate: 3,
+    };
 
     fn parse<T: std::str::FromStr>(value: &Value) -> T
     where
         T::Err: std::fmt::Debug,
     {
-        match value {
-            Value::String(s) => s.parse().unwrap(),
-            other => other.to_string().parse().unwrap(),
+        if let Value::String(s) = value {
+            s.parse().unwrap()
+        } else {
+            value.to_string().parse().unwrap()
         }
     }
 
@@ -465,7 +521,7 @@ mod tests {
         }
     }
 
-    fn ticks(name: &str) -> BTreeMap<i32, i128> {
+    fn tick_deltas(name: &str) -> BTreeMap<i32, i128> {
         let mut net = BTreeMap::new();
         for (lower, upper, liquidity) in positions(name) {
             *net.entry(lower).or_insert(0) += liquidity;
@@ -495,7 +551,7 @@ mod tests {
     }
 
     /// The component and state attributes the indexer emits for the vector's pool, with the
-    /// vector's anchor already updated at `TIMESTAMP`.
+    /// vector's anchor already updated at `timestamp`.
     fn snapshot(vector: &Value, timestamp: u32) -> ComponentWithState {
         let name = vector["name"].as_str().unwrap();
         let cfg = &vector["cfg"];
@@ -559,7 +615,7 @@ mod tests {
         .into_iter()
         .map(|(key, value)| (key, value.into()))
         .collect();
-        for (index, delta) in ticks(name) {
+        for (index, delta) in tick_deltas(name) {
             attributes.insert(format!("tick/{index}"), delta.to_be_bytes().to_vec().into());
         }
 
@@ -576,17 +632,19 @@ mod tests {
     }
 
     async fn decode(vector: &Value, timestamp: u32) -> MevCaptureV21Pool {
-        match try_decode_snapshot_with_defaults::<EkuboV3State>(snapshot(vector, timestamp))
+        let state = try_decode_snapshot_with_defaults::<EkuboV3State>(snapshot(vector, timestamp))
             .await
-            .expect("decoding snapshot")
-        {
-            EkuboV3State::MevCaptureV21(pool) => pool,
-            other => panic!("decoded {other:?}"),
-        }
+            .expect("decoding snapshot");
+        let EkuboV3State::MevCaptureV21(pool) = state else {
+            panic!("decoded a pool of another type");
+        };
+        pool
     }
 
-    /// Every contract-traced vector: the quote through the integration matches the traced
-    /// totals, and the SDK pool built from the indexed attributes reproduces every Core call.
+    /// Every contract-traced vector: the SDK pool built from the indexed attributes reproduces
+    /// every Core call, and the quote through the integration matches the traced totals for the
+    /// 20 vectors with `skipAhead` 0. The vectors start from an anchor already updated in the
+    /// block; `test_first_swap_of_block_updates_anchor` covers the update.
     #[tokio::test]
     async fn test_golden_vectors() {
         const TIMESTAMP: u32 = 1_000_000;
@@ -613,7 +671,7 @@ mod tests {
 
             // Per-call breakdown, with the vector's skipAhead.
             let swap = pool
-                .sdk_pool()
+                .imp
                 .swap_through_segments(core(&vector["before"]), params, parse(&vector["anchorX16"]))
                 .unwrap_or_else(|err| panic!("{name}: {err}"));
             let expected = vector["calls"].as_array().unwrap();
@@ -681,7 +739,7 @@ mod tests {
             .find(|v| v["name"] == "dec_toward_then_away_exact_in")
             .unwrap();
         let last_update_time =
-            (crate::evm::protocol::ekubo_v3::test_cases::TEST_TIMESTAMP as u32) - 5;
+            u32::try_from(crate::evm::protocol::ekubo_v3::test_cases::TEST_TIMESTAMP).unwrap() - 5;
         let pool = decode(&vector, last_update_time).await;
         let token = TOKEN0;
 
@@ -698,7 +756,7 @@ mod tests {
             last_update_time + 12
         );
         assert!(after_first.swapped_this_block);
-        assert_ne!(after_first.state.anchor, pool.state.anchor);
+        assert_ne!(after_first.state.anchor.anchor_x16, pool.state.anchor.anchor_x16);
 
         let second = after_first
             .quote(EvmTokenAmount { token, amount: 1_000_000_000 }, None)
@@ -769,30 +827,20 @@ mod tests {
 
     /// The swaps of `EkuboV3MevCaptureV21Test` (tycho-execution), executed through the executor
     /// and `Core.forward` against the extension on an Ethereum fork, on a pool the test creates.
-    /// The executed amounts and resulting states, logged by that test, equal these quotes.
+    /// That test asserts that the executed amounts and resulting states equal these quotes.
     #[test]
     fn test_fork_route_quotes() {
         const USDC: Address = address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
         const USDT: Address = address!("0xdAC17F958D2ee523a2206206994597C13D831ec7");
         const L: i128 = 40_000_000_000_000;
 
-        fn word(hex: &str) -> MevCaptureV21MainAnchor {
+        fn anchor_from_hex(hex: &str) -> MevCaptureV21MainAnchor {
             anchor_from_bytes(&alloy::hex::decode(hex).unwrap()).unwrap()
         }
         fn core_from_raw(raw: &str, tick: i32, liquidity: u128) -> MevCaptureV21MainCoreState {
             core_state(sqrt_ratio_from_raw(raw.parse().unwrap()), tick, liquidity)
         }
 
-        // `getConfig` of the deployed extension.
-        let config = MevCaptureV21MainConfig {
-            half_life: 120,
-            slope_k: 4,
-            segment_exp: 0,
-            j_lin: 16,
-            max_fee: 1 << 63,
-            clamp_ticks: 2500,
-            m_gate: 3,
-        };
         let ticks = [
             (-50_000, L),
             (-3000, L),
@@ -817,10 +865,12 @@ mod tests {
                     pool_type_config: TickSpacing(1000),
                 },
             },
-            config,
+            DEPLOYED_CONFIG,
             MevCaptureV21MainPoolState {
                 core: core_from_raw("39614081261743854815199363072", 0, 40_000_000_000_000),
-                anchor: word("6ada581f6ada581f6ada581f00006ada57a70000000000000000000000000000"),
+                anchor: anchor_from_hex(
+                    "6ada581f6ada581f6ada581f00006ada57a70000000000000000000000000000",
+                ),
             },
             ticks,
         )
@@ -843,21 +893,28 @@ mod tests {
             pool.state,
             MevCaptureV21MainPoolState {
                 core: core_from_raw("39599244835603686790750605543", -1499, 80_000_000_000_000),
-                anchor: word("6ada582b6ada582b6ada581f01006ada582b0000000000000000000000000000"),
+                anchor: anchor_from_hex(
+                    "6ada582b6ada582b6ada581f01006ada582b0000000000000000000000000000"
+                ),
             }
         );
 
         // Block 2: the indexer delivers the new state.
         pool.finish_transition(HashMap::new(), HashSet::new())
             .unwrap();
-        let (away_inc, away_inc_gas, pool) = swap(&pool, USDT, 150_000_000_000);
-        let (toward_dec, toward_dec_gas, pool) = swap(&pool, USDC, 5_000_000_000);
-        assert_eq!((away_inc, toward_dec), (149_559_555_721, 5_012_253_996));
+        // Toward and then away from the anchor, increasing price, through the tick at 4000 whose
+        // net liquidity delta is zero; then toward the anchor, decreasing price, back across it.
+        let (away_inc, away_inc_gas, pool) = swap(&pool, USDT, 210_000_000_000);
+        assert_eq!(pool.state.core.tick, 4991);
+        let (toward_dec, toward_dec_gas, pool) = swap(&pool, USDC, 40_000_000_000);
+        assert_eq!((away_inc, toward_dec), (209_045_869_607, 40_153_242_269));
         assert_eq!(
             pool.state,
             MevCaptureV21MainPoolState {
-                core: core_from_raw("39614081261750541708812399991", 2897, 100_000_000_000_000),
-                anchor: word("6ada58376ada58376ada581f01006ada582b000000000000ffffffffff9b9dcf"),
+                core: core_from_raw("39614081261752292887120781112", 3656, 60_000_000_000_000),
+                anchor: anchor_from_hex(
+                    "6ada58376ada58376ada581f01006ada582b000000000000ffffffffff9b9dcf"
+                ),
             }
         );
 
@@ -918,6 +975,106 @@ mod tests {
                 .quote(EvmTokenAmount { token, amount: limit }, None)
                 .unwrap();
             assert_eq!(quote.consumed_amount, limit);
+        }
+    }
+
+    /// Tick spacing 1, liquidity around the price and a position at `MIN_TICK`, about 346k empty
+    /// bitmap words away.
+    fn sparse_pool() -> MevCaptureV21Pool {
+        let liquidity: u128 = 1 << 70;
+        let delta = i128::try_from(liquidity).unwrap();
+        MevCaptureV21Pool::new(
+            PoolKey {
+                token0: TOKEN0,
+                token1: TOKEN1,
+                config: PoolConfig {
+                    extension: MEV_CAPTURE_V21_ETHEREUM_ADDRESS,
+                    fee: 55_340_232_221_128_654,
+                    pool_type_config: TickSpacing(1),
+                },
+            },
+            DEPLOYED_CONFIG,
+            MevCaptureV21MainPoolState {
+                core: core_state(to_sqrt_ratio::<Evm>(0).unwrap(), 0, liquidity),
+                anchor: MevCaptureV21MainAnchor {
+                    last_update_time: 1_000,
+                    l_ref_time: 1_000,
+                    last_pos_time: 1_000,
+                    l_ref_bits: 0,
+                    snap_bits: 0,
+                    l_ref_raise_time: 1_000,
+                    anchor_x16: 0,
+                },
+            },
+            [(EVM_MIN_TICK, delta), (EVM_MIN_TICK + 1, -delta), (-1000, delta), (1000, -delta)]
+                .map(|(index, liquidity_delta)| Tick { index, liquidity_delta })
+                .to_vec(),
+        )
+        .unwrap()
+    }
+
+    /// The probe of `get_limit` and a quote without price limit stop where the swap would have
+    /// searched `UNPAYABLE_BITMAP_WORDS` bitmap words, instead of walking every empty word.
+    #[test]
+    fn test_sparse_pool_quotes_stop_at_unpayable_words() {
+        let pool = sparse_pool();
+        let words = u32::try_from(UNPAYABLE_BITMAP_WORDS).unwrap();
+
+        for (token, increasing) in [(TOKEN0, false), (TOKEN1, true)] {
+            let bound = pool
+                .unreachable_sqrt_ratio(increasing)
+                .unwrap();
+            let distance =
+                i32::try_from(UNPAYABLE_BITMAP_WORDS * TICK_SPACINGS_PER_BITMAP_WORD).unwrap();
+            let bound_tick = if increasing { distance } else { -distance };
+            assert_eq!(bound, to_sqrt_ratio::<Evm>(bound_tick).unwrap());
+
+            let quote = pool
+                .sdk_quote(EvmTokenAmount { token, amount: i128::MAX }, None)
+                .unwrap();
+            assert_eq!(quote.state_after.core.sqrt_ratio, bound);
+            assert!(quote.consumed_amount < i128::MAX);
+            // One step per searched word, plus the rate cuts before the surcharge reaches its cap
+            // and the bridge onto the initialized tick at -1000 or 1000.
+            let resources = quote.execution_resources;
+            assert!(resources.core_steps >= words, "{resources:?}");
+            assert!(resources.core_steps <= words + 32, "{resources:?}");
+
+            let limit = pool.get_limit(token).unwrap();
+            assert!(limit > 0);
+            let quote = pool
+                .quote(EvmTokenAmount { token, amount: limit }, None)
+                .unwrap();
+            assert_eq!(quote.consumed_amount, limit);
+        }
+    }
+
+    /// Swaps that fit in a transaction are quoted as without the bound. These stay within the
+    /// liquidity around the price, which holds about 5.9e17 of either token.
+    #[test]
+    fn test_sparse_pool_executable_quotes_are_unchanged() {
+        let pool = sparse_pool();
+        for token in [TOKEN0, TOKEN1] {
+            for amount in [100_000_000_000_000_000, -100_000_000_000_000_000] {
+                let token_amount = EvmTokenAmount { token, amount };
+                let bounded = pool
+                    .sdk_quote(token_amount, None)
+                    .unwrap();
+                let unbounded = pool
+                    .imp
+                    .quote(QuoteParams {
+                        token_amount,
+                        sqrt_ratio_limit: None,
+                        override_state: Some(pool.state),
+                        meta: u64::from(pool.timestamp().unwrap()),
+                    })
+                    .unwrap();
+                assert_eq!(bounded.consumed_amount, amount);
+                assert_eq!(bounded.consumed_amount, unbounded.consumed_amount);
+                assert_eq!(bounded.calculated_amount, unbounded.calculated_amount);
+                assert_eq!(bounded.state_after, unbounded.state_after);
+                assert_eq!(bounded.execution_resources, unbounded.execution_resources);
+            }
         }
     }
 

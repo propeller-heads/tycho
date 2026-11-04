@@ -13,7 +13,7 @@ use ekubo_sdk::{
             stableswap::{StableswapPoolKey, StableswapPoolState},
             twamm::TwammPoolState,
         },
-        types::{PoolConfig, PoolKey, Tick, TimeRateDelta},
+        types::{PoolConfig, Tick, TimeRateDelta},
         util::find_nearest_initialized_tick_index,
     },
     U256,
@@ -272,29 +272,15 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
                     ));
                 };
 
-                let tick = attribute(&state_attrs, "tick")?
-                    .clone()
-                    .try_into()?;
+                let (key, _, tick, ticks) = concentrated_pool(&state_attrs, pool_type_config)?;
                 let anchor = mev_capture_v21::anchor_from_bytes(attribute(
                     &state_attrs,
                     mev_capture_v21::ANCHOR_STATE_ATTRIBUTE,
                 )?)
                 .map_err(InvalidSnapshotError::ValueError)?;
 
-                let mut ticks = ticks_from_attributes(
-                    state_attrs
-                        .iter()
-                        .map(|(key, value)| (key.as_str(), Cow::Borrowed(value))),
-                )
-                .map_err(InvalidSnapshotError::ValueError)?;
-                ticks.sort_unstable_by_key(|tick| tick.index);
-
                 Self::MevCaptureV21(MevCaptureV21Pool::new(
-                    PoolKey {
-                        token0,
-                        token1,
-                        config: PoolConfig { extension, fee, pool_type_config },
-                    },
+                    key,
                     mev_capture_v21::config_from_attributes(&static_attrs)?,
                     MevCaptureV21MainPoolState {
                         core: mev_capture_v21::core_state(sqrt_ratio, tick, liquidity),

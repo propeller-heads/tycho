@@ -92,15 +92,20 @@ contract EkuboV3MevCaptureV21Test is Constants, TestUtils {
         );
 
         _nextBlock();
-        // Toward then away from the anchor, increasing price, crossing ticks
-        // including one with a zero net liquidity delta.
-        _swap(USDT_ADDR, USDC_ADDR, 150_000e6, 149_559_555_721, "away_inc");
-        // Toward the anchor, decreasing price.
-        _swap(USDC_ADDR, USDT_ADDR, 5_000e6, 5_012_253_996, "toward_dec");
+        // Toward then away from the anchor, increasing price, through the
+        // tick at 4000, whose net liquidity delta is zero, to tick 4991.
+        _swap(USDT_ADDR, USDC_ADDR, 210_000e6, 209_045_869_607, "away_inc");
+        assertEq(
+            CORE.poolState(toPoolId(mevCaptureV21PoolKey())).tick(),
+            4991,
+            "away_inc tick"
+        );
+        // Toward the anchor, decreasing price, back across the tick at 4000.
+        _swap(USDC_ADDR, USDT_ADDR, 40_000e6, 40_153_242_269, "toward_dec");
         _assertState(
-            39614081261750541708812399991,
-            2897,
-            100_000_000_000_000,
+            39614081261752292887120781112,
+            3656,
+            60_000_000_000_000,
             0x6ada58376ada58376ada581f01006ada582b000000000000ffffffffff9b9dcf
         );
     }
@@ -200,5 +205,7 @@ contract TychoRouterForEkuboV3MevCaptureV21Test is TychoRouterTestSetup {
             IERC20(USDT_ADDR).balanceOf(ALICE) - balanceBefore, 49_868_947_729
         );
         assertEq(IERC20(USDC_ADDR).balanceOf(ALICE), 0);
+        assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(USDT_ADDR).balanceOf(tychoRouterAddr), 0);
     }
 }
