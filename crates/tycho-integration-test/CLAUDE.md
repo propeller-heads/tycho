@@ -27,7 +27,7 @@ cargo run -p tycho-integration-test -- \
 ```
 
 Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`, `--disable-pamm`,
-`--rfq-all-pairs`, `--disable-price-level-stream`, `--disable-execution`,
+`--pamm metric`, `--rfq-all-pairs`, `--disable-price-level-stream`, `--disable-execution`,
 `--protocols uniswap_v2,curve`,
 `--protocol-tvl-thresholds lunarbase=10` (replaces `--tvl-threshold` for the named protocols;
 each one must be enabled),
@@ -60,8 +60,11 @@ shows up as a failure.
     their quotes move with time, so a full block's swaps execute in that next block's context
     (`simulate_swap_transaction_next_block`). Add a protocol there when its state implements
     `apply_block`
-  - `book_stream_processor.rs`: Handles the off-chain book feeds (the RFQ venues and Metric) —
-    fetches live quotes, compares against simulation
+  - `book_stream_processor.rs`: Handles the off-chain book feeds in one processor. RFQ and pAMM
+    are selected and checked separately: `RfqSelection` (each RFQ venue whose credentials are
+    set, off with `--disable-rfq`) and `PammSelection` (`--pamm`, `PammVenue`, off with
+    `--disable-pamm`). It fetches live quotes and compares them against simulation. When
+    neither side adds a feed, no book stream starts and a warning names the reason for each
   - `price_level_stream_processor.rs`: Handles Titan pAMM price level stream updates (Ethereum
     only) — emits one sampled update per `--price-level-stream-block-interval` blocks, holding a
     chosen block's latest snapshot back until the stream moves to the next block (least drift to
