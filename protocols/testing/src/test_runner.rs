@@ -923,6 +923,13 @@ impl TestRunner {
             if let Some(reason) = component.skip_simulation.reason() {
                 checks.skip_component(CheckId::SimLadder, id, reason);
                 checks.skip_component(CheckId::ExecLadder, id, reason);
+                if config.harness == Harness::Strict {
+                    for limit_check in
+                        [CheckId::LimitsAtLimit, CheckId::LimitsPastLimit, CheckId::LimitsMaxOutput]
+                    {
+                        checks.skip_component(limit_check, id, reason);
+                    }
+                }
             } else if let Some(reason) = component.skip_execution.reason() {
                 checks.skip_component(CheckId::ExecLadder, id, reason);
             }
@@ -1719,7 +1726,7 @@ impl TestRunner {
                 judged.check,
                 &judged.component,
                 &judged.direction,
-                judged.skipped,
+                judged.unfailed,
                 &judged.failures,
             );
         }
