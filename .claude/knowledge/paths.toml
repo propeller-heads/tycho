@@ -1,0 +1,138 @@
+# The path table: the layer each file of the repo belongs to, and the knowledge of each layer.
+#
+# A file belongs to the layer whose `paths` it matches. A layer's `knowledge` names files in this
+# directory, without `.md`, beyond those that hold for all code. `contract` marks the layers on
+# either side of the contracts between layers: what one produces and another consumes.
+#
+# Patterns are globs on the path from the repo root: `*` matches within one path segment, `**` any
+# number of segments. A pattern starting with `!` takes the files it matches out of the layer.
+#
+# Two layers have no knowledge of their own: `uncovered`, the code no layer's knowledge covers yet,
+# each entry a gap to close; and `general`, the code that belongs to no layer. A file in no layer is
+# `general` too. A file is in at most one layer, every `.rs` and `.sol` file is in one, and every
+# pattern matches at least one file.
+
+[[layer]]
+name = "indexing"
+paths = ["protocols/substreams/**"]
+knowledge = ["indexing", "libraries-tycho"]
+contract = true
+
+[[layer]]
+name = "simulation"
+paths = [
+    "crates/tycho-simulation/src/evm/**",
+    "!crates/tycho-simulation/src/evm/decoder.rs",
+    "crates/tycho-simulation/tests/**",
+    "protocols/adapter-integration/evm/**",
+]
+knowledge = ["simulation", "libraries-tycho"]
+contract = true
+
+# Simulation's types and decoder, which the other layers read.
+[[layer]]
+name = "shared-simulation"
+paths = [
+    "crates/tycho-simulation/src/evm/decoder.rs",
+    "crates/tycho-simulation/src/protocol/**",
+]
+knowledge = ["architecture", "simulation", "libraries-tycho"]
+contract = true
+
+[[layer]]
+name = "offchain"
+paths = [
+    "crates/tycho-simulation/src/snapshot_feed/**",
+    "crates/tycho-simulation/src/book/**",
+    "crates/tycho-simulation/src/rfq/**",
+    "crates/tycho-simulation/src/pamm/**",
+    "crates/tycho-simulation/src/price_level_stream/**",
+]
+knowledge = ["offchain", "simulation", "libraries-tycho"]
+contract = true
+
+[[layer]]
+name = "execution"
+paths = [
+    "crates/tycho-execution/src/encoding/**",
+    "!crates/tycho-execution/src/encoding/models.rs",
+    "!crates/tycho-execution/src/encoding/evm/swap_encoder/swap_encoder_registry.rs",
+    "crates/tycho-execution/tests/**",
+    "crates/tycho-execution/model/**",
+    "crates/tycho-execution/contracts/src/**",
+    "crates/tycho-execution/contracts/interfaces/**",
+    # tycho's own libraries; the subdirectories hold vendored code
+    "crates/tycho-execution/contracts/lib/*.sol",
+    "crates/tycho-execution/contracts/test/**",
+    "crates/tycho-execution/contracts/script/**",
+    "crates/tycho-execution/contracts/scripts/**",
+]
+knowledge = ["execution", "libraries-tycho"]
+contract = true
+
+# Execution's models and encoder registry, which the other layers read.
+[[layer]]
+name = "shared-execution"
+paths = [
+    "crates/tycho-execution/src/encoding/models.rs",
+    "crates/tycho-execution/src/encoding/evm/swap_encoder/swap_encoder_registry.rs",
+]
+knowledge = ["architecture", "execution", "libraries-tycho"]
+contract = true
+
+# Types, registries and configs more than one layer reads.
+[[layer]]
+name = "shared"
+paths = [
+    "crates/tycho-common/src/models/**",
+    "crates/tycho-common/src/simulation/**",
+    "crates/tycho-common/src/dto.rs",
+    "crates/tycho-execution/config/**",
+    "crates/tycho-indexer/extractors.yaml",
+]
+knowledge = ["architecture"]
+contract = true
+
+[[layer]]
+name = "docs"
+paths = ["docs/**"]
+knowledge = ["gitbook"]
+
+[[layer]]
+name = "uncovered"
+paths = [
+    "crates/tycho/**",
+    "crates/tycho-client/**",
+    "crates/tycho-client-py/**",
+    "crates/tycho-ethereum/**",
+    "crates/tycho-indexer/**",
+    "!crates/tycho-indexer/extractors.yaml",
+    "crates/tycho-integration-test/**",
+    "crates/tycho-protobuf/**",
+    "crates/tycho-storage/**",
+    "crates/tycho-test/**",
+    "protocols/testing/**",
+    # the router-trades Substreams package: the indexing knowledge is written for the protocol
+    # packages under `protocols/substreams/`
+    "crates/tycho-execution/substreams/**",
+    # the ERC20 proxy simulation overrides tokens with
+    "crates/tycho-simulation/token-proxy-contracts/**",
+]
+knowledge = []
+
+[[layer]]
+name = "general"
+paths = [
+    # the crate roots, helpers and entry points of the layered crates
+    "crates/tycho-common/src/*.rs",
+    "!crates/tycho-common/src/dto.rs",
+    "crates/tycho-simulation/src/*.rs",
+    "crates/tycho-execution/src/*.rs",
+    "crates/tycho-execution/src/bin/**",
+    "crates/tycho-simulation/examples/**",
+    "crates/tycho-simulation/benches/**",
+    "crates/tycho-execution/examples/**",
+    # vendored code
+    "crates/tycho-execution/contracts/lib/*/**",
+]
+knowledge = []
