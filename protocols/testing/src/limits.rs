@@ -78,7 +78,7 @@ pub fn check_direction(
                     format!(
                         "{direction}: the limit is declared hard, but {past}, one unit past it, \
                          quotes {}. Either the limit is below the venue's bound (declare it \
-                         `under_cap`, with evidence) or get_amount_out does not enforce it",
+                         `under_cap`) or get_amount_out does not enforce it",
                         past_quote.amount
                     ),
                 ));
