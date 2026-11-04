@@ -51,7 +51,8 @@ function openEtherfiRedemptions(
         uint256(vm.load(liquidityPool, slot)) & type(uint128).max;
     (,,,,,, uint16 lowWatermarkInBpsOfTvl) = IEtherfiRedemptionManagerView(
             redemptionManager
-        ).tokenToRedemptionInfo(ethSentinel);
+        )
+        .tokenToRedemptionInfo(ethSentinel);
 
     // Solve `inLp - bps * (inLp + outOfLp) / 10000 = amount` for `inLp`, rounded up.
     uint256 bps = uint256(lowWatermarkInBpsOfTvl);

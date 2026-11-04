@@ -1,3 +1,25 @@
+## [0.501.0](https://github.com/propeller-heads/tycho/compare/0.500.0...0.501.0) (2026-11-04)
+
+
+### Features
+
+* **integration-test:** select pAMM book feeds with --pamm ([2b447b9](https://github.com/propeller-heads/tycho/commit/2b447b9ce4364381baf82a30b55d8a5b5d79ea69))
+* **integration-test:** select RFQ and pAMM book feeds separately ([#1736](https://github.com/propeller-heads/tycho/issues/1736)) ([d561642](https://github.com/propeller-heads/tycho/commit/d56164265a3ddb1213e3491a8a5eddf8dd00d7fb))
+
+
+### Bug Fixes
+
+* **integration-test:** keep RFQ credentials out of Debug output ([4a0ee47](https://github.com/propeller-heads/tycho/commit/4a0ee47b63d374ee700442911294bca5ed0c0575))
+
+## [0.500.0](https://github.com/propeller-heads/tycho/compare/0.499.0...0.500.0) (2026-11-04)
+
+
+### Features
+
+* **execution:** register the Biconomy PropAMMExecutor on Base ([1ba2c6e](https://github.com/propeller-heads/tycho/commit/1ba2c6e4fe138cd2d7fe3628a7eb93ee8aa55ecd))
+* **execution:** register the Biconomy PropAMMExecutor on Base ([#1725](https://github.com/propeller-heads/tycho/issues/1725)) ([250c232](https://github.com/propeller-heads/tycho/commit/250c232920159be2c7aec2bd3bd1923cca1d2aa6))
+* **integration-test:** test biconomy on Base by default ([9f642db](https://github.com/propeller-heads/tycho/commit/9f642dbf08afd5b7aba18f6bce6c82351971b86d))
+
 ## [0.499.0](https://github.com/propeller-heads/tycho/compare/0.498.0...0.499.0) (2026-11-03)
 
 
