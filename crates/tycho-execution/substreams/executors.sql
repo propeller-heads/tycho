@@ -67,6 +67,7 @@ INSERT INTO executors (chain, address, protocol_systems) VALUES
     ('base', '0xcdf4e28676b9f2e8c6a722eb163e0c2f9c0716b7', ARRAY['rfq:bebop']),
     ('base', '0xd689b184c250e543eb3938d524733ff6b4cfc296', ARRAY['uniswap_v2']),
     ('base', '0xe12eb9fcd93c7ffabfed66b20d4b0df02b44f6b3', ARRAY['aerodrome_slipstreams']),
+    ('base', '0xf30f4c985fca63913f421f78058031fa6514ef7f', ARRAY['biconomy']),
     ('base', '0xf35839c54a33fe88867acb3deac9db3adb9bfa78', ARRAY['rfq:bebop']),
     ('base', '0xf435299a20c1405c957c3f407cc3e9b9df76ee7b', ARRAY['lunar_base', 'lunarbase']),
     ('base', '0xf6f8fb2321fb8431400ae546037cd2ae969a2c22', ARRAY['aero_basic']),

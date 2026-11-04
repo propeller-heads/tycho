@@ -61,17 +61,10 @@ contract UniswapV4ExecutorExposed is UniswapV4Executor {
     }
 }
 
-contract UniswapV4AngstromExecutorTest is Constants, TestUtils {
-    using SafeERC20 for IERC20;
-
+contract UniswapV4AngstromAttestationTest is Constants {
     UniswapV4ExecutorExposed angstromExecutor;
-    IERC20 USDC = IERC20(USDC_ADDR);
-    IERC20 WETH = IERC20(WETH_ADDR);
 
     function setUp() public {
-        // Block must match or be close to attestation block in test_encode_angstrom_grouped_swap
-        uint256 forkBlock = 25429947;
-        vm.createSelectFork(vm.rpcUrl("mainnet"), forkBlock);
         angstromExecutor = new UniswapV4ExecutorExposed(
             IPoolManager(POOL_MANAGER), ANGSTROM_HOOK
         );
@@ -121,6 +114,23 @@ contract UniswapV4AngstromExecutorTest is Constants, TestUtils {
         bytes memory selected =
             angstromExecutor.selectAttestation(encodedAttestations);
         assertEq(selected, "");
+    }
+}
+
+contract UniswapV4AngstromExecutorTest is Constants, TestUtils {
+    using SafeERC20 for IERC20;
+
+    UniswapV4ExecutorExposed angstromExecutor;
+    IERC20 USDC = IERC20(USDC_ADDR);
+    IERC20 WETH = IERC20(WETH_ADDR);
+
+    function setUp() public {
+        // Block must match or be close to attestation block in test_encode_angstrom_grouped_swap
+        uint256 forkBlock = 25429947;
+        vm.createSelectFork(vm.rpcUrl("mainnet"), forkBlock);
+        angstromExecutor = new UniswapV4ExecutorExposed(
+            IPoolManager(POOL_MANAGER), ANGSTROM_HOOK
+        );
     }
 
     function testSingleSwapAngstrom() public {
