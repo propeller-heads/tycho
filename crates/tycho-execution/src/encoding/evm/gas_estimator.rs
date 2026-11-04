@@ -53,6 +53,7 @@ pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] = &[
     "sushiswap_v2",
     "pancakeswap_v2",
     "quickswap_v2",
+    "propamm:elfomofi",
 ];
 
 /// Whether the router-to-pool input transfer is skipped for `protocol_system` (see
@@ -402,6 +403,38 @@ mod tests {
         // pool gas                            100_000
         // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER, fee path adds it
         assert_eq!(gas, BigUint::from(200_000u64));
+    }
+
+    #[test]
+    fn test_elfomofi_direct_funding_has_no_approval_or_duplicate_input_transfer() {
+        let swap = make_swap("propamm:elfomofi");
+        assert!(!needs_approval("propamm:elfomofi"));
+        assert_eq!(
+            estimate_gas_usage(&make_solution(vec![swap.clone()]), Strategy::Single),
+            BigUint::from(200_000u64),
+        );
+        // Venue bounds include margin over the pinned Base/BSC/Robinhood measurements;
+        // router overhead is added separately. Full-route measurements are independent baselines.
+        for (pool_gas, observed_route_gas) in
+            [(320_000u64, 382_768u64), (300_000, 363_704), (340_000, 407_872)]
+        {
+            let measured =
+                make_swap_with_tokens("propamm:elfomofi", token_a(), token_b(), pool_gas);
+            assert!(
+                estimate_gas_usage(&make_solution(vec![measured]), Strategy::Single) >=
+                    BigUint::from(observed_route_gas)
+            );
+        }
+        // Split routes stage input in Tycho first, then pay exactly one transfer to settlement.
+        assert_eq!(
+            estimate_transfer_overhead(
+                "propamm:elfomofi",
+                swap.token_in(),
+                swap.token_out(),
+                &Strategy::Split,
+            ),
+            transfer_token_gas(swap.token_in()),
+        );
     }
 
     #[test]

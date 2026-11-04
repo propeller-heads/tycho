@@ -137,6 +137,7 @@ impl TychoEncoder for TychoRouterEncoder {
         }
 
         let swaps = solution.swaps();
+        super::swap_encoder::validate_elfomofi_swaps(swaps)?;
         let mut solution_tokens = vec![];
         let mut split_tokens_already_considered = HashSet::new();
         for (i, swap) in swaps.iter().enumerate() {
