@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use ekubo_sdk::{
-    chain::evm::{Evm, EvmPoolKey, EvmTokenAmount, EVM_MAX_TICK, EVM_MIN_TICK},
+    chain::evm::{
+        Evm, EvmConcentratedPoolResources, EvmPoolKey, EvmTokenAmount, EVM_MAX_TICK, EVM_MIN_TICK,
+    },
     math::tick::to_sqrt_ratio,
     quoting::{
         pools::{
@@ -23,7 +25,7 @@ use tycho_common::{
     Bytes,
 };
 
-use super::{timed::estimate_block_timestamp, EkuboPool, EkuboPoolQuote};
+use super::{concentrated, timed::estimate_block_timestamp, EkuboPool, EkuboPoolQuote};
 use crate::{
     evm::protocol::ekubo_v3::attributes::ticks_from_attributes,
     protocol::errors::InvalidSnapshotError,
@@ -33,26 +35,21 @@ use crate::{
 /// slot keyed by the pool ID).
 pub const ANCHOR_STATE_ATTRIBUTE: &str = "anchor_state";
 
-// Gas of the executor's Ekubo v3 flow around the forwarded swap (same as for other v3 pools).
-const TRANSFER_FROM_USER_GAS_COST: u64 = 40_000;
-const START_PAYMENT_GAS_COST: u64 = 6_000;
-const WITHDRAW_GAS_COST: u64 = 37_500;
-const COMPLETE_PAYMENT_GAS_COST: u64 = 2_000;
-
-// Base gas of one Core swap that the forge-fitted constants below are added to, and the cold
-// access of the extension through `Core.forward`.
-const BASE_CORE_SWAP_GAS_COST: u64 = 7_900;
-const COLD_EXTENSION_ACCESS_GAS_COST: u64 = 2_500;
-
-// Fitted with forge on 62 swaps against the same swaps on pools without extension, with the
-// deployed configuration: per forwarded swap, Core call, extra Core swap step, initialized tick
-// crossed, `accumulateAsFees` and first-of-timestamp anchor update (including the state write).
-const EXTRA_BASE_GAS_COST: u64 = 8_250;
-const GAS_COST_OF_ONE_CORE_CALL: u64 = 12_350;
-const GAS_COST_OF_ONE_EXTRA_CORE_STEP: u64 = 2_850;
-const GAS_COST_OF_ONE_TICK_CROSSED: u64 = 13_150;
-const GAS_COST_OF_ONE_FEE_ACCUMULATION: u64 = 7_950;
-const GAS_COST_OF_ONE_ANCHOR_UPDATE: u64 = 4_650;
+// The extension's gas on top of the concentrated pool's estimate of the same swap, fitted to the
+// difference `EkuboV3MevCaptureV21GasTest` (tycho-execution) measures between pools with and
+// without the extension (`tests::test_gas_matches_fork_measurements` checks the fit): per
+// forwarded swap, per Core call after the first, per `accumulateAsFees`, once more for the first
+// `accumulateAsFees` of a swap, which writes a slot the transaction has not written yet, and per
+// anchor update (the first swap of a timestamp), which includes the write of the extension's pool
+// state.
+const EXTRA_BASE_GAS_COST: u64 = 11_150;
+const GAS_COST_OF_ONE_EXTRA_CORE_CALL: u64 = 9_650;
+const GAS_COST_OF_ONE_FEE_ACCUMULATION: u64 = 10_350;
+const GAS_COST_OF_FIRST_FEE_ACCUMULATION: u64 = 4_650;
+const GAS_COST_OF_ONE_ANCHOR_UPDATE: u64 = 6_950;
+// Any other write of the extension's pool state, which the swap read before (EIP-2929 and
+// EIP-2200: 5,000 gas less the 2,100 of the cold read).
+const GAS_COST_OF_ONE_STATE_WRITE: u64 = 2_900;
 
 // The SDK emulates Core's tick bitmap, so a swap takes one step per bitmap word it searches, even
 // an empty one: in a sparse pool with a small tick spacing, the work is bounded by the tick range
@@ -364,25 +361,30 @@ fn gas_costs(
         core_calls,
         core_steps,
         initialized_ticks_crossed,
-        bridges: _,
+        bridges,
         tick_event_searches: _,
         accumulate_as_fees,
         anchor_updates,
-        state_writes: _,
+        state_writes,
     }: MevCaptureV21MainPoolResources,
 ) -> u64 {
-    TRANSFER_FROM_USER_GAS_COST +
-        START_PAYMENT_GAS_COST +
-        WITHDRAW_GAS_COST +
-        COMPLETE_PAYMENT_GAS_COST +
-        BASE_CORE_SWAP_GAS_COST +
-        COLD_EXTENSION_ACCESS_GAS_COST +
-        EXTRA_BASE_GAS_COST +
-        GAS_COST_OF_ONE_CORE_CALL * u64::from(core_calls) +
-        GAS_COST_OF_ONE_EXTRA_CORE_STEP * u64::from(core_steps.saturating_sub(core_calls)) +
-        GAS_COST_OF_ONE_TICK_CROSSED * u64::from(initialized_ticks_crossed) +
+    // Core's swap loop takes a step per call and one more per initialized tick or bitmap word end
+    // it crosses within the call. A bridge call crosses its tick in its only step, and a word end
+    // away from the anchor ends a call, so those cost no extra step.
+    let bitmap_words_crossed_within_calls = core_steps
+        .saturating_sub(core_calls)
+        .saturating_sub(initialized_ticks_crossed.saturating_sub(bridges));
+
+    concentrated::gas_costs(EvmConcentratedPoolResources {
+        no_override_price_change: 0,
+        initialized_ticks_crossed,
+        extra_distinct_bitmap_lookups: bitmap_words_crossed_within_calls,
+    }) + EXTRA_BASE_GAS_COST +
+        GAS_COST_OF_ONE_EXTRA_CORE_CALL * u64::from(core_calls.saturating_sub(1)) +
         GAS_COST_OF_ONE_FEE_ACCUMULATION * u64::from(accumulate_as_fees) +
-        GAS_COST_OF_ONE_ANCHOR_UPDATE * u64::from(anchor_updates)
+        GAS_COST_OF_FIRST_FEE_ACCUMULATION * u64::from(accumulate_as_fees.min(1)) +
+        GAS_COST_OF_ONE_ANCHOR_UPDATE * u64::from(anchor_updates) +
+        GAS_COST_OF_ONE_STATE_WRITE * u64::from(state_writes.saturating_sub(anchor_updates))
 }
 
 /// Parses the extension's `getConfig` from the component's static attributes.
@@ -424,13 +426,17 @@ mod tests {
 
     use alloy::primitives::aliases::B32;
     use ekubo_sdk::{
-        chain::evm::EvmPoolTypeConfig,
+        chain::evm::{
+            EvmConcentratedPoolConfig, EvmConcentratedPoolKey, EvmConcentratedPoolState,
+            EvmPoolTypeConfig,
+        },
         quoting::{
             pools::mev_capture_v21_main::{
                 sqrt_ratio_from_raw, sqrt_ratio_to_raw, MevCaptureV21MainCallKind,
                 MevCaptureV21MainSwapParams,
             },
             types::{PoolConfig, PoolKey},
+            util::find_nearest_initialized_tick_index,
         },
     };
     use revm::primitives::address;
@@ -443,7 +449,10 @@ mod tests {
 
     use super::*;
     use crate::evm::protocol::{
-        ekubo_v3::{addresses::MEV_CAPTURE_V21_ETHEREUM_ADDRESS, state::EkuboV3State},
+        ekubo_v3::{
+            addresses::MEV_CAPTURE_V21_ETHEREUM_ADDRESS, pool::concentrated::ConcentratedPool,
+            state::EkuboV3State,
+        },
         test_utils::try_decode_snapshot_with_defaults,
     };
 
@@ -881,12 +890,12 @@ mod tests {
                 .unwrap();
             assert_eq!(quote.consumed_amount, amount);
             let EkuboV3State::MevCaptureV21(next) = quote.new_state else { panic!() };
-            (quote.calculated_amount, quote.gas, next)
+            (quote.calculated_amount, next)
         };
 
         // Block 1 (one slot later): away from the anchor, then back toward it.
-        let (away_dec, away_dec_gas, pool) = swap(&seeded, USDC, 50_000_000_000);
-        let (toward_inc, toward_inc_gas, mut pool) = swap(&pool, USDT, 10_000_000_000);
+        let (away_dec, pool) = swap(&seeded, USDC, 50_000_000_000);
+        let (toward_inc, mut pool) = swap(&pool, USDT, 10_000_000_000);
         assert_eq!((away_dec, toward_inc), (49_868_947_729, 10_011_242_024));
         assert_eq!(
             pool.state,
@@ -903,9 +912,9 @@ mod tests {
             .unwrap();
         // Toward and then away from the anchor, increasing price, through the tick at 4000 whose
         // net liquidity delta is zero; then toward the anchor, decreasing price, back across it.
-        let (away_inc, away_inc_gas, pool) = swap(&pool, USDT, 210_000_000_000);
+        let (away_inc, pool) = swap(&pool, USDT, 210_000_000_000);
         assert_eq!(pool.state.core.tick, 4991);
-        let (toward_dec, toward_dec_gas, pool) = swap(&pool, USDC, 40_000_000_000);
+        let (toward_dec, pool) = swap(&pool, USDC, 40_000_000_000);
         assert_eq!((away_inc, toward_dec), (209_045_869_607, 40_153_242_269));
         assert_eq!(
             pool.state,
@@ -916,11 +925,105 @@ mod tests {
                 ),
             }
         );
+    }
 
-        println!(
-            "gas estimates: away_dec {away_dec_gas}, toward_inc {toward_inc_gas}, \
-             away_inc {away_inc_gas}, toward_dec {toward_dec_gas}"
-        );
+    /// The swaps `EkuboV3MevCaptureV21GasTest` (tycho-execution) executes through the executor on
+    /// an Ethereum fork, on MEVCapture v2.1 pools and on twin pools without extension, recorded
+    /// with both pools' states before each swap. Each quote equals the executed output, and
+    /// each gas estimate is within 5% of the concentrated pool's estimate of the twin swap plus
+    /// the measured difference between the pools.
+    #[test]
+    fn test_gas_matches_fork_measurements() {
+        let file: Value =
+            serde_json::from_str(include_str!("../assets/mev_capture_v21_gas.json")).unwrap();
+        let rows = file["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 49);
+
+        for row in rows {
+            let name = row["name"].as_str().unwrap();
+            let pool = &file["pools"][row["pool"].as_str().unwrap()];
+            let fee: u64 = parse(&pool["fee"]);
+            let spacing = TickSpacing(parse(&pool["tickSpacing"]));
+            let mut net = BTreeMap::new();
+            for position in pool["positions"].as_array().unwrap() {
+                let liquidity: i128 = parse(&position[2]);
+                *net.entry(parse(&position[0]))
+                    .or_insert(0) += liquidity;
+                *net.entry(parse(&position[1]))
+                    .or_insert(0) -= liquidity;
+            }
+            let ticks: Vec<Tick> = net
+                .into_iter()
+                .map(|(index, liquidity_delta)| Tick { index, liquidity_delta })
+                .collect();
+            let token_amount = EvmTokenAmount {
+                token: if row["isToken1"].as_bool().unwrap() { TOKEN1 } else { TOKEN0 },
+                amount: parse(&row["amount"]),
+            };
+
+            let quote = MevCaptureV21MainPool::new(
+                PoolKey {
+                    token0: TOKEN0,
+                    token1: TOKEN1,
+                    config: PoolConfig {
+                        extension: MEV_CAPTURE_V21_ETHEREUM_ADDRESS,
+                        fee,
+                        pool_type_config: spacing,
+                    },
+                },
+                DEPLOYED_CONFIG,
+                MevCaptureV21MainPoolState {
+                    core: core(&row["before"]),
+                    anchor: anchor_from_bytes(
+                        &alloy::hex::decode(row["anchor"].as_str().unwrap()).unwrap(),
+                    )
+                    .unwrap(),
+                },
+                ticks.clone(),
+            )
+            .unwrap()
+            .quote(QuoteParams {
+                token_amount,
+                sqrt_ratio_limit: None,
+                override_state: None,
+                meta: parse(&row["now"]),
+            })
+            .unwrap();
+            assert_eq!(quote.consumed_amount, token_amount.amount, "{name}");
+            assert_eq!(quote.calculated_amount, parse::<u128>(&row["v21Out"]), "{name}");
+
+            let plain = core(&row["plainBefore"]);
+            let plain_estimate = ConcentratedPool::new(
+                EvmConcentratedPoolKey {
+                    token0: TOKEN0,
+                    token1: TOKEN1,
+                    config: EvmConcentratedPoolConfig {
+                        fee,
+                        pool_type_config: spacing,
+                        extension: Address::ZERO,
+                    },
+                },
+                EvmConcentratedPoolState {
+                    sqrt_ratio: plain.sqrt_ratio,
+                    liquidity: plain.liquidity,
+                    active_tick_index: find_nearest_initialized_tick_index(&ticks, plain.tick),
+                },
+                plain.tick,
+                ticks,
+            )
+            .unwrap()
+            .quote(token_amount, None)
+            .unwrap()
+            .gas;
+
+            let measured =
+                plain_estimate + parse::<u64>(&row["v21Gas"]) - parse::<u64>(&row["plainGas"]);
+            let estimate = gas_costs(quote.execution_resources);
+            assert!(
+                estimate.abs_diff(measured) * 20 <= measured,
+                "{name}: estimated {estimate}, measured {measured}"
+            );
+        }
     }
 
     #[test]

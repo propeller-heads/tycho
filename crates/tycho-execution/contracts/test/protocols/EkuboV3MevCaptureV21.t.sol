@@ -121,13 +121,10 @@ contract EkuboV3MevCaptureV21Test is Constants, TestUtils {
         bytes memory data = abi.encodePacked(
             tokenIn, tokenOut, PoolConfig.unwrap(mevCaptureV21PoolKey().config)
         );
-        uint256 gasBefore = gasleft();
         executor.swap(amountIn, data, address(executor));
-        uint256 gasUsed = gasBefore - gasleft();
 
         uint256 amountOut =
             IERC20(tokenOut).balanceOf(address(executor)) - outBefore;
-        console.log(label, amountOut, "gas", gasUsed);
         assertEq(amountOut, expectedOut, label);
         assertEq(IERC20(tokenIn).balanceOf(address(executor)), 0);
     }
