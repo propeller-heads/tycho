@@ -2,7 +2,6 @@ mod adapter_builder;
 mod balances;
 mod config;
 mod execution;
-mod limits;
 mod report;
 mod rpc;
 mod state_registry;
