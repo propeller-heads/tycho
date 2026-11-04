@@ -1,7 +1,10 @@
 pragma solidity ^0.8.26;
 
 import "../TychoRouterTestSetup.sol";
-import {FluidV1Executor} from "@src/executors/FluidV1Executor.sol";
+import {
+    FluidV1Executor,
+    FluidV1Executor__InvalidCallback
+} from "@src/executors/FluidV1Executor.sol";
 import {IFluidV1Dex} from "@interfaces/IFluidV1Dex.sol";
 import {Constants} from "../Constants.sol";
 import "forge-std/Test.sol";
@@ -17,12 +20,16 @@ contract FluidV1ExecutorExposed is FluidV1Executor {
         return _decodeData(data);
     }
 
-    function setCurrentDex(IFluidV1Dex dex) public {
+    function setAndGetCurrentDex(IFluidV1Dex dex) external returns (address) {
         _setCurrentDex(dex);
+        return _getCurrentDex();
     }
 
-    function getCurrentDex() public view returns (address) {
-        return _getCurrentDex();
+    function verifyCallbackWithCurrentDex(IFluidV1Dex dex, bytes calldata data)
+        external
+    {
+        _setCurrentDex(dex);
+        verifyCallback(data);
     }
 
     // The Fluid protocol calls dexCallback(address token, uint256 amount) during swapInWithCallback.
@@ -91,9 +98,6 @@ contract FluidV1ExecutorTest is Test, Constants {
         uint256 amountOwed = 1000000000000000000;
         bytes memory data =
             abi.encodeWithSelector(hex"12345678", DAI_ADDR, amountOwed);
-        address dexAddress = 0x1DD125C32e4B5086c63CC13B3cA02C4A2a61Fa9b;
-        executor.setCurrentDex(IFluidV1Dex(dexAddress));
-
         (TransferManager.TransferType transferType, address receiver) =
             executor.getCallbackTransferData(data, DAI_ADDR, address(this));
 
@@ -107,9 +111,6 @@ contract FluidV1ExecutorTest is Test, Constants {
         uint256 amountOwed = 1000000000000000000;
         bytes memory data =
             abi.encodeWithSelector(hex"12345678", ETH_ADDR, amountOwed);
-        address dexAddress = 0x1DD125C32e4B5086c63CC13B3cA02C4A2a61Fa9b;
-        executor.setCurrentDex(IFluidV1Dex(dexAddress));
-
         (TransferManager.TransferType transferType, address receiver) =
             executor.getCallbackTransferData(data, ETH_ADDR, address(this));
 
@@ -123,38 +124,32 @@ contract FluidV1ExecutorTest is Test, Constants {
         address dexAddress = 0x1DD125C32e4B5086c63CC13B3cA02C4A2a61Fa9b;
         IFluidV1Dex dex = IFluidV1Dex(dexAddress);
 
-        executor.setCurrentDex(dex);
-        address dexVal = executor.getCurrentDex();
-
-        assertEq(dexVal, dexAddress);
+        assertEq(executor.setAndGetCurrentDex(dex), dexAddress);
     }
 
     function testVerifyCallbackOk() public {
         address dexAddress = 0x1DD125C32e4B5086c63CC13B3cA02C4A2a61Fa9b;
-        executor.setCurrentDex(IFluidV1Dex(dexAddress));
         bytes memory param = abi.encodePacked(bytes4(0x9410ae88));
 
         vm.prank(dexAddress);
-        executor.verifyCallback(param);
+        executor.verifyCallbackWithCurrentDex(IFluidV1Dex(dexAddress), param);
     }
 
     function testVerifyCallbackBadSender() public {
         address dexAddress = 0x1DD125C32e4B5086c63CC13B3cA02C4A2a61Fa9b;
-        executor.setCurrentDex(IFluidV1Dex(dexAddress));
         bytes memory param = abi.encodePacked(bytes4(0x9410ae88));
 
-        vm.expectRevert();
-        executor.verifyCallback(param);
+        vm.expectRevert(FluidV1Executor__InvalidCallback.selector);
+        executor.verifyCallbackWithCurrentDex(IFluidV1Dex(dexAddress), param);
     }
 
     function testVerifyCallbackBadSelector() public {
         address dexAddress = 0x1DD125C32e4B5086c63CC13B3cA02C4A2a61Fa9b;
-        executor.setCurrentDex(IFluidV1Dex(dexAddress));
         bytes memory param = abi.encodePacked(bytes4(0x00000000));
 
         vm.prank(dexAddress);
-        vm.expectRevert();
-        executor.verifyCallback(param);
+        vm.expectRevert(FluidV1Executor__InvalidCallback.selector);
+        executor.verifyCallbackWithCurrentDex(IFluidV1Dex(dexAddress), param);
     }
 
     function testSwap() public {

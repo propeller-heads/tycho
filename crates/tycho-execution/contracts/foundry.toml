@@ -2,6 +2,12 @@
 src = 'src'
 out = 'out'
 libs = ['lib']
+# Remappings come from remappings.txt alone. Auto-detection scopes each dependency's
+# nested libraries to it with context remappings (`lib/<dep>/:<prefix>=...`), and the
+# Hardhat deploy scripts break on those: @nomicfoundation/hardhat-foundry reads
+# `forge remappings` and rejects any context. Re-enable it once deployments have moved
+# off Hardhat.
+auto_detect_remappings = false
 evm_version = 'osaka'
 optimizer = true
 optimizer_runs = 200
