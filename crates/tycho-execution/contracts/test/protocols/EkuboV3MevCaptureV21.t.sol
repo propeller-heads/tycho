@@ -56,13 +56,6 @@ contract EkuboV3MevCaptureV21Test is Constants, TestUtils {
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("mainnet"), MEV_CAPTURE_V21_FORK_BLOCK);
-        // TODO: remove once Foundry stable includes the Fusaka hardfork mapping.
-        // Forks use the chain's hardfork, not foundry.toml's evm_version.
-        // The current stable (Dec 2024) predates Fusaka (Dec 2025),
-        // so Osaka opcodes aren't enabled for post-Fusaka blocks.
-        // See: https://github.com/foundry-rs/foundry/issues/13040
-        address(vm)
-            .call(abi.encodeWithSignature("setEvmVersion(string)", "osaka"));
 
         deal(USDC_ADDR, address(liquidityHelper), 10_000_000e6);
         deal(USDT_ADDR, address(liquidityHelper), 10_000_000e6);
@@ -171,14 +164,6 @@ contract TychoRouterForEkuboV3MevCaptureV21Test is TychoRouterTestSetup {
 
     function setUp() public virtual override {
         super.setUp();
-
-        // TODO: remove once Foundry stable includes the Fusaka hardfork mapping.
-        // Forks use the chain's hardfork, not foundry.toml's evm_version.
-        // The current stable (Dec 2024) predates Fusaka (Dec 2025),
-        // so Osaka opcodes aren't enabled for post-Fusaka blocks.
-        // See: https://github.com/foundry-rs/foundry/issues/13040
-        address(vm)
-            .call(abi.encodeWithSignature("setEvmVersion(string)", "osaka"));
 
         // Remove delegations
         vm.etch(ALICE, "");
