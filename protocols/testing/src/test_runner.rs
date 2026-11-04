@@ -40,6 +40,7 @@ use tycho_simulation::{
             token::Token,
             Chain,
         },
+        simulation::protocol_sim::ProtocolSim,
         Bytes,
     },
 };
@@ -63,6 +64,7 @@ use crate::{
     report::{CheckId, Checks, Report},
     rpc::RPCProvider,
     state_registry::register_protocol,
+    tvl_only,
     tycho_rpc::TychoClient,
     tycho_runner::TychoRunner,
     utils::{build_spkg, extract_initial_block},
@@ -138,6 +140,43 @@ fn format_bps(bps: f64) -> String {
         format!("{bps:.2}")
     } else {
         format!("{bps:.1e}")
+    }
+}
+
+/// The chain the balance check reads, at one block.
+struct RpcChain<'a> {
+    runner: &'a TestRunner,
+    block: u64,
+}
+
+impl balances::Chain for RpcChain<'_> {
+    fn balance_of(&self, token: &Bytes, holder: &Bytes) -> Result<BigUint, String> {
+        let token = bytes_to_address(token).map_err(|e| e.to_string())?;
+        let holder = bytes_to_address(holder).map_err(|e| e.to_string())?;
+        let balance = self
+            .runner
+            .runtime
+            .block_on(
+                self.runner
+                    .rpc_provider
+                    .get_token_balance(token, holder, self.block),
+            )
+            .map_err(|e| format!("{e:#}"))?;
+        Ok(BigUint::from_bytes_be(&balance.to_be_bytes::<32>()))
+    }
+
+    fn call(&self, to: &Bytes, calldata: &Bytes) -> Result<Bytes, String> {
+        let to = bytes_to_address(to).map_err(|e| e.to_string())?;
+        let returned = self
+            .runner
+            .runtime
+            .block_on(
+                self.runner
+                    .rpc_provider
+                    .call(to, calldata.to_vec().into(), self.block),
+            )
+            .map_err(|e| format!("{e:#}"))?;
+        Ok(Bytes::from(returned.to_vec()))
     }
 }
 
@@ -882,6 +921,17 @@ impl TestRunner {
             .iter()
             .map(|c| c.base.id.to_lowercase())
             .collect::<Vec<String>>();
+        // Strict: the components whose balances are declared to feed only TVL, which the runner
+        // verifies by quoting them again with their balances halved.
+        let tvl_only_ids: Vec<String> = match config.harness {
+            Harness::Strict => test
+                .expected_components
+                .iter()
+                .filter(|component| component.tvl_only.is_some())
+                .map(|component| component.base.id.clone())
+                .collect(),
+            Harness::Legacy => Vec::new(),
+        };
 
         let Some((header, (protocol_components, snapshot, all_tokens))) =
             checks.run(CheckId::Index, || {
@@ -907,6 +957,9 @@ impl TestRunner {
                 CheckId::ExecLadder,
             ] {
                 checks.not_run(id, CheckId::Index);
+            }
+            if !tvl_only_ids.is_empty() {
+                checks.not_run(CheckId::BalancesTvlOnly, CheckId::Index);
             }
             return Ok(());
         };
@@ -940,8 +993,13 @@ impl TestRunner {
         if config.harness == Harness::Strict {
             // `from_yaml` rejected a package-level skip.
             for component in &test.expected_components {
+                let tolerance = component
+                    .tvl_only
+                    .as_ref()
+                    .map_or(Tolerance::EXACT, |tvl_only| tvl_only.tolerance());
                 let failures = self.check_component_balances(
                     component,
+                    tolerance,
                     &protocol_components,
                     &response_protocol_states_by_id,
                     &all_tokens,
@@ -974,14 +1032,24 @@ impl TestRunner {
             }
         }
 
-        let Some(update) = checks.run(CheckId::Decode, || {
-            let adapter_contract_path_str = self.get_adapter_contract_path(
+        let adapter_contract_path = || {
+            self.get_adapter_contract_path(
                 config.adapter_contract.as_deref(),
                 config
                     .adapter_build_signature
                     .as_deref(),
                 config.adapter_build_args.as_deref(),
-            )?;
+            )
+        };
+        // Taken before the snapshot is decoded, which consumes it.
+        let halved = (!tvl_only_ids.is_empty()).then(|| {
+            let mut halved = snapshot.clone();
+            let changed = tvl_only::halve_balances(&mut halved, &tvl_only_ids);
+            (halved, changed, all_tokens.clone())
+        });
+
+        let Some(update) = checks.run(CheckId::Decode, || {
+            let adapter_contract_path_str = adapter_contract_path()?;
             let update = self.decode_snapshot(
                 &config.protocol_system,
                 &header,
@@ -1001,8 +1069,35 @@ impl TestRunner {
         else {
             checks.not_run(CheckId::SimLadder, CheckId::Decode);
             checks.not_run(CheckId::ExecLadder, CheckId::Decode);
+            if halved.is_some() {
+                checks.not_run(CheckId::BalancesTvlOnly, CheckId::Decode);
+            }
             return Ok(());
         };
+
+        if let Some((snapshot, changed, all_tokens)) = halved {
+            // Decoding again replaces the VM database with the same storage, so the states
+            // decoded above still simulate as before.
+            let decoded = adapter_contract_path().and_then(|path| {
+                self.decode_snapshot(
+                    &config.protocol_system,
+                    &header,
+                    snapshot,
+                    all_tokens,
+                    path.as_deref(),
+                    self.vm_simulation_traces,
+                )
+            });
+            for id in &tvl_only_ids {
+                let failures = match &decoded {
+                    Ok(halved) => Self::check_tvl_only(id, &update, halved, &changed),
+                    Err(e) => {
+                        vec![format!("decoding the snapshot with halved balances failed: {e:#}")]
+                    }
+                };
+                checks.record_component(CheckId::BalancesTvlOnly, id, &failures);
+            }
+        }
 
         let protocol_components_simulation: HashMap<String, ProtocolComponentModel> =
             update.new_pairs.clone();
@@ -2015,11 +2110,47 @@ impl TestRunner {
         Ok(())
     }
 
+    /// Strict: verifies that component `id`, declared `tvl_only`, quotes the same in `halved`, the
+    /// snapshot decoded with its balances halved, as in `update`. `changed` counts the balances
+    /// halving changed, per component. Returns every difference.
+    fn check_tvl_only(
+        id: &str,
+        update: &Update,
+        halved: &Update,
+        changed: &HashMap<String, usize>,
+    ) -> Vec<String> {
+        if changed
+            .get(id)
+            .is_none_or(|count| *count == 0)
+        {
+            return vec!["the component has no nonzero indexed balance, so halving its balances \
+                 verifies nothing; it needs no `tvl_only`"
+                .to_string()];
+        }
+        fn find<'a>(update: &'a Update, id: &str) -> Option<(&'a String, &'a dyn ProtocolSim)> {
+            update
+                .states
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(id))
+                .map(|(key, state)| (key, state.as_ref()))
+        }
+        let (Some((key, original)), Some((_, quoted_halved))) =
+            (find(update, id), find(halved, id))
+        else {
+            return vec!["the component did not decode with its balances halved".to_string()];
+        };
+        let Some(component) = update.new_pairs.get(key) else {
+            return vec![format!("the update has no component {key}")];
+        };
+        tvl_only::compare(original, quoted_halved, &component.tokens, executable_max_input)
+    }
+
     /// Strict: checks an expected component's indexed balances against the source it declares,
-    /// at `block`. Returns every failure, empty when all its balances match.
+    /// at `block`, within `tolerance`. Returns every failure, empty when all its balances match.
     fn check_component_balances(
         &self,
         expected: &ProtocolComponentWithTestConfig,
+        tolerance: Tolerance,
         indexed_components: &[ProtocolComponent],
         states: &HashMap<String, ProtocolComponentState>,
         all_tokens: &HashMap<Bytes, Token>,
@@ -2051,25 +2182,14 @@ impl TestRunner {
             static_attributes: &indexed.static_attributes,
             state_attributes: &state.attributes,
         };
-        let balance_of = |token: &Bytes, holder: &Bytes| -> Result<BigUint, String> {
-            let token = bytes_to_address(token).map_err(|e| e.to_string())?;
-            let holder = bytes_to_address(holder).map_err(|e| e.to_string())?;
-            let balance = self
-                .runtime
-                .block_on(
-                    self.rpc_provider
-                        .get_token_balance(token, holder, block),
-                )
-                .map_err(|e| format!("{e:#}"))?;
-            Ok(BigUint::from_bytes_be(&balance.to_be_bytes::<32>()))
-        };
         balances::check_component(
             &component,
             expected
                 .balance_check
                 .as_ref()
                 .unwrap_or(&BalanceCheck::Default),
-            balance_of,
+            tolerance,
+            &RpcChain { runner: self, block },
         )
     }
 

@@ -127,19 +127,79 @@ sits in the PSM's pocket, and the USDS it can pay out is the PSM's DAI:
           token: "0x6b175474e89094c44da98b954eedeac495271d0f"
 ```
 
+Where a balance is protocol accounting rather than a token balance, or a singleton vault keeps
+every pool's funds, a view call returning a `uint` gives the amount, per token or for every token:
+
+```yaml
+  - id: "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"   # Lido
+    balance_check:
+      tokens:
+        # ETH: the protocol's pooled ether
+        "0x0000000000000000000000000000000000000000": {call: {to: self, fn: "getTotalPooledEther()"}}
+        # stETH, wstETH: traded, but the indexer tracks no balance for them
+        "0xae7ab96520de3a18e5e111b5eaab095312d7fe84": {unindexed: {reason: "only the pooled ether is tracked"}}
+        "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0": {unindexed: {reason: "only the pooled ether is tracked"}}
+  - id: "0x3225737a9bbb6473cb4a45b7244aca2befdb276a"   # Sky DAI/USDS converter
+    balance_check:
+      tokens:
+        # DAI: the DAI join's escrow in the vat, kept in rad (1e45) for an 18-decimal token
+        "0x6b175474e89094c44da98b954eedeac495271d0f":
+          call:
+            to: "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"   # vat
+            fn: "dai(address)"
+            args: ["0x9759a6ac90977b93b58547b4a71c78317f391a28"]   # DAI join
+            divide_by: "1e27"
+  - id: "0xe96a45f66bdda121b24f0a861372a72e8889523d00020000000000000000069b"   # Balancer V2
+    # every token: the pool's cash in the vault
+    balance_check: {call: {to: "0xBA12222222228d8Ba445958a75a0704d566BF2C8", fn: "getPoolTokenInfo(bytes32,address)", args: [self, token]}}
+```
+
+- `fn` is the signature, `name(type,...)`; the first word returned is the amount.
+- `args` has one entry per parameter: `self` (the component id), `token` (the token being
+  checked), `attribute:NAME`, or a literal of the parameter's type.
+- `divide_by` (an integer or `1eN`) divides the result, rounding down.
+- `unindexed` passes only while the indexer reports no balance (or zero) for the token.
+
 - An `attribute:NAME` holder is read from the component's static attributes, then from its state
   attributes at the snapshot block; a 32-byte ABI-encoded address is accepted.
 - `min_of` compares the indexed balance with the smallest of the holders' balances, for an amount
   bounded by each of them. It needs at least two holders.
-- The comparison is exact, and a token without an indexed balance counts as zero.
+- The comparison is exact, unless the component is `tvl_only` (below), and a token without an
+  indexed balance counts as zero.
 - A `tokens` entry for a token the component does not have fails the component.
 - A component whose id is not an address needs a holder.
 - The package-level `skip_balance_check` is an error in strict mode, whatever its reason; it can
-  be left out, as it defaults to `false` in both modes. A
-  balance that is protocol accounting rather than a token balance (`totalPooledEther`, say) has
-  no source to declare yet; such a package stays in legacy mode for now.
+  be left out, as it defaults to `false` in both modes.
 
 `balance_check` is read in legacy mode, where it is ignored.
+
+#### Balances that feed only TVL
+
+Some packages index a balance that drifts slightly from the chain for a known reason, such as a
+fee bucket or pending deposits the contract also holds. When simulation does not read those
+balances, being slightly off only moves TVL, and the component can declare a tolerance:
+
+```yaml
+  - id: "0x..."
+    tvl_only:
+      bps: 10        # of the on-chain amount; or `wei`, or both
+      cause: "the indexed reserves exclude the protocol fee bucket the contract also holds"
+      measured: "6.2 bps at most over 40 components, blocks 21000000-21000100 (range --report)"
+```
+
+- The tolerance takes the same fields as `execution_tolerance`, checked the same way in both modes.
+  It applies to `holder`, `min_of` and `call` sources. An `unindexed` token must still have no
+  balance.
+- **The runner verifies the declaration** (`balances.tvl_only`). It decodes the snapshot again
+  with the component's balances halved, and every limit, spot price and quote at 0.1%, 1% and 10%
+  of the limit must come out the same, in every direction. If one changes, simulation reads the
+  balances, and the check fails, naming each change:
+  ```
+  WBTC -> WETH: limits is max input 8384236, max output 683094418215225792, but max input 3889669, max output 499999999548736461 with the balances halved
+  ```
+- A component with no nonzero indexed balance fails the check, as halving verifies nothing.
+- Strict mode rejects `tvl_only` on a component that sets `skip_simulation`, since the check
+  quotes it.
 
 ### Limits
 
@@ -254,6 +314,7 @@ tolerance or not, so `measured` can be checked against a run.
 | `state.components` | every expected component is indexed, with its tokens and static attributes |
 | `state.excluded` | no excluded component is indexed |
 | `balances` | indexed balances match `balanceOf` on chain; strict: per component, against its declared holder |
+| `balances.tvl_only` | strict: a `tvl_only` component quotes the same with its balances halved |
 | `decode` | the snapshot decodes, and so does every expected component |
 | `sim.ladder` | limits, spot prices and quotes at 0.1%, 1% and 10% of the limit, every direction |
 | `exec.ladder` | executing each quote on chain matches the simulation, within the tolerance |

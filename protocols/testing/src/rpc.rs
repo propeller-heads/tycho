@@ -2,9 +2,9 @@ use alloy::{
     contract::{ContractInstance, Interface},
     dyn_abi::DynSolValue,
     eips::{eip1898::BlockId, BlockNumberOrTag},
-    primitives::{address, Address, U256},
+    primitives::{address, Address, Bytes, U256},
     providers::{Provider, ProviderBuilder},
-    rpc::types::Block,
+    rpc::types::{Block, TransactionRequest},
     transports::http::reqwest::Url,
 };
 use miette::{IntoDiagnostic, WrapErr};
@@ -69,6 +69,26 @@ impl RPCProvider {
                 Ok(result)
             }
         }
+    }
+
+    /// The return data of an `eth_call` to `to` with `calldata`, at `block_number`.
+    pub async fn call(
+        &self,
+        to: Address,
+        calldata: Bytes,
+        block_number: u64,
+    ) -> miette::Result<Bytes> {
+        let provider = ProviderBuilder::new().connect_http(self.url.clone());
+        provider
+            .call(
+                TransactionRequest::default()
+                    .to(to)
+                    .input(calldata.into()),
+            )
+            .block(BlockId::from(block_number))
+            .await
+            .into_diagnostic()
+            .wrap_err_with(|| format!("eth_call to {to} failed"))
     }
 
     pub async fn get_block_header(&self, block_number: u64) -> miette::Result<Block> {

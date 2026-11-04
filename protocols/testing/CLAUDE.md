@@ -31,10 +31,12 @@ A test yaml can opt into `harness: strict`; without it the runner behaves as bef
 rejects keys the runner does not read, requires a reason on every skip (and `evidence` on a
 `skip_execution` when the executor has a fixture), and reports every failed check of a test, not
 just the first. It is not required of any package yet, and new checks go into strict mode only.
-Strict mode checks every expected component's balances against its declared `balance_check`
-(`default` = `balanceOf(id)`, `{holder: attribute:NAME | 0x...}`, `{min_of: [...]}`, or per token
-`{tokens: {0x<token>: {holder, token?}}}`) and rejects
-`skip_balance_check`. Strict mode requires every direction of every expected component to declare its limit (`limits:
+Strict mode checks every expected component's balances against its declared `balance_check`:
+`default` (`balanceOf(id)`), `{holder: attribute:NAME | 0x...}`, `{min_of: [...]}`, `{call: {to,
+fn, args, divide_by?}}`, or per token `{tokens: {0x<token>: {holder, token?} | {call} |
+{unindexed: {reason}}}}`, exactly unless the component declares `tvl_only: {bps?, wei?, cause,
+measured}`, which the runner verifies by re-decoding with halved balances and requiring the same
+quotes (`balances.tvl_only`); it rejects `skip_balance_check`. Strict mode requires every direction of every expected component to declare its limit (`limits:
 {kind: hard | soft | under_cap}`, on the package or the component, for every direction or keyed
 `0x<in>->0x<out>`) and tests it at the limit and, for a hard one, one unit past, reporting each
 direction separately. Strict mode also requires executions to match simulation exactly unless the
