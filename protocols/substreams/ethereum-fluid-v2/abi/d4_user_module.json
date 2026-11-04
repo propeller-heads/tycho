@@ -1,0 +1,389 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "liquidityAddress_",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "constructor"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "errorId_", "type": "uint256" }
+    ],
+    "name": "FluidDexV2D3D4Error",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "errorId_", "type": "uint256" }
+    ],
+    "name": "FluidLiquidityCalcsError",
+    "type": "error"
+  },
+  { "inputs": [], "name": "R", "type": "error" },
+  { "inputs": [], "name": "T", "type": "error" },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "dexType",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "dexId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "int24",
+        "name": "tickLower",
+        "type": "int24"
+      },
+      {
+        "indexed": false,
+        "internalType": "int24",
+        "name": "tickUpper",
+        "type": "int24"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes32",
+        "name": "positionSalt",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount0",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount1",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "feeAccruedToken0",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "feeAccruedToken1",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "liquidityIncreaseRaw",
+        "type": "uint256"
+      }
+    ],
+    "name": "LogBorrow",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "dexType",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "dexId",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          { "internalType": "address", "name": "token0", "type": "address" },
+          { "internalType": "address", "name": "token1", "type": "address" },
+          { "internalType": "uint24", "name": "fee", "type": "uint24" },
+          { "internalType": "uint24", "name": "tickSpacing", "type": "uint24" },
+          { "internalType": "address", "name": "controller", "type": "address" }
+        ],
+        "indexed": false,
+        "internalType": "struct DexKey",
+        "name": "dexKey",
+        "type": "tuple"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "sqrtPriceX96",
+        "type": "uint256"
+      }
+    ],
+    "name": "LogInitialize",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "dexType",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "dexId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "int24",
+        "name": "tickLower",
+        "type": "int24"
+      },
+      {
+        "indexed": false,
+        "internalType": "int24",
+        "name": "tickUpper",
+        "type": "int24"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes32",
+        "name": "positionSalt",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount0",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount1",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "feeAccruedToken0",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "feeAccruedToken1",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "liquidityDecreaseRaw",
+        "type": "uint256"
+      }
+    ],
+    "name": "LogPayback",
+    "type": "event"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          {
+            "components": [
+              {
+                "internalType": "address",
+                "name": "token0",
+                "type": "address"
+              },
+              {
+                "internalType": "address",
+                "name": "token1",
+                "type": "address"
+              },
+              { "internalType": "uint24", "name": "fee", "type": "uint24" },
+              {
+                "internalType": "uint24",
+                "name": "tickSpacing",
+                "type": "uint24"
+              },
+              {
+                "internalType": "address",
+                "name": "controller",
+                "type": "address"
+              }
+            ],
+            "internalType": "struct DexKey",
+            "name": "dexKey",
+            "type": "tuple"
+          },
+          { "internalType": "int24", "name": "tickLower", "type": "int24" },
+          { "internalType": "int24", "name": "tickUpper", "type": "int24" },
+          {
+            "internalType": "bytes32",
+            "name": "positionSalt",
+            "type": "bytes32"
+          },
+          { "internalType": "uint256", "name": "amount0", "type": "uint256" },
+          { "internalType": "uint256", "name": "amount1", "type": "uint256" },
+          {
+            "internalType": "uint256",
+            "name": "amount0Min",
+            "type": "uint256"
+          },
+          { "internalType": "uint256", "name": "amount1Min", "type": "uint256" }
+        ],
+        "internalType": "struct BorrowParams",
+        "name": "params_",
+        "type": "tuple"
+      }
+    ],
+    "name": "borrow",
+    "outputs": [
+      { "internalType": "uint256", "name": "", "type": "uint256" },
+      { "internalType": "uint256", "name": "", "type": "uint256" },
+      { "internalType": "uint256", "name": "", "type": "uint256" },
+      { "internalType": "uint256", "name": "", "type": "uint256" },
+      { "internalType": "uint256", "name": "", "type": "uint256" }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          {
+            "components": [
+              {
+                "internalType": "address",
+                "name": "token0",
+                "type": "address"
+              },
+              {
+                "internalType": "address",
+                "name": "token1",
+                "type": "address"
+              },
+              { "internalType": "uint24", "name": "fee", "type": "uint24" },
+              {
+                "internalType": "uint24",
+                "name": "tickSpacing",
+                "type": "uint24"
+              },
+              {
+                "internalType": "address",
+                "name": "controller",
+                "type": "address"
+              }
+            ],
+            "internalType": "struct DexKey",
+            "name": "dexKey",
+            "type": "tuple"
+          },
+          {
+            "internalType": "uint256",
+            "name": "sqrtPriceX96",
+            "type": "uint256"
+          }
+        ],
+        "internalType": "struct InitializeParams",
+        "name": "params_",
+        "type": "tuple"
+      }
+    ],
+    "name": "initialize",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          {
+            "components": [
+              {
+                "internalType": "address",
+                "name": "token0",
+                "type": "address"
+              },
+              {
+                "internalType": "address",
+                "name": "token1",
+                "type": "address"
+              },
+              { "internalType": "uint24", "name": "fee", "type": "uint24" },
+              {
+                "internalType": "uint24",
+                "name": "tickSpacing",
+                "type": "uint24"
+              },
+              {
+                "internalType": "address",
+                "name": "controller",
+                "type": "address"
+              }
+            ],
+            "internalType": "struct DexKey",
+            "name": "dexKey",
+            "type": "tuple"
+          },
+          { "internalType": "int24", "name": "tickLower", "type": "int24" },
+          { "internalType": "int24", "name": "tickUpper", "type": "int24" },
+          {
+            "internalType": "bytes32",
+            "name": "positionSalt",
+            "type": "bytes32"
+          },
+          { "internalType": "uint256", "name": "amount0", "type": "uint256" },
+          { "internalType": "uint256", "name": "amount1", "type": "uint256" },
+          {
+            "internalType": "uint256",
+            "name": "amount0Min",
+            "type": "uint256"
+          },
+          { "internalType": "uint256", "name": "amount1Min", "type": "uint256" }
+        ],
+        "internalType": "struct PaybackParams",
+        "name": "params_",
+        "type": "tuple"
+      }
+    ],
+    "name": "payback",
+    "outputs": [
+      { "internalType": "uint256", "name": "", "type": "uint256" },
+      { "internalType": "uint256", "name": "", "type": "uint256" },
+      { "internalType": "uint256", "name": "", "type": "uint256" },
+      { "internalType": "uint256", "name": "", "type": "uint256" },
+      { "internalType": "uint256", "name": "", "type": "uint256" }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+]

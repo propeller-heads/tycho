@@ -37,6 +37,7 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "up_v3",
     "aero_cl",
     "vm:balancer_v3",
+    "fluid_v2",
 ];
 
 /// Exact-name protocols where the router-to-pool input transfer is skipped (funds are sent
@@ -507,11 +508,13 @@ mod tests {
         assert_eq!(gas, BigUint::from(285_000u64));
     }
 
-    #[test]
-    fn test_single_callback_protocol() {
-        // uniswap_v3 is a callback protocol: the pool pulls funds inside the callback, so that
-        // cost is already in pool gas. The only extra is the fee path's output transfer.
-        let solution = make_solution(vec![make_swap("uniswap_v3")]);
+    #[rstest]
+    #[case::uniswap_v3("uniswap_v3")]
+    #[case::fluid_v2("fluid_v2")]
+    fn test_single_callback_protocol(#[case] protocol_system: &str) {
+        // A callback protocol pulls funds inside the callback, so that cost is already in pool
+        // gas. The only extra is the fee path's output transfer.
+        let solution = make_solution(vec![make_swap(protocol_system)]);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
 
         // user transfer                             0  ← callback + TransferFrom, nothing extra

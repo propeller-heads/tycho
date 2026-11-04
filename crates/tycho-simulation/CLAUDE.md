@@ -42,8 +42,10 @@ for any protocol indexed by Tycho.
     steps they already took (`utils/uniswap/swap_step_cache.rs`), shared by their clones: code
     that changes a state's price, tick, liquidity, fee or ticks must start an empty step cache,
     and changes ticks only through `Arc::make_mut`
-  - **Hybrid** (`fluid/`, `balancer_v3/`, `curve/`): native Rust quote math over VM-indexed pool
-    state (each has both `state.rs` and `vm.rs`)
+  - **Hybrid** (`fluid/`, `fluid_v2/`, `balancer_v3/`, `curve/`): native Rust quote math over
+    VM-indexed pool state (each has both `state.rs` and `vm.rs`). `fluid_v2/` keeps the pool
+    itself in indexed attributes and reads only the tokens' Fluid Liquidity state (exchange
+    prices, payout caps, pauses) through the DEX v2 resolver in the VM
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
     protocols without a native implementation
 - **`snapshot_feed/`**: latest-value snapshot feeds, both ends, generic in the snapshot and the

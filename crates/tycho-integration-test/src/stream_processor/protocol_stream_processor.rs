@@ -30,6 +30,7 @@ use tycho_simulation::{
                 fluid_v1_paused_pools_filter, liquidityparty_killed_pools_filter,
             },
             fluid::FluidV1,
+            fluid_v2::state::FluidV2State,
             lido_v4::state::LidoV4State,
             lunarbase::LunarBaseState,
             pancakeswap_v2::state::PancakeswapV2State,
@@ -457,6 +458,9 @@ impl ProtocolStreamProcessor {
                     tvl_filter.clone(),
                     Some(fluid_v1_paused_pools_filter),
                 );
+            }
+            "fluid_v2" => {
+                stream = stream.exchange::<FluidV2State>("fluid_v2", tvl_filter.clone(), None);
             }
             "aerodrome_slipstreams" => {
                 stream = stream.exchange::<AerodromeSlipstreamsState>(

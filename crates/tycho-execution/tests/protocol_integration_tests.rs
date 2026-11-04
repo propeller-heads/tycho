@@ -1448,6 +1448,111 @@ fn test_sequential_encoding_strategy_fluid() {
     write_calldata_to_file("test_sequential_encoding_strategy_fluid_v1", hex_calldata.as_str());
 }
 
+/// Writes router calldata for a 10 USDC exact-in swap on one Ethereum Fluid DEX v2 pool.
+fn write_fluid_v2_single_swap_calldata(
+    test_name: &str,
+    component_id: &str,
+    static_attributes: HashMap<String, Bytes>,
+    token_out: Bytes,
+    expected_amount_out: &str,
+    min_amount_out: &str,
+) {
+    let pool = ProtocolComponent {
+        id: String::from(component_id),
+        protocol_system: String::from("fluid_v2"),
+        static_attributes,
+        ..Default::default()
+    };
+    let token_in = usdc();
+    let swap = Swap::new(
+        pool,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("10_000000").unwrap(),
+        BigUint::from_str(expected_amount_out).unwrap(),
+        BigUint::from_str(min_amount_out).unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    write_calldata_to_file(test_name, encode(&calldata).as_str());
+}
+
+fn fluid_v2_static_attributes(
+    dex_type: &str,
+    fee: &str,
+    tick_spacing: &str,
+) -> HashMap<String, Bytes> {
+    HashMap::from([
+        ("dex_type".to_string(), Bytes::from(dex_type)),
+        ("fee".to_string(), Bytes::from(fee)),
+        ("tick_spacing".to_string(), Bytes::from(tick_spacing)),
+        ("controller".to_string(), Bytes::zero(20)),
+    ])
+}
+
+#[test]
+fn test_single_encoding_strategy_fluid_v2_d3() {
+    // USDC ──(Fluid DEX v2 D3, fee 100, tick spacing 1)──> USDT
+    write_fluid_v2_single_swap_calldata(
+        "test_single_encoding_strategy_fluid_v2_d3",
+        "0x03e018f09af38956affdfeab72c2cefbcd4e6fee44d09df7525ec9dba3e51356a5",
+        fluid_v2_static_attributes("0x03", "0x64", "0x01"),
+        usdt(),
+        "9_900000",
+        "9_800000",
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_fluid_v2_d4() {
+    // USDC ──(Fluid DEX v2 D4, fee 100, tick spacing 1)──> USDT
+    write_fluid_v2_single_swap_calldata(
+        "test_single_encoding_strategy_fluid_v2_d4",
+        "0x04e018f09af38956affdfeab72c2cefbcd4e6fee44d09df7525ec9dba3e51356a5",
+        fluid_v2_static_attributes("0x04", "0x64", "0x01"),
+        usdt(),
+        "9_900000",
+        "9_800000",
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_fluid_v2_native() {
+    // USDC ──(Fluid DEX v2 D3, fee 500, tick spacing 10)──> ETH
+    write_fluid_v2_single_swap_calldata(
+        "test_single_encoding_strategy_fluid_v2_native",
+        "0x03d0adee4ff64cfb16d76667ef79e093420a3f01cd648ffaae9bfab849449930fd",
+        fluid_v2_static_attributes("0x03", "0x01f4", "0x0a"),
+        eth(),
+        "1000000000000000",
+        "100000000000000",
+    );
+}
+
 #[test]
 fn test_single_encoding_strategy_rocketpool_deposit() {
     // ETH -> (rocketpool) -> rETH

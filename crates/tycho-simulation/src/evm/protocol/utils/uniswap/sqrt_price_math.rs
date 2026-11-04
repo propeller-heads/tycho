@@ -76,7 +76,7 @@ pub fn get_amount1_delta(
     }
 }
 
-pub(super) fn get_next_sqrt_price_from_input(
+pub(crate) fn get_next_sqrt_price_from_input(
     sqrt_price: U256,
     liquidity: u128,
     amount_in: U256,

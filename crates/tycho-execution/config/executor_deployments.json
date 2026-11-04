@@ -54,6 +54,13 @@
       "contract": "FluidV1Executor",
       "args": ["0x52Aa899454998Be5b000Ad077a46Bbe360F4e497"]
     },
+    "fluid_v2": {
+      "contract": "FluidV2Executor",
+      "args": [
+        "0xaBE4D5AA1Bb188f4B5d3a1aE3B8ec5e300A78261",
+        "0x52Aa899454998Be5b000Ad077a46Bbe360F4e497"
+      ]
+    },
     "erc4626": { "contract": "ERC4626Executor", "args": [] },
     "rocketpool": {
       "contract": "RocketpoolExecutor",

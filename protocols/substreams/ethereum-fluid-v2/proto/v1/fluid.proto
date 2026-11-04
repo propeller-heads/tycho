@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package tycho.evm.fluid_v2;
+
+message Pool {
+  bytes token0 = 1;
+  bytes token1 = 2;
+  bytes created_tx_hash = 3;
+}
