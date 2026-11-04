@@ -81,17 +81,17 @@ pub(crate) fn coerce_error(
         SimulationEngineError::StorageError(message) => {
             SimulationError::RecoverableError(message.clone())
         }
-        _ => SimulationError::FatalError(err.clone().to_string()), /* Otherwise return the
-                                                                    * original error */
+        SimulationEngineError::OutOfGas(..) | SimulationEngineError::TraceError(_) => {
+            SimulationError::FatalError(err.clone().to_string())
+        }
     }
 }
 
 fn parse_solidity_error_message(data: &str) -> String {
     // 10 for "0x" + 8 hex chars error signature
     if data.len() >= 10 {
-        let data_bytes = match Vec::from_hex(&data[2..]) {
-            Ok(bytes) => bytes,
-            Err(_) => return format!("Failed to decode: {data}"),
+        let Ok(data_bytes) = Vec::from_hex(&data[2..]) else {
+            return format!("Failed to decode: {data}")
         };
 
         // Check for specific error selectors:
@@ -231,17 +231,15 @@ pub(crate) async fn get_code_for_contract(
     // Get the connection string, defaulting to the RPC_URL environment variable
     let connection_string = connection_string.or_else(|| env::var("RPC_URL").ok());
 
-    let connection_string = match connection_string {
-        Some(url) => url,
-        None => {
-            return Err(SimulationError::FatalError(
-                "RPC_URL environment variable is not set".to_string(),
-            ))
-        }
+    let Some(connection_string) = connection_string else {
+        return Err(SimulationError::FatalError(
+            "RPC_URL environment variable is not set".to_string(),
+        ))
     };
 
-    let addr = Address::from_str(address)
-        .map_err(|_| SimulationError::FatalError(format!("Invalid address format: {address}")))?;
+    let addr = Address::from_str(address).map_err(|e| {
+        SimulationError::FatalError(format!("Invalid address format: {address}: {e}"))
+    })?;
     // Call eth_getCode to get the bytecode of the contract
     match sync_get_code(&connection_string, addr) {
         Ok(code) if code.is_empty() => {
@@ -255,13 +253,22 @@ pub(crate) async fn get_code_for_contract(
             RpcError::Transport(err) => Err(SimulationError::RecoverableError(format!(
                 "Failed to get code for contract due to internal RPC error: {err:?}"
             ))),
-            _ => Err(SimulationError::FatalError(format!(
+            RpcError::ErrorResp(_) |
+            RpcError::NullResp |
+            RpcError::UnsupportedFeature(_) |
+            RpcError::LocalUsageError(_) |
+            RpcError::SerError(_) |
+            RpcError::DeserError { .. } => Err(SimulationError::FatalError(format!(
                 "Failed to get code for contract. Invalid response from RPC: {e:?}"
             ))),
         },
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "keeps alloy's non-Sync provider future out of the Send + Sync future TryFromWithBlock requires; panics on a current-thread runtime"
+)]
 fn sync_get_code(
     connection_string: &str,
     addr: Address,
@@ -354,15 +361,15 @@ pub fn string_to_bytes32(pool_id: &str) -> Result<[u8; 32], SimulationError> {
 /// ```
 pub fn json_deserialize_address_list(input: &[u8]) -> Result<Vec<Vec<u8>>, SimulationError> {
     let json_value: Value = serde_json::from_slice(input)
-        .map_err(|_| SimulationError::FatalError(format!("Invalid JSON: {input:?}")))?;
+        .map_err(|e| SimulationError::FatalError(format!("Invalid JSON: {input:?}: {e}")))?;
 
     if let Value::Array(hex_strings) = json_value {
         let mut result = Vec::new();
 
         for val in hex_strings {
             if let Value::String(hexstring) = val {
-                let bytes = hex::decode(hexstring.trim_start_matches("0x")).map_err(|_| {
-                    SimulationError::FatalError(format!("Invalid hex string: {hexstring}"))
+                let bytes = hex::decode(hexstring.trim_start_matches("0x")).map_err(|e| {
+                    SimulationError::FatalError(format!("Invalid hex string: {hexstring}: {e}"))
                 })?;
                 result.push(bytes);
             } else {
@@ -409,15 +416,15 @@ pub fn json_deserialize_address_list(input: &[u8]) -> Result<Vec<Vec<u8>>, Simul
 /// ```
 pub fn json_deserialize_be_bigint_list(input: &[u8]) -> Result<Vec<BigInt>, SimulationError> {
     let json_value: Value = serde_json::from_slice(input)
-        .map_err(|_| SimulationError::FatalError(format!("Invalid JSON: {input:?}")))?;
+        .map_err(|e| SimulationError::FatalError(format!("Invalid JSON: {input:?}: {e}")))?;
 
     if let Value::Array(hex_strings) = json_value {
         let mut result = Vec::new();
 
         for val in hex_strings {
             if let Value::String(hexstring) = val {
-                let bytes = hex::decode(hexstring.trim_start_matches("0x")).map_err(|_| {
-                    SimulationError::FatalError(format!("Invalid hex string: {hexstring}"))
+                let bytes = hex::decode(hexstring.trim_start_matches("0x")).map_err(|e| {
+                    SimulationError::FatalError(format!("Invalid hex string: {hexstring}: {e}"))
                 })?;
                 let bigint = BigInt::from_signed_bytes_be(&bytes);
                 result.push(bigint);
@@ -470,9 +477,9 @@ where
                 (resolved, code)
             }
         };
-        let account: Address = account.parse().map_err(|_| {
+        let account: Address = account.parse().map_err(|e| {
             SimulationError::FatalError(format!(
-                "stateless contract has an invalid address {account}"
+                "stateless contract has an invalid address {account}: {e}"
             ))
         })?;
         engine
@@ -522,9 +529,9 @@ where
             ))
         })?
         .parse()
-        .map_err(|_| {
+        .map_err(|e| {
             SimulationError::FatalError(format!(
-                "stateless call directive has an invalid target {directive}"
+                "stateless call directive has an invalid target {directive}: {e}"
             ))
         })?;
     let mut hasher = Keccak256::new();
@@ -551,7 +558,7 @@ mod tests {
     use crate::utils::hexstring_to_vec;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[cfg_attr(not(feature = "network_tests"), ignore)]
+    #[cfg_attr(not(feature = "network_tests"), ignore = "requires RPC_URL")]
     async fn test_get_code_for_address() {
         let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| {
             dotenv().expect("Missing .env file");

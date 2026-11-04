@@ -33,6 +33,7 @@ use crate::{
 };
 
 #[derive(Error, Debug)]
+#[expect(clippy::enum_variant_names, reason = "public API; renaming is a breaking change")]
 pub enum StreamError {
     #[error("Error during stream set up: {0}")]
     SetUpError(String),
@@ -71,6 +72,10 @@ pub struct ConstantRetryConfiguration {
 fn validate_chain_config() -> Result<(), StreamError> {
     let registry = ChainConfigRegistry::load_default()
         .map_err(|e| StreamError::SetUpError(format!("failed to load custom chain config: {e}")))?;
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "an already-installed registry is the intended outcome of a prior lazy access"
+    )]
     let _ = init_chain_registry(registry);
     Ok(())
 }
@@ -94,6 +99,7 @@ fn validate_subscription_buffer_size(subscription_buffer_size: usize) -> Result<
     Ok(())
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "each bool is an independent feature toggle")]
 pub struct TychoStreamBuilder {
     tycho_url: String,
     chain: Chain,
@@ -121,7 +127,8 @@ impl TychoStreamBuilder {
     /// Creates a new `TychoStreamBuilder` with the given Tycho URL and blockchain network.
     /// Initializes the builder with default values for block time and timeout based on the chain.
     pub fn new(tycho_url: &str, chain: Chain) -> Self {
-        let (block_time, timeout, max_missed_blocks) = Self::default_timing(&chain);
+        let (block_time, timeout, max_missed_blocks, startup_timeout) =
+            Self::default_timing(&chain);
         Self {
             tycho_url: tycho_url.to_string(),
             chain,
@@ -129,7 +136,7 @@ impl TychoStreamBuilder {
             blocklisted_ids: HashSet::new(),
             block_time,
             timeout,
-            startup_timeout: Duration::from_secs(block_time * max_missed_blocks),
+            startup_timeout: Duration::from_secs(startup_timeout),
             max_missed_blocks,
             state_sync_retry_config: RetryConfiguration::constant(
                 32,
@@ -152,24 +159,30 @@ impl TychoStreamBuilder {
         }
     }
 
-    /// Returns the default block_time, timeout and max_missed_blocks values for the given
-    /// blockchain network.
-    fn default_timing(chain: &Chain) -> (u64, u64, u64) {
+    /// Returns the default `(block_time, timeout, max_missed_blocks, startup_timeout)` for the
+    /// given blockchain network. Times are in seconds.
+    ///
+    /// A silent synchronizer holds every round while it is Delayed, and stays Delayed for
+    /// `block_time * max_missed_blocks`. The consumer falls about that far behind the chain head
+    /// before the synchronizer goes stale and stops holding rounds. Chains whose blocks come
+    /// faster than their one-second `block_time` therefore use 20 missed blocks, keeping that
+    /// lag near 20 s. The startup timeout is set apart, so large first snapshots keep their time.
+    fn default_timing(chain: &Chain) -> (u64, u64, u64, u64) {
         match chain {
-            Chain::Ethereum => (12, 36, 50),
-            Chain::Starknet => (2, 8, 50),
-            Chain::ZkSync => (3, 12, 50),
-            Chain::Arbitrum => (1, 9, 100), // Typically closer to 0.25s
-            Chain::Base => (2, 12, 50),
-            Chain::Bsc => (1, 12, 50),
-            Chain::Unichain => (1, 10, 100),
-            Chain::Polygon => (2, 12, 50),   // ~2s block time
-            Chain::Plasma => (1, 10, 100),   // ~1s block time
-            Chain::Robinhood => (1, 5, 100), // Arbitrum Orbit, typically closer to 0.25s
-            Chain::Arc => (1, 5, 100),       // Typically closer to 0.5s
-            _ => {
+            Chain::Ethereum => (12, 36, 50, 600),
+            Chain::Starknet => (2, 8, 50, 100),
+            Chain::ZkSync => (3, 12, 50, 150),
+            Chain::Arbitrum => (1, 9, 20, 100), // Typically closer to 0.25s
+            Chain::Base => (2, 12, 50, 100),
+            Chain::Bsc => (1, 12, 50, 50),
+            Chain::Unichain => (1, 10, 20, 100),
+            Chain::Polygon => (2, 12, 50, 100),  // ~2s block time
+            Chain::Plasma => (1, 10, 20, 100),   // ~1s block time
+            Chain::Robinhood => (1, 5, 20, 100), // Typically closer to 0.1s
+            Chain::Arc => (1, 5, 20, 100),       // Typically closer to 0.5s
+            Chain::Custom(_) | _ => {
                 let block_time = chain.block_time_secs();
-                (block_time, block_time * 3, 50)
+                (block_time, block_time * 3, 50, block_time * 50)
             }
         }
     }
@@ -431,6 +444,7 @@ impl TychoStreamBuilder {
             Duration::from_secs(self.timeout),
             self.max_missed_blocks,
         );
+        block_sync.startup_timeout(self.startup_timeout);
         if let Some(n) = self.max_messages {
             block_sync.max_messages(n);
         }
@@ -510,7 +524,11 @@ impl TychoStreamBuilder {
         let handle = tokio::spawn(async move {
             tokio::select! {
                 res = &mut ws_jh => {
-                    let _ = res.map_err(|e| StreamError::WebSocketConnectionError(e.to_string()));
+                    match res {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => warn!(?e, "WebSocket task ended with an error"),
+                        Err(e) => warn!(?e, "WebSocket task panicked"),
+                    }
                     // The task has ended, so its handle must not be polled again.
                     if let Err(e) = ws_client.close().await {
                         warn!(?e, "Failed to close WebSocket client");
@@ -675,6 +693,10 @@ mod tests {
                     break;
                 }
             }
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the test may have dropped the receiver before the connection closes"
+            )]
             let _ = closed_tx.send(());
         });
         (addr, closed_rx)
@@ -797,12 +819,12 @@ mod tests {
 
     #[test]
     fn arc_uses_fast_chain_default_timing() {
-        assert_eq!(TychoStreamBuilder::default_timing(&Chain::Arc), (1, 5, 100));
+        assert_eq!(TychoStreamBuilder::default_timing(&Chain::Arc), (1, 5, 20, 100));
     }
 
     #[test]
     fn arbitrum_default_timing_outlasts_substreams_reconnect() {
-        assert_eq!(TychoStreamBuilder::default_timing(&Chain::Arbitrum), (1, 9, 100));
+        assert_eq!(TychoStreamBuilder::default_timing(&Chain::Arbitrum), (1, 9, 20, 100));
     }
 
     #[tokio::test]

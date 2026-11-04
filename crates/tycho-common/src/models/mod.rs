@@ -873,6 +873,10 @@ mod tests {
     #[should_panic(expected = "no registered config")]
     fn test_from_dto_unregistered_custom_panics() {
         let dto_chain = dto::Chain::Custom(ArrayString::from("nope").unwrap());
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the conversion panics before yielding a value"
+        )]
         let _: Chain = dto_chain.into();
     }
 

@@ -39,9 +39,14 @@ Please submit pull requests (PRs) targeting the main branch. Ensure all PR and c
 Please ensure the following commands pass if you have changed the code:
 
 ```
-cargo clippy --workspace --lib --all-targets --all-features
-cargo +nightly fmt --check
+cargo +"$RUST_NIGHTLY" clippy --workspace --all-targets --all-features -- -D warnings
+cargo +"$RUST_NIGHTLY" fmt --all --check
 ```
+
+These commands assume [mise](https://mise.jdx.dev) is activated in the repository and its tools are
+installed (`mise install`): it provides the tools and environment variables CI uses, pinned in
+`mise.toml`. The Rust toolchains are pinned in
+`rust-toolchain.toml`, which rustup reads on its own.
 
 ### Join tycho.build
 

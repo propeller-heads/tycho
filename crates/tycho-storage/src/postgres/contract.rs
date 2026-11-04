@@ -23,7 +23,8 @@ use tycho_common::{
 };
 
 use super::{
-    maybe_lookup_block_ts, maybe_lookup_version_ts, orm, schema, storage_error_from_diesel,
+    count_to_i64, maybe_lookup_block_ts, maybe_lookup_version_ts, orm, schema,
+    storage_error_from_diesel,
     versioning::{apply_partitioned_versioning, apply_versioning, VersioningEntry},
     PostgresError, PostgresGateway, WithOrdinal, WithTxHash, MAX_TS, MAX_VERSION_TS,
 };
@@ -512,7 +513,6 @@ impl PostgresGateway {
             .map_err(PostgresError::from)?
             .into_iter()
             .collect();
-        #[allow(clippy::mutable_key_type)]
         let accounts: HashSet<_> = slots
             .values()
             .flat_map(|contract_slots| contract_slots.keys())
@@ -657,7 +657,6 @@ impl PostgresGateway {
                 .distinct_on((account::id, slot))
                 .into_boxed();
             if let Some(addresses) = contracts {
-                #[allow(clippy::mutable_key_type)]
                 let filter_val: HashSet<_> = addresses.iter().collect();
                 q = q.filter(account::address.eq_any(filter_val));
             }
@@ -670,13 +669,13 @@ impl PostgresGateway {
             .map_err(PostgresError::from)?
             .into_iter()
             .collect::<HashMap<i64, Bytes>>();
-        Self::construct_account_to_contract_store(slots.into_iter(), accounts)
+        Self::construct_account_to_contract_store(slots.into_iter(), &accounts)
     }
 
     /// Constructs a mapping from address to contract slots
     fn construct_account_to_contract_store(
         slot_values: impl Iterator<Item = (i64, Bytes, Option<Bytes>)>,
-        addresses: HashMap<i64, Bytes>,
+        addresses: &HashMap<i64, Bytes>,
     ) -> Result<AccountToContractStoreDeltas, StorageError> {
         let mut result: AccountToContractStoreDeltas = HashMap::with_capacity(addresses.len());
         for (cid, raw_key, raw_val) in slot_values.into_iter() {
@@ -1052,7 +1051,7 @@ impl PostgresGateway {
                 .map_err(PostgresError::from)?
         } else {
             // If no pagination, use the length of the result
-            res.len() as i64
+            count_to_i64(res.len())
         };
 
         Ok(WithTotal { entity: res, total: Some(total_count) })
@@ -1095,7 +1094,6 @@ impl PostgresGateway {
             chain_id,
             creation_tx: creation_tx_id,
             created_at: Some(created_ts),
-            deleted_at: None,
         };
         let hex_addr = hex::encode(&new.address);
 
@@ -1920,7 +1918,7 @@ mod test {
                 "account0".to_owned(),
                 contract_slots([(1, 5), (2, 1), (0, 1)])
                     .into_iter()
-                    .map(|(k, v)| (k, v.unwrap_or(Bytes::from("0x00"))))
+                    .map(|(k, v)| (k, v.unwrap_or_else(|| Bytes::from("0x00"))))
                     .collect(),
                 Bytes::from(100u64).lpad(32, 0),
                 vec![
@@ -1975,7 +1973,7 @@ mod test {
                 "account0".to_owned(),
                 contract_slots([(6, 30), (5, 25), (1, 3), (2, 1), (0, 2)])
                     .into_iter()
-                    .map(|(k, v)| (k, v.unwrap_or(Bytes::from("0x00"))))
+                    .map(|(k, v)| (k, v.unwrap_or_else(|| Bytes::from("0x00"))))
                     .collect(),
                 Bytes::from(101u64).lpad(32, 0),
                 vec![
@@ -2049,7 +2047,7 @@ mod test {
                 "c1".to_owned(),
                 contract_slots([(1, 255), (0, 128)])
                     .into_iter()
-                    .map(|(k, v)| (k, v.unwrap_or(Bytes::from("0x00"))))
+                    .map(|(k, v)| (k, v.unwrap_or_else(|| Bytes::from("0x00"))))
                     .collect(),
                 Bytes::from(50u64).lpad(32, 0),
                 HashMap::new(),
@@ -2077,7 +2075,7 @@ mod test {
                 "c2".to_owned(),
                 contract_slots([(1, 2), (2, 4)])
                     .into_iter()
-                    .map(|(k, v)| (k, v.unwrap_or(Bytes::from("0x00"))))
+                    .map(|(k, v)| (k, v.unwrap_or_else(|| Bytes::from("0x00"))))
                     .collect(),
                 Bytes::from(25u64).lpad(32, 0),
                 HashMap::new(),

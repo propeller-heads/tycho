@@ -9,5 +9,8 @@ pub(crate) use common::{
 };
 pub use ethcall_detector::EthCallDetector;
 pub use onchain_owners::OnChainTokenOwners;
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "TraceCallDetector is deprecated for consumers but still exported"
+)]
 pub use trace_detector::TraceCallDetector;

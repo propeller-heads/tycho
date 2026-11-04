@@ -231,7 +231,7 @@ impl EkuboPool for MevCaptureV21Pool {
         deleted_attributes: HashSet<String>,
     ) -> Result<(), TransitionError> {
         if let Some(tick) = updated_attributes.remove("tick") {
-            self.state.core.tick = tick.into();
+            self.state.core.tick = i32::try_from(tick)?;
         }
 
         if let Some(anchor_state) = updated_attributes.remove(ANCHOR_STATE_ATTRIBUTE) {

@@ -14,19 +14,16 @@ use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use diesel_derive_enum::DbEnum;
 use tycho_common::{
     models::{
-        self,
-        blockchain::{
-            EntryPointWithTracingParams as EntryPointWithTracingParamsCommon,
-            TracingParams as EntryPointTracingParamsCommon,
-        },
-        Address, AttrStoreKey, Balance, BlockHash, Code, CodeHash, ComponentId, ContractId,
-        EntryPointId, PaginationParams, StoreVal, TxHash,
+        self, blockchain::TracingParams as EntryPointTracingParamsCommon, Address, AttrStoreKey,
+        Balance, BlockHash, Code, CodeHash, ComponentId, ContractId, EntryPointId,
+        PaginationParams, StoreVal, TxHash,
     },
     storage::{BlockIdentifier, StorageError, WithTotal},
     Bytes,
 };
 
 use super::{
+    convert_int,
     schema::{
         account, account_balance, block, chain, component_balance, component_balance_default,
         component_tvl, contract_code, contract_storage, contract_storage_default, entry_point,
@@ -1407,19 +1404,49 @@ impl NewToken {
     /// PostgreSQL wire protocol uses i16 for parameter count (max 32767).
     pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 
-    pub fn from_token(account_id: i64, token: &models::token::Token) -> Self {
-        Self {
+    pub fn from_token(account_id: i64, token: &models::token::Token) -> Result<Self, StorageError> {
+        Ok(Self {
             account_id,
             symbol: token.symbol.clone(),
-            decimals: token.decimals as i32,
-            tax: token.tax as i64,
+            decimals: convert_int(token.decimals, "token decimals")?,
+            tax: convert_int(token.tax, "token tax")?,
             gas: token
                 .gas
                 .iter()
-                .map(|g| g.map(|u| u as i64))
-                .collect(),
-            quality: token.quality as i32,
-        }
+                .map(|g| {
+                    g.map(|u| convert_int(u, "token gas"))
+                        .transpose()
+                })
+                .collect::<Result<_, _>>()?,
+            quality: convert_int(token.quality, "token quality")?,
+        })
+    }
+}
+
+impl Token {
+    /// Builds the domain token of this row, failing when a column holds a negative value.
+    pub fn to_model(
+        &self,
+        address: &Address,
+        chain: models::Chain,
+    ) -> Result<models::token::Token, StorageError> {
+        let gas_usage = self
+            .gas
+            .iter()
+            .map(|gas| {
+                gas.map(|value| convert_int(value, "token gas"))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(models::token::Token::new(
+            address,
+            self.symbol.as_str(),
+            convert_int(self.decimals, "token decimals")?,
+            convert_int(self.tax, "token tax")?,
+            gas_usage.as_slice(),
+            chain,
+            convert_int(self.quality, "token quality")?,
+        ))
     }
 }
 
@@ -1633,7 +1660,6 @@ pub struct NewContractCode<'a> {
     pub valid_to: Option<NaiveDateTime>,
 }
 
-#[allow(clippy::needless_lifetimes)]
 impl<'a> VersionedRow for NewContractCode<'a> {
     type SortKey = (i64, NaiveDateTime, i64);
     type EntityId = i64;
@@ -1662,8 +1688,6 @@ pub struct NewContract {
     pub chain_id: i64,
     pub creation_tx: Option<i64>,
     pub created_at: Option<NaiveDateTime>,
-    #[allow(dead_code)]
-    pub deleted_at: Option<NaiveDateTime>,
 }
 
 impl NewContract {
@@ -1821,10 +1845,9 @@ impl From<NewSlot> for NewSlotLatest {
 #[diesel(table_name = protocol_component_holds_token)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct ProtocolHoldsToken {
-    protocol_component_id: i64,
-    token_id: i64,
-    #[allow(dead_code)]
-    token_index: i16,
+    pub protocol_component_id: i64,
+    pub token_id: i64,
+    pub token_index: i16,
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
 }
@@ -1842,8 +1865,8 @@ pub struct NewProtocolComponentHoldsToken {
 #[diesel(table_name = component_tvl)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct ComponentTVL {
-    id: i64,
-    protocol_component_id: i64,
+    pub id: i64,
+    pub protocol_component_id: i64,
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
 }
@@ -1907,7 +1930,7 @@ impl From<EntryPoint> for models::blockchain::EntryPoint {
         Self {
             external_id: value.external_id.clone(),
             target: value.target.clone(),
-            signature: value.signature.clone(),
+            signature: value.signature,
         }
     }
 }
@@ -1931,24 +1954,6 @@ impl EntryPoint {
             .into_iter()
             .map(|(ep_id, ext_id)| (ext_id, ep_id))
             .collect::<HashMap<_, _>>())
-    }
-
-    /// Retrieves the database id of an entry point from a target address and function signature.
-    #[allow(dead_code)]
-    pub(crate) async fn id_by_target_and_signature(
-        target_: &Bytes,
-        signature_: &String,
-        conn: &mut AsyncPgConnection,
-    ) -> Result<i64, StorageError> {
-        use crate::postgres::schema::entry_point::dsl::*;
-
-        Ok(entry_point
-            .select(id)
-            .filter(target.eq(target_))
-            .filter(signature.eq(signature_))
-            .first::<i64>(conn)
-            .await
-            .map_err(PostgresError::from)?)
     }
 }
 
@@ -1974,56 +1979,32 @@ pub struct EntryPointTracingParams {
     pub modified_ts: NaiveDateTime,
 }
 
-impl From<&EntryPointTracingParams> for models::blockchain::TracingParams {
-    fn from(value: &EntryPointTracingParams) -> Self {
+impl TryFrom<&EntryPointTracingParams> for models::blockchain::TracingParams {
+    type Error = StorageError;
+
+    fn try_from(value: &EntryPointTracingParams) -> Result<Self, Self::Error> {
         match value.tracing_type {
             EntryPointTracingType::RpcTracer => {
-                let rpc_tracer: models::blockchain::RPCTracerParams =
-                    serde_json::from_value(value.data.clone().unwrap()).unwrap();
-                models::blockchain::TracingParams::RPCTracer(rpc_tracer)
+                let data = value.data.clone().ok_or_else(|| {
+                    StorageError::DecodeError(format!(
+                        "Missing data for RPC tracing params {}",
+                        value.id
+                    ))
+                })?;
+                let rpc_tracer: models::blockchain::RPCTracerParams = serde_json::from_value(data)
+                    .map_err(|e| {
+                        StorageError::DecodeError(format!(
+                            "Failed to decode RPC tracing params {}: {e}",
+                            value.id
+                        ))
+                    })?;
+                Ok(models::blockchain::TracingParams::RPCTracer(rpc_tracer))
             }
         }
     }
 }
 
 impl EntryPointTracingParams {
-    /// Retrieves the database id of an entry point tracing params from an
-    /// `EntryPointWithTracingParams`.
-    #[allow(dead_code)]
-    pub(crate) async fn id_from_entry_point_with_tracing_params(
-        entry_point: &EntryPointWithTracingParamsCommon,
-        conn: &mut AsyncPgConnection,
-    ) -> Result<i64, StorageError> {
-        let tracing_type = EntryPointTracingType::from(&entry_point.params);
-        let data = match &entry_point.params {
-            EntryPointTracingParamsCommon::RPCTracer(rpc_tracer) => {
-                serde_json::to_value(rpc_tracer).map_err(|e| {
-                    StorageError::Unexpected(format!(
-                        "Failed to serialize RPCTracerEntryPoint: {e}"
-                    ))
-                })?
-            }
-        };
-
-        let id_ = super::schema::entry_point_tracing_params::table
-            .inner_join(super::schema::entry_point::table)
-            .filter(super::schema::entry_point::target.eq(entry_point.entry_point.target.clone()))
-            .filter(
-                super::schema::entry_point::signature.eq(entry_point
-                    .entry_point
-                    .signature
-                    .clone()),
-            )
-            .filter(super::schema::entry_point_tracing_params::tracing_type.eq(tracing_type))
-            .filter(super::schema::entry_point_tracing_params::data.eq(data))
-            .select(super::schema::entry_point_tracing_params::id)
-            .first::<i64>(conn)
-            .await
-            .map_err(PostgresError::from)?;
-
-        Ok(id_)
-    }
-
     // Retrieves the database ids of an entry point tracing params (linked to the entrypoint id)
     // from a list of entry points ids and tracing params.
     pub(crate) async fn ids_by_entry_point_with_tracing_params(
@@ -2091,13 +2072,10 @@ impl EntryPointTracingParams {
             .filter_map(|(ext_id, tracing_type, params, id)| {
                 let tracing_params = match tracing_type {
                     EntryPointTracingType::RpcTracer => {
-                        let params_value = match params {
-                            Some(params) => params,
-                            None => {
-                                return Some(Err(StorageError::Unexpected(
-                                    "Data should be Some for RpcTracer".to_string(),
-                                )));
-                            }
+                        let Some(params_value) = params else {
+                            return Some(Err(StorageError::Unexpected(
+                                "Data should be Some for RpcTracer".to_string(),
+                            )));
                         };
 
                         match serde_json::from_value(params_value) {

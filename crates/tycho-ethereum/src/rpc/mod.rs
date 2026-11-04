@@ -726,9 +726,7 @@ impl EthereumRpcClient {
                 }
             })
             .await
-            .map_err(|e| {
-                RPCError::from_alloy("eth_call with state overrides failed".to_string(), e)
-            })
+            .map_err(|e| RPCError::from_alloy("eth_call with state overrides failed", e))
     }
 
     #[instrument(level = "debug", skip(self, access_list_params, trace_call_params))]
@@ -1198,7 +1196,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
-    async fn test_ethereum_rpc_client_creation() -> Result<(), RPCError> {
+    async fn test_ethereum_rpc_client_creation() {
         let url = std::env::var("RPC_URL").expect("RPC_URL must be set for testing");
 
         // Test with valid URL
@@ -1208,8 +1206,6 @@ mod tests {
         // Test with invalid URL
         let result = EthereumRpcClient::new("invalid_url");
         assert!(result.is_err());
-
-        Ok(())
     }
 
     #[tokio::test]
@@ -1246,11 +1242,14 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
-    async fn test_get_block_number() -> Result<(), RPCError> {
+    async fn test_get_block_number() {
         let fixture = TestFixture::new();
         let client = fixture.create_rpc_client(false);
 
-        let block_number = client.get_block_number().await?;
+        let block_number = client
+            .get_block_number()
+            .await
+            .expect("Failed to get block number");
 
         // For Ethereum mainnet, we know block numbers are in the millions
         // This is a sanity check to ensure we're not getting garbage data
@@ -1259,8 +1258,6 @@ mod tests {
             "Block number seems too low for Ethereum mainnet: {}",
             block_number
         );
-
-        Ok(())
     }
 
     #[rstest]
@@ -1425,7 +1422,7 @@ mod tests {
     #[traced_test]
     #[tokio::test]
     #[ignore = "require RPC connection"]
-    async fn test_fetch_account_storage_without_specific_slots() -> Result<(), RPCError> {
+    async fn test_fetch_account_storage_without_specific_slots() {
         let fixture = TestFixture::new();
         let client = fixture.create_rpc_client(false);
 
@@ -1434,7 +1431,8 @@ mod tests {
                 parse_address(BALANCER_VAULT_STR),
                 B256::from_bytes(&fixture.block.hash),
             )
-            .await?;
+            .await
+            .expect("Failed to fetch account storage");
 
         // Verify that we got the storage for all requested slots
         assert_eq!(storage.len(), BALANCER_VAULT_EXPECTED_SLOTS);
@@ -1445,8 +1443,6 @@ mod tests {
             assert!(storage.contains_key(key));
             assert_eq!(storage.get(key), Some(value)); // Storage value exists and matches
         }
-
-        Ok(())
     }
 
     #[rstest]
@@ -1490,7 +1486,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
-    async fn test_trace_call_many() -> Result<(), RPCError> {
+    async fn test_trace_call_many() {
         let fixture = TestFixture::new();
         let client = fixture.create_rpc_client(false);
 
@@ -1506,7 +1502,8 @@ mod tests {
 
         let traces = client
             .trace_call_many(vec![request], BlockNumberOrTag::Number(TEST_BLOCK_NUMBER))
-            .await?;
+            .await
+            .expect("trace_call_many failed");
 
         // Verify we got a response
         assert_eq!(traces.len(), 1);
@@ -1534,13 +1531,11 @@ mod tests {
             "USDC balance from trace mismatch. Expected: {}, Got: {}",
             expected_balance, balance
         );
-
-        Ok(())
     }
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
-    async fn test_eth_call() -> Result<(), RPCError> {
+    async fn test_eth_call() {
         use alloy::{
             primitives::U256,
             rpc::types::{TransactionInput, TransactionRequest},
@@ -1564,7 +1559,8 @@ mod tests {
 
         let result = client
             .eth_call(request, BlockNumberOrTag::Number(TEST_BLOCK_NUMBER))
-            .await?;
+            .await
+            .expect("eth_call failed");
 
         // Verify we got a response
         assert!(!result.is_empty(), "eth_call should return non-empty data");
@@ -1580,8 +1576,6 @@ mod tests {
             "USDC balance mismatch. Expected: {}, Got: {}",
             expected_balance, balance
         );
-
-        Ok(())
     }
 
     /// Note: We support `"storage": null` as a temporary workaround for Unichain nodes that
@@ -1791,7 +1785,7 @@ mod tests {
     }
 
     async fn mock_batch_slot_detector_tests_call(
-        server: &mut ServerGuard,
+        server: &ServerGuard,
     ) -> Result<Vec<TransportResult<Value>>, RPCError> {
         let policy = retry::tests::mock_retry_policy();
 
@@ -1860,7 +1854,7 @@ mod tests {
         // At this point the id counter should be 2 as it increments per request starting from 0
         let m_success = mock_success_at(&mut server, MOCK_RETRY_POLICY_MAX_ATTEMPTS).await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         assert!(result.is_ok());
 
@@ -1885,7 +1879,7 @@ mod tests {
         }
         let m_failure = mock_retryable_failure(&mut server).await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         assert!(result.is_err());
         // The error can be either RequestError (if the request itself fails) or
@@ -1924,7 +1918,7 @@ mod tests {
         // Second attempt: success
         let m2 = mock_success_at(&mut server, 1).await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         assert!(result.is_ok());
         let responses = result.unwrap();
@@ -1962,7 +1956,7 @@ mod tests {
         // Second attempt: success (after retry for safety)
         let m2 = mock_success_at(&mut server, 1).await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         // Should succeed after retry (safety measure)
         assert!(result.is_ok());
@@ -1994,7 +1988,7 @@ mod tests {
             .create_async()
             .await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         // Should return mixed results without retrying (not all failed)
         assert!(result.is_ok());
@@ -2200,20 +2194,26 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
-    async fn test_get_gas_price() -> Result<(), RPCError> {
+    async fn test_get_gas_price() {
         use tycho_common::traits::FeePriceGetter;
 
         let fixture = TestFixture::new();
         let client = fixture.create_rpc_client(false);
 
-        let gas_price = client.get_gas_price().await?;
+        let gas_price = client
+            .get_gas_price()
+            .await
+            .expect("Failed to get gas price");
 
         assert!(
             gas_price.effective_gas_price() > num_bigint::BigUint::from(0u128),
             "Gas price should be positive"
         );
 
-        let gas_price_via_trait = client.get_latest_fee_price().await?;
+        let gas_price_via_trait = client
+            .get_latest_fee_price()
+            .await
+            .expect("Failed to get latest fee price");
         assert!(
             gas_price_via_trait.effective_gas_price() > num_bigint::BigUint::from(0u128),
             "Gas price from trait should be positive"
@@ -2229,8 +2229,6 @@ mod tests {
         } else if matches!(gas_price.pricing, crate::gas::GasPrice::Legacy { .. }) {
             println!("Detected legacy chain");
         }
-
-        Ok(())
     }
 
     #[test]
@@ -2285,7 +2283,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
-    async fn test_simulate_txs_with_trace_state_override() -> Result<(), RPCError> {
+    async fn test_simulate_txs_with_trace_state_override() {
         let fixture = TestFixture::new();
         let client = fixture.create_rpc_client(true);
 
@@ -2324,7 +2322,8 @@ mod tests {
 
         let results = client
             .simulate_txs_with_trace(BlockNumberOrTag::Number(TEST_BLOCK_NUMBER), tx_requests)
-            .await?;
+            .await
+            .expect("simulate_txs_with_trace failed");
 
         assert_eq!(results.len(), 2);
 
@@ -2343,7 +2342,5 @@ mod tests {
             override_balance,
             "With override should return overridden balance"
         );
-
-        Ok(())
     }
 }

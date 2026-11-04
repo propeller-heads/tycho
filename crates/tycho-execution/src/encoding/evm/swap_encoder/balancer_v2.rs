@@ -34,7 +34,7 @@ impl SwapEncoder for BalancerV2SwapEncoder {
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
         let component_id = AlloyBytes::from_str(&swap.component().id)
-            .map_err(|_| EncodingError::FatalError("Invalid component ID".to_string()))?;
+            .map_err(|e| EncodingError::FatalError(format!("Invalid component ID: {e}")))?;
 
         let args = (
             bytes_to_address(&swap.token_in().address)?,
@@ -80,8 +80,8 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             origin: None,
         };
         let encoder = BalancerV2SwapEncoder::new(

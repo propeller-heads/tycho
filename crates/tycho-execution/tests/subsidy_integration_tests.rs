@@ -17,7 +17,7 @@ use tycho_execution::encoding::{
         encoder_builders::TychoRouterEncoderBuilder,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry, utils::write_calldata_to_file,
     },
-    models::{default_token, Solution, SubsidyTerms, Swap, UserTransferType},
+    models::{default_token, EncodedSolution, Solution, SubsidyTerms, Swap, UserTransferType},
     tycho_encoder::TychoEncoder,
 };
 
@@ -89,27 +89,28 @@ fn subsidized_solution(
 /// Writes the unsigned calldata as `{test_identifier}_unsigned` and the signed calldata as
 /// `test_identifier`.
 fn write_signed_calldata(test_identifier: &str, solution: Solution, client_fee_bps: u32) {
+    let solutions = vec![solution];
     let mut encoded_solution = subsidy_encoder()
-        .encode_solutions(vec![solution.clone()])
+        .encode_solutions(solutions.clone())
         .unwrap()
         .remove(0);
     let client_fee_receiver =
         if client_fee_bps == 0 { Bytes::zero(20) } else { client_fee_receiver() };
-    let router_calldata = |encoded_solution| {
+    let router_calldata = |encoded_solution: &EncodedSolution| {
         encode_tycho_router_call(
             eth_chain().id(),
             encoded_solution,
-            &solution,
+            &solutions[0],
             &eth(),
             Some(get_signer()),
             client_fee_bps,
-            client_fee_receiver.clone(),
-            BigUint::ZERO,
+            &client_fee_receiver,
+            &BigUint::ZERO,
         )
         .unwrap()
         .data
     };
-    let unsigned_calldata = router_calldata(encoded_solution.clone());
+    let unsigned_calldata = router_calldata(&encoded_solution);
     write_calldata_to_file(&format!("{test_identifier}_unsigned"), &encode(&unsigned_calldata));
 
     let signing_hash = encoded_solution
@@ -123,7 +124,7 @@ fn write_signed_calldata(test_identifier: &str, solution: Solution, client_fee_b
     encoded_solution
         .write_subsidy_signature(&signature)
         .unwrap();
-    write_calldata_to_file(test_identifier, &encode(router_calldata(encoded_solution)));
+    write_calldata_to_file(test_identifier, &encode(router_calldata(&encoded_solution)));
 }
 
 fn swap(component: ProtocolComponent, token_in: &Bytes, token_out: &Bytes) -> Swap {

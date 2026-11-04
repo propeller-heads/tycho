@@ -298,6 +298,7 @@ impl ProtocolStatesParams {
 #[derive(Clone, PartialEq, Debug)]
 pub struct TokensParams {
     chain: Chain,
+    token_addresses: Option<Vec<Bytes>>,
     min_quality: Option<i32>,
     traded_n_days_ago: Option<u64>,
     page: i64,
@@ -308,11 +309,19 @@ impl TokensParams {
     pub fn new(chain: Chain) -> Self {
         Self {
             chain,
+            token_addresses: None,
             min_quality: None,
             traded_n_days_ago: None,
             page: 0,
             page_size: TokensRequestBody::MAX_PAGE_SIZE_COMPRESSED,
         }
+    }
+
+    /// Returns only the tokens at `addresses`. An address Tycho does not know is left out of the
+    /// response; an empty list returns no tokens.
+    pub fn with_token_addresses(mut self, addresses: Vec<Bytes>) -> Self {
+        self.token_addresses = Some(addresses);
+        self
     }
 
     pub fn with_min_quality(mut self, min_quality: i32) -> Self {
@@ -760,7 +769,7 @@ impl RPCError {
     /// NOTE: The string matching below is coupled to the server's error message text. If those
     /// messages change server-side this silently regresses to `ParseResponse`. Replace with a
     /// structured error code if the server ever returns typed error responses.
-    fn from_parse_error(err: serde_json::Error, body: &str) -> Self {
+    fn from_parse_error(err: &serde_json::Error, body: &str) -> Self {
         if body.contains("version is older than") || body.contains("Could not find Block") {
             RPCError::StaleBlock(body.to_string())
         } else if body.starts_with("Unknown extractor:") {
@@ -799,11 +808,14 @@ pub trait RPCClient: Send + Sync {
         let mut sorted_ids = params.contract_ids;
         sorted_ids.sort();
 
-        let max_page_size = StateRequestBody::effective_max_page_size(self.compression()) as usize;
-        let chunk_size = params
-            .chunk_size
-            .unwrap_or(CONTRACT_STATE_CHUNK_SIZE)
-            .min(max_page_size);
+        let (chunk_size, page_size) = resolve_chunk_size(
+            Some(
+                params
+                    .chunk_size
+                    .unwrap_or(CONTRACT_STATE_CHUNK_SIZE),
+            ),
+            StateRequestBody::effective_max_page_size(self.compression()),
+        );
 
         let mut tasks = Vec::new();
         for chunk in sorted_ids.chunks(chunk_size) {
@@ -812,12 +824,12 @@ pub trait RPCClient: Send + Sync {
                 ContractStateParams::new(params.chain, params.protocol_system.as_str())
                     .with_contract_ids(chunk.to_vec())
                     .with_version(params.version.clone())
-                    .with_pagination(0, chunk_size as i64);
+                    .with_pagination(0, page_size);
             tasks.push(async move {
                 let _permit = sem
                     .acquire()
                     .await
-                    .map_err(|_| RPCError::Fatal("Semaphore dropped".to_string()))?;
+                    .map_err(|_closed| RPCError::Fatal("Semaphore dropped".to_string()))?;
                 self.get_contract_state(base_params)
                     .await
             });
@@ -857,36 +869,35 @@ pub trait RPCClient: Send + Sync {
 
         let semaphore = Arc::new(Semaphore::new(concurrency));
 
-        let max_page_size =
-            ProtocolComponentsRequestBody::effective_max_page_size(self.compression()) as usize;
-        let chunk_size = chunk_size
-            .unwrap_or(max_page_size)
-            .min(max_page_size);
+        let (chunk_size, page_size) = resolve_chunk_size(
+            chunk_size,
+            ProtocolComponentsRequestBody::effective_max_page_size(self.compression()),
+        );
 
         // If a set of component IDs is specified, the maximum return size is already known,
         // allowing us to pre-compute the number of requests to be made.
         match component_ids {
             Some(ids) => {
                 // The server pages within the requested ids, so every chunk is page 0.
-                let tasks: Vec<_> =
-                    ids.chunks(chunk_size)
-                        .map(|chunk| {
-                            let sem = semaphore.clone();
-                            let mut base =
-                                ProtocolComponentsParams::new(chain, protocol_system.as_str())
-                                    .with_component_ids(chunk.to_vec())
-                                    .with_pagination(0, chunk_size as i64);
-                            if let Some(tvl) = tvl_gt {
-                                base = base.with_tvl_gt(tvl);
-                            }
-                            async move {
-                                let _permit = sem.acquire().await.map_err(|_| {
-                                    RPCError::Fatal("Semaphore dropped".to_string())
-                                })?;
-                                self.get_protocol_components(base).await
-                            }
-                        })
-                        .collect();
+                let tasks: Vec<_> = ids
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        let sem = semaphore.clone();
+                        let mut base =
+                            ProtocolComponentsParams::new(chain, protocol_system.as_str())
+                                .with_component_ids(chunk.to_vec())
+                                .with_pagination(0, page_size);
+                        if let Some(tvl) = tvl_gt {
+                            base = base.with_tvl_gt(tvl);
+                        }
+                        async move {
+                            let _permit = sem.acquire().await.map_err(|_closed| {
+                                RPCError::Fatal("Semaphore dropped".to_string())
+                            })?;
+                            self.get_protocol_components(base).await
+                        }
+                    })
+                    .collect();
 
                 try_join_all(tasks)
                     .await
@@ -897,7 +908,7 @@ pub trait RPCClient: Send + Sync {
                 // number of results from the first response.
                 let mut base_params =
                     ProtocolComponentsParams::new(chain, protocol_system.as_str())
-                        .with_pagination(0, chunk_size as i64);
+                        .with_pagination(0, page_size);
                 if let Some(tvl) = tvl_gt {
                     base_params = base_params.with_tvl_gt(tvl);
                 }
@@ -907,25 +918,26 @@ pub trait RPCClient: Send + Sync {
                     .await?;
 
                 let total_items = first_page.total();
-                let total_pages = (total_items as f64 / chunk_size as f64).ceil() as i64;
+                let total_pages = total_pages(total_items, page_size);
 
                 let mut all: Vec<ProtocolComponent> = first_page.into_data();
 
                 let mut page = 1;
                 while page < total_pages {
-                    let requests_in_this_iteration = (total_pages - page).min(concurrency as i64);
+                    let requests_in_this_iteration =
+                        (total_pages - page).min(saturating_i64(concurrency));
 
                     let tasks: Vec<_> = (0..requests_in_this_iteration)
                         .map(|iter| {
                             let sem = semaphore.clone();
                             let mut p =
                                 ProtocolComponentsParams::new(chain, protocol_system.as_str())
-                                    .with_pagination(page + iter, chunk_size as i64);
+                                    .with_pagination(page + iter, page_size);
                             if let Some(tvl) = tvl_gt {
                                 p = p.with_tvl_gt(tvl);
                             }
                             async move {
-                                let _permit = sem.acquire().await.map_err(|_| {
+                                let _permit = sem.acquire().await.map_err(|_closed| {
                                     RPCError::Fatal("Semaphore dropped".to_string())
                                 })?;
                                 self.get_protocol_components(p).await
@@ -963,12 +975,10 @@ pub trait RPCClient: Send + Sync {
     ) -> Result<Vec<ProtocolComponentState>, RPCError> {
         let semaphore = Arc::new(Semaphore::new(params.concurrency));
 
-        let max_page_size =
-            ProtocolStateRequestBody::effective_max_page_size(self.compression()) as usize;
-        let chunk_size = params
-            .chunk_size
-            .unwrap_or(max_page_size)
-            .min(max_page_size);
+        let (chunk_size, page_size) = resolve_chunk_size(
+            params.chunk_size,
+            ProtocolStateRequestBody::effective_max_page_size(self.compression()),
+        );
 
         let tasks: Vec<_> = params
             .protocol_ids
@@ -979,12 +989,12 @@ pub trait RPCClient: Send + Sync {
                     .with_protocol_ids(c.to_vec())
                     .with_include_balances(params.include_balances)
                     .with_version(params.version.clone())
-                    .with_pagination(0, chunk_size as i64);
+                    .with_pagination(0, page_size);
                 async move {
                     let _permit = sem
                         .acquire()
                         .await
-                        .map_err(|_| RPCError::Fatal("Semaphore dropped".to_string()))?;
+                        .map_err(|_closed| RPCError::Fatal("Semaphore dropped".to_string()))?;
                     self.get_protocol_states(p).await
                 }
             })
@@ -1004,17 +1014,12 @@ pub trait RPCClient: Send + Sync {
     ///
     /// If `chunk_size` is `None`, it defaults to the maximum page size.
     async fn get_all_tokens(&self, params: AllTokensParams) -> Result<Vec<Token>, RPCError> {
-        let max_page_size = TokensRequestBody::effective_max_page_size(self.compression()) as usize;
-        let chunk_size = params
-            .chunk_size
-            .unwrap_or(max_page_size)
-            .min(max_page_size);
+        let (_, page_size) = resolve_chunk_size(
+            params.chunk_size,
+            TokensRequestBody::effective_max_page_size(self.compression()),
+        );
 
         let semaphore = Arc::new(Semaphore::new(params.concurrency));
-
-        let page_size: i64 = chunk_size.try_into().map_err(|_| {
-            RPCError::FormatRequest("Failed to convert chunk_size into i64".to_string())
-        })?;
 
         let mut base_params = TokensParams::new(params.chain).with_pagination(0, page_size);
         if let Some(q) = params.min_quality {
@@ -1025,7 +1030,7 @@ pub trait RPCClient: Send + Sync {
         }
 
         let first_page = self.get_tokens(base_params).await?;
-        let total_pages = (first_page.total() as f64 / chunk_size as f64).ceil() as i64;
+        let total_pages = total_pages(first_page.total(), page_size);
 
         let mut all_tokens: Vec<Token> = first_page.into_data();
 
@@ -1047,7 +1052,7 @@ pub trait RPCClient: Send + Sync {
                     let _permit = sem
                         .acquire()
                         .await
-                        .map_err(|_| RPCError::Fatal("Semaphore dropped".to_string()))?;
+                        .map_err(|_closed| RPCError::Fatal("Semaphore dropped".to_string()))?;
                     self.get_tokens(p).await
                 }
             })
@@ -1084,34 +1089,32 @@ pub trait RPCClient: Send + Sync {
     ) -> Result<HashMap<String, f64>, RPCError> {
         let semaphore = Arc::new(Semaphore::new(params.concurrency));
 
-        let max_page_size =
-            ComponentTvlRequestBody::effective_max_page_size(self.compression()) as usize;
-        let chunk_size = params
-            .chunk_size
-            .unwrap_or(max_page_size)
-            .min(max_page_size);
+        let (chunk_size, page_size) = resolve_chunk_size(
+            params.chunk_size,
+            ComponentTvlRequestBody::effective_max_page_size(self.compression()),
+        );
 
         match params.component_ids {
             Some(ids) => {
                 // The server pages within the requested ids, so every chunk is page 0.
-                let tasks: Vec<_> =
-                    ids.chunks(chunk_size)
-                        .map(|chunk| {
-                            let sem = semaphore.clone();
-                            let mut p = ComponentTvlParams::new(params.chain)
-                                .with_component_ids(chunk.to_vec())
-                                .with_pagination(0, chunk_size as i64);
-                            if let Some(ref ps) = params.protocol_system {
-                                p = p.with_protocol_system(ps.as_str());
-                            }
-                            async move {
-                                let _permit = sem.acquire().await.map_err(|_| {
-                                    RPCError::Fatal("Semaphore dropped".to_string())
-                                })?;
-                                self.get_component_tvl(p).await
-                            }
-                        })
-                        .collect();
+                let tasks: Vec<_> = ids
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        let sem = semaphore.clone();
+                        let mut p = ComponentTvlParams::new(params.chain)
+                            .with_component_ids(chunk.to_vec())
+                            .with_pagination(0, page_size);
+                        if let Some(ref ps) = params.protocol_system {
+                            p = p.with_protocol_system(ps.as_str());
+                        }
+                        async move {
+                            let _permit = sem.acquire().await.map_err(|_closed| {
+                                RPCError::Fatal("Semaphore dropped".to_string())
+                            })?;
+                            self.get_component_tvl(p).await
+                        }
+                    })
+                    .collect();
 
                 let pages = try_join_all(tasks).await?;
 
@@ -1125,33 +1128,32 @@ pub trait RPCClient: Send + Sync {
                 Ok(merged_tvl)
             }
             None => {
-                let mut base =
-                    ComponentTvlParams::new(params.chain).with_pagination(0, chunk_size as i64);
+                let mut base = ComponentTvlParams::new(params.chain).with_pagination(0, page_size);
                 if let Some(ref ps) = params.protocol_system {
                     base = base.with_protocol_system(ps.as_str());
                 }
 
                 let first_page = self.get_component_tvl(base).await?;
                 let total_items = first_page.total();
-                let total_pages = (total_items as f64 / chunk_size as f64).ceil() as i64;
+                let total_pages = total_pages(total_items, page_size);
 
                 let mut merged_tvl: HashMap<String, f64> = first_page.into_data();
 
                 let mut page = 1;
                 while page < total_pages {
                     let requests_in_this_iteration =
-                        (total_pages - page).min(params.concurrency as i64);
+                        (total_pages - page).min(saturating_i64(params.concurrency));
 
                     let tasks: Vec<_> = (0..requests_in_this_iteration)
                         .map(|i| {
                             let sem = semaphore.clone();
                             let mut p = ComponentTvlParams::new(params.chain)
-                                .with_pagination(page + i, chunk_size as i64);
+                                .with_pagination(page + i, page_size);
                             if let Some(ref ps) = params.protocol_system {
                                 p = p.with_protocol_system(ps.as_str());
                             }
                             async move {
-                                let _permit = sem.acquire().await.map_err(|_| {
+                                let _permit = sem.acquire().await.map_err(|_closed| {
                                     RPCError::Fatal("Semaphore dropped".to_string())
                                 })?;
                                 self.get_component_tvl(p).await
@@ -1198,11 +1200,10 @@ pub trait RPCClient: Send + Sync {
 
         let semaphore = Arc::new(Semaphore::new(concurrency));
 
-        let max_page_size =
-            TracedEntryPointRequestBody::effective_max_page_size(self.compression()) as usize;
-        let chunk_size = chunk_size
-            .unwrap_or(max_page_size)
-            .min(max_page_size);
+        let (chunk_size, page_size) = resolve_chunk_size(
+            chunk_size,
+            TracedEntryPointRequestBody::effective_max_page_size(self.compression()),
+        );
 
         let tasks: Vec<_> = component_ids
             .chunks(chunk_size)
@@ -1210,12 +1211,12 @@ pub trait RPCClient: Send + Sync {
                 let sem = semaphore.clone();
                 let params = TracedEntryPointsParams::new(chain, protocol_system.as_str())
                     .with_component_ids(c.to_vec())
-                    .with_pagination(0, chunk_size as i64);
+                    .with_pagination(0, page_size);
                 async move {
                     let _permit = sem
                         .acquire()
                         .await
-                        .map_err(|_| RPCError::Fatal("Semaphore dropped".to_string()))?;
+                        .map_err(|_closed| RPCError::Fatal("Semaphore dropped".to_string()))?;
                     self.get_traced_entry_points(params)
                         .await
                 }
@@ -1229,7 +1230,6 @@ pub trait RPCClient: Send + Sync {
 
     // clippy false positive: `'a` is required by the trait method signature and is
     // used in `SnapshotParameters<'a>`, but `async_trait` makes Clippy miss it.
-    #[allow(clippy::extra_unused_lifetimes)]
     async fn get_snapshots<'a>(
         &self,
         request: &SnapshotParameters<'a>,
@@ -1292,6 +1292,10 @@ pub struct HttpRPCClient {
 }
 
 impl HttpRPCClient {
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "public API; taking `&HttpRPCClientOptions` is a breaking change"
+    )]
     pub fn new(base_uri: &str, options: HttpRPCClientOptions) -> Result<Self, RPCError> {
         let uri = base_uri
             .parse::<Url>()
@@ -1434,7 +1438,13 @@ impl HttpRPCClient {
                 }
             }
             RPCError::RateLimited(None) => e.into(),
-            _ => backoff::Error::permanent(e),
+            RPCError::UrlParsing(..) |
+            RPCError::FormatRequest(_) |
+            RPCError::HttpClient(..) |
+            RPCError::ParseResponse(_) |
+            RPCError::StaleBlock(_) |
+            RPCError::UnknownExtractor(_) |
+            RPCError::Fatal(_) => backoff::Error::permanent(e),
         }
     }
 
@@ -1483,6 +1493,29 @@ impl HttpRPCClient {
         .await?;
         Ok(response)
     }
+}
+
+/// Resolves a requested chunk size against the server's maximum page size. Returns the chunk size
+/// as an item count and as the page size to put in a request; `None` selects the maximum.
+fn resolve_chunk_size(requested: Option<usize>, max_page_size: i64) -> (usize, i64) {
+    let max_chunk_size =
+        usize::try_from(max_page_size).expect("maximum page sizes are positive constants");
+    let chunk_size = requested
+        .unwrap_or(max_chunk_size)
+        .min(max_chunk_size);
+    let page_size =
+        i64::try_from(chunk_size).expect("the chunk size is clamped to the maximum page size");
+    (chunk_size, page_size)
+}
+
+/// Number of pages of `page_size` items needed to hold `total_items`.
+fn total_pages(total_items: i64, page_size: i64) -> i64 {
+    total_items / page_size + i64::from(total_items % page_size > 0)
+}
+
+/// Converts a count to `i64`, clamping to `i64::MAX`.
+fn saturating_i64(count: usize) -> i64 {
+    i64::try_from(count).unwrap_or(i64::MAX)
 }
 
 fn parse_retry_value(val: &str) -> Option<SystemTime> {
@@ -1549,7 +1582,7 @@ impl RPCClient for HttpRPCClient {
         // runtime stays responsive and concurrent requests decode in parallel.
         let (data, pagination) = tokio::task::spawn_blocking(move || {
             let dto_response = serde_json::from_str::<StateRequestResponse>(&body)
-                .map_err(|err| RPCError::from_parse_error(err, &body))?;
+                .map_err(|err| RPCError::from_parse_error(&err, &body))?;
             trace!(?dto_response, "Received contract_state response from Tycho server");
 
             let data: Vec<Account> = dto_response
@@ -1597,7 +1630,7 @@ impl RPCClient for HttpRPCClient {
             .await
             .map_err(|e| RPCError::ParseResponse(e.to_string()))?;
         let dto_response = serde_json::from_str::<ProtocolComponentRequestResponse>(&body)
-            .map_err(|err| RPCError::from_parse_error(err, &body))?;
+            .map_err(|err| RPCError::from_parse_error(&err, &body))?;
         trace!(?dto_response, "Received protocol_components response from Tycho server");
 
         let data: Vec<ProtocolComponent> = dto_response
@@ -1660,7 +1693,7 @@ impl RPCClient for HttpRPCClient {
         }
 
         let dto_response = serde_json::from_str::<ProtocolStateRequestResponse>(&body)
-            .map_err(|err| RPCError::from_parse_error(err, &body))?;
+            .map_err(|err| RPCError::from_parse_error(&err, &body))?;
         trace!(?dto_response, "Received protocol_states response from Tycho server");
 
         let data: Vec<ProtocolComponentState> = dto_response
@@ -1678,7 +1711,7 @@ impl RPCClient for HttpRPCClient {
 
     async fn get_tokens(&self, params: TokensParams) -> Result<Page<Vec<Token>>, RPCError> {
         let request = TokensRequestBody {
-            token_addresses: None,
+            token_addresses: params.token_addresses,
             min_quality: params.min_quality,
             traded_n_days_ago: params.traded_n_days_ago,
             pagination: PaginationParams { page: params.page, page_size: params.page_size },
@@ -2014,7 +2047,10 @@ mod tests {
     // Dummy implementation of `get_protocol_states_paginated` for backwards compatibility testing
     // purposes
     impl MockRPCClient {
-        #[allow(clippy::too_many_arguments)]
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "mirrors the parameters of the paginated RPC method it records calls for"
+        )]
         async fn test_get_protocol_states_paginated<T>(
             &self,
             chain: Chain,
@@ -2039,7 +2075,7 @@ mod tests {
                         protocol_system.to_string(),
                         include_balances,
                         block_number,
-                        PaginationParams { page: 0, page_size: chunk_size as i64 },
+                        PaginationParams { page: 0, page_size: i64::try_from(chunk_size).unwrap() },
                     )
                 })
                 .collect()
@@ -2257,7 +2293,7 @@ mod tests {
                     RPC_CLIENT_CONCURRENCY,
                 )
                 .with_component_ids(ids)
-                .with_chunk_size(max as usize * 2),
+                .with_chunk_size(usize::try_from(max).unwrap() * 2),
             )
             .await
             .expect("get components");
@@ -2290,7 +2326,7 @@ mod tests {
             .get_component_tvl_paginated(
                 ComponentTvlPaginatedParams::new(Chain::Ethereum, RPC_CLIENT_CONCURRENCY)
                     .with_component_ids(ids)
-                    .with_chunk_size(max as usize * 2),
+                    .with_chunk_size(usize::try_from(max).unwrap() * 2),
             )
             .await
             .expect("get component tvl");
@@ -2516,8 +2552,13 @@ mod tests {
         // test that the response is deserialized correctly
         serde_json::from_str::<TokensRequestResponse>(server_resp).expect("deserialize");
 
+        let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let usdc = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
         let mocked_server = server
             .mock("POST", "/v1/tokens")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "token_addresses": [weth.to_string(), usdc.to_string()],
+            })))
             .expect(1)
             .with_body(server_resp)
             .create_async()
@@ -2526,7 +2567,7 @@ mod tests {
             .expect("create client");
 
         let tokens = client
-            .get_tokens(TokensParams::new(Chain::Ethereum))
+            .get_tokens(TokensParams::new(Chain::Ethereum).with_token_addresses(vec![weth, usdc]))
             .await
             .expect("get tokens");
 
@@ -2942,7 +2983,9 @@ mod tests {
                 assert_eq!(msg, "Service down");
                 assert_eq!(retry_after, Some(Duration::from_millis(50))); // Fast test duration
             }
-            _ => panic!("Expected transient error for ServerUnreachable"),
+            backoff::Error::Permanent(_) | backoff::Error::Transient { .. } => {
+                panic!("Expected transient error for ServerUnreachable")
+            }
         }
     }
 
@@ -2963,7 +3006,9 @@ mod tests {
             backoff::Error::Transient { err: RPCError::RateLimited(retry_after), .. } => {
                 assert_eq!(retry_after, Some(future_time));
             }
-            _ => panic!("Expected transient error for RateLimited"),
+            backoff::Error::Permanent(_) | backoff::Error::Transient { .. } => {
+                panic!("Expected transient error for RateLimited")
+            }
         }
 
         // Verify that retry_after was stored in the client state
@@ -2987,7 +3032,9 @@ mod tests {
             backoff::Error::Transient { err: RPCError::RateLimited(None), .. } => {
                 // This is expected - no retry-after still allows retries with default policy
             }
-            _ => panic!("Expected transient error for RateLimited without retry-after"),
+            backoff::Error::Permanent(_) | backoff::Error::Transient { .. } => {
+                panic!("Expected transient error for RateLimited without retry-after")
+            }
         }
     }
 
@@ -3007,7 +3054,9 @@ mod tests {
             backoff::Error::Permanent(RPCError::ParseResponse(msg)) => {
                 assert_eq!(msg, "Invalid JSON");
             }
-            _ => panic!("Expected permanent error for ParseResponse"),
+            backoff::Error::Permanent(_) | backoff::Error::Transient { .. } => {
+                panic!("Expected permanent error for ParseResponse")
+            }
         }
     }
 
@@ -3650,7 +3699,7 @@ mod tests {
 
         let mut server = Server::new_async().await;
 
-        let total_pages = (total_tokens as f64 / page_size as f64).ceil() as i64;
+        let total_pages = total_tokens.div_ceil(page_size);
 
         // Mock all required pages
         for page in 0..total_pages {
@@ -3658,8 +3707,8 @@ mod tests {
             let max_conc = max_concurrent.clone();
 
             let tokens_in_page = {
-                let start_idx = (page as usize) * page_size;
-                let end_idx = ((page as usize + 1) * page_size).min(total_tokens);
+                let start_idx = page * page_size;
+                let end_idx = ((page + 1) * page_size).min(total_tokens);
                 (start_idx..end_idx)
                     .map(|i| {
                         format!(
@@ -3721,7 +3770,7 @@ mod tests {
 
         // Verify concurrency was respected
         let max = max_concurrent.load(Ordering::SeqCst);
-        let expected_max_concurrency = (total_pages as usize)
+        let expected_max_concurrency = total_pages
             .saturating_sub(1)
             .min(allowed_concurrency);
         assert!(

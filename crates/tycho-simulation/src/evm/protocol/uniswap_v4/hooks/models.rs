@@ -104,10 +104,10 @@ impl BalanceDelta {
 impl Sub for BalanceDelta {
     type Output = BalanceDelta;
 
-    fn sub(self, other: BalanceDelta) -> BalanceDelta {
+    fn sub(self, rhs: BalanceDelta) -> BalanceDelta {
         // Extract the high and low 128-bit parts and perform subtraction
         let a = self.as_i256();
-        let b = other.as_i256();
+        let b = rhs.as_i256();
         // High 128 bits (arithmetic right shift)
         let a0 = a >> 128;
         let b0 = b >> 128;
@@ -137,6 +137,10 @@ pub struct BeforeSwapOutput {
 }
 
 impl BeforeSwapOutput {
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "public API; taking the sol output by reference is a breaking change"
+    )]
     pub fn new(
         before_swap_output: BeforeSwapSolOutput,
         overwrites: HashMap<Address, HashMap<U256, U256>>,

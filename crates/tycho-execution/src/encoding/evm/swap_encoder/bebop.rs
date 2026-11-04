@@ -22,12 +22,13 @@ fn parse_partial_fill_offset(partial_fill_offset: &Bytes) -> Result<u8, Encoding
     let offset_bytes: [u8; 8] = partial_fill_offset
         .as_ref()
         .try_into()
-        .map_err(|_| {
+        .map_err(|_wrong_length| {
             EncodingError::FatalError("Bebop partial_fill_offset must be a u64".to_string())
         })?;
     let offset = u64::from_be_bytes(offset_bytes);
-    u8::try_from(offset)
-        .map_err(|_| EncodingError::FatalError("Bebop partial_fill_offset exceeds u8".to_string()))
+    u8::try_from(offset).map_err(|_out_of_range| {
+        EncodingError::FatalError("Bebop partial_fill_offset exceeds u8".to_string())
+    })
 }
 
 /// Encodes a swap on Bebop (PMM RFQ) through the given executor address.
@@ -41,7 +42,10 @@ fn parse_partial_fill_offset(partial_fill_offset: &Bytes) -> Result<u8, Encoding
 pub struct BebopSwapEncoder {
     executor_address: Bytes,
     runtime_handle: Handle,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "owns the runtime behind `runtime_handle`; dropping it would shut the runtime down"
+    )]
     runtime: SafeRuntime,
 }
 
@@ -78,17 +82,21 @@ impl SwapEncoder for BebopSwapEncoder {
             let estimated_amount_in = swap
                 .estimated_amount_in()
                 .clone()
-                .ok_or(EncodingError::FatalError(
-                    "Estimated amount in is mandatory for a Bebop swap".to_string(),
-                ))?;
+                .ok_or_else(|| {
+                    EncodingError::FatalError(
+                        "Estimated amount in is mandatory for a Bebop swap".to_string(),
+                    )
+                })?;
             let token_in = swap.token_in().address.clone();
             let token_out = swap.token_out().address.clone();
             let router_address = encoding_context
                 .router_address
                 .clone()
-                .ok_or(EncodingError::FatalError(
-                    "The router address is needed to perform a Bebop swap".to_string(),
-                ))?;
+                .ok_or_else(|| {
+                    EncodingError::FatalError(
+                        "The router address is needed to perform a Bebop swap".to_string(),
+                    )
+                })?;
 
             let params = GetAmountOutParams {
                 amount_in: estimated_amount_in,
@@ -109,21 +117,25 @@ impl SwapEncoder for BebopSwapEncoder {
             let bebop_calldata = signed_quote
                 .quote_attributes
                 .get("calldata")
-                .ok_or(EncodingError::FatalError(
-                    "Bebop quote must have a calldata attribute".to_string(),
-                ))?;
+                .ok_or_else(|| {
+                    EncodingError::FatalError(
+                        "Bebop quote must have a calldata attribute".to_string(),
+                    )
+                })?;
             let partial_fill_offset = signed_quote
                 .quote_attributes
                 .get("partial_fill_offset")
-                .ok_or(EncodingError::FatalError(
-                    "Bebop quote must have a partial_fill_offset attribute".to_string(),
-                ))?;
+                .ok_or_else(|| {
+                    EncodingError::FatalError(
+                        "Bebop quote must have a partial_fill_offset attribute".to_string(),
+                    )
+                })?;
             let target = signed_quote
                 .quote_attributes
                 .get("tx_to")
-                .ok_or(EncodingError::FatalError(
-                    "Bebop quote must have a tx_to attribute".to_string(),
-                ))?;
+                .ok_or_else(|| {
+                    EncodingError::FatalError("Bebop quote must have a tx_to attribute".to_string())
+                })?;
             let partial_fill_offset = parse_partial_fill_offset(partial_fill_offset)?;
             // The executor compares this with runtime amountIn, so both values must use taker/input
             // units.
@@ -270,7 +282,7 @@ mod tests {
         assert_eq!(&encoded_swap[0..20], token_in.as_ref());
         assert_eq!(&encoded_swap[20..40], token_out.as_ref());
         assert_eq!(&encoded_swap[40..60], target.as_ref());
-        assert_eq!(encoded_swap[60], partial_fill_offset as u8);
+        assert_eq!(encoded_swap[60], u8::try_from(partial_fill_offset).unwrap());
         assert_eq!(&encoded_swap[61..93], &biguint_to_u256(&quote_amount_in).to_be_bytes::<32>());
         assert_eq!(&encoded_swap[93..], bebop_calldata.as_ref());
     }

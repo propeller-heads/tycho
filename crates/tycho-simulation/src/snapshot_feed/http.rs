@@ -388,6 +388,10 @@ pub(crate) mod test_support {
         }
         let mut body = vec![0; length];
         if length > 0 {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = reader.read_exact(&mut body).await;
         }
         String::from_utf8_lossy(&body).into_owned()
@@ -449,9 +453,17 @@ pub(crate) mod test_support {
                     body.len()
                 );
                     let mut stream = reader.into_inner();
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = stream
                         .write_all(payload.as_bytes())
                         .await;
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = stream.shutdown().await;
                 });
             }

@@ -29,6 +29,13 @@ pub fn usd_stablecoins_for_chain(chain: Chain) -> Option<HashSet<Bytes>> {
         Chain::Robinhood => HashSet::from([
             Bytes::from(hex!("5fc5360D0400a0Fd4f2af552ADD042D716F1d168")), // USDG
         ]),
+        Chain::Starknet |
+        Chain::ZkSync |
+        Chain::Unichain |
+        Chain::Polygon |
+        Chain::Plasma |
+        Chain::Arc |
+        Chain::Custom(_) |
         _ => return None,
     };
     Some(tokens)

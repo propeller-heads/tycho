@@ -310,7 +310,7 @@ impl<P: PairState, S> From<Vec<VenueBook<P, S>>> for VenueBooks<P, S> {
 type Answered<'a, P, S> = (&'a VenueBook<P, S>, Result<GetAmountOutResult, SimulationError>);
 
 /// `amount` less `taken`, or nothing where `taken` is more.
-fn saturating_sub(amount: BigUint, taken: &BigUint) -> BigUint {
+fn saturating_sub(amount: &BigUint, taken: &BigUint) -> BigUint {
     amount
         .checked_sub(taken)
         .unwrap_or_default()
@@ -503,6 +503,10 @@ impl<P: PairState + PricesAfterFill, T: Turns> AllPairs<P, T> {
     /// direction. A swap fills against one book, so the venue's limit is that book's, not the
     /// sum of every book's. On a pair the route has filled, each book's limits are what is left
     /// after the merged swap so far.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "public API; taking &Bytes is a breaking change"
+    )]
     pub fn get_limits(
         &self,
         sell_token: Bytes,
@@ -517,8 +521,8 @@ impl<P: PairState + PricesAfterFill, T: Turns> AllPairs<P, T> {
                 .get_limits(sell_token.clone(), buy_token.clone())
                 .map(|(sell, buy)| match filled {
                     Some(fill) => (
-                        saturating_sub(sell, &fill.amount_in),
-                        saturating_sub(buy, &fill.amount_out),
+                        saturating_sub(&sell, &fill.amount_in),
+                        saturating_sub(&buy, &fill.amount_out),
                     ),
                     None => (sell, buy),
                 });
@@ -574,7 +578,7 @@ impl<P: PairState + PricesAfterFill, T: Turns> AllPairs<P, T> {
         let continued = |mut result: GetAmountOutResult| {
             let merged_out = result.amount.clone();
             if let Some(previous) = previous {
-                result.amount = saturating_sub(merged_out.clone(), &previous.amount_out);
+                result.amount = saturating_sub(&merged_out, &previous.amount_out);
                 result.gas = BigUint::zero();
             }
             let fill = PairFill {
@@ -1015,7 +1019,12 @@ mod tests {
             token_in: &Token,
             _token_out: &Token,
         ) -> Result<GetAmountOutResult, SimulationError> {
-            assert_eq!(token_in.address, self.base.address, "a book is given its own tokens");
+            if token_in.address != self.base.address {
+                return Err(SimulationError::InvalidInput(
+                    format!("token {} is not the book's base token", token_in.address),
+                    None,
+                ));
+            }
             let filled = amount_in.clone().min(whole(self.depth));
             let result = GetAmountOutResult {
                 amount: &filled * BigUint::from(self.out_per_in),
@@ -1037,6 +1046,7 @@ mod tests {
             Ok((whole(self.depth), whole(self.depth * self.out_per_in)))
         }
 
+        #[expect(clippy::unimplemented, reason = "test doubles never transition")]
         fn delta_transition(
             &mut self,
             _delta: ProtocolStateDelta,
@@ -1117,6 +1127,7 @@ mod tests {
             self.0.get_limits(sell_token, buy_token)
         }
 
+        #[expect(clippy::unimplemented, reason = "test doubles never transition")]
         fn delta_transition(
             &mut self,
             _delta: ProtocolStateDelta,

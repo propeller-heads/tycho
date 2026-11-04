@@ -236,9 +236,9 @@ impl ProtocolSim for AeroBasicState {
         let fee_bps = self.fee_bps()?;
         if self.stable {
             self.stable_pool()
-                .get_limits(sell_token, buy_token)
+                .get_limits(&sell_token, &buy_token)
         } else {
-            cpmm_get_limits(sell_token, buy_token, self.reserve0, self.reserve1, fee_bps)
+            cpmm_get_limits(&sell_token, &buy_token, self.reserve0, self.reserve1, fee_bps)
         }
     }
 
@@ -256,10 +256,10 @@ impl ProtocolSim for AeroBasicState {
             self.reserve1 = U256::from_be_slice(value);
         }
         if let Some(value) = attributes.get("custom_fee") {
-            self.custom_fee = u32::from(value.clone());
+            self.custom_fee = u32::try_from(value.clone())?;
         }
         if let Some(value) = attributes.get("default_fee") {
-            self.default_fee = u32::from(value.clone());
+            self.default_fee = u32::try_from(value.clone())?;
         }
         if let Some(value) = attributes.get("fee_module") {
             self.fee_module = value.clone();

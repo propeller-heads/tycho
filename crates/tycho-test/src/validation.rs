@@ -351,7 +351,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore] // This test requires an RPC connection
+    #[ignore = "requires an RPC connection (RPC_URL)"]
     async fn test_batch_validate_multiple_components() {
         let block_id = BlockId::from(23775987);
 

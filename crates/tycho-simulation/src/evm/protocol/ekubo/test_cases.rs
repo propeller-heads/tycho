@@ -372,13 +372,13 @@ pub fn twamm() -> TestCase {
                 vec![
                     TwammSaleRateDelta {
                         time: FIRST_ORDER_START_TIME,
-                        sale_rate_delta0: TOKEN0_SALE_RATE as i128,
-                        sale_rate_delta1: TOKEN1_SALE_RATE as i128,
+                        sale_rate_delta0: i128::try_from(TOKEN0_SALE_RATE).unwrap(),
+                        sale_rate_delta1: i128::try_from(TOKEN1_SALE_RATE).unwrap(),
                     },
                     TwammSaleRateDelta {
                         time: FIRST_ORDER_END_TIME,
-                        sale_rate_delta0: (TOKEN0_SALE_RATE as i128).neg(),
-                        sale_rate_delta1: (TOKEN1_SALE_RATE as i128).neg(),
+                        sale_rate_delta0: (i128::try_from(TOKEN0_SALE_RATE).unwrap()).neg(),
+                        sale_rate_delta1: (i128::try_from(TOKEN1_SALE_RATE).unwrap()).neg(),
                     },
                 ],
             )
@@ -399,18 +399,18 @@ pub fn twamm() -> TestCase {
                 vec![
                     TwammSaleRateDelta {
                         time: FIRST_ORDER_END_TIME,
-                        sale_rate_delta0: (TOKEN0_SALE_RATE as i128).neg(),
-                        sale_rate_delta1: (TOKEN1_SALE_RATE as i128).neg(),
+                        sale_rate_delta0: (i128::try_from(TOKEN0_SALE_RATE).unwrap()).neg(),
+                        sale_rate_delta1: (i128::try_from(TOKEN1_SALE_RATE).unwrap()).neg(),
                     },
                     TwammSaleRateDelta {
                         time: SECOND_ORDER_START_TIME,
-                        sale_rate_delta0: TOKEN0_SALE_RATE as i128,
-                        sale_rate_delta1: TOKEN1_SALE_RATE as i128,
+                        sale_rate_delta0: i128::try_from(TOKEN0_SALE_RATE).unwrap(),
+                        sale_rate_delta1: i128::try_from(TOKEN1_SALE_RATE).unwrap(),
                     },
                     TwammSaleRateDelta {
                         time: SECOND_ORDER_END_TIME,
-                        sale_rate_delta0: (TOKEN0_SALE_RATE as i128).neg(),
-                        sale_rate_delta1: (TOKEN1_SALE_RATE as i128).neg(),
+                        sale_rate_delta0: (i128::try_from(TOKEN0_SALE_RATE).unwrap()).neg(),
+                        sale_rate_delta1: (i128::try_from(TOKEN1_SALE_RATE).unwrap()).neg(),
                     },
                 ],
             )
@@ -442,26 +442,26 @@ pub fn twamm() -> TestCase {
             ("last_execution_time".to_string(), LAST_EXECUTION_TIME.to_be_bytes().into()),
             (
                 format!("orders/token0/{SECOND_ORDER_START_TIME}"),
-                (TOKEN0_SALE_RATE as i128)
+                (i128::try_from(TOKEN0_SALE_RATE).unwrap())
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("orders/token1/{SECOND_ORDER_START_TIME}"),
-                (TOKEN1_SALE_RATE as i128)
+                (i128::try_from(TOKEN1_SALE_RATE).unwrap())
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("orders/token0/{SECOND_ORDER_END_TIME}"),
-                (TOKEN0_SALE_RATE as i128)
+                (i128::try_from(TOKEN0_SALE_RATE).unwrap())
                     .neg()
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("orders/token1/{SECOND_ORDER_END_TIME}"),
-                (TOKEN1_SALE_RATE as i128)
+                (i128::try_from(TOKEN1_SALE_RATE).unwrap())
                     .neg()
                     .to_be_bytes()
                     .into(),
@@ -476,26 +476,26 @@ pub fn twamm() -> TestCase {
             ("last_execution_time".to_string(), 0_u64.to_be_bytes().into()),
             (
                 format!("orders/token0/{FIRST_ORDER_START_TIME}"),
-                (TOKEN0_SALE_RATE as i128)
+                (i128::try_from(TOKEN0_SALE_RATE).unwrap())
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("orders/token1/{FIRST_ORDER_START_TIME}"),
-                (TOKEN1_SALE_RATE as i128)
+                (i128::try_from(TOKEN1_SALE_RATE).unwrap())
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("orders/token0/{FIRST_ORDER_END_TIME}"),
-                (TOKEN0_SALE_RATE as i128)
+                (i128::try_from(TOKEN0_SALE_RATE).unwrap())
                     .neg()
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("orders/token1/{FIRST_ORDER_END_TIME}"),
-                (TOKEN1_SALE_RATE as i128)
+                (i128::try_from(TOKEN1_SALE_RATE).unwrap())
                     .neg()
                     .to_be_bytes()
                     .into(),
