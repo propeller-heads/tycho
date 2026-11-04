@@ -27,7 +27,7 @@ cargo run -p tycho-integration-test -- \
 ```
 
 Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`, `--disable-pamm`,
-`--pamm metric`, `--rfq-all-pairs`, `--disable-price-level-stream`, `--disable-execution`,
+`--pamm metric,baibai`, `--rfq-all-pairs`, `--disable-price-level-stream`, `--disable-execution`,
 `--protocols uniswap_v2,curve`,
 `--protocol-tvl-thresholds lunarbase=10` (replaces `--tvl-threshold` for the named protocols;
 each one must be enabled),

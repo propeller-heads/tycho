@@ -110,10 +110,11 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_pamm: bool,
 
-    /// pAMM book feeds to run, comma-separated (e.g. metric). Replaces the default list
-    /// (metric). A listed venue missing its credentials, or whose feed fails to build, fails the
-    /// run; a default venue is skipped instead. A feed that builds but fails once it runs, for
-    /// example on a chain its venue does not serve, ends with a warning like any other feed.
+    /// pAMM book feeds to run, comma-separated (e.g. metric,baibai). Replaces the default list
+    /// (metric). BaiBai runs on Base only and reads its books over --rpc-url. A listed venue
+    /// missing its credentials, or whose feed fails to build, fails the run; a default venue
+    /// is skipped instead. A feed that builds but fails once it runs, for example on a chain
+    /// its venue does not serve, ends with a warning like any other feed.
     #[arg(long, value_delimiter = ',', conflicts_with = "disable_pamm")]
     pamm: Option<Vec<PammVenue>>,
 
@@ -513,6 +514,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
         Duration::from_secs(cli.skip_messages_duration),
         RfqSelection::from_cli(cli.disable_rfq, |name| std::env::var(name).ok()),
         PammSelection::from_cli(cli.disable_pamm, cli.pamm.clone()),
+        cli.rpc_url.clone(),
         cli.rfq_all_pairs,
     );
     let mut book_handle = book_stream_processor

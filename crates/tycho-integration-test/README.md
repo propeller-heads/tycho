@@ -15,7 +15,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 
 - **On-chain Protocols**: All DEX protocols supported by Tycho (Uniswap V2/V3, Curve, Balancer, etc.)
 - **RFQ Protocols**: Request-for-Quote venues (Bebop, Hashflow, Liquorice, Native), each run when its credentials are set
-- **pAMM Book Feeds**: venues selected by `--pamm` (default: Metric)
+- **pAMM Book Feeds**: venues selected by `--pamm` (default: Metric; BaiBai on Base when listed)
 - **Price Level Stream**: Titan pAMM price level stream venues (`pricelevelstream:*`, Ethereum only)
 
 ## Configuration
@@ -47,7 +47,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `--disable-onchain`        | `false`    | Skip on-chain protocol testing                                                                                   |
 | `--disable-rfq`            | `false`    | Skip the RFQ book feeds (Bebop, Hashflow, Liquorice, Native)                                                     |
 | `--disable-pamm`           | `false`    | Skip the pAMM book feeds. Conflicts with `--pamm`                                                                |
-| `--pamm`                   | `metric`   | Comma-separated pAMM venues to run; replaces the default list. A listed venue missing its credentials, or whose feed fails to build, fails the run |
+| `--pamm`                   | `metric`   | Comma-separated pAMM venues to run (`metric`, `baibai`); replaces the default list. `baibai` runs on Base only and reads its books over `RPC_URL`. A listed venue missing its credentials, or whose feed fails to build, fails the run |
 | `--rfq-all-pairs`          | `false`    | Publish each RFQ venue as one component for every pair it prices                                                 |
 | `--disable-price-level-stream` | `false` | Skip Titan pAMM price level stream testing (only active on Ethereum)                                            |
 | `--price-level-stream-block-interval` | `1` | Emit one sampled price level update per this many blocks                                                    |
