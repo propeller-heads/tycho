@@ -118,10 +118,12 @@ tests:
           pool_type_config: "0x00000000"
         creation_tx: "0x79c97f33b095982d051667b3335533cacb7915a491308907bd2205a5f4dc1216"
 
-  # Quoting needs the extension's config (read with an eth_call on creation) and its anchor state
+  # Quoting needs the extension's config (read with an eth_call on creation) and its anchor state.
+  # The pool is created in the start block; the stop block has five swaps forwarded through the
+  # extension, which rewrite the anchor state while the pool has liquidity.
   - name: mev_capture_v21
     start_block: 26248730
-    stop_block: 26248730
+    stop_block: 26249544
     expected_components:
       - id: "0x0ef8efeb49edc59b806501610bf7b7a2b0ee338d825afad50ba7c7e21b09a41a"
         tokens:

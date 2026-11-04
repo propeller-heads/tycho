@@ -135,13 +135,6 @@ modules:
     inputs:
       - map: map_tick_deltas
 
-  - name: store_tick_liquidity_gross
-    kind: store
-    valueType: bigint
-    updatePolicy: add
-    inputs:
-      - map: map_tick_deltas
-
   # Stage 6
   - name: store_active_liquidities
     kind: store
@@ -170,8 +163,6 @@ modules:
         mode: deltas
       - map: map_tick_deltas
       - store: store_tick_deltas
-        mode: deltas
-      - store: store_tick_liquidity_gross
         mode: deltas
       - store: store_pool_details
       - map: map_rate_deltas

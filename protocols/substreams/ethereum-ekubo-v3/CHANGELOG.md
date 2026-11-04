@@ -16,8 +16,9 @@
     is taken from the transaction's storage changes;
   - keep `tick/{index}` attributes while any position references the tick,
     with a zero value when the net liquidity delta is zero. The extension cuts
-    its Core calls at initialized ticks, so quoting needs all of them. Tick
-    initialization is tracked by the new `store_tick_liquidity_gross` store.
+    its Core calls at initialized ticks, so quoting needs all of them.
+    `store_tick_deltas` tracks each tick's gross liquidity next to its net
+    delta, under a second key.
 
 ## v0.2.6
 
