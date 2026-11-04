@@ -121,8 +121,8 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
     function deposit(address token, uint256 amount)
         external
         payable
-        whenNotPaused
         nonReentrant
+        whenNotPaused
     {
         if (token == address(0)) {
             revert Vault__AddressZero();
