@@ -305,7 +305,6 @@ async fn live_pamm_quotes_simulated_with_their_overrides() {
             )]),
             &block,
             RouterOverwritesData::default(),
-            None,
         )
         .await;
         match with
@@ -344,7 +343,6 @@ async fn live_pamm_quotes_simulated_with_their_overrides() {
             HashMap::from([("one".to_string(), input)]),
             &block,
             RouterOverwritesData::default(),
-            None,
         )
         .await;
         match without
