@@ -47,6 +47,9 @@ error UniswapV4Executor__InvalidAngstromAttestationDataLength(uint256 length);
 error UniswapV4Executor__ZeroAddressAngstromHook();
 
 contract UniswapV4Executor is IExecutor, ICallback {
+    // token (20) + fee (3) + tickSpacing (3) + hook (20) + hookDataLength (2)
+    uint16 private constant _POOL_HEADER_LENGTH = 48;
+
     using SafeERC20 for IERC20;
     using CurrencyLibrary for Currency;
     using V4SafeCast for *;
@@ -217,8 +220,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
         bytes calldata remaining = data[42:];
 
         // Decode first pool with hook data
-        if (remaining.length < 48) {
-            // 20 + 3 + 3 + 20 + 2 = 48 minimum
+        if (remaining.length < _POOL_HEADER_LENGTH) {
             revert UniswapV4Executor__InvalidDataLength();
         }
 
@@ -228,7 +230,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
         address firstHook = address(bytes20(remaining[26:46]));
         uint16 firstHookDataLength = uint16(bytes2(remaining[46:48]));
 
-        uint256 firstPoolTotalLength = 48 + firstHookDataLength;
+        uint256 firstPoolTotalLength = _POOL_HEADER_LENGTH + firstHookDataLength;
         if (remaining.length < firstPoolTotalLength) {
             revert UniswapV4Executor__InvalidDataLength();
         }
@@ -238,10 +240,18 @@ contract UniswapV4Executor is IExecutor, ICallback {
             // Select attestation from first pool's hook data
             // Convert calldata to memory since _selectAttestation requires bytes memory
             firstHookData = _selectAttestation(
-                bytes(remaining[48:48 + firstHookDataLength])
+                bytes(
+                    remaining[_POOL_HEADER_LENGTH:_POOL_HEADER_LENGTH
+                                + firstHookDataLength
+                    ]
+                )
             );
         } else {
-            firstHookData = bytes(remaining[48:48 + firstHookDataLength]);
+            firstHookData = bytes(
+                remaining[_POOL_HEADER_LENGTH:_POOL_HEADER_LENGTH
+                            + firstHookDataLength
+                ]
+            );
         }
 
         // Remaining after first pool are ple encoded
@@ -276,7 +286,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
 
             intermediaryToken = _toV4Token(intermediaryToken);
 
-            if (poolData.length < 48 + hookDataLength) {
+            if (poolData.length < _POOL_HEADER_LENGTH + hookDataLength) {
                 revert UniswapV4Executor__InvalidDataLength();
             }
 
@@ -284,7 +294,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
             // We copy byte-by-byte because we cannot slice bytes memory in Solidity
             bytes memory rawHookData = new bytes(hookDataLength);
             for (uint256 j = 0; j < hookDataLength; j++) {
-                rawHookData[j] = poolData[48 + j];
+                rawHookData[j] = poolData[_POOL_HEADER_LENGTH + j];
             }
 
             bytes memory hookData;

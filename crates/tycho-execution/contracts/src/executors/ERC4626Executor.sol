@@ -14,6 +14,9 @@ error ERC4626Executor__InvalidDataLength();
 error ERC4626Executor__InvalidTarget();
 
 contract ERC4626Executor is IExecutor {
+    // tokenIn (20) + target (20)
+    uint256 private constant _DATA_LENGTH = 40;
+
     using SafeERC20 for IERC20;
 
     constructor() {}
@@ -57,7 +60,7 @@ contract ERC4626Executor is IExecutor {
         pure
         returns (IERC20 tokenIn, address target)
     {
-        if (data.length != 40) {
+        if (data.length != _DATA_LENGTH) {
             revert ERC4626Executor__InvalidDataLength();
         }
         tokenIn = IERC20(address(bytes20(data[0:20])));
@@ -75,7 +78,7 @@ contract ERC4626Executor is IExecutor {
             bool outputToRouter
         )
     {
-        if (data.length != 40) {
+        if (data.length != _DATA_LENGTH) {
             revert ERC4626Executor__InvalidDataLength();
         }
         tokenIn = address(bytes20(data[0:20]));

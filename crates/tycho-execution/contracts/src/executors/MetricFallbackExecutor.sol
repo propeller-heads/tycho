@@ -11,6 +11,9 @@ import {MetricFallbackRouter} from "../fallback/MetricFallbackRouter.sol";
 /// @title MetricFallbackExecutor
 /// @notice Runs one swap through `MetricFallbackRouter`.
 contract MetricFallbackExecutor is FallbackExecutor {
+    // tokenIn (20) + tokenOut (20) + pool (20) + Metric data (1)
+    uint256 private constant _FALLBACK_SWAP_START = 61;
+
     constructor(address fallbackRouter_) FallbackExecutor(fallbackRouter_) {}
 
     // slither-disable-next-line locked-ether
@@ -40,9 +43,9 @@ contract MetricFallbackExecutor is FallbackExecutor {
         override
         returns (uint256)
     {
-        if (data.length <= 61) {
+        if (data.length <= _FALLBACK_SWAP_START) {
             revert FallbackExecutor__InvalidDataLength(data.length);
         }
-        return 61;
+        return _FALLBACK_SWAP_START;
     }
 }

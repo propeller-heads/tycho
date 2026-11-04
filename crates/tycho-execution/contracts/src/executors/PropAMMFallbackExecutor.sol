@@ -11,6 +11,9 @@ import {PropAMMFallbackRouter} from "../fallback/PropAMMFallbackRouter.sol";
 /// @title PropAMMFallbackExecutor
 /// @notice Runs one swap through `PropAMMFallbackRouter`.
 contract PropAMMFallbackExecutor is FallbackExecutor {
+    // tokenIn (20) + tokenOut (20) + pAMM (20)
+    uint256 private constant _FALLBACK_SWAP_START = 60;
+
     constructor(address fallbackRouter_) FallbackExecutor(fallbackRouter_) {}
 
     // slither-disable-next-line locked-ether
@@ -35,9 +38,9 @@ contract PropAMMFallbackExecutor is FallbackExecutor {
         override
         returns (uint256)
     {
-        if (data.length <= 60) {
+        if (data.length <= _FALLBACK_SWAP_START) {
             revert FallbackExecutor__InvalidDataLength(data.length);
         }
-        return 60;
+        return _FALLBACK_SWAP_START;
     }
 }

@@ -63,6 +63,8 @@ contract EkuboV3Executor is IExecutor, ICallback {
     /// hop through the signed path.
     address public immutable signedExclusiveSwap;
 
+    uint256 private constant _ADDRESS_LEN = 20;
+    uint256 private constant _WORD_LEN = 32;
     uint256 private constant _POOL_DATA_OFFSET = 56;
     uint256 internal constant _HOP_BYTE_LEN = 52;
 
@@ -105,18 +107,20 @@ contract EkuboV3Executor is IExecutor, ICallback {
         // output). Here `data` is tokenIn(20) followed by the hops, so the
         // first hop starts at offset 20. Hops with a self-describing tail
         // advance past it via `_hopEnd`; fixed-size hops advance by 52.
-        uint256 offset = 20;
+        uint256 offset = _ADDRESS_LEN;
         uint256 lastHopOffset = offset;
         while (offset < data.length) {
             if (offset + _HOP_BYTE_LEN > data.length) {
                 revert EkuboV3Executor__InvalidDataLength();
             }
             lastHopOffset = offset;
-            PoolConfig poolConfig =
-                PoolConfig.wrap(bytes32(data[offset + 20:offset + 52]));
+            PoolConfig poolConfig = PoolConfig.wrap(
+                bytes32(data[offset + _ADDRESS_LEN:offset + _HOP_BYTE_LEN])
+            );
             offset = _hopEnd(data, offset + _HOP_BYTE_LEN, poolConfig);
         }
-        tokenOut = address(bytes20(data[lastHopOffset:lastHopOffset + 20]));
+        tokenOut =
+            address(bytes20(data[lastHopOffset:lastHopOffset + _ADDRESS_LEN]));
         // Ekubo uses flash accounting: no pre-swap transfer needed.
         // Tokens are paid during the callback in the Dispatcher
         return (
@@ -239,10 +243,15 @@ contract EkuboV3Executor is IExecutor, ICallback {
                         poolKey,
                         swapParameters,
                         // SignedSwapMeta (uint256)
-                        uint256(bytes32(swapData[offset:offset + 32])),
+                        uint256(bytes32(swapData[offset:offset + _WORD_LEN])),
                         // minBalanceUpdate
                         PoolBalanceUpdate.wrap(
-                            bytes32(swapData[offset + 32:offset + 64])
+                            bytes32(
+                                swapData[offset
+                                        + _WORD_LEN:offset
+                                            + _SIGNED_FIXED_TAIL_LEN
+                                ]
+                            )
                         ),
                         // signature
                         bytes(swapData[sigStart:nextOffset])
@@ -320,8 +329,9 @@ contract EkuboV3Executor is IExecutor, ICallback {
             nextTokenOut =
                 address(bytes20(LibBytes.loadCalldata(swapData, offset)));
             if (nextTokenOut == ETH_ADDRESS) nextTokenOut = address(0);
-            PoolConfig poolConfig =
-                PoolConfig.wrap(LibBytes.loadCalldata(swapData, offset + 20));
+            PoolConfig poolConfig = PoolConfig.wrap(
+                LibBytes.loadCalldata(swapData, offset + _ADDRESS_LEN)
+            );
 
             (
                 address token0,

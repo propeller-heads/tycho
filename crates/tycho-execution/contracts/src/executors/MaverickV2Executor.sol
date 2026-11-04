@@ -11,6 +11,9 @@ import {TransferManager} from "../TransferManager.sol";
 error MaverickV2Executor__InvalidDataLength();
 
 contract MaverickV2Executor is IExecutor {
+    // pool (20) + tokenIn (20) + tokenOut (20)
+    uint256 private constant _DATA_LENGTH = 60;
+
     using SafeERC20 for IERC20;
 
     constructor() {}
@@ -54,7 +57,7 @@ contract MaverickV2Executor is IExecutor {
         pure
         returns (address target, IERC20 inToken)
     {
-        if (data.length != 60) {
+        if (data.length != _DATA_LENGTH) {
             revert MaverickV2Executor__InvalidDataLength();
         }
         target = address(bytes20(data[0:20]));
@@ -72,7 +75,7 @@ contract MaverickV2Executor is IExecutor {
             bool outputToRouter
         )
     {
-        if (data.length != 60) {
+        if (data.length != _DATA_LENGTH) {
             revert MaverickV2Executor__InvalidDataLength();
         }
         receiver = address(bytes20(data[0:20]));

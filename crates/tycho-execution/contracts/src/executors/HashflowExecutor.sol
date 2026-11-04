@@ -33,6 +33,9 @@ interface IHashflowRouter {
 }
 
 contract HashflowExecutor is IExecutor {
+    // 6 addresses (6 * 20) + 5 words (5 * 32) + signature (65)
+    uint256 private constant _DATA_LENGTH = 345;
+
     using SafeERC20 for IERC20;
 
     address public constant NATIVE_TOKEN =
@@ -84,7 +87,7 @@ contract HashflowExecutor is IExecutor {
         pure
         returns (IHashflowRouter.RFQTQuote memory quote)
     {
-        if (data.length != 345) {
+        if (data.length != _DATA_LENGTH) {
             revert HashflowExecutor__InvalidDataLength();
         }
 
@@ -115,7 +118,7 @@ contract HashflowExecutor is IExecutor {
             bool outputToRouter
         )
     {
-        if (data.length != 345) {
+        if (data.length != _DATA_LENGTH) {
             revert HashflowExecutor__InvalidDataLength();
         }
 

@@ -25,6 +25,7 @@ contract BebopFallbackRouter is TychoFallbackRouter {
     using Address for address;
 
     uint256 private constant _CALLDATA_START = 33;
+    uint256 private constant _SELECTOR_LEN = 4;
 
     bytes4 private constant _SWAP_SINGLE_SELECTOR = 0x4dcebcba;
     bytes4 private constant _SWAP_AGGREGATE_SELECTOR = 0xa2f74893;
@@ -60,11 +61,12 @@ contract BebopFallbackRouter is TychoFallbackRouter {
         bytes calldata bebopData,
         bytes calldata fallbackSwap
     ) external {
-        if (bebopData.length < _CALLDATA_START + 4) {
+        if (bebopData.length < _CALLDATA_START + _SELECTOR_LEN) {
             revert BebopFallbackRouter__InvalidDataLength(bebopData.length);
         }
         _validateCall(
-            target, bytes4(bebopData[_CALLDATA_START:_CALLDATA_START + 4])
+            target,
+            bytes4(bebopData[_CALLDATA_START:_CALLDATA_START + _SELECTOR_LEN])
         );
         _swap(swap_, target, bebopData, fallbackSwap);
 
@@ -138,7 +140,8 @@ contract BebopFallbackRouter is TychoFallbackRouter {
         if (amountIn >= originalFilledTakerAmount) {
             return bebopCalldata;
         }
-        uint256 filledTakerAmountPos = 4 + uint256(partialFillOffset) * 32;
+        uint256 filledTakerAmountPos =
+            _SELECTOR_LEN + uint256(partialFillOffset) * 32;
         // slither-disable-next-line assembly
         assembly {
             mstore(

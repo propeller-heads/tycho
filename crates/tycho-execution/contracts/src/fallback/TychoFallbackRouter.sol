@@ -101,6 +101,15 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         bytes hookData;
     }
 
+    // pool (20) + feeBps (1)
+    uint256 private constant _UNISWAP_V2_SWAP_LEN = 21;
+    // pool (20)
+    uint256 private constant _UNISWAP_V3_SWAP_LEN = 20;
+    // dex (20) + zero2one (1)
+    uint256 private constant _FLUID_V1_SWAP_LEN = 21;
+    // pool (20)
+    uint256 private constant _AERODROME_V1_SWAP_LEN = 20;
+
     // keccak256("TychoFallbackRouter#CALLBACK_SOURCE")
     bytes32 private constant _CALLBACK_SOURCE_SLOT =
         0xf69ae8e0008b818aeb91c2b052698e485056e760fad9d0aa28144b842debe4f7;
@@ -474,7 +483,7 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         pure
         returns (IUniswapV2Pair pair, uint256 feeBps)
     {
-        if (data.length != 21) {
+        if (data.length != _UNISWAP_V2_SWAP_LEN) {
             revert TychoFallbackRouter__InvalidSwapLength(data.length);
         }
         pair = IUniswapV2Pair(address(bytes20(data[0:20])));
@@ -506,7 +515,7 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         pure
         returns (address pool)
     {
-        if (data.length != 20) {
+        if (data.length != _UNISWAP_V3_SWAP_LEN) {
             revert TychoFallbackRouter__InvalidSwapLength(data.length);
         }
         pool = address(bytes20(data[0:20]));
@@ -586,7 +595,7 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         pure
         returns (address dex, bool zero2one)
     {
-        if (data.length != 21) {
+        if (data.length != _FLUID_V1_SWAP_LEN) {
             revert TychoFallbackRouter__InvalidSwapLength(data.length);
         }
         dex = address(bytes20(data[0:20]));
@@ -624,7 +633,7 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         pure
         returns (IAerodromeV1Pool pool)
     {
-        if (data.length != 20) {
+        if (data.length != _AERODROME_V1_SWAP_LEN) {
             revert TychoFallbackRouter__InvalidSwapLength(data.length);
         }
         pool = IAerodromeV1Pool(address(bytes20(data[0:20])));

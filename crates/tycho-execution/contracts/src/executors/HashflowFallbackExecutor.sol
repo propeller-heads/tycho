@@ -11,6 +11,9 @@ import {HashflowFallbackRouter} from "../fallback/HashflowFallbackRouter.sol";
 /// @title HashflowFallbackExecutor
 /// @notice Runs one swap through `HashflowFallbackRouter`.
 contract HashflowFallbackExecutor is FallbackExecutor {
+    // tokenIn (20) + tokenOut (20) + Hashflow router data (345)
+    uint256 private constant _FALLBACK_SWAP_START = 385;
+
     constructor(address fallbackRouter_) FallbackExecutor(fallbackRouter_) {}
 
     // slither-disable-next-line locked-ether
@@ -35,9 +38,9 @@ contract HashflowFallbackExecutor is FallbackExecutor {
         override
         returns (uint256)
     {
-        if (data.length <= 385) {
+        if (data.length <= _FALLBACK_SWAP_START) {
             revert FallbackExecutor__InvalidDataLength(data.length);
         }
-        return 385;
+        return _FALLBACK_SWAP_START;
     }
 }

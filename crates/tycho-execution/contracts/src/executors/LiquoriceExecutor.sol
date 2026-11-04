@@ -20,6 +20,11 @@ import {
 /// @dev Handles RFQ swaps through Liquorice settlement contracts
 ///      with support for partial fills and dynamic allowance management
 contract LiquoriceExecutor is IExecutor {
+    // tokenIn (20) + tokenOut (20) + partialFillOffset (4) +
+    // originalBaseTokenAmount (32) + minBaseTokenAmount (32) +
+    // liquoriceCalldata selector (4)
+    uint256 private constant _MIN_DATA_LENGTH = 112;
+
     using SafeERC20 for IERC20;
     using Address for address;
 
@@ -121,11 +126,7 @@ contract LiquoriceExecutor is IExecutor {
             bytes memory liquoriceCalldata
         )
     {
-        // Minimum fixed fields:
-        // tokenIn (20) + tokenOut (20) + partialFillOffset (4) +
-        // originalBaseTokenAmount (32) + minBaseTokenAmount (32) +
-        // liquoriceCalldata selector (4) = 112 bytes
-        if (data.length < 112) {
+        if (data.length < _MIN_DATA_LENGTH) {
             revert LiquoriceExecutor__InvalidDataLength();
         }
 
@@ -186,7 +187,7 @@ contract LiquoriceExecutor is IExecutor {
             bool outputToRouter
         )
     {
-        if (data.length < 112) {
+        if (data.length < _MIN_DATA_LENGTH) {
             revert LiquoriceExecutor__InvalidDataLength();
         }
 

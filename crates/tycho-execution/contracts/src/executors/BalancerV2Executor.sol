@@ -15,6 +15,9 @@ import {TransferManager} from "../TransferManager.sol";
 error BalancerV2Executor__InvalidDataLength();
 
 contract BalancerV2Executor is IExecutor {
+    // tokenIn (20) + tokenOut (20) + poolId (32)
+    uint256 private constant _DATA_LENGTH = 72;
+
     using SafeERC20 for IERC20;
 
     address private constant _VAULT =
@@ -70,7 +73,7 @@ contract BalancerV2Executor is IExecutor {
         pure
         returns (address tokenIn, address tokenOut, bytes32 poolId)
     {
-        if (data.length != 72) {
+        if (data.length != _DATA_LENGTH) {
             revert BalancerV2Executor__InvalidDataLength();
         }
 
@@ -90,7 +93,7 @@ contract BalancerV2Executor is IExecutor {
             bool outputToRouter
         )
     {
-        if (data.length != 72) {
+        if (data.length != _DATA_LENGTH) {
             revert BalancerV2Executor__InvalidDataLength();
         }
 

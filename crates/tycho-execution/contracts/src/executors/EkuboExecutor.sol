@@ -31,6 +31,7 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
     ICore private immutable _core;
     address private immutable _mevResist;
 
+    uint256 private constant _ADDRESS_LEN = 20;
     uint256 private constant _POOL_DATA_OFFSET = 56;
     uint256 private constant _HOP_BYTE_LEN = 52;
 
@@ -150,8 +151,9 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
             nextTokenOut =
                 address(bytes20(LibBytes.loadCalldata(swapData, offset)));
             if (nextTokenOut == ETH_ADDRESS) nextTokenOut = address(0);
-            Config poolConfig =
-                Config.wrap(LibBytes.loadCalldata(swapData, offset + 20));
+            Config poolConfig = Config.wrap(
+                LibBytes.loadCalldata(swapData, offset + _ADDRESS_LEN)
+            );
 
             (
                 address token0,
@@ -266,9 +268,10 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
     {
         uint256 hopsLength =
             (data.length - _POOL_DATA_OFFSET + 36) / _HOP_BYTE_LEN;
-        uint256 lastHopOffset = 20 + (hopsLength - 1) * _HOP_BYTE_LEN;
+        uint256 lastHopOffset = _ADDRESS_LEN + (hopsLength - 1) * _HOP_BYTE_LEN;
         tokenIn = address(bytes20(data[0:20]));
-        tokenOut = address(bytes20(data[lastHopOffset:lastHopOffset + 20]));
+        tokenOut =
+            address(bytes20(data[lastHopOffset:lastHopOffset + _ADDRESS_LEN]));
         return (
             TransferManager.TransferType.None,
             address(0),

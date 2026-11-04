@@ -37,6 +37,7 @@ error RingSwapV2Executor__ZeroRingSwapFactory();
 
 contract RingSwapV2Executor is IExecutor {
     uint256 private constant FEE_BPS = 30;
+    uint256 private constant _BPS_DENOMINATOR = 10000;
     address public immutable fewFactory;
     address public immutable ringSwapFactory;
 
@@ -171,9 +172,10 @@ contract RingSwapV2Executor is IExecutor {
         if (reserveIn == 0 || reserveOut == 0) {
             revert RingSwapV2Executor__InsufficientLiquidity();
         }
-        uint256 amountInWithFee = amountIn * (10000 - FEE_BPS);
+        uint256 amountInWithFee = amountIn * (_BPS_DENOMINATOR - FEE_BPS);
         uint256 numerator = amountInWithFee * uint256(reserveOut);
-        uint256 denominator = (uint256(reserveIn) * 10000) + amountInWithFee;
+        uint256 denominator =
+            (uint256(reserveIn) * _BPS_DENOMINATOR) + amountInWithFee;
         amount = numerator / denominator;
     }
 

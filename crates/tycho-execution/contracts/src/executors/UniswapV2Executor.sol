@@ -18,6 +18,10 @@ error UniswapV2Executor__InsufficientLiquidity();
 contract UniswapV2Executor is IExecutor {
     using SafeERC20 for IERC20;
 
+    // pool (20) + tokenIn (20) + tokenOut (20)
+    uint256 private constant _DATA_LENGTH = 60;
+    uint256 private constant _BPS_DENOMINATOR = 10000;
+
     uint256 public immutable feeBps;
 
     constructor(uint256 feeBps_) {
@@ -80,7 +84,7 @@ contract UniswapV2Executor is IExecutor {
         pure
         returns (address target, address tokenIn, address tokenOut)
     {
-        if (data.length != 60) {
+        if (data.length != _DATA_LENGTH) {
             revert UniswapV2Executor__InvalidDataLength();
         }
         target = address(bytes20(data[0:20]));
@@ -97,9 +101,10 @@ contract UniswapV2Executor is IExecutor {
             reserveIn > 0 && reserveOut > 0,
             UniswapV2Executor__InsufficientLiquidity()
         );
-        uint256 amountInWithFee = amountIn * (10000 - feeBps);
+        uint256 amountInWithFee = amountIn * (_BPS_DENOMINATOR - feeBps);
         uint256 numerator = amountInWithFee * uint256(reserveOut);
-        uint256 denominator = (uint256(reserveIn) * 10000) + amountInWithFee;
+        uint256 denominator =
+            (uint256(reserveIn) * _BPS_DENOMINATOR) + amountInWithFee;
         amount = numerator / denominator;
     }
 
@@ -114,7 +119,7 @@ contract UniswapV2Executor is IExecutor {
             bool outputToRouter
         )
     {
-        if (data.length != 60) {
+        if (data.length != _DATA_LENGTH) {
             revert UniswapV2Executor__InvalidDataLength();
         }
         address target = address(bytes20(data[0:20]));
