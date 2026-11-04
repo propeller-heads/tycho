@@ -14,6 +14,7 @@ import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 
 error UniswapXFiller__AddressZero();
 error UniswapXFiller__BatchExecutionNotSupported();
+error UniswapXFiller__NotAContract(address addr);
 
 contract UniswapXFiller is AccessControl, IReactorCallback {
     using SafeERC20 for IERC20;
@@ -164,6 +165,9 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
      */
     // slither-disable-next-line locked-ether
     receive() external payable {
-        require(msg.sender.code.length != 0);
+        require(
+            msg.sender.code.length != 0,
+            UniswapXFiller__NotAContract(msg.sender)
+        );
     }
 }

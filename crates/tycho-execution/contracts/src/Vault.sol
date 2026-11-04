@@ -21,6 +21,8 @@ error Vault__AddressZero();
 error Vault__UnexpectedNonZeroCount(uint256 nonZeroCount);
 error Vault__InvalidInputDelta(address token, int256 expected, int256 actual);
 error Vault__UnexpectedInputDelta(int256 inputDelta);
+error Vault__ValueMismatch(uint256 msgValue, uint256 amount);
+error Vault__EthNotAccepted(uint256 msgValue);
 
 /**
  * @title Vault - ERC6909-compliant multi-token vault
@@ -134,10 +136,12 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
 
         if (token == ETH_ADDRESS) {
             // Native ETH deposit
-            require(msg.value == amount, "Value mismatch");
+            require(
+                msg.value == amount, Vault__ValueMismatch(msg.value, amount)
+            );
             _mint(msg.sender, id, amount);
         } else {
-            require(msg.value == 0, "ETH not accepted for ERC20 deposit");
+            require(msg.value == 0, Vault__EthNotAccepted(msg.value));
             // ERC20 deposit - transfer to this contract and measure actual received
             // amount to handle  fee-on-transfer and rebasing tokens
             uint256 balanceBefore = IERC20(token).balanceOf(address(this));

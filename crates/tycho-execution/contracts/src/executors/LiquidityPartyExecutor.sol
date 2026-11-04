@@ -4,6 +4,8 @@ pragma solidity ^0.8.26;
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {TransferManager} from "../TransferManager.sol";
 
+error LiquidityPartyExecutor__InvalidDataLength();
+
 contract LiquidityPartyExecutor is IExecutor {
     /// @dev We avoid declaring any IERC20 types, since it is critical to use the router's transfer facility and never
     /// the inherent ERC20 transfer methods, not even the SafeERC20 versions.
@@ -71,7 +73,7 @@ contract LiquidityPartyExecutor is IExecutor {
             uint8 indexOut
         )
     {
-        require(data.length == 62, "LiqP executor: invalid data length");
+        require(data.length == 62, LiquidityPartyExecutor__InvalidDataLength());
         pool = IPartyPool(address(bytes20(data[0:20])));
         tokenIn = address(bytes20(data[20:40]));
         tokenOut = address(bytes20(data[40:60]));

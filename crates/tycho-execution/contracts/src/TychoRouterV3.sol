@@ -1288,7 +1288,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @dev Allows this contract to receive native token with empty msg.data from contracts
      */
     receive() external payable whenNotPaused {
-        require(msg.sender.code.length != 0);
+        require(
+            msg.sender.code.length != 0, TychoRouter__NotAContract(msg.sender)
+        );
     }
 
     /**

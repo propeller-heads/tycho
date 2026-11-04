@@ -19,6 +19,7 @@ import {
 error CurveExecutor__AddressZero();
 error CurveExecutor__InvalidDataLength();
 error CurveExecutor__TokenAddressZero();
+error CurveExecutor__NotAContract(address addr);
 
 contract CurveExecutor is IExecutor {
     using SafeERC20 for IERC20;
@@ -120,7 +121,9 @@ contract CurveExecutor is IExecutor {
      * There are some curve pools that take ETH directly.
      */
     receive() external payable {
-        require(msg.sender.code.length != 0);
+        require(
+            msg.sender.code.length != 0, CurveExecutor__NotAContract(msg.sender)
+        );
     }
 
     function getTransferData(bytes calldata data)

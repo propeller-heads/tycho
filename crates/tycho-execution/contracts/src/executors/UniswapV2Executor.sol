@@ -13,6 +13,7 @@ import {TransferManager} from "../TransferManager.sol";
 
 error UniswapV2Executor__InvalidDataLength();
 error UniswapV2Executor__InvalidFee();
+error UniswapV2Executor__InsufficientLiquidity();
 
 contract UniswapV2Executor is IExecutor {
     using SafeERC20 for IERC20;
@@ -92,7 +93,10 @@ contract UniswapV2Executor is IExecutor {
         uint112 reserveIn,
         uint112 reserveOut
     ) internal view returns (uint256 amount) {
-        require(reserveIn > 0 && reserveOut > 0, "L");
+        require(
+            reserveIn > 0 && reserveOut > 0,
+            UniswapV2Executor__InsufficientLiquidity()
+        );
         uint256 amountInWithFee = amountIn * (10000 - feeBps);
         uint256 numerator = amountInWithFee * uint256(reserveOut);
         uint256 denominator = (uint256(reserveIn) * 10000) + amountInWithFee;
