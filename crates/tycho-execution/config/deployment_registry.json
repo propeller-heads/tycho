@@ -122,7 +122,8 @@
         "fallback:rfq:bebop": "0x683fDC846657A5108791C236c395C512bd7bD84B",
         "pancakeswap_infinity_cl": "0x6EbFE9c9b8Ed29260a1301db5F2a7fDf72899E25",
         "aero_basic": "0xf6F8fb2321FB8431400ae546037cD2AE969a2c22",
-        "fallback:rfq:native": "0x57D9099BB65dCAB2F64238718f2CbB261255Fc5c"
+        "fallback:rfq:native": "0x57D9099BB65dCAB2F64238718f2CbB261255Fc5c",
+        "biconomy": "0xF30f4c985fCA63913f421F78058031FA6514eF7f"
       },
       "superseded": [{
         "status": "superseded",
