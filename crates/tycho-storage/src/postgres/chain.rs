@@ -365,6 +365,21 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_latest_version_of_a_chain_without_blocks_is_before_any_row() {
+        let mut conn = setup_db().await;
+        db_fixtures::insert_chain(&mut conn, "base").await;
+
+        let ts = crate::postgres::maybe_lookup_block_ts(
+            &tycho_common::storage::BlockOrTimestamp::Block(BlockIdentifier::Latest(Chain::Base)),
+            &mut conn,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(ts, chrono::NaiveDateTime::UNIX_EPOCH);
+    }
+
+    #[tokio::test]
     async fn test_get_block() {
         let mut conn = setup_db().await;
         setup_data(&mut conn).await;

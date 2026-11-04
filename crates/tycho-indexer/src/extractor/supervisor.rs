@@ -64,6 +64,7 @@ pub struct ExtractorSupervisor {
     id: ExtractorIdentity,
     max_restarts: Option<u32>,
     next_subscriber_id: u64,
+    wait_for_subscriber: bool,
 }
 
 impl ExtractorSupervisor {
@@ -79,7 +80,17 @@ impl ExtractorSupervisor {
             id,
             max_restarts,
             next_subscriber_id: 0,
+            wait_for_subscriber: false,
         }
+    }
+
+    /// Holds the extractor back until the first external subscriber joins, and delivers to that
+    /// subscriber like an in-process one: the extractor waits for room in its channel instead of
+    /// removing it. A test that follows a historical range through the stream uses it, since the
+    /// extractor would otherwise run through the range before the client subscribes, and leave
+    /// a slow client behind.
+    pub fn wait_for_subscriber(&mut self) {
+        self.wait_for_subscriber = true;
     }
 
     /// Registers an in-process subscriber.
@@ -124,6 +135,16 @@ impl ExtractorSupervisor {
     /// over RPC. A future improvement could instead retry transient build failures in place
     /// and reserve `Err` for deterministic configuration errors.
     pub async fn run(mut self) -> Result<(), ExtractionError> {
+        if self.wait_for_subscriber {
+            info!(extractor = %self.id, "Waiting for the first subscriber");
+            let Some(sender) = first_subscriber(&mut self.control_rx).await else {
+                info!(extractor = %self.id, "Stopped before a subscriber joined");
+                return Ok(());
+            };
+            self.insert_subscriber(sender, SubscriberKind::Internal)
+                .await;
+        }
+
         let mut restart_count: u32 = 0;
         let mut backoff_strategy = restart_backoff();
         let restarts = restart_counter(&self.id);
@@ -350,6 +371,17 @@ impl ExtractorSupervisor {
     }
 }
 
+/// Waits for the first `Subscribe` and returns its sender, or `None` on `Stop` or when every
+/// handle is gone.
+async fn first_subscriber(
+    control_rx: &mut Receiver<ControlMessage>,
+) -> Option<Sender<DeltaCommand>> {
+    match control_rx.recv().await? {
+        ControlMessage::Stop => None,
+        ControlMessage::Subscribe { sender, .. } => Some(sender),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -407,5 +439,45 @@ mod tests {
         });
 
         assert_eq!(restarts_series(&snapshotter), vec![(labels, 2)]);
+    }
+
+    #[tokio::test]
+    async fn first_subscriber_returns_the_sender_of_the_first_subscription() {
+        let (ctrl_tx, mut ctrl_rx) = mpsc::channel(CONTROL_CHANNEL_SIZE);
+        let (tx, mut rx) = mpsc::channel(1);
+        ctrl_tx
+            .send(ControlMessage::Subscribe {
+                sender: tx,
+                subscription_id: uuid::Uuid::new_v4(),
+                user_identity: None,
+            })
+            .await
+            .unwrap();
+
+        let sender = first_subscriber(&mut ctrl_rx)
+            .await
+            .expect("a subscriber joined");
+        sender
+            .send(DeltaCommand::ExtractorRestarted("uniswap_v2".to_string()))
+            .await
+            .unwrap();
+        assert!(matches!(rx.recv().await, Some(DeltaCommand::ExtractorRestarted(_))));
+    }
+
+    #[tokio::test]
+    async fn first_subscriber_gives_up_on_stop_or_when_every_handle_is_gone() {
+        let (ctrl_tx, mut ctrl_rx) = mpsc::channel(CONTROL_CHANNEL_SIZE);
+        ctrl_tx
+            .send(ControlMessage::Stop)
+            .await
+            .unwrap();
+        assert!(first_subscriber(&mut ctrl_rx)
+            .await
+            .is_none());
+
+        drop(ctrl_tx);
+        assert!(first_subscriber(&mut ctrl_rx)
+            .await
+            .is_none());
     }
 }

@@ -428,7 +428,16 @@ where
         deltas: &BlockAggregatedChanges,
     ) -> (Vec<ComponentId>, Vec<ComponentId>) {
         match &self.filter.variant {
-            ComponentFilterVariant::Ids(_) => (Default::default(), Default::default()),
+            // A listed component created after tracking started is added in its creation block.
+            ComponentFilterVariant::Ids(ids) => {
+                let to_add = deltas
+                    .new_protocol_components
+                    .keys()
+                    .filter(|id| ids.contains(&id.to_lowercase()))
+                    .cloned()
+                    .collect();
+                (to_add, Vec::new())
+            }
             ComponentFilterVariant::MinimumTVLRange { range: (remove_tvl, add_tvl), .. } => {
                 let (mut to_add, mut to_remove): (Vec<_>, Vec<_>) = deltas
                     .component_tvl
@@ -616,6 +625,24 @@ mod test {
             .expect("start_tracking should succeed");
 
         assert!(tracker.components.is_empty(), "Blocklisted component should not be tracked");
+    }
+
+    #[test]
+    fn test_filter_updated_adds_a_listed_component_when_it_is_created() {
+        let mut tracker = with_mocked_rpc();
+        tracker.filter = ComponentFilter::Ids(vec!["0xListed".to_string()]);
+
+        let deltas = BlockAggregatedChanges {
+            new_protocol_components: HashMap::from([
+                ("0xlisted".to_string(), ProtocolComponent::default()),
+                ("0xother".to_string(), ProtocolComponent::default()),
+            ]),
+            ..Default::default()
+        };
+
+        let (to_add, to_remove) = tracker.filter_updated_components(&deltas);
+        assert_eq!(to_add, vec!["0xlisted".to_string()]);
+        assert!(to_remove.is_empty());
     }
 
     #[test]

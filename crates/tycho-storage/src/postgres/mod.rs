@@ -474,11 +474,15 @@ async fn maybe_lookup_block_ts(
                 .map_err(|err| storage_error_from_diesel(err, "Block", &format!("{no}"), None))?
                 .ts)
         }
+        // Before the first block of a chain is stored, the latest version is empty: every row
+        // is valid from a later time. A reader that merges pending blocks over the stored state,
+        // as the RPC does while the first blocks are uncommitted, then gets them alone.
         BlockOrTimestamp::Block(BlockIdentifier::Latest(chain)) => {
-            Ok(orm::Block::most_recent(*chain, conn)
-                .await
-                .map_err(|err| storage_error_from_diesel(err, "Block", "latest", None))?
-                .ts)
+            match orm::Block::most_recent(*chain, conn).await {
+                Ok(block) => Ok(block.ts),
+                Err(diesel::result::Error::NotFound) => Ok(NaiveDateTime::UNIX_EPOCH),
+                Err(err) => Err(storage_error_from_diesel(err, "Block", "latest", None).into()),
+            }
         }
         BlockOrTimestamp::Timestamp(ts) => Ok(*ts),
     }

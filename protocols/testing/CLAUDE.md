@@ -40,5 +40,9 @@ quotes (`balances.tvl_only`); it rejects `skip_balance_check`. Strict mode requi
 {kind: hard | soft | under_cap}`, on the package or the component, for every direction or keyed
 `0x<in>->0x<out>`) and tests it at the limit and, for a hard one, one unit past, reporting each
 direction separately. Strict mode also requires executions to match simulation exactly unless the
-package declares `execution_tolerance: {bps and/or wei, cause, measured}`; legacy mode allows 0.5%.
+package declares `execution_tolerance: {bps and/or wei, cause, measured}`; legacy mode allows 0.5%. Strict
+`range` streams the range while indexing (`--no-stream` turns it off): it applies every block,
+simulates at up to 50 changed blocks, executes at as few as meet the coverage floor, and requires
+the streamed state to quote as the stop-block snapshot (`stream.matches_snapshot`);
+`stream.coverage` reports the floor as a warning for now.
 `range --report <path>` writes each check's outcome as JSON. See `README.md`, "Strict mode".

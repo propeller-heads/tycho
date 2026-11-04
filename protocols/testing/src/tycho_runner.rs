@@ -42,7 +42,99 @@ impl TychoRunner {
         module_name: Option<&str>,
     ) -> miette::Result<()> {
         info!("Running Tycho indexer from block {start_block} to {end_block}...");
+        let mut process = self
+            .indexer_command(
+                spkg_path,
+                start_block,
+                end_block,
+                protocol_type_names,
+                protocol_system,
+                module_name,
+            )?
+            .spawn()
+            .into_diagnostic()
+            .wrap_err("Error running Tycho indexer")?;
 
+        Self::handle_process_output(&mut process);
+
+        let status = process
+            .wait()
+            .into_diagnostic()
+            .wrap_err("Failed to wait on Tycho indexer process")?;
+
+        // Note: tycho-indexer may exit with non-zero status when stream ends normally
+        // This is expected behavior and should not be treated as an error
+        if !status.success() {
+            debug!("Tycho indexer process exited with status: {status}");
+        }
+
+        Ok(())
+    }
+
+    /// Starts the indexer for a test that follows the range through its stream, and returns the
+    /// running process.
+    ///
+    /// The indexer waits for the first subscriber before extracting, delivers every block to it,
+    /// and keeps every version, so the client's snapshots at past blocks resolve. It keeps serving
+    /// after the range: stop it with [`Self::stop_tycho`] once the subscription has ended.
+    pub fn start_tycho_streaming(
+        &self,
+        spkg_path: &str,
+        start_block: u64,
+        end_block: u64,
+        protocol_type_names: &[String],
+        protocol_system: &str,
+        module_name: Option<&str>,
+    ) -> miette::Result<Child> {
+        info!("Running Tycho indexer from block {start_block} to {end_block} for a subscriber...");
+        let mut process = self
+            .indexer_command(
+                spkg_path,
+                start_block,
+                end_block,
+                protocol_type_names,
+                protocol_system,
+                module_name,
+            )?
+            .args(["--wait-for-subscriber", "--retention-horizon", "2099-01-01T00:00:00"])
+            .spawn()
+            .into_diagnostic()
+            .wrap_err("Error running Tycho indexer")?;
+        Self::handle_process_output(&mut process);
+        Ok(process)
+    }
+
+    /// Stops an indexer started by [`Self::start_tycho_streaming`].
+    ///
+    /// Once its subscription has ended, the extractor has stopped and its commits are written,
+    /// so killing the process loses nothing the snapshot reads.
+    pub fn stop_tycho(mut process: Child) -> miette::Result<()> {
+        if process
+            .try_wait()
+            .into_diagnostic()?
+            .is_none()
+        {
+            process
+                .kill()
+                .into_diagnostic()
+                .wrap_err("Failed to stop the Tycho indexer")?;
+        }
+        process
+            .wait()
+            .into_diagnostic()
+            .wrap_err("Failed to wait on Tycho indexer process")?;
+        Ok(())
+    }
+
+    fn indexer_command(
+        &self,
+        spkg_path: &str,
+        start_block: u64,
+        end_block: u64,
+        protocol_type_names: &[String],
+        protocol_system: &str,
+        module_name: Option<&str>,
+    ) -> miette::Result<Command> {
         let mut cmd = Command::new("tycho-indexer");
         cmd.env(
             "RUST_LOG",
@@ -96,26 +188,7 @@ impl TychoRunner {
 
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped());
-
-        let mut process = cmd
-            .spawn()
-            .into_diagnostic()
-            .wrap_err("Error running Tycho indexer")?;
-
-        Self::handle_process_output(&mut process);
-
-        let status = process
-            .wait()
-            .into_diagnostic()
-            .wrap_err("Failed to wait on Tycho indexer process")?;
-
-        // Note: tycho-indexer may exit with non-zero status when stream ends normally
-        // This is expected behavior and should not be treated as an error
-        if !status.success() {
-            debug!("Tycho indexer process exited with status: {status}");
-        }
-
-        Ok(())
+        Ok(cmd)
     }
 
     pub fn start_rpc_server(&self) -> TychoRpcServer {

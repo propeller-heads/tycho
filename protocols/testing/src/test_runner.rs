@@ -1,8 +1,10 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
+    process::Child,
     str::FromStr,
     sync::{Arc, LazyLock, RwLock},
+    time::Duration,
 };
 
 use alloy::{
@@ -27,10 +29,11 @@ use tycho_simulation::{
             u256_num::bytes_to_u256,
             uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
         },
-        stream::ProtocolStreamBuilder,
+        stream::{ProtocolStreamBuilder, StreamEndPolicy},
     },
     protocol::models::{DecoderContext, ProtocolComponent as ProtocolComponentModel, Update},
     tycho_client::feed::{
+        component_tracker::ComponentFilter,
         synchronizer::{Snapshot, StateSyncMessage},
         BlockHeader, FeedMessage,
     },
@@ -63,12 +66,17 @@ use crate::{
     execution, limits,
     report::{CheckId, Checks, Report},
     rpc::RPCProvider,
-    state_registry::register_protocol,
-    tvl_only,
+    state_registry::{register_protocol, register_protocol_with_filter},
+    stream, tvl_only,
     tycho_rpc::TychoClient,
     tycho_runner::TychoRunner,
     utils::{build_spkg, extract_initial_block},
 };
+
+/// How long the stream is polled before checking on the indexer.
+const STREAM_POLL: Duration = Duration::from_secs(30);
+/// How long the stream may send nothing before it reaches the end of the range.
+const STREAM_IDLE_LIMIT: Duration = Duration::from_secs(600);
 
 static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
@@ -191,6 +199,61 @@ struct SimulationOutput {
     past_limit: HashMap<String, TychoExecutionInput>,
     /// Strict: every direction whose limit was checked.
     limit_directions: Vec<LimitDirection>,
+}
+
+/// Strict mode tests each direction's limit as declared, keyed by lowercase component id;
+/// `from_yaml` made sure every direction of every expected component has a declaration.
+fn limit_kinds(
+    test: &IntegrationTest,
+    config: &IntegrationTestsConfig,
+) -> HashMap<(String, Direction), LimitKind> {
+    test.expected_components
+        .iter()
+        .flat_map(|component| {
+            component_directions(component)
+                .into_iter()
+                .filter_map(move |direction| {
+                    let kind = config
+                        .limits_for(component, &direction)?
+                        .kind;
+                    Some(((component.base.id.to_lowercase(), direction), kind))
+                })
+        })
+        .collect()
+}
+
+/// A component's quote sheet: each question it answers, with the answer.
+type Sheet = BTreeMap<String, String>;
+
+/// What streaming a range produced, for the checks after it.
+struct Streamed {
+    /// For each block the stream delivered at or past the stop block, the quote sheet of each
+    /// expected component then, by lowercase id. The snapshot is compared with the latest one at
+    /// or before its block.
+    sheets: BTreeMap<u64, HashMap<String, Sheet>>,
+    /// Errors the stream reported.
+    errors: Vec<String>,
+    coverage: stream::Coverage,
+    /// The output of each simulated block, in block order, for execution.
+    simulated: Vec<(u64, SimulationOutput)>,
+}
+
+impl Streamed {
+    /// The sheets to compare with the snapshot at `block`.
+    fn sheets_at(&self, block: u64) -> miette::Result<&HashMap<String, Sheet>> {
+        self.sheets
+            .range(..=block)
+            .next_back()
+            .map(|(_, sheets)| sheets)
+            .ok_or_else(|| {
+                let last = self
+                    .sheets
+                    .keys()
+                    .next()
+                    .map_or_else(|| "before the stop block".to_string(), |b| format!("at {b}"));
+                miette!("the stream has no state at the snapshot block {block}: it starts {last}")
+            })
+    }
 }
 
 /// Strict: the limit checks of one direction of one component, before execution.
@@ -375,6 +438,8 @@ pub struct TestTypeRange {
     pub match_test: Option<String>,
     /// Where to write the outcome of every check, if anywhere.
     pub report: Option<PathBuf>,
+    /// Strict: stream the range while it is indexed, and check it at its changed blocks.
+    pub stream: bool,
 }
 
 pub struct RunnerConfig {
@@ -800,6 +865,7 @@ impl TestRunner {
             harness: config.harness,
             results: Vec::new(),
             drift: Vec::new(),
+            coverage: Vec::new(),
         };
 
         for (idx, test) in tests.iter().enumerate() {
@@ -817,13 +883,30 @@ impl TestRunner {
                 .runtime
                 .block_on(self.tycho_runner(initialized_accounts))?;
             let mut checks = Checks::new(config.harness, &test.name);
+            let streaming = config.harness == Harness::Strict && test_type.stream;
+            let mut streamed = None;
             if self.reuse_last_sync {
-                info!("Skipping indexing and using existent DB")
+                info!("Skipping indexing and using existent DB");
+                if streaming {
+                    let reason = "--reuse-last-sync reads an indexed database, with no stream";
+                    checks.skip(CheckId::StreamMatchesSnapshot, reason);
+                    checks.skip(CheckId::StreamCoverage, reason);
+                }
             } else {
                 let indexed =
                     build_spkg(substreams_yaml_path, Some(test.start_block), self.prebuilt_wasm)
                         .wrap_err("Failed to build spkg")
                         .and_then(|spkg_path| {
+                            if streaming {
+                                streamed = Some(self.index_streaming(
+                                    &tycho_runner,
+                                    &spkg_path,
+                                    test,
+                                    config,
+                                    &mut checks,
+                                )?);
+                                return Ok(());
+                            }
                             tycho_runner
                                 .run_tycho(
                                     &spkg_path,
@@ -842,6 +925,9 @@ impl TestRunner {
                     return Err(e);
                 }
             }
+            if let Some(Ok(streamed)) = &mut streamed {
+                self.execute_streamed(streamed, config, &mut checks);
+            }
             let rpc_server = tycho_runner.start_rpc_server();
             let result = match self
                 .runtime
@@ -854,7 +940,32 @@ impl TestRunner {
                          (stop block {})",
                         test.stop_block
                     );
-                    let run = self.run_test(test, config, block, &mut checks);
+                    let run = self.run_test(
+                        test,
+                        config,
+                        block,
+                        streamed.as_ref().map(|streamed| {
+                            streamed
+                                .as_ref()
+                                .map_err(String::as_str)
+                        }),
+                        &mut checks,
+                    );
+                    match streamed {
+                        Some(Ok(streamed)) => {
+                            let floor_problems = streamed.coverage.shortfalls(
+                                stream::Floor::DEFAULT,
+                                &simulated_ids(test),
+                                &executed_ids(test),
+                            );
+                            checks.warn(CheckId::StreamCoverage, &floor_problems);
+                            report.coverage.push(streamed.coverage);
+                        }
+                        Some(Err(_)) => {
+                            checks.not_run(CheckId::StreamCoverage, CheckId::StreamMatchesSnapshot)
+                        }
+                        None => {}
+                    }
                     report.drift.extend(checks.take_drift());
                     let (outcome, results) = checks.finish();
                     report.results.extend(results);
@@ -894,11 +1005,15 @@ impl TestRunner {
     ///
     /// In legacy mode the first failing check returns its error. In strict mode every check that
     /// does not depend on a failed one still runs, and the caller reads the outcome from `checks`.
+    ///
+    /// `streamed` is the outcome of streaming the range, when it was streamed: the stream's state
+    /// must then quote exactly as the snapshot's.
     fn run_test(
         &self,
         test: &IntegrationTest,
         config: &IntegrationTestsConfig,
         block: u64,
+        streamed: Option<Result<&Streamed, &str>>,
         checks: &mut Checks,
     ) -> miette::Result<()> {
         let expected_ids = test
@@ -942,6 +1057,9 @@ impl TestRunner {
                 CheckId::ExecLadder,
             ] {
                 checks.not_run(id, CheckId::Index);
+            }
+            if streamed.is_some() {
+                checks.not_run(CheckId::StreamMatchesSnapshot, CheckId::Index);
             }
             if !tvl_only_ids.is_empty() {
                 checks.not_run(CheckId::BalancesTvlOnly, CheckId::Index);
@@ -1057,8 +1175,20 @@ impl TestRunner {
             if halved.is_some() {
                 checks.not_run(CheckId::BalancesTvlOnly, CheckId::Decode);
             }
+            if streamed.is_some() {
+                checks.not_run(CheckId::StreamMatchesSnapshot, CheckId::Decode);
+            }
             return Ok(());
         };
+
+        if let Some(streamed) = streamed {
+            // Before anything decodes again: VM states read the shared database the next decode
+            // replaces.
+            checks.run(CheckId::StreamMatchesSnapshot, || {
+                let streamed = streamed.map_err(|e| miette!("the stream failed: {e}"))?;
+                Self::check_stream_matches_snapshot(test, streamed, &update, block)
+            })?;
+        }
 
         if let Some((snapshot, changed, all_tokens)) = halved {
             // Decoding again replaces the VM database with the same storage, so the states
@@ -1087,24 +1217,7 @@ impl TestRunner {
         let protocol_components_simulation: HashMap<String, ProtocolComponentModel> =
             update.new_pairs.clone();
 
-        // Strict mode tests each direction's limit as declared; `from_yaml` made sure every
-        // direction of every expected component has a declaration.
-        let limit_kinds: Option<HashMap<(String, Direction), LimitKind>> =
-            (config.harness == Harness::Strict).then(|| {
-                test.expected_components
-                    .iter()
-                    .flat_map(|component| {
-                        component_directions(component)
-                            .into_iter()
-                            .filter_map(move |direction| {
-                                let kind = config
-                                    .limits_for(component, &direction)?
-                                    .kind;
-                                Some(((component.base.id.to_lowercase(), direction), kind))
-                            })
-                    })
-                    .collect()
-            });
+        let limit_kinds = (config.harness == Harness::Strict).then(|| limit_kinds(test, config));
 
         // A test-wide ladder result covers the components without a skip. When every component
         // skips, nothing runs, and the ladder is reported skipped rather than passed.
@@ -1155,7 +1268,7 @@ impl TestRunner {
         if limit_kinds.is_some() {
             return self.check_strict_executions(
                 output,
-                &header,
+                Some(&header),
                 &config.protocol_system,
                 config.tolerance(),
                 executes_nothing,
@@ -2041,11 +2154,13 @@ impl TestRunner {
     /// the revert one unit past a hard limit, and the max output. Every execution runs in one
     /// batch, and each limit check is recorded per component and direction. With
     /// `executes_nothing`, the reason every component skips execution, the ladder is recorded as
-    /// skipped.
+    /// skipped. With no `block` to execute at, nothing is executed or recorded for the ladder, and
+    /// the limit checks are recorded from the simulation alone: a streamed block that only
+    /// simulates.
     fn check_strict_executions(
         &self,
         output: SimulationOutput,
-        block: &Block,
+        block: Option<&Block>,
         protocol_system: &str,
         tolerance: Tolerance,
         executes_nothing: Option<&str>,
@@ -2056,11 +2171,16 @@ impl TestRunner {
         let mut inputs = executions.clone();
         inputs.extend(at_limit.clone());
         inputs.extend(past_limit.clone());
-        let executed = self
-            .runtime
-            .block_on(self.simulate_executions(&inputs, block, protocol_system));
+        let execute = block.is_some();
+        let executed = match block {
+            Some(block) => self
+                .runtime
+                .block_on(self.simulate_executions(&inputs, block, protocol_system)),
+            None => Ok(HashMap::new()),
+        };
         let no_results = HashMap::new();
         let results = match &executed {
+            Ok(results) if !execute => results,
             Ok(results) => {
                 observe_executions(checks, &executions, results);
                 observe_executions(checks, &at_limit, results);
@@ -2086,6 +2206,9 @@ impl TestRunner {
             .map(|e| format!("the executions could not be simulated: {e:#}"));
         let execution_failure =
             |id: &Option<String>, judge: &dyn Fn(&str, &TychoExecutionInput) -> Option<String>| {
+                if !execute {
+                    return None;
+                }
                 let id = id.as_ref()?;
                 let input = at_limit
                     .get(id)
@@ -2166,6 +2289,405 @@ impl TestRunner {
             return vec![format!("the update has no component {key}")];
         };
         tvl_only::compare(original, quoted_halved, &component.tokens, executable_max_input)
+    }
+
+    /// Strict: indexes the test's range while streaming it. The indexer runs in the background,
+    /// serving the blocks it indexes; the runner subscribes before extraction starts, so every
+    /// block's deltas go through the decoder. Returns the indexer's outcome, and the stream's,
+    /// which may fail on its own.
+    fn index_streaming(
+        &self,
+        tycho_runner: &TychoRunner,
+        spkg_path: &str,
+        test: &IntegrationTest,
+        config: &IntegrationTestsConfig,
+        checks: &mut Checks,
+    ) -> miette::Result<Result<Streamed, String>> {
+        let limit_kinds = limit_kinds(test, config);
+        let mut indexer = tycho_runner
+            .start_tycho_streaming(
+                spkg_path,
+                test.start_block,
+                test.stop_block,
+                &config.protocol_type_names,
+                &config.protocol_system,
+                config.module_name.as_deref(),
+            )
+            .wrap_err("Failed to run Tycho")?;
+        let streamed = self.runtime.block_on(self.stream_range(
+            test,
+            config,
+            &limit_kinds,
+            &mut indexer,
+            checks,
+        ));
+        let indexed = TychoRunner::stop_tycho(indexer);
+        indexed?;
+        Ok(streamed.map_err(|e| {
+            error!("[{}] streaming the range failed: {e:#}", test.name);
+            format!("{e:#}")
+        }))
+    }
+
+    /// Subscribes to the indexer of the test's range and follows it to the end of the range:
+    /// applies every block, and runs the simulation checks at the sampled changed blocks.
+    async fn stream_range(
+        &self,
+        test: &IntegrationTest,
+        config: &IntegrationTestsConfig,
+        limit_kinds: &HashMap<(String, Direction), LimitKind>,
+        indexer: &mut Child,
+        checks: &mut Checks,
+    ) -> miette::Result<Streamed> {
+        let mut exited = || {
+            indexer
+                .try_wait()
+                .map_or(true, |status| status.is_some())
+        };
+        let expected: HashSet<String> = test
+            .expected_components
+            .iter()
+            .map(|component| component.base.id.to_lowercase())
+            .collect();
+
+        // The indexer's server comes up before extraction starts; wait for it.
+        let mut waited = 0;
+        let tokens = loop {
+            match tycho_simulation::utils::load_all_tokens(
+                &self.tycho_host(),
+                true,
+                Some("dummy"),
+                true,
+                self.chain,
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(tokens) => break tokens,
+                Err(e) if exited() || waited >= 300 => {
+                    return Err(miette!("the indexer's server did not come up: {e}"))
+                }
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    waited += 1;
+                }
+            }
+        };
+
+        let adapter_contract_path = self.get_adapter_contract_path(
+            config.adapter_contract.as_deref(),
+            config
+                .adapter_build_signature
+                .as_deref(),
+            config.adapter_build_args.as_deref(),
+        )?;
+        let mut decoder_context = DecoderContext::new().vm_traces(self.vm_simulation_traces);
+        if let Some(path) = adapter_contract_path
+            .as_deref()
+            .and_then(Path::to_str)
+        {
+            decoder_context = decoder_context.vm_adapter_path(path);
+        }
+        tycho_simulation::evm::engine_db::SHARED_TYCHO_DB
+            .clear()
+            .into_diagnostic()?;
+        let builder = ProtocolStreamBuilder::new(&self.tycho_host(), self.chain)
+            .auth_key(Some("dummy".to_string()))
+            // After `auth_key`, which turns TLS on.
+            .no_tls(true)
+            .min_token_quality(0)
+            .stream_end_policy(StreamEndPolicy::AnyEnded)
+            // The indexer sends the range as fast as it extracts it, and the client drops a
+            // subscription whose buffer fills, so the buffer holds the whole range while blocks
+            // are simulated.
+            .subscription_buffer_size(tokio::sync::Semaphore::MAX_PERMITS);
+        let builder = register_protocol_with_filter(
+            builder,
+            &config.protocol_system,
+            decoder_context,
+            ComponentFilter::Ids(expected.iter().cloned().collect()),
+        )
+        .skip_state_decode_failures(false)
+        .set_tokens(tokens)
+        .await;
+        let stream = builder
+            .build()
+            .await
+            .into_diagnostic()
+            .wrap_err("Failed to subscribe to the indexer")?;
+        tokio::pin!(stream);
+        info!("[{}] Streaming blocks {}-{}", test.name, test.start_block, test.stop_block);
+
+        let mut sampler =
+            stream::Sampler::new(test.start_block, test.stop_block, stream::MAX_SIMULATED_BLOCKS);
+        let mut streamed = Streamed {
+            sheets: BTreeMap::new(),
+            errors: Vec::new(),
+            coverage: stream::Coverage { test: test.name.clone(), ..Default::default() },
+            simulated: Vec::new(),
+        };
+        let mut components: HashMap<String, ProtocolComponentModel> = HashMap::new();
+        let mut latest: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut first = true;
+        let mut reached_stop = false;
+        let mut idle = Duration::ZERO;
+        loop {
+            // The stream ends when the indexer has extracted the range and ended the
+            // subscription. Waiting is bounded in case it ends without saying so.
+            let next = tokio::time::timeout(STREAM_POLL, stream.next()).await;
+            let update = match next {
+                Ok(Some(Ok(update))) => update,
+                Ok(Some(Err(e))) => {
+                    streamed.errors.push(format!("{e:#}"));
+                    continue;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    idle += STREAM_POLL;
+                    if reached_stop || exited() {
+                        break;
+                    }
+                    if idle >= STREAM_IDLE_LIMIT {
+                        return Err(miette!(
+                            "the stream sent nothing for {}s before reaching block {}",
+                            idle.as_secs(),
+                            test.stop_block
+                        ));
+                    }
+                    continue;
+                }
+            };
+            idle = Duration::ZERO;
+            let block = update.block_number;
+            for (id, component) in &update.new_pairs {
+                if expected.contains(&id.to_lowercase()) {
+                    components.insert(id.clone(), component.clone());
+                }
+            }
+            let changed: HashMap<String, Box<dyn ProtocolSim>> = update
+                .states
+                .iter()
+                .filter(|(id, _)| expected.contains(&id.to_lowercase()))
+                .map(|(id, state)| (id.clone(), state.clone_box()))
+                .collect();
+            for (id, state) in &changed {
+                latest.insert(id.clone(), state.clone_box());
+            }
+
+            // The first message is the snapshot the stream starts from, not a block's deltas.
+            let in_range = (test.start_block..=test.stop_block).contains(&block);
+            if !first && in_range {
+                streamed.coverage.blocks_streamed += 1;
+            }
+            if !first && in_range && !changed.is_empty() {
+                let coverage = &mut streamed.coverage;
+                coverage.changed_blocks += 1;
+                for id in changed.keys() {
+                    *coverage
+                        .changed_blocks_by_component
+                        .entry(id.to_lowercase())
+                        .or_default() += 1;
+                }
+                if sampler.take(block) {
+                    let new_pairs = changed
+                        .keys()
+                        .filter_map(|id| {
+                            components
+                                .get(id)
+                                .map(|c| (id.clone(), c.clone()))
+                        })
+                        .collect();
+                    let at_block = Update::new(block, changed, new_pairs);
+                    checks.at_block(Some(block));
+                    let output = checks.run(CheckId::SimLadder, || {
+                        self.run_simulation(
+                            &at_block,
+                            &components,
+                            &test.expected_components,
+                            &config.protocol_system,
+                            Some(limit_kinds),
+                        )
+                    });
+                    checks.at_block(None);
+                    if let Some(output) = output? {
+                        for limits in &output.limit_directions {
+                            coverage
+                                .quoted_directions
+                                .entry(limits.component.to_lowercase())
+                                .or_default()
+                                .insert(limits.direction.to_string());
+                        }
+                        coverage.simulated_blocks.push(block);
+                        streamed.simulated.push((block, output));
+                    }
+                }
+            }
+            first = false;
+
+            if block >= test.stop_block {
+                reached_stop = true;
+                let sheets = latest
+                    .iter()
+                    .filter_map(|(id, state)| {
+                        let component = components.get(id)?;
+                        let sheet = stream::quote_sheet(
+                            state.as_ref(),
+                            &component.tokens,
+                            executable_max_input,
+                        );
+                        Some((id.to_lowercase(), sheet))
+                    })
+                    .collect();
+                streamed.sheets.insert(block, sheets);
+            }
+        }
+
+        // The directions that trade at the end of the stream, which the floor asks to see quoted.
+        for (id, state) in &latest {
+            let Some(component) = components.get(id) else {
+                continue;
+            };
+            let tradable = component
+                .tokens
+                .iter()
+                .permutations(2)
+                .filter(|pair| {
+                    state
+                        .get_limits(pair[0].address.clone(), pair[1].address.clone())
+                        .is_ok_and(|(max_input, _)| !max_input.is_zero())
+                })
+                .map(|pair| {
+                    Direction {
+                        token_in: pair[0].address.clone(),
+                        token_out: pair[1].address.clone(),
+                    }
+                    .to_string()
+                })
+                .collect();
+            streamed
+                .coverage
+                .tradable_directions
+                .insert(id.to_lowercase(), tradable);
+        }
+        info!(
+            "[{}] Streamed {} blocks: {} changed an expected component, {} simulated",
+            test.name,
+            streamed.coverage.blocks_streamed,
+            streamed.coverage.changed_blocks,
+            streamed.simulated.len()
+        );
+        Ok(streamed)
+    }
+
+    /// Strict, after a streamed range: executes at the fewest simulated blocks, spread evenly,
+    /// that meet the floor, and records the limit checks of every simulated block.
+    fn execute_streamed(
+        &self,
+        streamed: &mut Streamed,
+        config: &IntegrationTestsConfig,
+        checks: &mut Checks,
+    ) {
+        let counts = |output: &SimulationOutput| {
+            stream::count_by_component(
+                output
+                    .executions
+                    .values()
+                    .chain(output.at_limit.values())
+                    .chain(output.past_limit.values())
+                    .map(|input| input.component_id.as_str()),
+            )
+        };
+        let candidates: Vec<stream::Candidate> = streamed
+            .simulated
+            .iter()
+            .map(|(block, output)| stream::Candidate { block: *block, executions: counts(output) })
+            .collect();
+        let to_execute = stream::blocks_to_execute(&candidates, stream::Floor::DEFAULT);
+        info!("Executing at {} of the {} simulated blocks", to_execute.len(), candidates.len());
+
+        for (block, output) in std::mem::take(&mut streamed.simulated) {
+            checks.at_block(Some(block));
+            let header = if to_execute.contains(&block) {
+                match self.runtime.block_on(
+                    self.rpc_provider
+                        .get_block_header(block),
+                ) {
+                    Ok(header) => Some(header),
+                    Err(e) => {
+                        checks.fail(CheckId::ExecLadder, &e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            if header.is_some() {
+                let coverage = &mut streamed.coverage;
+                for (id, count) in counts(&output) {
+                    coverage.executions += count;
+                    *coverage
+                        .executions_by_component
+                        .entry(id)
+                        .or_default() += count;
+                }
+                coverage.executed_blocks.push(block);
+            }
+            // Strict mode records each failure and goes on, so this never returns an error.
+            if let Err(e) = self.check_strict_executions(
+                output,
+                header.as_ref(),
+                &config.protocol_system,
+                config.tolerance(),
+                None,
+                checks,
+            ) {
+                error!("Executing at block {block} failed: {e:#}");
+            }
+        }
+        checks.at_block(None);
+    }
+
+    /// Strict, streamed: each simulated expected component of the snapshot at `block` must quote
+    /// exactly as its streamed state did then.
+    fn check_stream_matches_snapshot(
+        test: &IntegrationTest,
+        streamed: &Streamed,
+        update: &Update,
+        block: u64,
+    ) -> miette::Result<()> {
+        let sheets = streamed.sheets_at(block)?;
+        let mut differences: Vec<String> = streamed
+            .errors
+            .iter()
+            .map(|e| format!("the stream reported an error: {e}"))
+            .collect();
+        for id in simulated_ids(test) {
+            let Some((key, state)) = update
+                .states
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(&id))
+            else {
+                differences.push(format!("{id}: not in the snapshot"));
+                continue;
+            };
+            let Some(component) = update.new_pairs.get(key) else {
+                differences.push(format!("{id}: the snapshot has no component for it"));
+                continue;
+            };
+            let snapshot =
+                stream::quote_sheet(state.as_ref(), &component.tokens, executable_max_input);
+            match sheets.get(&id) {
+                None => differences.push(format!("{id}: not in the stream")),
+                Some(streamed) => differences.extend(
+                    stream::sheet_differences(streamed, &snapshot)
+                        .into_iter()
+                        .map(|difference| format!("{id}: {difference}")),
+                ),
+            }
+        }
+        ensure!(differences.is_empty(), "{}", differences.join("; "));
+        Ok(())
     }
 
     /// Strict: checks an expected component's indexed balances against the source it declares,
@@ -2344,6 +2866,26 @@ fn undecoded_components<'a>(
         .filter(|component| !component.skip_simulation.is_skipped())
         .map(|component| component.base.id.to_lowercase())
         .filter(|id| !decoded.contains(id))
+        .collect()
+}
+
+/// The lowercase ids of the expected components that are simulated.
+fn simulated_ids(test: &IntegrationTest) -> Vec<String> {
+    test.expected_components
+        .iter()
+        .filter(|component| !component.skip_simulation.is_skipped())
+        .map(|component| component.base.id.to_lowercase())
+        .collect()
+}
+
+/// The lowercase ids of the expected components that are executed.
+fn executed_ids(test: &IntegrationTest) -> Vec<String> {
+    test.expected_components
+        .iter()
+        .filter(|component| {
+            !component.skip_simulation.is_skipped() && !component.skip_execution.is_skipped()
+        })
+        .map(|component| component.base.id.to_lowercase())
         .collect()
 }
 
@@ -2607,7 +3149,11 @@ mod tests {
             ),
         ] {
             let runner = TestRunner::new(RunnerConfig {
-                test_type: TestType::Range(TestTypeRange { match_test: None, report: None }),
+                test_type: TestType::Range(TestTypeRange {
+                    match_test: None,
+                    report: None,
+                    stream: true,
+                }),
                 root_path: root_path.clone(),
                 chain: Chain::Arc,
                 protocol: protocol.to_string(),
@@ -2664,7 +3210,11 @@ mod tests {
     fn get_mocked_runner_for(chain: Chain, protocol: &str, rpc_url: String) -> TestRunner {
         let current_dir = std::env::current_dir().unwrap();
         TestRunner::new(RunnerConfig {
-            test_type: TestType::Range(TestTypeRange { match_test: None, report: None }),
+            test_type: TestType::Range(TestTypeRange {
+                match_test: None,
+                report: None,
+                stream: true,
+            }),
             root_path: current_dir,
             chain,
             protocol: protocol.to_string(),
