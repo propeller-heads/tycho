@@ -14,7 +14,8 @@ This test runs continuously in the cluster but it can also be run locally for de
 ## Supported Protocols
 
 - **On-chain Protocols**: All DEX protocols supported by Tycho (Uniswap V2/V3, Curve, Balancer, etc.)
-- **RFQ Protocols**: Request-for-Quote protocols like Hashflow
+- **RFQ Protocols**: Request-for-Quote venues (Bebop, Hashflow, Liquorice, Native), each run when its credentials are set
+- **pAMM Book Feeds**: venues selected by `--pamm` (default: Metric)
 - **Price Level Stream**: Titan pAMM price level stream venues (`pricelevelstream:*`, Ethereum only)
 
 ## Configuration
@@ -27,6 +28,8 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `TYCHO_URL`     | Tycho indexer endpoint     | `tycho-dev.propellerheads.xyz`             |
 | `RPC_URL`       | Blockchain RPC endpoint    | `https://eth-mainnet.alchemyapi.io/v2/...` |
 | `TYCHO_API_KEY` | API key for Tycho services | `your-api-key`                             |
+| `BEBOP_KEY`, `HASHFLOW_USER` + `HASHFLOW_KEY`, `LIQUORICE_USER` + `LIQUORICE_KEY`, `NATIVE_API_KEY` | RFQ venue credentials; a venue without them is skipped | |
+| `METRIC_API_KEY` | Metric (pAMM) credentials; required when `--pamm` lists `metric` | |
 
 ### Command Line Arguments
 
@@ -43,7 +46,8 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `--metrics-port`           | `9898`     | Port for Prometheus metrics server                                                                               |
 | `--disable-onchain`        | `false`    | Skip on-chain protocol testing                                                                                   |
 | `--disable-rfq`            | `false`    | Skip the RFQ book feeds (Bebop, Hashflow, Liquorice, Native)                                                     |
-| `--disable-pamm`           | `false`    | Skip the pAMM book feeds (Metric)                                                                                |
+| `--disable-pamm`           | `false`    | Skip the pAMM book feeds. Conflicts with `--pamm`                                                                |
+| `--pamm`                   | `metric`   | Comma-separated pAMM venues to run; replaces the default list. A listed venue missing its credentials, or whose feed fails to build, fails the run |
 | `--rfq-all-pairs`          | `false`    | Publish each RFQ venue as one component for every pair it prices                                                 |
 | `--disable-price-level-stream` | `false` | Skip Titan pAMM price level stream testing (only active on Ethereum)                                            |
 | `--price-level-stream-block-interval` | `1` | Emit one sampled price level update per this many blocks                                                    |
