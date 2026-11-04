@@ -750,12 +750,6 @@ Spot: A constructor or helper that receives an `Instant` parameter but calls `Sy
 Applies: rust, rust-test, substreams, script, python, solidity · look first at lines matching `now\(|instant|systemtime|clock|time|chrono|utc|date`
 Checked by: ast-grep `injected-and-internal-clock`
 
-### client-types-use-interface-terms
-A client-side type that maps onto an external interface uses that interface's parameters and names, not an abstraction the client converts back into them (an amount plus a tolerance fraction in place of the two bounds the interface takes).
-Why: Readers move between the contract docs, its revert errors and the client type, and a mismatch between them causes confusion and wrong conversions.
-Spot: A struct documented as 'becomes the router's X' whose fields differ from the contract arguments they feed.
-Applies: rust, rust-test, substreams, solidity, solidity-test, script, python
-
 ### migration-docs-between-released-versions
 User-facing migration docs describe the versions users move between; intermediate states that were superseded before users adopted them are dropped.
 Why: Documenting transient rules users never ran adds constraints to reason about and confuses the upgrade path.

@@ -292,3 +292,9 @@ Source: `crates/tycho-execution/CLAUDE.md` § Security › Building Executors (e
 Spot: handleCallback implementations without a verifyCallback call; Callback parameters commented out (`address /* token_ */`) while the body pays from transient context
 Applies: solidity, solidity-test · look first at lines matching `callback`
 Checked by: ast-grep `sol-callback-without-verify`; ast-grep `sol-callback-ignores-token`
+
+### client-types-use-interface-terms
+A client-side type that maps onto an external interface uses that interface's parameters and names, not an abstraction the client converts back into them (an amount plus a tolerance fraction in place of the two bounds the interface takes). This holds for the type that builds the call, not for user-facing request types.
+Why: Readers move between the contract docs, its revert errors and the client type, and a mismatch between them causes confusion and wrong conversions.
+Spot: A struct documented as 'becomes the router's X' whose fields differ from the contract arguments they feed.
+Applies: rust
