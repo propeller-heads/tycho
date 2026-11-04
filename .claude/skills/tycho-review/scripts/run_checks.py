@@ -134,7 +134,7 @@ class Run:
 
 def nextest_failures(text: str):
     seen, out = set(), []
-    for m in re.finditer(r"^\s+FAIL \[[^\]]*\] (?:\(\d+/\d+\) )?(\S+) (\S+)\s*$", text, re.M):
+    for m in re.finditer(r"^\s+FAIL \[[^\]]*\] (?:\(\s*\d+/\d+\) )?(\S+) (\S+)\s*$", text, re.M):
         key = (m.group(1), m.group(2))
         if key not in seen:
             seen.add(key)
@@ -142,7 +142,7 @@ def nextest_failures(text: str):
     return out
 
 
-ENVIRONMENT = re.compile(r"createSelectFork|forked environment|missing trie node|environment variable `\w+` not found|"
+ENVIRONMENT = re.compile(r"createSelectFork|forked environment|missing trie node|environment variable `\w+` not found|NotPresent|"
                          r"error sending request|tls handshake|connection (refused|reset)|timed out|rate limit|429")
 
 
