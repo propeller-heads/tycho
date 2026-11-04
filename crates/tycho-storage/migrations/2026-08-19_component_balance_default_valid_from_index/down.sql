@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS idx_component_balance_default_valid_from;
