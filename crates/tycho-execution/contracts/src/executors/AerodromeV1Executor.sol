@@ -47,8 +47,6 @@ contract AerodromeV1Executor is IExecutor {
     }
 
     /// @dev The output to request from `pool` for `amountIn` already sent to it.
-    // Called by `_swap`; Slither misreads the AeroBasicExecutor override as making it unused.
-    // slither-disable-next-line dead-code
     function _getAmountOut(
         IAerodromeV1Pool pool,
         uint256 amountIn,

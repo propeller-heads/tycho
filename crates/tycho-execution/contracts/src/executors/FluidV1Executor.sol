@@ -41,7 +41,6 @@ contract FluidV1Executor is IExecutor, ICallback {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable

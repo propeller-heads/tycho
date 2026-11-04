@@ -191,8 +191,6 @@ abstract contract TychoFallbackRouter is
         }
 
         FallbackProtocol protocol = _executeFallback(swap_, fallbackSwap);
-        // Reentrancy cannot happen: `_swap` is nonReentrant.
-        // slither-disable-next-line reentrancy-events
         emit FallbackSwap(
             primary,
             swap_.tokenIn,

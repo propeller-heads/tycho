@@ -6,9 +6,7 @@ import {
     IERC20,
     SafeERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-// slither-disable-next-line solc-version
 import {IAsset} from "@balancer-labs/v2-interfaces/contracts/vault/IAsset.sol";
-// slither-disable-next-line solc-version
 import {IVault} from "@balancer-labs/v2-interfaces/contracts/vault/IVault.sol";
 import {TransferManager} from "../TransferManager.sol";
 

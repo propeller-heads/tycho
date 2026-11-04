@@ -160,7 +160,6 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
     /**
      * @dev Allows this contract to receive native token with empty msg.data from contracts
      */
-    // slither-disable-next-line locked-ether
     receive() external payable {
         require(
             msg.sender.code.length != 0,

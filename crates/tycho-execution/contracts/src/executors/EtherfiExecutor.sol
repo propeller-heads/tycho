@@ -77,7 +77,6 @@ contract EtherfiExecutor is IExecutor {
         redemptionManagerAddress = _redemptionManagerAddress;
     }
 
-    // slither-disable-next-line locked-ether
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable

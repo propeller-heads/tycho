@@ -188,7 +188,6 @@ contract UniswapV4Executor is IExecutor, ICallback {
         return token == ETH_ADDRESS ? address(0) : token;
     }
 
-    // slither-disable-next-line dead-code
     function _decodeData(bytes calldata data)
         internal
         view
