@@ -23,7 +23,7 @@ RUST_NIGHTLY = "nightly-2026-06-28"
 # Rust, since rustup verifies its own downloads.
 
 # Solidity: forge, cast, anvil. solc is pinned per project in each foundry.toml.
-foundry = "1.5.1"
+foundry = "1.9.0"
 "pipx:slither-analyzer" = "0.11.4"
 node = "26.12.1"
 
