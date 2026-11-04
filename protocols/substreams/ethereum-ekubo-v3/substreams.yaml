@@ -28,11 +28,13 @@ networks:
     initialBlock:
       map_events: 24134506 # First pool creation
 
-# Extension addresses for the indexed chain. `ve33_address` is empty on chains
-# without a Ve33 deployment (e.g. Ethereum); `signed_exclusive_swap_address` is
-# the chain's SignedExclusiveSwap deployment; `mev_capture_v21_address` is the
-# chain's MEVCapture v2.1 deployment (Ethereum only). Override at deployment time, e.g.
-# `-p map_events=ve33_address=0x... -p map_components=ve33_address=0x...`.
+# Extension addresses for the indexed chain, as query strings. `ve33_address` is
+# omitted on chains without a Ve33 deployment (e.g. Ethereum);
+# `signed_exclusive_swap_address` is the chain's SignedExclusiveSwap deployment;
+# `mev_capture_v21_address` is the chain's MEVCapture v2.1 deployment (Ethereum
+# only). A `-p` override replaces a module's whole params string, so it must
+# repeat every address the module uses, e.g.
+# `-p map_events=mev_capture_v21_address=0x...&ve33_address=0x...`.
 params:
   map_events: "mev_capture_v21_address=0x51f831c23fa4051862881Ef8EfC0c3C37905Ce49"
   map_components: "signed_exclusive_swap_address=0x550CFe1292d0D9c0d28f232b3F42Edb4439B1D09"

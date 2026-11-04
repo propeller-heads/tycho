@@ -287,11 +287,13 @@ mod tests {
     fn test_extension_state_updates_take_the_last_write_per_pool() {
         let trace = TransactionTrace {
             calls: vec![
+                // A parent call's write after its subcalls comes before them in `calls`.
                 Call {
                     storage_changes: vec![
                         change(EXTENSION, 1, 10, 5),
                         change(EXTENSION, 2, 20, 6),
                         change(CORE_ADDRESS, 1, 99, 7),
+                        change(EXTENSION, 1, 12, 10),
                     ],
                     ..Default::default()
                 },
@@ -316,6 +318,6 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(updates, vec![(2, 20, 6), (1, 11, 8)]);
+        assert_eq!(updates, vec![(2, 20, 6), (1, 12, 10)]);
     }
 }

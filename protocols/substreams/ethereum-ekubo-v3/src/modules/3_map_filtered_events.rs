@@ -2,6 +2,11 @@
 //! pool details store. When the package is synced from its intended start
 //! block every pool initialization is seen, so this filter is a no-op; it
 //! exists to support range integration tests, which don't sync from the start.
+//!
+//! Also drops MEVCapture v2.1 state updates for pools on another extension.
+//! The extension writes the state slot of whichever pool a forwarded call
+//! names, so a call naming a pool it doesn't extend must not give that pool an
+//! `anchor_state` attribute.
 
 use substreams::store::{StoreGet, StoreGetProto};
 use substreams_helper::hex::Hexable;
@@ -35,10 +40,12 @@ fn map_filtered_events(
                             Event::PositionUpdated(_) |
                             Event::VirtualExecution(_) |
                             Event::RateUpdated(_) |
-                            Event::SwapFeeUpdated(_) |
-                            Event::ExtensionStateUpdated(_) => {
+                            Event::SwapFeeUpdated(_) => {
                                 pool_details_store.has_last(log.pool_id.to_hex())
                             }
+                            Event::ExtensionStateUpdated(_) => pool_details_store
+                                .get_last(log.pool_id.to_hex())
+                                .is_some_and(|details| details.is_mev_capture_v21),
                         }
                     })
                     .collect();

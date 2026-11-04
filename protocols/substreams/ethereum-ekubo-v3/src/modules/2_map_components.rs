@@ -156,7 +156,7 @@ fn maybe_create_component(
     ];
 
     if pi.is_mev_capture_v21 {
-        static_att.extend(mev_capture_v21_config_attributes(pool_config.extension));
+        static_att.extend(mev_capture_v21_config_attributes(pool_config.extension, &component_id));
     }
 
     if Some(pool_config.extension) == signed_exclusive_swap_address {
@@ -198,8 +198,14 @@ fn maybe_create_component(
 }
 
 /// The MEVCapture v2.1 extension's immutable configuration (`getConfig`), which
-/// quoting needs and which no event carries.
-fn mev_capture_v21_config_attributes(extension: Address) -> Vec<Attribute> {
+/// quoting needs and which no event carries. Each value is a big-endian
+/// attribute of its width in the extension's `Config`: `half_life` and
+/// `clamp_ticks` take 4 bytes, `max_fee` 8 bytes, and `slope_k`, `segment_exp`,
+/// `j_lin` and `m_gate` 1 byte. `segmentWidthMultiplier` is left out, because
+/// it is `2 ** segmentExp`.
+///
+/// Panics if the call fails, which it can't for the deployed extension.
+fn mev_capture_v21_config_attributes(extension: Address, component_id: &str) -> Vec<Attribute> {
     let (
         half_life,
         slope_k,
@@ -211,16 +217,30 @@ fn mev_capture_v21_config_attributes(extension: Address) -> Vec<Attribute> {
         m_gate,
     ) = mev_capture_v21::functions::GetConfig {}
         .call(extension.to_vec())
-        .expect("MEVCapture v2.1 getConfig call to succeed");
+        .unwrap_or_else(|| {
+            panic!(
+                "getConfig of MEVCapture v2.1 extension {extension} failed for pool {component_id}"
+            )
+        });
+
+    let uint32 = |value: BigInt| {
+        u32::try_from(value.to_u64())
+            .expect("getConfig field should be a uint32")
+            .to_be_bytes()
+            .to_vec()
+    };
+    let uint8 = |value: BigInt| {
+        vec![u8::try_from(value.to_u64()).expect("getConfig field should be a uint8")]
+    };
 
     [
-        ("half_life", half_life.to_u64().to_be_bytes()[4..].to_vec()),
-        ("slope_k", vec![slope_k.to_u64() as u8]),
-        ("segment_exp", vec![segment_exp.to_u64() as u8]),
-        ("j_lin", vec![j_lin.to_u64() as u8]),
+        ("half_life", uint32(half_life)),
+        ("slope_k", uint8(slope_k)),
+        ("segment_exp", uint8(segment_exp)),
+        ("j_lin", uint8(j_lin)),
         ("max_fee", max_fee.to_u64().to_be_bytes().to_vec()),
-        ("clamp_ticks", clamp_ticks.to_u64().to_be_bytes()[4..].to_vec()),
-        ("m_gate", vec![m_gate.to_u64() as u8]),
+        ("clamp_ticks", uint32(clamp_ticks)),
+        ("m_gate", uint8(m_gate)),
     ]
     .into_iter()
     .map(|(name, value)| Attribute {

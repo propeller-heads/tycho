@@ -2,6 +2,7 @@ use alloy_primitives::Address;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Params {
     ve33_address: Option<Address>,
     signed_exclusive_swap_address: Option<Address>,

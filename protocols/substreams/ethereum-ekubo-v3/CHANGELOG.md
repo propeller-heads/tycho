@@ -9,9 +9,11 @@
     is created and add it as static attributes (`half_life`, `slope_k`,
     `segment_exp`, `j_lin`, `max_fee`, `clamp_ticks`, `m_gate`);
   - emit the extension's per-pool storage word (the anchor state, stored at
-    the slot keyed by the pool ID) as the `anchor_state` attribute. It changes
-    on the first swap of a timestamp and on position updates without an
-    event, so it is taken from the transaction's storage changes;
+    the slot keyed by the pool ID) as the `anchor_state` attribute, only for
+    pools on the extension. It is written without an event at pool
+    initialization, by the first swap and the first position update of a
+    timestamp, and by a later swap that raises the liquidity reference, so it
+    is taken from the transaction's storage changes;
   - keep `tick/{index}` attributes while any position references the tick,
     with a zero value when the net liquidity delta is zero. The extension cuts
     its Core calls at initialized ticks, so quoting needs all of them. Tick
