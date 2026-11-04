@@ -103,6 +103,30 @@ pub async fn simulate_swap_transaction_before_block(
     .await
 }
 
+/// [`simulate_swap_transaction`], but in the context of the block after `block`: the next number,
+/// and a timestamp `block_time_secs` later. A swap quoted on `block`'s state executes there at the
+/// earliest, and the tycho-simulation decoder prices native protocol states for that block, so a
+/// time-dependent quote is compared against the execution it predicts. A pending block, whose hash
+/// is zero, simulates on the pending state as [`simulate_swap_transaction`] does.
+pub async fn simulate_swap_transaction_next_block(
+    rpc_tools: &RPCTools,
+    execution_info: HashMap<String, TychoExecutionInput>,
+    block: &Block,
+    router_overwrites_data: RouterOverwritesData,
+    oracle_overwrites: Option<AddressHashMap<B256HashMap<B256>>>,
+    block_time_secs: u64,
+) -> SwapSimulationResult {
+    simulate_swap_transaction_on(
+        rpc_tools,
+        execution_info,
+        block,
+        router_overwrites_data,
+        oracle_overwrites,
+        SimulationBase::NextBlock { block_time_secs },
+    )
+    .await
+}
+
 /// What [`simulate_swap_transaction`] returns: one result per simulation id, or the error that
 /// failed the whole batch with the overwrites and metadata built for it so far.
 pub type SwapSimulationResult = Result<
@@ -876,14 +900,30 @@ mod tests {
         assert_eq!(call, (BlockId::from(PARENT_HASH), Some(number_and_time())));
     }
 
+    /// In the block after a mined block, a simulation reads the mined block's state with the next
+    /// number and a timestamp one block time later.
+    #[tokio::test]
+    async fn in_the_next_block_the_simulation_reads_the_state_one_block_time_later() {
+        let call = traced_call(SimulationBase::NextBlock { block_time_secs: 2 }, true).await;
+
+        let next_block = BlockOverrides {
+            number: Some(U256::from(NUMBER + 1)),
+            time: Some(TIMESTAMP + 2),
+            ..Default::default()
+        };
+        assert_eq!(call, (BlockId::from(NUMBER), Some(next_block)));
+    }
+
     /// A pending block reads the pending state, with no block overrides, whatever the base.
     #[tokio::test]
     async fn a_pending_block_reads_the_pending_state_whatever_the_base() {
         let after = traced_call(SimulationBase::AfterBlock, false).await;
         let before = traced_call(SimulationBase::BeforeBlock, false).await;
+        let next = traced_call(SimulationBase::NextBlock { block_time_secs: 2 }, false).await;
 
         let pending = (BlockId::from(BlockNumberOrTag::Pending), None);
         assert_eq!(after, pending);
         assert_eq!(before, pending);
+        assert_eq!(next, pending);
     }
 }

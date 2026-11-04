@@ -46,7 +46,8 @@ use tycho_test::{
     execution::{
         encoding::{encode_swap, pamm_account_overwrites},
         models::{RouterOverwritesData, TychoExecutionInput, TychoExecutionResult},
-        simulate_swap_transaction, simulate_swap_transaction_before_block, tenderly,
+        simulate_swap_transaction, simulate_swap_transaction_before_block,
+        simulate_swap_transaction_next_block, tenderly,
     },
     is_block_not_found,
     token_prices::{cap_amount_to_eth_value, load_token_prices},
@@ -1441,12 +1442,22 @@ async fn process_update(
     // A price level quote prices the block Titan was building, and its swaps carry the account
     // state the quote was priced on (`account_overwrites`) whenever the stream attached one. So
     // they are simulated the way a consumer tests the quote before that block exists: on the
-    // quoted block's parent, with the quoted block's number and timestamp. Every other swap, a
-    // pinned component's say, is simulated on the block's own state.
+    // quoted block's parent, with the quoted block's number and timestamp. The decoder prices a
+    // native state of a full block's update for the block after it, where a swap quoted on it
+    // executes at the earliest, so those swaps are simulated on the block's state in the next
+    // block's context. Every other swap — a VM state's, a partial block's or an RFQ quote's — is
+    // simulated on the block's own state, in its own context.
     let (before_block, after_block): (HashMap<_, _>, HashMap<_, _>) = block_execution_info
         .clone()
         .into_iter()
         .partition(|(_, info)| simulates_before_block(&info.protocol_system));
+    let full_block_update = match &update.payload {
+        StreamUpdatePayload::Protocol(protocol_update) => !protocol_update.is_partial,
+        StreamUpdatePayload::Book { .. } | StreamUpdatePayload::PriceLevelStream(_) => false,
+    };
+    let (next_block, after_block): (HashMap<_, _>, HashMap<_, _>) = after_block
+        .into_iter()
+        .partition(|(_, info)| full_block_update && is_native(&info.protocol_system));
     record_swaps_without_simulation_overrides(&before_block);
     let mut results = HashMap::new();
     if !before_block.is_empty() {
@@ -1457,6 +1468,20 @@ async fn process_update(
                 &block,
                 router_overwrites_data.clone(),
                 None,
+            )
+            .await
+            .map_err(|(e, _, _)| e)?,
+        );
+    }
+    if !next_block.is_empty() {
+        results.extend(
+            simulate_swap_transaction_next_block(
+                &rpc_tools,
+                next_block,
+                &block,
+                router_overwrites_data.clone(),
+                None,
+                chain.block_time_secs(),
             )
             .await
             .map_err(|(e, _, _)| e)?,
@@ -2213,6 +2238,12 @@ fn simulates_before_block(protocol_system: &str) -> bool {
     pamm_venue(protocol_system).is_some()
 }
 
+/// Whether `protocol_system` is simulated by a native state, which the decoder prices for the
+/// block after its update's, rather than by a VM state, which runs in the update block's context.
+fn is_native(protocol_system: &str) -> bool {
+    !protocol_system.starts_with("vm:")
+}
+
 /// The block a Tenderly link replays a swap of `block` in. `None` keeps the link's default, the
 /// block after `block`, which matches a simulation on `block`'s own state. A swap simulated before
 /// `block` replays in `block` itself, on its parent's state.
@@ -2326,7 +2357,7 @@ mod tests {
     use tycho_simulation::tycho_common::models::Chain;
 
     use super::{
-        book_swap_directions, is_oracle_stale_revert, is_stale_quote, pamm_venue,
+        book_swap_directions, is_native, is_oracle_stale_revert, is_stale_quote, pamm_venue,
         sample_swap_directions, should_fetch_block_by_number, Cli, TychoState,
     };
 
@@ -2343,6 +2374,17 @@ mod tests {
         #[case] expected: Option<&str>,
     ) {
         assert_eq!(pamm_venue(protocol_system), expected);
+    }
+
+    #[rstest]
+    #[case::native("biconomy", true)]
+    #[case::native_hooks("uniswap_v4_hooks", true)]
+    #[case::vm("vm:curve", false)]
+    fn native_protocols_are_told_apart_from_vm_ones(
+        #[case] protocol_system: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(is_native(protocol_system), expected);
     }
 
     #[rstest]
