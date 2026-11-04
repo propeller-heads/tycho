@@ -249,10 +249,8 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             address(usv3Executor), usdcWethV3Pool2OneZeroData
         );
 
-        // Set transient storage to allow transferFrom from ALICE
-        tychoRouter.tstoreExposed(USDC_ADDR, amountIn, false, false);
-        tychoRouter.exposedSequentialSwap(
-            amountIn, pleEncode(swaps), tychoRouterAddr
+        tychoRouter.exposedSequentialSwapWithTransferFrom(
+            USDC_ADDR, amountIn, pleEncode(swaps), tychoRouterAddr
         );
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 99792554);
         assertEq(IERC20(USDC_ADDR).balanceOf(ALICE), 0);
