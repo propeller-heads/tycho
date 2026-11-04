@@ -74,15 +74,6 @@ contract TychoRouterExposed is TychoRouterV3 {
         )
     {}
 
-    function tstoreExposed(
-        address tokenIn,
-        uint256 amountIn,
-        bool isPermit2,
-        bool useVault
-    ) external {
-        _tstoreTransferFromInfo(tokenIn, amountIn, isPermit2, useVault);
-    }
-
     function exposedSplitSwap(
         uint256 amountIn,
         uint256 nTokens,
@@ -98,6 +89,31 @@ contract TychoRouterExposed is TychoRouterV3 {
         bytes calldata swaps,
         address receiver
     ) external returns (uint256) {
+        return _sequentialSwap(amountIn, swaps, receiver);
+    }
+
+    /// Authorises the swap to `transferFrom` `amountIn` of `tokenIn` from the
+    /// caller, then runs the split swap.
+    function exposedSplitSwapWithTransferFrom(
+        address tokenIn,
+        uint256 amountIn,
+        uint256 nTokens,
+        bytes calldata swaps,
+        address receiver,
+        bool isCyclical
+    ) external returns (uint256) {
+        _tstoreTransferFromInfo(tokenIn, amountIn, false, false);
+        return _splitSwap(amountIn, nTokens, swaps, receiver, isCyclical);
+    }
+
+    /// Sequential-swap counterpart of `exposedSplitSwapWithTransferFrom`.
+    function exposedSequentialSwapWithTransferFrom(
+        address tokenIn,
+        uint256 amountIn,
+        bytes calldata swaps,
+        address receiver
+    ) external returns (uint256) {
+        _tstoreTransferFromInfo(tokenIn, amountIn, false, false);
         return _sequentialSwap(amountIn, swaps, receiver);
     }
 
