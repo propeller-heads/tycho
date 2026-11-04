@@ -401,7 +401,10 @@ async fn main() -> miette::Result<()> {
     match result {
         Ok(_) => std::process::exit(0),
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("Error: {e}");
+            for cause in e.chain().skip(1) {
+                eprintln!("  caused by: {cause}");
+            }
             std::process::exit(1);
         }
     }
