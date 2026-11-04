@@ -11,12 +11,12 @@ pub struct PoolParams {
     pub asset: String,
     pub static_attribute_keys: Option<Vec<String>>,
     pub static_attribute_vals: Option<Vec<String>>,
-    /// Getters traced as extra entrypoints, so DCI indexes state the standard entrypoints can
-    /// miss: storage a conversion reads only on some branches (e.g. an accrual rate skipped when
-    /// `rho == block.timestamp`) or that the simulation reads directly. Paired by index with
-    /// `getter_calldata`.
-    pub getter_signatures: Option<Vec<String>>,
-    pub getter_calldata: Option<Vec<String>>,
+    /// DCI entrypoints traced in addition to the standard ERC4626 ones, so DCI indexes storage
+    /// the standard traces can miss: state a conversion reads only on some branches (e.g. an
+    /// accrual rate skipped when `rho == block.timestamp`). Paired by index with
+    /// `entrypoint_calldata`.
+    pub entrypoint_signatures: Option<Vec<String>>,
+    pub entrypoint_calldata: Option<Vec<String>>,
 }
 
 impl PoolParams {
@@ -30,32 +30,32 @@ impl PoolParams {
         Ok(result)
     }
 
-    /// Returns the `(signature, calldata)` of each configured getter.
-    pub fn getters(&self) -> Result<Vec<(String, Vec<u8>)>> {
+    /// Returns the `(signature, calldata)` of each configured extra entrypoint.
+    pub fn extra_entrypoints(&self) -> Result<Vec<(String, Vec<u8>)>> {
         let signatures = self
-            .getter_signatures
+            .entrypoint_signatures
             .clone()
             .unwrap_or_default();
         let calldata = self
-            .getter_calldata
+            .entrypoint_calldata
             .clone()
             .unwrap_or_default();
         if signatures.len() != calldata.len() {
             anyhow::bail!(
-                "Vault {}: {} getter signatures but {} calldata entries",
+                "Vault {}: {} entrypoint signatures but {} calldata entries",
                 self.address,
                 signatures.len(),
                 calldata.len()
             );
         }
-        let mut getters = Vec::with_capacity(signatures.len());
+        let mut entrypoints = Vec::with_capacity(signatures.len());
         for (signature, data) in signatures.into_iter().zip(calldata) {
             let data = hex::decode(&data).with_context(|| {
-                format!("Vault {}: invalid calldata for getter {signature}", self.address)
+                format!("Vault {}: invalid calldata for entrypoint {signature}", self.address)
             })?;
-            getters.push((signature, data));
+            entrypoints.push((signature, data));
         }
-        Ok(getters)
+        Ok(entrypoints)
     }
 }
 
@@ -70,40 +70,37 @@ mod test {
     }
 
     #[test]
-    fn test_decode_getters() {
-        let params = "address=056b269eb1f75477a8666ae8c7fe01b64dd55ecc&tx_hash=a50b&asset=a0b8&block=1&getter_signatures[]=lastReport()&getter_calldata[]=c3535b52&getter_signatures[]=balanceOf(address)&getter_calldata[]=70a08231000000000000000000000000056b269eb1f75477a8666ae8c7fe01b64dd55ecc#address=a3931d71877c0e7a3148cb7eb4463524fec27fbd&tx_hash=e1be&asset=dc03&block=2";
+    fn test_decode_extra_entrypoints() {
+        let params = "address=99cd4ec3f88a45940936f469e4bb72a2a701eeb9&tx_hash=719e&asset=dc03&block=1&entrypoint_signatures[]=str()&entrypoint_calldata[]=c15bae84&entrypoint_signatures[]=chi()&entrypoint_calldata[]=c92aecc4#address=a3931d71877c0e7a3148cb7eb4463524fec27fbd&tx_hash=e1be&asset=dc03&block=2";
         let pools = PoolParams::parse_params(params).unwrap();
 
-        let getters = pools[0].getters().unwrap();
+        let entrypoints = pools[0].extra_entrypoints().unwrap();
         assert_eq!(
-            getters,
+            entrypoints,
             vec![
-                ("lastReport()".to_string(), hex::decode("c3535b52").unwrap()),
-                (
-                    "balanceOf(address)".to_string(),
-                    hex::decode(
-                        "70a08231000000000000000000000000056b269eb1f75477a8666ae8c7fe01b64dd55ecc"
-                    )
-                    .unwrap()
-                ),
+                ("str()".to_string(), hex::decode("c15bae84").unwrap()),
+                ("chi()".to_string(), hex::decode("c92aecc4").unwrap()),
             ]
         );
-        assert!(pools[1].getters().unwrap().is_empty());
+        assert!(pools[1]
+            .extra_entrypoints()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
-    fn test_getters_reject_unpaired_entries() {
-        let params = "address=99cd&tx_hash=719e&asset=dc03&block=1&getter_signatures[]=str()&getter_signatures[]=chi()&getter_calldata[]=c15bae84";
+    fn test_extra_entrypoints_reject_unpaired_entries() {
+        let params = "address=99cd&tx_hash=719e&asset=dc03&block=1&entrypoint_signatures[]=str()&entrypoint_signatures[]=chi()&entrypoint_calldata[]=c15bae84";
         let pools = PoolParams::parse_params(params).unwrap();
 
-        assert!(pools[0].getters().is_err());
+        assert!(pools[0].extra_entrypoints().is_err());
     }
 
     #[test]
-    fn test_getters_reject_invalid_calldata() {
-        let params = "address=99cd&tx_hash=719e&asset=dc03&block=1&getter_signatures[]=str()&getter_calldata[]=0xc15bae84";
+    fn test_extra_entrypoints_reject_invalid_calldata() {
+        let params = "address=99cd&tx_hash=719e&asset=dc03&block=1&entrypoint_signatures[]=str()&entrypoint_calldata[]=0xc15bae84";
         let pools = PoolParams::parse_params(params).unwrap();
 
-        assert!(pools[0].getters().is_err());
+        assert!(pools[0].extra_entrypoints().is_err());
     }
 }

@@ -47,7 +47,7 @@
     "block": 23219535,
     "tx_hash": "719ef7cf10e4497963bd2c0a7d4123240331d94991c5ee5010ba1beee9effcfd",
     "asset": "dc035d45d973e3ec169d2276ddab16f1e407384f",
-    "getters": [
+    "extra_entrypoints": [
       {
         "signature": "str()",
         "calldata": "c15bae84"

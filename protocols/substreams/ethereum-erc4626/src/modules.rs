@@ -237,9 +237,9 @@ pub fn map_protocol_changes(
     first_interaction_store: StoreDeltas,
 ) -> Result<BlockChanges, substreams::errors::Error> {
     let pool_params = PoolParams::parse_params(params.as_str())?;
-    let mut getters: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
+    let mut extra_entrypoints: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
     for pool in &pool_params {
-        getters.insert(format!("0x{}", pool.address), pool.getters()?);
+        extra_entrypoints.insert(format!("0x{}", pool.address), pool.extra_entrypoints()?);
     }
 
     // We merge contract changes by transaction (identified by transaction index)
@@ -337,7 +337,11 @@ pub fn map_protocol_changes(
                     "maxRedeem(address)",
                     erc4626::functions::MaxRedeem { owner: user.clone() }.encode(),
                 );
-                for (signature, calldata) in getters
+                // DCI indexes only the slots these traces read, on the branch the vault takes at
+                // this block. A vault whose conversion reads some state only on other branches
+                // (stUSDS's `str`) lists an entrypoint reading it in `params.json`; the Readme
+                // gives each vault's reason.
+                for (signature, calldata) in extra_entrypoints
                     .get(&log.address.to_hex())
                     .into_iter()
                     .flatten()

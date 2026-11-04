@@ -14,8 +14,8 @@ This Substreams package tracks ERC4626 vaults on Ethereum, emitting `ProtocolCom
    - `tx_hash`: transaction hash that created/initialized the vault; used to emit the component in that block.
    - `block`: block number where the vault is created/initialized.
    - `asset`: underlying asset address (lowercase, no `0x`).
-   - `getters` (optional): extra view calls traced as DCI entrypoints, each a
-     `signature` (e.g. `str()`) and its full `calldata` (hex, no `0x`). See below.
+   - `extra_entrypoints` (optional): DCI entrypoints traced in addition to the standard ones,
+     each a `signature` (e.g. `str()`) and its full `calldata` (hex, no `0x`). See below.
 2. Generate the encoded params string:
    ```bash
    python params.py
@@ -23,13 +23,13 @@ This Substreams package tracks ERC4626 vaults on Ethereum, emitting `ProtocolCom
 3. Copy the output and replace both the `params.map_protocol_components` and the `params.map_protocol_changes` values in `substreams.yaml` (keep each quoted as a single string).
 4. Rebuild the Substreams package if needed for deployment or testing.
 
-## Entrypoints and getters
+## Entrypoints
 
 At a vault's first `Deposit`/`Withdraw`, `map_protocol_changes` emits DCI entrypoints for
-`totalSupply()`, `convertToShares`, `convertToAssets`, `maxDeposit` and `maxRedeem`, plus one per
-configured getter. DCI indexes only the storage slots a trace reads, and that first trace runs on
-whatever branch the vault was on at that block. A vault that reads part of its rate only on some
-branches therefore needs a getter that reads that state directly:
+`totalSupply()`, `convertToShares`, `convertToAssets`, `maxDeposit` and `maxRedeem`, plus the
+vault's `extra_entrypoints`. DCI indexes only the storage slots a trace reads, and that first
+trace runs on whatever branch the vault was on at that block. A vault that reads part of its rate
+only on some branches therefore needs an extra entrypoint that reads that state directly:
 
 - `stUSDS`: `str()`. Its rate accrues `str` only when `block.timestamp > rho`, and every deposit
   sets `rho` to the current block, so the first trace never reads it.
