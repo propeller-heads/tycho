@@ -101,7 +101,9 @@ abstract contract TychoSubsidizingTestBase is TychoRouterTestSetup {
         executor = new TychoSubsidizingExecutor(payer_);
         address[] memory executors = new address[](1);
         executors[0] = address(executor);
-        vm.warp(block.timestamp - tychoRouter.DELAY_EXECUTOR_ACTIVATION());
+        vm.warp(
+            vm.getBlockTimestamp() - tychoRouter.DELAY_EXECUTOR_ACTIVATION()
+        );
         vm.prank(EXECUTOR_SETTER);
         tychoRouter.setExecutors(executors);
         vm.warp(forkTimestamp);
@@ -273,7 +275,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             amount,
             MIN_AMOUNT_IN,
             NONCE,
-            uint48(block.timestamp + 1 hours),
+            uint48(vm.getBlockTimestamp() + 1 hours),
             signature,
             inner,
             innerData
@@ -1206,7 +1208,7 @@ contract TychoSubsidizingWithPayerTest is TychoSubsidizingTestBase {
             minAmountIn: 1,
             innerSwapHash: keccak256(abi.encodePacked(inner, innerData)),
             nonce: NONCE,
-            deadline: block.timestamp + 1 hours
+            deadline: vm.getBlockTimestamp() + 1 hours
         });
     }
 
@@ -1218,6 +1220,7 @@ contract TychoSubsidizingWithPayerTest is TychoSubsidizingTestBase {
                 DOMAIN_TYPEHASH,
                 keccak256("TychoSubsidyPayer"),
                 keccak256("1"),
+                // forge-lint: disable-next-line(environment-read-across-mutation) no test here changes the chain id
                 block.chainid,
                 address(payer)
             )
