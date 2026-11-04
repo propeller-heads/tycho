@@ -1,5 +1,11 @@
 use crate::{abi, params::DeploymentConfig, utils::address_id};
 use abi::{
+    quantamm_weighted_pool_factory_contract::{
+        events::PoolCreated as QuantAmmPoolCreated,
+        functions::{
+            Create as QuantAmmPoolCreate, CreateWithoutArgs as QuantAmmPoolCreateWithoutArgs,
+        },
+    },
     reclamm_pool_factory_contract::{
         events::PoolCreated as ReClammPoolCreated, functions::Create as ReClammPoolCreate,
     },
@@ -155,6 +161,40 @@ pub fn address_map(
             ("token_a_price_includes_rate", &token_a_price_includes_rate_bytes),
             ("token_b_price_includes_rate", &token_b_price_includes_rate_bytes),
         ];
+
+        if !rate_providers.is_empty() {
+            attributes.push(("rate_providers", &rate_providers_bytes));
+        }
+
+        return Some(create_pool_component(&pool, tokens.as_slice(), &attributes, config));
+    }
+
+    if !config.quantamm_factory.is_empty() &&
+        pool_factory_address == config.quantamm_factory.as_slice()
+    {
+        // CreationNewPoolParams tuple: tokens at 2, swapFeePercentage at 5.
+        // Omit normalized_weights — QuantAMM weights change via storage/time interpolation.
+        let params = QuantAmmPoolCreate::match_and_decode(call)
+            .map(|c| c.params)
+            .or_else(|| QuantAmmPoolCreateWithoutArgs::match_and_decode(call).map(|c| c.params))?;
+        let token_config = params.2;
+        let swap_fee_percentage = params.5;
+        let QuantAmmPoolCreated { pool } = QuantAmmPoolCreated::match_and_decode(log)?;
+        let rate_providers = collect_rate_providers(&token_config);
+        if should_skip_rate_provider_pool(config, &rate_providers) {
+            return None;
+        }
+
+        let tokens = token_config
+            .into_iter()
+            .map(|t| t.0)
+            .collect::<Vec<_>>();
+
+        let fee_bytes = swap_fee_percentage.to_signed_bytes_be();
+        let rate_providers_bytes = json_serialize_address_list(rate_providers.as_slice());
+
+        let mut attributes =
+            vec![("pool_type", "QuantAMMWeightedPoolFactory".as_bytes()), ("fee", &fee_bytes)];
 
         if !rate_providers.is_empty() {
             attributes.push(("rate_providers", &rate_providers_bytes));
