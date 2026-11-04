@@ -163,7 +163,8 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
                 ? (nextTokenOut, nextTokenIn, true, MAX_SQRT_RATIO)
                 : (nextTokenIn, nextTokenOut, false, MIN_SQRT_RATIO);
 
-            PoolKey memory pk = PoolKey(token0, token1, poolConfig);
+            PoolKey memory pk =
+                PoolKey({token0: token0, token1: token1, config: poolConfig});
 
             int128 delta0;
             int128 delta1;

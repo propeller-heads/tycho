@@ -699,13 +699,13 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
 
         BalanceDelta delta = poolManager.swap(
             key,
-            SwapParams(
-                zeroForOne,
-                -int256(swap_.amountIn),
-                zeroForOne
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(swap_.amountIn),
+                sqrtPriceLimitX96: zeroForOne
                     ? TickMath.MIN_SQRT_PRICE + 1
                     : TickMath.MAX_SQRT_PRICE - 1
-            ),
+            }),
             v4Swap.hookData
         );
 

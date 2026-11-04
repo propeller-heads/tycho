@@ -252,9 +252,13 @@ contract UniswapV4Executor is IExecutor, ICallback {
         );
 
         pools = new UniswapV4Pool[](1 + encodedPools.length);
-        pools[0] = UniswapV4Pool(
-            firstToken, firstFee, firstTickSpacing, firstHook, firstHookData
-        );
+        pools[0] = UniswapV4Pool({
+            intermediaryToken: firstToken,
+            fee: firstFee,
+            tickSpacing: firstTickSpacing,
+            hook: firstHook,
+            hookData: firstHookData
+        });
 
         // Decode subsequent pools
         for (uint256 i = 0; i < encodedPools.length; i++) {
@@ -297,9 +301,13 @@ contract UniswapV4Executor is IExecutor, ICallback {
                 hookData = rawHookData;
             }
 
-            pools[i + 1] = UniswapV4Pool(
-                intermediaryToken, fee, tickSpacing, hook, hookData
-            );
+            pools[i + 1] = UniswapV4Pool({
+                intermediaryToken: intermediaryToken,
+                fee: fee,
+                tickSpacing: tickSpacing,
+                hook: hook,
+                hookData: hookData
+            });
         }
     }
 
@@ -435,13 +443,13 @@ contract UniswapV4Executor is IExecutor, ICallback {
             // slither-disable-next-line calls-loop
             BalanceDelta delta = poolManager.swap(
                 poolKey,
-                SwapParams(
-                    zeroForOne,
-                    amountSpecified,
-                    zeroForOne
+                SwapParams({
+                    zeroForOne: zeroForOne,
+                    amountSpecified: amountSpecified,
+                    sqrtPriceLimitX96: zeroForOne
                         ? TickMath.MIN_SQRT_PRICE + 1
                         : TickMath.MAX_SQRT_PRICE - 1
-                ),
+                }),
                 hookData
             );
 
