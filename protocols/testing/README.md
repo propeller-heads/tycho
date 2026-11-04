@@ -160,8 +160,7 @@ tests:
           "0x<asset>->0x<share>": {kind: hard}
           "0x<share>->0x<asset>":
             kind: under_cap
-            reason: "the redemption limit depends on a keeper-set rate we do not index"
-            evidence: "cast call 0x... 'maxRedeem(address)' -b 21000000 returns ..."
+            reason: "the redemption limit depends on a keeper-set rate we do not index; cast call 0x... 'maxRedeem(address)' -b 21000000 returns ..."
             lost_capacity: "up to 2% of the vault's redeemable shares"
 ```
 
@@ -174,7 +173,7 @@ component's).
 |---|---|---|---|
 | `hard` | the venue rejects any input above the limit, and the limit is that bound | | at the limit, and one unit past it |
 | `soft` | the venue has no bound on the input; the limit is a recommended size, as the `ProtocolSim::get_limits` documentation allows | `reason` | at the limit |
-| `under_cap` | the venue has a bound, and the limit stays below it because the exact bound cannot be derived | `reason`, `evidence`, `lost_capacity` | at the limit |
+| `under_cap` | the venue has a bound, and the limit stays below it because the exact bound cannot be derived | `reason` (showing why, such as a command and its output), `lost_capacity` | at the limit |
 
 - **At the limit** (`limits.at_limit`): `get_amount_out(max_input)` succeeds, and executing it
   settles and matches the simulation.

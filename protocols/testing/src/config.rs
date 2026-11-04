@@ -267,8 +267,8 @@ pub enum LimitKind {
     /// `ProtocolSim::get_limits` documentation allows. Requires a `reason`.
     Soft,
     /// The venue has a bound, and the limit stays below it on purpose because the exact bound
-    /// cannot be derived. Requires a `reason`, the `evidence` that no exact bound can be derived,
-    /// and the `lost_capacity` it gives up.
+    /// cannot be derived. Requires a `reason`, which shows why no exact bound can be derived, and
+    /// the `lost_capacity` it gives up.
     UnderCap,
 }
 
@@ -277,7 +277,7 @@ pub enum LimitKind {
 /// ```yaml
 /// {kind: hard}
 /// {kind: soft, reason: "constant product: any input trades, at a worse price"}
-/// {kind: under_cap, reason: "...", evidence: "...", lost_capacity: "~2% of the vault cap"}
+/// {kind: under_cap, reason: "...", lost_capacity: "~2% of the vault cap"}
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -285,8 +285,6 @@ pub struct Limits {
     pub kind: LimitKind,
     #[serde(default)]
     pub reason: Option<String>,
-    #[serde(default)]
-    pub evidence: Option<String>,
     #[serde(default)]
     pub lost_capacity: Option<String>,
 }
@@ -297,7 +295,7 @@ impl Limits {
         let required: &[&'static str] = match self.kind {
             LimitKind::Hard => &[],
             LimitKind::Soft => &["reason"],
-            LimitKind::UnderCap => &["reason", "evidence", "lost_capacity"],
+            LimitKind::UnderCap => &["reason", "lost_capacity"],
         };
         required
             .iter()
@@ -305,7 +303,6 @@ impl Limits {
             .filter(|field| {
                 let value = match *field {
                     "reason" => &self.reason,
-                    "evidence" => &self.evidence,
                     _ => &self.lost_capacity,
                 };
                 value
@@ -1024,7 +1021,7 @@ tests:
     }
 
     fn hard() -> Limits {
-        Limits { kind: LimitKind::Hard, reason: None, evidence: None, lost_capacity: None }
+        Limits { kind: LimitKind::Hard, reason: None, lost_capacity: None }
     }
 
     fn direction(key: &str) -> Direction {
@@ -1045,8 +1042,7 @@ tests:
             .collect()
     }
 
-    const UNDER_CAP: &str =
-        "{kind: under_cap, reason: \"r\", evidence: \"e\", lost_capacity: \"2%\"}";
+    const UNDER_CAP: &str = "{kind: under_cap, reason: \"r\", lost_capacity: \"2%\"}";
 
     #[test]
     fn strict_mode_requires_a_declaration_for_every_direction() {
@@ -1107,7 +1103,7 @@ tests:
         for (declaration, problem) in [
             ("{kind: soft}", "default: missing reason"),
             ("{kind: soft, reason: \" \"}", "default: missing reason"),
-            ("{kind: under_cap, reason: \"r\"}", "default: missing evidence, lost_capacity"),
+            ("{kind: under_cap, reason: \"r\"}", "default: missing lost_capacity"),
             ("{\"0x01->0x02\": {kind: soft}}", "0x01->0x02: missing reason"),
         ] {
             for harness in ["", "harness: strict"] {
@@ -1144,6 +1140,7 @@ tests:
         for declaration in [
             "{kind: exact}",
             "{kind: hard, because: \"x\"}",
+            "{kind: under_cap, reason: \"r\", evidence: \"e\", lost_capacity: \"2%\"}",
             "{\"0x01-0x02\": {kind: hard}}",
             "{\"0x01->0x01\": {kind: hard}}",
             "{\"0x01->usdc\": {kind: hard}}",
