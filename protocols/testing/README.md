@@ -180,12 +180,16 @@ component's).
 - **Max output** (`limits.max_output`): the quote at `max_input` pays no more than `max_output`.
 - **One unit past a hard limit** (`limits.past_limit`): `get_amount_out(max_input + 1)` errors,
   and executing it reverts. The swap's minimum output is set from the quote at the limit, so the
-  revert comes from the venue, not from the router's slippage check. When the `int128` cap applied,
-  the capped amount is not the venue's bound, and nothing is probed past it.
+  revert comes from the venue, not from the router's slippage check. When the limit is at or above
+  the `int128` cap, the cap is not the venue's bound, and nothing is probed past it.
 
 Each of the three checks is reported per component and direction, with `component` and
-`direction` keys in the report. `limits.past_limit` is reported as skipped for a soft or under-cap
-limit, or one the cap replaced. A declaration missing a required field, or naming a direction its
+`direction` keys in the report. A check passes only once everything it tests ran:
+- `limits.past_limit` is skipped for a soft or under-cap limit, or one at the cap.
+- When the quote at the limit fails, `limits.past_limit` and `limits.max_output` are `not_run`.
+- A component with `skip_execution` runs the checks in simulation only: `limits.at_limit` and
+  `limits.past_limit` are skipped with its reason, unless the simulation already failed them.
+- A component with `skip_simulation` has all three skipped. A declaration missing a required field, or naming a direction its
 component does not have, is an error in both modes. Legacy mode reads the declarations but runs
 none of these checks.
 
