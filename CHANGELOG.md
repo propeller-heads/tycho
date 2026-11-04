@@ -1,3 +1,12 @@
+## [0.500.0](https://github.com/propeller-heads/tycho/compare/0.499.0...0.500.0) (2026-11-04)
+
+
+### Features
+
+* **execution:** register the Biconomy PropAMMExecutor on Base ([1ba2c6e](https://github.com/propeller-heads/tycho/commit/1ba2c6e4fe138cd2d7fe3628a7eb93ee8aa55ecd))
+* **execution:** register the Biconomy PropAMMExecutor on Base ([#1725](https://github.com/propeller-heads/tycho/issues/1725)) ([250c232](https://github.com/propeller-heads/tycho/commit/250c232920159be2c7aec2bd3bd1923cca1d2aa6))
+* **integration-test:** test biconomy on Base by default ([9f642db](https://github.com/propeller-heads/tycho/commit/9f642dbf08afd5b7aba18f6bce6c82351971b86d))
+
 ## [0.499.0](https://github.com/propeller-heads/tycho/compare/0.498.0...0.499.0) (2026-11-03)
 
 
