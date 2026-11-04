@@ -18,11 +18,11 @@ error Dispatcher__ExecutorAlreadyExists(address executor);
 error Dispatcher__SwapReverted(address executor);
 error Dispatcher__CallbackReverted(address executor);
 
-// keccak256("Dispatcher#CURRENTLY_SWAPPING_EXECUTOR_SLOT")
 // Shared with TychoSubsidizingExecutor, which points the router's fallback at
 // its inner executor.
-bytes32 constant CURRENTLY_SWAPPING_EXECUTOR_SLOT =
-    0x098a7a3b47801589e8cdf9ec791b93ad44273246946c32ef1fc4dbe45390c80e;
+TransientSlot.AddressSlot constant CURRENTLY_SWAPPING_EXECUTOR_SLOT =
+    TransientSlot.AddressSlot
+        .wrap(keccak256("Dispatcher#CURRENTLY_SWAPPING_EXECUTOR_SLOT"));
 
 /**
  * @title Dispatcher - Dispatch execution to external contracts
@@ -38,7 +38,6 @@ bytes32 constant CURRENTLY_SWAPPING_EXECUTOR_SLOT =
 contract Dispatcher is TransferManager {
     // One directive per slot type: Slither 0.11.6 can fail to analyse a
     // contract that uses `using TransientSlot for *`.
-    using TransientSlot for bytes32;
     using TransientSlot for TransientSlot.AddressSlot;
     using TransientSlot for TransientSlot.BooleanSlot;
     using TransientSlot for TransientSlot.Uint256Slot;
@@ -46,18 +45,18 @@ contract Dispatcher is TransferManager {
 
     mapping(address => uint256) public executorsActivationTimestamp;
 
-    // keccak256("Dispatcher#IS_SPLIT_SWAP_SLOT")
-    bytes32 private constant _IS_SPLIT_SWAP_SLOT =
-        0x7b3c4e5f6a8d9e0f1c2b3a4d5e6f7c8d9e0f1c2b3a4d5e6f7c8d9e0f1c2b3a4d;
-    // keccak256("Dispatcher#IS_FIRST_SWAP_SLOT")
-    bytes32 private constant _IS_FIRST_SWAP_SLOT =
-        0x8c47a7e3f4c2e1b5a6d9f0e8c7b3a2d1e4f5c6b7a8d9e0f1c2b3a4d5e6f7c8d9;
-    // keccak256("Dispatcher#SWAP_INPUT_AMOUNT_SLOT")
-    bytes32 private constant _SWAP_INPUT_AMOUNT_SLOT =
-        0xce9e2e8e50d57f2d688020ea7ab16e2039bcf4dc7175eba827e178586597bb39;
-    // keccak256("Dispatcher#SWAP_INPUT_TOKEN_SLOT")
-    bytes32 private constant _SWAP_INPUT_TOKEN_SLOT =
-        0x0c22c14aba48b0e26e3b58475c66f358c352532122e537c32e8184c0159e6e10;
+    TransientSlot.BooleanSlot private constant _IS_SPLIT_SWAP_SLOT =
+        TransientSlot.BooleanSlot
+            .wrap(keccak256("Dispatcher#IS_SPLIT_SWAP_SLOT"));
+    TransientSlot.BooleanSlot private constant _IS_FIRST_SWAP_SLOT =
+        TransientSlot.BooleanSlot
+            .wrap(keccak256("Dispatcher#IS_FIRST_SWAP_SLOT"));
+    TransientSlot.Uint256Slot private constant _SWAP_INPUT_AMOUNT_SLOT =
+        TransientSlot.Uint256Slot
+            .wrap(keccak256("Dispatcher#SWAP_INPUT_AMOUNT_SLOT"));
+    TransientSlot.AddressSlot private constant _SWAP_INPUT_TOKEN_SLOT =
+        TransientSlot.AddressSlot
+            .wrap(keccak256("Dispatcher#SWAP_INPUT_TOKEN_SLOT"));
 
     uint256 public constant DELAY_EXECUTOR_ACTIVATION = 1 days;
 
@@ -109,10 +108,10 @@ contract Dispatcher is TransferManager {
     ) internal returns (uint256 amountOut) {
         _validateExecutor(executor);
 
-        CURRENTLY_SWAPPING_EXECUTOR_SLOT.asAddress().tstore(executor);
-        _IS_FIRST_SWAP_SLOT.asBoolean().tstore(isFirstSwap);
-        _IS_SPLIT_SWAP_SLOT.asBoolean().tstore(isSplitSwap);
-        _SWAP_INPUT_AMOUNT_SLOT.asUint256().tstore(amount);
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.tstore(executor);
+        _IS_FIRST_SWAP_SLOT.tstore(isFirstSwap);
+        _IS_SPLIT_SWAP_SLOT.tstore(isSplitSwap);
+        _SWAP_INPUT_AMOUNT_SLOT.tstore(amount);
 
         // slither-disable-next-line calls-loop
         (
@@ -131,7 +130,7 @@ contract Dispatcher is TransferManager {
 
         // Store tokenIn so it can be passed to getCallbackTransferData if a
         // callback occurs during the swap.
-        _SWAP_INPUT_TOKEN_SLOT.asAddress().tstore(tokenIn);
+        _SWAP_INPUT_TOKEN_SLOT.tstore(tokenIn);
 
         // Measure output before _transfer so cyclic handling is uniform
         // across callback and direct-transfer types.
@@ -156,11 +155,11 @@ contract Dispatcher is TransferManager {
         );
 
         // Clear transient storage in case no callback was performed
-        CURRENTLY_SWAPPING_EXECUTOR_SLOT.asAddress().tstore(address(0));
-        _IS_FIRST_SWAP_SLOT.asBoolean().tstore(false);
-        _IS_SPLIT_SWAP_SLOT.asBoolean().tstore(false);
-        _SWAP_INPUT_AMOUNT_SLOT.asUint256().tstore(0);
-        _SWAP_INPUT_TOKEN_SLOT.asAddress().tstore(address(0));
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.tstore(address(0));
+        _IS_FIRST_SWAP_SLOT.tstore(false);
+        _IS_SPLIT_SWAP_SLOT.tstore(false);
+        _SWAP_INPUT_AMOUNT_SLOT.tstore(0);
+        _SWAP_INPUT_TOKEN_SLOT.tstore(address(0));
 
         // Revoke any lingering allowance the protocol didn't consume.
         if (transferType == TransferType.ProtocolWillDebit) {
@@ -203,11 +202,11 @@ contract Dispatcher is TransferManager {
         bool isSplitSwap;
         uint256 amount;
         address tokenIn;
-        executor = CURRENTLY_SWAPPING_EXECUTOR_SLOT.asAddress().tload();
-        isFirstSwap = _IS_FIRST_SWAP_SLOT.asBoolean().tload();
-        isSplitSwap = _IS_SPLIT_SWAP_SLOT.asBoolean().tload();
-        amount = _SWAP_INPUT_AMOUNT_SLOT.asUint256().tload();
-        tokenIn = _SWAP_INPUT_TOKEN_SLOT.asAddress().tload();
+        executor = CURRENTLY_SWAPPING_EXECUTOR_SLOT.tload();
+        isFirstSwap = _IS_FIRST_SWAP_SLOT.tload();
+        isSplitSwap = _IS_SPLIT_SWAP_SLOT.tload();
+        amount = _SWAP_INPUT_AMOUNT_SLOT.tload();
+        tokenIn = _SWAP_INPUT_TOKEN_SLOT.tload();
 
         _validateExecutor(executor);
 
@@ -245,9 +244,9 @@ contract Dispatcher is TransferManager {
         }
 
         // to prevent multiple callbacks
-        CURRENTLY_SWAPPING_EXECUTOR_SLOT.asAddress().tstore(address(0));
-        _IS_FIRST_SWAP_SLOT.asBoolean().tstore(false);
-        _IS_SPLIT_SWAP_SLOT.asBoolean().tstore(false);
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.tstore(address(0));
+        _IS_FIRST_SWAP_SLOT.tstore(false);
+        _IS_SPLIT_SWAP_SLOT.tstore(false);
 
         // The final callback result should not be ABI encoded. That is why we are decoding here.
         // ABI encoding is very gas expensive and we want to avoid it if possible.

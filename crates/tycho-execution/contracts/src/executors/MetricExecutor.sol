@@ -29,7 +29,6 @@ error MetricExecutor__InvalidCallback();
 contract MetricExecutor is IExecutor, ICallback {
     // One directive per slot type: Slither 0.11.6 can fail to analyse a
     // contract that uses `using TransientSlot for *`.
-    using TransientSlot for bytes32;
     using TransientSlot for TransientSlot.AddressSlot;
     uint256 private constant _DATA_LENGTH = 61;
     uint256 private constant _INT128_MAX = uint256(uint128(type(int128).max));
@@ -37,9 +36,9 @@ contract MetricExecutor is IExecutor, ICallback {
     // metricOmmSwapCallback(int256,int256,bytes) — the only callback the pool emits.
     bytes4 private constant _METRIC_CALLBACK_SELECTOR = 0xc3251075;
 
-    // keccak256("MetricExecutor#CURRENT_METRIC_POOL")
-    bytes32 private constant _CURRENT_METRIC_POOL_SLOT =
-        0x4d22bc52e1e7b4ceea27d9d7b99b3dc629ed6f14191a4839f79502a7ee831121;
+    TransientSlot.AddressSlot private constant _CURRENT_METRIC_POOL_SLOT =
+        TransientSlot.AddressSlot
+            .wrap(keccak256("MetricExecutor#CURRENT_METRIC_POOL"));
 
     function fundsExpectedAddress(
         bytes calldata /* data */
@@ -162,10 +161,10 @@ contract MetricExecutor is IExecutor, ICallback {
     }
 
     function _setCurrentPool(address pool) internal {
-        _CURRENT_METRIC_POOL_SLOT.asAddress().tstore(pool);
+        _CURRENT_METRIC_POOL_SLOT.tstore(pool);
     }
 
     function _getCurrentPool() internal view returns (address pool) {
-        pool = _CURRENT_METRIC_POOL_SLOT.asAddress().tload();
+        pool = _CURRENT_METRIC_POOL_SLOT.tload();
     }
 }

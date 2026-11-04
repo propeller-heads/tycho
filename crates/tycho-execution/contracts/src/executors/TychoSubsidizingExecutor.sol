@@ -24,7 +24,6 @@ error TychoSubsidizingExecutor__UnapprovedInnerExecutor(address executor);
 contract TychoSubsidizingExecutor is IExecutor {
     // One directive per slot type: Slither 0.11.6 can fail to analyse a
     // contract that uses `using TransientSlot for *`.
-    using TransientSlot for bytes32;
     using TransientSlot for TransientSlot.AddressSlot;
     ISubsidyPayer public immutable payer;
     address private immutable _self;
@@ -51,7 +50,7 @@ contract TychoSubsidizingExecutor is IExecutor {
         (,,, address tokenOut, bool outputToRouter) =
             inner.getTransferData(innerData);
 
-        CURRENTLY_SWAPPING_EXECUTOR_SLOT.asAddress().tstore(address(inner));
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.tstore(address(inner));
 
         // The router approved the inner executor, and the Dispatcher sets
         // receiver.
@@ -64,7 +63,7 @@ contract TychoSubsidizingExecutor is IExecutor {
 
         // The payer calls out to `subsidyReceiver`; nothing may reach the inner
         // executor through the router's fallback from there.
-        CURRENTLY_SWAPPING_EXECUTOR_SLOT.asAddress().tstore(address(0));
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.tstore(address(0));
 
         // Must equal the Dispatcher's measureAt in _callSwapOnExecutor, so the
         // Dispatcher counts the subsidy as hop output.

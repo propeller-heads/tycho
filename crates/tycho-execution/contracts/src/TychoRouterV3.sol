@@ -110,15 +110,12 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     using LibPrefixLengthEncodedByteArray for bytes;
     using LibSwap for bytes;
 
-    //keccak256("NAME_OF_ROLE") : save gas on deployment
     bytes32 public constant EXECUTOR_SETTER_ROLE =
-        0x6a1dd52dcad5bd732e45b6af4e7344fa284e2d7d4b23b5b09cb55d36b0685c87;
-    bytes32 public constant PAUSER_ROLE =
-        0x65d7a28e3265b37a6474929f336521b332c1681b933f6cb9f3376673440d862a;
-    bytes32 public constant UNPAUSER_ROLE =
-        0x427da25fe773164f88948d3e215c94b6554e2ed5e5f203a821c9f2f6131cf75a;
+        keccak256("EXECUTOR_SETTER_ROLE");
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+    bytes32 public constant UNPAUSER_ROLE = keccak256("UNPAUSER_ROLE");
     bytes32 public constant ROUTER_FEE_SETTER_ROLE =
-        0x9939157be7760e9462f1d5a0dcad88b616ddc64138e317108b40b1cf55601348;
+        keccak256("ROUTER_FEE_SETTER_ROLE");
 
     uint256 public constant DELAY_FEE_CALCULATOR_ACTIVATION = 1 days;
 

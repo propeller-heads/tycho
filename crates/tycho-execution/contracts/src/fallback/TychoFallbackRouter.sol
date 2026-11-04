@@ -73,7 +73,6 @@ abstract contract TychoFallbackRouter is
 {
     // One directive per slot type: Slither 0.11.6 can fail to analyse a
     // contract that uses `using TransientSlot for *`.
-    using TransientSlot for bytes32;
     using TransientSlot for TransientSlot.AddressSlot;
     using TransientSlot for TransientSlot.Uint256Slot;
     using SafeERC20 for IERC20;
@@ -123,15 +122,15 @@ abstract contract TychoFallbackRouter is
     // pool (20)
     uint256 private constant _AERODROME_V1_SWAP_LEN = 20;
 
-    // keccak256("TychoFallbackRouter#CALLBACK_SOURCE")
-    bytes32 private constant _CALLBACK_SOURCE_SLOT =
-        0xf69ae8e0008b818aeb91c2b052698e485056e760fad9d0aa28144b842debe4f7;
-    // keccak256("TychoFallbackRouter#CALLBACK_TOKEN")
-    bytes32 private constant _CALLBACK_TOKEN_SLOT =
-        0xbb428614797396c24d2ae21e3c7c9a28d69673f64cb7ba6433b600b67ed8541b;
-    // keccak256("TychoFallbackRouter#CALLBACK_AMOUNT")
-    bytes32 private constant _CALLBACK_AMOUNT_SLOT =
-        0xde66fd0ca9c728ba44ca7bab17a304d328bf9cf5d5c72b8bf8ea7cd13765e542;
+    TransientSlot.AddressSlot private constant _CALLBACK_SOURCE_SLOT =
+        TransientSlot.AddressSlot
+            .wrap(keccak256("TychoFallbackRouter#CALLBACK_SOURCE"));
+    TransientSlot.AddressSlot private constant _CALLBACK_TOKEN_SLOT =
+        TransientSlot.AddressSlot
+            .wrap(keccak256("TychoFallbackRouter#CALLBACK_TOKEN"));
+    TransientSlot.Uint256Slot private constant _CALLBACK_AMOUNT_SLOT =
+        TransientSlot.Uint256Slot
+            .wrap(keccak256("TychoFallbackRouter#CALLBACK_AMOUNT"));
 
     /// @notice Uniswap V4's PoolManager, or `address(0)` on a chain without Uniswap V4.
     IPoolManager public immutable poolManager;
@@ -744,9 +743,9 @@ abstract contract TychoFallbackRouter is
     function _setCallbackContext(address source, address token, uint256 amount)
         internal
     {
-        _CALLBACK_SOURCE_SLOT.asAddress().tstore(source);
-        _CALLBACK_TOKEN_SLOT.asAddress().tstore(token);
-        _CALLBACK_AMOUNT_SLOT.asUint256().tstore(amount);
+        _CALLBACK_SOURCE_SLOT.tstore(source);
+        _CALLBACK_TOKEN_SLOT.tstore(token);
+        _CALLBACK_AMOUNT_SLOT.tstore(amount);
     }
 
     /// @dev Rejects a `msg.sender` that is not the stored source, and clears the context so one
@@ -756,12 +755,12 @@ abstract contract TychoFallbackRouter is
         returns (address token, uint256 amount)
     {
         address source;
-        source = _CALLBACK_SOURCE_SLOT.asAddress().tload();
-        token = _CALLBACK_TOKEN_SLOT.asAddress().tload();
-        amount = _CALLBACK_AMOUNT_SLOT.asUint256().tload();
-        _CALLBACK_SOURCE_SLOT.asAddress().tstore(address(0));
-        _CALLBACK_TOKEN_SLOT.asAddress().tstore(address(0));
-        _CALLBACK_AMOUNT_SLOT.asUint256().tstore(0);
+        source = _CALLBACK_SOURCE_SLOT.tload();
+        token = _CALLBACK_TOKEN_SLOT.tload();
+        amount = _CALLBACK_AMOUNT_SLOT.tload();
+        _CALLBACK_SOURCE_SLOT.tstore(address(0));
+        _CALLBACK_TOKEN_SLOT.tstore(address(0));
+        _CALLBACK_AMOUNT_SLOT.tstore(0);
         // An unset context has source == address(0), which no real sender matches.
         if (msg.sender != source) {
             revert TychoFallbackRouter__InvalidCallback();

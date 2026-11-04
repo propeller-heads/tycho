@@ -48,9 +48,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     // while positive slippage capture is enabled
     mapping(address => bool) private _positiveSlippageExempt;
 
-    //keccak256("ROUTER_FEE_SETTER_ROLE")
     bytes32 public constant ROUTER_FEE_SETTER_ROLE =
-        0x9939157be7760e9462f1d5a0dcad88b616ddc64138e317108b40b1cf55601348;
+        keccak256("ROUTER_FEE_SETTER_ROLE");
 
     event RouterFeeOnOutputUpdated(uint32 oldFeeBps, uint32 newFeeBps);
     event RouterFeeOnClientFeeUpdated(uint32 oldFeeBps, uint32 newFeeBps);

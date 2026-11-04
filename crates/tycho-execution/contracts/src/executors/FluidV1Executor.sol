@@ -15,12 +15,10 @@ error FluidV1Executor__InvalidCallback();
 contract FluidV1Executor is IExecutor, ICallback {
     // One directive per slot type: Slither 0.11.6 can fail to analyse a
     // contract that uses `using TransientSlot for *`.
-    using TransientSlot for bytes32;
     using TransientSlot for TransientSlot.AddressSlot;
-    // keccak(FluidV1Executor#CURRENT_DEX)
-    // stores current dex address
-    bytes32 private constant _CURRENT_DEX_SLOT =
-        0x823205ddf0d345ca541c0f695a3f87b5dce7be9df5ecffce73a87e1ad796ad20;
+    TransientSlot.AddressSlot private constant _CURRENT_DEX_SLOT =
+        TransientSlot.AddressSlot
+        .wrap(keccak256("FluidV1Executor#CURRENT_DEX"));
     // dexCallback(address,amount)
     bytes4 private constant _CALLBACK_SELECTOR = 0x9410ae88;
 
@@ -66,11 +64,11 @@ contract FluidV1Executor is IExecutor, ICallback {
 
     // Stores dex address in transient storage
     function _setCurrentDex(IFluidV1Dex dex) internal {
-        _CURRENT_DEX_SLOT.asAddress().tstore(address(dex));
+        _CURRENT_DEX_SLOT.tstore(address(dex));
     }
 
     function _getCurrentDex() internal view returns (address dex) {
-        dex = _CURRENT_DEX_SLOT.asAddress().tload();
+        dex = _CURRENT_DEX_SLOT.tload();
     }
 
     function _decodeData(bytes calldata data)

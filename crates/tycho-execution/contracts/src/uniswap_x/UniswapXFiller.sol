@@ -24,11 +24,8 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
     address public immutable tychoRouter;
     address public immutable nativeAddress;
 
-    // keccak256("NAME_OF_ROLE") : save gas on deployment
-    bytes32 public constant REACTOR_ROLE =
-        0x39dd1d7269516fc1f719706a5e9b05cdcb1644978808b171257d9a8eab55dd57;
-    bytes32 public constant EXECUTOR_ROLE =
-        0xd8aa0f3194971a2a116679f7c2090f6939c8d4e01a2a8d7e41d55e5351469e63;
+    bytes32 public constant REACTOR_ROLE = keccak256("REACTOR_ROLE");
+    bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
 
     event Withdrawal(
         address indexed token, uint256 amount, address indexed receiver

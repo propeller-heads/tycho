@@ -42,12 +42,11 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
     mapping(address => mapping(uint256 => uint256)) private _vaultBalances;
 
     // Transient storage slot for tracking deltas during swap sequences
-    // keccak256("TychoVault#NON_ZERO_DELTA_COUNT_SLOT")
-    bytes32 private constant _NON_ZERO_DELTA_COUNT_SLOT =
-        0xee3c9c434505299f2450d3624302a27b8a6978e973825330bc744ba925eec199;
-    // keccak256("Vault#USE_VAULT_SLOT")
-    bytes32 internal constant _USE_VAULT_SLOT =
-        0xce5ffa91873ede1b462af74ea59bab3721b06b0ff726b90311437efde2001795;
+    TransientSlot.Uint256Slot private constant _NON_ZERO_DELTA_COUNT_SLOT =
+        TransientSlot.Uint256Slot
+            .wrap(keccak256("TychoVault#NON_ZERO_DELTA_COUNT_SLOT"));
+    TransientSlot.BooleanSlot internal constant _USE_VAULT_SLOT =
+        TransientSlot.BooleanSlot.wrap(keccak256("Vault#USE_VAULT_SLOT"));
 
     // ============ ERC6909 Overrides and Extensions ============
 
@@ -219,21 +218,21 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
      * @dev Get non zero delta count from transient storage
      */
     function _getNonZeroDeltaCount() internal view returns (uint256 count) {
-        count = _NON_ZERO_DELTA_COUNT_SLOT.asUint256().tload();
+        count = _NON_ZERO_DELTA_COUNT_SLOT.tload();
     }
 
     /**
      * @dev Set non zero delta count in transient storage
      */
     function _setNonZeroDeltaCount(uint256 count) internal {
-        _NON_ZERO_DELTA_COUNT_SLOT.asUint256().tstore(count);
+        _NON_ZERO_DELTA_COUNT_SLOT.tstore(count);
     }
 
     /**
      * @dev Get the USE_VAULT flag from transient storage
      */
     function _getUseVault() internal view virtual returns (bool) {
-        return _USE_VAULT_SLOT.asBoolean().tload();
+        return _USE_VAULT_SLOT.tload();
     }
 
     /**

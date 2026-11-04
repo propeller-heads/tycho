@@ -48,25 +48,24 @@ error TransferManager__UnknownTransferType();
 contract TransferManager is Vault {
     // One directive per slot type: Slither 0.11.6 can fail to analyse a
     // contract that uses `using TransientSlot for *`.
-    using TransientSlot for bytes32;
     using TransientSlot for TransientSlot.AddressSlot;
     using TransientSlot for TransientSlot.BooleanSlot;
     using TransientSlot for TransientSlot.Uint256Slot;
     using SafeERC20 for IERC20;
 
     IAllowanceTransfer public immutable permit2;
-    // keccak256("TransferManager#TOKEN_IN_SLOT")
-    bytes32 private constant _TOKEN_IN_SLOT =
-        0xaf58e9f1b0923d55d0ec6a57763d43cd9bb1d6bd8bad5ce9522fbe772c6ec42b;
-    // keccak256("TransferManager#AMOUNT_ALLOWED_SLOT")
-    bytes32 private constant _AMOUNT_ALLOWED_SLOT =
-        0x28d0e2684c9341fec58f816e0c375a4e51f9f34ec034a29c97467df00497c8d9;
-    // keccak256("TransferManager#IS_PERMIT2_SLOT")
-    bytes32 private constant _IS_PERMIT2_SLOT =
-        0xd847dc13274ab371f6244234290f56fa8650ec9dceff86e20efe1ddc141bdb03;
-    // keccak256("TransferManager#SENDER_SLOT")
-    bytes32 private constant _SENDER_SLOT =
-        0x99298391997747e556e81b2d36d99151315b6c1b92e826ca8d37acad5fddaf70;
+    TransientSlot.AddressSlot private constant _TOKEN_IN_SLOT =
+        TransientSlot.AddressSlot
+            .wrap(keccak256("TransferManager#TOKEN_IN_SLOT"));
+    TransientSlot.Uint256Slot private constant _AMOUNT_ALLOWED_SLOT =
+        TransientSlot.Uint256Slot
+            .wrap(keccak256("TransferManager#AMOUNT_ALLOWED_SLOT"));
+    TransientSlot.BooleanSlot private constant _IS_PERMIT2_SLOT =
+        TransientSlot.BooleanSlot
+            .wrap(keccak256("TransferManager#IS_PERMIT2_SLOT"));
+    TransientSlot.AddressSlot private constant _SENDER_SLOT =
+        TransientSlot.AddressSlot
+        .wrap(keccak256("TransferManager#SENDER_SLOT"));
 
     constructor(address permit2_) {
         if (permit2_.code.length == 0) {
@@ -93,11 +92,11 @@ contract TransferManager is Vault {
         bool useVault
     ) internal {
         uint256 amountAllowed = useVault ? 0 : amountIn;
-        _TOKEN_IN_SLOT.asAddress().tstore(tokenIn);
-        _AMOUNT_ALLOWED_SLOT.asUint256().tstore(amountAllowed);
-        _IS_PERMIT2_SLOT.asBoolean().tstore(isPermit2);
-        _SENDER_SLOT.asAddress().tstore(msg.sender);
-        _USE_VAULT_SLOT.asBoolean().tstore(useVault);
+        _TOKEN_IN_SLOT.tstore(tokenIn);
+        _AMOUNT_ALLOWED_SLOT.tstore(amountAllowed);
+        _IS_PERMIT2_SLOT.tstore(isPermit2);
+        _SENDER_SLOT.tstore(msg.sender);
+        _USE_VAULT_SLOT.tstore(useVault);
     }
 
     /**
@@ -145,7 +144,7 @@ contract TransferManager is Vault {
 
         // Determine if we need to transfer from user wallet (first swap + not using vault)
         bool useVault;
-        useVault = _USE_VAULT_SLOT.asBoolean().tload();
+        useVault = _USE_VAULT_SLOT.tload();
         bool needsTransferFromUser = isFirstSwap && !useVault;
 
         // Scenario 3 & 4: Protocol will debit tokens from router
@@ -237,10 +236,10 @@ contract TransferManager is Vault {
         address sender;
         bool isPermit2;
 
-        tokenInStorage = _TOKEN_IN_SLOT.asAddress().tload();
-        amountAllowed = _AMOUNT_ALLOWED_SLOT.asUint256().tload();
-        sender = _SENDER_SLOT.asAddress().tload();
-        isPermit2 = _IS_PERMIT2_SLOT.asBoolean().tload();
+        tokenInStorage = _TOKEN_IN_SLOT.tload();
+        amountAllowed = _AMOUNT_ALLOWED_SLOT.tload();
+        sender = _SENDER_SLOT.tload();
+        isPermit2 = _IS_PERMIT2_SLOT.tload();
 
         if (amount > amountAllowed) {
             revert TransferManager__ExceededTransferFromAllowance(
@@ -253,7 +252,7 @@ contract TransferManager is Vault {
 
         // Update remaining allowance
         amountAllowed -= amount;
-        _AMOUNT_ALLOWED_SLOT.asUint256().tstore(amountAllowed);
+        _AMOUNT_ALLOWED_SLOT.tstore(amountAllowed);
 
         uint256 balanceBefore = _balanceOf(token, receiver);
         // Perform the actual transfer
