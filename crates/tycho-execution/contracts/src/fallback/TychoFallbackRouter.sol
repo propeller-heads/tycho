@@ -15,6 +15,9 @@ import {
     IUniswapV3Pool
 } from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {
+    IUnlockCallback
+} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -62,7 +65,10 @@ error TychoFallbackRouter__UnknownProtocol(uint8 protocol);
 /// mistaken transfer) is claimable by anyone through a router's `swap` and is considered lost, which is also
 /// why a Curve approval is left in place rather than revoked. Native ETH, fee-on-transfer and
 /// rebasing tokens are unsupported.
-abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
+abstract contract TychoFallbackRouter is
+    ReentrancyGuardTransient,
+    IUnlockCallback
+{
     using SafeERC20 for IERC20;
 
     /// @notice The protocols a fallback may use.
