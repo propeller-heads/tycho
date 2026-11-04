@@ -4,7 +4,6 @@ import "./EkuboV3.t.sol";
 import {PoolId} from "@ekubo-v3/types/poolId.sol";
 import {toPoolId} from "@ekubo-v3/types/poolKey.sol";
 
-address constant MEV_CAPTURE_V21 = 0x51f831c23fa4051862881Ef8EfC0c3C37905Ce49;
 uint256 constant MEV_CAPTURE_V21_FORK_BLOCK = 26250000;
 address constant MEV_CAPTURE_V21_TOKEN0 =
     0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48; // USDC
@@ -19,7 +18,7 @@ function mevCaptureV21PoolKey() pure returns (PoolKey memory) {
         config: createConcentratedPoolConfig({
             _fee: 0x0020c49ba5e353f7,
             _tickSpacing: 1000,
-            _extension: MEV_CAPTURE_V21
+            _extension: MEV_CAPTURE_V21_ADDRESS
         })
     });
 }
@@ -50,9 +49,6 @@ contract EkuboV3MevCaptureV21Test is Constants, TestUtils {
         new EkuboV3ExecutorStandalone(EKUBO_V3_SIGNED_EXCLUSIVE_SWAP);
     LiquidityHelper immutable liquidityHelper = new LiquidityHelper();
 
-    IERC20 USDC = IERC20(USDC_ADDR);
-    IERC20 USDT = IERC20(USDT_ADDR);
-
     constructor() {
         vm.makePersistent(address(executor));
         vm.makePersistent(address(liquidityHelper));
@@ -61,6 +57,10 @@ contract EkuboV3MevCaptureV21Test is Constants, TestUtils {
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("mainnet"), MEV_CAPTURE_V21_FORK_BLOCK);
         // TODO: remove once Foundry stable includes the Fusaka hardfork mapping.
+        // Forks use the chain's hardfork, not foundry.toml's evm_version.
+        // The current stable (Dec 2024) predates Fusaka (Dec 2025),
+        // so Osaka opcodes aren't enabled for post-Fusaka blocks.
+        // See: https://github.com/foundry-rs/foundry/issues/13040
         address(vm)
             .call(abi.encodeWithSignature("setEvmVersion(string)", "osaka"));
 
@@ -121,7 +121,7 @@ contract EkuboV3MevCaptureV21Test is Constants, TestUtils {
         uint256 amountIn,
         uint256 expectedOut,
         string memory label
-    ) internal returns (uint256 amountOut) {
+    ) internal {
         deal(tokenIn, address(executor), amountIn);
         uint256 outBefore = IERC20(tokenOut).balanceOf(address(executor));
 
@@ -132,13 +132,15 @@ contract EkuboV3MevCaptureV21Test is Constants, TestUtils {
         executor.swap(amountIn, data, address(executor));
         uint256 gasUsed = gasBefore - gasleft();
 
-        amountOut = IERC20(tokenOut).balanceOf(address(executor)) - outBefore;
+        uint256 amountOut =
+            IERC20(tokenOut).balanceOf(address(executor)) - outBefore;
         console.log(label, amountOut, "gas", gasUsed);
         assertEq(amountOut, expectedOut, label);
         assertEq(IERC20(tokenIn).balanceOf(address(executor)), 0);
     }
 
-    /// Core's pool state (raw sqrt ratio) and the extension's state word.
+    /// Asserts Core's pool state (raw sqrt ratio, tick, liquidity) and the
+    /// extension's state word for the pool.
     function _assertState(
         uint96 sqrtRatio,
         int32 tick,
@@ -151,7 +153,7 @@ contract EkuboV3MevCaptureV21Test is Constants, TestUtils {
         assertEq(state.tick(), tick, "tick");
         assertEq(state.liquidity(), liquidity, "liquidity");
         assertEq(
-            vm.load(MEV_CAPTURE_V21, PoolId.unwrap(poolId)),
+            vm.load(MEV_CAPTURE_V21_ADDRESS, PoolId.unwrap(poolId)),
             extensionState,
             "extension state"
         );
@@ -171,6 +173,10 @@ contract TychoRouterForEkuboV3MevCaptureV21Test is TychoRouterTestSetup {
         super.setUp();
 
         // TODO: remove once Foundry stable includes the Fusaka hardfork mapping.
+        // Forks use the chain's hardfork, not foundry.toml's evm_version.
+        // The current stable (Dec 2024) predates Fusaka (Dec 2025),
+        // so Osaka opcodes aren't enabled for post-Fusaka blocks.
+        // See: https://github.com/foundry-rs/foundry/issues/13040
         address(vm)
             .call(abi.encodeWithSignature("setEvmVersion(string)", "osaka"));
 

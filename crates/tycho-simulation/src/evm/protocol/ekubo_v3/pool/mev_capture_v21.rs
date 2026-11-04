@@ -559,7 +559,7 @@ mod tests {
         let fee: u64 = parse(&vector["pool"]["fee"]);
         let spacing: u32 = parse(&vector["pool"]["tickSpacing"]);
 
-        let mut static_attributes: HashMap<String, Bytes> = [
+        let static_attributes: HashMap<String, Bytes> = [
             ("token0", TOKEN0.to_vec()),
             ("token1", TOKEN1.to_vec()),
             ("extension", MEV_CAPTURE_V21_ETHEREUM_ADDRESS.to_vec()),
@@ -594,7 +594,6 @@ mod tests {
         .into_iter()
         .map(|(key, value)| (key.to_string(), value.into()))
         .collect();
-        static_attributes.insert("extension_id".to_string(), 0_i32.to_be_bytes().into());
 
         let anchor = MevCaptureV21MainAnchor {
             last_update_time: timestamp,

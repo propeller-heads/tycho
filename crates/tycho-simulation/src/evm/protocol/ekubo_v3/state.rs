@@ -313,7 +313,7 @@ mod tests {
     /// Only a pool that cannot be swapped without `Core.forward` is surcharged.
     #[rstest]
     fn test_other_pools_carry_no_forward_overhead() {
-        for case in [concentrated(), full_range(), mev_capture()] {
+        for case in [concentrated(), full_range(), mev_capture(), mev_capture_v21()] {
             assert_eq!(
                 case.state_after_transition
                     .forward_overhead_gas(),

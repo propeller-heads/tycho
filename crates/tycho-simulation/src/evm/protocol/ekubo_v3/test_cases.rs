@@ -15,10 +15,14 @@ use ekubo_sdk::{
     },
     quoting::{
         pools::{
-            concentrated::TickSpacing, full_range::FullRangePoolTypeConfig,
+            concentrated::TickSpacing,
+            full_range::FullRangePoolTypeConfig,
+            mev_capture_v21_main::{
+                MevCaptureV21MainAnchor, MevCaptureV21MainConfig, MevCaptureV21MainPoolState,
+            },
             stableswap::StableswapPoolTypeConfig,
         },
-        types::{Tick, TimeRateDelta},
+        types::{PoolConfig, PoolKey, Tick, TimeRateDelta},
     },
     U256,
 };
@@ -34,13 +38,14 @@ use tycho_common::{
 use super::{pool::concentrated::ConcentratedPool, state::EkuboV3State};
 use crate::evm::protocol::ekubo_v3::{
     addresses::{
-        BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
-        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS_V2, VE33_ROBINHOOD_ADDRESS,
+        BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, MEV_CAPTURE_V21_ETHEREUM_ADDRESS,
+        ORACLE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS_V2, VE33_ROBINHOOD_ADDRESS,
     },
     pool::{
         boosted_fees::BoostedFeesPool,
         full_range::FullRangePool,
         mev_capture::MevCapturePool,
+        mev_capture_v21::{core_state, MevCaptureV21Pool, ANCHOR_STATE_ATTRIBUTE},
         oracle::OraclePool,
         stableswap::StableswapPool,
         twamm::TwammPool,
@@ -1077,6 +1082,147 @@ pub fn mev_capture() -> TestCase {
 }
 
 #[fixture]
+pub fn mev_capture_v21() -> TestCase {
+    const POOL_KEY: PoolKey<Address, u64, TickSpacing> = PoolKey {
+        token0: TOKEN0,
+        token1: TOKEN1,
+        config: PoolConfig {
+            fee: u64::MAX / 10,
+            pool_type_config: TickSpacing(10),
+            extension: MEV_CAPTURE_V21_ETHEREUM_ADDRESS,
+        },
+    };
+    const CONFIG: MevCaptureV21MainConfig = MevCaptureV21MainConfig {
+        half_life: 120,
+        slope_k: 4,
+        segment_exp: 0,
+        j_lin: 16,
+        max_fee: 1 << 63,
+        clamp_ticks: 2500,
+        m_gate: 3,
+    };
+    // Anchored at tick 0 by the pool's initialization at time 0.
+    const ANCHOR: MevCaptureV21MainAnchor = MevCaptureV21MainAnchor {
+        last_update_time: 0,
+        l_ref_time: 0,
+        last_pos_time: 0,
+        l_ref_bits: 0,
+        snap_bits: 0,
+        l_ref_raise_time: 0,
+        anchor_x16: 0,
+    };
+
+    const LOWER_TICK: Tick = Tick { index: -10, liquidity_delta: 100_000_000 };
+    const UPPER_TICK: Tick =
+        Tick { index: -LOWER_TICK.index, liquidity_delta: -LOWER_TICK.liquidity_delta };
+
+    const TICK_INDEX_BETWEEN: i32 = 0;
+    const SQRT_RATIO_BETWEEN: U256 = U256::from_limbs([0, 0, 1, 0]);
+    const LIQUIDITY_BETWEEN: u128 = LOWER_TICK
+        .liquidity_delta
+        .unsigned_abs();
+
+    let pool = |liquidity, ticks| {
+        EkuboV3State::MevCaptureV21(
+            MevCaptureV21Pool::new(
+                POOL_KEY,
+                CONFIG,
+                MevCaptureV21MainPoolState {
+                    core: core_state(SQRT_RATIO_BETWEEN, TICK_INDEX_BETWEEN, liquidity),
+                    anchor: ANCHOR,
+                },
+                ticks,
+            )
+            .unwrap(),
+        )
+    };
+
+    TestCase {
+        component: component([
+            ("token0".to_string(), POOL_KEY.token0.into_array().into()),
+            ("token1".to_string(), POOL_KEY.token1.into_array().into()),
+            ("fee".to_string(), POOL_KEY.config.fee.into()),
+            (
+                "pool_type_config".to_string(),
+                B32::from(EvmPoolTypeConfig::Concentrated(POOL_KEY.config.pool_type_config))
+                    .0
+                    .into(),
+            ),
+            (
+                "extension".to_string(),
+                POOL_KEY
+                    .config
+                    .extension
+                    .into_array()
+                    .into(),
+            ),
+            ("half_life".to_string(), CONFIG.half_life.to_be_bytes().into()),
+            ("slope_k".to_string(), CONFIG.slope_k.to_be_bytes().into()),
+            ("segment_exp".to_string(), CONFIG.segment_exp.to_be_bytes().into()),
+            ("j_lin".to_string(), CONFIG.j_lin.to_be_bytes().into()),
+            ("max_fee".to_string(), CONFIG.max_fee.to_be_bytes().into()),
+            ("clamp_ticks".to_string(), CONFIG.clamp_ticks.to_be_bytes().into()),
+            ("m_gate".to_string(), CONFIG.m_gate.to_be_bytes().into()),
+        ]),
+        state_before_transition: pool(0, vec![]),
+        state_after_transition: pool(LIQUIDITY_BETWEEN, vec![LOWER_TICK, UPPER_TICK]),
+        required_attributes: [
+            "token0",
+            "token1",
+            "fee",
+            "pool_type_config",
+            "extension",
+            "half_life",
+            "slope_k",
+            "segment_exp",
+            "j_lin",
+            "max_fee",
+            "clamp_ticks",
+            "m_gate",
+            "liquidity",
+            "sqrt_ratio",
+            "tick",
+            ANCHOR_STATE_ATTRIBUTE,
+        ]
+        .map(str::to_string)
+        .into(),
+        transition_attributes: [
+            ("liquidity".to_string(), LIQUIDITY_BETWEEN.to_be_bytes().into()),
+            (
+                format!("tick/{}", LOWER_TICK.index),
+                LOWER_TICK
+                    .liquidity_delta
+                    .to_be_bytes()
+                    .into(),
+            ),
+            (
+                format!("tick/{}", UPPER_TICK.index),
+                UPPER_TICK
+                    .liquidity_delta
+                    .to_be_bytes()
+                    .into(),
+            ),
+        ]
+        .into(),
+        state_attributes: [
+            ("liquidity".to_string(), 0_u128.to_be_bytes().into()),
+            (
+                "sqrt_ratio".to_string(),
+                SQRT_RATIO_BETWEEN
+                    .to_be_bytes_vec()
+                    .into(),
+            ),
+            ("tick".to_string(), TICK_INDEX_BETWEEN.to_be_bytes().into()),
+            (ANCHOR_STATE_ATTRIBUTE.to_string(), [0_u8; 32].into()),
+        ]
+        .into(),
+        // Less than MEVCapture's 87: the swap moves away from the anchor and pays the surcharge.
+        swap_token0: (100_u8.into(), 80_u8.into()),
+        expected_limit_token0: 559_u16.into(),
+    }
+}
+
+#[fixture]
 pub fn signed_exclusive_swap() -> TestCase {
     const POOL_KEY: EvmConcentratedPoolKey = EvmConcentratedPoolKey {
         token0: TOKEN0,
@@ -1196,6 +1342,7 @@ pub fn signed_exclusive_swap() -> TestCase {
 #[case::oracle(oracle())]
 #[case::twamm(twamm())]
 #[case::mev_capture(mev_capture())]
+#[case::mev_capture_v21(mev_capture_v21())]
 #[case::boosted_fees(boosted_fees())]
 #[case::signed_exclusive_swap(signed_exclusive_swap())]
 pub fn all_cases(#[case] case: TestCase) {}

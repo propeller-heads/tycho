@@ -501,7 +501,7 @@ mod tests {
             EkuboV3State::Oracle(_) => 2,
             EkuboV3State::Twamm(_) => 3,
             EkuboV3State::MevCapture(_) => 4,
-            // BoostedFees is new, no legacy format
+            // Extensions added after the legacy format have none
             EkuboV3State::BoostedFees(_) |
             EkuboV3State::MevCaptureV21(_) |
             EkuboV3State::Ve33(_) => return,
