@@ -64,7 +64,7 @@ use crate::{
         LimitKind, ProtocolComponentWithTestConfig, Skip, Tolerance,
     },
     execution, limits,
-    report::{CheckId, Checks, Report},
+    report::{CheckId, Checks, Outcome, Report},
     rpc::RPCProvider,
     state_registry::{register_protocol, register_protocol_with_filter},
     stream, tvl_only,
@@ -261,8 +261,13 @@ struct LimitDirection {
     component: String,
     direction: Direction,
     kind: LimitKind,
-    /// Whether the `int128` execution cap replaced the limit.
+    /// Whether the limit is at or above `int128::MAX`, the execution cap.
     capped: bool,
+    /// Whether `max_input` quoted. The past-limit swap and the max-output comparison need it.
+    quoted_at_limit: bool,
+    /// Why the component skips execution, if it does: the limit checks then run in simulation
+    /// only.
+    execution_skipped: Option<String>,
     /// The checks that failed in simulation, with the reason.
     failures: Vec<(CheckId, String)>,
     /// The ids of the direction's executions in [`SimulationOutput::at_limit`] and
@@ -280,15 +285,52 @@ impl LimitDirection {
             .collect()
     }
 
-    /// Why `limits.past_limit` does not apply, if it does not.
-    fn past_limit_skipped(&self) -> Option<&'static str> {
+    /// What `limits.at_limit` records when nothing failed: a pass once the quote at the limit
+    /// was executed, a skip when the component skips execution.
+    fn at_limit_unfailed(&self) -> Outcome {
+        match (&self.at_limit, &self.execution_skipped) {
+            (None, Some(reason)) => Outcome::Skipped {
+                reason: format!("the quote at the limit is not executed: {reason}"),
+            },
+            (Some(_), _) | (None, None) => Outcome::Pass,
+        }
+    }
+
+    /// What `limits.past_limit` records when nothing failed: a skip when the check does not apply
+    /// to the limit or the component skips execution, not run when the limit did not quote, since
+    /// the past-limit swap takes its minimum output from that quote, and a pass once the swap
+    /// was executed.
+    fn past_limit_unfailed(&self) -> Outcome {
+        let skipped = |reason: &str| Outcome::Skipped { reason: reason.to_string() };
         match self.kind {
-            LimitKind::Soft => Some("the limit is declared soft"),
-            LimitKind::UnderCap => Some("the limit is declared under_cap"),
+            LimitKind::Soft => return skipped("the limit is declared soft"),
+            LimitKind::UnderCap => return skipped("the limit is declared under_cap"),
             LimitKind::Hard if self.capped => {
-                Some("the limit was capped at int128::MAX, which is not the venue's bound")
+                return skipped(
+                    "the limit is at the int128::MAX cap, which is not the venue's bound",
+                )
             }
-            LimitKind::Hard => None,
+            LimitKind::Hard => {}
+        }
+        match (&self.past_limit, self.quoted_at_limit, &self.execution_skipped) {
+            (Some(_), _, _) => Outcome::Pass,
+            (None, false, _) => {
+                Outcome::NotRun { reason: format!("{} failed", CheckId::LimitsAtLimit) }
+            }
+            (None, true, Some(reason)) => Outcome::Skipped {
+                reason: format!("the swap past the limit is not executed: {reason}"),
+            },
+            (None, true, None) => Outcome::Pass,
+        }
+    }
+
+    /// What `limits.max_output` records when nothing failed: not run when the limit did not
+    /// quote, since there is nothing to compare, and a pass otherwise.
+    fn max_output_unfailed(&self) -> Outcome {
+        if self.quoted_at_limit {
+            Outcome::Pass
+        } else {
+            Outcome::NotRun { reason: format!("{} failed", CheckId::LimitsAtLimit) }
         }
     }
 }
@@ -417,12 +459,24 @@ fn missing_revert(
 ///
 /// Returns `limit` unchanged when it is at or below the ceiling.
 fn executable_max_input(limit: &BigUint) -> BigUint {
-    let ceiling = BigUint::from(i128::MAX as u128);
+    let ceiling = int128_ceiling();
     if *limit > ceiling {
         ceiling
     } else {
         limit.clone()
     }
+}
+
+/// `int128::MAX`, the largest amount a swap can be executed with.
+fn int128_ceiling() -> BigUint {
+    BigUint::from(i128::MAX as u128)
+}
+
+/// Whether `limit` is at or above `int128::MAX`. Such a limit is the execution cap, not the venue's
+/// bound: even at exactly `int128::MAX`, one unit past it reverts in the executor's cast, whatever
+/// the venue allows.
+fn at_execution_cap(limit: &BigUint) -> bool {
+    *limit >= int128_ceiling()
 }
 
 pub enum TestType {
@@ -1130,6 +1184,13 @@ impl TestRunner {
             if let Some(reason) = component.skip_simulation.reason() {
                 checks.skip_component(CheckId::SimLadder, id, reason);
                 checks.skip_component(CheckId::ExecLadder, id, reason);
+                if config.harness == Harness::Strict {
+                    for limit_check in
+                        [CheckId::LimitsAtLimit, CheckId::LimitsPastLimit, CheckId::LimitsMaxOutput]
+                    {
+                        checks.skip_component(limit_check, id, reason);
+                    }
+                }
             } else if let Some(reason) = component.skip_execution.reason() {
                 checks.skip_component(CheckId::ExecLadder, id, reason);
             }
@@ -1835,7 +1896,7 @@ impl TestRunner {
                 );
 
                 let executable_input = executable_max_input(&max_input);
-                let capped = executable_input != max_input;
+                let capped = at_execution_cap(&max_input);
                 if capped {
                     warn!(
                         "[{}] Limit of {max_input} {} exceeds what a swap can be executed with; \
@@ -1963,6 +2024,10 @@ impl TestRunner {
                         direction,
                         kind: *kind,
                         capped,
+                        quoted_at_limit: checked.at_limit.is_some(),
+                        execution_skipped: skip_execution
+                            .get(id)
+                            .map(|reason| reason.to_string()),
                         failures: checked.failures,
                         at_limit: None,
                         past_limit: None,
@@ -2229,7 +2294,7 @@ impl TestRunner {
                 CheckId::LimitsAtLimit,
                 &limits.component,
                 &direction,
-                None,
+                limits.at_limit_unfailed(),
                 &at_limit_failures,
             );
 
@@ -2241,7 +2306,7 @@ impl TestRunner {
                 CheckId::LimitsPastLimit,
                 &limits.component,
                 &direction,
-                limits.past_limit_skipped(),
+                limits.past_limit_unfailed(),
                 &past_limit_failures,
             );
 
@@ -2249,7 +2314,7 @@ impl TestRunner {
                 CheckId::LimitsMaxOutput,
                 &limits.component,
                 &direction,
-                None,
+                limits.max_output_unfailed(),
                 &limits.failures_of(CheckId::LimitsMaxOutput),
             );
         }
@@ -2967,6 +3032,79 @@ mod tests {
         // The limit the deep Pons pool reports, some 12 orders of magnitude past the ceiling.
         let pons_limit = BigUint::from_str("1693513416259416009682992155640660564186233").unwrap();
         assert_eq!(executable_max_input(&pons_limit), ceiling);
+    }
+
+    #[test]
+    fn a_limit_at_or_above_int128_max_is_the_execution_cap() {
+        let ceiling = BigUint::from(i128::MAX as u128);
+
+        assert!(!at_execution_cap(&(&ceiling - 1u32)));
+        // Exactly the ceiling: one unit past it reverts in the cast, not at the venue's bound.
+        assert!(at_execution_cap(&ceiling));
+        assert!(at_execution_cap(&(&ceiling + 1u32)));
+    }
+
+    /// A hard limit's direction, with every check passing in simulation unless `quoted_at_limit`
+    /// is false, executed unless `execution_skipped` gives a reason.
+    fn hard_limit(quoted_at_limit: bool, execution_skipped: Option<&str>) -> LimitDirection {
+        let executed = quoted_at_limit && execution_skipped.is_none();
+        LimitDirection {
+            component: "0x01".to_string(),
+            direction: Direction { token_in: Bytes::from("0x0a"), token_out: Bytes::from("0x0b") },
+            kind: LimitKind::Hard,
+            capped: false,
+            quoted_at_limit,
+            execution_skipped: execution_skipped.map(str::to_string),
+            failures: Vec::new(),
+            at_limit: executed.then(|| "at_limit".to_string()),
+            past_limit: executed.then(|| "past_limit".to_string()),
+        }
+    }
+
+    #[test]
+    fn limit_checks_pass_only_once_executed() {
+        let executed = hard_limit(true, None);
+        assert_eq!(executed.at_limit_unfailed(), Outcome::Pass);
+        assert_eq!(executed.past_limit_unfailed(), Outcome::Pass);
+        assert_eq!(executed.max_output_unfailed(), Outcome::Pass);
+    }
+
+    #[test]
+    fn limit_checks_of_a_component_that_skips_execution_are_skipped() {
+        let skipped = hard_limit(true, Some("no fork state"));
+        assert_eq!(
+            skipped.at_limit_unfailed(),
+            Outcome::Skipped {
+                reason: "the quote at the limit is not executed: no fork state".to_string()
+            }
+        );
+        assert_eq!(
+            skipped.past_limit_unfailed(),
+            Outcome::Skipped {
+                reason: "the swap past the limit is not executed: no fork state".to_string()
+            }
+        );
+        // The comparison runs in simulation alone.
+        assert_eq!(skipped.max_output_unfailed(), Outcome::Pass);
+    }
+
+    #[test]
+    fn checks_that_need_the_quote_at_the_limit_are_not_run_without_it() {
+        let unquoted = hard_limit(false, None);
+        let not_run = Outcome::NotRun { reason: "limits.at_limit failed".to_string() };
+        assert_eq!(unquoted.past_limit_unfailed(), not_run);
+        assert_eq!(unquoted.max_output_unfailed(), not_run);
+    }
+
+    #[test]
+    fn a_capped_or_non_hard_limit_skips_the_past_limit_check() {
+        let capped = LimitDirection { capped: true, ..hard_limit(true, None) };
+        assert!(matches!(capped.past_limit_unfailed(), Outcome::Skipped { .. }));
+        let soft = LimitDirection { kind: LimitKind::Soft, ..hard_limit(true, None) };
+        assert_eq!(
+            soft.past_limit_unfailed(),
+            Outcome::Skipped { reason: "the limit is declared soft".to_string() }
+        );
     }
 
     #[test]
