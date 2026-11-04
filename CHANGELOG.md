@@ -1,3 +1,16 @@
+## [0.501.0](https://github.com/propeller-heads/tycho/compare/0.500.0...0.501.0) (2026-11-04)
+
+
+### Features
+
+* **integration-test:** select pAMM book feeds with --pamm ([2b447b9](https://github.com/propeller-heads/tycho/commit/2b447b9ce4364381baf82a30b55d8a5b5d79ea69))
+* **integration-test:** select RFQ and pAMM book feeds separately ([#1736](https://github.com/propeller-heads/tycho/issues/1736)) ([d561642](https://github.com/propeller-heads/tycho/commit/d56164265a3ddb1213e3491a8a5eddf8dd00d7fb))
+
+
+### Bug Fixes
+
+* **integration-test:** keep RFQ credentials out of Debug output ([4a0ee47](https://github.com/propeller-heads/tycho/commit/4a0ee47b63d374ee700442911294bca5ed0c0575))
+
 ## [0.500.0](https://github.com/propeller-heads/tycho/compare/0.499.0...0.500.0) (2026-11-04)
 
 
