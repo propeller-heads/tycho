@@ -8,7 +8,7 @@ use alloy::{
     network::Ethereum,
     primitives::{Address, Bytes as AlloyBytes, TxKind},
     providers::{Provider, RootProvider},
-    rpc::types::TransactionRequest,
+    rpc::types::{BlockId, TransactionRequest},
     sol,
     sol_types::SolCall,
 };
@@ -102,7 +102,11 @@ pub async fn fetch_router_fee_on_output(
     Ok(RouterFeeOnOutput { numerator, denominator })
 }
 
-/// Performs an `eth_call` of `calldata` against `contract` and decodes the return value.
+/// Performs an `eth_call` of `calldata` against `contract` at the latest block and decodes the
+/// return value.
+///
+/// The block is set explicitly: without one, the provider sends `pending`, which nodes that keep
+/// no pending state reject.
 async fn eth_call<C: SolCall>(
     provider: &RootProvider<Ethereum>,
     contract: Address,
@@ -115,6 +119,7 @@ async fn eth_call<C: SolCall>(
             input: AlloyBytes::from(calldata).into(),
             ..Default::default()
         })
+        .block(BlockId::latest())
         .await
         .map_err(|e| miette!("{method} call to {contract} failed: {e}"))?;
     C::abi_decode_returns(response.as_ref())
