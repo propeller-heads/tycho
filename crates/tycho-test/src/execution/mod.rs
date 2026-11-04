@@ -105,9 +105,10 @@ pub async fn simulate_swap_transaction_before_block(
 
 /// [`simulate_swap_transaction`], but in the context of the block after `block`: the next number,
 /// and a timestamp `block_time_secs` later. A swap quoted on `block`'s state executes there at the
-/// earliest, and the tycho-simulation decoder prices native protocol states for that block, so a
-/// time-dependent quote is compared against the execution it predicts. A pending block, whose hash
-/// is zero, simulates on the pending state as [`simulate_swap_transaction`] does.
+/// earliest, and the tycho-simulation decoder prices states that implement
+/// `ProtocolSim::apply_block` for that block, so their time-dependent quotes are compared against
+/// the execution they predict. A pending block, whose hash is zero, simulates on the pending state
+/// as [`simulate_swap_transaction`] does.
 pub async fn simulate_swap_transaction_next_block(
     rpc_tools: &RPCTools,
     execution_info: HashMap<String, TychoExecutionInput>,

@@ -1442,11 +1442,10 @@ async fn process_update(
     // A price level quote prices the block Titan was building, and its swaps carry the account
     // state the quote was priced on (`account_overwrites`) whenever the stream attached one. So
     // they are simulated the way a consumer tests the quote before that block exists: on the
-    // quoted block's parent, with the quoted block's number and timestamp. The decoder prices a
-    // native state of a full block's update for the block after it, where a swap quoted on it
-    // executes at the earliest, so those swaps are simulated on the block's state in the next
-    // block's context. Every other swap — a VM state's, a partial block's or an RFQ quote's — is
-    // simulated on the block's own state, in its own context.
+    // quoted block's parent, with the quoted block's number and timestamp. A full block's update
+    // of a protocol in `NEXT_BLOCK_PROTOCOLS` is priced for the block after it, where a swap
+    // quoted on it executes at the earliest, so those swaps are simulated on the block's state in
+    // the next block's context. Every other swap is simulated on the block's own state.
     let (before_block, after_block): (HashMap<_, _>, HashMap<_, _>) = block_execution_info
         .clone()
         .into_iter()
@@ -1457,7 +1456,7 @@ async fn process_update(
     };
     let (next_block, after_block): (HashMap<_, _>, HashMap<_, _>) = after_block
         .into_iter()
-        .partition(|(_, info)| full_block_update && is_native(&info.protocol_system));
+        .partition(|(_, info)| full_block_update && executes_in_next_block(&info.protocol_system));
     record_swaps_without_simulation_overrides(&before_block);
     let mut results = HashMap::new();
     if !before_block.is_empty() {
@@ -2238,10 +2237,14 @@ fn simulates_before_block(protocol_system: &str) -> bool {
     pamm_venue(protocol_system).is_some()
 }
 
-/// Whether `protocol_system` is simulated by a native state, which the decoder prices for the
-/// block after its update's, rather than by a VM state, which runs in the update block's context.
-fn is_native(protocol_system: &str) -> bool {
-    !protocol_system.starts_with("vm:")
+/// Protocol systems whose quotes move with the block they execute in and that the decoder prices
+/// for the block after the update's, via `ProtocolSim::apply_block`.
+const NEXT_BLOCK_PROTOCOLS: [&str; 1] = ["biconomy"];
+
+/// Whether a swap of `protocol_system` from a full block's update is simulated in the next block's
+/// context, the block its quote priced.
+fn executes_in_next_block(protocol_system: &str) -> bool {
+    NEXT_BLOCK_PROTOCOLS.contains(&protocol_system)
 }
 
 /// The block a Tenderly link replays a swap of `block` in. `None` keeps the link's default, the
@@ -2357,8 +2360,8 @@ mod tests {
     use tycho_simulation::tycho_common::models::Chain;
 
     use super::{
-        book_swap_directions, is_native, is_oracle_stale_revert, is_stale_quote, pamm_venue,
-        sample_swap_directions, should_fetch_block_by_number, Cli, TychoState,
+        book_swap_directions, executes_in_next_block, is_oracle_stale_revert, is_stale_quote,
+        pamm_venue, sample_swap_directions, should_fetch_block_by_number, Cli, TychoState,
     };
 
     #[rstest]
@@ -2377,14 +2380,14 @@ mod tests {
     }
 
     #[rstest]
-    #[case::native("biconomy", true)]
-    #[case::native_hooks("uniswap_v4_hooks", true)]
+    #[case::listed("biconomy", true)]
+    #[case::unlisted_native("uniswap_v3", false)]
     #[case::vm("vm:curve", false)]
-    fn native_protocols_are_told_apart_from_vm_ones(
+    fn only_listed_protocols_execute_in_the_next_block(
         #[case] protocol_system: &str,
         #[case] expected: bool,
     ) {
-        assert_eq!(is_native(protocol_system), expected);
+        assert_eq!(executes_in_next_block(protocol_system), expected);
     }
 
     #[rstest]

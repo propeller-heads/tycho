@@ -167,7 +167,8 @@ pub enum SimulationBase {
     BeforeBlock,
     /// The state after the block, in the context of the block after it: the next number, and a
     /// timestamp `block_time_secs` later. A swap quoted on the block's state executes there at the
-    /// earliest, and the tycho-simulation decoder prices native protocol states for it.
+    /// earliest, and the tycho-simulation decoder prices states that implement
+    /// `ProtocolSim::apply_block` for it.
     NextBlock { block_time_secs: u64 },
 }
 
