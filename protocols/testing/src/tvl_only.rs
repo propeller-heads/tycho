@@ -89,7 +89,10 @@ const LADDER: [u32; 3] = [1, 10, 100];
 /// Compares `original` with `halved`, the same component decoded with its balances halved, in
 /// every direction between `tokens`: limits, spot price, and a quote at 0.1%, 1% and 10% of the
 /// original max input after `sizing`, which caps it as the ladder does. Returns every difference.
-/// A question both states fail to answer is no difference.
+///
+/// A question both states fail to answer with the same error is no difference. When the original
+/// state answers no question at all, nothing was compared, and that is returned as a difference
+/// too: the halving would otherwise verify nothing.
 pub fn compare<Q: Quoter + ?Sized>(
     original: &Q,
     halved: &Q,
@@ -97,10 +100,12 @@ pub fn compare<Q: Quoter + ?Sized>(
     sizing: impl Fn(&BigUint) -> BigUint,
 ) -> Vec<String> {
     let mut changes = Vec::new();
+    let mut answered = 0usize;
     for pair in tokens.iter().permutations(2) {
         let (token_in, token_out) = (pair[0], pair[1]);
         let direction = format!("{} -> {}", token_in.symbol, token_out.symbol);
         let limits = original.limits(token_in, token_out);
+        answered += usize::from(limits.is_ok());
         if let Some(change) =
             changed(&limits, &halved.limits(token_in, token_out), |(input, output)| {
                 format!("max input {input}, max output {output}")
@@ -108,11 +113,11 @@ pub fn compare<Q: Quoter + ?Sized>(
         {
             changes.push(format!("{direction}: limits {change}"));
         }
-        if let Some(change) = changed(
-            &original.spot_price(token_in, token_out),
-            &halved.spot_price(token_in, token_out),
-            f64::to_string,
-        ) {
+        let spot_price = original.spot_price(token_in, token_out);
+        answered += usize::from(spot_price.is_ok());
+        if let Some(change) =
+            changed(&spot_price, &halved.spot_price(token_in, token_out), f64::to_string)
+        {
             changes.push(format!("{direction}: spot price {change}"));
         }
         let Ok((max_input, _)) = limits else {
@@ -124,8 +129,10 @@ pub fn compare<Q: Quoter + ?Sized>(
             if amount_in.is_zero() {
                 continue;
             }
+            let quote = original.amount_out(amount_in.clone(), token_in, token_out);
+            answered += usize::from(quote.is_ok());
             if let Some(change) = changed(
-                &original.amount_out(amount_in.clone(), token_in, token_out),
+                &quote,
                 &halved.amount_out(amount_in.clone(), token_in, token_out),
                 BigUint::to_string,
             ) {
@@ -135,6 +142,12 @@ pub fn compare<Q: Quoter + ?Sized>(
                 ));
             }
         }
+    }
+    if answered == 0 {
+        changes.push(
+            "every limit, spot price and quote errors, so halving the balances verifies nothing"
+                .to_string(),
+        );
     }
     changes
 }
@@ -151,7 +164,7 @@ fn changed<T: PartialEq>(
     };
     let same = match (original, halved) {
         (Ok(original), Ok(halved)) => original == halved,
-        (Err(_), Err(_)) => true,
+        (Err(original), Err(halved)) => original == halved,
         (Ok(_), Err(_)) | (Err(_), Ok(_)) => false,
     };
     (!same).then(|| format!("is {}, but {} with the balances halved", show(original), show(halved)))
@@ -287,8 +300,65 @@ mod tests {
     }
 
     #[test]
-    fn an_error_on_one_side_only_is_a_change_and_on_both_is_not() {
-        assert!(compare(&Failing, &Failing, &tokens(), BigUint::clone).is_empty());
+    fn a_component_that_answers_nothing_verifies_nothing() {
+        let changes = compare(&Failing, &Failing, &tokens(), BigUint::clone);
+        assert_eq!(
+            changes,
+            vec!["every limit, spot price and quote errors, so halving the balances verifies \
+                  nothing"
+                .to_string()]
+        );
+    }
+
+    /// A pool that quotes, but has no spot price: the error is `price_error`.
+    struct Unpriced {
+        pool: Pool,
+        price_error: &'static str,
+    }
+
+    impl Quoter for Unpriced {
+        fn limits(
+            &self,
+            token_in: &Token,
+            token_out: &Token,
+        ) -> Result<(BigUint, BigUint), String> {
+            self.pool.limits(token_in, token_out)
+        }
+        fn spot_price(&self, _: &Token, _: &Token) -> Result<f64, String> {
+            Err(self.price_error.to_string())
+        }
+        fn amount_out(
+            &self,
+            amount_in: BigUint,
+            token_in: &Token,
+            token_out: &Token,
+        ) -> Result<BigUint, String> {
+            self.pool
+                .amount_out(amount_in, token_in, token_out)
+        }
+    }
+
+    #[test]
+    fn the_same_error_on_both_sides_is_no_change_and_a_different_one_is() {
+        let (original, halved) = pair(false);
+        let unpriced = |pool, price_error| Unpriced { pool, price_error };
+        let (original, halved) = (unpriced(original, "no price"), unpriced(halved, "no price"));
+        assert!(compare(&original, &halved, &tokens(), BigUint::clone).is_empty());
+
+        let halved = Unpriced { price_error: "no price for 50000", ..halved };
+        let changes = compare(&original, &halved, &tokens(), BigUint::clone);
+        assert_eq!(changes.len(), 2, "{changes:?}");
+        assert!(
+            changes[0].ends_with(
+                "spot price is an error (no price), but an error (no price for 50000) with the \
+                 balances halved"
+            ),
+            "{changes:?}"
+        );
+    }
+
+    #[test]
+    fn an_error_on_one_side_only_is_a_change() {
         let (original, _) = pair(false);
         let mixed: [&dyn Quoter; 2] = [&original, &Failing];
         let changes = compare(mixed[0], mixed[1], &tokens(), BigUint::clone);

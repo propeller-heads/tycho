@@ -147,14 +147,17 @@ every pool's funds, a view call returning a `uint` gives the amount, per token o
             args: ["0x9759a6ac90977b93b58547b4a71c78317f391a28"]   # DAI join
             divide_by: "1e27"
   - id: "0xe96a45f66bdda121b24f0a861372a72e8889523d00020000000000000000069b"   # Balancer V2
-    # every token: the pool's cash in the vault
-    balance_check: {call: {to: "0xBA12222222228d8Ba445958a75a0704d566BF2C8", fn: "getPoolTokenInfo(bytes32,address)", args: [self, token]}}
+    # every token: the pool's cash in the vault, the first of the four values it returns
+    balance_check: {call: {to: "0xBA12222222228d8Ba445958a75a0704d566BF2C8", fn: "getPoolTokenInfo(bytes32,address) returns (uint256,uint256,uint256,address)", args: [self, token]}}
 ```
 
-- `fn` is the signature, `name(type,...)`; the first word returned is the amount.
+- `fn` is the signature, `name(type,...)`. A function that returns anything but a single
+  `uint256` declares its outputs, `name(type,...) returns (type,...)`; the amount is the first, or
+  the one `output` gives by index. That output must be a `uint`: an `int` or a dynamic type is
+  rejected at load. Without declared outputs, a call that returns more than one word fails.
 - `args` has one entry per parameter: `self` (the component id), `token` (the token being
   checked), `attribute:NAME`, or a literal of the parameter's type.
-- `divide_by` (an integer or `1eN`) divides the result, rounding down.
+- `divide_by` (an integer or `1eN`, quoted or not) divides the result, rounding down.
 - `unindexed` passes only while the indexer reports no balance (or zero) for the token.
 
 - An `attribute:NAME` holder is read from the component's static attributes, then from its state
@@ -194,7 +197,9 @@ balances, being slightly off only moves TVL, and the component can declare a tol
   ```
   WBTC -> WETH: limits is max input 8384236, max output 683094418215225792, but max input 3889669, max output 499999999548736461 with the balances halved
   ```
-- A component with no nonzero indexed balance fails the check, as halving verifies nothing.
+- A component with no nonzero indexed balance fails the check, as halving verifies nothing. So
+  does one whose every limit, spot price and quote errors: nothing was compared. An error counts
+  as the same only when both states give the same message.
 - Strict mode rejects `tvl_only` on a component that sets `skip_simulation`, since the check
   quotes it.
 
