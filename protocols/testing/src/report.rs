@@ -265,22 +265,23 @@ impl Checks {
     }
 
     /// Records the outcome of a check on one direction of one component: a failure listing
-    /// `failures` if there are any, else a skip when `skipped` gives a reason, else a pass.
+    /// `failures` if there are any, else `unfailed`, which says whether the check passed or why it
+    /// did not run.
     pub fn record_direction(
         &mut self,
         id: CheckId,
         component: &str,
         direction: &str,
-        skipped: Option<&str>,
+        unfailed: Outcome,
         failures: &[String],
     ) {
-        self.record_scoped(id, component, Some(direction), skipped, failures);
+        self.record_scoped(id, component, Some(direction), unfailed, failures);
     }
 
     /// Records the outcome of a check on one component: a failure listing `failures` if there
     /// are any, else a pass.
     pub fn record_component(&mut self, id: CheckId, component: &str, failures: &[String]) {
-        self.record_scoped(id, component, None, None, failures);
+        self.record_scoped(id, component, None, Outcome::Pass, failures);
     }
 
     fn record_scoped(
@@ -288,19 +289,17 @@ impl Checks {
         id: CheckId,
         component: &str,
         direction: Option<&str>,
-        skipped: Option<&str>,
+        unfailed: Outcome,
         failures: &[String],
     ) {
-        let outcome = match (skipped, failures.is_empty()) {
-            (_, false) => {
-                let detail = failures.join("; ");
-                let scope =
-                    direction.map_or_else(|| component.to_string(), |d| format!("{component} {d}"));
-                error!("[{}] {id} failed for {scope}: {detail}", self.test);
-                Outcome::Fail { detail }
-            }
-            (Some(reason), true) => Outcome::Skipped { reason: reason.to_string() },
-            (None, true) => Outcome::Pass,
+        let outcome = if failures.is_empty() {
+            unfailed
+        } else {
+            let detail = failures.join("; ");
+            let scope =
+                direction.map_or_else(|| component.to_string(), |d| format!("{component} {d}"));
+            error!("[{}] {id} failed for {scope}: {detail}", self.test);
+            Outcome::Fail { detail }
         };
         self.record(id, Some(component), direction, outcome);
     }
@@ -464,19 +463,22 @@ mod tests {
     }
 
     #[test]
-    fn a_check_recorded_per_direction_passes_fails_or_skips_per_direction() {
+    fn a_check_recorded_per_direction_passes_fails_skips_or_is_not_run_per_direction() {
         let mut checks = Checks::new(Harness::Strict, "t");
         let failure = ["quotes past the limit".to_string()];
-        checks.record_direction(CheckId::LimitsPastLimit, "0x01", "0xa->0xb", None, &[]);
-        checks.record_direction(CheckId::LimitsPastLimit, "0x01", "0xb->0xa", None, &failure);
-        checks.record_direction(CheckId::LimitsPastLimit, "0x02", "0xa->0xb", Some("soft"), &[]);
+        let soft = || Outcome::Skipped { reason: "soft".to_string() };
+        let not_run = || Outcome::NotRun { reason: "limits.at_limit failed".to_string() };
+        checks.record_direction(CheckId::LimitsPastLimit, "0x01", "0xa->0xb", Outcome::Pass, &[]);
         checks.record_direction(
             CheckId::LimitsPastLimit,
-            "0x02",
+            "0x01",
             "0xb->0xa",
-            Some("soft"),
+            Outcome::Pass,
             &failure,
         );
+        checks.record_direction(CheckId::LimitsPastLimit, "0x02", "0xa->0xb", soft(), &[]);
+        checks.record_direction(CheckId::LimitsPastLimit, "0x02", "0xb->0xa", soft(), &failure);
+        checks.record_direction(CheckId::LimitsPastLimit, "0x03", "0xa->0xb", not_run(), &[]);
 
         let (outcome, results) = checks.finish();
         // The check failed twice and is named once.
@@ -487,12 +489,10 @@ mod tests {
             .collect();
         assert_eq!(outcomes[0], (Some("0x01"), Some("0xa->0xb"), &Outcome::Pass));
         assert!(matches!(outcomes[1].2, Outcome::Fail { .. }));
-        assert_eq!(
-            outcomes[2],
-            (Some("0x02"), Some("0xa->0xb"), &Outcome::Skipped { reason: "soft".to_string() })
-        );
+        assert_eq!(outcomes[2], (Some("0x02"), Some("0xa->0xb"), &soft()));
         // A failure outranks a skip.
         assert!(matches!(outcomes[3].2, Outcome::Fail { .. }));
+        assert_eq!(outcomes[4], (Some("0x03"), Some("0xa->0xb"), &not_run()));
     }
 
     #[test]
