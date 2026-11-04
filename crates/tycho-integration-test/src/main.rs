@@ -102,7 +102,7 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_rfq: bool,
 
-    /// Disable the pAMM book feeds (Metric)
+    /// Disable the pAMM book feeds (Metric; BaiBai on Base once its executor is configured)
     #[arg(long, default_value_t = false)]
     disable_pamm: bool,
 
@@ -498,6 +498,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
             !cli.disable_rfq,
             !cli.disable_pamm,
             cli.rfq_all_pairs,
+            cli.rpc_url.clone(),
         )
         .unwrap_or_else(|e| panic!("Failed to create book stream processor: {e}"));
         rfq_handle = Some(

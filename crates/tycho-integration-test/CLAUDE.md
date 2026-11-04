@@ -54,7 +54,7 @@ shows up as a failure.
 - **`stream_processor/`**:
   - `protocol_stream_processor.rs`: Handles on-chain protocol updates — applies deltas to
     `ProtocolSim` instances, runs `get_amount_out` simulations, validates via RPC execution
-  - `book_stream_processor.rs`: Handles the off-chain book feeds (the RFQ venues and Metric) —
+  - `book_stream_processor.rs`: Handles the off-chain book feeds (the RFQ venues, Metric and BaiBai) —
     fetches live quotes, compares against simulation
   - `price_level_stream_processor.rs`: Handles Titan pAMM price level stream updates (Ethereum
     only) — emits one sampled update per `--price-level-stream-block-interval` blocks, holding a

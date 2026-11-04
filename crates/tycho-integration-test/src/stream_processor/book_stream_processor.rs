@@ -9,13 +9,18 @@ use tycho_common::{
     models::{token::Token, Chain},
     Bytes,
 };
-use tycho_execution::encoding::evm::get_router_address;
+use tycho_execution::encoding::evm::{
+    get_router_address, swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
+};
 use tycho_simulation::{
     book::{
         all_pairs::QuoteRule, quote_tokens::usd_stablecoins_for_chain, BookFeedConfig,
         BookFeedEvent, BookFeedOutcome, BookFeedStreams, BookSnapshot,
     },
-    pamm::protocols::metric::{self, feed::MetricFeedBuilder},
+    pamm::protocols::{
+        baibai::{self, BaibaiFeedBuilder},
+        metric::{self, feed::MetricFeedBuilder},
+    },
     rfq::protocols::{
         bebop::{self, feed::BebopFeedBuilder},
         hashflow::{self, feed::HashflowFeedBuilder},
@@ -28,8 +33,7 @@ use tycho_test::execution::encoding::USER_ADDR;
 
 use crate::stream_processor::{StreamUpdate, StreamUpdatePayload};
 
-/// The venues that sign binding quotes. Metric is the pAMM of the family and is configured on
-/// its own.
+/// The venues that sign binding quotes. The pAMMs (Metric, BaiBai) are configured on their own.
 #[derive(Debug, PartialEq, Eq, Hash)]
 enum RfqVenue {
     Bebop,
@@ -55,6 +59,8 @@ pub struct BookStreamProcessor {
     credentials: HashMap<RfqVenue, (String, String)>,
     sample_size: usize,
     pamm_feeds: bool,
+    /// The node BaiBai's feed reads its books from.
+    rpc_url: String,
     /// The protocol's stream will skip messages for this duration after processing a message
     skip_messages_duration: Duration,
     /// Whether each venue publishes one component for all of its pairs rather than one each.
@@ -62,6 +68,7 @@ pub struct BookStreamProcessor {
 }
 
 impl BookStreamProcessor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         chain: Chain,
         tvl_threshold: f64,
@@ -70,6 +77,7 @@ impl BookStreamProcessor {
         rfq_feeds: bool,
         pamm_feeds: bool,
         all_pairs: bool,
+        rpc_url: String,
     ) -> miette::Result<Self> {
         let mut credentials = HashMap::new();
         if rfq_feeds {
@@ -109,7 +117,7 @@ impl BookStreamProcessor {
             if pamm_feeds {
                 info!("No RFQ venue is configured. Continuing with the pAMM feeds only.");
             } else {
-                return Err(miette!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, or drop --disable-pamm to run Metric on its own."));
+                return Err(miette!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, or drop --disable-pamm to run the pAMM feeds on their own."));
             }
         }
         Ok(Self {
@@ -118,6 +126,7 @@ impl BookStreamProcessor {
             credentials,
             sample_size,
             pamm_feeds,
+            rpc_url,
             skip_messages_duration,
             all_pairs,
         })
@@ -162,6 +171,7 @@ impl BookStreamProcessor {
                     info!("Metric credentials not found. Expected environment variable: METRIC_API_KEY");
                 }
             }
+            self.add_baibai_feed(&mut feeds, &book_config);
         }
 
         for (protocol, (user, key)) in &self.credentials {
@@ -382,6 +392,45 @@ impl BookStreamProcessor {
             info!("book stream processor stopping");
         });
         Ok(handle)
+    }
+
+    /// Adds BaiBai's feed on Base. BaiBai needs no credentials, since its books are read from
+    /// the chain over `rpc_url`, so the feed runs once a BaiBai executor is configured for the
+    /// chain: without one, every sampled swap would fail to encode.
+    fn add_baibai_feed(&self, feeds: &mut BookFeedStreams, book_config: &BookFeedConfig) {
+        if self.chain != Chain::Base {
+            return;
+        }
+        let registry = match SwapEncoderRegistry::new(self.chain).add_default_encoders(None) {
+            Ok(registry) => registry,
+            Err(e) => {
+                warn!(
+                    "Skipping {}: the swap encoders failed to load: {e}",
+                    baibai::PROTOCOL_SYSTEM
+                );
+                return;
+            }
+        };
+        if !registry
+            .executor_addresses()
+            .contains_key(baibai::PROTOCOL_SYSTEM)
+        {
+            info!(
+                "Skipping {}: no executor is configured for it on {:?}",
+                baibai::PROTOCOL_SYSTEM,
+                self.chain
+            );
+            return;
+        }
+        match BaibaiFeedBuilder::new(book_config.clone(), self.rpc_url.clone()).build() {
+            Ok(baibai_feed) => {
+                info!("Adding {} feed...", baibai::PROTOCOL_SYSTEM);
+                feeds
+                    .add(baibai::PROTOCOL_SYSTEM, baibai_feed)
+                    .expect("each provider is added once");
+            }
+            Err(e) => warn!("Failed to build BaiBai feed, skipping: {e}"),
+        }
     }
 }
 
