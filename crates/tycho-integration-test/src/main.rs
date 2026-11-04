@@ -57,7 +57,7 @@ use crate::{
     fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
     statistics::TestStatistics,
     stream_processor::{
-        book_stream_processor::BookStreamProcessor,
+        book_stream_processor::{BookStreamProcessor, PammSelection, PammVenue},
         price_level_stream_processor::PriceLevelStreamProcessor,
         protocol_stream_processor::{ProtocolStreamProcessor, ProtocolTvlThreshold},
         StreamUpdate, StreamUpdatePayload,
@@ -106,9 +106,15 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_rfq: bool,
 
-    /// Disable the pAMM book feeds (Metric)
+    /// Disable the pAMM book feeds
     #[arg(long, default_value_t = false)]
     disable_pamm: bool,
+
+    /// pAMM book feeds to run, comma-separated (e.g. metric). Replaces the default list
+    /// (metric). A listed venue that cannot run, such as one missing its credentials, fails the
+    /// run; a default venue is skipped instead.
+    #[arg(long, value_delimiter = ',', conflicts_with = "disable_pamm")]
+    pamm: Option<Vec<PammVenue>>,
 
     /// Publish each RFQ venue as one component for every pair it prices, which a route may
     /// take one quote from, rather than one component per pair. The number of directions
@@ -507,7 +513,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
             cli.max_simulations as usize,
             Duration::from_secs(cli.skip_messages_duration),
             !cli.disable_rfq,
-            !cli.disable_pamm,
+            PammSelection::from_cli(cli.disable_pamm, cli.pamm.clone()),
             cli.rfq_all_pairs,
         )
         .unwrap_or_else(|e| panic!("Failed to create book stream processor: {e}"));
@@ -2327,7 +2333,7 @@ mod tests {
 
     use super::{
         book_swap_directions, is_oracle_stale_revert, is_stale_quote, pamm_venue,
-        sample_swap_directions, should_fetch_block_by_number, Cli, TychoState,
+        sample_swap_directions, should_fetch_block_by_number, Cli, PammVenue, TychoState,
     };
 
     #[rstest]
@@ -2448,6 +2454,45 @@ mod tests {
             .map(|t| (t.protocol.as_str(), t.threshold))
             .collect();
         assert_eq!(parsed, [("lunarbase", 10.0), ("pancakeswap_infinity_cl", 3.0)]);
+    }
+
+    fn parse(extra: &[&str]) -> Result<Cli, clap::Error> {
+        let mut args = vec![
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+        ];
+        args.extend_from_slice(extra);
+        Cli::try_parse_from(args)
+    }
+
+    #[test]
+    fn pamm_defaults_to_none() {
+        assert_eq!(parse(&[]).unwrap().pamm, None);
+    }
+
+    #[test]
+    fn pamm_parses_comma_separated_venues() {
+        let cli = parse(&["--pamm", "metric,metric"]).unwrap();
+        assert_eq!(cli.pamm, Some(vec![PammVenue::Metric, PammVenue::Metric]));
+    }
+
+    #[test]
+    fn pamm_rejects_an_unknown_venue() {
+        let error = parse(&["--pamm", "metric,unknown"])
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn pamm_conflicts_with_disable_pamm() {
+        let error = parse(&["--pamm", "metric", "--disable-pamm"])
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

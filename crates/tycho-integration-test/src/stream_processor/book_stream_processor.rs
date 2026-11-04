@@ -1,5 +1,6 @@
 use std::{collections::HashMap, env, fmt::Display, str::FromStr, sync::Arc, time::Duration};
 
+use clap::ValueEnum;
 use futures::StreamExt as _;
 use miette::{miette, IntoDiagnostic, WrapErr};
 use rand::prelude::IteratorRandom;
@@ -28,8 +29,7 @@ use tycho_test::execution::encoding::USER_ADDR;
 
 use crate::stream_processor::{StreamUpdate, StreamUpdatePayload};
 
-/// The venues that sign binding quotes. Metric is the pAMM of the family and is configured on
-/// its own.
+/// The venues that sign binding quotes. The pAMM venues are [`PammVenue`].
 #[derive(Debug, PartialEq, Eq, Hash)]
 enum RfqVenue {
     Bebop,
@@ -49,12 +49,76 @@ impl Display for RfqVenue {
     }
 }
 
+/// The pAMM venues the book stream can run, named on the command line by `--pamm`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
+pub enum PammVenue {
+    Metric,
+}
+
+impl PammVenue {
+    /// The venues run when `--pamm` is not given.
+    pub fn defaults() -> Vec<PammVenue> {
+        vec![PammVenue::Metric]
+    }
+
+    /// The name `--pamm` takes for this venue.
+    fn cli_name(self) -> String {
+        self.to_possible_value()
+            .map_or_else(|| self.to_string(), |value| value.get_name().to_string())
+    }
+}
+
+impl Display for PammVenue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PammVenue::Metric => write!(f, "{}", metric::PROTOCOL_SYSTEM),
+        }
+    }
+}
+
+/// Which pAMM venues the book stream runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PammSelection {
+    /// `--disable-pamm`: no pAMM venue.
+    Disabled,
+    /// No `--pamm`: [`PammVenue::defaults`]. A venue that cannot run is skipped.
+    Defaults,
+    /// `--pamm`: exactly these venues, each once. A venue that cannot run fails the run.
+    Listed(Vec<PammVenue>),
+}
+
+impl PammSelection {
+    /// The selection `--disable-pamm` and `--pamm` describe. Clap rejects the two together.
+    pub fn from_cli(disable_pamm: bool, pamm: Option<Vec<PammVenue>>) -> Self {
+        if disable_pamm {
+            return PammSelection::Disabled;
+        }
+        let Some(listed) = pamm else {
+            return PammSelection::Defaults;
+        };
+        let mut venues = Vec::with_capacity(listed.len());
+        for venue in listed {
+            if !venues.contains(&venue) {
+                venues.push(venue);
+            }
+        }
+        PammSelection::Listed(venues)
+    }
+
+    fn is_disabled(&self) -> bool {
+        match self {
+            PammSelection::Disabled => true,
+            PammSelection::Defaults | PammSelection::Listed(_) => false,
+        }
+    }
+}
+
 pub struct BookStreamProcessor {
     chain: Chain,
     tvl_threshold: f64,
     credentials: HashMap<RfqVenue, (String, String)>,
     sample_size: usize,
-    pamm_feeds: bool,
+    pamm: PammSelection,
     /// The protocol's stream will skip messages for this duration after processing a message
     skip_messages_duration: Duration,
     /// Whether each venue publishes one component for all of its pairs rather than one each.
@@ -68,7 +132,7 @@ impl BookStreamProcessor {
         sample_size: usize,
         skip_messages_duration: Duration,
         rfq_feeds: bool,
-        pamm_feeds: bool,
+        pamm: PammSelection,
         all_pairs: bool,
     ) -> miette::Result<Self> {
         let mut credentials = HashMap::new();
@@ -106,18 +170,17 @@ impl BookStreamProcessor {
         }
 
         if credentials.is_empty() {
-            if pamm_feeds {
-                info!("No RFQ venue is configured. Continuing with the pAMM feeds only.");
-            } else {
-                return Err(miette!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, or drop --disable-pamm to run Metric on its own."));
+            if pamm.is_disabled() {
+                return Err(miette!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, or drop --disable-pamm to run the pAMM feeds on their own."));
             }
+            info!("No RFQ venue is configured. Continuing with the pAMM feeds only.");
         }
         Ok(Self {
             chain,
             tvl_threshold,
             credentials,
             sample_size,
-            pamm_feeds,
+            pamm,
             skip_messages_duration,
             all_pairs,
         })
@@ -144,25 +207,7 @@ impl BookStreamProcessor {
 
         let mut feeds = BookFeedStreams::new();
 
-        if self.pamm_feeds {
-            match env::var("METRIC_API_KEY") {
-                // Metric's own defaults already set its cadence and withdrawal age.
-                Ok(api_key) => match MetricFeedBuilder::new(book_config.clone(), api_key).build() {
-                    Ok(metric_feed) => {
-                        info!("Adding {} feed...", metric::PROTOCOL_SYSTEM);
-                        feeds
-                            .add(metric::PROTOCOL_SYSTEM, metric_feed)
-                            .expect("each provider is added once");
-                    }
-                    Err(e) => {
-                        warn!("Failed to build Metric feed, skipping: {e}");
-                    }
-                },
-                Err(_) => {
-                    info!("Metric credentials not found. Expected environment variable: METRIC_API_KEY");
-                }
-            }
-        }
+        add_pamm_feeds(&self.pamm, &book_config, &mut feeds, |name| env::var(name).ok())?;
 
         for (protocol, (user, key)) in &self.credentials {
             let Some(usd_quote_tokens) = &usd_quote_tokens else {
@@ -385,6 +430,60 @@ impl BookStreamProcessor {
     }
 }
 
+/// Adds the feed of each venue `selection` names. `secret` looks up an environment variable.
+///
+/// # Errors
+/// Returns an error when a venue listed in `--pamm` lacks its credentials or its feed fails to
+/// build. A default venue that cannot run is logged and skipped instead.
+fn add_pamm_feeds(
+    selection: &PammSelection,
+    book_config: &BookFeedConfig,
+    feeds: &mut BookFeedStreams,
+    secret: impl Fn(&str) -> Option<String>,
+) -> miette::Result<()> {
+    let (venues, listed) = match selection {
+        PammSelection::Disabled => return Ok(()),
+        PammSelection::Defaults => (PammVenue::defaults(), false),
+        PammSelection::Listed(venues) => (venues.clone(), true),
+    };
+    for venue in venues {
+        match venue {
+            PammVenue::Metric => {
+                let Some(api_key) = secret("METRIC_API_KEY") else {
+                    if listed {
+                        return Err(miette!(
+                            "--pamm lists {}, but METRIC_API_KEY is not set. Set it, or drop {} \
+                             from --pamm.",
+                            venue.cli_name(),
+                            venue.cli_name()
+                        ));
+                    }
+                    info!(
+                        "Metric credentials not found. Expected environment variable: METRIC_API_KEY"
+                    );
+                    continue;
+                };
+                // Metric's own defaults already set its cadence and withdrawal age.
+                match MetricFeedBuilder::new(book_config.clone(), api_key).build() {
+                    Ok(metric_feed) => {
+                        info!("Adding {venue} feed...");
+                        feeds
+                            .add(venue.to_string(), metric_feed)
+                            .map_err(|_feed| miette!("The {venue} feed was added twice"))?;
+                    }
+                    Err(e) if listed => {
+                        return Err(miette!(
+                            "Failed to build the {venue} feed that --pamm lists: {e}"
+                        ));
+                    }
+                    Err(e) => warn!("Failed to build Metric feed, skipping: {e}"),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Hands one update to the harness. `false` once nobody is receiving, which is the processor's
 /// signal to stop.
 async fn forward(
@@ -396,4 +495,110 @@ async fn forward(
         warn!("Receiver dropped, stopping stream processor");
     }
     receiving
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn book_config() -> BookFeedConfig {
+        BookFeedConfig { chain: Chain::Base, tokens: Arc::new(HashMap::new()), min_tvl_usd: 0.0 }
+    }
+
+    /// The labels of the feeds `selection` adds when `METRIC_API_KEY` holds `key`.
+    fn added(selection: &PammSelection, key: Option<&str>) -> miette::Result<Vec<String>> {
+        let mut feeds = BookFeedStreams::new();
+        add_pamm_feeds(selection, &book_config(), &mut feeds, |name| {
+            key.filter(|_| name == "METRIC_API_KEY")
+                .map(str::to_string)
+        })?;
+        Ok(feeds
+            .labels()
+            .map(str::to_string)
+            .collect())
+    }
+
+    #[test]
+    fn the_cli_selects_disabled_defaults_or_the_listed_venues_once() {
+        assert_eq!(PammSelection::from_cli(true, None), PammSelection::Disabled);
+        assert_eq!(PammSelection::from_cli(false, None), PammSelection::Defaults);
+        assert_eq!(
+            PammSelection::from_cli(false, Some(vec![PammVenue::Metric, PammVenue::Metric])),
+            PammSelection::Listed(vec![PammVenue::Metric])
+        );
+    }
+
+    #[test]
+    fn a_venue_is_named_metric_on_the_cli_and_by_its_protocol_system_elsewhere() {
+        assert_eq!(PammVenue::Metric.cli_name(), "metric");
+        assert_eq!(PammVenue::Metric.to_string(), metric::PROTOCOL_SYSTEM);
+    }
+
+    #[tokio::test]
+    async fn a_default_venue_without_credentials_is_skipped() {
+        assert!(added(&PammSelection::Defaults, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_default_venue_whose_feed_fails_to_build_is_skipped() {
+        assert!(added(&PammSelection::Defaults, Some(""))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_listed_venue_without_credentials_fails_the_run() {
+        let error = added(&PammSelection::Listed(vec![PammVenue::Metric]), None).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("METRIC_API_KEY"), "{message}");
+        assert!(message.contains("--pamm"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_listed_venue_whose_feed_fails_to_build_fails_the_run() {
+        let error = added(&PammSelection::Listed(vec![PammVenue::Metric]), Some("")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("trading key is empty"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_venue_with_credentials_is_added_under_its_protocol_system() {
+        for selection in [PammSelection::Defaults, PammSelection::Listed(vec![PammVenue::Metric])] {
+            assert_eq!(added(&selection, Some("key")).unwrap(), [metric::PROTOCOL_SYSTEM]);
+        }
+    }
+
+    #[tokio::test]
+    async fn disabling_the_pamm_feeds_adds_nothing() {
+        assert!(added(&PammSelection::Disabled, Some("key"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn disabling_the_pamm_feeds_without_rfq_credentials_is_refused() {
+        let error = BookStreamProcessor::new(
+            Chain::Base,
+            0.0,
+            1,
+            Duration::ZERO,
+            false,
+            PammSelection::Disabled,
+            false,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("--disable-pamm"),
+            "{error}"
+        );
+    }
 }
