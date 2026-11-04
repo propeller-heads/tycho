@@ -14,7 +14,8 @@ This test runs continuously in the cluster but it can also be run locally for de
 ## Supported Protocols
 
 - **On-chain Protocols**: All DEX protocols supported by Tycho (Uniswap V2/V3, Curve, Balancer, etc.)
-- **RFQ Protocols**: Request-for-Quote protocols like Hashflow
+- **RFQ Protocols**: Request-for-Quote venues (Bebop, Hashflow, Liquorice, Native), each run when its credentials are set
+- **pAMM Book Feeds**: venues selected by `--pamm` (default: Metric)
 - **Price Level Stream**: Titan pAMM price level stream venues (`pricelevelstream:*`, Ethereum only)
 
 ## Configuration
@@ -27,6 +28,8 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `TYCHO_URL`     | Tycho indexer endpoint     | `tycho-dev.propellerheads.xyz`             |
 | `RPC_URL`       | Blockchain RPC endpoint    | `https://eth-mainnet.alchemyapi.io/v2/...` |
 | `TYCHO_API_KEY` | API key for Tycho services | `your-api-key`                             |
+| `BEBOP_KEY`, `HASHFLOW_USER` + `HASHFLOW_KEY`, `LIQUORICE_USER` + `LIQUORICE_KEY`, `NATIVE_API_KEY` | RFQ venue credentials; a venue without them is skipped | |
+| `METRIC_API_KEY` | Metric (pAMM) credentials; required when `--pamm` lists `metric` | |
 
 ### Command Line Arguments
 

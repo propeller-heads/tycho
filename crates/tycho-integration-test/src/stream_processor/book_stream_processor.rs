@@ -412,7 +412,7 @@ impl BookStreamProcessor {
                 }
                 *next_stream_time = now + skip_messages_duration;
 
-                // Sample random RFQ quotes from the complete book
+                // Sample random books from the venue's complete snapshot
                 let books = Arc::new(
                     books
                         .iter()

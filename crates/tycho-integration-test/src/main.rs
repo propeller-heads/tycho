@@ -481,7 +481,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
     // processing cannot block protocol update consumption
     let (protocol_tx, mut protocol_rx) =
         tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
-    let (rfq_tx, mut rfq_rx) = tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
+    let (book_tx, mut book_rx) = tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
     let (price_level_tx, mut price_level_rx) =
         tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
     let mut protocol_handle = None;
@@ -514,8 +514,8 @@ async fn run(cli: Cli) -> miette::Result<()> {
         PammSelection::from_cli(cli.disable_pamm, cli.pamm.clone()),
         cli.rfq_all_pairs,
     );
-    let mut rfq_handle = book_stream_processor
-        .run_stream(Arc::clone(&all_tokens), rfq_tx)
+    let mut book_handle = book_stream_processor
+        .run_stream(Arc::clone(&all_tokens), book_tx)
         .await?;
     if !cli.disable_price_level_stream {
         if let Some(price_level_stream_processor) = PriceLevelStreamProcessor::new(
@@ -550,10 +550,10 @@ async fn run(cli: Cli) -> miette::Result<()> {
     }
     info!("Waiting for first protocol update...");
     let protocol_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
-    let rfq_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
+    let book_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let price_level_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let mut protocol_stream_open = true;
-    let mut book_stream_open = rfq_handle.is_some();
+    let mut book_stream_open = book_handle.is_some();
     let mut price_level_stream_open = price_level_handle.is_some();
 
     // Staleness watchdog: if no protocol update arrives within stale_threshold_secs, mark all
@@ -596,13 +596,13 @@ async fn run(cli: Cli) -> miette::Result<()> {
 
             // Monitor book stream termination
             result = async {
-                if let Some(handle) = rfq_handle.as_mut() {
+                if let Some(handle) = book_handle.as_mut() {
                     handle.await
                 } else {
                     std::future::pending().await
                 }
-            }, if rfq_handle.is_some() => {
-                rfq_handle = None;
+            }, if book_handle.is_some() => {
+                book_handle = None;
                 match result {
                     Ok(()) => {
                         warn!("Book stream terminated");
@@ -708,7 +708,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
             }
 
             // Process book updates independently
-            update = rfq_rx.recv(), if book_stream_open => {
+            update = book_rx.recv(), if book_stream_open => {
                 match update {
                     Some(update) => {
                         let update = match update {
@@ -725,7 +725,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
-                        let permit = rfq_semaphore
+                        let permit = book_semaphore
                             .clone()
                             .acquire_owned()
                             .await
