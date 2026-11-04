@@ -2238,8 +2238,11 @@ fn simulates_before_block(protocol_system: &str) -> bool {
 }
 
 /// Protocol systems whose quotes move with the block they execute in and that the decoder prices
-/// for the block after the update's, via `ProtocolSim::apply_block`.
-const NEXT_BLOCK_PROTOCOLS: [&str; 3] = ["biconomy", "etherfi", "lido_v4"];
+/// for the block after the update's, via `ProtocolSim::apply_block`. The v4 families stay out
+/// although the `pancakeswap_clalpha` hook implements it: their pools with VM hooks are priced on
+/// the update's block.
+const NEXT_BLOCK_PROTOCOLS: [&str; 5] =
+    ["aerodrome_slipstreams", "biconomy", "etherfi", "lido_v4", "lunarbase"];
 
 /// Whether a swap of `protocol_system` from a full block's update is simulated in the next block's
 /// context, the block its quote priced.
@@ -2380,9 +2383,12 @@ mod tests {
     }
 
     #[rstest]
+    #[case::aerodrome_slipstreams("aerodrome_slipstreams", true)]
     #[case::biconomy("biconomy", true)]
     #[case::etherfi("etherfi", true)]
     #[case::lido_v4("lido_v4", true)]
+    #[case::lunarbase("lunarbase", true)]
+    #[case::uniswap_v4("uniswap_v4", false)]
     #[case::unlisted_native("uniswap_v3", false)]
     #[case::vm("vm:curve", false)]
     fn only_listed_protocols_execute_in_the_next_block(
