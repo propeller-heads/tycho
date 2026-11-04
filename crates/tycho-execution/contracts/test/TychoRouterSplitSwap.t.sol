@@ -29,7 +29,6 @@ contract HackedCallbackDataPool is Constants {
         );
         uint256 stolenAmount = 1000 ether;
 
-        // slither-disable-next-line low-level-calls
         (bool ok,) = msg.sender
             .call(
                 abi.encodeWithSignature(

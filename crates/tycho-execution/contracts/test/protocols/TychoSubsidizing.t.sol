@@ -1104,12 +1104,10 @@ contract SwapDelegatingRouter {
     mapping(address => uint256) public executorsActivationTimestamp;
 
     function delegateSwap(address executor, bytes calldata data) external {
-        // slither-disable-next-line controlled-delegatecall,low-level-calls
         (bool success, bytes memory result) = executor.delegatecall(
             abi.encodeCall(IExecutor.swap, (1 ether, data, address(this)))
         );
         if (!success) {
-            // slither-disable-next-line assembly
             assembly {
                 revert(add(result, 0x20), mload(result))
             }

@@ -247,9 +247,7 @@ contract UniswapXFillerTest is Test, TychoRouterTestSetup {
 
         // Check balances after withdrawing
         for (uint256 i = 0; i < tokens.length; i++) {
-            // slither-disable-next-line calls-loop
             assertEq(tokens[i].balanceOf(fillerAddr), 0);
-            // slither-disable-next-line calls-loop
             assertEq(tokens[i].balanceOf(ADMIN), 100 ether);
         }
         vm.stopPrank();
