@@ -20,7 +20,6 @@ import {
 } from "@ekubo/types/sqrtRatio.sol";
 import {TransferManager} from "../TransferManager.sol";
 import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
-import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 
 contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
     error EkuboExecutor__AddressZero();

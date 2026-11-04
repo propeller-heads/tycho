@@ -44,6 +44,7 @@ import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
 import {RingSwapV2Executor} from "../src/executors/RingSwapV2Executor.sol";
 import {NativeExecutor} from "../src/executors/NativeExecutor.sol";
 import {SkyExecutor} from "../src/executors/SkyExecutor.sol";
+import {TransferManager} from "../src/TransferManager.sol";
 // Test utilities and mocks
 import "./Constants.sol";
 import "./TestUtils.sol";

@@ -12,7 +12,6 @@ import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {Vault} from "./Vault.sol";
 import {ETH_ADDRESS} from "../lib/NativeETH.sol";
 
-error TransferManager__AddressZero();
 error TransferManager__NotAContract(address addr);
 error TransferManager__ExceededTransferFromAllowance(
     uint256 allowedAmount, uint256 amountAttempted

@@ -11,8 +11,6 @@ import {
 error Dispatcher__UnapprovedExecutor(address executor);
 error Dispatcher__ExecutorIsTimelocked(address executor);
 error Dispatcher__NonContractExecutor();
-error Dispatcher__InvalidDataLength();
-error Dispatcher__AddressZero();
 error Dispatcher__UnsupportedSingleHopCycle(address token);
 error Dispatcher__ExecutorAlreadyExists(address executor);
 error Dispatcher__SwapReverted(address executor);

@@ -21,16 +21,12 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PathKey} from "@uniswap/v4-periphery/src/libraries/PathKey.sol";
 import {
-    IUnlockCallback
-} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
-import {
     SafeCast as V4SafeCast
 } from "@uniswap/v4-core/src/libraries/SafeCast.sol";
 import {
     TransientStateLibrary
 } from "@uniswap/v4-core/src/libraries/TransientStateLibrary.sol";
 import {TransferManager} from "../TransferManager.sol";
-import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {
     LibPrefixLengthEncodedByteArray
 } from "../../lib/bytes/LibPrefixLengthEncodedByteArray.sol";
@@ -39,10 +35,6 @@ error UniswapV4Executor__InvalidDataLength();
 error UniswapV4Executor__NotPoolManager();
 error UniswapV4Executor__UnknownCallback(bytes4 selector);
 error UniswapV4Executor__DeltaNotPositive(Currency currency);
-error UniswapV4Executor__DeltaNotNegative(Currency currency);
-error UniswapV4Executor__V4TooMuchRequested(
-    uint256 maxAmountInRequested, uint256 amountRequested
-);
 error UniswapV4Executor__InvalidAngstromAttestationDataLength(uint256 length);
 error UniswapV4Executor__ZeroAddressAngstromHook();
 

@@ -1,14 +1,11 @@
 pragma solidity ^0.8.26;
 
-import {
-    TychoRouterV3,
-    TransferManager,
-    ClientFeeParams
-} from "@src/TychoRouterV3.sol";
+import {TychoRouterV3, ClientFeeParams} from "@src/TychoRouterV3.sol";
 import "./TychoRouterTestSetup.sol";
 import {Vault__UnexpectedNonZeroCount} from "@src/Vault.sol";
 
 import {
+    TransferManager,
     TransferManager__ExceededTransferFromAllowance
 } from "@src/TransferManager.sol";
 

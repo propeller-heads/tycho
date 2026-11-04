@@ -19,7 +19,6 @@ error Vault__InsufficientBalance(
 error Vault__AmountZero();
 error Vault__AddressZero();
 error Vault__UnexpectedNonZeroCount(uint256 nonZeroCount);
-error Vault__InvalidInputDelta(address token, int256 expected, int256 actual);
 error Vault__UnexpectedInputDelta(int256 inputDelta);
 error Vault__ValueMismatch(uint256 msgValue, uint256 amount);
 error Vault__EthNotAccepted(uint256 msgValue);
