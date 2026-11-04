@@ -30,8 +30,8 @@ use tycho_test::execution::encoding::USER_ADDR;
 use crate::stream_processor::{StreamUpdate, StreamUpdatePayload};
 
 /// The venues that sign binding quotes. The pAMM venues are [`PammVenue`].
-#[derive(Debug, PartialEq, Eq, Hash)]
-enum RfqVenue {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RfqVenue {
     Bebop,
     Hashflow,
     Liquorice,
@@ -76,6 +76,66 @@ impl Display for PammVenue {
     }
 }
 
+/// Which RFQ venues the book stream runs: each venue whose credentials are set. A venue without
+/// them is skipped, since RFQ has no explicit venue list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RfqSelection {
+    /// `--disable-rfq`: no RFQ venue.
+    Disabled,
+    /// The venues whose credentials were found, possibly none.
+    Credentials(HashMap<RfqVenue, (String, String)>),
+}
+
+impl RfqSelection {
+    /// The selection `--disable-rfq` and the venues' credentials describe. `secret` looks up an
+    /// environment variable.
+    pub fn from_cli(disable_rfq: bool, secret: impl Fn(&str) -> Option<String>) -> Self {
+        if disable_rfq {
+            return RfqSelection::Disabled;
+        }
+        let mut credentials = HashMap::new();
+        if let Some(key) = secret("BEBOP_KEY") {
+            info!("Bebop RFQ credentials found");
+            credentials.insert(RfqVenue::Bebop, (String::new(), key));
+        } else {
+            info!("Bebop RFQ credentials not found. Expected environment variable: BEBOP_KEY");
+        }
+        if let (Some(user), Some(key)) = (secret("HASHFLOW_USER"), secret("HASHFLOW_KEY")) {
+            info!("Hashflow RFQ credentials found");
+            credentials.insert(RfqVenue::Hashflow, (user, key));
+        } else {
+            info!("Hashflow RFQ credentials not found. Expected environment variables: HASHFLOW_USER, HASHFLOW_KEY");
+        }
+        if let (Some(user), Some(key)) = (secret("LIQUORICE_USER"), secret("LIQUORICE_KEY")) {
+            info!("Liquorice RFQ credentials found");
+            credentials.insert(RfqVenue::Liquorice, (user, key));
+        } else {
+            info!("Liquorice RFQ credentials not found. Expected environment variables: LIQUORICE_USER, LIQUORICE_KEY");
+        }
+        if let Some(key) = secret("NATIVE_API_KEY") {
+            info!("Native RFQ credentials found");
+            credentials.insert(RfqVenue::Native, (String::new(), key));
+        } else {
+            info!(
+                "Native RFQ credentials not found. Expected environment variable: NATIVE_API_KEY"
+            );
+        }
+        RfqSelection::Credentials(credentials)
+    }
+
+    /// Why this selection may have added no feed, for the warning when no book feed runs.
+    fn why_empty(&self) -> &'static str {
+        match self {
+            RfqSelection::Disabled => "RFQ is disabled by --disable-rfq",
+            RfqSelection::Credentials(credentials) if credentials.is_empty() => {
+                "no RFQ credentials are set (BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, \
+                 LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY)"
+            }
+            RfqSelection::Credentials(_) => "no RFQ venue with credentials serves this chain",
+        }
+    }
+}
+
 /// Which pAMM venues the book stream runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PammSelection {
@@ -105,10 +165,12 @@ impl PammSelection {
         PammSelection::Listed(venues)
     }
 
-    fn is_disabled(&self) -> bool {
+    /// Why this selection may have added no feed, for the warning when no book feed runs.
+    fn why_empty(&self) -> &'static str {
         match self {
-            PammSelection::Disabled => true,
-            PammSelection::Defaults | PammSelection::Listed(_) => false,
+            PammSelection::Disabled => "pAMM is disabled by --disable-pamm",
+            PammSelection::Defaults => "no default pAMM venue could run (see the log above)",
+            PammSelection::Listed(_) => "--pamm lists no venue",
         }
     }
 }
@@ -116,7 +178,7 @@ impl PammSelection {
 pub struct BookStreamProcessor {
     chain: Chain,
     tvl_threshold: f64,
-    credentials: HashMap<RfqVenue, (String, String)>,
+    rfq: RfqSelection,
     sample_size: usize,
     pamm: PammSelection,
     /// The protocol's stream will skip messages for this duration after processing a message
@@ -131,66 +193,20 @@ impl BookStreamProcessor {
         tvl_threshold: f64,
         sample_size: usize,
         skip_messages_duration: Duration,
-        rfq_feeds: bool,
+        rfq: RfqSelection,
         pamm: PammSelection,
         all_pairs: bool,
-    ) -> miette::Result<Self> {
-        let mut credentials = HashMap::new();
-        if rfq_feeds {
-            if let Ok(key) = env::var("BEBOP_KEY") {
-                info!("Bebop RFQ credentials found");
-                credentials.insert(RfqVenue::Bebop, (String::new(), key));
-            } else {
-                info!("Bebop RFQ credentials not found. Expected environment variable: BEBOP_KEY");
-            }
-            let (hashflow_user, hashflow_key) =
-                (env::var("HASHFLOW_USER").ok(), env::var("HASHFLOW_KEY").ok());
-            if let (Some(user), Some(key)) = (hashflow_user, hashflow_key) {
-                info!("Hashflow RFQ credentials found");
-                credentials.insert(RfqVenue::Hashflow, (user, key));
-            } else {
-                info!("Hashflow RFQ credentials not found. Expected environment variables: HASHFLOW_USER, HASHFLOW_KEY");
-            }
-            let (liquorice_user, liquorice_key) =
-                (env::var("LIQUORICE_USER").ok(), env::var("LIQUORICE_KEY").ok());
-            if let (Some(user), Some(key)) = (liquorice_user, liquorice_key) {
-                info!("Liquorice RFQ credentials found");
-                credentials.insert(RfqVenue::Liquorice, (user, key));
-            } else {
-                info!("Liquorice RFQ credentials not found. Expected environment variables: LIQUORICE_USER, LIQUORICE_KEY");
-            }
-            if let Ok(key) = env::var("NATIVE_API_KEY") {
-                info!("Native RFQ credentials found");
-                credentials.insert(RfqVenue::Native, (String::new(), key));
-            } else {
-                info!(
-                    "Native RFQ credentials not found. Expected environment variable: NATIVE_API_KEY"
-                );
-            }
-        }
-
-        if credentials.is_empty() {
-            if pamm.is_disabled() {
-                return Err(miette!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, or drop --disable-pamm to run the pAMM feeds on their own."));
-            }
-            info!("No RFQ venue is configured. Continuing with the pAMM feeds only.");
-        }
-        Ok(Self {
-            chain,
-            tvl_threshold,
-            credentials,
-            sample_size,
-            pamm,
-            skip_messages_duration,
-            all_pairs,
-        })
+    ) -> Self {
+        Self { chain, tvl_threshold, rfq, sample_size, pamm, skip_messages_duration, all_pairs }
     }
 
+    /// Starts the book stream, or returns `None` when no book feed was added: both kinds are
+    /// disabled, or neither has a venue that can run, which is logged with the reason for each.
     pub async fn run_stream(
         &self,
         all_tokens: Arc<HashMap<Bytes, Token>>,
         stream_tx: Sender<miette::Result<StreamUpdate>>,
-    ) -> miette::Result<JoinHandle<()>> {
+    ) -> miette::Result<Option<JoinHandle<()>>> {
         info!("Starting book stream processor for chain {:?}", self.chain);
         // A receiver holds only its provider's latest complete book, so the per-provider
         // throttling below never samples a backlog: whenever it decides to emit, what it reads
@@ -209,7 +225,12 @@ impl BookStreamProcessor {
 
         add_pamm_feeds(&self.pamm, &book_config, &mut feeds, |name| env::var(name).ok())?;
 
-        for (protocol, (user, key)) in &self.credentials {
+        let no_credentials = HashMap::new();
+        let credentials = match &self.rfq {
+            RfqSelection::Disabled => &no_credentials,
+            RfqSelection::Credentials(credentials) => credentials,
+        };
+        for (protocol, (user, key)) in credentials {
             let Some(usd_quote_tokens) = &usd_quote_tokens else {
                 warn!(
                     "Skipping {protocol}: it prices its books' TVL in USD stablecoins, and none \
@@ -333,6 +354,18 @@ impl BookStreamProcessor {
             }
         }
 
+        if feeds.labels().next().is_none() {
+            match (&self.rfq, &self.pamm) {
+                (RfqSelection::Disabled, PammSelection::Disabled) => {
+                    info!("Book feeds are disabled");
+                }
+                (rfq, pamm) => {
+                    warn!("No book feed is running: {}; {}", rfq.why_empty(), pamm.why_empty());
+                }
+            }
+            return Ok(None);
+        }
+
         let mut is_first_update = true;
         let sample_size = self.sample_size;
         let skip_messages_duration = self.skip_messages_duration;
@@ -426,7 +459,7 @@ impl BookStreamProcessor {
             // the BookFeedStreams aborts any feed task still running.
             info!("book stream processor stopping");
         });
-        Ok(handle)
+        Ok(Some(handle))
     }
 }
 
@@ -581,24 +614,71 @@ mod tests {
             .is_empty());
     }
 
+    fn secrets<'a>(set: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        |name| {
+            set.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        }
+    }
+
     #[test]
-    fn disabling_the_pamm_feeds_without_rfq_credentials_is_refused() {
-        let error = BookStreamProcessor::new(
-            Chain::Base,
-            0.0,
-            1,
-            Duration::ZERO,
-            false,
-            PammSelection::Disabled,
-            false,
-        )
-        .err()
-        .unwrap();
-        assert!(
-            error
-                .to_string()
-                .contains("--disable-pamm"),
-            "{error}"
+    fn the_cli_selects_the_rfq_venues_whose_credentials_are_set() {
+        assert_eq!(
+            RfqSelection::from_cli(true, secrets(&[("BEBOP_KEY", "key")])),
+            RfqSelection::Disabled
         );
+        assert_eq!(
+            RfqSelection::from_cli(false, secrets(&[])),
+            RfqSelection::Credentials(HashMap::new())
+        );
+        let selection = RfqSelection::from_cli(
+            false,
+            secrets(&[
+                ("BEBOP_KEY", "bebop"),
+                ("HASHFLOW_USER", "user"),
+                ("NATIVE_API_KEY", "native"),
+            ]),
+        );
+        let RfqSelection::Credentials(credentials) = selection else {
+            panic!("RFQ is not disabled");
+        };
+        let mut venues: Vec<String> = credentials
+            .keys()
+            .map(ToString::to_string)
+            .collect();
+        venues.sort();
+        // Hashflow needs both its user and its key.
+        assert_eq!(venues, [bebop::PROTOCOL_SYSTEM, native::PROTOCOL_SYSTEM]);
+    }
+
+    async fn run(rfq: RfqSelection, pamm: PammSelection) -> Option<JoinHandle<()>> {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        BookStreamProcessor::new(Chain::Base, 0.0, 1, Duration::ZERO, rfq, pamm, false)
+            .run_stream(Arc::new(HashMap::new()), sender)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn no_book_stream_starts_without_a_feed() {
+        let no_credentials = RfqSelection::Credentials(HashMap::new());
+        for (rfq, pamm) in [
+            (RfqSelection::Disabled, PammSelection::Disabled),
+            (no_credentials.clone(), PammSelection::Disabled),
+            (RfqSelection::Disabled, PammSelection::Listed(Vec::new())),
+            (no_credentials, PammSelection::Listed(Vec::new())),
+        ] {
+            assert!(run(rfq, pamm).await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_book_stream_starts_with_one_rfq_feed_and_the_pamm_feeds_disabled() {
+        let credentials = HashMap::from([(RfqVenue::Bebop, (String::new(), "key".to_string()))]);
+        let handle = run(RfqSelection::Credentials(credentials), PammSelection::Disabled).await;
+        handle
+            .expect("the Bebop feed runs")
+            .abort();
     }
 }

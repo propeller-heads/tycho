@@ -57,7 +57,7 @@ use crate::{
     fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
     statistics::TestStatistics,
     stream_processor::{
-        book_stream_processor::{BookStreamProcessor, PammSelection, PammVenue},
+        book_stream_processor::{BookStreamProcessor, PammSelection, PammVenue, RfqSelection},
         price_level_stream_processor::PriceLevelStreamProcessor,
         protocol_stream_processor::{ProtocolStreamProcessor, ProtocolTvlThreshold},
         StreamUpdate, StreamUpdatePayload,
@@ -485,7 +485,6 @@ async fn run(cli: Cli) -> miette::Result<()> {
     let (price_level_tx, mut price_level_rx) =
         tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
     let mut protocol_handle = None;
-    let mut rfq_handle = None;
     let mut price_level_handle = None;
 
     if !cli.disable_onchain {
@@ -506,23 +505,18 @@ async fn run(cli: Cli) -> miette::Result<()> {
                 .await?,
         );
     }
-    if !cli.disable_rfq || !cli.disable_pamm {
-        let book_stream_processor = BookStreamProcessor::new(
-            chain,
-            tvl_threshold,
-            cli.max_simulations as usize,
-            Duration::from_secs(cli.skip_messages_duration),
-            !cli.disable_rfq,
-            PammSelection::from_cli(cli.disable_pamm, cli.pamm.clone()),
-            cli.rfq_all_pairs,
-        )
-        .unwrap_or_else(|e| panic!("Failed to create book stream processor: {e}"));
-        rfq_handle = Some(
-            book_stream_processor
-                .run_stream(Arc::clone(&all_tokens), rfq_tx)
-                .await?,
-        );
-    }
+    let book_stream_processor = BookStreamProcessor::new(
+        chain,
+        tvl_threshold,
+        cli.max_simulations as usize,
+        Duration::from_secs(cli.skip_messages_duration),
+        RfqSelection::from_cli(cli.disable_rfq, |name| std::env::var(name).ok()),
+        PammSelection::from_cli(cli.disable_pamm, cli.pamm.clone()),
+        cli.rfq_all_pairs,
+    );
+    let mut rfq_handle = book_stream_processor
+        .run_stream(Arc::clone(&all_tokens), rfq_tx)
+        .await?;
     if !cli.disable_price_level_stream {
         if let Some(price_level_stream_processor) = PriceLevelStreamProcessor::new(
             chain,
@@ -559,7 +553,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
     let rfq_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let price_level_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let mut protocol_stream_open = true;
-    let mut book_stream_open = !cli.disable_rfq || !cli.disable_pamm;
+    let mut book_stream_open = rfq_handle.is_some();
     let mut price_level_stream_open = price_level_handle.is_some();
 
     // Staleness watchdog: if no protocol update arrives within stale_threshold_secs, mark all
