@@ -34,6 +34,7 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
     constructor(
         address _tychoRouter,
         address _reactor,
+        // forge-lint: disable-next-line(missing-zero-check) UniswapX marks native ETH with address(0).
         address _native_address
     ) {
         if (_tychoRouter == address(0)) {
@@ -46,7 +47,6 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
         tychoRouter = _tychoRouter;
         reactor = IReactor(_reactor);
 
-        // slither-disable-next-line missing-zero-check
         nativeAddress = _native_address;
     }
 
@@ -78,7 +78,7 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
                 .forceApprove(tychoRouter, type(uint256).max);
         }
 
-        // slither-disable-next-line low-level-calls
+        // forge-lint: disable-next-line(low-level-calls)
         (bool success, bytes memory result) = tychoRouter.call(tychoCalldata);
 
         if (!success) {
@@ -130,7 +130,6 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
         }
 
         for (uint256 i = 0; i < tokens.length; i++) {
-            // slither-disable-next-line calls-loop
             uint256 tokenBalance = tokens[i].balanceOf(address(this));
             if (tokenBalance > 0) {
                 emit Withdrawal(address(tokens[i]), tokenBalance, receiver);
@@ -153,6 +152,7 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
         uint256 amount = address(this).balance;
         if (amount > 0) {
             emit Withdrawal(ETH_ADDRESS, amount, receiver);
+            // forge-lint: disable-next-line(arbitrary-send-eth) Only DEFAULT_ADMIN_ROLE withdraws, to the receiver it names.
             Address.sendValue(payable(receiver), amount);
         }
     }

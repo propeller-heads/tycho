@@ -221,7 +221,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      *      so unsigned swaps can still benefit from custom router fee rates negotiated with the
      *      client that originated the transaction.
      */
-    // slither-disable-next-line tx-origin
     function _resolveClient(address client) internal view returns (address) {
         return client == address(0) ? tx.origin : client;
     }

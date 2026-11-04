@@ -1,3 +1,42 @@
 {
-    "filter_paths": "(^|/)lib/"
+    "filter_paths": "(^|/)lib/",
+    "detectors_to_exclude": [
+        "arbitrary-send-eth",
+        "arbitrary-send-erc20",
+        "arbitrary-send-erc20-permit",
+        "missing-zero-check",
+        "calls-loop",
+        "delegatecall-loop",
+        "low-level-calls",
+        "assembly",
+        "too-many-digits",
+        "tx-origin",
+        "return-bomb",
+        "missing-inheritance",
+
+        "timestamp",
+        "incorrect-equality",
+        "unused-state",
+        "reentrancy-balance",
+
+        "incorrect-shift",
+        "protected-vars",
+        "rtlo",
+        "msg-value-loop",
+        "mapping-deletion",
+        "tautology",
+        "incorrect-modifier",
+        "events-access",
+        "events-maths",
+        "incorrect-unary",
+        "constable-states",
+        "external-function",
+        "var-read-using-this",
+        "boolean-equal",
+        "cyclomatic-complexity",
+        "function-init-state",
+        "uninitialized-local",
+        "unprotected-upgrade",
+        "pragma"
+    ]
 }

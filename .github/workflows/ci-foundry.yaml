@@ -104,6 +104,10 @@ jobs:
       - name: Check formatting
         run: forge fmt --check
 
+      - name: Lint
+        if: matrix.project.path == 'crates/tycho-execution/contracts'
+        run: forge lint --report-unused-suppressions --deny notes
+
       - name: Run tests
         run: forge test -vvv
 

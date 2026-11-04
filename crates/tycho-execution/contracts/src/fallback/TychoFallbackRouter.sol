@@ -51,6 +51,7 @@ error TychoFallbackRouter__ProtocolUnavailable(uint8 protocol);
 error TychoFallbackRouter__SimulatedAmountOut(uint256 amountOut);
 error TychoFallbackRouter__UnknownProtocol(uint8 protocol);
 
+// forge-lint: disable-next-item(missing-inheritance) Only the poolManager() getter matches Uniswap V4's IImmutableState.
 /// @title TychoFallbackRouter
 /// @notice Quotes a primary venue against the caller's chosen fallback protocol and runs whichever
 /// quotes more `tokenOut`. A primary that wins the quote but fails still falls through to the
@@ -159,12 +160,11 @@ abstract contract TychoFallbackRouter is
     /// V3 fallbacks by simulation.
     constructor(
         IPoolManager poolManager_,
+        // forge-lint: disable-next-line(missing-zero-check) address(0) deploys without Fluid.
         address fluidLiquidity_,
         IUniswapV3StaticQuoter uniswapV3StaticQuoter_
     ) {
         poolManager = poolManager_;
-        // Zero is the documented way to deploy without Fluid on this chain.
-        // slither-disable-next-line missing-zero-check
         fluidLiquidity = fluidLiquidity_;
         uniswapV3StaticQuoter = uniswapV3StaticQuoter_;
     }

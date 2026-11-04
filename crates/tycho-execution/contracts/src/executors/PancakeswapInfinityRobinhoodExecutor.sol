@@ -51,11 +51,9 @@ contract PancakeswapInfinityRobinhoodExecutor is IExecutor, ICallback {
     uint256 private constant _DATA_LENGTH = 97;
     /// @dev Lock payload: 32 + 20 + _DATA_LENGTH.
     // Used only as a calldata slice bound, which Slither does not count as a use.
-    // slither-disable-next-line unused-state
     uint256 private constant _PAYLOAD_LENGTH = 149;
     /// @dev lockAcquired header: 4 + 32 + 32.
     // Same slice-bound false positive as _PAYLOAD_LENGTH.
-    // slither-disable-next-line unused-state
     uint256 private constant _CALLBACK_HEADER = 68;
     bytes4 private constant _LOCK_ACQUIRED =
         bytes4(keccak256("lockAcquired(bytes)"));
@@ -69,7 +67,9 @@ contract PancakeswapInfinityRobinhoodExecutor is IExecutor, ICallback {
     /// @dev Zero manager: its pool type reverts. At least one required.
     constructor(
         IPancakeswapInfinityVault vault_,
+        // forge-lint: disable-next-line(missing-zero-check) A zero pool manager disables its pool type; the constructor requires one.
         address clPoolManager_,
+        // forge-lint: disable-next-line(missing-zero-check) A zero pool manager disables its pool type; the constructor requires one.
         address binPoolManager_
     ) {
         if (

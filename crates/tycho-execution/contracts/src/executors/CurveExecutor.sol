@@ -26,6 +26,7 @@ contract CurveExecutor is IExecutor {
     address public immutable stEthAddress;
     bool public immutable hasStETH;
 
+    // forge-lint: disable-next-line(missing-zero-check) address(0) means the chain has no stETH pool.
     constructor(address nativeToken_, address stEthAddress_) {
         if (nativeToken_ == address(0)) {
             revert CurveExecutor__AddressZero();
@@ -72,12 +73,12 @@ contract CurveExecutor is IExecutor {
         }
 
         if (isCurveStablePool(poolType)) {
-            // slither-disable-next-line arbitrary-send-eth
+            // forge-lint: disable-next-line(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
             ICurveStablePool(pool).exchange{value: ethAmount}(i, j, amountIn, 0);
         } else {
             // crypto or llamma
             if (tokenIn == nativeToken || tokenOut == nativeToken) {
-                // slither-disable-next-line arbitrary-send-eth
+                // forge-lint: disable-next-item(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
                 ICurveCryptoPoolETH(pool).exchange{value: ethAmount}(
                     uint256(int256(i)), uint256(int256(j)), amountIn, 0, true
                 );

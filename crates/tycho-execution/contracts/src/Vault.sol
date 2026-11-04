@@ -245,18 +245,15 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         internal
         virtual
     {
-        // slither-disable-next-line incorrect-equality
         if (deltaChange == 0) return;
 
         int256 oldDelta = _getDelta(token);
         int256 newDelta = oldDelta + deltaChange;
 
         // Update non zero delta counter based on transitions
-        // slither-disable-next-line incorrect-equality
         if (oldDelta != 0 && newDelta == 0) {
             // Was non zero, now zero: decrement counter
             _setNonZeroDeltaCount(_getNonZeroDeltaCount() - 1);
-            // slither-disable-next-line incorrect-equality
         } else if (oldDelta == 0 && newDelta != 0) {
             // Was zero, now non zero: increment counter
             _setNonZeroDeltaCount(_getNonZeroDeltaCount() + 1);
@@ -275,7 +272,6 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         internal
         virtual
     {
-        // slither-disable-next-line incorrect-equality
         if (amount == 0) return;
 
         uint256 id = _toId(token);
@@ -295,7 +291,6 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         internal
         virtual
     {
-        // slither-disable-next-line incorrect-equality
         if (amount == 0) return;
 
         uint256 id = _toId(token);
@@ -313,7 +308,6 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         internal
         virtual
     {
-        // slither-disable-next-line incorrect-equality
         if (amount == 0) return;
 
         uint256 id = _toId(token);
@@ -343,7 +337,6 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
                 revert Vault__UnexpectedNonZeroCount(nonZeroCount);
             } else if (nonZeroCount == 1) {
                 int256 inputDelta = _getDelta(inputToken);
-                // slither-disable-next-line incorrect-equality
                 if (inputDelta == 0 || inputDelta != -int256(inputAmount)) {
                     revert Vault__UnexpectedInputDelta(inputDelta);
                 }

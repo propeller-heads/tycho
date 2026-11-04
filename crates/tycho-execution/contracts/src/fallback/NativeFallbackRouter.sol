@@ -157,7 +157,7 @@ contract NativeFallbackRouter is TychoFallbackRouter {
         pure
     {
         // `_validate` guarantees the word lies within `payload`.
-        // slither-disable-next-line assembly
+        // forge-lint: disable-next-line(inline-assembly) Solidity cannot write a word into memory bytes at an offset.
         assembly ("memory-safe") {
             mstore(
                 add(add(payload, 0x20), _ACTUAL_SELLER_AMOUNT_OFFSET),

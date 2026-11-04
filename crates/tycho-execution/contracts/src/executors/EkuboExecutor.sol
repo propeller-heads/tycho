@@ -179,7 +179,6 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
                     (int128, int128)
                 );
             } else {
-                // slither-disable-next-line calls-loop
                 (delta0, delta1) = _core.swap_611415377(
                     pk, nextAmountIn, isToken1, sqrtRatioLimit, _SKIP_AHEAD
                 );
@@ -206,7 +205,7 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
             bytes4(0x101e8952), bytes32(uint256(uint160(to))), data
         );
 
-        // slither-disable-next-line low-level-calls,calls-loop
+        // forge-lint: disable-next-line(low-level-calls)
         (bool success, bytes memory returnData) = address(_core).call(callData);
 
         if (!success) {

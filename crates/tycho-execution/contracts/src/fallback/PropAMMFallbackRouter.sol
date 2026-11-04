@@ -48,7 +48,7 @@ contract PropAMMFallbackRouter is TychoFallbackRouter {
     {
         // Low-level so a `pamm` without code, or one returning nothing decodable, quotes zero
         // instead of reverting `swap`. That covers `pamm == address(0)`, so no zero check.
-        // slither-disable-next-line low-level-calls,missing-zero-check
+        // forge-lint: disable-next-item(low-level-calls) A pAMM that cannot quote must quote zero, not revert, see above.
         (bool quoted, bytes memory quote) = pamm.call(
             abi.encodeCall(
                 IPropAMM.quote, (swap_.tokenIn, swap_.tokenOut, swap_.amountIn)

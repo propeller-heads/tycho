@@ -61,11 +61,9 @@ contract MetricExecutor is IExecutor, ICallback {
             revert MetricExecutor__AmountInTooLarge();
         }
 
-        // We already checked that this fits in int128.
-        // forge-lint: disable-next-line(unsafe-typecast)
+        // forge-lint: disable-next-line(unsafe-typecast) We already checked that this fits in int128.
         uint128 amountIn128 = uint128(amountIn);
-        // We already checked that this fits in int128.
-        // forge-lint: disable-next-line(unsafe-typecast)
+        // forge-lint: disable-next-line(unsafe-typecast) We already checked that this fits in int128.
         int128 amountSpecified = int128(amountIn128);
 
         _setCurrentPool(pool);

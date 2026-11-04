@@ -209,7 +209,6 @@ contract TransferManager is Vault {
      * In the normal case the protocol consumed the approval, so we skip the expensive
      * forceApprove.
      */
-    // slither-disable-next-line calls-loop
     function _revokeUnconsumedApproval(address token, address spender)
         internal
     {
@@ -235,7 +234,6 @@ contract TransferManager is Vault {
         uint256 amountAllowed;
         address sender;
         bool isPermit2;
-
         tokenInStorage = _TOKEN_IN_SLOT.tload();
         amountAllowed = _AMOUNT_ALLOWED_SLOT.tload();
         sender = _SENDER_SLOT.tload();
@@ -258,10 +256,9 @@ contract TransferManager is Vault {
         // Perform the actual transfer
         if (isPermit2) {
             // Permit2.permit is already called from the TychoRouterV3
-            // slither-disable-next-line calls-loop
             permit2.transferFrom(sender, receiver, uint160(amount), token);
         } else {
-            // slither-disable-next-line arbitrary-send-erc20
+            // forge-lint: disable-next-line(arbitrary-send-erc20)
             IERC20(token).safeTransferFrom(sender, receiver, amount);
         }
         uint256 balanceAfter = _balanceOf(token, receiver);
@@ -276,11 +273,9 @@ contract TransferManager is Vault {
         view
         returns (uint256)
     {
-        // slither-disable-next-line calls-loop
-        return
-            token == ETH_ADDRESS
-                ? owner.balance
-                : IERC20(token).balanceOf(owner);
+        return token == ETH_ADDRESS
+            ? owner.balance
+            : IERC20(token).balanceOf(owner);
     }
 
     /**
@@ -296,6 +291,7 @@ contract TransferManager is Vault {
     {
         uint256 balanceBefore = _balanceOf(token, to);
         if (token == ETH_ADDRESS) {
+            // forge-lint: disable-next-line(arbitrary-send-eth) Sends a swap's output to the receiver its caller chose.
             Address.sendValue(payable(to), amount);
         } else {
             IERC20(token).safeTransfer(to, amount);

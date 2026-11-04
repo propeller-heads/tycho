@@ -74,7 +74,6 @@ contract Dispatcher is TransferManager {
             revert Dispatcher__NonContractExecutor();
         }
 
-        // slither-disable-next-line timestamp
         if (executorsActivationTimestamp[target] != 0) {
             revert Dispatcher__ExecutorAlreadyExists(target);
         }
@@ -97,7 +96,7 @@ contract Dispatcher is TransferManager {
      * @dev Calls an executor, assumes swap.protocolData contains
      *  protocol-specific data required by the executor.
      */
-    // slither-disable-next-line delegatecall-loop,assembly,controlled-delegatecall,cyclomatic-complexity
+    // slither-disable-next-line controlled-delegatecall
     function _callSwapOnExecutor(
         address executor,
         uint256 amount,
@@ -113,7 +112,6 @@ contract Dispatcher is TransferManager {
         _IS_SPLIT_SWAP_SLOT.tstore(isSplitSwap);
         _SWAP_INPUT_AMOUNT_SLOT.tstore(amount);
 
-        // slither-disable-next-line calls-loop
         (
             TransferManager.TransferType transferType,
             address transferReceiver,
@@ -147,7 +145,7 @@ contract Dispatcher is TransferManager {
             false
         );
 
-        // slither-disable-next-line controlled-delegatecall,low-level-calls,calls-loop,reentrancy-balance
+        // forge-lint: disable-next-item(delegatecall-loop, low-level-calls)
         (bool success, bytes memory result) = executor.delegatecall(
             abi.encodeWithSelector(
                 IExecutor.swap.selector, amount, data, receiver
@@ -167,12 +165,12 @@ contract Dispatcher is TransferManager {
         }
 
         if (!success) {
-            // slither-disable-next-line incorrect-equality
             if (result.length == 0) {
                 revert Dispatcher__SwapReverted(executor);
             }
             // Bubble the executor's revert payload byte-for-byte so callers
-            // see the original Error(string)/Panic/custom-error
+            // see the original Error(string)/Panic/custom-error.
+            // forge-lint: disable-next-line(inline-assembly) LowLevelCall.bubbleRevert(result) exceeds the stack limit here, and a later call overwrites the return data.
             assembly {
                 revert(add(result, 0x20), mload(result))
             }
@@ -188,7 +186,6 @@ contract Dispatcher is TransferManager {
 
         // Delta accounting if tokens stay at router
         if (receiver == address(this)) {
-            // slither-disable-next-line calls-loop
             _updateDeltaAccounting(tokenOut, int256(amountOut));
         }
     }
@@ -223,13 +220,12 @@ contract Dispatcher is TransferManager {
             true
         );
 
-        // slither-disable-next-line controlled-delegatecall,low-level-calls
+        // forge-lint: disable-next-item(low-level-calls)
         (bool success, bytes memory result) = executor.delegatecall(
             abi.encodeWithSelector(ICallback.handleCallback.selector, data)
         );
 
         if (!success) {
-            // slither-disable-next-line incorrect-equality
             if (result.length == 0) {
                 revert Dispatcher__CallbackReverted(executor);
             }
@@ -262,18 +258,15 @@ contract Dispatcher is TransferManager {
     {
         _validateExecutor(executor);
 
-        // slither-disable-next-line calls-loop
         receiver = IExecutor(executor).fundsExpectedAddress(data);
     }
 
     function _validateExecutor(address executor) private view {
         uint256 activationTimestamp = executorsActivationTimestamp[executor];
 
-        // slither-disable-next-line incorrect-equality
         if (activationTimestamp == 0) {
             revert Dispatcher__UnapprovedExecutor(executor);
         }
-        // slither-disable-next-line timestamp
         if (block.timestamp < activationTimestamp) {
             revert Dispatcher__ExecutorIsTimelocked(executor);
         }

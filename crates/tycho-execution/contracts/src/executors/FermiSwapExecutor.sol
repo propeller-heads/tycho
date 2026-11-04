@@ -48,8 +48,7 @@ contract FermiSwapExecutor is IExecutor {
             revert FermiSwapExecutor__AmountTooLarge();
         }
 
-        // amountIn is checked above against int256.max.
-        // forge-lint: disable-next-line(unsafe-typecast)
+        // forge-lint: disable-next-line(unsafe-typecast) amountIn is checked above against int256.max.
         int256 amountSpecified = int256(amountIn);
 
         // slither-disable-next-line unused-return

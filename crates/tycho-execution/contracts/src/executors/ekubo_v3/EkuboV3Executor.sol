@@ -235,7 +235,6 @@ contract EkuboV3Executor is IExecutor, ICallback {
             nextOffset = _hopEnd(swapData, offset, poolKey.config);
             uint256 sigStart = offset + _SIGNED_FIXED_TAIL_LEN + _SIG_LEN_BYTES;
 
-            // slither-disable-next-line calls-loop
             (balanceUpdate,) = abi.decode(
                 CORE.forward(
                     signedExclusiveSwap,
@@ -261,7 +260,6 @@ contract EkuboV3Executor is IExecutor, ICallback {
             );
         } else if (extension == MEV_CAPTURE_ADDRESS) {
             (balanceUpdate,) = abi.decode(
-                // slither-disable-next-line calls-loop
                 CORE.forward(
                     MEV_CAPTURE_ADDRESS, abi.encode(poolKey, swapParameters)
                 ),
@@ -270,7 +268,6 @@ contract EkuboV3Executor is IExecutor, ICallback {
             nextOffset = offset;
         } else {
             PoolState _stateAfter;
-            // slither-disable-next-line calls-loop
             (balanceUpdate, _stateAfter) = CORE.swap(0, poolKey, swapParameters);
             nextOffset = offset;
         }
@@ -367,6 +364,7 @@ contract EkuboV3Executor is IExecutor, ICallback {
 
     function _pay(address token, uint128 amount) private {
         if (token == NATIVE_TOKEN_ADDRESS) {
+            // forge-lint: disable-next-line(arbitrary-send-eth) CORE_ADDRESS is a file-level constant.
             SafeTransferLib.safeTransferETH(CORE_ADDRESS, amount);
             return;
         }

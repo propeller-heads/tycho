@@ -155,11 +155,9 @@ contract TychoSubsidizingExecutor is IExecutor {
     {
         uint256 activation =
             Dispatcher(router).executorsActivationTimestamp(inner);
-        // slither-disable-next-line incorrect-equality
         if (activation == 0 || inner == _self) {
             revert TychoSubsidizingExecutor__UnapprovedInnerExecutor(inner);
         }
-        // slither-disable-next-line timestamp
         if (block.timestamp < activation) {
             revert TychoSubsidizingExecutor__UnapprovedInnerExecutor(inner);
         }

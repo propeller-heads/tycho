@@ -89,7 +89,7 @@ contract EtherfiExecutor is IExecutor {
             IEtherfiRedemptionManager(redemptionManagerAddress)
                 .redeemEEth(amountIn, receiver, ethAddress);
         } else if (direction == EtherfiDirection.EthToEeth) {
-            // slither-disable-next-line arbitrary-send-eth,unused-return
+            // slither-disable-next-line unused-return
             IEtherfiLiquidityPool(liquidityPoolAddress)
             .deposit{value: amountIn}();
         } else if (direction == EtherfiDirection.EethToWeeth) {

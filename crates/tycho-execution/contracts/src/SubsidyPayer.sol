@@ -179,6 +179,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         if (to == address(0)) revert SubsidyPayer__AddressZero();
         emit Withdrawal(token, amount, to);
         if (token == ETH_ADDRESS) {
+            // forge-lint: disable-next-line(arbitrary-send-eth) Only BUDGET_ROLE withdraws, to the recipient it names.
             Address.sendValue(payable(to), amount);
         } else {
             IERC20(token).safeTransfer(to, amount);
@@ -218,7 +219,6 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         returns (uint256 word, uint256 bit)
     {
         word = nonce >> 8;
-        // forge-lint: disable-next-line(incorrect-shift)
         bit = 1 << (nonce & 0xff);
     }
 
@@ -238,8 +238,6 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         if (paused()) {
             return SkipReason.Paused;
         }
-        // A few seconds of validator drift on the deadline is harmless
-        // slither-disable-next-line timestamp
         if (block.timestamp > subsidy.deadline) {
             return SkipReason.Expired;
         }
@@ -255,9 +253,8 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         // - `tx.origin` covers a user EOA that calls the router through an
         //   integrator contract, so the router's caller is the integrator.
         // A copied signature sent by anyone else matches neither and is
-        // skipped without using the nonce. tx.origin only decides who earns
-        // the subsidy; it guards no funds.
-        // slither-disable-next-line tx-origin
+        // skipped without using the nonce.
+        // forge-lint: disable-next-line(tx-origin) tx.origin only decides who earns the subsidy; it guards no funds.
         if (subsidy.boundTo != routerMsgSender && subsidy.boundTo != tx.origin)
         {
             return SkipReason.CallerMismatch;
@@ -312,7 +309,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         // huge payload only loses its subsidy: it cannot spend more than the
         // cap, which also bounds the return data copied back
         // (testPayEthFailingReceiver measures that copy).
-        // slither-disable-next-line low-level-calls,arbitrary-send-eth,return-bomb
+        // forge-lint: disable-next-line(arbitrary-send-eth, low-level-calls, return-bomb) Only the router calls pay, and `to` is where it measures the hop's output.
         (success,) = to.call{value: amount, gas: _ETH_TRANSFER_GAS}("");
     }
 }

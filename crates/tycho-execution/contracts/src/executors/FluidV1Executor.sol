@@ -57,7 +57,8 @@ contract FluidV1Executor is IExecutor, ICallback {
             // slither-disable-next-line unused-return
             dex.swapInWithCallback(zero2one, amountIn, 0, receiver);
         } else {
-            // slither-disable-next-line arbitrary-send-eth,unused-return
+            // forge-lint: disable-next-item(arbitrary-send-eth) Sends the swap input to the dex the swap data names.
+            // slither-disable-next-line unused-return
             dex.swapIn{value: amountIn}(zero2one, amountIn, 0, receiver);
         }
     }

@@ -40,6 +40,7 @@ error UniswapV4Executor__DeltaNotPositive(Currency currency);
 error UniswapV4Executor__InvalidAngstromAttestationDataLength(uint256 length);
 error UniswapV4Executor__ZeroAddressAngstromHook();
 
+// forge-lint: disable-next-item(missing-inheritance) Only the poolManager() getter matches Uniswap V4's IImmutableState.
 contract UniswapV4Executor is IExecutor, ICallback {
     // token (20) + fee (3) + tickSpacing (3) + hook (20) + hookDataLength (2)
     uint16 private constant _POOL_HEADER_LENGTH = 48;
@@ -157,9 +158,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
         if (skipUnlock) {
             // Caller must have called poolManager.sync(tokenIn)
             // and the Dispatcher transferred tokens to PM already.
-            // This delegatecall is safe because the swapData signature is constructed
-            // in this method.
-            // slither-disable-next-line low-level-calls
+            // forge-lint: disable-next-item(low-level-calls) swapData's selector is built in this function.
             (bool success, bytes memory returnData) =
                 _self.delegatecall(swapData);
             if (!success) {
@@ -335,7 +334,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
         }
 
         // here we expect to call either `swapExactInputSingle` or `swapExactInput`. See `swap` to see how we encode the selector and the calldata
-        // slither-disable-next-line low-level-calls
+        // forge-lint: disable-next-line(low-level-calls)
         (bool success, bytes memory returnData) = _self.delegatecall(data);
         if (!success) {
             revert(
@@ -432,7 +431,6 @@ contract UniswapV4Executor is IExecutor, ICallback {
         bytes calldata hookData
     ) private returns (int128 reciprocalAmount) {
         unchecked {
-            // slither-disable-next-line calls-loop
             BalanceDelta delta = poolManager.swap(
                 poolKey,
                 SwapParams({
@@ -537,7 +535,6 @@ contract UniswapV4Executor is IExecutor, ICallback {
 
             // If we find the attestation for the current block, stop decoding early
             // and return the attestation.
-            // slither-disable-next-line incorrect-equality
             if (blockNumber == block.number) {
                 return
                     Bytes.slice(

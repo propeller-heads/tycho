@@ -139,6 +139,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
 
     constructor(
         address permit2_,
+        // forge-lint: disable-next-line(missing-zero-check) The code-length check rejects address(0).
         address feeCalculator,
         address pauserAdmin,
         address unpauserAdmin,
@@ -1175,6 +1176,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @notice Queues a new fee calculator with a timelock delay.
      * @param feeCalculator The address of the fee calculator contract
      */
+    // forge-lint: disable-next-line(missing-zero-check) The code-length check rejects address(0).
     function setFeeCalculator(address feeCalculator)
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
@@ -1214,11 +1216,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      */
     function activateFeeCalculator() external onlyRole(ROUTER_FEE_SETTER_ROLE) {
         uint48 activationTs = _feeCalculatorActivationTimestamp;
-        // slither-disable-next-line incorrect-equality
         if (activationTs == 0) {
             revert TychoRouter__NoPendingFeeCalculator();
         }
-        // slither-disable-next-line timestamp
         if (block.timestamp < activationTs) {
             revert TychoRouter__TimelockNotExpired(
                 activationTs, block.timestamp
@@ -1331,11 +1331,11 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                 // output transfer has been performed yet, or the user has specified the
                 // receiver to be the router in order to rebalance their vault.
                 _updateDeltaAccounting(tokenOut, int256(requiredContribution));
-                // slither-disable-next-line incorrect-equality
             } else if (outputDelta == 0) {
                 if (receiver == address(this)) {
                     _creditVault(msg.sender, tokenOut, requiredContribution);
                 } else if (tokenOut == ETH_ADDRESS) {
+                    // forge-lint: disable-next-line(arbitrary-send-eth) Pays the client's contribution to the swap's receiver.
                     Address.sendValue(payable(receiver), requiredContribution);
                 } else {
                     // Measure user balance before and after required contribution to
@@ -1390,7 +1390,6 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             }
             return;
         }
-        // slither-disable-next-line timestamp
         if (block.timestamp > p.deadline) {
             revert TychoRouter__ExpiredClientSignature(
                 p.deadline, block.timestamp

@@ -91,8 +91,7 @@ contract MetricFallbackRouter is TychoFallbackRouter {
             .swap(
                 swap_.receiver,
                 zeroForOne,
-                // `_quotePrimary` quotes zero above int128's maximum, so no swap runs.
-                // forge-lint: disable-next-line(unsafe-typecast)
+                // forge-lint: disable-next-line(unsafe-typecast) `_quotePrimary` quotes zero above int128's maximum, so no swap runs.
                 int128(uint128(swap_.amountIn)),
                 _priceLimit(zeroForOne),
                 "",

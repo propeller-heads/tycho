@@ -65,7 +65,7 @@ contract LidoV4Executor is IExecutor {
         // The Dispatcher measures output via balance checks, so the minted or
         // unwrapped amounts these calls return are not needed here.
         if (direction == LidoV4Direction.EthToStEth) {
-            // slither-disable-next-line arbitrary-send-eth,unused-return
+            // slither-disable-next-line unused-return
             stEth.submit{value: amountIn}(address(0));
         } else if (direction == LidoV4Direction.StEthToWstEth) {
             // slither-disable-next-line unused-return
@@ -75,8 +75,7 @@ contract LidoV4Executor is IExecutor {
             wstEth.unwrap(amountIn);
         } else if (direction == LidoV4Direction.EthToWstEth) {
             // wstETH's receive() submits the ETH and mints the wrapper's shares in one call.
-            // It needs more than a transfer stipend, so this has to be a call.
-            // slither-disable-next-line arbitrary-send-eth,low-level-calls
+            // forge-lint: disable-next-line(low-level-calls) wstETH's receive() needs more than a transfer stipend.
             (bool sent,) = address(wstEth).call{value: amountIn}("");
             if (!sent) revert LidoV4Executor__NativeTransferFailed();
         } else {

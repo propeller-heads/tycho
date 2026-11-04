@@ -70,9 +70,7 @@ contract NativeExecutor is IExecutor {
             revert NativeExecutor__InvalidTarget();
         }
 
-        // _decodeData guarantees at least four payload bytes, and truncating here
-        // intentionally reads only the function selector.
-        // forge-lint: disable-next-line(unsafe-typecast)
+        // forge-lint: disable-next-line(unsafe-typecast) Reads only the selector; _decodeData guarantees four payload bytes.
         bytes4 selector = bytes4(payload);
         if (selector != TRADE_RFQT_SELECTOR) {
             revert NativeExecutor__InvalidPayload();
@@ -100,6 +98,7 @@ contract NativeExecutor is IExecutor {
         // amountIn is authoritative for the ETH forwarded during execution.
         uint256 executionValue = tokenIn == ETH_ADDRESS ? amountIn : 0;
 
+        // forge-lint: disable-next-item(arbitrary-send-eth) _isValidTarget limits target to the immutable nativeRouterV6.
         // slither-disable-next-line unused-return
         target.functionCallWithValue(payload, executionValue);
     }
@@ -155,7 +154,7 @@ contract NativeExecutor is IExecutor {
         pure
     {
         // _decodeData guarantees the fixed 32-byte write stays within payload.
-        // slither-disable-next-line assembly
+        // forge-lint: disable-next-line(inline-assembly) Solidity cannot write a word into memory bytes at an offset.
         assembly ("memory-safe") {
             mstore(
                 add(add(payload, 0x20), _ACTUAL_SELLER_AMOUNT_OFFSET),
