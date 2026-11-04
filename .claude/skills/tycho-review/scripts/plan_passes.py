@@ -56,7 +56,7 @@ CHECKED = re.compile(r"^Checked by: (.+)$", re.M)
 # counterweights that keep it from removing a type that carries an invariant.
 SIMPLIFY = [
     "remove-what-the-change-made-redundant", "remove-single-use-indirection", "no-single-use-interfaces",
-    "single-definition-of-logic", "one-definition-of-shared-shapes", "fact-lives-once",
+    "single-definition-of-logic", "fact-lives-once",
     "repeat-the-data-not-the-code", "typed-deserialization-once", "single-pass-over-collection",
     "data-clumps-become-a-type", "error-names-its-cause", "minimal-trait-surface",
     "no-twin-methods-for-api-change", "remove-redundant-tests", "reuse-fixture-builders", "store-graph-minimal",
