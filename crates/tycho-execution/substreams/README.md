@@ -478,11 +478,9 @@ consumer and leaves the index alone. An index that is already built stays valid.
 
 ## Running locally
 
+With mise activated, `substreams` and `substreams-sink-sql` come from the repository's `mise.toml`.
+
 ```bash
-rustup target add wasm32-unknown-unknown
-brew install streamingfast/tap/substreams            # or see substreams.dev
-# substreams-sink-sql: download the release binary for your platform from
-# https://github.com/streamingfast/substreams-sink-sql/releases (tested with v4.13.1)
 export SUBSTREAMS_API_TOKEN=$(curl -s https://auth.streamingfast.io/v1/auth/issue \
   -d "{\"api_key\":\"$STREAMINGFAST_KEY\"}" | jq -r .token)
 

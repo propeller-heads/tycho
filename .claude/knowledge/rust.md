@@ -10,7 +10,7 @@ cargo test
 cargo clippy --all-features
 ```
 
-After a task is done, run `cargo +nightly fmt --all` and the tests that cover what you changed (e.g.
+After a task is done, run `cargo +"$RUST_NIGHTLY" fmt --all` and the tests that cover what you changed (e.g.
 `cargo nextest run -p tycho-indexer`). Save the `/run-ci` skill for when you open a PR or change
 something workspace-wide. See `.claude/skills/run-ci/SKILL.md` for the canonical commands.
 
@@ -53,5 +53,5 @@ refactor the code instead. Comments explain WHY, not WHAT. Wrap comment lines at
   don't control. Use the `testing.rs` mocks (`MockBlockchainGateway`, etc.) and `test-utils` feature.
 - **Verify tests catch failures.** Break the code, confirm the test fails, then fix.
 
-After every task is done, run `cargo +nightly fmt --all` and the tests covering your change. Then check whether docs
+After every task is done, run `cargo +"$RUST_NIGHTLY" fmt --all` and the tests covering your change. Then check whether docs
 need updating with `/sync-docs`.
