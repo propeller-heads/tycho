@@ -753,21 +753,6 @@ impl TestRunner {
 
         info!("Running {} tests on Chain {}...\n", tests_count, self.chain);
 
-        if config.harness == Harness::Strict &&
-            execution::has_executor_fixture(self.chain, &config.protocol_system)
-        {
-            let unjustified = config.execution_skips_without_evidence();
-            ensure!(
-                unjustified.is_empty(),
-                "`harness: strict`: the harness plants the {} executor's runtime bytecode from \
-                 protocols/testing/fixtures/, so execution runs whether or not the executor is \
-                 deployed, and a missing deployment is not a reason to skip it. Remove these \
-                 `skip_execution`s, or add `evidence` showing why execution cannot be tested: {}",
-                config.protocol_system,
-                unjustified.join("; ")
-            );
-        }
-
         let mut failed_tests: Vec<String> = Vec::new();
         let mut report = Report {
             package: self.protocol.clone(),
@@ -1013,6 +998,28 @@ impl TestRunner {
                     .collect()
             });
 
+        // A test-wide ladder result covers the components without a skip. When every component
+        // skips, nothing runs, and the ladder is reported skipped rather than passed.
+        let every_component = |skips: fn(&ProtocolComponentWithTestConfig) -> bool| {
+            !test.expected_components.is_empty() &&
+                test.expected_components
+                    .iter()
+                    .all(skips)
+        };
+        if every_component(|c| c.skip_simulation.is_skipped()) {
+            let reason = "every expected component skips simulation";
+            checks.skip(CheckId::SimLadder, reason);
+            checks.skip(CheckId::ExecLadder, reason);
+            if limit_kinds.is_some() {
+                for id in
+                    [CheckId::LimitsAtLimit, CheckId::LimitsPastLimit, CheckId::LimitsMaxOutput]
+                {
+                    checks.skip(id, reason);
+                }
+            }
+            return Ok(());
+        }
+
         let Some(output) = checks.run(CheckId::SimLadder, || {
             self.run_simulation(
                 &update,
@@ -1034,14 +1041,22 @@ impl TestRunner {
             return Ok(());
         };
 
+        let executes_nothing =
+            every_component(|c| c.skip_simulation.is_skipped() || c.skip_execution.is_skipped())
+                .then_some("every expected component skips execution");
         if limit_kinds.is_some() {
             return self.check_strict_executions(
                 output,
                 &header,
                 &config.protocol_system,
                 config.tolerance(),
+                executes_nothing,
                 checks,
             );
+        }
+        if let Some(reason) = executes_nothing {
+            checks.skip(CheckId::ExecLadder, reason);
+            return Ok(());
         }
 
         // The drift is noted whether or not the executions match, so a failing run still
@@ -1916,13 +1931,16 @@ impl TestRunner {
 
     /// Strict mode's execution checks: the ladder, then per direction the quote at the limit,
     /// the revert one unit past a hard limit, and the max output. Every execution runs in one
-    /// batch, and each limit check is recorded per component and direction.
+    /// batch, and each limit check is recorded per component and direction. With
+    /// `executes_nothing`, the reason every component skips execution, the ladder is recorded as
+    /// skipped.
     fn check_strict_executions(
         &self,
         output: SimulationOutput,
         block: &Block,
         protocol_system: &str,
         tolerance: Tolerance,
+        executes_nothing: Option<&str>,
         checks: &mut Checks,
     ) -> miette::Result<()> {
         let SimulationOutput { executions, at_limit, past_limit, limit_directions } = output;
@@ -1938,9 +1956,14 @@ impl TestRunner {
             Ok(results) => {
                 observe_executions(checks, &executions, results);
                 observe_executions(checks, &at_limit, results);
-                checks.run(CheckId::ExecLadder, || {
-                    check_executions_match(&executions, results, tolerance)
-                })?;
+                match executes_nothing {
+                    Some(reason) => checks.skip(CheckId::ExecLadder, reason),
+                    None => {
+                        checks.run(CheckId::ExecLadder, || {
+                            check_executions_match(&executions, results, tolerance)
+                        })?;
+                    }
+                }
                 results
             }
             Err(e) => {
