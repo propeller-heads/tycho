@@ -390,7 +390,7 @@ Applies: rust, rust-test, substreams, solidity, solidity-test, script, python, c
 Checked by: ast-grep `unexplained-numeric-const`; ast-grep `sol-selector-constant-signature`; repo-script `sol-selector-comment-matches`; forge-lint `forge-lint literal-instead-of-constant (Foundry >= 1.8.5)`
 
 ### error-names-its-cause
-An error names its actual cause in both variant and message: conditions with different remedies never share one message, an error from a branch the code considers unreachable names the broken invariant rather than reading like bad input, the variant constructed is the one whose name describes the failure (a catch-all only where none fits), and when handling starts to branch on the variant every producer of that variant is checked to use it for the meaning the handling assumes.
+An error names its actual cause in both variant and message: conditions with different remedies never share one message, an error from a branch the code considers unreachable names the broken invariant rather than reading like bad input, the variant constructed is the one whose name describes the failure (a catch-all only where none fits), and when handling starts to branch on the variant every producer of that variant is checked to use it for the meaning the handling assumes. A rejection of caller input states the broken rule in the caller's terms, not as a negated formula.
 Why: Logs and callers cannot tell a data problem from expected policy, handling that branches on the variant (retry, reject input) does the wrong thing, and readers chase a cause that is not there.
 Spot: One error string returned from several sites that guard different conditions; a new rejection branch reusing an existing generic message; a catch-all or fatal variant built in a length or format check on caller input or in the error mapping of a network call; an error mapped into a variant whose name describes a different cause than the wrapped error, often copied from a sibling module. Errors in branches guarded by an earlier non-empty check whose message reads like an input failure; a From/match that starts mapping variants differently with no change at their producers. One trailing error reached when any of several distinct checks fails (a fall-through `Err` after a chain of early `return Ok`/`continue`, or a message of the form 'neither X nor Y'): split it so each failed check names itself.
 Applies: rust, rust-test, substreams, solidity, solidity-test, script, python · look first at lines matching `err|fail|panic|bail|anyhow|revert|require|raise|throw|except|invalid|unreachable|expect|unwrap|from|variant|=>|\?`
@@ -853,12 +853,6 @@ Why: One form per language keeps tests findable by name and lets tooling filter 
 Spot: A Rust `#[test] fn` without the `test_` prefix beside prefixed siblings; a Solidity test function not starting with `test` (it is not run).
 Applies: rust-test, solidity-test · look first at lines matching `fn\s|function\s`
 
-### rejection-message-states-rule-and-reason
-A rejection message states the rule the input broke in the caller's terms and, when the rule is not self-evident, why it exists; it does not negate a formula and append a definition.
-Why: The caller reads the message to fix the input; a negated inequality with a definitional aside makes them reconstruct the rule and gives no reason to trust it.
-Spot: A message of the form 'X must not exceed Y minus Z: \<definition of Y>'; a message naming internal fields without the consequence the rule prevents; a reviewer suggestion rewording a message.
-Applies: rust, solidity, python, substreams · look first at lines matching `Err|error|revert|raise|bail|anyhow|format!`
-
 ### optional-feature-keeps-base-inputs
 A change that adds an optional feature (a subsidy, a fee, a hook) keeps processing every input the base accepted: where the feature cannot apply, the input goes through without it, and rejecting a previously accepted input is a stated and tested decision.
 Why: A new rejection on the feature's path silently drops inputs that worked before (routes that stop encoding, pools that stop decoding), and nothing in the diff shows the regression.
@@ -907,12 +901,6 @@ Why: Incidental churn obscures the real diff, can smuggle dependency upgrades in
 Spot: Lockfile changes in packages the PR doesn't otherwise touch; large diffs in generated files unrelated to the change; formatting diffs produced by a different formatter version than CI's.
 Applies: any
 Checked by: pr-script `lockfile-churn`; pr-script `generated-abi-rewritten`; ci `cargo +"$RUST_NIGHTLY" fmt --check, forge fmt --check (already in CI)`
-
-### bundle-fixes-sharing-a-resync
-When a change forces an expensive one-off operation (a full resync or reindex, a data migration, a redeploy), the review lists the open PRs that need the same operation (for a Substreams package: open PRs touching the same package) and asks whether they should ship in the same rollout.
-Why: Each such operation is expensive; shipping a known-needed fix later costs a second full run of it.
-Spot: A PR that forces a resync, migration or redeploy while other open PRs touch the same package or need the same operation (gh pr list --search on the path).
-Applies: substreams, sql, solidity, config, rust, pr
 
 ### docs-updated-with-behaviour
 Behaviour changes that the docs describe (agent docs such as CLAUDE.md, architecture docs, docs/, field and function docs) update those docs in the same PR, and every doc enumerating the affected cases gains the new case. Docs that describe what is deployed or available to users (deployed addresses, supported-protocols listings) change at launch, not at merge (`deployment-artifacts-after-launch`). An edit to a behaviour doc keeps every statement the unchanged code still implements; each removed statement is checked against the code.
