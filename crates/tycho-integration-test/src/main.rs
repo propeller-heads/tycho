@@ -57,7 +57,7 @@ use crate::{
     fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
     statistics::TestStatistics,
     stream_processor::{
-        book_stream_processor::BookStreamProcessor,
+        book_stream_processor::{BookStreamProcessor, PammSelection, PammVenue, RfqSelection},
         price_level_stream_processor::PriceLevelStreamProcessor,
         protocol_stream_processor::{ProtocolStreamProcessor, ProtocolTvlThreshold},
         StreamUpdate, StreamUpdatePayload,
@@ -106,9 +106,16 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_rfq: bool,
 
-    /// Disable the pAMM book feeds (Metric)
+    /// Disable the pAMM book feeds
     #[arg(long, default_value_t = false)]
     disable_pamm: bool,
+
+    /// pAMM book feeds to run, comma-separated (e.g. metric). Replaces the default list
+    /// (metric). A listed venue missing its credentials, or whose feed fails to build, fails the
+    /// run; a default venue is skipped instead. A feed that builds but fails once it runs, for
+    /// example on a chain its venue does not serve, ends with a warning like any other feed.
+    #[arg(long, value_delimiter = ',', conflicts_with = "disable_pamm")]
+    pamm: Option<Vec<PammVenue>>,
 
     /// Publish each RFQ venue as one component for every pair it prices, which a route may
     /// take one quote from, rather than one component per pair. The number of directions
@@ -475,11 +482,10 @@ async fn run(cli: Cli) -> miette::Result<()> {
     // processing cannot block protocol update consumption
     let (protocol_tx, mut protocol_rx) =
         tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
-    let (rfq_tx, mut rfq_rx) = tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
+    let (book_tx, mut book_rx) = tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
     let (price_level_tx, mut price_level_rx) =
         tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
     let mut protocol_handle = None;
-    let mut rfq_handle = None;
     let mut price_level_handle = None;
 
     if !cli.disable_onchain {
@@ -500,23 +506,18 @@ async fn run(cli: Cli) -> miette::Result<()> {
                 .await?,
         );
     }
-    if !cli.disable_rfq || !cli.disable_pamm {
-        let book_stream_processor = BookStreamProcessor::new(
-            chain,
-            tvl_threshold,
-            cli.max_simulations as usize,
-            Duration::from_secs(cli.skip_messages_duration),
-            !cli.disable_rfq,
-            !cli.disable_pamm,
-            cli.rfq_all_pairs,
-        )
-        .unwrap_or_else(|e| panic!("Failed to create book stream processor: {e}"));
-        rfq_handle = Some(
-            book_stream_processor
-                .run_stream(Arc::clone(&all_tokens), rfq_tx)
-                .await?,
-        );
-    }
+    let book_stream_processor = BookStreamProcessor::new(
+        chain,
+        tvl_threshold,
+        cli.max_simulations as usize,
+        Duration::from_secs(cli.skip_messages_duration),
+        RfqSelection::from_cli(cli.disable_rfq, |name| std::env::var(name).ok()),
+        PammSelection::from_cli(cli.disable_pamm, cli.pamm.clone()),
+        cli.rfq_all_pairs,
+    );
+    let mut book_handle = book_stream_processor
+        .run_stream(Arc::clone(&all_tokens), book_tx)
+        .await?;
     if !cli.disable_price_level_stream {
         if let Some(price_level_stream_processor) = PriceLevelStreamProcessor::new(
             chain,
@@ -550,10 +551,10 @@ async fn run(cli: Cli) -> miette::Result<()> {
     }
     info!("Waiting for first protocol update...");
     let protocol_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
-    let rfq_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
+    let book_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let price_level_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let mut protocol_stream_open = true;
-    let mut book_stream_open = !cli.disable_rfq || !cli.disable_pamm;
+    let mut book_stream_open = book_handle.is_some();
     let mut price_level_stream_open = price_level_handle.is_some();
 
     // Staleness watchdog: if no protocol update arrives within stale_threshold_secs, mark all
@@ -596,13 +597,13 @@ async fn run(cli: Cli) -> miette::Result<()> {
 
             // Monitor book stream termination
             result = async {
-                if let Some(handle) = rfq_handle.as_mut() {
+                if let Some(handle) = book_handle.as_mut() {
                     handle.await
                 } else {
                     std::future::pending().await
                 }
-            }, if rfq_handle.is_some() => {
-                rfq_handle = None;
+            }, if book_handle.is_some() => {
+                book_handle = None;
                 match result {
                     Ok(()) => {
                         warn!("Book stream terminated");
@@ -708,7 +709,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
             }
 
             // Process book updates independently
-            update = rfq_rx.recv(), if book_stream_open => {
+            update = book_rx.recv(), if book_stream_open => {
                 match update {
                     Some(update) => {
                         let update = match update {
@@ -725,7 +726,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
-                        let permit = rfq_semaphore
+                        let permit = book_semaphore
                             .clone()
                             .acquire_owned()
                             .await
@@ -2327,7 +2328,7 @@ mod tests {
 
     use super::{
         book_swap_directions, is_oracle_stale_revert, is_stale_quote, pamm_venue,
-        sample_swap_directions, should_fetch_block_by_number, Cli, TychoState,
+        sample_swap_directions, should_fetch_block_by_number, Cli, PammVenue, TychoState,
     };
 
     #[rstest]
@@ -2448,6 +2449,45 @@ mod tests {
             .map(|t| (t.protocol.as_str(), t.threshold))
             .collect();
         assert_eq!(parsed, [("lunarbase", 10.0), ("pancakeswap_infinity_cl", 3.0)]);
+    }
+
+    fn parse(extra: &[&str]) -> Result<Cli, clap::Error> {
+        let mut args = vec![
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+        ];
+        args.extend_from_slice(extra);
+        Cli::try_parse_from(args)
+    }
+
+    #[test]
+    fn pamm_defaults_to_none() {
+        assert_eq!(parse(&[]).unwrap().pamm, None);
+    }
+
+    #[test]
+    fn pamm_parses_comma_separated_venues() {
+        let cli = parse(&["--pamm", "metric,metric"]).unwrap();
+        assert_eq!(cli.pamm, Some(vec![PammVenue::Metric, PammVenue::Metric]));
+    }
+
+    #[test]
+    fn pamm_rejects_an_unknown_venue() {
+        let error = parse(&["--pamm", "metric,unknown"])
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn pamm_conflicts_with_disable_pamm() {
+        let error = parse(&["--pamm", "metric", "--disable-pamm"])
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
