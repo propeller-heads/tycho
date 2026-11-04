@@ -80,12 +80,25 @@ impl Display for PammVenue {
 
 /// Which RFQ venues the book stream runs: each venue whose credentials are set. A venue without
 /// them is skipped, since RFQ has no explicit venue list.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum RfqSelection {
     /// `--disable-rfq`: no RFQ venue.
     Disabled,
     /// The venues whose credentials were found, possibly none.
     Credentials(HashMap<RfqVenue, (String, String)>),
+}
+
+/// Prints the venues only: the credentials are secrets and must not reach the logs.
+impl std::fmt::Debug for RfqSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RfqSelection::Disabled => write!(f, "Disabled"),
+            RfqSelection::Credentials(credentials) => f
+                .debug_tuple("Credentials")
+                .field(&credentials.keys().collect::<Vec<_>>())
+                .finish(),
+        }
+    }
 }
 
 impl RfqSelection {
@@ -647,6 +660,18 @@ mod tests {
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| value.to_string())
         }
+    }
+
+    #[test]
+    fn debug_prints_the_rfq_venues_but_not_their_credentials() {
+        let selection = RfqSelection::from_cli(
+            false,
+            secrets(&[("HASHFLOW_USER", "hashflow-user"), ("HASHFLOW_KEY", "hashflow-key")]),
+        );
+
+        let printed = format!("{selection:?}");
+
+        assert_eq!(printed, "Credentials([Hashflow])");
     }
 
     #[test]
