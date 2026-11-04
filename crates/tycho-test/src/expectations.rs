@@ -13,7 +13,7 @@ use serde::{
     de::{self, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
 };
-use tycho_simulation::tycho_common::Bytes;
+use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 /// Which checks a package's tests run.
 ///
@@ -562,28 +562,30 @@ impl PackageExpectations {
 /// Reads the declarations of every package for `chain` under `root` (`protocols/substreams`), by
 /// protocol system.
 ///
-/// A package's chain is the first word of its name, as protocol-testing names packages: the
-/// directory of an `integration_test.tycho.yaml` (`ethereum-curve`), or the rest of the file name
-/// of a clone's `integration_test_<name>.tycho.yaml` (`bsc_ekubo_v3`). Templates are skipped. Two
-/// packages declaring different things for the same chain and protocol system are an error, since
-/// a pool could not tell which applies.
+/// A package's chain is the one its `substreams_yaml_path` names: the first word of that file's
+/// name (`base-aero-cl.yaml`, `test-base-lunarbase.yaml`), and Ethereum for a package's own
+/// `substreams.yaml`. Templates are skipped. A yaml whose chain cannot be told, or that does not
+/// parse, is an error, as are two packages declaring different things for the same chain and
+/// protocol system, since a pool could not tell which applies.
 pub fn load_packages(
     root: &Path,
-    chain: &str,
+    chain: Chain,
 ) -> miette::Result<HashMap<String, PackageExpectations>> {
     let mut packages: HashMap<String, (PackageExpectations, String)> = HashMap::new();
     for path in test_yamls(root)? {
-        let Some(package_chain) = package_chain(root, &path) else {
-            continue;
-        };
+        let source = path.display().to_string();
+        let yaml = fs::read_to_string(&path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("Failed to read {source}"))?;
+        let manifest: ManifestEntry = serde_yaml::from_str(&yaml)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("Failed to read the substreams_yaml_path of {source}"))?;
+        let package_chain =
+            package_chain(&manifest.substreams_yaml_path).map_err(|e| miette!("{source}: {e}"))?;
         if package_chain != chain {
             continue;
         }
-        let source = path.display().to_string();
-        let file = fs::File::open(&path)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("Failed to open {source}"))?;
-        let package = PackageExpectations::from_yaml(file, &source)?;
+        let package = PackageExpectations::from_yaml(yaml.as_bytes(), &source)?;
         match packages.get(&package.protocol_system) {
             Some((seen, _)) if *seen == package => {}
             Some((_, first)) => {
@@ -602,6 +604,12 @@ pub fn load_packages(
         .into_iter()
         .map(|(system, (package, _))| (system, package))
         .collect())
+}
+
+/// The part of a test yaml that names the package's substreams manifest.
+#[derive(Deserialize)]
+struct ManifestEntry {
+    substreams_yaml_path: String,
 }
 
 /// Every `integration_test*.tycho.yaml` under `root`, outside build output and templates, sorted.
@@ -631,26 +639,23 @@ fn test_yamls(root: &Path) -> miette::Result<Vec<std::path::PathBuf>> {
     Ok(found)
 }
 
-/// The chain of the package whose test yaml is `path`: the first word of its name.
-fn package_chain(root: &Path, path: &Path) -> Option<String> {
-    let file = path.file_name()?.to_str()?;
-    let name = match file
-        .strip_prefix("integration_test_")
-        .and_then(|rest| rest.strip_suffix(".tycho.yaml"))
-    {
-        Some(clone) => clone.to_string(),
-        None => path
-            .strip_prefix(root)
-            .ok()?
-            .components()
-            .next()?
-            .as_os_str()
-            .to_str()?
-            .to_string(),
-    };
-    name.split(['-', '_'])
-        .next()
-        .map(str::to_string)
+/// The chain a package's substreams manifest is built for: the first word of the manifest's file
+/// name, after a `test-` prefix, and Ethereum for `substreams.yaml`, the name of a package's
+/// Ethereum manifest.
+fn package_chain(substreams_yaml_path: &str) -> Result<Chain, String> {
+    let name = Path::new(substreams_yaml_path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| format!("`{substreams_yaml_path}` names no manifest"))?;
+    let name = name
+        .strip_prefix("test-")
+        .unwrap_or(name);
+    if name == "substreams" {
+        return Ok(Chain::Ethereum);
+    }
+    let word = name.split('-').next().unwrap_or(name);
+    Chain::from_str(word)
+        .map_err(|e| format!("cannot tell the chain of `{substreams_yaml_path}`: {e}"))
 }
 
 #[cfg(test)]
@@ -726,17 +731,20 @@ tests:
     #[test]
     fn every_package_in_the_repository_loads_by_chain_and_protocol_system() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocols/substreams");
-        let ethereum = load_packages(&root, "ethereum").unwrap();
+        let ethereum = load_packages(&root, Chain::Ethereum).unwrap();
         assert!(ethereum.len() > 20, "{} packages", ethereum.len());
         for system in ["uniswap_v2", "uniswap_v4_hooks", "ekubo_v3", "vm:curve"] {
             assert!(ethereum.contains_key(system), "{system}");
         }
         for (chain, system) in [
-            ("bsc", "ekubo_v3"),
-            ("base", "ekubo_v3"),
-            ("robinhood", "uniswap_v4_hooks"),
-            ("unichain", "vm:curve"),
-            ("arc", "uniswap_v2"),
+            (Chain::Bsc, "ekubo_v3"),
+            (Chain::Base, "ekubo_v3"),
+            // In `evm-aero-*`: the directory names no chain, the manifest does.
+            (Chain::Base, "aero_cl"),
+            (Chain::Base, "aero_basic"),
+            (Chain::Robinhood, "uniswap_v4_hooks"),
+            (Chain::Unichain, "vm:curve"),
+            (Chain::Arc, "uniswap_v2"),
         ] {
             let packages = load_packages(&root, chain).unwrap();
             assert!(packages.contains_key(system), "{system} on {chain}");
@@ -744,20 +752,28 @@ tests:
     }
 
     #[test]
-    fn a_package_is_on_the_chain_its_name_starts_with() {
-        let root = Path::new("/p");
-        let chain = |path: &str| package_chain(root, Path::new(path));
-        assert_eq!(
-            chain("/p/ethereum-curve/integration_test.tycho.yaml").as_deref(),
-            Some("ethereum")
+    fn a_package_is_on_the_chain_its_manifest_names() {
+        assert_eq!(package_chain("./substreams.yaml"), Ok(Chain::Ethereum));
+        assert_eq!(package_chain("./base-aero-cl.yaml"), Ok(Chain::Base));
+        assert_eq!(package_chain("./bsc-ekubo-v3.yaml"), Ok(Chain::Bsc));
+        assert_eq!(package_chain("./test-base-lunarbase.yaml"), Ok(Chain::Base));
+        let unknown = package_chain("./evm-aero-cl.yaml").unwrap_err();
+        assert!(
+            unknown.starts_with("cannot tell the chain of `./evm-aero-cl.yaml`:") &&
+                unknown.contains("evm"),
+            "{unknown}"
         );
-        assert_eq!(
-            chain("/p/ethereum-uniswap-v4/with-hooks/integration_test.tycho.yaml").as_deref(),
-            Some("ethereum")
-        );
-        assert_eq!(
-            chain("/p/ethereum-ekubo-v3/integration_test_bsc_ekubo_v3.tycho.yaml").as_deref(),
-            Some("bsc")
-        );
+    }
+
+    #[test]
+    fn every_package_in_the_repository_names_a_known_chain() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocols/substreams");
+        for path in test_yamls(&root).unwrap() {
+            let manifest: ManifestEntry =
+                serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            if let Err(e) = package_chain(&manifest.substreams_yaml_path) {
+                panic!("{}: {e}", path.display());
+            }
+        }
     }
 }
