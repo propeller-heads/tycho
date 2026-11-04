@@ -12,7 +12,7 @@ use alloy::primitives::{address, Address};
 use serde::{Deserialize, Serialize};
 use tycho_common::{simulation::errors::SimulationError, Bytes};
 
-use crate::evm::protocol::utils::slipstreams::observations::Observations;
+use crate::evm::protocol::utils::slipstreams::observations::{Observations, ObserveError};
 
 /// The `DynamicSwapFeeHook` deployment; the same address on every chain AERO v1.1 runs on.
 const DYNAMIC_SWAP_FEE_HOOK: Address = address!("C0ed888AfE87ed1AcF01D9f19bB850159e3ce434");
@@ -269,16 +269,20 @@ impl AeroHookFee {
         if self.seconds_ago == 0 || self.seconds_ago > available {
             return Ok((0, false));
         }
-        let Ok((tick_cumulatives, _)) = pool.observations.observe(
+        // The hook catches a reverting `observe` and adds no dynamic fee. The oracle reverts with
+        // `OLD`; any other failure is missing or inconsistent data in this copy of it, so the
+        // quote fails rather than drop a fee the pool charges.
+        let (tick_cumulatives, _) = match pool.observations.observe(
             timestamp,
             &[self.seconds_ago, 0],
             pool.tick,
             pool.observation_index,
             pool.liquidity,
             cardinality,
-        ) else {
-            // The hook catches a reverting `observe` and adds no dynamic fee.
-            return Ok((0, true));
+        ) {
+            Ok(observed) => observed,
+            Err(ObserveError::TooOld) => return Ok((0, true)),
+            Err(ObserveError::Data(err)) => return Err(err),
         };
         let delta = tick_cumulatives[1] - tick_cumulatives[0];
         let twap_tick = delta.div_euclid(i64::from(self.seconds_ago));

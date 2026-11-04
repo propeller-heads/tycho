@@ -14,10 +14,13 @@ pub struct Observation {
 }
 
 impl Observation {
+    /// Decodes the storage word of slot `index`. The word arrives as a big-endian integer without
+    /// its leading zero bytes, so a slot whose `initialized` byte is clear, such as one that
+    /// `increaseObservationCardinalityNext` prefilled with timestamp 1, is shorter than 32 bytes.
     pub fn from_attribute(index: i32, bytes: &[u8]) -> Result<Self, SimulationError> {
-        if bytes.len() != 32 {
+        if bytes.len() > 32 {
             return Err(SimulationError::FatalError(format!(
-                "Invalid observation length: expected 32 bytes, got {}",
+                "Invalid observation length: expected at most 32 bytes, got {}",
                 bytes.len()
             )));
         }
@@ -59,6 +62,35 @@ impl Observation {
             initialized,
             index,
         })
+    }
+}
+
+/// Why [`Observations::observe`] returned no value.
+#[derive(Debug)]
+pub enum ObserveError {
+    /// `Oracle.observe` reverts with `OLD`: the target is older than the oldest observation. The
+    /// fee modules and the AERO swap hook catch that revert and charge no dynamic fee.
+    TooOld,
+    /// This copy of the oracle cannot answer: an observation is missing or inconsistent, or the
+    /// execution context is. The chain never fails this way, so a caller must not read it as a
+    /// revert.
+    Data(SimulationError),
+}
+
+impl From<SimulationError> for ObserveError {
+    fn from(err: SimulationError) -> Self {
+        Self::Data(err)
+    }
+}
+
+impl From<ObserveError> for SimulationError {
+    fn from(err: ObserveError) -> Self {
+        match err {
+            ObserveError::TooOld => Self::FatalError(
+                "Observation target is older than the oldest observation".to_string(),
+            ),
+            ObserveError::Data(err) => err,
+        }
     }
 }
 
@@ -188,9 +220,9 @@ impl Observations {
         index: u16,
         liquidity: u128,
         cardinality: u16,
-    ) -> Result<(Vec<i64>, Vec<U256>), SimulationError> {
+    ) -> Result<(Vec<i64>, Vec<U256>), ObserveError> {
         if cardinality == 0 {
-            return Err(SimulationError::FatalError("Cardinality must be > 0".to_string()));
+            return Err(SimulationError::FatalError("Cardinality must be > 0".to_string()).into());
         }
         let mut tick_cumulatives = Vec::with_capacity(seconds_agos.len());
         let mut seconds_per_liquidity_cumulative_x128s = Vec::with_capacity(seconds_agos.len());
@@ -211,9 +243,9 @@ impl Observations {
         target: u32,
         index: u16,
         cardinality: u16,
-    ) -> Result<(Observation, Observation), SimulationError> {
+    ) -> Result<(Observation, Observation), ObserveError> {
         if self.observations.is_empty() {
-            return Err(SimulationError::FatalError("No observations available".to_string()));
+            return Err(SimulationError::FatalError("No observations available".to_string()).into());
         }
         let mut l = (index as usize + 1) % cardinality as usize;
         let mut r = l + cardinality as usize - 1;
@@ -246,7 +278,8 @@ impl Observations {
 
         Err(SimulationError::FatalError(
             "Binary search failed — inconsistent oracle data".to_string(),
-        ))
+        )
+        .into())
     }
 
     pub fn get_surrounding_observations(
@@ -257,10 +290,12 @@ impl Observations {
         index: u16,
         liquidity: u128,
         cardinality: u16,
-    ) -> Result<(Observation, Observation), SimulationError> {
+    ) -> Result<(Observation, Observation), ObserveError> {
         let idx = index as usize;
         if idx >= self.observations.len() {
-            return Err(self.observation_index_err(idx, index, cardinality));
+            return Err(self
+                .observation_index_err(idx, index, cardinality)
+                .into());
         }
         let mut before_or_at = self.observations[idx];
 
@@ -276,10 +311,9 @@ impl Observations {
             before_or_at = self.slot(0);
         }
 
+        // `require(lte(time, beforeOrAt.blockTimestamp, target), "OLD")`
         if !lte(time, before_or_at.block_timestamp, target) {
-            return Err(SimulationError::FatalError(
-                "Target too old (after oldest observation)".to_string(),
-            ));
+            return Err(ObserveError::TooOld);
         }
 
         self.binary_search(time, target, index, cardinality)
@@ -293,11 +327,13 @@ impl Observations {
         index: u16,
         liquidity: u128,
         cardinality: u16,
-    ) -> Result<(i64, U256), SimulationError> {
+    ) -> Result<(i64, U256), ObserveError> {
         if seconds_ago == 0 {
             let idx = index as usize;
             if idx >= self.observations.len() {
-                return Err(self.observation_index_err(idx, index, cardinality));
+                return Err(self
+                    .observation_index_err(idx, index, cardinality)
+                    .into());
             }
             let mut last = self.observations[idx];
             if last.block_timestamp != time {
@@ -306,7 +342,9 @@ impl Observations {
             return Ok((last.tick_cumulative, last.seconds_per_liquidity_cumulative_x128));
         }
 
-        let target = time - seconds_ago;
+        // `Oracle.observeSingle` computes this in unchecked uint32 arithmetic (Solidity 0.7), and
+        // `lte` and the deltas below already treat timestamps as wrapping.
+        let target = time.wrapping_sub(seconds_ago);
         let (before_or_at, at_or_after) =
             self.get_surrounding_observations(time, target, tick, index, liquidity, cardinality)?;
 
@@ -468,7 +506,10 @@ mod tests {
             .observe_single(900, 0, 0, 0, 1, 1)
             .expect_err("a target behind the last observation must not wrap");
 
-        assert!(matches!(err, SimulationError::InvalidInput(_, _)), "got {err:?}");
+        assert!(
+            matches!(err, ObserveError::Data(SimulationError::InvalidInput(_, _))),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -570,6 +611,34 @@ mod tests {
             value |= U256::from(1) << 248u32;
         }
         value.to_be_bytes()
+    }
+
+    #[test]
+    fn from_attribute_reads_a_word_without_its_leading_zero_bytes() {
+        // A slot `increaseObservationCardinalityNext` prefilled holds timestamp 1 and nothing
+        // else, so the indexer sends the word as the single byte 0x01.
+        let observation = Observation::from_attribute(592, &[0x01]).expect("short word");
+
+        assert_eq!(
+            observation,
+            Observation { block_timestamp: 1, index: 592, ..Default::default() }
+        );
+        assert_eq!(
+            Observation::from_attribute(
+                3,
+                &encode_observation_bytes(7, -5, U256::from(9), true)[1..]
+            )
+            .expect("leading zero dropped")
+            .block_timestamp,
+            Observation::from_attribute(3, &encode_observation_bytes(7, -5, U256::from(9), true))
+                .expect("full word")
+                .block_timestamp
+        );
+    }
+
+    #[test]
+    fn from_attribute_rejects_a_word_longer_than_32_bytes() {
+        assert!(Observation::from_attribute(0, &[0; 33]).is_err());
     }
 
     #[test]

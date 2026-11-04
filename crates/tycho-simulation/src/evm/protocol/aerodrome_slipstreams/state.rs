@@ -1002,6 +1002,16 @@ mod tests {
             initialized: true,
             index: 213,
         });
+        // The fixture carries only the newest slot. Slot 0, where the oracle falls back while the
+        // next slot is unwritten, is set inside the 600 s window, so `observe` reverts `OLD` and
+        // the module charges no dynamic fee, which is all this replay needs with a zero
+        // scaling factor. Unwritten history at timestamp 0 would be a ring no pool has.
+        observations[0] = Observation {
+            block_timestamp: 1_787_122_690,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        };
 
         let mut pool = AerodromeSlipstreamsState::new(
             "0xdFe5F275020def30993f042174Fc2D335678b626".to_string(),

@@ -4,39 +4,79 @@ use alloy::primitives::{address, Address};
 use serde::{Deserialize, Serialize};
 use tycho_common::{simulation::errors::SimulationError, Bytes};
 
-use crate::evm::protocol::utils::slipstreams::observations::Observations;
+use crate::evm::protocol::utils::slipstreams::observations::{Observations, ObserveError};
 
 pub const ZERO_FEE_INDICATOR: u32 = 420;
+// The `secondsAgo` the dynamic fee modules are deployed with, and the one a config serialized
+// before it became per module takes. `SUPPORTED_DYNAMIC_FEE_MODULES` holds each module's own.
 pub const DEFAULT_SECONDS_AGO: u32 = 600;
 pub const MIN_SECONDS_AGO: u32 = 2;
 pub const DEFAULT_SCALING_FACTOR: u64 = 0;
 // The upgraded DynamicSwapFeeModule deployments use 30_000 as their default fee cap.
 pub const DEFAULT_FEE_CAP: u32 = 30_000;
 const SCALING_PRECISION: u128 = 1_000_000;
-const SUPPORTED_DYNAMIC_FEE_MODULES: [Address; 4] = [
-    address!("090b2A6bb475c00e2256e2095A60887cD710803b"),
-    address!("F4Ecd78EBEB6d36CF7f80B5B6B41453515fe2785"),
-    address!("87D8f999BBa9343E8099552426775B51C338E8CB"),
+const DYNAMIC_FEE_MODULE_ATTRIBUTE: &str = "dynamic_fee_module";
+
+/// A deployed fee module whose `getFee` `get_dynamic_fee` reproduces.
+struct SupportedModule {
+    address: Address,
+    /// The module's `secondsAgo`: the TWAP window, which also sets the minimum observation
+    /// cardinality (`secondsAgo / MIN_SECONDS_AGO`) below which the module adds no dynamic fee.
+    /// A snapshot of state the swap fee manager can change with `setSecondsAgo`, which emits
+    /// `SecondsAgoSet`; nothing indexes it, so a change needs a code change here.
+    seconds_ago: u32,
+}
+
+const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 4] = [
+    // The three Base modules moved from 600 to 480 in tx 0x42122c80…7550 (block 52,307,488), and
+    // 0x87D8 again to 30 in tx 0x1aeb7f17…2ae4 (block 53,228,614).
+    SupportedModule {
+        address: address!("090b2A6bb475c00e2256e2095A60887cD710803b"),
+        seconds_ago: 480,
+    },
+    SupportedModule {
+        address: address!("F4Ecd78EBEB6d36CF7f80B5B6B41453515fe2785"),
+        seconds_ago: 480,
+    },
+    SupportedModule {
+        address: address!("87D8f999BBa9343E8099552426775B51C338E8CB"),
+        seconds_ago: 30,
+    },
     // UP on Robinhood Chain. Same module code as the Base deployments above, so the fee resolution
     // below applies unchanged; only its `factory` immutable and the name of its base-fee event
     // differ.
-    address!("a8Bdc945bE050E451C97f935d7c0D6B0087cF94c"),
+    SupportedModule {
+        address: address!("a8Bdc945bE050E451C97f935d7c0D6B0087cF94c"),
+        seconds_ago: DEFAULT_SECONDS_AGO,
+    },
 ];
-const DYNAMIC_FEE_MODULE_ATTRIBUTE: &str = "dynamic_fee_module";
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+fn supported_dynamic_fee_module(fee_module: &[u8]) -> Option<&'static SupportedModule> {
+    SUPPORTED_DYNAMIC_FEE_MODULES
+        .iter()
+        .find(|supported| supported.address.as_slice() == fee_module)
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DynamicFeeConfig {
     base_fee: u32,
     fee_cap: u32,
     scaling_factor: u64,
     initial_fee_enabled: bool,
     initial_fee: u32,
+    /// The pool's fee module's `secondsAgo`.
+    #[serde(default = "default_seconds_ago")]
+    seconds_ago: u32,
 }
 
-fn is_supported_dynamic_fee_module(fee_module: &[u8]) -> bool {
-    SUPPORTED_DYNAMIC_FEE_MODULES
-        .iter()
-        .any(|supported| supported.as_slice() == fee_module)
+fn default_seconds_ago() -> u32 {
+    DEFAULT_SECONDS_AGO
+}
+
+impl Default for DynamicFeeConfig {
+    fn default() -> Self {
+        Self::new(0, 0, 0, false, 0)
+    }
 }
 
 impl DynamicFeeConfig {
@@ -47,7 +87,20 @@ impl DynamicFeeConfig {
         initial_fee_enabled: bool,
         initial_fee: u32,
     ) -> Self {
-        Self { base_fee, fee_cap, scaling_factor, initial_fee_enabled, initial_fee }
+        Self {
+            base_fee,
+            fee_cap,
+            scaling_factor,
+            initial_fee_enabled,
+            initial_fee,
+            seconds_ago: DEFAULT_SECONDS_AGO,
+        }
+    }
+
+    /// The same config under a module whose `secondsAgo` is `seconds_ago`.
+    #[cfg(test)]
+    pub(crate) fn with_seconds_ago(self, seconds_ago: u32) -> Self {
+        Self { seconds_ago, ..self }
     }
 
     /// Builds a config from a full snapshot's attributes.
@@ -56,12 +109,12 @@ impl DynamicFeeConfig {
     /// `base_fee == 0` makes `get_dynamic_fee` fall back to the pool's static `default_fee`. Only
     /// errors when a supported marker is present but a dynamic-fee attribute is missing.
     pub(crate) fn from_attributes(attributes: &HashMap<String, Bytes>) -> Result<Self, String> {
-        if !attributes
+        let Some(module) = attributes
             .get(DYNAMIC_FEE_MODULE_ATTRIBUTE)
-            .is_some_and(|module| is_supported_dynamic_fee_module(module))
-        {
+            .and_then(|module| supported_dynamic_fee_module(module))
+        else {
             return Ok(Self::default());
-        }
+        };
 
         Ok(Self {
             base_fee: u32::try_from(
@@ -95,6 +148,7 @@ impl DynamicFeeConfig {
                 .transpose()
                 .map_err(|err| err.to_string())?
                 .unwrap_or_default(),
+            seconds_ago: module.seconds_ago,
         })
     }
 
@@ -255,10 +309,15 @@ fn resolve_dynamic_fee(
         observations,
         execution_timestamp,
         scaling_factor,
+        dfc.seconds_ago,
     )?;
     Ok(ResolvedFee { fee: (base_fee + dynamic_component).min(fee_cap), observed_twap })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "inputs mirror the on-chain dynamic fee module and pool state"
+)]
 fn calculate_dynamic_fee(
     current_tick: i32,
     liquidity: u128,
@@ -267,34 +326,32 @@ fn calculate_dynamic_fee(
     observations: &Observations,
     blocktime: u32,
     scaling_factor: u64,
+    seconds_ago: u32,
 ) -> Result<(u32, bool), SimulationError> {
-    if u32::from(observation_cardinality) < DEFAULT_SECONDS_AGO / MIN_SECONDS_AGO {
+    if u32::from(observation_cardinality) < seconds_ago / MIN_SECONDS_AGO {
         // The module returns before reaching the oracle: no observe gas.
         return Ok((0, false));
-    };
-    // Mirror the on-chain module's `try pool.observe(...) { ... } catch { return 0; }`: a failed
-    // observation (e.g. a ring buffer Tycho only partially indexed) contributes no dynamic
-    // component instead of failing the whole quote.
-    let Ok(observed) = observations.observe(
+    }
+    // The module wraps `observe` in try/catch and adds no dynamic component when it reverts,
+    // which the oracle does with `OLD` when the window reaches past the oldest observation. Any
+    // other failure is missing or inconsistent data in this copy of the oracle, which the chain
+    // never sees, so the quote fails rather than drop a fee the pool charges.
+    let (tick_cumulatives, _) = match observations.observe(
         blocktime,
-        &[DEFAULT_SECONDS_AGO, 0],
+        &[seconds_ago, 0],
         current_tick,
         observation_index,
         liquidity,
         observation_cardinality,
-    ) else {
-        return Ok((0, true));
+    ) {
+        Ok(observed) => observed,
+        Err(ObserveError::TooOld) => return Ok((0, true)),
+        Err(ObserveError::Data(err)) => return Err(err),
     };
-    let tw_avg_tick = match observed {
-        (tick_cumulatives, _) if tick_cumulatives.len() >= 2 => {
-            let average =
-                (tick_cumulatives[1] - tick_cumulatives[0]) / i64::from(DEFAULT_SECONDS_AGO);
-            i32::try_from(average).map_err(|e| {
-                SimulationError::FatalError(format!("Time-weighted average tick {average}: {e}"))
-            })?
-        }
-        _ => return Ok((0, true)),
-    };
+    let average = (tick_cumulatives[1] - tick_cumulatives[0]) / i64::from(seconds_ago);
+    let tw_avg_tick = i32::try_from(average).map_err(|e| {
+        SimulationError::FatalError(format!("Time-weighted average tick {average}: {e}"))
+    })?;
 
     let abs_tick_delta = (current_tick - tw_avg_tick).unsigned_abs();
 
@@ -307,6 +364,7 @@ fn calculate_dynamic_fee(
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::U256;
     use hex_literal::hex;
     use rstest::rstest;
 
@@ -462,32 +520,159 @@ mod tests {
         assert_eq!(fee, ResolvedFee::flat(3000));
     }
 
-    #[test]
-    fn observe_failure_falls_back_to_base_fee() {
-        // cardinality clears the min-history guard but exceeds the indexed buffer, so observe()
-        // errors out of bounds. Like the on-chain try/catch, the dynamic component is 0 and the
-        // fee falls back to the base fee instead of failing the quote — but the attempted
-        // observe still costs gas, so observed_twap stays true.
-        let dfc = DynamicFeeConfig::default();
-        let observations = Observations::new(vec![
-            Observation {
-                block_timestamp: 999_000,
+    /// A ring of `cardinality` slots holding the given `(index, timestamp, tick cumulative,
+    /// seconds-per-liquidity cumulative)` observations; every other slot is unwritten.
+    fn ring(cardinality: usize, written: &[(usize, u32, i64, &str)]) -> Observations {
+        let mut slots = vec![Observation::default(); cardinality];
+        for &(index, block_timestamp, tick_cumulative, seconds_per_liquidity) in written {
+            slots[index] = Observation {
+                block_timestamp,
+                tick_cumulative,
+                seconds_per_liquidity_cumulative_x128: U256::from_str_radix(
+                    seconds_per_liquidity,
+                    10,
+                )
+                .expect("decimal cumulative"),
                 initialized: true,
-                index: 0,
-                ..Default::default()
-            },
-            Observation {
-                block_timestamp: 999_500,
-                initialized: true,
-                index: 1,
-                ..Default::default()
-            },
-        ]);
+                index: i32::try_from(index).expect("slot index fits i32"),
+            };
+        }
+        Observations::new(slots)
+    }
 
-        let fee = get_dynamic_fee(&dfc, 3000, 0, 1, 1, 300, &observations, 1_000_000, true)
-            .expect("observe failure should fall back to the base fee, not error");
+    #[test]
+    fn observe_reverting_old_charges_no_dynamic_fee() {
+        // The only observation is younger than the 600 s window, so `observe` reverts `OLD`. The
+        // module catches it: base fee only, and the attempted observe still costs gas.
+        let dfc = DynamicFeeConfig::new(0, 10_000, 1_000_000, false, 0);
+        let observations = ring(300, &[(0, 999_500, 0, "0")]);
+
+        let fee = get_dynamic_fee(&dfc, 3000, 7, 1, 0, 300, &observations, 1_000_000, true)
+            .expect("an OLD revert falls back to the base fee");
 
         assert_eq!(fee, ResolvedFee { fee: 3000, observed_twap: true });
+    }
+
+    #[test]
+    fn observation_data_error_fails_the_quote() {
+        // Slot 5 is the pool's current index but holds nothing: the chain cannot be in this
+        // state, so it is missing data here, not an `OLD` revert to absorb.
+        let dfc = DynamicFeeConfig::new(0, 10_000, 1_000_000, false, 0);
+        let observations = Observations::new(vec![Observation {
+            block_timestamp: 999_000,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        }]);
+
+        let result = get_dynamic_fee(&dfc, 3000, 7, 1, 5, 300, &observations, 1_000_000, true);
+
+        assert!(result.is_err(), "got {result:?}");
+    }
+
+    #[test]
+    fn young_ring_reads_unwritten_slots_as_uninitialized() {
+        // Robinhood pool 0x8132252bd65e7c03f7b57739e1db1c58d6ee792f at block 61,011,933: slots
+        // 0-2 written, cardinality 500, the rest prefilled but unwritten. Config (50, 500, 1e7)
+        // under a 600 s module; `getFee` returns 110 on chain, 50 base plus 6 ticks of TWAP
+        // deviation at 1e7 / 1e6.
+        let dfc = DynamicFeeConfig::new(50, 500, 10_000_000, false, 0);
+        let observations = ring(
+            500,
+            &[
+                (0, 1_789_205_466, -3_753_782_792, "4871078707023353428616415205"),
+                (1, 1_789_206_050, -3_869_381_504, "4943578347386704671325331035"),
+                (2, 1_789_206_560, -3_970_336_004, "5006891389484836749718391092"),
+            ],
+        );
+
+        let fee = get_dynamic_fee(
+            &dfc,
+            500,
+            -197_954,
+            18_176_761_252_316_136,
+            2,
+            500,
+            &observations,
+            1_789_206_560,
+            true,
+        )
+        .expect("fee");
+
+        assert_eq!(fee, ResolvedFee { fee: 110, observed_twap: true });
+    }
+
+    #[test]
+    fn twap_window_is_the_modules_seconds_ago() {
+        // Base pool 0x3fe04a59ebd38cf06080a6f60a98d124eb59392a at block 53,246,841 (ts
+        // 1,793,283,029), on module 0x87D8 whose `secondsAgo` is 30: config (250, 10_000, 1.25e8),
+        // tick -198,816, index 35 of 1,801. The slots are the ones both windows' binary searches
+        // read on chain. `getFee` returns 625: a 3-tick deviation over 30 s. A 600 s window
+        // deviates by 9 ticks and would charge 1,375.
+        let attributes = HashMap::from([
+            (
+                DYNAMIC_FEE_MODULE_ATTRIBUTE.to_string(),
+                Bytes::from(hex!("87D8f999BBa9343E8099552426775B51C338E8CB")),
+            ),
+            ("dfc_baseFee".to_string(), Bytes::from(250_u32.to_be_bytes())),
+            ("dfc_feeCap".to_string(), Bytes::from(10_000_u32.to_be_bytes())),
+            ("dfc_scalingFactor".to_string(), Bytes::from(125_000_000_u64.to_be_bytes())),
+        ]);
+        let dfc = DynamicFeeConfig::from_attributes(&attributes).expect("supported module");
+        let observations = ring(
+            1801,
+            &[
+                (0, 1793282575, -3275662076386, "4825203962939739569257789745571497048595234"),
+                (7, 1793282623, -3275671619302, "4825203962939739569276893739575444000335090"),
+                (8, 1793282633, -3275673607392, "4825203962939739569280873738326266281947560"),
+                (21, 1793282821, -3275710982996, "4825203962939739569355697714841725176262000"),
+                (22, 1793282845, -3275715754508, "4825203962939739569365249711843698652131929"),
+                (28, 1793282925, -3275731659364, "4825203962939739569397089714845879783423417"),
+                (29, 1793282931, -3275732852212, "4825203962939739569399477720594174591586762"),
+                (30, 1793282943, -3275735237920, "4825203962939739569404253732090764207913453"),
+                (31, 1793282975, -3275741599840, "4825203962939739569416989762748336518117962"),
+                (32, 1793283009, -3275748359448, "4825203962939739569430521795322007097710253"),
+                (33, 1793283013, -3275749154700, "4825203962939739569432113799154203636485816"),
+                (35, 1793283025, -3275751540474, "4825203962939739569436889810650793252812506"),
+                (36, 1793244467, -3268084691080, "4825203962939739551051757126085317697368620"),
+                (936, 1793265129, -3272193430366, "4825203962939739562297101138547303077297501"),
+                (937, 1793265139, -3272195418466, "4825203962939739562301084452370714260727039"),
+                (1386, 1793276999, -3274553455060, "4825203962939739567024672774306500132937332"),
+                (1387, 1793277003, -3274554250332, "4825203962939739567026265905404686576486673"),
+                (1611, 1793280663, -3275281921370, "4825203962939739568483314884286832984753085"),
+                (1612, 1793280665, -3275282318968, "4825203962939739568484112377091106362391932"),
+                (1724, 1793281749, -3275497853804, "4825203962939739568928959549000027675629456"),
+                (1725, 1793281759, -3275499842184, "4825203962939739568932939571799223800243474"),
+                (1780, 1793282351, -3275617544942, "4825203962939739569168558897552147796963386"),
+                (1781, 1793282359, -3275619135318, "4825203962939739569171748849458536199122231"),
+                (1787, 1793282393, -3275625894320, "4825203962939739569185306145060686908297322"),
+                (1788, 1793282399, -3275627087114, "4825203962939739569187698608990478209916456"),
+                (1790, 1793282417, -3275630665516, "4825203962939739569194874512553419470556641"),
+                (1791, 1793282427, -3275632653536, "4825203962939739569198854511304241752169111"),
+                (1792, 1793282457, -3275638617626, "4825203962939739569210794507556708597006522"),
+                (1793, 1793282459, -3275639015230, "4825203962939739569211590507306873053329016"),
+                (1794, 1793282485, -3275644184004, "4825203962939739569221957851002635360345264"),
+                (1795, 1793282501, -3275647364804, "4825203962939739569228337754815412164662955"),
+            ],
+        );
+        let fee_over = |dfc: &DynamicFeeConfig| {
+            get_dynamic_fee(
+                dfc,
+                3000,
+                -198_816,
+                854_978_763_339_884_583,
+                35,
+                1801,
+                &observations,
+                1_793_283_029,
+                true,
+            )
+            .expect("fee")
+            .fee
+        };
+
+        assert_eq!(fee_over(&dfc), 625);
+        assert_eq!(fee_over(&dfc.with_seconds_ago(DEFAULT_SECONDS_AGO)), 1375);
     }
 
     #[test]

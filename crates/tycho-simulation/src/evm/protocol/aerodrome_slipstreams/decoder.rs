@@ -190,28 +190,35 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
 
         ticks.sort_by_key(|tick| tick.index);
 
-        let observations: Vec<Observation> = snapshot
-            .state
-            .attributes
-            .iter()
-            .filter_map(|(key, value)| {
-                key.strip_prefix("observations/")?
-                    .parse::<i32>()
-                    .ok()
-                    .and_then(|idx| Observation::from_attribute(idx, value).ok())
-            })
-            .collect();
-
-        let mut observations: Vec<_> = observations
-            .into_iter()
-            .filter(|t| t.initialized)
-            .collect();
-
-        if observations.is_empty() {
-            return Err(InvalidSnapshotError::MissingAttribute("observations".to_string()));
+        // The oracle is a ring addressed by index, and lookups read slot `i` as position `i`, so
+        // each observation goes to its own index. A slot that `increaseObservationCardinalityNext`
+        // prefilled but no swap has written yet stays uninitialized, as on chain.
+        let mut observations: Vec<Observation> = Vec::new();
+        for (key, value) in &snapshot.state.attributes {
+            let Some(index) = key
+                .strip_prefix("observations/")
+                .and_then(|index| index.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            let observation = i32::try_from(index)
+                .map_err(|err| err.to_string())
+                .and_then(|slot| {
+                    Observation::from_attribute(slot, value).map_err(|err| err.to_string())
+                })
+                .map_err(|err| InvalidSnapshotError::ValueError(format!("{key}: {err}")))?;
+            if observations.len() <= index {
+                observations.resize_with(index + 1, Observation::default);
+            }
+            observations[index] = observation;
         }
 
-        observations.sort_by_key(|observation| observation.index);
+        if !observations
+            .iter()
+            .any(|observation| observation.initialized)
+        {
+            return Err(InvalidSnapshotError::MissingAttribute("observations".to_string()));
+        }
 
         AerodromeSlipstreamsState::new(
             snapshot.component.id,
@@ -301,21 +308,72 @@ mod tests {
     }
 
     fn expected_state(dfc: DynamicFeeConfig) -> AerodromeSlipstreamsState {
+        expected_state_with_ring(
+            dfc,
+            0,
+            1,
+            vec![Observation { initialized: true, index: 0, ..Default::default() }],
+        )
+    }
+
+    fn expected_state_with_ring(
+        dfc: DynamicFeeConfig,
+        observation_index: u16,
+        observation_cardinality: u16,
+        observations: Vec<Observation>,
+    ) -> AerodromeSlipstreamsState {
         AerodromeSlipstreamsState::new(
             "test-pool".to_string(),
             0,
             100,
             get_sqrt_ratio_at_tick(0).expect("tick zero should have a sqrt price"),
-            0,
-            1,
+            observation_index,
+            observation_cardinality,
             100,
             1,
             0,
             vec![TickInfo::new(-1, 1).unwrap(), TickInfo::new(1, -1).unwrap()],
-            vec![Observation { initialized: true, index: 0, ..Default::default() }],
+            observations,
             dfc,
         )
         .expect("test state should be valid")
+    }
+
+    #[tokio::test]
+    async fn observations_are_placed_at_their_ring_index() {
+        // Slot 1 was prefilled by `increaseObservationCardinalityNext` and never written, so the
+        // indexer sends it as the single byte 0x01; slot 2 holds the newest observation. Each must
+        // sit at its own index: lookups read position `i` as slot `i`.
+        let mut snapshot = snapshot(None);
+        let newest = ((U256::from(1) << 248_u32) | U256::from(5_u32)).to_be_bytes::<32>();
+        let attributes = &mut snapshot.state.attributes;
+        attributes.insert("observations/1".to_string(), Bytes::from([0x01_u8]));
+        attributes.insert("observations/2".to_string(), Bytes::from(newest));
+        attributes.insert("observationIndex".to_string(), Bytes::from(2_u16.to_be_bytes()));
+        attributes.insert("observationCardinality".to_string(), Bytes::from(3_u16.to_be_bytes()));
+
+        let decoded = try_decode_snapshot_with_defaults::<AerodromeSlipstreamsState>(snapshot)
+            .await
+            .expect("snapshot should decode");
+
+        assert_eq!(
+            decoded,
+            expected_state_with_ring(
+                DynamicFeeConfig::default(),
+                2,
+                3,
+                vec![
+                    Observation { initialized: true, index: 0, ..Default::default() },
+                    Observation { block_timestamp: 1, index: 1, ..Default::default() },
+                    Observation {
+                        block_timestamp: 5,
+                        initialized: true,
+                        index: 2,
+                        ..Default::default()
+                    },
+                ],
+            )
+        );
     }
 
     #[rstest]
@@ -336,12 +394,13 @@ mod tests {
     }
 
     #[rstest]
-    #[case::factory_5e7b(hex_literal::hex!("090b2A6bb475c00e2256e2095A60887cD710803b"))]
-    #[case::factory_ade6(hex_literal::hex!("F4Ecd78EBEB6d36CF7f80B5B6B41453515fe2785"))]
-    #[case::factory_f8f2(hex_literal::hex!("87D8f999BBa9343E8099552426775B51C338E8CB"))]
+    #[case::factory_5e7b(hex_literal::hex!("090b2A6bb475c00e2256e2095A60887cD710803b"), 480)]
+    #[case::factory_ade6(hex_literal::hex!("F4Ecd78EBEB6d36CF7f80B5B6B41453515fe2785"), 480)]
+    #[case::factory_f8f2(hex_literal::hex!("87D8f999BBa9343E8099552426775B51C338E8CB"), 30)]
     #[tokio::test]
     async fn supported_module_defaults_missing_initial_fee_attributes(
         #[case] dynamic_fee_module: [u8; 20],
+        #[case] seconds_ago: u32,
     ) {
         let mut snapshot = snapshot(Some(Bytes::from(dynamic_fee_module)));
         snapshot
@@ -357,6 +416,11 @@ mod tests {
             .await
             .expect("new module updates should work with pre-upgrade pool state");
 
-        assert_eq!(decoded, expected_state(DynamicFeeConfig::new(500, 700, 6_000_000, false, 0)));
+        assert_eq!(
+            decoded,
+            expected_state(
+                DynamicFeeConfig::new(500, 700, 6_000_000, false, 0).with_seconds_ago(seconds_ago)
+            )
+        );
     }
 }

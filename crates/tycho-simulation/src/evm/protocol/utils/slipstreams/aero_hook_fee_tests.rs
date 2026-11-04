@@ -141,6 +141,22 @@ fn uninitialized_next_slot_reads_the_oldest_observation_at_index_zero() {
 }
 
 #[test]
+fn missing_current_observation_fails_the_quote() {
+    // Index 5 is the pool's newest slot but holds nothing: missing data here, which the chain
+    // cannot have, so it must not pass for a reverting `observe`.
+    let observations = observations();
+    let pool = PoolOracle {
+        observation_index: 5,
+        observation_cardinality: 8,
+        ..oracle(&observations, 10)
+    };
+
+    let result = configured(300, 5_000, 1_000_000).resolve(&pool, TICK_SPACING_FEE, execution(10));
+
+    assert!(result.is_err(), "got {result:?}");
+}
+
+#[test]
 fn later_swaps_in_a_traded_block_pay_its_cached_fee() {
     let mut hook = configured(300, 5_000, 1_000_000);
     hook.store_block_fee(10, 450);
