@@ -193,7 +193,9 @@ pub fn run_ladder(
     let mut output = LadderOutput::default();
 
     for (id, state) in update.states.iter() {
-        if let Some(reason) = skip_simulation.get(id) {
+        // The skips and limit kinds are keyed by lowercase id; the update keeps the id as indexed.
+        let key = id.to_lowercase();
+        if let Some(reason) = skip_simulation.get(&key) {
             info!("Skipping simulation for component {id}: {reason}");
             continue;
         }
@@ -310,7 +312,7 @@ pub fn run_ladder(
 
                 quoted_any_direction = true;
 
-                if let Some(reason) = skip_execution.get(id) {
+                if let Some(reason) = skip_execution.get(&key) {
                     info!("Skipping execution for component {id}: {reason}");
                     continue;
                 }
@@ -340,7 +342,7 @@ pub fn run_ladder(
                 token_in: token_in.address.clone(),
                 token_out: token_out.address.clone(),
             };
-            let kind = limit_kinds.and_then(|kinds| kinds.get(&(id.clone(), direction.clone())));
+            let kind = limit_kinds.and_then(|kinds| kinds.get(&(key.clone(), direction.clone())));
             if let Some(kind) = kind {
                 let checked = limits::check_direction(
                     |amount| {
@@ -362,13 +364,14 @@ pub fn run_ladder(
                     capped,
                     quoted_at_limit: checked.at_limit.is_some(),
                     execution_skipped: skip_execution
-                        .get(id)
+                        .get(&key)
                         .map(|reason| reason.to_string()),
                     failures: checked.failures,
                     at_limit: None,
                     past_limit: None,
                 };
-                if let (Some(quote), false) = (&checked.at_limit, skip_execution.contains_key(id)) {
+                if let (Some(quote), false) = (&checked.at_limit, skip_execution.contains_key(&key))
+                {
                     let simulation_id = format!("at_limit_{id}_{}", limits.direction);
                     output.at_limit.insert(
                         simulation_id.clone(),
@@ -542,7 +545,10 @@ mod tests {
     use std::str::FromStr;
 
     use tycho_execution::encoding::models::Solution;
-    use tycho_simulation::tycho_common::Bytes;
+    use tycho_simulation::{
+        evm::protocol::uniswap_v2::state::UniswapV2State,
+        tycho_common::{simulation::protocol_sim::ProtocolSim, Bytes},
+    };
 
     use super::*;
     use crate::execution::models::Transaction;
@@ -694,6 +700,80 @@ mod tests {
             &judge_limits(&capped, None, Tolerance::EXACT)[1].unfailed,
             Outcome::Skipped { reason } if reason.contains("int128::MAX")
         ));
+    }
+
+    /// A uniswap v2 pool with a mixed-case id, as an update can carry it, and its component.
+    fn mixed_case_pool() -> (Update, HashMap<String, ProtocolComponent>) {
+        let id = "0xAbCd000000000000000000000000000000000001";
+        let token = |address: &str, symbol: &str| {
+            Token::new(&Bytes::from_str(address).unwrap(), symbol, 18, 0, &[], Chain::Ethereum, 100)
+        };
+        let tokens = vec![
+            token("0x00000000000000000000000000000000000000a1", "A"),
+            token("0x00000000000000000000000000000000000000b1", "B"),
+        ];
+        let component = ProtocolComponent::new(
+            Bytes::from_str(id).unwrap(),
+            "uniswap_v2".to_string(),
+            "uniswap_v2_pool".to_string(),
+            Chain::Ethereum,
+            tokens,
+            Vec::new(),
+            HashMap::new(),
+            Bytes::default(),
+            Default::default(),
+        );
+        let reserve = alloy::primitives::U256::from(10u64).pow(alloy::primitives::U256::from(24));
+        let state: Box<dyn ProtocolSim> = Box::new(UniswapV2State::new(reserve, reserve));
+        let components = HashMap::from([(id.to_string(), component)]);
+        let update = Update::new(1, HashMap::from([(id.to_string(), state)]), components.clone());
+        (update, components)
+    }
+
+    #[test]
+    fn a_skip_applies_to_a_component_whatever_the_case_of_its_id() {
+        let (update, components) = mixed_case_pool();
+        let lowercase = "0xabcd000000000000000000000000000000000001".to_string();
+
+        let skip = HashMap::from([(lowercase.clone(), "no adapter")]);
+        let skipped = run_ladder(
+            Chain::Ethereum,
+            &update,
+            &components,
+            &skip,
+            &HashMap::new(),
+            "uniswap_v2",
+            None,
+        )
+        .unwrap();
+        assert!(skipped.executions.is_empty());
+
+        // Skipping execution, with limits declared: the limits are checked in simulation, and
+        // nothing is queued for execution.
+        let kinds: HashMap<(String, Direction), LimitKind> = [
+            "0x00000000000000000000000000000000000000a1->0x00000000000000000000000000000000000000b1",
+            "0x00000000000000000000000000000000000000b1->0x00000000000000000000000000000000000000a1",
+        ]
+        .into_iter()
+        .map(|direction| ((lowercase.clone(), Direction::from_str(direction).unwrap()), LimitKind::Soft))
+        .collect();
+        let simulated_only = run_ladder(
+            Chain::Ethereum,
+            &update,
+            &components,
+            &HashMap::new(),
+            &skip,
+            "uniswap_v2",
+            Some(&kinds),
+        )
+        .unwrap();
+        assert!(simulated_only.executions.is_empty());
+        assert!(simulated_only.at_limit.is_empty());
+        assert_eq!(simulated_only.limit_directions.len(), 2);
+        assert!(simulated_only
+            .limit_directions
+            .iter()
+            .all(|limits| limits.execution_skipped.as_deref() == Some("no adapter")));
     }
 
     #[test]
