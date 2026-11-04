@@ -5,6 +5,7 @@
 //! each runner's own: protocol-testing writes a JSON report, the in-cluster test exports metrics.
 
 pub mod execution;
+pub mod ladder;
 pub mod limits;
 pub mod outcome;
 pub mod sheet;
