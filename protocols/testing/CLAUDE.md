@@ -35,5 +35,5 @@ Strict mode requires every direction of every expected component to declare its 
 {kind: hard | soft | under_cap}`, on the package or the component, for every direction or keyed
 `0x<in>->0x<out>`) and tests it at the limit and, for a hard one, one unit past, reporting each
 direction separately. Strict mode also requires executions to match simulation exactly unless the
-package declares `execution_tolerance: {bps, cause, measured}`; legacy mode allows 0.5%.
+package declares `execution_tolerance: {bps and/or wei, cause, measured}`; legacy mode allows 0.5%.
 `range --report <path>` writes each check's outcome as JSON. See `README.md`, "Strict mode".

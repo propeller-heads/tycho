@@ -362,37 +362,49 @@ impl Limits {
 ///   measured: "2.1 bps at most over blocks 21000000-21000100 (range --report)"
 /// ```
 ///
+/// `bps` is relative to the executed amount; `wei` is absolute, in base units of the token out,
+/// for a fixed rounding loss such as stETH's 1-2 wei per transfer. Either or both can be declared,
+/// and a difference within either passes.
+///
 /// A tolerance can hide a fee or rounding bug as well as a known artifact, so it states why
 /// exact is out of reach and the drift a run measured.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionTolerance {
     /// The largest difference allowed, in basis points of the executed amount.
-    pub bps: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bps: Option<u32>,
+    /// The largest difference allowed, in base units of the token out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wei: Option<u64>,
     /// Why simulation cannot match execution exactly.
     pub cause: String,
     /// The largest drift a run measured, and which run.
     pub measured: String,
 }
 
-/// How far an executed amount out may differ from the simulated one.
+/// How far an executed amount out may differ from the simulated one: up to `bps` basis points of
+/// the executed amount, or up to `wei` base units of the token out, whichever allows more. Both
+/// zero is exact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tolerance {
-    Exact,
-    /// At most this many basis points of the executed amount.
-    Bps(u32),
+pub struct Tolerance {
+    pub bps: u32,
+    pub wei: u64,
 }
 
 impl Tolerance {
+    pub const EXACT: Tolerance = Tolerance { bps: 0, wei: 0 };
     /// Legacy mode's tolerance for every package: 0.5%.
-    pub const LEGACY: Tolerance = Tolerance::Bps(50);
+    pub const LEGACY: Tolerance = Tolerance { bps: 50, wei: 0 };
 }
 
 impl fmt::Display for Tolerance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Tolerance::Exact => f.write_str("exact"),
-            Tolerance::Bps(bps) => write!(f, "{bps} bps"),
+        match (self.bps, self.wei) {
+            (0, 0) => f.write_str("exact"),
+            (bps, 0) => write!(f, "{bps} bps"),
+            (0, wei) => write!(f, "{wei} wei"),
+            (bps, wei) => write!(f, "{bps} bps or {wei} wei"),
         }
     }
 }
@@ -615,25 +627,33 @@ impl IntegrationTestsConfig {
     pub fn tolerance(&self) -> Tolerance {
         match (self.harness, &self.execution_tolerance) {
             (Harness::Legacy, _) => Tolerance::LEGACY,
-            (Harness::Strict, None) => Tolerance::Exact,
-            (Harness::Strict, Some(declared)) => Tolerance::Bps(declared.bps),
+            (Harness::Strict, None) => Tolerance::EXACT,
+            (Harness::Strict, Some(declared)) => {
+                Tolerance { bps: declared.bps.unwrap_or(0), wei: declared.wei.unwrap_or(0) }
+            }
         }
     }
 
-    /// A declared tolerance is at least 1 bps and below 100%, and states its cause and
-    /// measurement, in both modes.
+    /// A declared tolerance has a nonzero `bps` below 100%, a nonzero `wei`, or both, and states
+    /// its cause and measurement, in both modes.
     fn check_tolerance(&self, source: &str) -> miette::Result<()> {
         let Some(tolerance) = &self.execution_tolerance else {
             return Ok(());
         };
         let mut problems = Vec::new();
-        if tolerance.bps == 0 {
-            problems.push(
-                "`bps: 0` is exact, which is the default: remove the declaration".to_string(),
-            );
-        }
-        if tolerance.bps >= 10_000 {
-            problems.push(format!("`bps: {}` allows any output", tolerance.bps));
+        match (tolerance.bps, tolerance.wei) {
+            (None, None) => problems.push(
+                "it declares neither `bps` nor `wei`; exact is the default: remove the declaration"
+                    .to_string(),
+            ),
+            (Some(0), _) | (_, Some(0)) => problems.push(
+                "a zero `bps` or `wei` allows nothing; exact is the default: leave it out"
+                    .to_string(),
+            ),
+            (Some(bps), _) if bps >= 10_000 => {
+                problems.push(format!("`bps: {bps}` allows any output"))
+            }
+            _ => {}
         }
         for (field, value) in [("cause", &tolerance.cause), ("measured", &tolerance.measured)] {
             if value.trim().is_empty() {
@@ -1132,10 +1152,21 @@ tests:
             parse(&yaml(STRICT_WITH_LIMITS, ""))
                 .unwrap()
                 .tolerance(),
-            Tolerance::Exact
+            Tolerance::EXACT
         );
         let declared = parse(&yaml(&format!("{STRICT_WITH_LIMITS}\n{TOLERANCE}"), "")).unwrap();
-        assert_eq!(declared.tolerance(), Tolerance::Bps(3));
+        assert_eq!(declared.tolerance(), Tolerance { bps: 3, wei: 0 });
+        for (declaration, expected) in [
+            ("{wei: 2, cause: \"c\", measured: \"m\"}", Tolerance { bps: 0, wei: 2 }),
+            ("{bps: 1, wei: 2, cause: \"c\", measured: \"m\"}", Tolerance { bps: 1, wei: 2 }),
+        ] {
+            let config = parse(&yaml(
+                &format!("{STRICT_WITH_LIMITS}\nexecution_tolerance: {declaration}"),
+                "",
+            ))
+            .unwrap();
+            assert_eq!(config.tolerance(), expected, "{declaration}");
+        }
     }
 
     #[test]
@@ -1157,7 +1188,10 @@ tests:
     #[test]
     fn a_tolerance_needs_a_cause_a_measurement_and_a_sensible_size() {
         for (declaration, problem) in [
-            ("{bps: 0, cause: \"c\", measured: \"m\"}", "`bps: 0` is exact"),
+            ("{bps: 0, cause: \"c\", measured: \"m\"}", "allows nothing"),
+            ("{wei: 0, cause: \"c\", measured: \"m\"}", "allows nothing"),
+            ("{bps: 2, wei: 0, cause: \"c\", measured: \"m\"}", "allows nothing"),
+            ("{cause: \"c\", measured: \"m\"}", "neither `bps` nor `wei`"),
             ("{bps: 10000, cause: \"c\", measured: \"m\"}", "allows any output"),
             ("{bps: 3, cause: \" \", measured: \"m\"}", "`cause` is empty"),
             ("{bps: 3, cause: \"c\", measured: \"\"}", "`measured` is empty"),

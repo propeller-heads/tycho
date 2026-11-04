@@ -158,10 +158,22 @@ execution_tolerance:
   measured: "2.1 bps at most, blocks 21000000-21000100 (range --report)"
 ```
 
-A mismatch says whether the simulation over- or underquotes, since those are different defects.
-`bps` must be between 1 and 9999, and `cause` and `measured` are required, in both modes; legacy
-mode keeps 0.5% whatever is declared. The report's `drift` gives the largest difference of each
-test, within tolerance or not, so `measured` can be checked against a run.
+`bps` is relative to the executed amount. Where the loss is a fixed amount whatever the trade's
+size, such as stETH's 1-2 wei per transfer, declare `wei` instead, in base units of the token out;
+a bps loose enough for a small trade allows ether on a large one:
+
+```yaml
+execution_tolerance:
+  wei: 2
+  cause: "stETH transfers move shares, rounding the amount down by up to 2 wei"
+  measured: "1 wei at most, blocks 25603204-25603404 (range --report)"
+```
+
+With both declared, a difference within either passes. A mismatch says whether the simulation
+over- or underquotes, since those are different defects. At least one of `bps` (1 to 9999) and
+`wei` (1 or more) is required, as are `cause` and `measured`, in both modes; legacy mode keeps
+0.5% whatever is declared. The report's `drift` gives the largest difference of each test, within
+tolerance or not, so `measured` can be checked against a run.
 
 ### Test report
 
@@ -180,7 +192,7 @@ test, within tolerance or not, so `measured` can be checked against a run.
     { "test": "second", "check": "limits.past_limit", "component": "0x...", "direction": "0x...->0x...", "outcome": "pass" }
   ],
   "drift": [
-    { "test": "second", "simulation": "test_0x..._USDC_WETH_1000000", "component": "0x...", "simulated": "1003", "executed": "1000", "bps": -30.0 }
+    { "test": "second", "simulation": "test_0x..._USDC_WETH_1000000", "component": "0x...", "simulated": "1003", "executed": "1000", "bps": -30.0, "largest_difference": "-3" }
   ]
 }
 ```
@@ -201,7 +213,8 @@ test, within tolerance or not, so `measured` can be checked against a run.
 A skipped check is reported with its reason, per component for `skip_simulation` and
 `skip_execution`. In legacy mode the report ends at the first failed check of a test. `drift`
 has one entry per test that executed anything: its largest `(executed - simulated) / executed`, in
-bps, negative when the simulation overquotes.
+bps, negative when the simulation overquotes, and its largest `executed - simulated` in base units
+of the token out, which may come from another execution.
 
 ## How to Run with Docker
 

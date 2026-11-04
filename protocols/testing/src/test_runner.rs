@@ -95,8 +95,8 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
     ])
 });
 
-/// Reports whether an executed amount out matches the simulated one within `tolerance`, measured
-/// in basis points of the executed amount.
+/// Reports whether an executed amount out matches the simulated one within `tolerance`: in basis
+/// points of the executed amount, or in base units of the token out.
 ///
 /// Returns the reason for the mismatch otherwise, saying whether the simulation over- or
 /// underquotes. A zero executed amount never matches, since no relative difference can be
@@ -112,17 +112,15 @@ fn check_execution_slippage(
 
     let executed = BigInt::from(amount_out.clone());
     let difference = executed.clone() - BigInt::from(expected_amount_out.clone());
-    let within = match tolerance {
-        Tolerance::Exact => difference.is_zero(),
-        Tolerance::Bps(bps) => difference.abs() * 10_000u32 <= executed.clone() * bps,
-    };
+    let within = difference.abs() <= BigInt::from(tolerance.wei) ||
+        difference.abs() * 10_000u32 <= executed.clone() * tolerance.bps;
     if within {
         return Ok(());
     }
 
     let bps = BigRational::new(difference.abs() * 10_000u32, executed)
         .to_f64()
-        .map_or_else(|| "?".to_string(), |bps| format!("{bps:.2}"));
+        .map_or_else(|| "?".to_string(), format_bps);
     let (paid, quotes) =
         if difference.is_negative() { ("less", "overquotes") } else { ("more", "underquotes") };
     Err(format!(
@@ -130,6 +128,16 @@ fn check_execution_slippage(
          the tolerance ({tolerance})",
         difference.abs()
     ))
+}
+
+/// Formats a basis-point difference with two decimals, or with two significant digits below
+/// 0.01 bps, where a wei of a large trade would otherwise print as `0.00`.
+fn format_bps(bps: f64) -> String {
+    if bps == 0.0 || bps.abs() >= 0.01 {
+        format!("{bps:.2}")
+    } else {
+        format!("{bps:.1e}")
+    }
 }
 
 /// What `run_simulation` hands to execution.
@@ -2223,9 +2231,9 @@ mod tests {
     #[test]
     fn exact_tolerance_fails_on_one_wei() {
         let executed = BigUint::from(1_000_000u32);
-        assert!(check_execution_slippage(&executed, &executed, Tolerance::Exact).is_ok());
+        assert!(check_execution_slippage(&executed, &executed, Tolerance::EXACT).is_ok());
         let reason =
-            check_execution_slippage(&BigUint::from(1_000_001u32), &executed, Tolerance::Exact)
+            check_execution_slippage(&BigUint::from(1_000_001u32), &executed, Tolerance::EXACT)
                 .expect_err("one wei off is not exact");
         assert!(reason.contains("paid 1 less"), "{reason}");
         assert!(reason.contains("tolerance (exact)"), "{reason}");
@@ -2235,7 +2243,11 @@ mod tests {
     fn a_declared_tolerance_allows_up_to_its_bps() {
         let executed = BigUint::from(10_000u32);
         let check = |simulated: u32| {
-            check_execution_slippage(&BigUint::from(simulated), &executed, Tolerance::Bps(3))
+            check_execution_slippage(
+                &BigUint::from(simulated),
+                &executed,
+                Tolerance { bps: 3, wei: 0 },
+            )
         };
         assert!(check(10_003).is_ok());
         assert!(check(9_997).is_ok());
@@ -2244,15 +2256,48 @@ mod tests {
     }
 
     #[test]
+    fn a_wei_tolerance_allows_a_fixed_difference_at_any_size() {
+        // stETH: a 150k ETH trade paying 1 wei less than simulated, which no bps can allow
+        // without allowing ether.
+        let executed = BigUint::from(150_000u32) * BigUint::from(10u32).pow(18);
+        let simulated = &executed + 1u32;
+        let one_wei = Tolerance { bps: 0, wei: 1 };
+        assert!(check_execution_slippage(&simulated, &executed, one_wei).is_ok());
+        assert!(check_execution_slippage(&(&executed - 1u32), &executed, one_wei).is_ok());
+        let reason = check_execution_slippage(&(&executed + 2u32), &executed, one_wei)
+            .expect_err("2 wei is past a 1 wei tolerance");
+        assert!(reason.contains("tolerance (1 wei)"), "{reason}");
+
+        // With both declared, a difference within either passes.
+        let both = Tolerance { bps: 1, wei: 5 };
+        let small = BigUint::from(10_000u32);
+        assert!(check_execution_slippage(&(&small + 5u32), &small, both).is_ok());
+        let large = BigUint::from(1_000_000u32);
+        assert!(check_execution_slippage(&(&large + 100u32), &large, both).is_ok());
+        assert!(check_execution_slippage(&(&large + 101u32), &large, both).is_err());
+    }
+
+    #[test]
+    fn a_tiny_mismatch_prints_its_bps_with_significant_digits() {
+        let executed = BigUint::from(150_000u32) * BigUint::from(10u32).pow(18);
+        let reason =
+            check_execution_slippage(&(&executed + 1u32), &executed, Tolerance::EXACT).unwrap_err();
+        assert!(reason.contains("overquotes by 6.7e-20 bps"), "{reason}");
+        assert_eq!(format_bps(0.0), "0.00");
+        assert_eq!(format_bps(0.01), "0.01");
+        assert_eq!(format_bps(0.0042), "4.2e-3");
+    }
+
+    #[test]
     fn a_mismatch_says_whether_the_simulation_over_or_underquotes() {
         let executed = BigUint::from(10_000u32);
-        let over = check_execution_slippage(&BigUint::from(10_010u32), &executed, Tolerance::Exact)
+        let over = check_execution_slippage(&BigUint::from(10_010u32), &executed, Tolerance::EXACT)
             .unwrap_err();
         assert!(
             over.contains("paid 10 less") && over.contains("overquotes by 10.00 bps"),
             "{over}"
         );
-        let under = check_execution_slippage(&BigUint::from(9_990u32), &executed, Tolerance::Exact)
+        let under = check_execution_slippage(&BigUint::from(9_990u32), &executed, Tolerance::EXACT)
             .unwrap_err();
         assert!(
             under.contains("paid 10 more") && under.contains("underquotes by 10.00 bps"),
@@ -2262,7 +2307,7 @@ mod tests {
 
     #[test]
     fn zero_output_execution_does_not_match() {
-        for tolerance in [Tolerance::Exact, Tolerance::Bps(3), Tolerance::LEGACY] {
+        for tolerance in [Tolerance::EXACT, Tolerance { bps: 0, wei: 5 }, Tolerance::LEGACY] {
             let reason =
                 check_execution_slippage(&BigUint::from(1000u32), &BigUint::zero(), tolerance)
                     .expect_err("a zero output must never match");
