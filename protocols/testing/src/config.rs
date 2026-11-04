@@ -15,6 +15,8 @@ use serde::{
 use similar::{ChangeTag, TextDiff};
 use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
+use crate::balances::BalanceCheck;
+
 /// Represents a ProtocolComponent with its main attributes
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProtocolComponentExpectation {
@@ -36,6 +38,9 @@ pub struct ProtocolComponentWithTestConfig {
     /// What the component's limits are, overriding the package's
     /// [`IntegrationTestsConfig::limits`].
     pub limits: Option<LimitsDeclaration>,
+    /// Where strict mode reads the component's balances on chain; `balanceOf(component id)`
+    /// without it.
+    pub balance_check: Option<BalanceCheck>,
 }
 
 /// An `expected_components` entry as written in the yaml, with every key at one level.
@@ -55,6 +60,8 @@ struct ExpectedComponentEntry {
     skip_execution: Skip,
     #[serde(default)]
     limits: Option<LimitsDeclaration>,
+    #[serde(default)]
+    balance_check: Option<BalanceCheck>,
 }
 
 impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
@@ -67,12 +74,14 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
             skip_simulation,
             skip_execution,
             limits,
+            balance_check,
         } = entry;
         Self {
             base: ProtocolComponentExpectation { id, tokens, static_attributes, creation_tx },
             skip_simulation,
             skip_execution,
             limits,
+            balance_check,
         }
     }
 }
@@ -568,6 +577,8 @@ pub struct IntegrationTestsConfig {
     pub adapter_build_signature: Option<String>,
     pub adapter_build_args: Option<String>,
     pub initialized_accounts: Option<Vec<String>>,
+    /// Off by default. Strict mode rejects it: each component declares its `balance_check`.
+    #[serde(default)]
     pub skip_balance_check: Skip,
     /// What the components' limits are, unless a component declares its own. Strict mode requires
     /// a declaration for every direction of every expected component, here or on the component.
@@ -616,6 +627,7 @@ impl IntegrationTestsConfig {
         }
         if config.harness == Harness::Strict {
             config.check_skips_have_reasons(source)?;
+            config.check_balances_are_not_skipped(source)?;
         }
         config.check_limits(source)?;
         config.check_tolerance(source)?;
@@ -779,6 +791,20 @@ impl IntegrationTestsConfig {
             "{source} declares `harness: strict`, where every skip needs a reason, but these are a \
              bare `true`: {}. Write each as `{{reason: \"...\"}}`, or remove it.",
             missing.join(", ")
+        ))
+    }
+
+    /// Strict mode: balances are checked for every expected component, against the source each
+    /// declares, so the package-level skip is not accepted, whatever its reason.
+    fn check_balances_are_not_skipped(&self, source: &str) -> miette::Result<()> {
+        let Some(reason) = self.skip_balance_check.reason() else {
+            return Ok(());
+        };
+        Err(miette!(
+            "{source} declares `harness: strict`, where every expected component's balances are \
+             checked, but it sets `skip_balance_check` ({reason}). Remove it, and declare where a \
+             component's balances are held with `balance_check: {{holder: \"attribute:NAME\" | \
+             \"0x...\"}}` or `{{min_of: [self, ...]}}` where it is not the component's own address."
         ))
     }
 
@@ -969,6 +995,54 @@ tests:
         let err = parse(&config).unwrap_err().to_string();
         assert!(err.contains("skip_balance_check (package)"), "{err}");
         assert!(err.contains("skip_simulation (test `test_foo`, component 0xAbC)"), "{err}");
+    }
+
+    #[test]
+    fn strict_mode_rejects_a_balance_skip_even_with_a_reason() {
+        let skipped = |harness: &str| {
+            yaml(harness, "").replace(
+                "skip_balance_check: false",
+                "skip_balance_check: {reason: \"held by the vault\"}",
+            )
+        };
+        let err = parse(&skipped(STRICT_WITH_LIMITS))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sets `skip_balance_check` (held by the vault)"), "{err}");
+        assert!(err.contains("balance_check: {holder:"), "{err}");
+
+        assert!(parse(&skipped(""))
+            .unwrap()
+            .skip_balance_check
+            .is_skipped());
+
+        // Without the key, the check runs, so a strict package need not write `false`.
+        let omitted = yaml(STRICT_WITH_LIMITS, "").replace("skip_balance_check: false\n", "");
+        assert!(!parse(&omitted)
+            .unwrap()
+            .skip_balance_check
+            .is_skipped());
+    }
+
+    #[test]
+    fn a_component_declares_its_balance_source_in_either_mode() {
+        let declared = "        balance_check: {min_of: [self, \"attribute:vault\"]}";
+        for harness in ["", STRICT_WITH_LIMITS] {
+            let config = parse(&yaml(harness, declared)).unwrap();
+            assert_eq!(
+                config.tests[0].expected_components[0].balance_check,
+                Some(BalanceCheck::MinOf(vec![
+                    crate::balances::Holder::Component,
+                    crate::balances::Holder::Attribute("vault".to_string()),
+                ]))
+            );
+            assert_eq!(
+                parse(&yaml(harness, "")).unwrap().tests[0].expected_components[0].balance_check,
+                None
+            );
+            let err = parse(&yaml(harness, "        balance_check: {holder: vault}")).unwrap_err();
+            assert!(format!("{err:?}").contains("not a holder"), "{err:?}");
+        }
     }
 
     #[test]
