@@ -87,11 +87,18 @@ Spot: An allowlist of target addresses plus a selector check, where one target i
 Applies: solidity · look first at lines matching `allow|target|selector|whitelist`
 
 ### push-payment-entrypoint
-Executors use the venue's push-payment entrypoint (tokens sent to the venue, then `swap`) rather than pull-payment/allowance variants when available, and reuse an existing generic executor that already targets the same interface (for the standard IPropAMM interface, the PropAMMExecutor) instead of adding a venue-specific one.
-Why: Pull-payment adds an extra hop (user -> router -> venue) when the venue leg is first in a route, costing gas, and a bespoke executor duplicates audited code.
-Spot: Executors calling `*WithAllowances`/`transferFrom`-based entrypoints; a new executor whose venue implements an interface an existing executor already calls. A new executor .sol under contracts/src/executors calling IPropAMM.swap or an equivalent push-payment swap.
-Applies: solidity · look first at lines matching `swap|transfer|allowance|executor|propamm|interface`
-Checked by: ast-grep `sol-executor-allowance-entrypoint`; ast-grep `sol-reuse-propamm-executor`
+Executors use the venue's push-payment entrypoint (tokens sent to the venue, then `swap`) rather than pull-payment/allowance variants when available.
+Why: Pull-payment adds an extra hop (user -> router -> venue) when the venue leg is first in a route, costing gas.
+Spot: Executors calling `*WithAllowances`/`transferFrom`-based entrypoints.
+Applies: solidity · look first at lines matching `swap|transfer|allowance|executor`
+Checked by: ast-grep `sol-executor-allowance-entrypoint`
+
+### reuse-propamm-executor
+Reuse the generic push-payment pAMM executor (PropAMMExecutor, crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol) for venues implementing the standard IPropAMM interface instead of writing a venue-specific executor.
+Why: Duplicate executors need separate audits, deployments and gas tuning for identical call shapes.
+Spot: New executor .sol under contracts/src/executors calling IPropAMM.swap or an equivalent push-payment swap.
+Applies: solidity · look first at lines matching `IPropAMM|PropAMM|executor|swap`
+Checked by: ast-grep `sol-reuse-propamm-executor`
 
 ### transfer-data-hardcoded
 Source: `crates/tycho-execution/CLAUDE.md` § Adding a New Executor, step 3
