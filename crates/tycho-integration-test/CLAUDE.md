@@ -55,11 +55,11 @@ shows up as a failure.
   - `protocol_stream_processor.rs`: Handles on-chain protocol updates — applies deltas to
     `ProtocolSim` instances, runs `get_amount_out` simulations, validates via RPC execution.
     Swaps are executed on the update block's state, in that block's context. The protocols in
-    `NEXT_BLOCK_PROTOCOLS` (`main.rs`, currently `biconomy`) are the exception: the decoder prices
-    them for the next block through `ProtocolSim::apply_block` (number + 1, timestamp +
-    `block_time_secs`), and their quotes move with time, so a full block's swaps execute in that
-    next block's context (`simulate_swap_transaction_next_block`). Add a protocol there when its
-    quote depends on the block it executes in
+    `NEXT_BLOCK_PROTOCOLS` (`main.rs`, currently `biconomy`, `etherfi` and `lido_v4`) are the
+    exception: the decoder prices them for the next block through `ProtocolSim::apply_block`
+    (number + 1, timestamp + `block_time_secs`), and their quotes move with time, so a full
+    block's swaps execute in that next block's context (`simulate_swap_transaction_next_block`).
+    Add a protocol there when its quote depends on the block it executes in
   - `book_stream_processor.rs`: Handles the off-chain book feeds (the RFQ venues and Metric) —
     fetches live quotes, compares against simulation
   - `price_level_stream_processor.rs`: Handles Titan pAMM price level stream updates (Ethereum

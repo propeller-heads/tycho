@@ -2239,7 +2239,7 @@ fn simulates_before_block(protocol_system: &str) -> bool {
 
 /// Protocol systems whose quotes move with the block they execute in and that the decoder prices
 /// for the block after the update's, via `ProtocolSim::apply_block`.
-const NEXT_BLOCK_PROTOCOLS: [&str; 1] = ["biconomy"];
+const NEXT_BLOCK_PROTOCOLS: [&str; 3] = ["biconomy", "etherfi", "lido_v4"];
 
 /// Whether a swap of `protocol_system` from a full block's update is simulated in the next block's
 /// context, the block its quote priced.
@@ -2380,7 +2380,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case::listed("biconomy", true)]
+    #[case::biconomy("biconomy", true)]
+    #[case::etherfi("etherfi", true)]
+    #[case::lido_v4("lido_v4", true)]
     #[case::unlisted_native("uniswap_v3", false)]
     #[case::vm("vm:curve", false)]
     fn only_listed_protocols_execute_in_the_next_block(
