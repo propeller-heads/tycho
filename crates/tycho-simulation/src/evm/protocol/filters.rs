@@ -297,8 +297,9 @@ fn has_unsupported_asset_type(attrs: &HashMap<String, Bytes>) -> bool {
 /// decode them exactly like the vaults listed below. They stay because consumers route through
 /// them, and each one is a whole leg rather than depth — a vault converts at a fixed rate at any
 /// size up to its caps — so excluding one takes USDS/sUSDS, USDC/sUSDC or WETH/spETH out of the
-/// graph outright. The fix belongs in the substreams: emit an entrypoint per rate getter, so the
-/// slot is captured whichever branch a conversion takes.
+/// graph outright. The fix is a rate getter entrypoint per vault (`vsr()`, `ssr()`) under
+/// `getters` in the erc4626 substreams' `params.json`, as stUSDS has for `str()`, so the slot is
+/// captured whichever branch a conversion takes.
 pub fn erc4626_filter(component: &ComponentWithState) -> bool {
     const UNSUPPORTED_POOLS: [&str; 2] = [
         // Spark Vault V2 (spUSDC, spUSDT). Their rate is `nowChi()`, which reads `vsr` (slot 4)
