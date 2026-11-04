@@ -1062,6 +1062,65 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[1].feeAmount, 0);
     }
 
+    function _surplusInput() internal view returns (FeeInput memory) {
+        return FeeInput({
+            actualAmountOut: 1.1 ether,
+            expectedAmountOut: 1 ether,
+            amountIn: 0,
+            tokenIn: address(0),
+            tokenOut: address(0),
+            clientFeeBps: 0,
+            client: BOB
+        });
+    }
+
+    function testSetPositiveSlippageShareUnauthorized() public {
+        vm.prank(BOB);
+        vm.expectRevert();
+        feeCalculator.setPositiveSlippageShare(_50_PCT);
+    }
+
+    function testSetPositiveSlippageShareTooHigh() public {
+        vm.prank(FEE_SETTER);
+        vm.expectRevert(FeeCalculator__FeeTooHigh.selector);
+        feeCalculator.setPositiveSlippageShare(_100_PCT + 1);
+    }
+
+    function testSetPositiveSlippageShare() public {
+        assertEq(feeCalculator.getPositiveSlippageShare(), _100_PCT);
+
+        vm.prank(FEE_SETTER);
+        vm.expectEmit(false, false, false, true);
+        emit FeeCalculator.PositiveSlippageShareUpdated(_100_PCT, _50_PCT);
+        feeCalculator.setPositiveSlippageShare(_50_PCT);
+        assertEq(feeCalculator.getPositiveSlippageShare(), _50_PCT);
+    }
+
+    function testRouterTakesShareOfPositiveSlippage() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageShare(_10_PCT);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(_surplusInput());
+
+        // router share = 0.1 ether * 10% = 0.01 ether
+        // feeBase = 1.1 - 0.01 = 1.09 ether
+        // router fee on output = 1.09 ether * 1% = 0.0109 ether
+        assertEq(fees[0].feeAmount, 0.0209 ether);
+        assertEq(fees[1].feeAmount, 0);
+    }
+
+    function testZeroShareSkipsRouterHop() public {
+        vm.prank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageShare(0);
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(_surplusInput());
+
+        assertEq(fees[0].feeAmount, 0);
+        assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
+    }
+
     function testNegativeSlippageNoSurplus() public {
         vm.prank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
