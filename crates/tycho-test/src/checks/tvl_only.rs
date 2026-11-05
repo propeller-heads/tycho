@@ -19,7 +19,7 @@ use tycho_simulation::{
     tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes},
 };
 
-use super::sheet::{Quoter, LADDER};
+use crate::checks::sheet::{Quoter, LADDER_THOUSANDTHS};
 
 /// Scales down every indexed balance of the components `ids` in `snapshot`, keeping each value's
 /// byte length: in token address order, the first token's balance to 1/2, the second's to 1/3,
@@ -140,7 +140,7 @@ pub fn compare<Q: Quoter + ?Sized>(
             continue;
         };
         let max_input = sizing(&max_input);
-        for thousandths in LADDER {
+        for thousandths in LADDER_THOUSANDTHS {
             let amount_in = &max_input * thousandths / 1000u32;
             if amount_in.is_zero() {
                 continue;

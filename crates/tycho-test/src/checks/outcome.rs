@@ -1,10 +1,11 @@
-//! The vocabulary every runner reports checks in: which check, and how it ended.
+//! Which check ran, and how it ended, as protocol-testing reports them. Which checks a runner runs,
+//! and in which mode, is the runner's: protocol-testing's README maps them to its modes.
 
 use std::fmt;
 
 use serde::Serialize;
 
-/// The checks a test runs, named the way the report and the yaml refer to them.
+/// A check, named by [`CheckId::as_str`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckId {
     /// Indexing the range and finding the block to read the snapshot at.
@@ -15,7 +16,7 @@ pub enum CheckId {
     StateExcluded,
     /// Indexed component balances match the chain.
     Balances,
-    /// Strict: a component declared `tvl_only` quotes the same with its balances scaled down.
+    /// A component declared `tvl_only` quotes the same with its balances scaled down.
     BalancesTvlOnly,
     /// The snapshot decodes, and every expected component decodes from it.
     Decode,
@@ -23,24 +24,24 @@ pub enum CheckId {
     SimLadder,
     /// Executing the ladder's quotes on chain matches the simulation.
     ExecLadder,
-    /// Strict: every direction quotes and executes at its limit.
+    /// Every direction quotes and executes at its limit.
     LimitsAtLimit,
-    /// Strict: past a hard limit, the quote errors and the execution reverts.
+    /// Past a hard limit, the quote errors and the execution reverts.
     LimitsPastLimit,
-    /// Strict: the quote at the limit pays no more than the limit's max output.
+    /// The quote at the limit pays no more than the limit's max output.
     LimitsMaxOutput,
-    /// Strict, streamed: the state streamed through the range quotes exactly as the snapshot at
-    /// the stop block.
+    /// The state streamed through a range quotes exactly as the snapshot at its stop block.
     StreamMatchesSnapshot,
-    /// Strict, streamed: the range exercised as much as the floor asks. Report-only for now.
+    /// The streamed range exercised as much as a floor asks.
     StreamCoverage,
 }
 
 impl CheckId {
-    /// Strict mode's three checks of each direction's limit.
+    /// The three checks of each direction's limit.
     pub const LIMITS: [CheckId; 3] =
         [CheckId::LimitsAtLimit, CheckId::LimitsPastLimit, CheckId::LimitsMaxOutput];
 
+    /// The check's name, as a report writes it: `sim.ladder`, `limits.at_limit`, ...
     pub fn as_str(&self) -> &'static str {
         match self {
             CheckId::Index => "index",
@@ -77,10 +78,12 @@ impl Serialize for CheckId {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Outcome {
     Pass,
+    /// The check found a problem.
     Fail {
+        /// What the problem is.
         detail: String,
     },
-    /// The package's configuration turned the check off.
+    /// The check was turned off, for `reason`.
     Skipped {
         reason: String,
     },
@@ -88,8 +91,9 @@ pub enum Outcome {
     NotRun {
         reason: String,
     },
-    /// A check that only reports for now: it found a problem, which does not fail the test.
+    /// The check found a problem that does not fail the test.
     Warn {
+        /// What the problem is.
         detail: String,
     },
 }
@@ -97,6 +101,7 @@ pub enum Outcome {
 /// One check of one test.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CheckResult {
+    /// The test's name.
     pub test: String,
     pub check: CheckId,
     /// The component the result is about, when it is about one only.

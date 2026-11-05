@@ -46,7 +46,7 @@ use tycho_simulation::{
     },
 };
 use tycho_test::{
-    checks::sheet,
+    checks::{sheet, tvl_only},
     execution::{
         encoding::{encode_swap, EXECUTOR_ADDRESS},
         models::{TychoExecutionInput, TychoExecutionResult},
@@ -1271,7 +1271,7 @@ impl TestRunner {
                     .iter()
                     .any(|declared| declared.eq_ignore_ascii_case(id))
             });
-            let changed = tycho_test::checks::tvl_only::scale_balances(&mut scaled, &tvl_only_ids);
+            let changed = tvl_only::scale_balances(&mut scaled, &tvl_only_ids);
             let decoded = adapter_contract_path().and_then(|path| {
                 self.decode_snapshot(
                     &config.protocol_system,
@@ -1332,13 +1332,9 @@ impl TestRunner {
         if let Some((decoded, changed)) = &scaled {
             for id in &tvl_only_ids {
                 let failures = match decoded {
-                    Ok(scaled) => tycho_test::checks::tvl_only::check(
-                        id,
-                        &update,
-                        scaled,
-                        changed,
-                        executable_max_input,
-                    ),
+                    Ok(scaled) => {
+                        tvl_only::check(id, &update, scaled, changed, executable_max_input)
+                    }
                     Err(e) => vec![format!(
                         "decoding the snapshot with scaled-down balances failed: {e:#}"
                     )],
@@ -2717,12 +2713,12 @@ impl TestRunner {
                     .iter()
                     .filter_map(|(id, state)| {
                         let component = components.get(id)?;
-                        let sheet = sheet::quote_sheet(
+                        let quotes = sheet::quote_sheet(
                             state.as_ref(),
                             &component.tokens,
                             executable_max_input,
                         );
-                        Some((id.to_lowercase(), sheet))
+                        Some((id.to_lowercase(), quotes))
                     })
                     .collect();
                 streamed.sheets.insert(block, sheets);

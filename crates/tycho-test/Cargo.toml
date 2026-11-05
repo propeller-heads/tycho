@@ -12,11 +12,11 @@ alloy = { workspace = true, features = [
 ] }
 alloy-chains = "0.2.39"
 alloy-rpc-types-trace = "1.0.38"
-itertools = { workspace = true }
 async-trait = { workspace = true }
 colored = "3.0.0"
 futures = { workspace = true }
 hex = { workspace = true }
+itertools = { workspace = true }
 miette = { version = "7.6.0" }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }
