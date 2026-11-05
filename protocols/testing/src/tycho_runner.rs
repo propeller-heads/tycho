@@ -22,6 +22,39 @@ pub struct TychoRpcServer {
     thread_handle: thread::JoinHandle<()>,
 }
 
+/// An indexer started by [`TychoRunner::start_tycho_streaming`], killed when dropped.
+pub struct StreamingIndexer(Option<Child>);
+
+impl StreamingIndexer {
+    /// Whether the indexer process has exited. An error checking counts as exited, since the
+    /// process can then not be followed either.
+    pub fn has_exited(&mut self) -> bool {
+        let Some(process) = self.0.as_mut() else {
+            return true;
+        };
+        match process.try_wait() {
+            Ok(status) => status.is_some(),
+            Err(e) => {
+                warn!("Could not check the Tycho indexer process: {e}");
+                true
+            }
+        }
+    }
+}
+
+impl Drop for StreamingIndexer {
+    fn drop(&mut self) {
+        if let Some(mut process) = self.0.take() {
+            if let Err(e) = process
+                .kill()
+                .and_then(|()| process.wait().map(|_| ()))
+            {
+                warn!("Failed to stop the Tycho indexer: {e}");
+            }
+        }
+    }
+}
+
 impl TychoRunner {
     pub fn new(
         chain: Chain,
@@ -74,9 +107,10 @@ impl TychoRunner {
     /// Starts the indexer for a test that follows the range through its stream, and returns the
     /// running process.
     ///
-    /// The indexer waits for the first subscriber before extracting, delivers every block to it,
-    /// and keeps every version, so the client's snapshots at past blocks resolve. It keeps serving
-    /// after the range: stop it with [`Self::stop_tycho`] once the subscription has ended.
+    /// The indexer waits for the first subscriber before extracting, and delivers every block to
+    /// it. It keeps serving after the range: stop it with [`Self::stop_tycho`] once the
+    /// subscription has ended. Dropping the returned process without stopping it, as a panic
+    /// does, kills it, so it does not hold the server port and the database for the next run.
     pub fn start_tycho_streaming(
         &self,
         spkg_path: &str,
@@ -85,7 +119,7 @@ impl TychoRunner {
         protocol_type_names: &[String],
         protocol_system: &str,
         module_name: Option<&str>,
-    ) -> miette::Result<Child> {
+    ) -> miette::Result<StreamingIndexer> {
         info!("Running Tycho indexer from block {start_block} to {end_block} for a subscriber...");
         let mut process = self
             .indexer_command(
@@ -96,29 +130,27 @@ impl TychoRunner {
                 protocol_system,
                 module_name,
             )?
-            .args(["--wait-for-subscriber", "--retention-horizon", "2099-01-01T00:00:00"])
+            .arg("--wait-for-subscriber")
             .spawn()
             .into_diagnostic()
             .wrap_err("Error running Tycho indexer")?;
         Self::handle_process_output(&mut process);
-        Ok(process)
+        Ok(StreamingIndexer(Some(process)))
     }
 
     /// Stops an indexer started by [`Self::start_tycho_streaming`].
     ///
     /// Once its subscription has ended, the extractor has stopped and its commits are written,
     /// so killing the process loses nothing the snapshot reads.
-    pub fn stop_tycho(mut process: Child) -> miette::Result<()> {
-        if process
-            .try_wait()
-            .into_diagnostic()?
-            .is_none()
-        {
-            process
-                .kill()
-                .into_diagnostic()
-                .wrap_err("Failed to stop the Tycho indexer")?;
-        }
+    pub fn stop_tycho(mut indexer: StreamingIndexer) -> miette::Result<()> {
+        let Some(mut process) = indexer.0.take() else {
+            return Ok(());
+        };
+        // `kill` succeeds on a process that has already exited.
+        process
+            .kill()
+            .into_diagnostic()
+            .wrap_err("Failed to stop the Tycho indexer")?;
         process
             .wait()
             .into_diagnostic()

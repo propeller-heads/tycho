@@ -15,7 +15,7 @@ pub enum CheckId {
     StateExcluded,
     /// Indexed component balances match the chain.
     Balances,
-    /// Strict: a component declared `tvl_only` quotes the same with its balances halved.
+    /// Strict: a component declared `tvl_only` quotes the same with its balances scaled down.
     BalancesTvlOnly,
     /// The snapshot decodes, and every expected component decodes from it.
     Decode,
@@ -37,6 +37,10 @@ pub enum CheckId {
 }
 
 impl CheckId {
+    /// Strict mode's three checks of each direction's limit.
+    pub const LIMITS: [CheckId; 3] =
+        [CheckId::LimitsAtLimit, CheckId::LimitsPastLimit, CheckId::LimitsMaxOutput];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             CheckId::Index => "index",

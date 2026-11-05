@@ -3,9 +3,10 @@
 //!
 //! A `tvl_only` component's balances are checked within a tolerance, which is only sound if they
 //! feed TVL and nothing else. A runner checks that, rather than taking it on trust: it decodes
-//! the snapshot a second time with the component's balances halved, and asks both decoded states
-//! the same questions. Every limit, spot price and ladder quote must come out the same. If one
-//! changes, simulation reads the balances, and they must match the chain exactly.
+//! the snapshot a second time with the component's balances scaled down, each token's by a
+//! different factor so their ratios change too, and asks both decoded states the same questions.
+//! Every limit, spot price and ladder quote must come out the same. If one changes, simulation
+//! reads the balances, and they must match the chain exactly.
 
 use std::collections::HashMap;
 
@@ -13,16 +14,19 @@ use itertools::Itertools;
 use num_bigint::BigUint;
 use num_traits::Zero;
 use tycho_simulation::{
+    protocol::models::Update,
     tycho_client::feed::synchronizer::Snapshot,
-    tycho_common::{models::token::Token, Bytes},
+    tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes},
 };
 
 use super::sheet::{Quoter, LADDER};
 
-/// Halves every indexed balance of the components `ids` in `snapshot`, keeping each value's byte
-/// length. Returns how many balances changed, per declared id: only a zero balance stays the
-/// same, and a component with nothing to halve verifies nothing.
-pub fn halve_balances(snapshot: &mut Snapshot, ids: &[String]) -> HashMap<String, usize> {
+/// Scales down every indexed balance of the components `ids` in `snapshot`, keeping each value's
+/// byte length: in token address order, the first token's balance to 1/2, the second's to 1/3,
+/// and so on, so a simulation that prices from the ratio of the balances quotes differently too.
+/// Returns how many balances changed, per declared id: only a zero balance stays the same, and a
+/// component with nothing to scale verifies nothing.
+pub fn scale_balances(snapshot: &mut Snapshot, ids: &[String]) -> HashMap<String, usize> {
     let mut changed = HashMap::new();
     for (id, component) in &mut snapshot.states {
         let Some(declared) = ids
@@ -34,15 +38,25 @@ pub fn halve_balances(snapshot: &mut Snapshot, ids: &[String]) -> HashMap<String
         let count = changed
             .entry(declared.clone())
             .or_insert(0);
-        for balance in component.state.balances.values_mut() {
+        let balances = component
+            .state
+            .balances
+            .iter_mut()
+            .sorted_by(|a, b| a.0.cmp(b.0));
+        for (divisor, (_, balance)) in (2u32..).zip(balances) {
             let value = BigUint::from_bytes_be(balance);
-            let half = &value / 2u32;
-            if half == value {
+            let scaled = &value / divisor;
+            if scaled == value {
                 continue;
             }
-            let half = half.to_bytes_be();
-            let mut bytes = vec![0u8; balance.len().saturating_sub(half.len())];
-            bytes.extend(half);
+            let scaled = scaled.to_bytes_be();
+            let mut bytes = vec![
+                0u8;
+                balance
+                    .len()
+                    .saturating_sub(scaled.len())
+            ];
+            bytes.extend(scaled);
             *balance = Bytes::from(bytes);
             *count += 1;
         }
@@ -50,7 +64,45 @@ pub fn halve_balances(snapshot: &mut Snapshot, ids: &[String]) -> HashMap<String
     changed
 }
 
-/// Compares `original` with `halved`, the same component decoded with its balances halved, in
+/// Verifies that component `id`, declared `tvl_only`, quotes the same in `scaled`, the snapshot
+/// decoded with its balances scaled down, as in `original`, with [`compare`]. `changed` counts the
+/// balances the scaling changed, per declared id. Returns every difference, or why the check could
+/// not be made: no balance to scale, or the component missing from either decode.
+pub fn check(
+    id: &str,
+    original: &Update,
+    scaled: &Update,
+    changed: &HashMap<String, usize>,
+    sizing: impl Fn(&BigUint) -> BigUint,
+) -> Vec<String> {
+    if changed
+        .get(id)
+        .is_none_or(|count| *count == 0)
+    {
+        return vec!["the component has no nonzero indexed balance, so scaling its balances \
+                     verifies nothing; it needs no `tvl_only`"
+            .to_string()];
+    }
+    fn find<'a>(update: &'a Update, id: &str) -> Option<(&'a String, &'a dyn ProtocolSim)> {
+        update
+            .states
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(id))
+            .map(|(key, state)| (key, state.as_ref()))
+    }
+    let Some((key, original_state)) = find(original, id) else {
+        return vec!["the component did not decode".to_string()];
+    };
+    let Some((_, scaled_state)) = find(scaled, id) else {
+        return vec!["the component did not decode with its balances scaled down".to_string()];
+    };
+    let Some(component) = original.new_pairs.get(key) else {
+        return vec![format!("the update has no component {key}")];
+    };
+    compare(original_state, scaled_state, &component.tokens, sizing)
+}
+
+/// Compares `original` with `scaled`, the same component decoded with its balances scaled, in
 /// every direction between `tokens`: limits, spot price, and a quote at 0.1%, 1% and 10% of the
 /// original max input after `sizing`, which caps it as the ladder does. Returns every difference.
 ///
@@ -59,7 +111,7 @@ pub fn halve_balances(snapshot: &mut Snapshot, ids: &[String]) -> HashMap<String
 /// too: the halving would otherwise verify nothing.
 pub fn compare<Q: Quoter + ?Sized>(
     original: &Q,
-    halved: &Q,
+    scaled: &Q,
     tokens: &[Token],
     sizing: impl Fn(&BigUint) -> BigUint,
 ) -> Vec<String> {
@@ -71,7 +123,7 @@ pub fn compare<Q: Quoter + ?Sized>(
         let limits = original.limits(token_in, token_out);
         answered += usize::from(limits.is_ok());
         if let Some(change) =
-            changed(&limits, &halved.limits(token_in, token_out), |(input, output)| {
+            changed(&limits, &scaled.limits(token_in, token_out), |(input, output)| {
                 format!("max input {input}, max output {output}")
             })
         {
@@ -80,7 +132,7 @@ pub fn compare<Q: Quoter + ?Sized>(
         let spot_price = original.spot_price(token_in, token_out);
         answered += usize::from(spot_price.is_ok());
         if let Some(change) =
-            changed(&spot_price, &halved.spot_price(token_in, token_out), f64::to_string)
+            changed(&spot_price, &scaled.spot_price(token_in, token_out), f64::to_string)
         {
             changes.push(format!("{direction}: spot price {change}"));
         }
@@ -97,7 +149,7 @@ pub fn compare<Q: Quoter + ?Sized>(
             answered += usize::from(quote.is_ok());
             if let Some(change) = changed(
                 &quote,
-                &halved.amount_out(amount_in.clone(), token_in, token_out),
+                &scaled.amount_out(amount_in.clone(), token_in, token_out),
                 BigUint::to_string,
             ) {
                 changes.push(format!(
@@ -116,22 +168,24 @@ pub fn compare<Q: Quoter + ?Sized>(
     changes
 }
 
-/// How `halved` differs from `original`, if it does: `is X, but Y with the balances halved`.
+/// How `scaled` differs from `original`, if it does: `is X, but Y with the balances scaled down`.
 fn changed<T: PartialEq>(
     original: &Result<T, String>,
-    halved: &Result<T, String>,
+    scaled: &Result<T, String>,
     show: impl Fn(&T) -> String,
 ) -> Option<String> {
     let show = |result: &Result<T, String>| match result {
         Ok(value) => show(value),
         Err(e) => format!("an error ({e})"),
     };
-    let same = match (original, halved) {
-        (Ok(original), Ok(halved)) => original == halved,
-        (Err(original), Err(halved)) => original == halved,
+    let same = match (original, scaled) {
+        (Ok(original), Ok(scaled)) => original == scaled,
+        (Err(original), Err(scaled)) => original == scaled,
         (Ok(_), Err(_)) | (Err(_), Ok(_)) => false,
     };
-    (!same).then(|| format!("is {}, but {} with the balances halved", show(original), show(halved)))
+    (!same).then(|| {
+        format!("is {}, but {} with the balances scaled down", show(original), show(scaled))
+    })
 }
 
 #[cfg(test)]
@@ -207,42 +261,42 @@ mod tests {
     fn pair(reads_balances: bool) -> (Pool, Pool) {
         let original =
             Pool { reserves: (100_000, 200_000), balances: (100_000, 200_000), reads_balances };
-        let halved = Pool { balances: (50_000, 100_000), ..original };
-        (original, halved)
+        // As `scale_balances` scales them: A to 1/2, B to 1/3.
+        let scaled = Pool { balances: (50_000, 66_666), ..original };
+        (original, scaled)
     }
 
     #[test]
-    fn a_component_that_ignores_its_balances_quotes_the_same_with_them_halved() {
-        let (original, halved) = pair(false);
-        let changes = compare(&original, &halved, &tokens(), BigUint::clone);
+    fn a_component_that_ignores_its_balances_quotes_the_same_with_them_scaled_down() {
+        let (original, scaled) = pair(false);
+        let changes = compare(&original, &scaled, &tokens(), BigUint::clone);
         assert!(changes.is_empty(), "{changes:?}");
     }
 
     #[test]
     fn a_component_that_reads_its_balances_fails_with_each_change() {
-        let (original, halved) = pair(true);
-        let changes = compare(&original, &halved, &tokens(), BigUint::clone);
-        // Per direction: the limits, and the quotes at 1% and 10%. The spot price is a ratio of
-        // the balances, so it holds, and so does the 0.1% quote, which rounds to the same amount.
-        assert_eq!(changes.len(), 6, "{changes:#?}");
+        let (original, scaled) = pair(true);
+        let changes = compare(&original, &scaled, &tokens(), BigUint::clone);
+        // Per direction: the limits, the spot price and every quote.
+        assert_eq!(changes.len(), 10, "{changes:#?}");
         assert_eq!(
             changes[0],
             "A -> B: limits is max input 100000, max output 200000, but max input 50000, max \
-             output 100000 with the balances halved"
+             output 66666 with the balances scaled down"
         );
         assert_eq!(
-            changes[1],
-            "A -> B: the quote for 1000 A is 1980, but 1960 with the balances halved"
+            changes[3],
+            "A -> B: the quote for 1000 A is 1980, but 1307 with the balances scaled down"
         );
     }
 
     #[test]
     fn the_quotes_are_sized_from_the_original_limits_after_the_ladder_cap() {
-        let (original, halved) = pair(true);
-        let changes = compare(&original, &halved, &tokens(), |_| BigUint::from(20_000u32));
+        let (original, scaled) = pair(true);
+        let changes = compare(&original, &scaled, &tokens(), |_| BigUint::from(20_000u32));
         assert!(
             changes.contains(
-                &"A -> B: the quote for 2000 A is 3921, but 3846 with the balances halved"
+                &"A -> B: the quote for 2000 A is 3921, but 2564 with the balances scaled down"
                     .to_string()
             ),
             "{changes:#?}"
@@ -304,18 +358,18 @@ mod tests {
 
     #[test]
     fn the_same_error_on_both_sides_is_no_change_and_a_different_one_is() {
-        let (original, halved) = pair(false);
+        let (original, scaled) = pair(false);
         let unpriced = |pool, price_error| Unpriced { pool, price_error };
-        let (original, halved) = (unpriced(original, "no price"), unpriced(halved, "no price"));
-        assert!(compare(&original, &halved, &tokens(), BigUint::clone).is_empty());
+        let (original, scaled) = (unpriced(original, "no price"), unpriced(scaled, "no price"));
+        assert!(compare(&original, &scaled, &tokens(), BigUint::clone).is_empty());
 
-        let halved = Unpriced { price_error: "no price for 50000", ..halved };
-        let changes = compare(&original, &halved, &tokens(), BigUint::clone);
+        let scaled = Unpriced { price_error: "no price for 50000", ..scaled };
+        let changes = compare(&original, &scaled, &tokens(), BigUint::clone);
         assert_eq!(changes.len(), 2, "{changes:?}");
         assert!(
             changes[0].ends_with(
                 "spot price is an error (no price), but an error (no price for 50000) with the \
-                 balances halved"
+                 balances scaled down"
             ),
             "{changes:?}"
         );
@@ -327,7 +381,7 @@ mod tests {
         let mixed: [&dyn Quoter; 2] = [&original, &Failing];
         let changes = compare(mixed[0], mixed[1], &tokens(), BigUint::clone);
         assert!(
-            changes[0].ends_with("but an error (no limits) with the balances halved"),
+            changes[0].ends_with("but an error (no limits) with the balances scaled down"),
             "{changes:?}"
         );
     }
@@ -359,17 +413,112 @@ mod tests {
         }
     }
 
+    /// An update holding a uniswap v2 pool `id` with `reserves`, whose tokens are A and B.
+    fn update(id: &str, reserves: Option<u64>) -> Update {
+        use tycho_simulation::{
+            evm::protocol::uniswap_v2::state::UniswapV2State,
+            protocol::models::ProtocolComponent as Component,
+        };
+        let component = Component::new(
+            Bytes::from_str(id).unwrap(),
+            "uniswap_v2".to_string(),
+            "uniswap_v2_pool".to_string(),
+            Chain::Ethereum,
+            tokens(),
+            Vec::new(),
+            HashMap::new(),
+            Bytes::default(),
+            Default::default(),
+        );
+        let states: HashMap<String, Box<dyn ProtocolSim>> = reserves
+            .map(|reserve| {
+                let reserve = alloy::primitives::U256::from(reserve);
+                let state: Box<dyn ProtocolSim> = Box::new(UniswapV2State::new(reserve, reserve));
+                (id.to_string(), state)
+            })
+            .into_iter()
+            .collect();
+        Update::new(1, states, HashMap::from([(id.to_string(), component)]))
+    }
+
+    const POOL: &str = "0x00000000000000000000000000000000000000Aa";
+
     #[test]
-    fn halving_touches_only_the_declared_components_and_keeps_the_byte_length() {
+    fn check_compares_the_two_decodes_of_a_declared_component() {
+        let changed = HashMap::from([(POOL.to_string(), 2)]);
+        let same = update(POOL, Some(1_000_000));
+        assert!(
+            check(POOL, &same, &update(POOL, Some(1_000_000)), &changed, BigUint::clone).is_empty()
+        );
+        let moved = check(POOL, &same, &update(POOL, Some(400_000)), &changed, BigUint::clone);
+        assert!(moved[0].starts_with("A -> B: limits is"), "{moved:?}");
+    }
+
+    #[test]
+    fn check_fails_when_it_cannot_compare() {
+        let decoded = update(POOL, Some(1_000_000));
+        let changed = HashMap::from([(POOL.to_string(), 2)]);
+        let nothing_scaled = check(POOL, &decoded, &decoded, &HashMap::new(), BigUint::clone);
+        assert!(nothing_scaled[0].contains("no nonzero indexed balance"), "{nothing_scaled:?}");
+        let undecoded = check(POOL, &decoded, &update(POOL, None), &changed, BigUint::clone);
+        assert_eq!(
+            undecoded,
+            vec!["the component did not decode with its balances scaled down".to_string()]
+        );
+        let missing = check(POOL, &update(POOL, None), &decoded, &changed, BigUint::clone);
+        assert_eq!(missing, vec!["the component did not decode".to_string()]);
+    }
+
+    /// A pool that prices from the ratio of its balances, with limits of its own: the shape a
+    /// uniform scaling of the balances would not catch.
+    struct RatioPool {
+        limits: (u64, u64),
+        balances: (u64, u64),
+    }
+
+    impl Quoter for RatioPool {
+        fn limits(&self, token_in: &Token, _: &Token) -> Result<(BigUint, BigUint), String> {
+            let (a, b) = self.limits;
+            Ok(if token_in.symbol == "A" { (a.into(), b.into()) } else { (b.into(), a.into()) })
+        }
+        fn spot_price(&self, base: &Token, _: &Token) -> Result<f64, String> {
+            let (a, b) = self.balances;
+            Ok(if base.symbol == "A" { b as f64 / a as f64 } else { a as f64 / b as f64 })
+        }
+        fn amount_out(
+            &self,
+            amount_in: BigUint,
+            token_in: &Token,
+            _: &Token,
+        ) -> Result<BigUint, String> {
+            let (a, b) = self.balances;
+            let (r_in, r_out) = if token_in.symbol == "A" { (a, b) } else { (b, a) };
+            Ok(amount_in * r_out / r_in)
+        }
+    }
+
+    #[test]
+    fn a_component_that_prices_from_the_ratio_of_its_balances_fails() {
+        let original = RatioPool { limits: (1_000, 2_000), balances: (100_000, 200_000) };
+        // Halving both would keep the ratio, and every answer.
+        let halved = RatioPool { balances: (50_000, 100_000), ..original };
+        assert!(compare(&original, &halved, &tokens(), BigUint::clone).is_empty());
+        let scaled = RatioPool { balances: (50_000, 66_666), ..original };
+        assert!(!compare(&original, &scaled, &tokens(), BigUint::clone).is_empty());
+    }
+
+    #[test]
+    fn scaling_touches_only_the_declared_components_and_keeps_the_byte_length() {
         let mut snapshot = snapshot(&[
-            ("0xaa", &[(1, vec![0, 0, 0x03, 0xe8]), (2, vec![1])]),
+            ("0xaa", &[(1, vec![0, 0, 0x03, 0xe8]), (2, vec![0x09])]),
             ("0xbb", &[(1, vec![0x64])]),
         ]);
-        let changed = halve_balances(&mut snapshot, &["0xAA".to_string()]);
+        let changed = scale_balances(&mut snapshot, &["0xAA".to_string()]);
         assert_eq!(changed, HashMap::from([("0xAA".to_string(), 2)]));
         let balances = &snapshot.states["0xaa"].state.balances;
+        // The first token by address to 1/2, the second to 1/3.
         assert_eq!(balances[&Bytes::from(vec![1])], Bytes::from(vec![0, 0, 0x01, 0xf4]));
-        assert_eq!(balances[&Bytes::from(vec![2])], Bytes::from(vec![0]));
+        assert_eq!(balances[&Bytes::from(vec![2])], Bytes::from(vec![0x03]));
         assert_eq!(
             snapshot.states["0xbb"].state.balances[&Bytes::from(vec![1])],
             Bytes::from(vec![0x64])
