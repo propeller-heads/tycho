@@ -144,7 +144,7 @@ const LADDER: [u32; 3] = [1, 10, 100];
 ///
 /// A question both states fail to answer with the same error is no difference. When the original
 /// state answers no question at all, nothing was compared, and that is returned as a difference
-/// too: the halving would otherwise verify nothing.
+/// too: the scaling would otherwise verify nothing.
 pub fn compare<Q: Quoter + ?Sized>(
     original: &Q,
     scaled: &Q,
@@ -197,7 +197,7 @@ pub fn compare<Q: Quoter + ?Sized>(
     }
     if answered == 0 {
         changes.push(
-            "every limit, spot price and quote errors, so halving the balances verifies nothing"
+            "every limit, spot price and quote errors, so scaling the balances verifies nothing"
                 .to_string(),
         );
     }
@@ -358,7 +358,7 @@ mod tests {
         let changes = compare(&Failing, &Failing, &tokens(), BigUint::clone);
         assert_eq!(
             changes,
-            vec!["every limit, spot price and quote errors, so halving the balances verifies \
+            vec!["every limit, spot price and quote errors, so scaling the balances verifies \
                   nothing"
                 .to_string()]
         );
