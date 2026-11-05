@@ -179,6 +179,7 @@ Each concrete router has its own executor, and each executor holds one router ad
 | `HashflowFallbackRouter` | `HashflowFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][quote: 345][fallback]` |
 | `NativeFallbackRouter` | `NativeFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][nativeDataLength: 4][nativeData][fallback]` |
 | `LiquoriceFallbackRouter` | `LiquoriceFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][calldataLength: 4][settlement calldata][fallback]` |
+| `TesseraFallbackRouter` | `TesseraFallbackExecutor` | `TesseraSwap.tesseraSwapViewAmounts` | `[tokenIn: 20][tokenOut: 20][fallback]` |
 
 A router whose `_runsPrimaryFirst()` is true has its price signed off-chain: the primary runs first, neither side is
 quoted, and the fallback runs only when the primary fails.
@@ -220,6 +221,14 @@ as a solver. `swap` checks the `settle`/`settleSingle` selector before anything 
 `liquoriceBalanceManager` for `amountIn`, calls the settlement, revokes the approval and forwards the output. The
 settlement pulls the signed amount, so the rest of `amountIn` goes back to the caller, as for Bebop. An `amountIn` below
 the signed amount makes the pull revert, and the fallback fills the whole leg.
+
+`TesseraFallbackRouter` runs Tessera through its immutable `tesseraSwap`, which finds the pair by its two tokens, so the
+primary carries no data. It quotes Tessera with the `tesseraSwapViewAmounts` view, priced for the router as the caller,
+as the swap is. The view leaves out the treasury's balance and the pair's fee module, which only the swap reads, so a
+quote the treasury cannot pay wins and then reverts in the swap, and the fallback fills. The router approves
+`tesseraSwap` for `amountIn`, calls `tesseraSwapWithAllowances` with empty `swapData`, and revokes the approval;
+Tessera's treasury pays the receiver directly. The pair reads its caller's code on both the quote and the swap, about
+1.3M gas each for the router.
 
 The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
 
@@ -312,16 +321,17 @@ Constraints:
   on execution); a zero quoter quotes Uniswap V3 by simulation. Every other protocol is addressed per swap, so no chain
   needs a variant of the contract -- a protocol a chain needs is a new byte in the shared enum.
 - `scripts/deploy-fallback-router.js` deploys the router `FALLBACK_ROUTER` names (`propamm`, the default, `metric`,
-  `bebop`, `hashflow`, `native` or `liquorice`) through the CREATE2 factory, reading `poolManager` and
+  `bebop`, `hashflow`, `native`, `liquorice` or `tessera`) through the CREATE2 factory, reading `poolManager` and
   `fluidLiquidity` from the chain's `uniswap_v4` and `fluid_v1` entries in `config/executor_deployments.json` and the static quoter from the script's own
   `STATIC_QUOTERS` map (Eden Network's deployments), zeroing whichever is missing. Bebop adds the `rfq:bebop` settlement and router; Hashflow adds
   the `rfq:hashflow` router; Native adds the `rfq:native` router; Liquorice adds the `rfq:liquorice` settlement
-  and balance manager.
+  and balance manager; Tessera adds the `pamm:tessera` `TesseraSwap`.
 - The executor then goes through `deploy-executors.js` like any executor: add an entry with the printed router address
   to `executor_deployments.json` and list it under the chain (`fallback` for `PropAMMFallbackExecutor`,
   `fallback:rfq:metric` for `MetricFallbackExecutor`, `fallback:rfq:bebop` for `BebopFallbackExecutor`,
   `fallback:rfq:hashflow` for `HashflowFallbackExecutor`, `fallback:rfq:native` for `NativeFallbackExecutor`,
-  `fallback:rfq:liquorice` for `LiquoriceFallbackExecutor`). An entry holds the zero address until its router is
+  `fallback:rfq:liquorice` for `LiquoriceFallbackExecutor`, `fallback:pamm:tessera` for `TesseraFallbackExecutor`).
+  An entry holds the zero address until its router is
   deployed; the executor constructor rejects it. A Bebop, Hashflow, Native or Liquorice router also needs its
   address as `fallback_router` under its protocol in `protocol_specific_addresses.json`; the Native entry also needs
   `router_v6`, and the Liquorice entry `settlement_address` and `balance_manager_address`. Liquorice must allow a
@@ -537,9 +547,15 @@ same `FallbackSwapData` `user_data`:
   inserts a length prefix before the venue data and appends the fallback; the Liquorice one drops the partial-fill
   fields and keeps the settlement calldata.
 
+`fallback:pamm:tessera` (`TESSERA_FALLBACK_PROTOCOL_SYSTEM`) is Tessera behind `TesseraFallbackRouter`. It has an
+exact executor-config entry too, and `get_encoder` keeps it out of the `fallback` family, whose encoder reads an
+`IPropAMM` from `pamm_address` that Tessera is not. `TesseraFallbackSwapEncoder` builds only on Base and writes the two
+tokens followed by the fallback from the same `FallbackSwapData` `user_data`.
+
 The Metric router is deployed on Ethereum, Base, BSC, Robinhood, Arbitrum and Polygon, Bebop's on Ethereum and Base,
-and Hashflow's on Ethereum. The Native and Liquorice routers are not deployed, so no chain lists their entries yet.
-The gas estimator charges a Metric leg its pool gas twice (the simulation runs the pool's swap), and a Bebop,
+and Hashflow's on Ethereum. The Native, Liquorice and Tessera routers are not deployed, so no chain lists their entries
+yet. The gas estimator charges a Metric leg its pool gas twice (the simulation runs the pool's swap), a Tessera leg its
+pool gas twice (the view quote reads the caller's code as the swap does) plus the router's approval, and a Bebop,
 Hashflow, Native or Liquorice leg the router's approval and output forward.
 
 `SUPPORTED_PROTOCOLS` in `fallback.rs` lists the fallback protocols per chain, and `supported_on`

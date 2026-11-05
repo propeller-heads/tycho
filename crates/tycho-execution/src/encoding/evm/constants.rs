@@ -178,6 +178,10 @@ pub const NATIVE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:native";
 /// Liquorice components executed through `LiquoriceFallbackRouter`.
 pub const LIQUORICE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:liquorice";
 
+/// Tessera components executed through `TesseraFallbackRouter`. `TesseraSwap` is not an
+/// `IPropAMM`, so the `fallback` family's encoder cannot encode them.
+pub const TESSERA_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:pamm:tessera";
+
 /// Components whose fallback router runs a signed RFQ quote first, approving the venue itself and
 /// forwarding the output.
 pub const SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS: [&str; 4] = [
@@ -202,6 +206,7 @@ mod tests {
         assert!(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
         assert!(NATIVE_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
         assert!(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(TESSERA_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
     }
 
     /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus

@@ -13,6 +13,14 @@ interface ITesseraSwap {
         address recipient,
         bytes calldata swapData
     ) external;
+
+    /// @notice What a swap of `amountSpecified` would take and pay, priced for the
+    /// caller. Leaves out the treasury's balance, which the swap needs.
+    function tesseraSwapViewAmounts(
+        address tokenIn,
+        address tokenOut,
+        int256 amountSpecified
+    ) external view returns (uint256 amountIn, uint256 amountOut);
 }
 
 error TesseraExecutor__ZeroTesseraSwapAddress();

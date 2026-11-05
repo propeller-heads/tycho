@@ -11,7 +11,7 @@ use crate::encoding::{
             METRIC_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
             NATIVE_WRAPPER_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX,
             PROTOCOL_SPECIFIC_CONFIG, SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS,
-            SUBSIDY_KEY, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
+            SUBSIDY_KEY, TESSERA_FALLBACK_PROTOCOL_SYSTEM, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
         },
         subsidy::SubsidyEncoder,
         swap_encoder::{
@@ -31,8 +31,8 @@ use crate::encoding::{
             pancakeswap_infinity::PancakeswapInfinitySwapEncoder, propamm::PropAMMSwapEncoder,
             ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
             sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
-            uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
-            uniswap_v4::UniswapV4SwapEncoder,
+            tessera_fallback::TesseraFallbackSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
+            uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
@@ -139,8 +139,9 @@ impl SwapEncoderRegistry {
     /// Price-level-stream protocols (`pricelevelstream:{protocol}`) without an exact entry fall
     /// back to the family entry registered under `pricelevelstream`, so a single configured
     /// executor address serves every pAMM — including auto-detected, address-named ones.
-    /// `fallback:{protocol}` resolves the same way against `fallback`, except the RFQ fallback
-    /// routers, which have no family entry.
+    /// `fallback:{protocol}` resolves the same way against `fallback`, except the venues with a
+    /// fallback router of their own (Metric, the RFQ venues and Tessera), which have no family
+    /// entry.
     ///
     /// `uniswap_v4_hooks` without an exact entry resolves to the `uniswap_v4` encoder: a hooked
     /// pool swaps through the same PoolManager and the same executor as a core V4 pool.
@@ -170,6 +171,7 @@ impl SwapEncoderRegistry {
         }
         if protocol_system.starts_with(FALLBACK_PREFIX) &&
             protocol_system != METRIC_FALLBACK_PROTOCOL_SYSTEM &&
+            protocol_system != TESSERA_FALLBACK_PROTOCOL_SYSTEM &&
             !SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system)
         {
             return self.encoders.get(FALLBACK_KEY);
@@ -315,6 +317,9 @@ impl SwapEncoderRegistry {
             NATIVE_FALLBACK_PROTOCOL_SYSTEM => {
                 Ok(Box::new(NativeFallbackSwapEncoder::new(executor_address, self.chain, config)?))
             }
+            TESSERA_FALLBACK_PROTOCOL_SYSTEM => {
+                Ok(Box::new(TesseraFallbackSwapEncoder::new(executor_address, self.chain, config)?))
+            }
             LIQUORICE_FALLBACK_PROTOCOL_SYSTEM => Ok(Box::new(LiquoriceFallbackSwapEncoder::new(
                 executor_address,
                 self.chain,
@@ -423,6 +428,11 @@ mod tests {
             .is_none());
         assert!(registry
             .get_encoder(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM)
+            .is_none());
+        // Tessera is not an `IPropAMM`, so the family's encoder would build swap data its router
+        // cannot read.
+        assert!(registry
+            .get_encoder(TESSERA_FALLBACK_PROTOCOL_SYSTEM)
             .is_none());
     }
 

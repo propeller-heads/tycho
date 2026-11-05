@@ -203,6 +203,10 @@
     "pamm:tessera": {
       "contract": "TesseraExecutor",
       "args": ["0x55555522005BcAE1c2424D474BfD5ed477749E3e"]
+    },
+    "fallback:pamm:tessera": {
+      "contract": "TesseraFallbackExecutor",
+      "args": ["0x0000000000000000000000000000000000000000"]
     }
   },
   "unichain": {
