@@ -118,36 +118,28 @@ impl Observations {
         let idx = usize::try_from(index).map_err(|e| {
             SimulationError::FatalError(format!("Invalid observation index {index}: {e}"))
         })?;
-        if bytes.is_empty() {
-            return if idx < self.observations.len() {
-                self.observations.remove(idx);
-                Ok(())
-            } else {
-                Err(SimulationError::FatalError(format!(
-                    "Cannot delete: index {} out of bounds (len={})",
-                    index,
-                    self.observations.len()
-                )))
-            };
-        }
-        let mut obs = Observation::from_attribute(index, bytes)?;
-        obs.index = index;
-        if idx < self.observations.len() {
-            self.observations[idx] = obs;
-            return Ok(());
-        }
-        if idx >= self.observations.capacity() {
-            self.observations
-                .reserve(idx - self.observations.len() + 1);
-        }
-
-        while self.observations.len() < idx {
-            self.observations
-                .push(Observation::default());
-        }
-
-        self.observations.push(obs);
+        // A deleted attribute is a zeroed storage word. Removing the slot instead would shift every
+        // later slot off its ring index.
+        let observation = if bytes.is_empty() {
+            Observation { index, ..Default::default() }
+        } else {
+            Observation::from_attribute(index, bytes)?
+        };
+        self.place(idx, observation);
         Ok(())
+    }
+
+    /// Stores `observation` at ring slot `idx`. Lookups read a slot past the end as uninitialized,
+    /// so an uninitialized observation there is not stored.
+    fn place(&mut self, idx: usize, observation: Observation) {
+        if idx >= self.observations.len() {
+            if !observation.initialized {
+                return;
+            }
+            self.observations
+                .resize_with(idx + 1, Observation::default);
+        }
+        self.observations[idx] = observation;
     }
 
     /// Mirrors `Oracle.write`: appends the observation the pool would record for a swap
@@ -623,16 +615,11 @@ mod tests {
             observation,
             Observation { block_timestamp: 1, index: 592, ..Default::default() }
         );
+        let word = encode_observation_bytes(7, -5, U256::from(9), false);
+        assert_eq!(word[0], 0, "an uninitialized word starts with a zero byte");
         assert_eq!(
-            Observation::from_attribute(
-                3,
-                &encode_observation_bytes(7, -5, U256::from(9), true)[1..]
-            )
-            .expect("leading zero dropped")
-            .block_timestamp,
-            Observation::from_attribute(3, &encode_observation_bytes(7, -5, U256::from(9), true))
-                .expect("full word")
-                .block_timestamp
+            Observation::from_attribute(3, &word[1..]).expect("leading zero dropped"),
+            Observation::from_attribute(3, &word).expect("full word")
         );
     }
 
@@ -667,7 +654,45 @@ mod tests {
         obs_vec
             .upsert_observation(0, &[])
             .unwrap();
-        assert_eq!(obs_vec.observations.len(), 0);
+        assert_eq!(obs_vec.observations, vec![Observation::default()]);
+    }
+
+    #[test]
+    fn deleting_a_slot_keeps_later_slots_at_their_index() {
+        let newest =
+            Observation { block_timestamp: 30, initialized: true, index: 2, ..Default::default() };
+        let mut observations = Observations::new(vec![
+            Observation { block_timestamp: 10, initialized: true, index: 0, ..Default::default() },
+            Observation { block_timestamp: 20, initialized: true, index: 1, ..Default::default() },
+            newest,
+        ]);
+
+        observations
+            .upsert_observation(1, &[])
+            .expect("delete");
+
+        assert!(!observations.slot(1).initialized);
+        assert_eq!(observations.slot(2), newest);
+    }
+
+    #[test]
+    fn uninitialized_slots_past_the_end_are_not_stored() {
+        let mut observations = Observations::new(vec![Observation {
+            block_timestamp: 10,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        }]);
+
+        observations
+            .upsert_observation(500, &[0x01])
+            .expect("prefilled slot");
+        observations
+            .upsert_observation(600, &[])
+            .expect("deleted slot");
+
+        assert_eq!(observations.observations.len(), 1);
+        assert!(!observations.slot(500).initialized);
     }
 
     #[test]

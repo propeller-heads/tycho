@@ -192,7 +192,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
 
         // The oracle is a ring addressed by index, and lookups read slot `i` as position `i`, so
         // each observation goes to its own index. A slot that `increaseObservationCardinalityNext`
-        // prefilled but no swap has written yet stays uninitialized, as on chain.
+        // prefilled but no swap has written yet is uninitialized, which is how lookups read any
+        // slot not stored, so only initialized slots are kept: every quote clones the ring.
         let mut observations: Vec<Observation> = Vec::new();
         for (key, value) in &snapshot.state.attributes {
             let Some(index) = key
@@ -207,6 +208,9 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
                     Observation::from_attribute(slot, value).map_err(|err| err.to_string())
                 })
                 .map_err(|err| InvalidSnapshotError::ValueError(format!("{key}: {err}")))?;
+            if !observation.initialized {
+                continue;
+            }
             if observations.len() <= index {
                 observations.resize_with(index + 1, Observation::default);
             }
@@ -341,14 +345,16 @@ mod tests {
 
     #[tokio::test]
     async fn observations_are_placed_at_their_ring_index() {
-        // Slot 1 was prefilled by `increaseObservationCardinalityNext` and never written, so the
-        // indexer sends it as the single byte 0x01; slot 2 holds the newest observation. Each must
-        // sit at its own index: lookups read position `i` as slot `i`.
+        // Slots 1 and 3 were prefilled by `increaseObservationCardinalityNext` and never written,
+        // so the indexer sends each as the single byte 0x01; slot 2 holds the newest observation.
+        // Each written slot must sit at its own index, as lookups read position `i` as slot `i`;
+        // the prefilled ones read as uninitialized whether stored or not, so they are not.
         let mut snapshot = snapshot(None);
         let newest = ((U256::from(1) << 248_u32) | U256::from(5_u32)).to_be_bytes::<32>();
         let attributes = &mut snapshot.state.attributes;
         attributes.insert("observations/1".to_string(), Bytes::from([0x01_u8]));
         attributes.insert("observations/2".to_string(), Bytes::from(newest));
+        attributes.insert("observations/3".to_string(), Bytes::from([0x01_u8]));
         attributes.insert("observationIndex".to_string(), Bytes::from(2_u16.to_be_bytes()));
         attributes.insert("observationCardinality".to_string(), Bytes::from(3_u16.to_be_bytes()));
 
@@ -364,7 +370,7 @@ mod tests {
                 3,
                 vec![
                     Observation { initialized: true, index: 0, ..Default::default() },
-                    Observation { block_timestamp: 1, index: 1, ..Default::default() },
+                    Observation::default(),
                     Observation {
                         block_timestamp: 5,
                         initialized: true,
