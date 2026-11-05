@@ -23,6 +23,7 @@ use alloy::{
     dyn_abi::{DynSolType, DynSolValue, FunctionExt},
     json_abi::Function,
 };
+use itertools::Itertools;
 use num_bigint::BigUint;
 use num_traits::Zero;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -420,8 +421,9 @@ impl BalanceCheck {
     }
 }
 
-const SHAPE: &str = "`default`, `{holder: …}`, `{min_of: [...]}`, `{call: …}` or `{tokens: \
-                     {0x<token>: {holder: …} | {call: …}, ...}}`";
+/// The shapes a `balance_check` takes, for messages.
+pub const SHAPE: &str = "`default`, `{holder: …}`, `{min_of: [...]}`, `{call: …}` or `{tokens: \
+                         {0x<token>: {holder: …} | {call: …} | {unindexed: \"<reason>\"}, ...}}`";
 
 /// The keys of a yaml mapping, in order.
 fn keys(map: &serde_yaml::Mapping) -> Vec<String> {
@@ -516,15 +518,17 @@ impl<'de> Deserialize<'de> for BalanceCheck {
         };
         let mut sources = HashMap::new();
         for (token, source) in tokens {
-            let token_key = token.as_str().unwrap_or("?");
+            let token_key = yaml_text(token);
             let location = format!("`balance_check` of token {token_key}");
-            let address = parse_address(token_key).map_err(de::Error::custom)?;
+            let address = parse_address(token).map_err(|e| {
+                de::Error::custom(format!("`balance_check: {{tokens: …}}`: a key {e}"))
+            })?;
             let serde_yaml::Value::Mapping(source) = source else {
                 return Err(de::Error::custom(format!(
                     "{location} takes `{{holder: …}}` or `{{call: …}}`"
                 )));
             };
-            if source.contains_key("unindexed") {
+            let token_source = if source.contains_key("unindexed") {
                 let reason = match (keys(source).as_slice(), source.get("unindexed")) {
                     ([only], Some(serde_yaml::Value::String(reason))) if only == "unindexed" => {
                         Some(reason).filter(|reason| !reason.trim().is_empty())
@@ -536,10 +540,8 @@ impl<'de> Deserialize<'de> for BalanceCheck {
                         "{location}: write `{{unindexed: \"<the reason>\"}}`, alone"
                     )));
                 };
-                sources.insert(address, TokenSource::Unindexed(reason.to_string()));
-                continue;
-            }
-            if source.contains_key("call") {
+                TokenSource::Unindexed(reason.to_string())
+            } else if source.contains_key("call") {
                 if keys(source) != ["call"] {
                     return Err(de::Error::custom(format!(
                         "{location} has keys {}; `call` stands alone",
@@ -550,26 +552,52 @@ impl<'de> Deserialize<'de> for BalanceCheck {
                     .map_err(|e: D::Error| de::Error::custom(format!("{location}: {e}")))?;
                 let call = Call::parse(entry)
                     .map_err(|e| de::Error::custom(format!("{location}: {e}")))?;
-                sources.insert(address, TokenSource::Call(call));
-                continue;
-            }
-            let token = match source.get("token") {
-                Some(read) => {
-                    Some(parse_address(read.as_str().unwrap_or("?")).map_err(de::Error::custom)?)
-                }
-                None => None,
+                TokenSource::Call(call)
+            } else {
+                let token = match source.get("token") {
+                    Some(read) => Some(
+                        parse_address(read)
+                            .map_err(|e| de::Error::custom(format!("{location}: `token` {e}")))?,
+                    ),
+                    None => None,
+                };
+                let holders = holders(source, &["token"], &location)?;
+                TokenSource::Held(Source { holders, token })
             };
-            let holders = holders(source, &["token"], &location)?;
-            sources.insert(address, TokenSource::Held(Source { holders, token }));
+            // Keys that differ only in case are one token.
+            if sources
+                .insert(address, token_source)
+                .is_some()
+            {
+                return Err(de::Error::custom(format!("{location} is declared twice")));
+            }
         }
         Ok(BalanceCheck::Tokens(sources))
     }
 }
 
-fn parse_address(s: &str) -> Result<Bytes, String> {
-    match s.parse::<Holder>()? {
-        Holder::Address(address) => Ok(address),
-        Holder::Component | Holder::Attribute(_) => Err(format!("`{s}` is not a token address")),
+/// A token address written as a string. The error, which reads after the name of what was
+/// parsed, gives the value as written.
+fn parse_address(value: &serde_yaml::Value) -> Result<Bytes, String> {
+    let not_an_address =
+        || format!("`{}` is not a token address, `0x` and 20 bytes", yaml_text(value));
+    let text = value
+        .as_str()
+        .ok_or_else(not_an_address)?;
+    match text.parse::<Holder>() {
+        Ok(Holder::Address(address)) => Ok(address),
+        Ok(Holder::Component | Holder::Attribute(_)) | Err(_) => Err(not_an_address()),
+    }
+}
+
+/// A yaml value as written, for messages: an unquoted `0x000…01` reads as the number 1, and a
+/// message should show that rather than `?`.
+fn yaml_text(value: &serde_yaml::Value) -> String {
+    match value.as_str() {
+        Some(text) => text.to_string(),
+        None => serde_yaml::to_string(value)
+            .map(|text| text.trim_end().to_string())
+            .unwrap_or_else(|e| format!("<unprintable: {e}>")),
     }
 }
 
@@ -673,7 +701,8 @@ pub fn check_component(
     };
     let mut failures = Vec::new();
     if let BalanceCheck::Tokens(sources) = check {
-        for token in sources.keys() {
+        // Sorted, so the failure lists the tokens in the same order on every run.
+        for token in sources.keys().sorted() {
             if !component
                 .tokens
                 .iter()
@@ -722,6 +751,10 @@ pub fn check_component(
             .token
             .as_ref()
             .map_or_else(String::new, |read| format!(" of {read}"));
+        if source.holders.is_empty() {
+            failures.push(format!("{symbol}: no holder is declared to read the balance from"));
+            continue;
+        }
         let mut smallest: Option<(BigUint, &Holder)> = None;
         let mut failed = false;
         for holder in &source.holders {
@@ -1011,6 +1044,25 @@ mod tests {
             .insert("vault".to_string(), amount(7));
         let failures = malformed.check(&check, &chain(&[]));
         assert!(failures[0].contains("not an address"), "{failures:?}");
+
+        // A 32-byte word holds an address only when its high 12 bytes are zero.
+        let mut word = vec![0u8; 32];
+        word[0] = 1;
+        word[12..].copy_from_slice(&bytes(VAULT));
+        let mut dirty = Fixture::new();
+        dirty
+            .state_attributes
+            .insert("vault".to_string(), Bytes::from(word));
+        let failures = dirty.check(&check, &chain(&[(TOKEN_A, VAULT, 100), (TOKEN_B, VAULT, 200)]));
+        assert!(failures[0].contains("not an address"), "{failures:?}");
+    }
+
+    #[test]
+    fn a_source_without_holders_fails_rather_than_passing_unchecked() {
+        let check = BalanceCheck::MinOf(vec![]);
+        let failures = Fixture::new().check(&check, &chain(&[]));
+        assert_eq!(failures.len(), 2, "{failures:?}");
+        assert!(failures[0].contains("no holder is declared"), "{failures:?}");
     }
 
     #[test]
@@ -1441,6 +1493,15 @@ mod tests {
             ("{holder: \"0x1234\"}", "not a 20-byte address"),
             ("{holder: vault}", "write `self`, `attribute:NAME` or a 0x address"),
             ("[self]", "takes `default`"),
+            ("{tokens: [self]}", "maps token addresses to sources"),
+            // An unquoted address reads as a number; the message shows it as written.
+            ("{tokens: {0x00000000000000000000000000000000000000a1: {holder: self}}}", "a key `161` is not a token address"),
+            ("{tokens: {usdc: {holder: self}}}", "a key `usdc` is not a token address"),
+            ("{tokens: {\"0x00000000000000000000000000000000000000a1\": {holder: self, token: usdc}}}", "`token` `usdc` is not a token address"),
+            (
+                "{tokens: {\"0x00000000000000000000000000000000000000A1\": {holder: self}, \"0x00000000000000000000000000000000000000a1\": {holder: self}}}",
+                "is declared twice",
+            ),
         ] {
             let err = parse(yaml).unwrap_err();
             assert!(err.contains(problem), "{yaml}: {err}");

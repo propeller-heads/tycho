@@ -77,17 +77,27 @@ In strict mode:
   ```
 
   A reason works in legacy mode too, where `true` and `false` stay valid. A trace, a command and
-  its output, or a ticket go in the reason, which the logs and the report show.
-- A missing executor deployment is not a reason to skip execution: the harness plants the
-  executor's runtime bytecode from `fixtures/`, so execution runs either way.
+  its output, or a ticket go in the reason. The runner logs it once per component, and the report
+  records it.
+- A `skip_execution` next to a `skip_simulation` is an error: execution never runs without
+  simulation, so its reason would be read nowhere.
+- A skip that reads as yes or no, such as `no` or `"false"`, is an error in both modes, since
+  `no` would otherwise turn the check off.
 - Every check of a test runs, and the test fails at the end listing every failed check, instead of
   stopping at the first. A check that needs the result of a failed one is reported as not run.
 - Every expected component's balances are checked, against where the component declares they are
   held, and `skip_balance_check` is an error (below).
 - Every direction of every expected component declares what kind of limit `get_limits` reports,
   and the limit is tested as declared (below).
+- An execution must pay exactly the simulated amount, unless the package declares a tolerance
+  (below, "Execution tolerance").
 - New checks are added to strict mode only, so a legacy package never starts failing because the
   harness grew.
+
+A missing executor deployment is not a reason to skip execution, in either mode, when the
+protocol's executor has a runtime bytecode fixture in `src/execution.rs`: the harness overrides the
+executor address with that bytecode, so execution runs either way. A protocol without one needs a
+fixture added first.
 
 ### Balances
 
@@ -166,7 +176,10 @@ every pool's funds, a view call returning a `uint` gives the amount, per token o
   bounded by each of them. It needs at least two holders.
 - The comparison is exact, unless the component is `tvl_only` (below), and a token without an
   indexed balance counts as zero.
-- A `tokens` entry for a token the component does not have fails the component.
+- A `tokens` entry for a token the component does not have fails the component, and two entries
+  for one token (keys that differ only in case) are an error.
+- A test in strict mode must list its expected components: an empty list, which elsewhere means
+  every component of the protocol, would leave the balances unchecked.
 - A component whose id is not an address needs a holder.
 - The package-level `skip_balance_check` is an error in strict mode, whatever its value; leave
   it out, as the check runs by default.
@@ -241,28 +254,40 @@ component's).
 | `under_cap` | the venue has a bound, and the limit stays below it because the exact bound cannot be derived | `reason` (showing why, such as a command and its output), `lost_capacity` | at the limit |
 
 - **At the limit** (`limits.at_limit`): `get_amount_out(max_input)` succeeds, and executing it
-  settles and matches the simulation.
+  does not revert and matches the simulation.
 - **Max output** (`limits.max_output`): the quote at `max_input` pays no more than `max_output`.
 - **One unit past a hard limit** (`limits.past_limit`): `get_amount_out(max_input + 1)` errors,
-  and executing it reverts. The swap's minimum output is set from the quote at the limit, so the
-  revert comes from the venue, not from the router's slippage check. When the limit is at or above
-  the `int128` cap, the cap is not the venue's bound, and nothing is probed past it.
+  and executing it reverts. The swap's minimum output is set from the quote at the limit, so a
+  venue that accepts the extra unit executes the swap and fails the check. The check accepts any
+  revert from the chain, but not a node error on the call, which proves nothing. When the limit is
+  at or above the `int128` cap, the cap is not the venue's bound, and nothing is probed past it.
 
 Each of the three checks is reported per component and direction, with `component` and
-`direction` keys in the report. A check passes only once everything it tests ran:
-- `limits.past_limit` is skipped for a soft or under-cap limit, or one at the cap.
+`direction` keys in the report. A check passes only once everything it tests ran. Unless the
+simulation already failed it:
+
+- `limits.past_limit` is skipped for a soft or under-cap limit, with the declared reason, and for
+  one at the cap.
 - When the quote at the limit fails, `limits.past_limit` and `limits.max_output` are `not_run`.
+  When the swap at the limit does not execute, `limits.past_limit` is `not_run` too: a revert
+  past a limit that does not execute either proves nothing.
 - A component with `skip_execution` runs the checks in simulation only: `limits.at_limit` and
-  `limits.past_limit` are skipped with its reason, unless the simulation already failed them.
-- A component with `skip_simulation` has all three skipped. A declaration missing a required field, or naming a direction its
-component does not have, is an error in both modes. Legacy mode reads the declarations but runs
-none of these checks.
+  `limits.past_limit` are skipped with its reason.
+- A component with `skip_simulation` has all three skipped.
+- A direction whose limit is zero at the tested block has all three skipped. A declared direction
+  the runner never quotes, because the indexed tokens differ from the expected ones, fails all
+  three.
+
+A declaration missing a required field, or with a field its kind does not read, or naming a
+direction its component does not have, or naming one direction twice, is an error in both modes.
+Legacy mode reads the declarations but runs none of these checks.
 
 ### Execution tolerance
 
 An execution matches its simulation when the executed amount out is within the tolerance, in basis
-points of the executed amount. Legacy mode allows 0.5% for every package. Strict mode requires an
-exact match: a simulation that ports the venue's math, or runs its bytecode, should not differ by
+points of the executed amount. Legacy mode allows 0.5% for every package. In `range`, strict mode
+requires an exact match (`full` reads neither `harness` nor `execution_tolerance`, and allows 0.5%
+for every package): a simulation that ports the venue's math, or runs its bytecode, should not differ by
 a wei, and 0.5% hides rounding and fee bugs. Where exact is out of reach, the package declares a
 tolerance, with why and what a run measured:
 
@@ -302,7 +327,8 @@ tolerance or not, so `measured` can be checked against a run.
   "harness": "strict",
   "results": [
     { "test": "first", "check": "state.components", "outcome": "pass" },
-    { "test": "first", "check": "balances", "outcome": "skipped", "reason": "skip_balance_check: true" },
+    { "test": "first", "check": "balances", "outcome": "pass" },
+    { "test": "first", "check": "exec.ladder", "component": "0xabc...", "outcome": "skipped", "reason": "range predates Shanghai; the router needs PUSH0" },
     { "test": "first", "check": "sim.ladder", "outcome": "fail", "detail": "Error calculating amount out ..." },
     { "test": "first", "check": "exec.ladder", "outcome": "not_run", "reason": "sim.ladder failed" },
     { "test": "second", "check": "limits.past_limit", "component": "0x...", "direction": "0x...->0x...", "outcome": "pass" }
@@ -328,12 +354,15 @@ tolerance or not, so `measured` can be checked against a run.
 | `limits.max_output` | strict: the quote at the limit pays no more than the limit's max output |
 
 A skipped check is reported with its reason, per component (by lowercase id) for
-`skip_simulation` and `skip_execution`. A test-wide `sim.ladder` or `exec.ladder` result covers
-only the components without a skip entry for it; when every component skips, the test-wide result
-is `skipped`. In legacy mode the report ends at the first failed check of a test. `drift`
-has one entry per test that executed anything: its largest `(executed - simulated) / executed`, in
-bps, negative when the simulation overquotes, and its largest `executed - simulated` in base units
-of the token out, which may come from another execution.
+`skip_simulation` and `skip_execution`; a legacy `true` reads "no reason given". A test-wide
+`sim.ladder` or `exec.ladder` result covers only the components without a `skipped` result for
+it. When every component skips, `range --report` records the test-wide result as `skipped`,
+unless an earlier check failed, in which case it is `not_run`. In legacy mode the report ends at
+the first failed check of a test. `drift` has one entry per test with at least one execution that
+paid a nonzero amount: of those, the largest `(executed - simulated) / executed` in magnitude, in
+bps, kept with its sign (negative when the simulation overquotes), and the largest
+`executed - simulated` in magnitude, in base units of the token out, which may come from another
+execution.
 
 ## How to Run with Docker
 

@@ -68,6 +68,16 @@ struct ExpectedComponentEntry {
     tvl_only: Option<TvlOnly>,
 }
 
+impl ProtocolComponentWithTestConfig {
+    /// Why the component does not execute, if it does not: its `skip_simulation`, since execution
+    /// needs a simulation, else its `skip_execution`.
+    pub fn execution_skip_reason(&self) -> Option<&str> {
+        self.skip_simulation
+            .reason()
+            .or_else(|| self.skip_execution.reason())
+    }
+}
+
 impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
     fn from(entry: ExpectedComponentEntry) -> Self {
         let ExpectedComponentEntry {
@@ -101,13 +111,14 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
 /// ```
 ///
 /// Legacy mode also accepts `true` and `false`. Strict mode rejects both: `true` gives no reason,
-/// and `false` is the default, so the key is left out.
+/// and `false` is the default, so the key is left out. In both modes, a string that reads as yes or
+/// no, such as `no` or `"false"`, is an error rather than a reason.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Skip {
     /// Not written: the check runs.
     #[default]
     No,
-    /// `true` or `false`, legacy mode's form.
+    /// `true` or `false`, legacy mode's form. `false` runs the check, like [`Skip::No`].
     Bool(bool),
     /// Skipped, for this reason.
     Reason(String),
@@ -115,10 +126,11 @@ pub enum Skip {
 
 impl Skip {
     pub fn is_skipped(&self) -> bool {
-        matches!(self, Skip::Bool(true) | Skip::Reason(_))
+        self.reason().is_some()
     }
 
-    /// Why the check is off, for logs and the report. `None` when it is not skipped.
+    /// Why the check is off, for logs and the report. `None` when it is not skipped. A legacy
+    /// `true` has no reason, and reads "no reason given".
     pub fn reason(&self) -> Option<&str> {
         match self {
             Skip::No | Skip::Bool(false) => None,
@@ -146,6 +158,18 @@ impl<'de> Deserialize<'de> for Skip {
             fn visit_str<E: de::Error>(self, v: &str) -> Result<Skip, E> {
                 if v.trim().is_empty() {
                     return Err(E::custom("the reason for a skip is empty"));
+                }
+                // serde_yaml reads only `true` and `false` as booleans, so `no` or a quoted
+                // `"false"` arrives as a string, and would otherwise turn the check off.
+                const YES_OR_NO: [&str; 8] = ["true", "false", "yes", "no", "on", "off", "y", "n"];
+                if YES_OR_NO
+                    .iter()
+                    .any(|word| v.trim().eq_ignore_ascii_case(word))
+                {
+                    return Err(E::custom(format!(
+                        "`{v}` reads as yes or no, not as a reason: write why the check is \
+                         skipped, or leave the key out to run it"
+                    )));
                 }
                 Ok(Skip::Reason(v.to_string()))
             }
@@ -296,27 +320,61 @@ pub struct Limits {
     pub lost_capacity: Option<String>,
 }
 
+impl fmt::Display for LimitKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            LimitKind::Hard => "hard",
+            LimitKind::Soft => "soft",
+            LimitKind::UnderCap => "under_cap",
+        })
+    }
+}
+
 impl Limits {
-    /// The fields this kind requires that are missing or empty.
-    fn missing_fields(&self) -> Vec<&'static str> {
-        let required: &[&'static str] = match self.kind {
-            LimitKind::Hard => &[],
-            LimitKind::Soft => &["reason"],
-            LimitKind::UnderCap => &["reason", "lost_capacity"],
+    /// What is wrong with the declaration's fields: each one its kind requires that is missing or
+    /// empty, and each one its kind does not read that is written.
+    fn field_problems(&self) -> Vec<String> {
+        let reason = ("reason", &self.reason);
+        let lost_capacity = ("lost_capacity", &self.lost_capacity);
+        let (required, unread) = match self.kind {
+            LimitKind::Hard => (vec![], vec![reason, lost_capacity]),
+            LimitKind::Soft => (vec![reason], vec![lost_capacity]),
+            LimitKind::UnderCap => (vec![reason, lost_capacity], vec![]),
         };
-        required
-            .iter()
-            .copied()
-            .filter(|field| {
-                let value = match *field {
-                    "reason" => &self.reason,
-                    _ => &self.lost_capacity,
-                };
-                value
+        let mut problems = Vec::new();
+        for (name, value) in required {
+            if value
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                problems.push(format!("missing {name}"));
+            }
+        }
+        for (name, value) in unread {
+            if value.is_some() {
+                problems.push(format!("{name} is not read for a {} limit", self.kind));
+            }
+        }
+        problems
+    }
+
+    /// Why `limits.past_limit` does not apply to this limit, if it does not: a soft or under-cap
+    /// limit is not the venue's bound. The reason names what the declaration gives.
+    pub fn past_limit_skip_reason(&self) -> Option<String> {
+        let reason = self
+            .reason
+            .as_deref()
+            .unwrap_or_default();
+        match self.kind {
+            LimitKind::Hard => None,
+            LimitKind::Soft => Some(format!("the limit is declared soft: {reason}")),
+            LimitKind::UnderCap => Some(format!(
+                "the limit is declared under_cap: {reason}; it gives up {}",
+                self.lost_capacity
                     .as_deref()
-                    .is_none_or(|value| value.trim().is_empty())
-            })
-            .collect()
+                    .unwrap_or_default()
+            )),
+        }
     }
 }
 
@@ -423,16 +481,20 @@ fn tolerance_problems(
     measured: &str,
 ) -> Vec<String> {
     let mut problems = Vec::new();
-    match (bps, wei) {
-        (None, None) => problems.push(
-            "it declares neither `bps` nor `wei`; exact is the default: remove the declaration"
+    if bps.is_none() && wei.is_none() {
+        problems.push(
+            "it declares neither `bps` nor `wei`: declare one, or remove the declaration (in \
+             strict mode, exact is the default)"
                 .to_string(),
-        ),
-        (Some(0), _) | (_, Some(0)) => problems.push(
-            "a zero `bps` or `wei` allows nothing; exact is the default: leave it out".to_string(),
-        ),
-        (Some(bps), _) if bps >= 10_000 => problems.push(format!("`bps: {bps}` allows any amount")),
-        _ => {}
+        );
+    }
+    for (field, value) in [("bps", bps.map(u64::from)), ("wei", wei)] {
+        if value == Some(0) {
+            problems.push(format!("`{field}: 0` allows nothing: leave it out"));
+        }
+    }
+    if let Some(bps) = bps.filter(|bps| *bps >= 10_000) {
+        problems.push(format!("`bps: {bps}` is out of range: `bps` must be 1 to 9999"));
     }
     for (field, value) in [("cause", cause), ("measured", measured)] {
         if value.trim().is_empty() {
@@ -544,9 +606,14 @@ impl<'de> Deserialize<'de> for LimitsDeclaration {
                 declaration.default = Some(parse(key, limits.clone())?);
             } else {
                 let direction = Direction::from_str(key).map_err(de::Error::custom)?;
-                declaration
+                // Keys that differ only in case or spacing are one direction.
+                if declaration
                     .directions
-                    .insert(direction, parse(key, limits.clone())?);
+                    .insert(direction.clone(), parse(key, limits.clone())?)
+                    .is_some()
+                {
+                    return Err(de::Error::custom(format!("limits: {direction} is declared twice")));
+                }
             }
         }
         Ok(declaration)
@@ -621,10 +688,12 @@ pub struct IntegrationTestsConfig {
 impl IntegrationTestsConfig {
     /// Parses a test configuration from yaml.
     ///
-    /// Keys the runner does not read are an error in strict mode, naming every such key, and a
-    /// warning in legacy mode, where the package keeps running as before. A `limits` declaration
-    /// must have the fields its kind requires, and in strict mode every expected component needs
-    /// one.
+    /// Errors when the yaml does not parse, or a skip is an empty string or reads as yes or no. In
+    /// strict mode it also errors, listing every problem at once, on keys the runner does not read
+    /// and on skips written as `true` or `false` or that can have no effect. In legacy mode
+    /// unknown keys are a warning, and the package keeps running as before. In both modes a
+    /// `limits` declaration must have the fields its kind requires, and in strict mode every
+    /// direction of every expected component needs one.
     pub fn from_yaml(reader: impl Read, source: &str) -> miette::Result<Self> {
         let mut unknown_keys = Vec::new();
         let config: Self =
@@ -634,24 +703,32 @@ impl IntegrationTestsConfig {
             .into_diagnostic()
             .wrap_err_with(|| format!("Failed to load test configuration {source}"))?;
 
-        if !unknown_keys.is_empty() {
-            match config.harness {
-                Harness::Strict => {
-                    return Err(miette!(
-                        "{source} declares `harness: strict` but has keys the runner does not \
-                         read: {}. Fix the spelling or remove them.",
+        match config.harness {
+            Harness::Strict => {
+                let mut problems = config.skip_problems();
+                problems.extend(config.balance_skip_problem());
+                problems.extend(config.empty_tests_problem());
+                if !unknown_keys.is_empty() {
+                    problems.push(format!(
+                        "keys the runner does not read: {}. Fix the spelling or remove them",
                         unknown_keys.join(", ")
-                    ))
+                    ));
                 }
-                Harness::Legacy => tracing::warn!(
-                    "{source} has keys the runner does not read: {}",
-                    unknown_keys.join(", ")
-                ),
+                if !problems.is_empty() {
+                    return Err(miette!(
+                        "{source} declares `harness: strict`, but has {}.",
+                        problems.join("; ")
+                    ));
+                }
             }
-        }
-        if config.harness == Harness::Strict {
-            config.check_skips_have_reasons(source)?;
-            config.check_balances_are_not_skipped(source)?;
+            Harness::Legacy => {
+                if !unknown_keys.is_empty() {
+                    tracing::warn!(
+                        "{source} has keys the runner does not read: {}",
+                        unknown_keys.join(", ")
+                    );
+                }
+            }
         }
         config.check_limits(source)?;
         config.check_tolerance(source)?;
@@ -809,66 +886,86 @@ impl IntegrationTestsConfig {
         Ok(())
     }
 
-    /// Every skip in the configuration, with where it is written: `(location, flag, skip)`.
-    fn skips(&self) -> Vec<(String, &'static str, &Skip)> {
-        let mut skips =
-            vec![("package".to_string(), "skip_balance_check", &self.skip_balance_check)];
+    /// Strict mode's problems with the skips, one entry per kind of problem: a skip is written
+    /// as its reason, so `true` (no reason) and `false` (the default) are errors, and so is a
+    /// `skip_execution` next to a `skip_simulation`, since execution never runs without
+    /// simulation and the reason would be read nowhere.
+    fn skip_problems(&self) -> Vec<String> {
+        let mut unexplained = Vec::new();
+        let mut redundant = Vec::new();
+        let mut unread = Vec::new();
+        let mut note = |flag: &str, location: &str, skip: &Skip| match skip {
+            Skip::Bool(true) => unexplained.push(format!("{flag} ({location})")),
+            Skip::Bool(false) => redundant.push(format!("{flag} ({location})")),
+            Skip::No | Skip::Reason(_) => {}
+        };
+        // `skip_balance_check` is rejected whatever its value, by `balance_skip_problem`.
         for test in &self.tests {
             for component in &test.expected_components {
                 let location = format!("test `{}`, component {}", test.name, component.base.id);
-                skips.push((location.clone(), "skip_simulation", &component.skip_simulation));
-                skips.push((location, "skip_execution", &component.skip_execution));
+                note("skip_simulation", &location, &component.skip_simulation);
+                note("skip_execution", &location, &component.skip_execution);
+                if component.skip_simulation.is_skipped() && component.skip_execution.is_skipped() {
+                    unread.push(location);
+                }
             }
         }
-        skips
-    }
 
-    /// Strict mode: a skip is its reason, a string. `true` gives none, and `false` is the default.
-    fn check_skips_have_reasons(&self, source: &str) -> miette::Result<()> {
-        let written = |value: bool| -> Vec<String> {
-            self.skips()
-                .into_iter()
-                .filter(|(_, _, skip)| **skip == Skip::Bool(value))
-                .map(|(location, flag, _)| format!("{flag} ({location})"))
-                .collect()
-        };
         let mut problems = Vec::new();
-        let unexplained = written(true);
         if !unexplained.is_empty() {
             problems.push(format!(
-                "these are `true`, which gives no reason: {}. Write each skip as its reason, \
-                 `skip_execution: \"...\"`",
+                "skips written as `true`, which gives no reason: {}. Write the reason instead, \
+                 as `<flag>: \"...\"`",
                 unexplained.join(", ")
             ));
         }
-        let redundant = written(false);
         if !redundant.is_empty() {
             problems.push(format!(
-                "these are `false`, which is the default: {}. Remove them",
+                "skips written as `false`, which is the default: {}. Remove them",
                 redundant.join(", ")
             ));
         }
-        if problems.is_empty() {
-            return Ok(());
+        if !unread.is_empty() {
+            problems.push(format!(
+                "`skip_execution` next to `skip_simulation`, where execution never runs: {}. \
+                 Remove the `skip_execution`",
+                unread.join(", ")
+            ));
         }
-        Err(miette!(
-            "{source} declares `harness: strict`, where a skip is written as its reason: {}.",
-            problems.join("; ")
+        problems
+    }
+
+    /// Strict mode's problem with the package-level `skip_balance_check`, whatever its value:
+    /// strict mode checks every expected component's balances against the source it declares.
+    fn balance_skip_problem(&self) -> Option<String> {
+        if self.skip_balance_check == Skip::No {
+            return None;
+        }
+        Some(format!(
+            "`skip_balance_check`, which strict mode does not accept, since it checks every \
+             expected component against the source it declares. Remove it, and declare where a \
+             component's balances are held where that is not the component's own address, with \
+             `balance_check`: {}",
+            crate::balances::SHAPE
         ))
     }
 
-    /// Strict mode: balances are checked for every expected component, against the source each
-    /// declares, so the package-level skip is not accepted, whatever its reason.
-    fn check_balances_are_not_skipped(&self, source: &str) -> miette::Result<()> {
-        let Some(reason) = self.skip_balance_check.reason() else {
-            return Ok(());
-        };
-        Err(miette!(
-            "{source} declares `harness: strict`, where every expected component's balances are \
-             checked, but it sets `skip_balance_check` ({reason}). Remove it, and declare where a \
-             component's balances are held with `balance_check: {{holder: \"attribute:NAME\" | \
-             \"0x...\"}}` or `{{min_of: [self, ...]}}` where it is not the component's own address."
-        ))
+    /// Strict mode's problem with tests that list no expected component: strict mode checks each
+    /// expected component, so such a test would check nothing.
+    fn empty_tests_problem(&self) -> Option<String> {
+        let empty: Vec<String> = self
+            .tests
+            .iter()
+            .filter(|test| test.expected_components.is_empty())
+            .map(|test| format!("`{}`", test.name))
+            .collect();
+        (!empty.is_empty()).then(|| {
+            format!(
+                "tests that list no expected components: {}. Strict mode checks each expected \
+                 component, so list the ones the test is about",
+                empty.join(", ")
+            )
+        })
     }
 }
 
@@ -890,9 +987,8 @@ pub fn component_directions(component: &ProtocolComponentWithTestConfig) -> Vec<
 /// Records each entry of `declaration` that lacks a field its kind requires.
 fn check_declaration(declaration: &LimitsDeclaration, location: &str, problems: &mut Vec<String>) {
     for (key, limits) in declaration.entries() {
-        let missing = limits.missing_fields();
-        if !missing.is_empty() {
-            problems.push(format!("{location}, {key}: missing {}", missing.join(", ")));
+        for problem in limits.field_problems() {
+            problems.push(format!("{location}, {key}: {problem}"));
         }
     }
 }
@@ -952,13 +1048,13 @@ tests:
     fn component_keys_reach_the_component() {
         let config = parse(&yaml(
             "harness: strict",
-            "        static_attributes: {fee: \"0x0bb8\"}\n        skip_simulation: \"r\"\n        skip_execution: \"r\"\n        limits: {kind: hard}",
+            "        static_attributes: {fee: \"0x0bb8\"}\n        skip_execution: \"r\"\n        limits: {kind: hard}",
         ))
         .unwrap();
         assert_eq!(config.harness, Harness::Strict);
         let component = &config.tests[0].expected_components[0];
         assert_eq!(component.base.static_attributes["fee"], Bytes::from("0x0bb8"));
-        assert!(component.skip_simulation.is_skipped());
+        assert!(!component.skip_simulation.is_skipped());
         assert!(component.skip_execution.is_skipped());
         assert_eq!(
             component.limits,
@@ -1038,24 +1134,43 @@ tests:
     }
 
     #[test]
-    fn strict_mode_rejects_true_and_false_and_names_each_flag_and_component() {
-        let err = parse(&yaml(
-            "harness: strict\nskip_balance_check: true",
-            "        skip_simulation: true\n        skip_execution: false",
-        ))
-        .unwrap_err()
-        .to_string();
-        assert!(
-            err.contains("`true`, which gives no reason: skip_balance_check (package)"),
-            "{err}"
-        );
-        assert!(err.contains("skip_simulation (test `test_foo`, component 0xAbC)"), "{err}");
+    fn strict_mode_rejects_true_and_names_each_flag_and_component() {
+        let err = parse(&yaml("harness: strict", "        skip_simulation: true"))
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains(
-                "`false`, which is the default: skip_execution (test `test_foo`, component 0xAbC)"
+                "skips written as `true`, which gives no reason: skip_simulation (test \
+                 `test_foo`, component 0xAbC)"
             ),
             "{err}"
         );
+    }
+
+    #[test]
+    fn strict_mode_gives_a_balance_skip_one_error_whatever_its_value() {
+        for value in ["true", "false", "\"held by the vault\""] {
+            let err = parse(&yaml(&format!("harness: strict\nskip_balance_check: {value}"), ""))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("`skip_balance_check`, which strict mode does not accept"),
+                "{err}"
+            );
+            assert!(!err.contains("skips written as"), "{value}: {err}");
+        }
+    }
+
+    #[test]
+    fn strict_mode_rejects_a_test_without_expected_components() {
+        let config = yaml(STRICT_WITH_LIMITS, "").replace(
+            "    expected_components:\n      - id: \"0xAbC\"\n        tokens: [\"0x01\", \"0x02\"]\n        \
+             creation_tx: \"0x03\"\n",
+            "    expected_components: []\n",
+        );
+        assert!(config.contains("expected_components: []"), "{config}");
+        let err = parse(&config).unwrap_err().to_string();
+        assert!(err.contains("tests that list no expected components: `test_foo`"), "{err}");
     }
 
     #[test]
@@ -1066,8 +1181,8 @@ tests:
         let err = parse(&skipped(STRICT_WITH_LIMITS))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("sets `skip_balance_check` (held by the vault)"), "{err}");
-        assert!(err.contains("balance_check: {holder:"), "{err}");
+        assert!(err.contains("`skip_balance_check`, which strict mode does not accept"), "{err}");
+        assert!(err.contains("{tokens: {0x<token>"), "{err}");
 
         assert!(parse(&skipped(""))
             .unwrap()
@@ -1100,6 +1215,79 @@ tests:
             let err = parse(&yaml(harness, "        balance_check: {holder: vault}")).unwrap_err();
             assert!(format!("{err:?}").contains("not a holder"), "{err:?}");
         }
+    }
+
+    #[test]
+    fn strict_mode_rejects_false_and_names_each_flag_and_component() {
+        let err = parse(&yaml("harness: strict", "        skip_execution: false"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(
+                "skips written as `false`, which is the default: skip_execution (test \
+                 `test_foo`, component 0xAbC). Remove them"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn strict_mode_rejects_a_skip_execution_next_to_a_skip_simulation() {
+        let both = "        skip_simulation: \"no adapter\"\n        skip_execution: \"no fork\"";
+        let err = parse(&yaml("harness: strict", both))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(
+                "`skip_execution` next to `skip_simulation`, where execution never runs: test \
+                 `test_foo`, component 0xAbC"
+            ),
+            "{err}"
+        );
+        assert!(parse(&yaml("", both)).is_ok());
+    }
+
+    #[test]
+    fn strict_mode_reports_skip_problems_and_unknown_keys_together() {
+        let err = parse(&yaml(
+            "harness: strict\nskip_balance_checks: x",
+            "        skip_execution: false",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("skips written as `false`"), "{err}");
+        assert!(err.contains("keys the runner does not read: skip_balance_checks"), "{err}");
+    }
+
+    #[test]
+    fn a_skip_that_reads_as_yes_or_no_is_an_error_in_both_modes() {
+        for word in ["no", "\"false\"", "off", "Yes", "\"TRUE\"", "n"] {
+            for harness in ["", "harness: strict"] {
+                let err = parse(&yaml(harness, &format!("        skip_execution: {word}")))
+                    .unwrap_err()
+                    .chain()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(": ");
+                assert!(err.contains("reads as yes or no, not as a reason"), "{word}: {err}");
+            }
+        }
+        // A reason that merely contains such a word is a reason.
+        let config = parse(&yaml("", "        skip_execution: \"no fork state\"")).unwrap();
+        assert!(config.tests[0].expected_components[0]
+            .skip_execution
+            .is_skipped());
+    }
+
+    #[test]
+    fn a_component_that_skips_simulation_does_not_execute_either() {
+        let config = parse(&yaml("", "        skip_simulation: \"no adapter\"")).unwrap();
+        let component = &config.tests[0].expected_components[0];
+        assert_eq!(component.execution_skip_reason(), Some("no adapter"));
+        let config = parse(&yaml("", "        skip_execution: \"no fork\"")).unwrap();
+        assert_eq!(config.tests[0].expected_components[0].execution_skip_reason(), Some("no fork"));
+        let config = parse(&yaml("", "")).unwrap();
+        assert_eq!(config.tests[0].expected_components[0].execution_skip_reason(), None);
     }
 
     #[test]
@@ -1233,17 +1421,43 @@ tests:
 
     #[test]
     fn a_malformed_declaration_is_an_error() {
-        for declaration in [
-            "{kind: exact}",
-            "{kind: hard, because: \"x\"}",
-            "{kind: under_cap, reason: \"r\", evidence: \"e\", lost_capacity: \"2%\"}",
-            "{\"0x01-0x02\": {kind: hard}}",
-            "{\"0x01->0x01\": {kind: hard}}",
-            "{\"0x01->usdc\": {kind: hard}}",
-            "hard",
+        for (declaration, expected) in [
+            ("{kind: exact}", "unknown variant `exact`"),
+            ("{kind: hard, because: \"x\"}", "unknown field `because`"),
+            (
+                "{kind: under_cap, reason: \"r\", evidence: \"e\", lost_capacity: \"2%\"}",
+                "unknown field `evidence`",
+            ),
+            ("{\"0x01-0x02\": {kind: hard}}", "is not a direction"),
+            ("{\"0x01->0x01\": {kind: hard}}", "sells and buys the same token"),
+            ("{\"0x01->usdc\": {kind: hard}}", "is not an address"),
+            ("{\"0x01->0x02\": {kind: hard}, \"0x01 -> 0x02\": {kind: hard}}", "declared twice"),
+            ("hard", "`limits` is `{kind: ...}`"),
         ] {
-            let err = parse(&yaml("", &format!("        limits: {declaration}"))).unwrap_err();
-            assert!(format!("{err:?}").contains("test.yaml"), "{declaration}: {err:?}");
+            let err = parse(&yaml("", &format!("        limits: {declaration}")))
+                .unwrap_err()
+                .chain()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(": ");
+            assert!(err.contains(expected), "{declaration}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_field_the_kind_does_not_read_is_an_error() {
+        for (declaration, problem) in [
+            ("{kind: hard, reason: \"r\"}", "reason is not read for a hard limit"),
+            ("{kind: hard, lost_capacity: \"2%\"}", "lost_capacity is not read for a hard limit"),
+            (
+                "{kind: soft, reason: \"r\", lost_capacity: \"2%\"}",
+                "lost_capacity is not read for a soft limit",
+            ),
+        ] {
+            let err = parse(&yaml("", &format!("        limits: {declaration}")))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("component 0xAbC, default: {problem}")), "{err}");
         }
     }
 
@@ -1299,11 +1513,12 @@ tests:
     #[test]
     fn a_tolerance_needs_a_cause_a_measurement_and_a_sensible_size() {
         for (declaration, problem) in [
-            ("{bps: 0, cause: \"c\", measured: \"m\"}", "allows nothing"),
-            ("{wei: 0, cause: \"c\", measured: \"m\"}", "allows nothing"),
-            ("{bps: 2, wei: 0, cause: \"c\", measured: \"m\"}", "allows nothing"),
+            ("{bps: 0, cause: \"c\", measured: \"m\"}", "`bps: 0` allows nothing"),
+            ("{wei: 0, cause: \"c\", measured: \"m\"}", "`wei: 0` allows nothing"),
+            ("{bps: 2, wei: 0, cause: \"c\", measured: \"m\"}", "`wei: 0` allows nothing"),
             ("{cause: \"c\", measured: \"m\"}", "neither `bps` nor `wei`"),
-            ("{bps: 10000, cause: \"c\", measured: \"m\"}", "allows any amount"),
+            ("{bps: 10000, cause: \"c\", measured: \"m\"}", "`bps` must be 1 to 9999"),
+            ("{bps: 10000, wei: 0, cause: \"c\", measured: \"m\"}", "`bps` must be 1 to 9999"),
             ("{bps: 3, cause: \" \", measured: \"m\"}", "`cause` is empty"),
             ("{bps: 3, cause: \"c\", measured: \"\"}", "`measured` is empty"),
         ] {
@@ -1315,11 +1530,17 @@ tests:
                 assert!(err.contains(problem), "{declaration}: {err}");
             }
         }
-        for declaration in
-            ["{bps: 3, cause: \"c\"}", "{bps: 3, cause: \"c\", measured: \"m\", why: \"x\"}"]
-        {
-            let err = parse(&yaml(&format!("execution_tolerance: {declaration}"), "")).unwrap_err();
-            assert!(format!("{err:?}").contains("test.yaml"), "{declaration}: {err:?}");
+        for (declaration, expected) in [
+            ("{bps: 3, cause: \"c\"}", "missing field `measured`"),
+            ("{bps: 3, cause: \"c\", measured: \"m\", why: \"x\"}", "unknown field `why`"),
+        ] {
+            let err = parse(&yaml(&format!("execution_tolerance: {declaration}"), ""))
+                .unwrap_err()
+                .chain()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(": ");
+            assert!(err.contains(expected), "{declaration}: {err}");
         }
     }
 
@@ -1346,8 +1567,8 @@ tests:
     fn tvl_only_needs_a_cause_a_measurement_and_a_sensible_size() {
         for (declaration, problem) in [
             ("{cause: \"c\", measured: \"m\"}", "neither `bps` nor `wei`"),
-            ("{bps: 0, cause: \"c\", measured: \"m\"}", "allows nothing"),
-            ("{bps: 10000, cause: \"c\", measured: \"m\"}", "allows any amount"),
+            ("{bps: 0, cause: \"c\", measured: \"m\"}", "`bps: 0` allows nothing"),
+            ("{bps: 10000, cause: \"c\", measured: \"m\"}", "`bps` must be 1 to 9999"),
             ("{wei: 5, cause: \"\", measured: \"m\"}", "`cause` is empty"),
             ("{bps: 5, cause: \"c\"}", "missing field `measured`"),
             ("{bps: 5, cause: \"c\", measured: \"m\", reason: \"r\"}", "unknown field `reason`"),
