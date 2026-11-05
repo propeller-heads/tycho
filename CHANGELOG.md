@@ -1,3 +1,11 @@
+## [0.502.0](https://github.com/propeller-heads/tycho/compare/0.501.0...0.502.0) (2026-11-05)
+
+
+### Features
+
+* **execution:** let any pool swap group carry a subsidy ([c0f98c0](https://github.com/propeller-heads/tycho/commit/c0f98c0a8ddfa927fe73f005f8bf8af815838581))
+* **execution:** let any pool swap group carry a subsidy ([#1722](https://github.com/propeller-heads/tycho/issues/1722)) ([4212063](https://github.com/propeller-heads/tycho/commit/42120632fa3d64c92c4b7f2b659ae6d818a89fd9))
+
 ## [0.501.0](https://github.com/propeller-heads/tycho/compare/0.500.0...0.501.0) (2026-11-04)
 
 
