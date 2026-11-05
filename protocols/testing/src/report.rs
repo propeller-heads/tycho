@@ -39,6 +39,10 @@ pub enum CheckId {
 }
 
 impl CheckId {
+    /// Strict mode's three checks of each direction's limit.
+    pub const LIMITS: [CheckId; 3] =
+        [CheckId::LimitsAtLimit, CheckId::LimitsPastLimit, CheckId::LimitsMaxOutput];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             CheckId::Index => "index",

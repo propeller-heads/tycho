@@ -133,22 +133,33 @@ component's).
 | `under_cap` | the venue has a bound, and the limit stays below it because the exact bound cannot be derived | `reason` (showing why, such as a command and its output), `lost_capacity` | at the limit |
 
 - **At the limit** (`limits.at_limit`): `get_amount_out(max_input)` succeeds, and executing it
-  settles and matches the simulation.
+  does not revert and matches the simulation.
 - **Max output** (`limits.max_output`): the quote at `max_input` pays no more than `max_output`.
 - **One unit past a hard limit** (`limits.past_limit`): `get_amount_out(max_input + 1)` errors,
-  and executing it reverts. The swap's minimum output is set from the quote at the limit, so the
-  revert comes from the venue, not from the router's slippage check. When the limit is at or above
-  the `int128` cap, the cap is not the venue's bound, and nothing is probed past it.
+  and executing it reverts. The swap's minimum output is set from the quote at the limit, so a
+  venue that accepts the extra unit executes the swap and fails the check. The check accepts any
+  revert from the chain, but not a node error on the call, which proves nothing. When the limit is
+  at or above the `int128` cap, the cap is not the venue's bound, and nothing is probed past it.
 
 Each of the three checks is reported per component and direction, with `component` and
-`direction` keys in the report. A check passes only once everything it tests ran:
-- `limits.past_limit` is skipped for a soft or under-cap limit, or one at the cap.
+`direction` keys in the report. A check passes only once everything it tests ran. Unless the
+simulation already failed it:
+
+- `limits.past_limit` is skipped for a soft or under-cap limit, with the declared reason, and for
+  one at the cap.
 - When the quote at the limit fails, `limits.past_limit` and `limits.max_output` are `not_run`.
+  When the swap at the limit does not execute, `limits.past_limit` is `not_run` too: a revert
+  past a limit that does not execute either proves nothing.
 - A component with `skip_execution` runs the checks in simulation only: `limits.at_limit` and
-  `limits.past_limit` are skipped with its reason, unless the simulation already failed them.
-- A component with `skip_simulation` has all three skipped. A declaration missing a required field, or naming a direction its
-component does not have, is an error in both modes. Legacy mode reads the declarations but runs
-none of these checks.
+  `limits.past_limit` are skipped with its reason.
+- A component with `skip_simulation` has all three skipped.
+- A direction whose limit is zero at the tested block has all three skipped. A declared direction
+  the runner never quotes, because the indexed tokens differ from the expected ones, fails all
+  three.
+
+A declaration missing a required field, or with a field its kind does not read, or naming a
+direction its component does not have, or naming one direction twice, is an error in both modes.
+Legacy mode reads the declarations but runs none of these checks.
 
 ### Test report
 

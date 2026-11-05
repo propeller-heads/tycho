@@ -304,27 +304,61 @@ pub struct Limits {
     pub lost_capacity: Option<String>,
 }
 
+impl fmt::Display for LimitKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            LimitKind::Hard => "hard",
+            LimitKind::Soft => "soft",
+            LimitKind::UnderCap => "under_cap",
+        })
+    }
+}
+
 impl Limits {
-    /// The fields this kind requires that are missing or empty.
-    fn missing_fields(&self) -> Vec<&'static str> {
-        let required: &[&'static str] = match self.kind {
-            LimitKind::Hard => &[],
-            LimitKind::Soft => &["reason"],
-            LimitKind::UnderCap => &["reason", "lost_capacity"],
+    /// What is wrong with the declaration's fields: each one its kind requires that is missing or
+    /// empty, and each one its kind does not read that is written.
+    fn field_problems(&self) -> Vec<String> {
+        let reason = ("reason", &self.reason);
+        let lost_capacity = ("lost_capacity", &self.lost_capacity);
+        let (required, unread) = match self.kind {
+            LimitKind::Hard => (vec![], vec![reason, lost_capacity]),
+            LimitKind::Soft => (vec![reason], vec![lost_capacity]),
+            LimitKind::UnderCap => (vec![reason, lost_capacity], vec![]),
         };
-        required
-            .iter()
-            .copied()
-            .filter(|field| {
-                let value = match *field {
-                    "reason" => &self.reason,
-                    _ => &self.lost_capacity,
-                };
-                value
+        let mut problems = Vec::new();
+        for (name, value) in required {
+            if value
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                problems.push(format!("missing {name}"));
+            }
+        }
+        for (name, value) in unread {
+            if value.is_some() {
+                problems.push(format!("{name} is not read for a {} limit", self.kind));
+            }
+        }
+        problems
+    }
+
+    /// Why `limits.past_limit` does not apply to this limit, if it does not: a soft or under-cap
+    /// limit is not the venue's bound. The reason names what the declaration gives.
+    pub fn past_limit_skip_reason(&self) -> Option<String> {
+        let reason = self
+            .reason
+            .as_deref()
+            .unwrap_or_default();
+        match self.kind {
+            LimitKind::Hard => None,
+            LimitKind::Soft => Some(format!("the limit is declared soft: {reason}")),
+            LimitKind::UnderCap => Some(format!(
+                "the limit is declared under_cap: {reason}; it gives up {}",
+                self.lost_capacity
                     .as_deref()
-                    .is_none_or(|value| value.trim().is_empty())
-            })
-            .collect()
+                    .unwrap_or_default()
+            )),
+        }
     }
 }
 
@@ -430,9 +464,14 @@ impl<'de> Deserialize<'de> for LimitsDeclaration {
                 declaration.default = Some(parse(key, limits.clone())?);
             } else {
                 let direction = Direction::from_str(key).map_err(de::Error::custom)?;
-                declaration
+                // Keys that differ only in case or spacing are one direction.
+                if declaration
                     .directions
-                    .insert(direction, parse(key, limits.clone())?);
+                    .insert(direction.clone(), parse(key, limits.clone())?)
+                    .is_some()
+                {
+                    return Err(de::Error::custom(format!("limits: {direction} is declared twice")));
+                }
             }
         }
         Ok(declaration)
@@ -698,9 +737,8 @@ pub fn component_directions(component: &ProtocolComponentWithTestConfig) -> Vec<
 /// Records each entry of `declaration` that lacks a field its kind requires.
 fn check_declaration(declaration: &LimitsDeclaration, location: &str, problems: &mut Vec<String>) {
     for (key, limits) in declaration.entries() {
-        let missing = limits.missing_fields();
-        if !missing.is_empty() {
-            problems.push(format!("{location}, {key}: missing {}", missing.join(", ")));
+        for problem in limits.field_problems() {
+            problems.push(format!("{location}, {key}: {problem}"));
         }
     }
 }
@@ -1066,17 +1104,43 @@ tests:
 
     #[test]
     fn a_malformed_declaration_is_an_error() {
-        for declaration in [
-            "{kind: exact}",
-            "{kind: hard, because: \"x\"}",
-            "{kind: under_cap, reason: \"r\", evidence: \"e\", lost_capacity: \"2%\"}",
-            "{\"0x01-0x02\": {kind: hard}}",
-            "{\"0x01->0x01\": {kind: hard}}",
-            "{\"0x01->usdc\": {kind: hard}}",
-            "hard",
+        for (declaration, expected) in [
+            ("{kind: exact}", "unknown variant `exact`"),
+            ("{kind: hard, because: \"x\"}", "unknown field `because`"),
+            (
+                "{kind: under_cap, reason: \"r\", evidence: \"e\", lost_capacity: \"2%\"}",
+                "unknown field `evidence`",
+            ),
+            ("{\"0x01-0x02\": {kind: hard}}", "is not a direction"),
+            ("{\"0x01->0x01\": {kind: hard}}", "sells and buys the same token"),
+            ("{\"0x01->usdc\": {kind: hard}}", "is not an address"),
+            ("{\"0x01->0x02\": {kind: hard}, \"0x01 -> 0x02\": {kind: hard}}", "declared twice"),
+            ("hard", "`limits` is `{kind: ...}`"),
         ] {
-            let err = parse(&yaml("", &format!("        limits: {declaration}"))).unwrap_err();
-            assert!(format!("{err:?}").contains("test.yaml"), "{declaration}: {err:?}");
+            let err = parse(&yaml("", &format!("        limits: {declaration}")))
+                .unwrap_err()
+                .chain()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(": ");
+            assert!(err.contains(expected), "{declaration}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_field_the_kind_does_not_read_is_an_error() {
+        for (declaration, problem) in [
+            ("{kind: hard, reason: \"r\"}", "reason is not read for a hard limit"),
+            ("{kind: hard, lost_capacity: \"2%\"}", "lost_capacity is not read for a hard limit"),
+            (
+                "{kind: soft, reason: \"r\", lost_capacity: \"2%\"}",
+                "lost_capacity is not read for a soft limit",
+            ),
+        ] {
+            let err = parse(&yaml("", &format!("        limits: {declaration}")))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("component 0xAbC, default: {problem}")), "{err}");
         }
     }
 
