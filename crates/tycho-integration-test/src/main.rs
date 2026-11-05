@@ -46,7 +46,8 @@ use tycho_test::{
     execution::{
         encoding::{encode_swap, pamm_account_overwrites},
         models::{RouterOverwritesData, TychoExecutionInput, TychoExecutionResult},
-        simulate_swap_transaction, simulate_swap_transaction_before_block, tenderly,
+        simulate_swap_transaction, simulate_swap_transaction_before_block,
+        simulate_swap_transaction_next_block, tenderly,
     },
     is_block_not_found,
     token_prices::{cap_amount_to_eth_value, load_token_prices},
@@ -57,7 +58,7 @@ use crate::{
     fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
     statistics::TestStatistics,
     stream_processor::{
-        book_stream_processor::BookStreamProcessor,
+        book_stream_processor::{BookStreamProcessor, PammSelection, PammVenue, RfqSelection},
         price_level_stream_processor::PriceLevelStreamProcessor,
         protocol_stream_processor::{ProtocolStreamProcessor, ProtocolTvlThreshold},
         StreamUpdate, StreamUpdatePayload,
@@ -106,9 +107,16 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_rfq: bool,
 
-    /// Disable the pAMM book feeds (Metric)
+    /// Disable the pAMM book feeds
     #[arg(long, default_value_t = false)]
     disable_pamm: bool,
+
+    /// pAMM book feeds to run, comma-separated (e.g. metric). Replaces the default list
+    /// (metric). A listed venue missing its credentials, or whose feed fails to build, fails the
+    /// run; a default venue is skipped instead. A feed that builds but fails once it runs, for
+    /// example on a chain its venue does not serve, ends with a warning like any other feed.
+    #[arg(long, value_delimiter = ',', conflicts_with = "disable_pamm")]
+    pamm: Option<Vec<PammVenue>>,
 
     /// Publish each RFQ venue as one component for every pair it prices, which a route may
     /// take one quote from, rather than one component per pair. The number of directions
@@ -478,11 +486,10 @@ async fn run(cli: Cli) -> miette::Result<()> {
     // processing cannot block protocol update consumption
     let (protocol_tx, mut protocol_rx) =
         tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
-    let (rfq_tx, mut rfq_rx) = tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
+    let (book_tx, mut book_rx) = tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
     let (price_level_tx, mut price_level_rx) =
         tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
     let mut protocol_handle = None;
-    let mut rfq_handle = None;
     let mut price_level_handle = None;
 
     if !cli.disable_onchain {
@@ -503,23 +510,18 @@ async fn run(cli: Cli) -> miette::Result<()> {
                 .await?,
         );
     }
-    if !cli.disable_rfq || !cli.disable_pamm {
-        let book_stream_processor = BookStreamProcessor::new(
-            chain,
-            tvl_threshold,
-            cli.max_simulations as usize,
-            Duration::from_secs(cli.skip_messages_duration),
-            !cli.disable_rfq,
-            !cli.disable_pamm,
-            cli.rfq_all_pairs,
-        )
-        .unwrap_or_else(|e| panic!("Failed to create book stream processor: {e}"));
-        rfq_handle = Some(
-            book_stream_processor
-                .run_stream(Arc::clone(&all_tokens), rfq_tx)
-                .await?,
-        );
-    }
+    let book_stream_processor = BookStreamProcessor::new(
+        chain,
+        tvl_threshold,
+        cli.max_simulations as usize,
+        Duration::from_secs(cli.skip_messages_duration),
+        RfqSelection::from_cli(cli.disable_rfq, |name| std::env::var(name).ok()),
+        PammSelection::from_cli(cli.disable_pamm, cli.pamm.clone()),
+        cli.rfq_all_pairs,
+    );
+    let mut book_handle = book_stream_processor
+        .run_stream(Arc::clone(&all_tokens), book_tx)
+        .await?;
     if !cli.disable_price_level_stream {
         if let Some(price_level_stream_processor) = PriceLevelStreamProcessor::new(
             chain,
@@ -553,10 +555,10 @@ async fn run(cli: Cli) -> miette::Result<()> {
     }
     info!("Waiting for first protocol update...");
     let protocol_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
-    let rfq_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
+    let book_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let price_level_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let mut protocol_stream_open = true;
-    let mut book_stream_open = !cli.disable_rfq || !cli.disable_pamm;
+    let mut book_stream_open = book_handle.is_some();
     let mut price_level_stream_open = price_level_handle.is_some();
 
     // Staleness watchdog: if no protocol update arrives within stale_threshold_secs, mark all
@@ -599,13 +601,13 @@ async fn run(cli: Cli) -> miette::Result<()> {
 
             // Monitor book stream termination
             result = async {
-                if let Some(handle) = rfq_handle.as_mut() {
+                if let Some(handle) = book_handle.as_mut() {
                     handle.await
                 } else {
                     std::future::pending().await
                 }
-            }, if rfq_handle.is_some() => {
-                rfq_handle = None;
+            }, if book_handle.is_some() => {
+                book_handle = None;
                 match result {
                     Ok(()) => {
                         warn!("Book stream terminated");
@@ -711,7 +713,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
             }
 
             // Process book updates independently
-            update = rfq_rx.recv(), if book_stream_open => {
+            update = book_rx.recv(), if book_stream_open => {
                 match update {
                     Some(update) => {
                         let update = match update {
@@ -728,7 +730,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
-                        let permit = rfq_semaphore
+                        let permit = book_semaphore
                             .clone()
                             .acquire_owned()
                             .await
@@ -1444,12 +1446,22 @@ async fn process_update(
     // A price level quote prices the block Titan was building, and its swaps carry the account
     // state the quote was priced on (`account_overwrites`) whenever the stream attached one. So
     // they are simulated the way a consumer tests the quote before that block exists: on the
-    // quoted block's parent, with the quoted block's number and timestamp. Every other swap, a
-    // pinned component's say, is simulated on the block's own state.
+    // quoted block's parent, with the quoted block's number and timestamp. A full block's update
+    // of a protocol in `NEXT_BLOCK_PROTOCOLS` is priced for the block after it, where a swap
+    // quoted on it executes at the earliest, so those swaps are simulated on the block's state in
+    // the next block's context. Every other swap, a pinned component's say, is simulated on the
+    // block's own state.
     let (before_block, after_block): (HashMap<_, _>, HashMap<_, _>) = block_execution_info
         .clone()
         .into_iter()
         .partition(|(_, info)| simulates_before_block(&info.protocol_system));
+    let full_block_update = match &update.payload {
+        StreamUpdatePayload::Protocol(protocol_update) => !protocol_update.is_partial,
+        StreamUpdatePayload::Book { .. } | StreamUpdatePayload::PriceLevelStream(_) => false,
+    };
+    let (next_block, after_block): (HashMap<_, _>, HashMap<_, _>) = after_block
+        .into_iter()
+        .partition(|(_, info)| full_block_update && executes_in_next_block(&info.protocol_system));
     record_swaps_without_simulation_overrides(&before_block);
     let mut results = HashMap::new();
     if !before_block.is_empty() {
@@ -1460,6 +1472,20 @@ async fn process_update(
                 &block,
                 router_overwrites_data.clone(),
                 None,
+            )
+            .await
+            .map_err(|(e, _, _)| e)?,
+        );
+    }
+    if !next_block.is_empty() {
+        results.extend(
+            simulate_swap_transaction_next_block(
+                &rpc_tools,
+                next_block,
+                &block,
+                router_overwrites_data.clone(),
+                None,
+                chain.block_time_secs(),
             )
             .await
             .map_err(|(e, _, _)| e)?,
@@ -2216,6 +2242,19 @@ fn simulates_before_block(protocol_system: &str) -> bool {
     pamm_venue(protocol_system).is_some()
 }
 
+/// Protocol systems whose quotes move with the block they execute in and that the decoder prices
+/// for the block after the update's, via `ProtocolSim::apply_block`. The v4 families stay out
+/// although the `pancakeswap_clalpha` hook implements it: their pools with VM hooks are priced on
+/// the update's block.
+const NEXT_BLOCK_PROTOCOLS: [&str; 5] =
+    ["aerodrome_slipstreams", "biconomy", "etherfi", "lido_v4", "lunarbase"];
+
+/// Whether a swap of `protocol_system` from a full block's update is simulated in the next block's
+/// context, the block its quote priced.
+fn executes_in_next_block(protocol_system: &str) -> bool {
+    NEXT_BLOCK_PROTOCOLS.contains(&protocol_system)
+}
+
 /// The block a Tenderly link replays a swap of `block` in. `None` keeps the link's default, the
 /// block after `block`, which matches a simulation on `block`'s own state. A swap simulated before
 /// `block` replays in `block` itself, on its parent's state.
@@ -2329,8 +2368,9 @@ mod tests {
     use tycho_simulation::tycho_common::models::Chain;
 
     use super::{
-        book_swap_directions, is_oracle_stale_revert, is_stale_quote, pamm_venue,
-        sample_swap_directions, should_fetch_block_by_number, Cli, TychoState,
+        book_swap_directions, executes_in_next_block, is_oracle_stale_revert, is_stale_quote,
+        pamm_venue, sample_swap_directions, should_fetch_block_by_number, Cli, PammVenue,
+        TychoState,
     };
 
     #[rstest]
@@ -2346,6 +2386,22 @@ mod tests {
         #[case] expected: Option<&str>,
     ) {
         assert_eq!(pamm_venue(protocol_system), expected);
+    }
+
+    #[rstest]
+    #[case::aerodrome_slipstreams("aerodrome_slipstreams", true)]
+    #[case::biconomy("biconomy", true)]
+    #[case::etherfi("etherfi", true)]
+    #[case::lido_v4("lido_v4", true)]
+    #[case::lunarbase("lunarbase", true)]
+    #[case::uniswap_v4("uniswap_v4", false)]
+    #[case::unlisted_native("uniswap_v3", false)]
+    #[case::vm("vm:curve", false)]
+    fn only_listed_protocols_execute_in_the_next_block(
+        #[case] protocol_system: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(executes_in_next_block(protocol_system), expected);
     }
 
     #[rstest]
@@ -2451,6 +2507,45 @@ mod tests {
             .map(|t| (t.protocol.as_str(), t.threshold))
             .collect();
         assert_eq!(parsed, [("lunarbase", 10.0), ("pancakeswap_infinity_cl", 3.0)]);
+    }
+
+    fn parse(extra: &[&str]) -> Result<Cli, clap::Error> {
+        let mut args = vec![
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+        ];
+        args.extend_from_slice(extra);
+        Cli::try_parse_from(args)
+    }
+
+    #[test]
+    fn pamm_defaults_to_none() {
+        assert_eq!(parse(&[]).unwrap().pamm, None);
+    }
+
+    #[test]
+    fn pamm_parses_comma_separated_venues() {
+        let cli = parse(&["--pamm", "metric,metric"]).unwrap();
+        assert_eq!(cli.pamm, Some(vec![PammVenue::Metric, PammVenue::Metric]));
+    }
+
+    #[test]
+    fn pamm_rejects_an_unknown_venue() {
+        let error = parse(&["--pamm", "metric,unknown"])
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn pamm_conflicts_with_disable_pamm() {
+        let error = parse(&["--pamm", "metric", "--disable-pamm"])
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
