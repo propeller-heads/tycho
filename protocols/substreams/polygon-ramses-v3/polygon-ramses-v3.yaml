@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "polygon_ramses_v3"
-  version: v0.1.0
+  version: v0.1.1
   url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/polygon-ramses-v3"
 
 network: polygon
