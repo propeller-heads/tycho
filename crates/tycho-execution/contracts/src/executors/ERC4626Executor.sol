@@ -6,7 +6,6 @@ import {
     SafeERC20,
     IERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {TransferManager} from "../TransferManager.sol";
 
@@ -14,6 +13,9 @@ error ERC4626Executor__InvalidDataLength();
 error ERC4626Executor__InvalidTarget();
 
 contract ERC4626Executor is IExecutor {
+    // tokenIn (20) + target (20)
+    uint256 private constant _DATA_LENGTH = 40;
+
     using SafeERC20 for IERC20;
 
     constructor() {}
@@ -28,7 +30,7 @@ contract ERC4626Executor is IExecutor {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -44,10 +46,10 @@ contract ERC4626Executor is IExecutor {
         }
 
         if (isRedeem) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             IERC4626(target).redeem(amountIn, receiver, address(this));
         } else {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             IERC4626(target).deposit(amountIn, receiver);
         }
     }
@@ -57,7 +59,7 @@ contract ERC4626Executor is IExecutor {
         pure
         returns (IERC20 tokenIn, address target)
     {
-        if (data.length != 40) {
+        if (data.length != _DATA_LENGTH) {
             revert ERC4626Executor__InvalidDataLength();
         }
         tokenIn = IERC20(address(bytes20(data[0:20])));
@@ -75,7 +77,7 @@ contract ERC4626Executor is IExecutor {
             bool outputToRouter
         )
     {
-        if (data.length != 40) {
+        if (data.length != _DATA_LENGTH) {
             revert ERC4626Executor__InvalidDataLength();
         }
         tokenIn = address(bytes20(data[0:20]));
