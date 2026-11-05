@@ -27,6 +27,8 @@ pub struct DirectionLimits {
     /// The input one unit past a hard limit, when the simulation rejected it as it must. Its
     /// execution must revert.
     pub past_limit: Option<BigUint>,
+    /// The error the simulation rejected that input with, for the logs.
+    pub past_limit_rejection: Option<String>,
     /// Every check that failed, with the reason.
     pub failures: Vec<(CheckId, String)>,
 }
@@ -69,6 +71,7 @@ pub fn check_direction(
         }
     };
 
+    let mut past_limit_rejection = None;
     let past_limit = if kind == LimitKind::Hard && !capped {
         let past = max_input + 1u32;
         match quote(past.clone()) {
@@ -84,13 +87,16 @@ pub fn check_direction(
                 ));
                 None
             }
-            Err(_) => Some(past),
+            Err(e) => {
+                past_limit_rejection = Some(e);
+                Some(past)
+            }
         }
     } else {
         None
     };
 
-    DirectionLimits { at_limit, past_limit, failures }
+    DirectionLimits { at_limit, past_limit, past_limit_rejection, failures }
 }
 
 #[cfg(test)]
