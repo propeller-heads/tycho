@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
-    process::Child,
     str::FromStr,
     sync::{Arc, LazyLock, RwLock},
     time::Duration,
@@ -68,7 +67,7 @@ use crate::{
     state_registry::{register_protocol, register_protocol_with_filter},
     stream, tvl_only,
     tycho_rpc::TychoClient,
-    tycho_runner::TychoRunner,
+    tycho_runner::{StreamingIndexer, TychoRunner},
     utils::{build_spkg, extract_initial_block},
 };
 
@@ -1017,7 +1016,16 @@ impl TestRunner {
                 }
             }
             if let Some(Ok(streamed)) = &mut streamed {
-                self.execute_streamed(streamed, config, &mut checks);
+                let executes_nothing = (!test.expected_components.is_empty() &&
+                    test.expected_components
+                        .iter()
+                        .all(|component| {
+                            component
+                                .execution_skip_reason()
+                                .is_some()
+                        }))
+                .then_some("every expected component skips execution");
+                self.execute_streamed(streamed, config, executes_nothing, &mut checks);
             }
             let rpc_server = tycho_runner.start_rpc_server();
             let result = match self
@@ -1063,6 +1071,17 @@ impl TestRunner {
                     run.and(outcome)
                 }
                 Err(e) => {
+                    // A stream that failed is the likelier cause of a range indexed short.
+                    let e = match &streamed {
+                        Some(Err(stream_error)) => {
+                            checks.fail(
+                                CheckId::StreamMatchesSnapshot,
+                                &miette!("the stream failed: {stream_error}"),
+                            );
+                            e.wrap_err(format!("after the stream failed: {stream_error}"))
+                        }
+                        Some(Ok(_)) | None => e,
+                    };
                     checks.fail(CheckId::Index, &e);
                     report.results.extend(checks.finish().1);
                     Err(e)
@@ -2365,11 +2384,19 @@ impl TestRunner {
             at_limit_failures.extend(execution_failure(&limits.at_limit, &|id, input| {
                 execution_mismatch(id, input, results, tolerance)
             }));
+            // At a block that only simulates, a queued swap is not executed there.
+            let not_executed_here = || Outcome::Skipped {
+                reason: "the swap is not executed at this block".to_string(),
+            };
+            let at_limit_unfailed = match (execute, &limits.at_limit) {
+                (false, Some(_)) => not_executed_here(),
+                (true, _) | (false, None) => limits.at_limit_unfailed(),
+            };
             checks.record_direction(
                 CheckId::LimitsAtLimit,
                 &limits.component,
                 &direction,
-                limits.at_limit_unfailed(),
+                at_limit_unfailed,
                 &at_limit_failures,
             );
 
@@ -2387,11 +2414,15 @@ impl TestRunner {
                     missing_revert(id, input, results)
                 }));
             }
+            let past_limit_unfailed = match (execute, &limits.past_limit) {
+                (false, Some(_)) => not_executed_here(),
+                (true, _) | (false, None) => limits.past_limit_unfailed(at_limit_executed),
+            };
             checks.record_direction(
                 CheckId::LimitsPastLimit,
                 &limits.component,
                 &direction,
-                limits.past_limit_unfailed(at_limit_executed),
+                past_limit_unfailed,
                 &past_limit_failures,
             );
 
@@ -2475,18 +2506,19 @@ impl TestRunner {
         test: &IntegrationTest,
         config: &IntegrationTestsConfig,
         declared_limits: &HashMap<(String, Direction), Limits>,
-        indexer: &mut Child,
+        indexer: &mut StreamingIndexer,
         checks: &mut Checks,
     ) -> miette::Result<Streamed> {
-        let mut exited = || {
-            indexer
-                .try_wait()
-                .map_or(true, |status| status.is_some())
-        };
+        let mut exited = || indexer.has_exited();
         let expected: HashSet<String> = test
             .expected_components
             .iter()
             .map(|component| component.base.id.to_lowercase())
+            .collect();
+        // The stream is judged on the components that simulate; one that skips simulation may
+        // not decode, and is dropped from the stream instead of failing it.
+        let simulated: HashSet<String> = simulated_ids(test)
+            .into_iter()
             .collect();
 
         // The indexer's server comes up before extraction starts; wait for it.
@@ -2547,7 +2579,7 @@ impl TestRunner {
             decoder_context,
             ComponentFilter::Ids(expected.iter().cloned().collect()),
         )
-        .skip_state_decode_failures(false)
+        .skip_state_decode_failures(true)
         .set_tokens(tokens)
         .await;
         let stream = builder
@@ -2570,6 +2602,7 @@ impl TestRunner {
         let mut latest: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
         let mut first = true;
         let mut reached_stop = false;
+        let mut last_block: Option<u64> = None;
         let mut idle = Duration::ZERO;
         loop {
             // The stream ends when the indexer has extracted the range and ended the
@@ -2599,6 +2632,15 @@ impl TestRunner {
             };
             idle = Duration::ZERO;
             let block = update.block_number;
+            // Every block of the range arrives, in order; a gap is a lost delta.
+            if let Some(last) = last_block.filter(|last| !first && block > last + 1) {
+                streamed.errors.push(format!(
+                    "blocks {}-{} never arrived in the stream",
+                    last + 1,
+                    block - 1
+                ));
+            }
+            last_block = Some(block);
             for (id, component) in &update.new_pairs {
                 if expected.contains(&id.to_lowercase()) {
                     components.insert(id.clone(), component.clone());
@@ -2607,7 +2649,7 @@ impl TestRunner {
             let changed: HashMap<String, Box<dyn ProtocolSim>> = update
                 .states
                 .iter()
-                .filter(|(id, _)| expected.contains(&id.to_lowercase()))
+                .filter(|(id, _)| simulated.contains(&id.to_lowercase()))
                 .map(|(id, state)| (id.clone(), state.clone_box()))
                 .collect();
             for (id, state) in &changed {
@@ -2682,7 +2724,17 @@ impl TestRunner {
             }
         }
 
-        // The directions that trade at the end of the stream, which the floor asks to see quoted.
+        if !reached_stop {
+            let indexer = if exited() { "; the indexer exited" } else { "" };
+            return Err(miette!(
+                "the stream ended at block {} before reaching the stop block {}{indexer}",
+                last_block.map_or_else(|| "none".to_string(), |block| block.to_string()),
+                test.stop_block
+            ));
+        }
+
+        // The directions of the simulated components that trade at the end of the stream, which
+        // the floor asks to see quoted; `latest` holds only simulated components.
         for (id, state) in &latest {
             let Some(component) = components.get(id) else {
                 continue;
@@ -2721,10 +2773,14 @@ impl TestRunner {
 
     /// Strict, after a streamed range: executes at the fewest simulated blocks, spread evenly,
     /// that meet the floor, and records the limit checks of every simulated block.
+    ///
+    /// With `executes_nothing`, the reason every component skips execution, nothing is executed,
+    /// and the execution ladder is recorded as skipped once.
     fn execute_streamed(
         &self,
         streamed: &mut Streamed,
         config: &IntegrationTestsConfig,
+        executes_nothing: Option<&str>,
         checks: &mut Checks,
     ) {
         let counts = |output: &SimulationOutput| {
@@ -2742,7 +2798,13 @@ impl TestRunner {
             .iter()
             .map(|(block, output)| stream::Candidate { block: *block, executions: counts(output) })
             .collect();
-        let to_execute = stream::blocks_to_execute(&candidates, stream::Floor::DEFAULT);
+        let to_execute = match executes_nothing {
+            Some(reason) => {
+                checks.skip(CheckId::ExecLadder, reason);
+                Vec::new()
+            }
+            None => stream::blocks_to_execute(&candidates, stream::Floor::DEFAULT),
+        };
         info!("Executing at {} of the {} simulated blocks", to_execute.len(), candidates.len());
 
         for (block, output) in std::mem::take(&mut streamed.simulated) {

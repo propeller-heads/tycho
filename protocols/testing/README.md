@@ -324,11 +324,11 @@ tolerance or not, so `measured` can be checked against a run.
 
 In strict mode, `range` streams the range while it is indexed; `--no-stream` turns it off. The
 runner starts the indexer with `--wait-for-subscriber`, so extraction starts only once the runner
-has subscribed, and every block reaches it: the indexer waits for room in the subscription's
-channel. Every block's deltas then go through tycho-client and the production decoder, as a
-consumer's would. The indexer also keeps every version (`--retention-horizon`), so the snapshot of
-a component created inside the range resolves at its block. The runner checks a sample of the
-blocks, not every one:
+has subscribed, and every block reaches it: the indexer waits for room in each subscription's
+channel, a resubscription's included. Every block's deltas then go through tycho-client and the
+production decoder. The client follows only the expected components, with a large buffer, and
+drops a component that does not decode, so a `skip_simulation` component that cannot decode does
+not fail the stream. The runner checks a sample of the blocks, not every one:
 
 | Every... | What runs | Cost |
 |---|---|---|
@@ -337,7 +337,18 @@ blocks, not every one:
 | of those, the fewest spread evenly that meet the floor below | `exec.ladder` and the limit executions | one node call per execution |
 
 Executions run after the stream ends, at each chosen block, so the stream never waits on the node.
-Checks at a streamed block carry its `block` in the report.
+Checks at a streamed block carry its `block` in the report. At a block that only simulates, the
+limit checks whose swap was queued are `skipped`, since nothing executed there. When every
+component skips execution, nothing is executed and `exec.ladder` is skipped.
+
+A stream that ends before the stop block, or skips a block, fails `stream.matches_snapshot`, naming
+the last block it reached or the missing blocks.
+
+The indexer keeps no version history (`run` takes the current time as its retention horizon), so
+the client's snapshot of a component created inside the range is read at the latest state, not at
+the creation block. A component that changes again before the client fetches its snapshot can
+therefore stream from a later state; `stream.matches_snapshot` then fails, so the race shows as a
+failure rather than a wrong pass.
 
 After the stream:
 
@@ -351,10 +362,10 @@ After the stream:
   | Measure | Floor |
   |---|---|
   | blocks in which an expected component changed | 20 |
-  | changed blocks per expected component | 2 |
+  | changed blocks per simulated component | 2 |
   | execution checks, in total | 100 |
   | execution checks per component with execution on | 10 |
-  | tradable directions quoted after a delta | all |
+  | tradable directions of the simulated components quoted after a delta | all |
 
   The report's `coverage` section has the counts per test.
 
