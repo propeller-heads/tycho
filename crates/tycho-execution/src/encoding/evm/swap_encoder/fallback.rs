@@ -151,6 +151,23 @@ impl FallbackProtocol {
             .get(&chain)
             .is_some_and(|protocols| protocols.contains(&self))
     }
+
+    /// Rejects this protocol when `chain`'s fallback routers do not run it: `router`, which names
+    /// the router in the error, would revert the swap.
+    pub(super) fn require_supported_on(
+        self,
+        chain: Chain,
+        router: &str,
+    ) -> Result<(), EncodingError> {
+        if self.supported_on(chain) {
+            return Ok(());
+        }
+        Err(EncodingError::InvalidInput(format!(
+            "Fallback protocol {} is not supported on {chain}: the chain's {router} would revert \
+             the swap",
+            self.user_data_name()
+        )))
+    }
 }
 
 /// The fallback protocol and its pool, from the swap's `user_data` JSON, e.g.
@@ -327,19 +344,6 @@ impl FallbackSwapEncoder {
                 ))
             })
     }
-
-    /// Rejects a protocol the chain's `TychoFallbackRouter` does not run.
-    fn reject_unsupported(&self, protocol: FallbackProtocol) -> Result<(), EncodingError> {
-        if !protocol.supported_on(self.chain) {
-            return Err(EncodingError::InvalidInput(format!(
-                "Fallback protocol {} is not supported on {}: the chain's TychoFallbackRouter \
-                 would revert the swap",
-                protocol.user_data_name(),
-                self.chain
-            )));
-        }
-        Ok(())
-    }
 }
 
 impl SwapEncoder for FallbackSwapEncoder {
@@ -357,7 +361,9 @@ impl SwapEncoder for FallbackSwapEncoder {
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
         let fallback = FallbackSwap::from_user_data(swap.user_data().as_ref())?;
-        self.reject_unsupported(fallback.protocol)?;
+        fallback
+            .protocol
+            .require_supported_on(self.chain, "TychoFallbackRouter")?;
         let pamm = bytes_to_address(&Self::pamm_address(swap)?)?;
         let token_in = bytes_to_address(&swap.token_in().address)?;
         let token_out = bytes_to_address(&swap.token_out().address)?;
