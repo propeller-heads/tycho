@@ -18,22 +18,26 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::evm::protocol::{
-    pancakeswap_infinity_bin::{
-        attributes::{
-            apply_reserve, decode_bin_id_attribute, decode_bool_attribute, decode_u16_attribute,
-            parse_bin_key,
-        },
-        math::{
-            bin::{
-                get_amounts_out, get_drain_amounts, get_liquidity, get_price_from_id, BinAmounts,
+use crate::{
+    evm::protocol::{
+        pancakeswap_infinity_bin::{
+            attributes::{
+                apply_reserve, decode_bin_id_attribute, decode_bool_attribute,
+                decode_u16_attribute, parse_bin_key,
             },
-            constants::{BIN_ID_COUNT, MAX_LIQUIDITY_PER_BIN, PIPS_DENOMINATOR},
-            fee::{calculate_swap_fee, protocol_fee_amount},
+            math::{
+                bin::{
+                    get_amounts_out, get_drain_amounts, get_liquidity, get_price_from_id,
+                    BinAmounts,
+                },
+                constants::{BIN_ID_COUNT, MAX_LIQUIDITY_PER_BIN},
+                fee::{calculate_swap_fee, protocol_fee_amount},
+            },
         },
+        u256_num::u256_to_f64,
+        utils::{add_fee_markup, uniswap::FEE_PIPS_DENOMINATOR as PIPS_DENOMINATOR},
     },
-    u256_num::u256_to_f64,
-    utils::add_fee_markup,
+    utils::decimals_exponent,
 };
 
 // Measured through the TychoRouter on a Base fork (`PancakeswapInfinityBinGas.t.sol`, which
@@ -346,6 +350,10 @@ impl ProtocolSim for PancakeswapInfinityBinState {
     /// The protocol fee is directional, so one number only exists when both halves agree. The
     /// trait allows a panic otherwise, as `uniswap_v4/state.rs` does. The pools indexed so far
     /// carry equal halves, e.g. 3 pips each on the Base USDC/USDT pool.
+    #[expect(
+        clippy::unimplemented,
+        reason = "fee() returns no error and the trait documents the panic for asymmetric fees"
+    )]
     fn fee(&self) -> f64 {
         if self.protocol_fee_zero_for_one != self.protocol_fee_one_for_zero {
             unimplemented!(
@@ -373,7 +381,7 @@ impl ProtocolSim for PancakeswapInfinityBinState {
 
         // `price` is y per x, already quote-per-base when base is the lower address.
         let (token0, token1) = if base_is_x { (base, quote) } else { (quote, base) };
-        let correction = 10f64.powi(token0.decimals as i32 - token1.decimals as i32);
+        let correction = 10f64.powi(decimals_exponent(token0.decimals, token1.decimals)?);
         let price = if base_is_x { price * correction } else { 1.0 / (price * correction) };
         let swap_fee = self.swap_fee(swap_for_y);
         Ok(add_fee_markup(price, swap_fee as f64 / f64::from(PIPS_DENOMINATOR)))
@@ -417,10 +425,10 @@ impl ProtocolSim for PancakeswapInfinityBinState {
     /// whose output rounds to zero still errors, as it does on chain.
     fn get_limits(
         &self,
-        token_in: Bytes,
-        token_out: Bytes,
+        sell_token: Bytes,
+        buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        let swap_for_y = token_in < token_out;
+        let swap_for_y = sell_token < buy_token;
         let bins = if swap_for_y {
             Either::Left(self.bins.range(..=self.active_id).rev())
         } else {
@@ -620,7 +628,7 @@ mod tests {
 
         let result = state.swap(true, 1_000_000).unwrap();
 
-        let mut expected = state.clone();
+        let mut expected = state;
         expected
             .bins
             .insert(REAL_ID_SHIFT, (999_997, 1_000_000_000 - 999_990));
@@ -745,7 +753,7 @@ mod tests {
             .swap(swap_for_y, 2_500_000_000)
             .unwrap();
 
-        let mut expected = state.clone();
+        let mut expected = state;
         expected.active_id = REAL_ID_SHIFT
             .checked_add_signed(final_offset)
             .unwrap();
@@ -1006,7 +1014,7 @@ mod tests {
 
         // The only bin pays out past `int128`, so nothing is quotable.
         let (max_in, max_out) = state
-            .get_limits(usdt().address.clone(), usdc().address.clone())
+            .get_limits(usdt().address, usdc().address)
             .unwrap();
         assert_eq!((max_in, max_out), (BigUint::ZERO, BigUint::ZERO));
     }
@@ -1142,7 +1150,7 @@ mod tests {
         );
 
         let (max_in, max_out) = state
-            .get_limits(usdc().address.clone(), usdt().address.clone())
+            .get_limits(usdc().address, usdt().address)
             .unwrap();
 
         // Everything on the output side is reachable, and the limit itself still quotes.
@@ -1180,7 +1188,7 @@ mod tests {
         let state = bin_state(REAL_ID_SHIFT, &bins);
 
         let (max_in, max_out) = state
-            .get_limits(usdc().address.clone(), usdt().address.clone())
+            .get_limits(usdc().address, usdt().address)
             .unwrap();
 
         assert_eq!(max_out, BigUint::from(expected_out));
@@ -1215,7 +1223,7 @@ mod tests {
         state.bin_step = 100;
 
         let (max_in, max_out) = state
-            .get_limits(usdt().address.clone(), usdc().address.clone())
+            .get_limits(usdt().address, usdc().address)
             .unwrap();
 
         assert_eq!(max_out, BigUint::from(1_000u64));
@@ -1242,7 +1250,7 @@ mod tests {
 
         assert_eq!(
             state
-                .get_limits(usdt().address.clone(), usdc().address.clone())
+                .get_limits(usdt().address, usdc().address)
                 .unwrap(),
             (BigUint::ZERO, BigUint::ZERO)
         );

@@ -112,7 +112,7 @@ pub fn parse_bin_key(key: &str) -> Result<(u32, Reserve), AttributeError> {
         .ok_or_else(|| AttributeError(format!("{key}: not a bins/{{id}}/reserve_* attribute")))?;
     let id: u32 = id
         .parse()
-        .map_err(|_| AttributeError(format!("{key}: bin id is not a u32")))?;
+        .map_err(|err| AttributeError(format!("{key}: bin id is not a u32: {err}")))?;
     if id >= BIN_ID_COUNT {
         return Err(AttributeError(format!("{key}: bin id is wider than the u24 on chain")));
     }

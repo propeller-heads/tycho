@@ -12,9 +12,6 @@ pub const SCALE: U256 = U256::from_limbs([0, 0, 1, 0]);
 /// Fee denominator. Fees reach this scale as `fee_pips * 1e12`.
 pub const PRECISION: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]);
 
-/// Pips denominator. LP and protocol fees are pips.
-pub(crate) use crate::evm::protocol::utils::uniswap::FEE_PIPS_DENOMINATOR as PIPS_DENOMINATOR;
-
 /// Scales pips to `PRECISION`: `1e18 / 1e6`. The fee helpers take pips and scale internally.
 pub const PIPS_TO_PRECISION: U256 = U256::from_limbs([1_000_000_000_000, 0, 0, 0]);
 

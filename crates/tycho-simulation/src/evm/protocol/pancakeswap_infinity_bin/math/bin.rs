@@ -26,7 +26,11 @@ pub fn get_base(bin_step: u16) -> U256 {
 ///
 /// [`PriceHelper.sol#L22-L27`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/PriceHelper.sol#L22-L27)
 pub fn get_price_from_id(id: u32, bin_step: u16) -> Result<U256, SimulationError> {
-    pow(get_base(bin_step), id as i32 - REAL_ID_SHIFT as i32)
+    let exponent =
+        i32::try_from(i64::from(id) - i64::from(REAL_ID_SHIFT)).map_err(|_wider_than_u24| {
+            SimulationError::InvalidInput(format!("bin id {id} exceeds u24"), None)
+        })?;
+    pow(get_base(bin_step), exponent)
 }
 
 /// One bin's contribution to a swap step.
@@ -156,8 +160,9 @@ pub fn get_liquidity(x: u128, y: u128, price: U256) -> Result<U256, SimulationEr
 
 /// Narrows a 256-bit intermediate, erroring where the Solidity's `safe128` reverts.
 fn to_u128(value: U256, what: &str) -> Result<u128, SimulationError> {
-    u128::try_from(value)
-        .map_err(|_| SimulationError::InvalidInput(format!("{what} exceeds u128: {value}"), None))
+    u128::try_from(value).map_err(|_wider_than_u128| {
+        SimulationError::InvalidInput(format!("{what} exceeds u128: {value}"), None)
+    })
 }
 
 #[cfg(test)]

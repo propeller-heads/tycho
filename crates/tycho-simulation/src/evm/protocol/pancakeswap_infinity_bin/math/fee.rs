@@ -8,8 +8,11 @@
 use alloy::primitives::U256;
 use tycho_common::simulation::errors::SimulationError;
 
-use super::constants::{PIPS_DENOMINATOR, PIPS_TO_PRECISION, PRECISION};
-use crate::evm::protocol::utils::solidity_math::{mul_div, mul_div_rounding_up};
+use super::constants::{PIPS_TO_PRECISION, PRECISION};
+use crate::evm::protocol::utils::{
+    solidity_math::{mul_div, mul_div_rounding_up},
+    uniswap::FEE_PIPS_DENOMINATOR as PIPS_DENOMINATOR,
+};
 
 /// Fee already contained in an amount, rounded up. Charged when the input is smaller than the bin
 /// can absorb.
@@ -18,8 +21,9 @@ use crate::evm::protocol::utils::solidity_math::{mul_div, mul_div_rounding_up};
 pub fn get_fee_amount_from(amount_with_fee: u128, fee_pips: u32) -> Result<u128, SimulationError> {
     let total_fee = U256::from(fee_pips) * PIPS_TO_PRECISION;
     let fee = mul_div_rounding_up(U256::from(amount_with_fee), total_fee, PRECISION)?;
-    u128::try_from(fee)
-        .map_err(|_| SimulationError::InvalidInput(format!("fee overflows u128: {fee}"), None))
+    u128::try_from(fee).map_err(|_wider_than_u128| {
+        SimulationError::InvalidInput(format!("fee overflows u128: {fee}"), None)
+    })
 }
 
 /// Fee to add on top of a net amount, rounded up. Charged on `max_amount_in`, which comes from a
@@ -39,8 +43,9 @@ pub fn get_fee_amount(amount: u128, fee_pips: u32) -> Result<u128, SimulationErr
     }
     let total_fee = U256::from(fee_pips) * PIPS_TO_PRECISION;
     let fee = mul_div_rounding_up(U256::from(amount), total_fee, PRECISION - total_fee)?;
-    u128::try_from(fee)
-        .map_err(|_| SimulationError::InvalidInput(format!("fee overflows u128: {fee}"), None))
+    u128::try_from(fee).map_err(|_wider_than_u128| {
+        SimulationError::InvalidInput(format!("fee overflows u128: {fee}"), None)
+    })
 }
 
 /// Swap fee in pips: protocol fee first, LP fee on the remainder. `protocol_fee` is the 12-bit
@@ -53,7 +58,12 @@ pub fn calculate_swap_fee(protocol_fee: u16, lp_fee: u32) -> u32 {
     let protocol_fee = u32::from(protocol_fee) & 0xfff;
     let lp_fee = lp_fee & 0xff_ffff;
     let numerator = u64::from(protocol_fee) * u64::from(lp_fee);
-    protocol_fee + lp_fee - (numerator / u64::from(PIPS_DENOMINATOR)) as u32
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a 12-bit times a 24-bit value over 1e6 is below 2^17"
+    )]
+    let overlap = (numerator / u64::from(PIPS_DENOMINATOR)) as u32;
+    protocol_fee + lp_fee - overlap
 }
 
 /// Protocol's cut of a bin's fee, rounded down. `protocol_fee` is the input side's half:
@@ -78,7 +88,7 @@ pub fn protocol_fee_amount(
         return Ok(fee_amount);
     }
     let share = mul_div(U256::from(fee_amount), U256::from(protocol_fee), U256::from(swap_fee))?;
-    u128::try_from(share).map_err(|_| {
+    u128::try_from(share).map_err(|_wider_than_u128| {
         SimulationError::InvalidInput(format!("protocol fee overflows u128: {share}"), None)
     })
 }

@@ -108,7 +108,7 @@ fn has_swap_hooks(parameters: &Bytes) -> Result<bool, InvalidSnapshotError> {
     let word: &[u8; 32] = parameters
         .as_ref()
         .try_into()
-        .map_err(|_| {
+        .map_err(|_not_32_bytes| {
             InvalidSnapshotError::ValueError(format!(
                 "parameters is {} bytes, expected 32",
                 parameters.len()
