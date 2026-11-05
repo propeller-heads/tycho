@@ -362,8 +362,9 @@ pool and the hop. Data shorter than 207 bytes reverts `TychoSubsidizingExecutor_
   would not count as output.
 
 Encoding (`src/encoding/evm/subsidy.rs`): `Solution::with_subsidy(SubsidyTerms)` makes the strategy encoders wrap one
-swap group in the subsidizing executor. `SubsidyTerms` documents which swap group can carry the subsidy, and
-`EncodedSolution::write_subsidy_signature` documents the signing order.
+swap group in the subsidizing executor. Any group but a wrap/unwrap can carry the subsidy; on a group that does not
+pay `token_out` the later swaps convert it. Encoding does not check that `min_amount_out` excludes the subsidy; the
+caller keeps it there. `EncodedSolution::write_subsidy_signature` documents the signing order.
 
 - The encoder does not sign. It writes a 65-byte zero signature, which the payer skips as `InvalidSignature`.
 - The executor address is the `subsidy` entry of `config/executor_addresses.json`; the payer is `payer_address` under
