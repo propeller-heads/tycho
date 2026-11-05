@@ -25,6 +25,9 @@ export LIQUORICE_KEY=<your-liquorice-key>
 
 export NATIVE_API_KEY=<your-native-api-key>
 
+# Euclid's gateway is public and needs no key
+export EUCLID_ENABLED=true
+
 export METRIC_API_KEY=<your-metric-trading-key>
 ```
 
@@ -44,7 +47,7 @@ so the example works with no RFQ credentials at all. Pass `--disable-pamm` to le
 cargo run --release --example book_quickstart -- --disable-pamm
 ```
 
-`--all-pairs` builds the four RFQ venues as one component per venue instead of one per book, which
+`--all-pairs` builds the five RFQ venues as one component per venue instead of one per book, which
 is the layout a router uses to hold a route to the quotes a venue will sign for it:
 
 ```bash
@@ -74,7 +77,9 @@ export RPC_URL=<your-rpc-url>
 ## Important Notes
 
 - **Credentials**: Contact each venue directly to obtain API credentials for accessing its live
-  book. The pAMM feeds need only `METRIC_API_KEY`; `--disable-pamm` leaves them out.
+  book. Euclid's is public: `EUCLID_ENABLED=true` turns it on, and `EUCLID_API_URL` and
+  `EUCLID_API_KEY` point it at another gateway and authenticate binding quotes where that gateway
+  asks for a key. The pAMM feeds need only `METRIC_API_KEY`; `--disable-pamm` leaves them out.
 
 ## What you'll see
 
