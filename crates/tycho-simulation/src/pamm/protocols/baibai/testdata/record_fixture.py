@@ -35,7 +35,10 @@ BASES = [
     ("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf", 8),
 ]
 
-ENV = {**os.environ, "ETH_RPC_URL": os.environ.get("BASE_RPC_URL", "https://mainnet.base.org")}
+RPC_URL = os.environ.get("BASE_RPC_URL")
+if not RPC_URL:
+    sys.exit("BASE_RPC_URL is not set: point it at a Base JSON-RPC node")
+ENV = {**os.environ, "ETH_RPC_URL": RPC_URL}
 
 
 def cast(*args: str) -> str:
@@ -44,7 +47,8 @@ def cast(*args: str) -> str:
         if result.returncode == 0:
             return result.stdout.strip()
         time.sleep(1.5 * (attempt + 1))
-    raise RuntimeError(result.stderr.strip())
+    # cast quotes the URL it failed on, and a node URL commonly carries a key.
+    raise RuntimeError(result.stderr.strip().replace(RPC_URL, "<rpc url>"))
 
 
 def call(block: int, *args: str) -> list[int]:

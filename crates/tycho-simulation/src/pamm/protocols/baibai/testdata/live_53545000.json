@@ -1,0 +1,451 @@
+{
+ "block": 53545000,
+ "timestamp": 1793879347,
+ "taker": "0xAbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67",
+ "quote": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+ "ttl": 8,
+ "c_unit": "1",
+ "available_quote": "97486458738",
+ "pairs": [
+  {
+   "base": "0x4200000000000000000000000000000000000006",
+   "decimals": 18,
+   "valid_until": 1793879354,
+   "available_base": "12382130688430583387",
+   "fee_pips": 0,
+   "pair": {
+    "seq": 3050492,
+    "fill_seq": 154380,
+    "last_update_at": 1793879347,
+    "mid": "2417070000",
+    "q_unit": "10000000000",
+    "ask": {
+     "spread_bps": 0,
+     "depth_bps": 10000,
+     "filled": "0",
+     "knots": [
+      [
+       41370000,
+       37233
+      ],
+      [
+       103410000,
+       266781
+      ],
+      [
+       310150000,
+       2892379
+      ],
+      [
+       516900000,
+       5559454
+      ],
+      [
+       640910000,
+       7307995
+      ]
+     ]
+    },
+    "bid": {
+     "spread_bps": 0,
+     "depth_bps": 10000,
+     "filled": "0",
+     "knots": [
+      [
+       41370000,
+       33096
+      ],
+      [
+       103430000,
+       256512
+      ],
+      [
+       310310000,
+       1166784
+      ],
+      [
+       517210000,
+       2118524
+      ],
+      [
+       1344850000,
+       6918836
+      ]
+     ]
+    }
+   },
+   "cases": [
+    {
+     "sell_base": true,
+     "amount_in": "1",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "1000000000000",
+     "amount_out": "2416",
+     "fee": "0",
+     "curve_out": "2416"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "100000000000000",
+     "amount_out": "241699",
+     "fee": "0",
+     "curve_out": "241699"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "10000000000000000",
+     "amount_out": "24169900",
+     "fee": "0",
+     "curve_out": "24169900"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "100000000000000000",
+     "amount_out": "241699000",
+     "fee": "0",
+     "curve_out": "241699000"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "300000000000000000",
+     "amount_out": "725097000",
+     "fee": "0",
+     "curve_out": "725097000"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "1000000000000000000",
+     "amount_out": "2416825836",
+     "fee": "0",
+     "curve_out": "2416825836"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "2000000000000000000",
+     "amount_out": "4833458580",
+     "fee": "0",
+     "curve_out": "4833458580"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "5000000000000000000",
+     "amount_out": "12083310642",
+     "fee": "0",
+     "curve_out": "12083310642"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "100000000000000000000",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "1",
+     "amount_out": "413708649",
+     "fee": "0",
+     "curve_out": "413708649"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "10",
+     "amount_out": "4137086498",
+     "fee": "0",
+     "curve_out": "4137086498"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "1000",
+     "amount_out": "413708649820",
+     "fee": "0",
+     "curve_out": "413708649820"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "100000",
+     "amount_out": "41370864982045",
+     "fee": "0",
+     "curve_out": "41370864982045"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "1000000",
+     "amount_out": "413708649820450",
+     "fee": "0",
+     "curve_out": "413708649820450"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "100000000",
+     "amount_out": "41370864982045044",
+     "fee": "0",
+     "curve_out": "41370864982045044"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "1000000000",
+     "amount_out": "413708648818584949",
+     "fee": "0",
+     "curve_out": "413708648818584949"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "3000000000",
+     "amount_out": "1240953102541412704",
+     "fee": "0",
+     "curve_out": "1240953102541412704"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "10000000000",
+     "amount_out": "4135492050811293603",
+     "fee": "0",
+     "curve_out": "4135492050811293603"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "20000000000",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "50000000000",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "1000000000000",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    }
+   ]
+  },
+  {
+   "base": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+   "decimals": 8,
+   "valid_until": 1793879353,
+   "available_base": "38402748",
+   "fee_pips": 0,
+   "pair": {
+    "seq": 768999,
+    "fill_seq": 28564,
+    "last_update_at": 1793879347,
+    "mid": "802645300000000000000",
+    "q_unit": "1",
+    "ask": {
+     "spread_bps": 0,
+     "depth_bps": 10000,
+     "filled": "0",
+     "knots": [
+      [
+       3100000,
+       364250
+      ],
+      [
+       6210000,
+       754866
+      ],
+      [
+       12430000,
+       1735760
+      ],
+      [
+       15540000,
+       2413429
+      ]
+     ]
+    },
+    "bid": {
+     "spread_bps": 0,
+     "depth_bps": 10000,
+     "filled": "0",
+     "knots": [
+      [
+       3100000,
+       363940
+      ],
+      [
+       6210000,
+       753934
+      ],
+      [
+       12440000,
+       1735159
+      ],
+      [
+       15550000,
+       2412206
+      ]
+     ]
+    }
+   },
+   "cases": [
+    {
+     "sell_base": true,
+     "amount_in": "1",
+     "amount_out": "801",
+     "fee": "0",
+     "curve_out": "801"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "100",
+     "amount_out": "80252",
+     "fee": "0",
+     "curve_out": "80252"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "10000",
+     "amount_out": "8025279",
+     "fee": "0",
+     "curve_out": "8025279"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "1000000",
+     "amount_out": "802527900",
+     "fee": "0",
+     "curve_out": "802527900"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "10000000",
+     "amount_out": "8025102141",
+     "fee": "0",
+     "curve_out": "8025102141"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "30000000",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "100000000",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "200000000",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "500000000",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    },
+    {
+     "sell_base": true,
+     "amount_in": "10000000000",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "1",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "10",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "1000",
+     "amount_out": "1",
+     "fee": "0",
+     "curve_out": "1"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "100000",
+     "amount_out": "124",
+     "fee": "0",
+     "curve_out": "124"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "1000000",
+     "amount_out": "1245",
+     "fee": "0",
+     "curve_out": "1245"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "100000000",
+     "amount_out": "124569",
+     "fee": "0",
+     "curve_out": "124569"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "1000000000",
+     "amount_out": "1245697",
+     "fee": "0",
+     "curve_out": "1245697"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "3000000000",
+     "amount_out": "3737087",
+     "fee": "0",
+     "curve_out": "3737087"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "10000000000",
+     "amount_out": "12456633",
+     "fee": "0",
+     "curve_out": "12456633"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "20000000000",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "50000000000",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    },
+    {
+     "sell_base": false,
+     "amount_in": "1000000000000",
+     "amount_out": "0",
+     "fee": "0",
+     "curve_out": "0"
+    }
+   ]
+  }
+ ]
+}

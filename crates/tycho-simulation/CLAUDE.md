@@ -151,8 +151,8 @@ for any protocol indexed by Tycho.
   the pool, no binding quote (Metric and BaiBai; their states do not implement
   `IndicativelyPriced`, and each client is held by the feed alone rather than by every state).
   Metric polls the venue's API; BaiBai reads its on-chain curve over JSON-RPC (two Multicall3
-  calls per poll) and prices it with the contract's arithmetic, and its router fee is a constant
-  in its `mod.rs`.
+  calls per poll) and prices it with the contract's arithmetic, at the fee the entrypoint
+  reports for Tycho's router (`TAKER` in its `mod.rs`), read every poll.
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
   it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the

@@ -1,7 +1,14 @@
 //! BaiBai's book feed: polls the Base deployment over JSON-RPC and publishes every poll as a
 //! complete [`BookSnapshot`].
 
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use alloy::primitives::Address;
 use chrono::DateTime;
@@ -19,7 +26,7 @@ use crate::{
         reader::{BaibaiReader, BookRead, PairRead},
         state::BaibaiState,
         Deployment, BASE_ATTRIBUTE, BASE_DEPLOYMENT, BASE_LISTED_BASES, PROTOCOL_SYSTEM,
-        PROTOCOL_TYPE, QUOTE_ATTRIBUTE, ROUTER_FEE_PIPS,
+        PROTOCOL_TYPE, QUOTE_ATTRIBUTE,
     },
     snapshot_feed::{
         errors::FeedError,
@@ -31,6 +38,10 @@ use crate::{
 /// Base's block time. A curve that expires before the next block can no longer be filled by a
 /// swap priced from it, so it is not published.
 const NEXT_BLOCK_SECONDS: u64 = 2;
+
+/// How far a read's block may trail the wall clock: two Base blocks. Past it the node is lagging,
+/// and curves it reports live may already have expired on chain.
+const MAX_BLOCK_LAG_SECONDS: u64 = 4;
 
 /// BaiBai's book feed. Built through [`BaibaiFeedBuilder`]. Neither its `Debug` output nor its
 /// errors carry the RPC URL, which commonly carries a key.
@@ -94,7 +105,8 @@ impl BaibaiFeedBuilder {
     }
 
     /// Fails for a chain other than Base, the only one BaiBai is deployed on, for an RPC URL
-    /// that is not one, and for bases that are not addresses.
+    /// that is not one, and for bases that are not addresses. The node's chain is checked on
+    /// every poll, which fails fatally when the node serves another one.
     pub fn build(self) -> Result<BaibaiFeed, FeedError> {
         if self.book_config.chain != Chain::Base {
             return Err(FeedError::InvalidInput(format!(
@@ -118,14 +130,17 @@ impl BaibaiFeedBuilder {
             source: BaibaiBookSource {
                 reader: BaibaiReader::new(rpc_url, deployment, bases),
                 assembler: BaibaiBookAssembler { book_config: self.book_config, deployment },
+                clock: Arc::new(unix_now),
+                last_block: Arc::new(AtomicU64::new(0)),
             },
         })
     }
 }
 
 fn address(bytes: &Bytes, what: &str) -> Result<Address, FeedError> {
-    Address::try_from(bytes.as_ref())
-        .map_err(|_| FeedError::InvalidInput(format!("BaiBai {what} {bytes} is not an address")))
+    Address::try_from(bytes.as_ref()).map_err(|e| {
+        FeedError::InvalidInput(format!("BaiBai {what} {bytes} is not an address: {e}"))
+    })
 }
 
 impl SnapshotFeed for BaibaiFeed {
@@ -141,21 +156,53 @@ impl SnapshotFeed for BaibaiFeed {
 }
 
 /// One poll: every configured pair read from the chain and turned into books.
-#[derive(Debug, Clone)]
+#[derive(Clone, derive_more::Debug)]
 pub(super) struct BaibaiBookSource {
     pub(super) reader: BaibaiReader,
     pub(super) assembler: BaibaiBookAssembler,
+    /// The current Unix time in seconds.
+    #[debug(skip)]
+    pub(super) clock: Arc<dyn Fn() -> u64 + Send + Sync>,
+    /// The newest block a poll has read, so that a node answering from an older one is caught.
+    pub(super) last_block: Arc<AtomicU64>,
 }
 
 impl HttpSource for BaibaiBookSource {
     type Snapshot = BookSnapshot<ReceivedAt>;
 
-    /// A read that fails fails the poll. Pairs the read returns but no book can be made of are
-    /// left out of it, so a poll whose every curve has expired withdraws every pair.
+    /// A read that fails fails the poll, and so does one from a block older than a previous
+    /// poll's or more than [`MAX_BLOCK_LAG_SECONDS`] behind the wall clock: a load-balanced or
+    /// lagging node would otherwise roll the books back or publish curves expired on chain.
+    /// Pairs the read returns but no book can be made of are left out of it, so a poll whose
+    /// every curve has expired withdraws every pair.
     async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
         let read = self.reader.read().await?;
-        Ok(BookSnapshot::received_now(self.assembler.books(&read)))
+        let now = (self.clock)();
+        if now > read.timestamp + MAX_BLOCK_LAG_SECONDS {
+            return Err(FeedError::Connection(format!(
+                "BaiBai node is {} s behind: its latest block {} is from {}",
+                now - read.timestamp,
+                read.block_number,
+                read.timestamp
+            )));
+        }
+        let newest = self
+            .last_block
+            .fetch_max(read.block_number, Ordering::Relaxed);
+        if read.block_number < newest {
+            return Err(FeedError::Connection(format!(
+                "BaiBai node answered from block {}, older than block {newest} already read",
+                read.block_number
+            )));
+        }
+        Ok(BookSnapshot::received_now(self.assembler.books(&read, now)))
     }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// Turns one [`BookRead`] into books: one per pair between served tokens that clears the TVL
@@ -167,10 +214,12 @@ pub(super) struct BaibaiBookAssembler {
 }
 
 impl BaibaiBookAssembler {
-    pub(super) fn books(&self, read: &BookRead) -> Books {
+    /// The books of `read`, judging expiry at `now` (Unix seconds) or the read's block timestamp,
+    /// whichever is later.
+    pub(super) fn books(&self, read: &BookRead, now: u64) -> Books {
         let mut books = Books::new();
         for pair in &read.pairs {
-            let Some(state) = self.state(read, pair) else {
+            let Some(state) = self.state(read, pair, now.max(read.timestamp)) else {
                 continue;
             };
             let base = state.base_token.address.clone();
@@ -202,19 +251,16 @@ impl BaibaiBookAssembler {
     }
 
     /// The pair's state, or `None`, logged, when its tokens are not served, its curve expires
-    /// before the next block or the chain reports it malformed.
-    fn state(&self, read: &BookRead, pair: &PairRead) -> Option<BaibaiState> {
+    /// before the block after `now` or the chain reports it malformed.
+    fn state(&self, read: &BookRead, pair: &PairRead, now: u64) -> Option<BaibaiState> {
         let base = Bytes::from(pair.base.to_vec());
         let quote = Bytes::from(self.deployment.quote.to_vec());
         let (base_token, quote_token) = self
             .book_config
             .pair_tokens(&base, &quote)?;
         let expires_at = expiry(pair.valid_until, pair.last_update_at, read.ttl);
-        if expires_at <
-            read.timestamp
-                .saturating_add(NEXT_BLOCK_SECONDS)
-        {
-            debug!(%base, expires_at, block_timestamp = read.timestamp, "skipping expiring curve");
+        if expires_at < now.saturating_add(NEXT_BLOCK_SECONDS) {
+            debug!(%base, expires_at, now, "skipping expiring curve");
             return None;
         }
         let state = BaibaiState {
@@ -226,7 +272,7 @@ impl BaibaiBookAssembler {
             ask: pair.ask.clone(),
             bid: pair.bid.clone(),
             available: [pair.available_base, read.available_quote],
-            fee_pips: ROUTER_FEE_PIPS,
+            fee_pips: pair.fee_pips,
         };
         match state.validated() {
             Ok(state) => Some(state),
@@ -248,7 +294,7 @@ impl BaibaiBookAssembler {
 fn tvl_usd(state: &BaibaiState) -> f64 {
     let (base, quote) = (&state.base_token, &state.quote_token);
     let mid = sim::to_human(&u256_to_biguint(state.mid), 18) *
-        10f64.powi(base.decimals as i32 - quote.decimals as i32);
+        10f64.powf(f64::from(base.decimals) - f64::from(quote.decimals));
     sim::to_human(&u256_to_biguint(state.available[1]), quote.decimals) +
         sim::to_human(&u256_to_biguint(state.available[0]), base.decimals) * mid
 }
@@ -266,15 +312,16 @@ fn expiry(valid_until: u64, last_update_at: u64, ttl: u64) -> u64 {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use alloy::primitives::Address;
+    use alloy::{primitives::Address, sol_types::SolCall};
     use rstest::rstest;
     use tycho_common::models::token::Token;
 
     use super::*;
     use crate::{
         book::{chain_without_id, Book},
-        pamm::protocols::baibai::test_support::{
-            book_config, bytes, cbbtc, state, token, weth, FakeNode,
+        pamm::protocols::baibai::{
+            reader::{taker_fee_call, ttlCall},
+            test_support::{book_config, bytes, cbbtc, state, token, weth, FakeNode},
         },
     };
 
@@ -284,22 +331,21 @@ mod tests {
             .unwrap()
     }
 
+    /// The books one poll of `node` publishes, with the wall clock at the node's block timestamp.
     async fn fetch(
         node: FakeNode,
         book_config: BookFeedConfig,
         bases: Option<Vec<Address>>,
     ) -> Result<HashMap<String, Book>, FeedError> {
+        let now = node.timestamp;
         let server = node.spawn().await;
         let mut builder = BaibaiFeedBuilder::new(book_config, server.url());
         if let Some(bases) = bases {
             builder = builder.bases(bases.into_iter().map(bytes).collect());
         }
-        let snapshot = builder
-            .build()
-            .unwrap()
-            .source
-            .fetch()
-            .await?;
+        let mut source = builder.build().unwrap().source;
+        source.clock = Arc::new(move || now);
+        let snapshot = source.fetch().await?;
         Ok(Arc::try_unwrap(snapshot.books).unwrap())
     }
 
@@ -314,7 +360,7 @@ mod tests {
     }
 
     /// One book per listed pair, labelled for BaiBai's encoder, holding the recorded curve priced
-    /// with the configured router fee.
+    /// with the fee the entrypoint reports for Tycho's router: zero since its whitelist.
     #[tokio::test]
     async fn every_listed_pair_is_published_as_a_book() {
         let node = FakeNode::new();
@@ -330,10 +376,116 @@ mod tests {
             assert_eq!(book.component.protocol_system, "baibai");
             assert_eq!(book.component.static_attributes["base"], base);
             assert_eq!(book.component.static_attributes["quote"], quote_token().address);
-            assert_eq!(book.updated_at.unwrap().timestamp() as u64, pair.pair.last_update_at);
-            let expected = BaibaiState { fee_pips: ROUTER_FEE_PIPS, ..state(&fixture, pair) };
-            assert!(book.state.eq(&expected), "{:?}", book.state);
+            let updated_at = book.updated_at.unwrap().timestamp();
+            assert_eq!(u64::try_from(updated_at).unwrap(), pair.pair.last_update_at);
+            assert!(book.state.eq(&state(&fixture, pair)), "{:?}", book.state);
+            assert_eq!(book.state.fee(), 0.0);
         }
+    }
+
+    /// The fee is read for each pair every poll, so a change the venue makes reaches the books.
+    #[tokio::test]
+    async fn the_books_carry_the_fee_the_entrypoint_reports() {
+        let mut node = FakeNode::new();
+        node.fixture.pairs[0].fee_pips = 50;
+
+        let books = books(node, book_config()).await;
+
+        let weth_book = pair_component_id(PROTOCOL_SYSTEM, &bytes(weth()), &quote_token().address);
+        assert_eq!(
+            books[&weth_book.to_string()]
+                .state
+                .fee(),
+            0.00005
+        );
+    }
+
+    /// After an upgrade that removes a getter the feed reads, no later poll can succeed.
+    #[rstest]
+    #[case::a_settings_getter(ttlCall::SELECTOR)]
+    #[case::the_taker_fee_getter(taker_fee_call(Address::ZERO)[..4].try_into().unwrap())]
+    #[tokio::test]
+    async fn a_reverting_getter_ends_the_feed(#[case] selector: [u8; 4]) {
+        let mut node = FakeNode::new();
+        node.reverting.push(selector);
+
+        let error = fetch(node, book_config(), None)
+            .await
+            .unwrap_err();
+
+        assert!(error.is_fatal(), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_node_on_another_chain_ends_the_feed() {
+        let mut node = FakeNode::new();
+        node.chain_id = 1;
+
+        let error = fetch(node, book_config(), None)
+            .await
+            .unwrap_err();
+
+        assert!(error.is_fatal(), "{error}");
+        assert!(error.to_string().contains("chain 1"), "{error}");
+    }
+
+    /// A load-balanced provider can answer from a block older than one already read; publishing
+    /// it would roll the books back.
+    #[tokio::test]
+    async fn a_read_older_than_the_last_one_fails_the_poll() {
+        let node = FakeNode::new();
+        let now = node.timestamp;
+        let mut older = node.clone();
+        older.block -= 1;
+        let (newer, older) = (node.spawn().await, older.spawn().await);
+        let mut source = feed(&newer.url(), book_config()).source;
+        source.clock = Arc::new(move || now);
+        source.fetch().await.unwrap();
+        let mut replica = feed(&older.url(), book_config()).source;
+        replica.clock = Arc::new(move || now);
+        replica.last_block = Arc::clone(&source.last_block);
+
+        let error = replica.fetch().await.unwrap_err();
+
+        assert!(matches!(error, FeedError::Connection(_)), "{error}");
+        source.fetch().await.unwrap();
+    }
+
+    /// The books of one poll of `node` with the wall clock `lag` seconds past its block.
+    async fn fetch_behind(node: FakeNode, lag: u64) -> Result<usize, FeedError> {
+        let now = node.timestamp + lag;
+        let server = node.spawn().await;
+        let mut source = feed(&server.url(), book_config()).source;
+        source.clock = Arc::new(move || now);
+        Ok(source.fetch().await?.books.len())
+    }
+
+    /// A node whose latest block trails the wall clock by more than two blocks is lagging: its
+    /// curves may have expired on chain.
+    #[tokio::test]
+    async fn a_lagging_node_fails_the_poll() {
+        assert_eq!(
+            fetch_behind(FakeNode::new(), 4)
+                .await
+                .unwrap(),
+            2
+        );
+
+        let error = fetch_behind(FakeNode::new(), 5)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, FeedError::Connection(_)), "{error}");
+    }
+
+    /// Within the lag a node is allowed, a curve is judged at the wall clock: cbBTC's, cut to
+    /// five seconds, is still live in the block after the node's but not in the one after now.
+    #[tokio::test]
+    async fn curves_are_judged_at_the_wall_clock_when_the_node_trails_it() {
+        let mut node = FakeNode::new();
+        node.fixture.pairs[1].valid_until = node.timestamp + 5;
+
+        assert_eq!(fetch_behind(node, 4).await.unwrap(), 1);
     }
 
     /// A base the book never listed reads as an empty pair, and one that is no token at all makes
@@ -371,10 +523,12 @@ mod tests {
     }
 
     /// A curve that expires before the next block cannot fill a swap priced from it. The
-    /// recording's curves run until `validUntil`, six seconds after their update.
+    /// recording's curves run until `validUntil`, six (cbBTC) and seven (WETH) seconds after
+    /// their update.
     #[rstest]
     #[case::fresh(0, 2)]
-    #[case::expiring_before_the_next_block(5, 0)]
+    #[case::one_expiring_before_the_next_block(5, 1)]
+    #[case::both_expiring_before_the_next_block(6, 0)]
     #[tokio::test]
     async fn curves_expiring_before_the_next_block_are_withdrawn(
         #[case] seconds_later: u64,

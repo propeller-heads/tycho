@@ -1,30 +1,31 @@
 //! Reads every configured BaiBai pair over JSON-RPC, all at one block.
 //!
-//! A read is two `Multicall3.aggregate3` calls: one at the latest block for its number and
-//! timestamp, the deployment's wiring, the book's settings, custody and each pair's parameters,
-//! then one pinned to that block for the knots those parameters say each side holds.
+//! A read is two `Multicall3.aggregate3` calls: one at the latest block for its number,
+//! timestamp and chain id, the deployment's wiring, the book's settings, custody and each pair's
+//! parameters and taker fee, then one pinned to that block for the knots those parameters say each
+//! side holds.
 
 use alloy::{
     eips::BlockId,
     primitives::{Address, Bytes as AlloyBytes, U256},
     providers::{
         bindings::IMulticall3::{
-            aggregate3Call, getBlockNumberCall, getCurrentBlockTimestampCall, Call3,
-            Result as Call3Result,
+            aggregate3Call, getBlockNumberCall, getChainIdCall, getCurrentBlockTimestampCall,
+            Call3, Result as Call3Result,
         },
         Provider, RootProvider, MULTICALL3_ADDRESS,
     },
     rpc::types::{TransactionInput, TransactionRequest},
     sol,
-    sol_types::SolCall,
+    sol_types::{SolCall, SolValue},
 };
 use reqwest::Url;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::{
     pamm::protocols::baibai::{
         math::{Knot, Side},
-        Deployment,
+        Deployment, TAKER,
     },
     snapshot_feed::errors::FeedError,
 };
@@ -62,6 +63,11 @@ sol! {
     function availableLiquidity(address token) external view returns (uint256);
 }
 
+/// The entrypoint's fee for a taker and base, in millionths of the gross output: an unnamed view
+/// of the unverified implementation, taking `(address taker, address base)` and identified by its
+/// storage reads matching `quoteFor`'s fee lookup.
+const TAKER_FEE_SELECTOR: [u8; 4] = [0xa5, 0xcb, 0xd1, 0xb7];
+
 /// `CurveBook.knot`'s side index of the ask and the bid.
 const ASK_SIDE: u8 = 0;
 const BID_SIDE: u8 = 1;
@@ -76,6 +82,9 @@ pub(super) struct PairRead {
     pub mid: U256,
     pub q_unit: U256,
     pub available_base: U256,
+    /// The entrypoint's fee for [`TAKER`], in millionths of the gross output; `u32::MAX` when the
+    /// chain reports one that does not fit.
+    pub fee_pips: u32,
     pub ask: Side,
     pub bid: Side,
 }
@@ -116,18 +125,21 @@ impl BaibaiReader {
 
     /// Reads every configured base at the latest block. A base the book has never listed, and one
     /// whose calls revert (an address that is no token), is left out; the other pairs are read.
-    /// Fails fatally when the deployment's contracts no longer point at each other the way this
-    /// integration was built for, since no later read will either.
+    /// Fails fatally when the node serves another chain, or when the deployment no longer answers
+    /// the way this integration was built for (its contracts point elsewhere, or a getter it
+    /// reads reverts), since no later read will either.
     pub(super) async fn read(&self) -> Result<BookRead, FeedError> {
-        let settings = self.settings_calls();
-        let mut first = settings.clone();
+        let mut first = Vec::new();
+        for (_, settings_call) in self.settings_calls() {
+            first.push(settings_call);
+        }
         for base in &self.bases {
             first.extend(self.pair_calls(*base));
         }
         let answers = self
             .aggregate(first, BlockId::latest())
             .await?;
-        let (settings_answers, pair_answers) = answers.split_at(settings.len());
+        let (settings_answers, pair_answers) = answers.split_at(SETTINGS_CALLS);
         let mut read = self.decode_settings(settings_answers)?;
 
         let mut listed = Vec::new();
@@ -145,9 +157,12 @@ impl BaibaiReader {
         for (pair, view) in &listed {
             second.extend(self.knot_calls(pair.base, view));
         }
-        let answers = self
-            .aggregate(second, BlockId::number(read.block_number))
-            .await?;
+        let answers = if second.is_empty() {
+            Vec::new()
+        } else {
+            self.aggregate(second, BlockId::number(read.block_number))
+                .await?
+        };
         let mut answers = answers.iter();
         for (mut pair, view) in listed {
             let ask = read_knots(&mut answers, view.ask.knotCount)?;
@@ -163,44 +178,72 @@ impl BaibaiReader {
         Ok(read)
     }
 
-    /// The block, the deployment's wiring, the book's settings and the quote token's custody.
-    fn settings_calls(&self) -> Vec<Call3> {
-        let Deployment { entrypoint, curve_book, custodian, quote } = self.deployment;
-        vec![
-            call(MULTICALL3_ADDRESS, getBlockNumberCall {}.abi_encode(), false),
-            call(MULTICALL3_ADDRESS, getCurrentBlockTimestampCall {}.abi_encode(), false),
-            call(entrypoint, curveBookCall {}.abi_encode(), false),
-            call(entrypoint, custodianCall {}.abi_encode(), false),
-            call(entrypoint, quoteTokenCall {}.abi_encode(), false),
-            call(curve_book, quoteTokenCall {}.abi_encode(), false),
-            call(curve_book, ttlCall {}.abi_encode(), false),
-            call(curve_book, cUnitCall {}.abi_encode(), false),
-            call(custodian, availableLiquidityCall { token: quote }.abi_encode(), false),
+    /// The block and chain, the deployment's wiring, the book's settings and the quote token's
+    /// custody, each with the getter's name. Multicall3's own views cannot revert; the
+    /// deployment's may, after an upgrade, and are allowed to so that [`Self::decode_settings`]
+    /// can tell that apart from a node that failed.
+    fn settings_calls(&self) -> [(&'static str, Call3); SETTINGS_CALLS] {
+        let Deployment { entrypoint, curve_book, custodian, quote, .. } = self.deployment;
+        [
+            ("block number", call(MULTICALL3_ADDRESS, getBlockNumberCall {}.abi_encode(), false)),
+            (
+                "block timestamp",
+                call(MULTICALL3_ADDRESS, getCurrentBlockTimestampCall {}.abi_encode(), false),
+            ),
+            ("chain id", call(MULTICALL3_ADDRESS, getChainIdCall {}.abi_encode(), false)),
+            ("entrypoint's curveBook", call(entrypoint, curveBookCall {}.abi_encode(), true)),
+            ("entrypoint's custodian", call(entrypoint, custodianCall {}.abi_encode(), true)),
+            ("entrypoint's quoteToken", call(entrypoint, quoteTokenCall {}.abi_encode(), true)),
+            ("curve book's quoteToken", call(curve_book, quoteTokenCall {}.abi_encode(), true)),
+            ("curve book's ttl", call(curve_book, ttlCall {}.abi_encode(), true)),
+            ("curve book's cUnit", call(curve_book, cUnitCall {}.abi_encode(), true)),
+            (
+                "custodian's availableLiquidity",
+                call(custodian, availableLiquidityCall { token: quote }.abi_encode(), true),
+            ),
         ]
     }
 
     /// The read's block and book-wide values, with no pairs yet.
     fn decode_settings(&self, answers: &[Call3Result]) -> Result<BookRead, FeedError> {
-        let Deployment { entrypoint, curve_book, custodian, quote } = self.deployment;
+        let Deployment { chain_id, entrypoint, curve_book, custodian, quote } = self.deployment;
+        for ((what, _), answer) in self
+            .settings_calls()
+            .iter()
+            .zip(answers)
+        {
+            if !answer.success {
+                return Err(FeedError::Fatal(format!(
+                    "BaiBai entrypoint {entrypoint}: the {what} getter reverted; the deployment \
+                     changed and the integration needs updating"
+                )));
+            }
+        }
+        let served = to_u64(decode::<getChainIdCall>(&answers[2], "chain id")?)?;
+        if served != chain_id {
+            return Err(FeedError::Fatal(format!(
+                "BaiBai: the RPC node serves chain {served}, not the deployment's chain {chain_id}"
+            )));
+        }
         let wiring = [
             (
                 "entrypoint's curve book",
-                decode::<curveBookCall>(&answers[2], "curveBook")?,
+                decode::<curveBookCall>(&answers[3], "curveBook")?,
                 curve_book,
             ),
             (
                 "entrypoint's custodian",
-                decode::<custodianCall>(&answers[3], "custodian")?,
+                decode::<custodianCall>(&answers[4], "custodian")?,
                 custodian,
             ),
             (
                 "entrypoint's quote token",
-                decode::<quoteTokenCall>(&answers[4], "quoteToken")?,
+                decode::<quoteTokenCall>(&answers[5], "quoteToken")?,
                 quote,
             ),
             (
                 "curve book's quote token",
-                decode::<quoteTokenCall>(&answers[5], "quoteToken")?,
+                decode::<quoteTokenCall>(&answers[6], "quoteToken")?,
                 quote,
             ),
         ];
@@ -218,19 +261,20 @@ impl BaibaiReader {
                 &answers[1],
                 "block timestamp",
             )?)?,
-            ttl: decode::<ttlCall>(&answers[6], "ttl")?,
-            c_unit: decode::<cUnitCall>(&answers[7], "cUnit")?,
-            available_quote: decode::<availableLiquidityCall>(&answers[8], "availableLiquidity")?,
+            ttl: decode::<ttlCall>(&answers[7], "ttl")?,
+            c_unit: decode::<cUnitCall>(&answers[8], "cUnit")?,
+            available_quote: decode::<availableLiquidityCall>(&answers[9], "availableLiquidity")?,
             pairs: Vec::new(),
         })
     }
 
     fn pair_calls(&self, base: Address) -> [Call3; PAIR_CALLS] {
-        let Deployment { curve_book, custodian, .. } = self.deployment;
+        let Deployment { entrypoint, curve_book, custodian, .. } = self.deployment;
         [
             call(curve_book, pairCall { base }.abi_encode(), true),
             call(curve_book, validUntilCall { base }.abi_encode(), true),
             call(custodian, availableLiquidityCall { token: base }.abi_encode(), true),
+            call(entrypoint, taker_fee_call(base), true),
         ]
     }
 
@@ -282,30 +326,50 @@ impl BaibaiReader {
     }
 }
 
+/// Calls of the first multicall before the pairs': see [`BaibaiReader::settings_calls`].
+const SETTINGS_CALLS: usize = 10;
+
 /// Calls per configured base in the first multicall: see [`BaibaiReader::pair_calls`].
-const PAIR_CALLS: usize = 3;
+const PAIR_CALLS: usize = 4;
+
+/// The entrypoint's fee for [`TAKER`] on `base`, as calldata.
+pub(super) fn taker_fee_call(base: Address) -> Vec<u8> {
+    let mut data = TAKER_FEE_SELECTOR.to_vec();
+    data.extend((TAKER, base).abi_encode_params());
+    data
+}
 
 fn call(target: Address, data: Vec<u8>, allow_failure: bool) -> Call3 {
     Call3 { target, allowFailure: allow_failure, callData: AlloyBytes::from(data) }
 }
 
 /// One configured base's pair, its knots still to read, with the view that says how many there
-/// are; `None` when the book has not listed it or one of its calls reverted.
+/// are; `None` when the book has not listed it or one of its calls reverted. Fails fatally when
+/// the taker fee getter reverts for a listed pair: the deployment changed.
 fn decode_pair(
     base: Address,
     answers: &[Call3Result],
 ) -> Result<Option<(PairRead, PairView)>, FeedError> {
-    if answers
-        .iter()
-        .any(|answer| !answer.success)
-    {
+    let [pair, valid_until, available, fee] = answers else {
+        return Err(FeedError::Parsing("BaiBai multicall answered too few calls".into()));
+    };
+    if !(pair.success && valid_until.success && available.success) {
         warn!(%base, "skipping BaiBai base whose pair or custody call reverted");
         return Ok(None);
     }
-    let view = decode::<pairCall>(&answers[0], "pair")?;
+    let view = decode::<pairCall>(pair, "pair")?;
     if view.qUnit == U256::ZERO {
+        debug!(%base, "skipping base the BaiBai curve book has not listed");
         return Ok(None);
     }
+    if !fee.success {
+        return Err(FeedError::Fatal(format!(
+            "BaiBai: the entrypoint's taker fee getter reverted for {base}; the deployment \
+             changed and the integration needs updating"
+        )));
+    }
+    let fee = U256::abi_decode(&fee.returnData)
+        .map_err(|e| FeedError::Parsing(format!("BaiBai taker fee: {e}")))?;
     let side = |side: &SideView| Side {
         spread_bps: side.spreadBps,
         depth_bps: side.depthBps,
@@ -315,10 +379,11 @@ fn decode_pair(
     let pair = PairRead {
         base,
         last_update_at: view.lastUpdateAt,
-        valid_until: decode::<validUntilCall>(&answers[1], "validUntil")?,
+        valid_until: decode::<validUntilCall>(valid_until, "validUntil")?,
         mid: U256::from(view.mid),
         q_unit: view.qUnit,
-        available_base: decode::<availableLiquidityCall>(&answers[2], "availableLiquidity")?,
+        available_base: decode::<availableLiquidityCall>(available, "availableLiquidity")?,
+        fee_pips: fee.try_into().unwrap_or(u32::MAX),
         ask: side(&view.ask),
         bid: side(&view.bid),
     };
@@ -350,7 +415,7 @@ fn read_knots<'a>(
 fn to_u64(value: U256) -> Result<u64, FeedError> {
     value
         .try_into()
-        .map_err(|_| FeedError::Parsing(format!("BaiBai block value {value} exceeds u64")))
+        .map_err(|e| FeedError::Parsing(format!("BaiBai block value {value}: {e}")))
 }
 
 fn decode<C: SolCall>(answer: &Call3Result, what: &str) -> Result<C::Return, FeedError> {

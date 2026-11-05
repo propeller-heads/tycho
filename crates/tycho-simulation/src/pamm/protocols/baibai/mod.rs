@@ -5,17 +5,23 @@
 //! getters, and prices swaps locally with the contract's arithmetic. The implementations behind
 //! the three proxies are not source-verified; the arithmetic was checked wei for wei against the
 //! deployed `CurveBook.quote` and `Entrypoint.quoteFor` (see `testdata/`), and an upgrade that
-//! changes it needs this module updated.
+//! changes it needs this module updated. The Entrypoint was last upgraded at Base block
+//! 53,492,231; the newest recording (53,545,000) postdates it.
+//!
+//! Only spreads of zero and depths of 0 or 100% have been seen live, so the spread and partial
+//! depth paths of the arithmetic follow the contract's observed rounding but have not been
+//! compared with it.
 //!
 //! # Priority surcharge
 //!
-//! The entrypoint withholds a further 10 bps of the gross output from a swap whose transaction
-//! gas price exceeds a threshold: the greater of an entrypoint-wide floor and the pair's
-//! `CurveBook.updatePriorityFee`. Measured at Base block 53,234,728 the threshold was 8e6 wei
-//! (0.008 gwei), set by the floor. The books do not price it, since the gas price is the sending
-//! client's choice and a quote does not carry one: a route through BaiBai sent above the
-//! threshold receives up to 10 bps less than quoted, and reverts when its slippage tolerance is
-//! tighter than that.
+//! The entrypoint withholds part of the gross output from a swap whose priority fee (gas price
+//! less basefee) exceeds 2e6 wei (0.002 gwei): one hundredth of a basis point per 1e4 wei above
+//! that, rounded down, capped at 50 bps (reached at 0.052 gwei), and the withheld amount rounded
+//! up. Measured at Base block 53,545,000, after the Entrypoint upgrade at 53,492,231; before it,
+//! the rule was a flat 10 bps above a gas price of 8e6 wei. The books do not price it, since the
+//! priority fee is the sending client's choice and a quote does not carry one: a route through
+//! BaiBai sent with a tip above 0.002 gwei receives up to 50 bps less than quoted, and reverts
+//! when its slippage tolerance is tighter than that.
 //!
 //! Reference: <https://docs.baibai.cx/takers/quoting-and-swapping>
 
@@ -41,9 +47,11 @@ pub(crate) const PROTOCOL_TYPE: &str = "baibai_pair";
 pub const BASE_ATTRIBUTE: &str = "base";
 pub const QUOTE_ATTRIBUTE: &str = "quote";
 
-/// The three proxies of one BaiBai deployment and the quote token every pair trades against.
+/// The three proxies of one BaiBai deployment, the chain they are on and the quote token every
+/// pair trades against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Deployment {
+    pub chain_id: u64,
     pub entrypoint: Address,
     pub curve_book: Address,
     pub custodian: Address,
@@ -52,6 +60,7 @@ pub(crate) struct Deployment {
 
 /// The Base deployment, quoted in USDC.
 pub(crate) const BASE_DEPLOYMENT: Deployment = Deployment {
+    chain_id: 8453,
     entrypoint: address!("98c1D9E102Eb2806D902b13186BDc7892aC4fFBa"),
     curve_book: address!("604d9b9eB1e1571C78661a6C1088427EC9c8c6E5"),
     custodian: address!("AaC48FEB93c5C97E0fb3c7C57E1633922A4ACDa3"),
@@ -66,22 +75,30 @@ pub(crate) const BASE_LISTED_BASES: [Address; 2] = [
     address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
 ];
 
-/// The entrypoint's fee on Tycho's router, in millionths of the gross output. BaiBai whitelisted
-/// the router at zero for every base at block 53,359,421; other callers pay the venue default of
-/// 50. Set by hand rather than read from the chain. Above the live fee the books under-quote;
-/// below it a swap receives less than quoted and the router's minimum output reverts it.
-pub(crate) const ROUTER_FEE_PIPS: u32 = 0;
+/// The taker the books are priced for: Tycho's router on Base, which calls the entrypoint. The
+/// entrypoint's fee for it is read every poll; BaiBai whitelisted it at zero for every base at
+/// block 53,359,421, where other callers pay the venue default of 50 millionths.
+pub(crate) const TAKER: Address = address!("AbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67");
 
 #[cfg(test)]
 mod test_support;
 
 #[cfg(test)]
 mod tests {
+    use tycho_common::models::Chain;
     use tycho_execution::encoding::evm::{
-        BAIBAI_BASE_ATTRIBUTE, BAIBAI_PROTOCOL_SYSTEM, BAIBAI_QUOTE_ATTRIBUTE,
+        get_router_address, BAIBAI_BASE_ATTRIBUTE, BAIBAI_PROTOCOL_SYSTEM, BAIBAI_QUOTE_ATTRIBUTE,
     };
 
     use super::*;
+
+    /// The books are priced for the router tycho-execution encodes BaiBai swaps through.
+    #[test]
+    fn the_books_are_priced_for_the_base_router() {
+        let router = get_router_address(&Chain::Base).unwrap();
+
+        assert_eq!(router.as_ref(), TAKER.as_slice());
+    }
 
     /// tycho-execution keys BaiBai's encoder on the protocol system and reads the pair from the
     /// two attributes, keeping its own copy of each; this holds the two crates to one spelling.

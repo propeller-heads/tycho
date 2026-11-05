@@ -14,6 +14,9 @@ pub(super) const MAX_KNOTS: usize = 36;
 const WAD: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]);
 const BPS: U256 = U256::from_limbs([10_000, 0, 0, 0]);
 
+/// A quote the state cannot give. Overflow is reported this way too, not as fatal: the
+/// parameters were checked when the state was built, so it comes from an input too large to
+/// price, and a smaller one may still be priced.
 pub(super) fn invalid(reason: impl std::fmt::Display) -> SimulationError {
     SimulationError::InvalidInput(format!("BaiBai: {reason}"), None)
 }
@@ -91,7 +94,8 @@ impl Curve {
             .last()
             .map_or(U256::ZERO, |knot| knot.0);
         let max = mul(last_q, U256::from(side.depth_bps))? / BPS;
-        let scale = U256::from((10_000 + i32::from(side.spread_bps)) as u32);
+        // Positive: a spread of -100% or less was refused above.
+        let scale = U256::from((10_000 + i32::from(side.spread_bps)).cast_unsigned());
         Ok(Curve { price: mul(mid, scale)? / BPS, filled: side.filled, max, knots, asks })
     }
 
@@ -191,16 +195,18 @@ impl Curve {
     }
 
     /// The gross output for `input` and the side's cursor after it. A zero output is an input
-    /// below the curve's atomic precision, which the contract refuses.
+    /// below the curve's atomic precision, which the contract refuses. Fails for an input beyond
+    /// [`Self::capacity`].
     pub(super) fn quote(&self, input: U256) -> Result<(U256, U256), SimulationError> {
         if input == U256::ZERO {
             return Ok((U256::ZERO, self.filled));
         }
         if !self.asks {
-            let q = add(self.filled, input)?;
-            if q > self.max {
-                return Err(invalid("beyond bid depth"));
+            // Past the capacity the contract still fills, paying less the more it is sold.
+            if input > self.capacity()? {
+                return Err(invalid("beyond the bid's paying depth"));
             }
+            let q = add(self.filled, input)?;
             let mid = mul(self.price, input)? / WAD;
             let extra = self.extra_at(q)? - self.extra_at(self.filled)?;
             return Ok((mid.saturating_sub(extra), q));

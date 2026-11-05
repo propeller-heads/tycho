@@ -25,13 +25,17 @@ use crate::{
     pamm::protocols::baibai::math::{invalid, Curve, Side},
 };
 
-/// Gas of the executor's swap: a base cost plus a cost per knot the walk passes. Measured cold on a
-/// Base fork at block 53,234,728 against WETH's five-knot sides: 110,963 to 122,575 buying base
-/// and 111,330 to 117,438 selling it, rising by 2,908 and 1,527 per knot passed. Curves with more
-/// knots were not available to measure. The router's own transfers and approval are added on top
-/// by tycho-execution's gas estimator.
-const BASE_SWAP_GAS: u64 = 112_000;
-const GAS_PER_KNOT_PASSED: u64 = 3_000;
+/// Gas of the executor's swap: a base cost, a cost per knot below the side's cursor after the swap
+/// (behind its previous fill or passed by this swap), and, buying base, a further cost per knot
+/// the swap itself passes. Measured cold on Base forks against WETH's five-knot sides: a base of
+/// 110,963 buying and 111,330 selling at block 53,234,728, which the Entrypoint upgrade at
+/// 53,492,231 raised by 3,379 both ways; each knot passed adds 1,527 selling and 2,908 buying,
+/// unchanged by the upgrade. Curves with more knots were not available to measure. cbBTC's token
+/// transfers cost about 17,000 more than WETH's, which this leaves out. The router's own
+/// transfers and approval are added on top by tycho-execution's gas estimator.
+const BASE_SWAP_GAS: u64 = 115_400;
+const GAS_PER_KNOT_BELOW_CURSOR: u64 = 1_550;
+const GAS_PER_KNOT_BOUGHT_THROUGH: u64 = 1_360;
 
 /// The entrypoint's fee denominator: fees are set in millionths of the gross output.
 const FEE_DENOMINATOR: u32 = 1_000_000;
@@ -40,8 +44,8 @@ const FEE_DENOMINATOR: u32 = 1_000_000;
 /// payout draws on, and the fee the entrypoint charges the taker the feed was built for.
 ///
 /// Prices exact-input swaps wei for wei as `Entrypoint.quoteFor(base, tokenIn, amountIn, taker)`
-/// does at that block. It does not price the entrypoint's priority surcharge, 10 bps withheld from
-/// a swap sent above a gas price threshold (0.008 gwei when measured): see the module docs.
+/// does at that block. It does not price the entrypoint's priority surcharge, up to 50 bps
+/// withheld from a swap sent with a priority fee above 0.002 gwei: see the module docs.
 #[derive(Clone, derive_more::Debug, PartialEq, Serialize, Deserialize)]
 pub struct BaibaiState {
     pub(super) base_token: Token,
@@ -91,9 +95,26 @@ impl BaibaiState {
         }
     }
 
-    /// The gross output less the entrypoint's fee, which the contract rounds up.
+    /// The gross output less the entrypoint's fee, which the contract rounds up. Fails for a fee
+    /// of the whole output or more, which [`Self::validated`] refuses but a deserialized state
+    /// has not been through.
     fn after_fee(&self, gross: U256) -> Result<U256, SimulationError> {
-        mul_div(gross, U256::from(FEE_DENOMINATOR - self.fee_pips), U256::from(FEE_DENOMINATOR))
+        let kept = FEE_DENOMINATOR
+            .checked_sub(self.fee_pips)
+            .ok_or_else(|| invalid(format!("fee of {} pips exceeds the output", self.fee_pips)))?;
+        mul_div(gross, U256::from(kept), U256::from(FEE_DENOMINATOR))
+    }
+
+    /// The executor's gas for a swap in `direction` that moves the side's cursor to `cursor`.
+    fn gas(curve: &Curve, direction: SwapDirection, cursor: U256) -> u64 {
+        let below = curve.knots_below(cursor);
+        let bought_through = match direction {
+            SwapDirection::BaseToQuote => 0,
+            SwapDirection::QuoteToBase => below - curve.knots_below(curve.filled),
+        };
+        BASE_SWAP_GAS +
+            GAS_PER_KNOT_BELOW_CURSOR * below +
+            GAS_PER_KNOT_BOUGHT_THROUGH * bought_through
     }
 
     fn sells(&self, direction: SwapDirection) -> bool {
@@ -145,7 +166,8 @@ impl ProtocolSim for BaibaiState {
         let atomic = self
             .curve(direction)?
             .marginal_price()?;
-        Ok(atomic * 10f64.powi(base.decimals as i32 - quote.decimals as i32) * (1.0 - self.fee()))
+        let decimals = 10f64.powf(f64::from(base.decimals) - f64::from(quote.decimals));
+        Ok(atomic * decimals * (1.0 - self.fee()))
     }
 
     fn get_amount_out(
@@ -187,7 +209,7 @@ impl ProtocolSim for BaibaiState {
         next.available[paid_out] -= output;
         Ok(GetAmountOutResult::new(
             u256_to_biguint(output),
-            BigUint::from(BASE_SWAP_GAS + GAS_PER_KNOT_PASSED * curve.knots_below(cursor)),
+            BigUint::from(Self::gas(&curve, direction, cursor)),
             Box::new(next),
         ))
     }
@@ -273,7 +295,7 @@ mod tests {
     use super::*;
     use crate::pamm::protocols::baibai::{
         math::Knot,
-        test_support::{fixtures, state, token, weth_state},
+        test_support::{fee_charging_fixture, fixtures, state, token, weth_state},
         BASE_DEPLOYMENT,
     };
 
@@ -282,8 +304,9 @@ mod tests {
     }
 
     /// Every recorded `quoteFor` for Tycho's router, both pairs and both directions, at blocks
-    /// with every cursor at zero, the ask partly filled and the bid partly filled, priced wei for
-    /// wei, including the sizes the entrypoint refused (recorded as zero output).
+    /// before and after the router's whitelist and the Entrypoint upgrade, with every cursor at
+    /// zero, the ask partly filled and the bid partly filled, priced wei for wei, including the
+    /// sizes the entrypoint refused (recorded as zero output).
     #[test]
     fn quotes_match_the_entrypoint_wei_for_wei() {
         let mut priced = 0;
@@ -309,7 +332,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(priced, 87, "the recordings' fillable cases");
+        assert_eq!(priced, 116, "the recordings' fillable cases");
     }
 
     /// The curve itself, without the fee, matches `CurveBook.quote` at every recorded block.
@@ -338,10 +361,26 @@ mod tests {
         }
     }
 
-    /// The recording's router fee, 50 millionths.
+    /// The oldest recording's router fee, 50 millionths, before the whitelist.
     #[test]
     fn the_fee_is_in_millionths_of_the_output() {
-        assert_eq!(weth_state().fee(), 0.00005);
+        let fixture = fee_charging_fixture();
+
+        assert_eq!(state(&fixture, &fixture.pairs[0]).fee(), 0.00005);
+    }
+
+    /// Since the router's whitelist, it is charged nothing: selling 1 WETH at block 53,545,000
+    /// fetched exactly what `quoteFor` returned for the router there.
+    #[test]
+    fn the_router_pays_no_fee_since_its_whitelist() {
+        let state = weth_state();
+
+        let result = state
+            .get_amount_out(BigUint::from(10u64).pow(18), &state.base_token.clone(), &quote())
+            .unwrap();
+
+        assert_eq!(state.fee(), 0.0);
+        assert_eq!(result.amount, BigUint::from(2_416_825_836u64));
     }
 
     #[test]
@@ -376,22 +415,93 @@ mod tests {
         assert!(again.amount <= result.amount);
     }
 
-    /// A swap costs a base amount plus a share per knot it walks past. The recording's WETH bid
-    /// has knots at about 0.43, 1.08, 3.25, 5.42 and 12.24 WETH; the fork measured 111,330 gas
-    /// selling 0.2 WETH and 114,384 selling 2 WETH.
+    /// A swap costs a base amount plus a share per knot it walks past, and more per knot buying
+    /// base. The recording's WETH sides have knots at about 0.41, 1.03, 3.10 and 5.17 WETH; the
+    /// fork measured 1,527 more gas selling 2 WETH (two knots) than 0.2 WETH (none), and 2,908 more
+    /// buying with 1,000 USDC (one knot) than with 500.
     #[rstest]
-    #[case::within_the_first_segment(2u64 * 10u64.pow(17), 112_000)]
-    #[case::past_two_knots(2u64 * 10u64.pow(18), 118_000)]
-    fn gas_grows_with_the_knots_a_swap_passes(#[case] amount: u64, #[case] expected: u64) {
+    #[case::selling_within_the_first_segment(true, 2u64 * 10u64.pow(17), 115_400)]
+    #[case::selling_past_two_knots(true, 2u64 * 10u64.pow(18), 118_500)]
+    #[case::buying_within_the_first_segment(false, 500_000_000, 115_400)]
+    #[case::buying_past_one_knot(false, 1_000_000_000, 118_310)]
+    fn gas_grows_with_the_knots_a_swap_passes(
+        #[case] sell_base: bool,
+        #[case] amount: u64,
+        #[case] expected: u64,
+    ) {
         let state = weth_state();
-        let weth = state.base_token.clone();
+        let (token_in, token_out) = if sell_base {
+            (state.base_token.clone(), quote())
+        } else {
+            (quote(), state.base_token.clone())
+        };
 
         let gas = state
-            .get_amount_out(BigUint::from(amount), &weth, &quote())
+            .get_amount_out(BigUint::from(amount), &token_in, &token_out)
             .unwrap()
             .gas;
 
         assert_eq!(gas, BigUint::from(expected));
+    }
+
+    /// A knot behind the side's previous fill still costs its share, but no longer the extra a
+    /// buy pays for walking through it.
+    #[test]
+    fn knots_behind_the_cursor_still_cost_gas() {
+        let mut state = weth_state();
+        state.ask.filled = U256::from(5u64) * U256::from(10u64).pow(U256::from(17));
+
+        let gas = state
+            .get_amount_out(BigUint::from(1_000_000u64), &quote(), &state.base_token.clone())
+            .unwrap()
+            .gas;
+
+        assert_eq!(gas, BigUint::from(115_400u64 + 1_550));
+    }
+
+    /// When a bid segment pays nothing, more input past it would buy less output; the state
+    /// refuses it rather than quote a falling price, and `get_limits` stops before it.
+    #[test]
+    fn a_bid_past_its_paying_depth_is_refused() {
+        let mut state = weth_state();
+        state.bid.knots = vec![Knot { q: 1_000, extra: 0 }, Knot { q: 2_000, extra: 46_000_000 }];
+        let weth = state.base_token.clone();
+
+        let (max_in, max_out) = state
+            .get_limits(weth.address.clone(), quote().address)
+            .unwrap();
+
+        let at_limit = state
+            .get_amount_out(max_in.clone(), &weth, &quote())
+            .unwrap();
+        assert_eq!(at_limit.amount, max_out);
+        let error = state
+            .get_amount_out(max_in + 1u32, &weth, &quote())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("paying depth"),
+            "{error}"
+        );
+    }
+
+    /// A state deserialized from elsewhere has not been validated; its fee still cannot wrap.
+    #[test]
+    fn a_fee_over_the_whole_output_is_refused_when_quoting() {
+        let mut state = weth_state();
+        state.fee_pips = 1_000_001;
+
+        let error = state
+            .get_amount_out(BigUint::from(10u64).pow(16), &state.base_token.clone(), &quote())
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the output"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -488,7 +598,7 @@ mod tests {
     fn spot_prices_bracket_the_mid() {
         let state = weth_state();
         let weth = state.base_token.clone();
-        let mid = 2_307.8;
+        let mid = 2_417.07;
 
         let bid = state
             .spot_price(&weth, &quote())
@@ -506,7 +616,7 @@ mod tests {
     #[rstest]
     #[case::fee_takes_everything(|s: &mut BaibaiState| s.fee_pips = 1_000_000)]
     #[case::no_mid(|s: &mut BaibaiState| s.mid = U256::ZERO)]
-    #[case::too_many_knots(|s: &mut BaibaiState| s.ask.knots = vec![Knot { q: 1, extra: 0 }; 37])]
+    #[case::too_many_knots(|s: &mut BaibaiState| s.ask.knots = (1..=37).map(|i| Knot { q: i, extra: i }).collect())]
     #[case::falling_cost(|s: &mut BaibaiState| s.bid.knots = vec![Knot { q: 1, extra: 5 }, Knot { q: 2, extra: 4 }])]
     #[case::repeated_quantity(|s: &mut BaibaiState| s.bid.knots = vec![Knot { q: 1, extra: 0 }, Knot { q: 1, extra: 1 }])]
     #[case::depth_over_100_percent(|s: &mut BaibaiState| s.ask.depth_bps = 10_001)]

@@ -7,7 +7,8 @@ use alloy::{
     primitives::{aliases::U48, Address, U256},
     providers::{
         bindings::IMulticall3::{
-            aggregate3Call, getBlockNumberCall, getCurrentBlockTimestampCall, Result as Call3Result,
+            aggregate3Call, getBlockNumberCall, getChainIdCall, getCurrentBlockTimestampCall,
+            Result as Call3Result,
         },
         MULTICALL3_ADDRESS,
     },
@@ -25,17 +26,20 @@ use crate::{
         math::{Knot, Side},
         reader::{
             availableLiquidityCall, cUnitCall, curveBookCall, custodianCall, knotCall, pairCall,
-            quoteTokenCall, ttlCall, validUntilCall, PairView, SideView,
+            quoteTokenCall, taker_fee_call, ttlCall, validUntilCall, PairView, SideView,
         },
         state::BaibaiState,
-        Deployment, BASE_DEPLOYMENT, BASE_LISTED_BASES,
+        Deployment, BASE_DEPLOYMENT, BASE_LISTED_BASES, TAKER,
     },
     snapshot_feed::http::test_support::{spawn_http_server, MockHttpServer, MockRequest},
 };
 
-/// Recorded by `testdata/record_fixture.py` at three Base blocks: the first with every cursor at
-/// zero, the second with WETH's ask partly filled, the third with its bid partly filled.
-const RECORDINGS: [&str; 3] = [
+/// Recorded by `testdata/record_fixture.py` at four Base blocks. The first, after the router's
+/// zero-fee whitelist and the Entrypoint upgrade, has every cursor at zero. The other three
+/// predate both and carry the default fee of 50 millionths: every cursor at zero, then WETH's ask
+/// partly filled, then its bid partly filled.
+const RECORDINGS: [&str; 4] = [
+    include_str!("testdata/live_53545000.json"),
     include_str!("testdata/live_53234728.json"),
     include_str!("testdata/live_53234783.json"),
     include_str!("testdata/live_53236603.json"),
@@ -80,7 +84,7 @@ pub(super) struct FixtureSide {
     pub knots: Vec<[u64; 2]>,
 }
 
-/// One recorded quote: `quoteFor` for the router (`amount_out`, `fee`) and the raw curve.
+/// One recorded quote: `quoteFor`'s net output for the router and the raw curve's output.
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct FixtureCase {
     pub sell_base: bool,
@@ -97,9 +101,14 @@ pub(super) fn fixtures() -> Vec<Fixture> {
         .collect()
 }
 
-/// The recording with every cursor at zero.
+/// The newest recording, with every cursor at zero and the router's fee at zero.
 pub(super) fn fixture() -> Fixture {
     serde_json::from_str(RECORDINGS[0]).unwrap()
+}
+
+/// The oldest recording with every cursor at zero, which charges the router 50 millionths.
+pub(super) fn fee_charging_fixture() -> Fixture {
+    serde_json::from_str(RECORDINGS[1]).unwrap()
 }
 
 pub(super) fn bytes(address: Address) -> Bytes {
@@ -163,7 +172,7 @@ pub(super) fn state(fixture: &Fixture, pair: &FixturePair) -> BaibaiState {
     .unwrap()
 }
 
-/// The first recording's WETH pair.
+/// The newest recording's WETH pair.
 pub(super) fn weth_state() -> BaibaiState {
     let fixture = fixture();
     state(&fixture, &fixture.pairs[0])
@@ -182,6 +191,12 @@ pub(super) struct FakeNode {
     /// Addresses with no token behind them, which the custodian reverts for. Any other token the
     /// recording does not list reads as zero custody.
     pub not_tokens: Vec<Address>,
+    /// The chain Multicall3 reports.
+    pub chain_id: u64,
+    /// Selectors of the deployment's getters that revert, as after an upgrade that removed them.
+    pub reverting: Vec<[u8; 4]>,
+    /// The block a read sees, to replay an older one.
+    pub block: u64,
 }
 
 impl FakeNode {
@@ -189,9 +204,12 @@ impl FakeNode {
         let fixture = fixture();
         Self {
             timestamp: fixture.timestamp,
+            block: fixture.block,
             fixture,
             entrypoint_curve_book: BASE_DEPLOYMENT.curve_book,
             not_tokens: Vec::new(),
+            chain_id: BASE_DEPLOYMENT.chain_id,
+            reverting: Vec::new(),
         }
     }
 
@@ -204,7 +222,7 @@ impl FakeNode {
         assert_eq!(request["method"], "eth_call", "the fake node serves eth_call only");
         let block = &request["params"][1];
         assert!(
-            *block == "latest" || *block == format!("{:#x}", self.fixture.block),
+            *block == "latest" || *block == format!("{:#x}", self.block),
             "a read asks for the latest block, then for the block it read: {block}"
         );
         let input = request["params"][0]["input"]
@@ -242,11 +260,19 @@ impl FakeNode {
 
     /// The answer to one call, or `None` where the chain reverts.
     fn call(&self, target: Address, data: &[u8]) -> Option<Vec<u8>> {
-        let Deployment { entrypoint, curve_book, custodian, quote } = BASE_DEPLOYMENT;
-        let selector: [u8; 4] = data[..4].try_into().unwrap();
+        let Deployment { entrypoint, curve_book, custodian, quote, .. } = BASE_DEPLOYMENT;
+        let Ok(selector) = <[u8; 4]>::try_from(&data[..4]) else {
+            panic!("a call to {target} carries no selector");
+        };
+        if target != MULTICALL3_ADDRESS && self.reverting.contains(&selector) {
+            return None;
+        }
         let answer = match (target, selector) {
             (t, getBlockNumberCall::SELECTOR) if t == MULTICALL3_ADDRESS => {
-                U256::from(self.fixture.block).abi_encode()
+                U256::from(self.block).abi_encode()
+            }
+            (t, getChainIdCall::SELECTOR) if t == MULTICALL3_ADDRESS => {
+                U256::from(self.chain_id).abi_encode()
             }
             (t, getCurrentBlockTimestampCall::SELECTOR) if t == MULTICALL3_ADDRESS => {
                 U256::from(self.timestamp).abi_encode()
@@ -274,10 +300,19 @@ impl FakeNode {
             }
             (t, knotCall::SELECTOR) if t == curve_book => {
                 let call = knotCall::abi_decode(data).unwrap();
-                let pair = self.pair(call.base).unwrap();
+                let Some(pair) = self.pair(call.base) else {
+                    panic!("the fake node has no knots for {}", call.base);
+                };
                 let side = if call.side == 0 { &pair.pair.ask } else { &pair.pair.bid };
                 let [q, extra] = side.knots[call.index.to::<usize>()];
                 (U48::from(q), U48::from(extra)).abi_encode_params()
+            }
+            (t, _) if t == entrypoint && data[..4] == taker_fee_call(Address::ZERO)[..4] => {
+                let (taker, base) = <(Address, Address)>::abi_decode_params(&data[4..]).unwrap();
+                assert_eq!(taker, TAKER, "the books are priced for Tycho's router");
+                self.pair(base)
+                    .map_or(50u32, |pair| pair.fee_pips)
+                    .abi_encode()
             }
             (t, availableLiquidityCall::SELECTOR) if t == custodian => {
                 let token = availableLiquidityCall::abi_decode(data)
@@ -317,7 +352,7 @@ impl FakeNode {
             spreadBps: side.spread_bps,
             depthBps: side.depth_bps,
             filled: side.filled,
-            knotCount: side.knots.len() as u8,
+            knotCount: u8::try_from(side.knots.len()).unwrap(),
         };
         PairView {
             seq: pair.pair.seq,
