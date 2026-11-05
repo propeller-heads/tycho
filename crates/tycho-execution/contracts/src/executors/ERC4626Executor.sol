@@ -30,7 +30,7 @@ contract ERC4626Executor is IExecutor {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -46,10 +46,10 @@ contract ERC4626Executor is IExecutor {
         }
 
         if (isRedeem) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             IERC4626(target).redeem(amountIn, receiver, address(this));
         } else {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             IERC4626(target).deposit(amountIn, receiver);
         }
     }

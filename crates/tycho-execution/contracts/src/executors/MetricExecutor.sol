@@ -50,7 +50,7 @@ contract MetricExecutor is IExecutor, ICallback {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -61,15 +61,11 @@ contract MetricExecutor is IExecutor, ICallback {
             revert MetricExecutor__AmountInTooLarge();
         }
 
-        // forge-lint: disable-next-line(unsafe-typecast) We already checked that this fits in int128.
         uint128 amountIn128 = uint128(amountIn);
-        // forge-lint: disable-next-line(unsafe-typecast) We already checked that this fits in int128.
         int128 amountSpecified = int128(amountIn128);
 
         _setCurrentPool(pool);
-        // The returned deltas are intentionally unused: the Dispatcher derives
-        // the output from balance diffs and never trusts protocol return values.
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         IMetricPool(pool)
             .swap(
                 receiver,

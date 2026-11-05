@@ -91,7 +91,7 @@ contract BebopExecutor is IExecutor {
 
         // Use OpenZeppelin's Address library for safe call
         // This will revert if the call fails
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         target.functionCall(finalCalldata);
     }
 

@@ -705,8 +705,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * splitSwap() and splitSwapPermit2() functions.
      *
      */
-    // State writes in _takeFees after external calls are safe because all public entry points use nonReentrant modifier
-    // slither-disable-next-line reentrancy-benign
+    // slither-disable-next-line reentrancy-benign State writes after external calls are safe: every entry point is nonReentrant.
     function _splitSwapChecked(
         uint256 amountIn,
         address tokenIn,
@@ -764,8 +763,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * singleSwap() and singleSwapPermit2() functions.
      *
      */
-    // State writes in _takeFees after external calls are safe because all public entry points use nonReentrant modifier
-    // slither-disable-next-line reentrancy-benign
+    // slither-disable-next-line reentrancy-benign State writes after external calls are safe: every entry point is nonReentrant.
     function _singleSwap(
         uint256 amountIn,
         address tokenIn,
@@ -822,8 +820,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * sequentialSwap() and sequentialSwapPermit2() functions.
      *
      */
-    // State writes in _takeFees after external calls are safe because all public entry points use nonReentrant modifier
-    // slither-disable-next-line reentrancy-benign
+    // slither-disable-next-line reentrancy-benign State writes after external calls are safe: every entry point is nonReentrant.
     function _sequentialSwapChecked(
         uint256 amountIn,
         address tokenIn,
@@ -1103,7 +1100,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                 receiver = finalReceiver;
             } else {
                 bytes calldata nextSwap;
-                // slither-disable-next-line unused-return
+                // slither-disable-next-line unused-return This only peeks at the next swap; the loop advances remainingSwaps itself.
                 (nextSwap,) = remainingSwaps.next();
                 (address nextExecutor, bytes calldata nextProtocolData) =
                     nextSwap.decodeSequentialSwap();
@@ -1418,7 +1415,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         // ECDSA runs before ERC-1271 so that an EOA carrying delegated code
         // (EIP-7702) keeps signing with its own key. tryRecover's third return
         // value only describes the error, which err already reports.
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return tryRecover's third return value only describes the error, which err already reports.
         (address recovered, ECDSA.RecoverError err,) =
             ECDSA.tryRecoverCalldata(digest, p.clientSignature);
         if (

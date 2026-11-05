@@ -86,12 +86,11 @@ contract MetricFallbackRouter is TychoFallbackRouter {
         bool zeroForOne = uint8(metricData[0]) > 0;
 
         _setCallbackContext(pool, swap_.tokenIn, swap_.amountIn);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher measures the output at the receiver.
         IMetricPool(pool)
             .swap(
                 swap_.receiver,
                 zeroForOne,
-                // forge-lint: disable-next-line(unsafe-typecast) `_quotePrimary` quotes zero above int128's maximum, so no swap runs.
                 int128(uint128(swap_.amountIn)),
                 _priceLimit(zeroForOne),
                 "",

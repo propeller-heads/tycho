@@ -78,7 +78,7 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
                 .forceApprove(tychoRouter, type(uint256).max);
         }
 
-        // forge-lint: disable-next-line(low-level-calls)
+        // forge-lint: disable-next-line(low-level-calls) tychoCalldata arrives encoded, so no high-level call fits.
         (bool success, bytes memory result) = tychoRouter.call(tychoCalldata);
 
         if (!success) {

@@ -62,7 +62,7 @@ contract RingSwapV2Executor is IExecutor {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -85,7 +85,7 @@ contract RingSwapV2Executor is IExecutor {
             IUniswapV2Pair(target), fwAmountIn, zeroForOne, address(this)
         );
 
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         IFewWrappedToken(fwTokenOut).unwrapTo(fwAmountOut, receiver);
     }
 
@@ -95,7 +95,7 @@ contract RingSwapV2Executor is IExecutor {
         bool zeroForOne,
         address receiver
     ) internal returns (uint256 amountOut) {
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return Pricing needs only the reserves, not their timestamp.
         (uint112 reserve0, uint112 reserve1,) = pool.getReserves();
         uint112 reserveIn = zeroForOne ? reserve0 : reserve1;
         uint112 reserveOut = zeroForOne ? reserve1 : reserve0;

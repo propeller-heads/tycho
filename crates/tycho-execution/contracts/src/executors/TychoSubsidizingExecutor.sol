@@ -46,7 +46,7 @@ contract TychoSubsidizingExecutor is IExecutor {
     {
         (IExecutor inner, bytes calldata innerData) = _decodeInner(data);
         _checkInnerExecutorApproval(address(inner), address(this));
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return Only tokenOut and outputToRouter decide where the subsidy is paid.
         (,,, address tokenOut, bool outputToRouter) =
             inner.getTransferData(innerData);
 
@@ -125,12 +125,10 @@ contract TychoSubsidizingExecutor is IExecutor {
         // msg.sender is the router's caller: the router delegatecalls swap.
         // The payer only matches it against the signed boundTo; the subsidy
         // goes to receiver.
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return A skipped subsidy is not an error: the payer emits SubsidySkipped and the swap fills.
         try payer.pay(subsidy, amountIn, msg.sender, receiver, data[122:187]) {}
         catch (bytes memory reason) {
-            // Reentrancy cannot happen: every router entry point is
-            // nonReentrant.
-            // slither-disable-next-line reentrancy-events
+            // slither-disable-next-line reentrancy-events Reentrancy cannot happen: every router entry point is nonReentrant.
             emit SubsidyPayerReverted(subsidy.nonce, reason);
         }
     }

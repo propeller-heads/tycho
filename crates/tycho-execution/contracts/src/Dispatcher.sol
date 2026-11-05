@@ -98,7 +98,7 @@ contract Dispatcher is TransferManager {
      * @dev Calls an executor, assumes swap.protocolData contains
      *  protocol-specific data required by the executor.
      */
-    // slither-disable-next-line controlled-delegatecall
+    // slither-disable-next-line controlled-delegatecall _validateExecutor only lets through executors approved and past their timelock.
     function _callSwapOnExecutor(
         address executor,
         uint256 amount,
@@ -226,7 +226,7 @@ contract Dispatcher is TransferManager {
             true
         );
 
-        // forge-lint: disable-next-item(low-level-calls)
+        // forge-lint: disable-next-item(low-level-calls) Solidity has no high-level delegatecall.
         (bool success, bytes memory result) = executor.delegatecall(
             abi.encodeWithSelector(ICallback.handleCallback.selector, data)
         );

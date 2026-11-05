@@ -307,7 +307,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         customFees.feeBpsOnOutput = feeBps;
         customFees.hasCustomFeeOnOutput = true;
         _customRouterFees[client] = customFees;
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return add returns false for a client already in the set, which is fine here.
         _customFeeClients.add(client);
 
         emit CustomRouterFeeOnOutputUpdated(client, oldFeeBps, feeBps);
@@ -328,7 +328,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         _customRouterFees[client] = customFees;
 
         if (!customFees.hasCustomFeeOnClientFee) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The client is in the set while it has a custom fee, so remove cannot fail.
             _customFeeClients.remove(client);
         }
 
@@ -374,7 +374,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         customFees.feeBpsOnClientFee = feeBps;
         customFees.hasCustomFeeOnClientFee = true;
         _customRouterFees[client] = customFees;
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return add returns false for a client already in the set, which is fine here.
         _customFeeClients.add(client);
 
         emit CustomRouterFeeOnClientFeeUpdated(client, oldFeeBps, feeBps);
@@ -394,7 +394,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         _customRouterFees[client] = customFees;
 
         if (!customFees.hasCustomFeeOnOutput) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The client is in the set while it has a custom fee, so remove cannot fail.
             _customFeeClients.remove(client);
         }
 

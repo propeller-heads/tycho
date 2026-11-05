@@ -178,7 +178,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
             poolManager.sync(Currency.wrap(tokenOut));
         } else {
             poolManager.sync(Currency.wrap(tokenIn));
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             poolManager.unlock(swapData);
         }
     }
@@ -334,7 +334,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
         }
 
         // here we expect to call either `swapExactInputSingle` or `swapExactInput`. See `swap` to see how we encode the selector and the calldata
-        // forge-lint: disable-next-line(low-level-calls)
+        // forge-lint: disable-next-line(low-level-calls) Solidity has no high-level delegatecall.
         (bool success, bytes memory returnData) = _self.delegatecall(data);
         if (!success) {
             revert(
@@ -476,10 +476,10 @@ contract UniswapV4Executor is IExecutor, ICallback {
     function _settle(Currency currency, uint256 amount) internal {
         if (amount == 0) return;
         if (currency.isAddressZero()) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return settle returns the amount paid, which is the amount just transferred.
             poolManager.settle{value: amount}();
         } else {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return settle returns the amount paid, which is the amount just transferred.
             poolManager.settle();
         }
     }

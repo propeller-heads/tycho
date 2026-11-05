@@ -70,7 +70,6 @@ contract NativeExecutor is IExecutor {
             revert NativeExecutor__InvalidTarget();
         }
 
-        // forge-lint: disable-next-line(unsafe-typecast) Reads only the selector; _decodeData guarantees four payload bytes.
         bytes4 selector = bytes4(payload);
         if (selector != TRADE_RFQT_SELECTOR) {
             revert NativeExecutor__InvalidPayload();
@@ -99,7 +98,7 @@ contract NativeExecutor is IExecutor {
         uint256 executionValue = tokenIn == ETH_ADDRESS ? amountIn : 0;
 
         // forge-lint: disable-next-item(arbitrary-send-eth) _isValidTarget limits target to the immutable nativeRouterV6.
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         target.functionCallWithValue(payload, executionValue);
     }
 

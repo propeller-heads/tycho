@@ -155,7 +155,7 @@ contract EkuboV3Executor is IExecutor, ICallback {
         // address(0) for Ekubo V3 protocol interaction.
         if (tokenIn == ETH_ADDRESS) tokenIn = address(0);
         // startPayments needs to be called in CORE before we transfer the token IN (which happens during callback)
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return startPayments returns token balances the executor does not need.
         LibCall.callContract(
             CORE_ADDRESS,
             abi.encodeWithSelector(
@@ -164,7 +164,7 @@ contract EkuboV3Executor is IExecutor, ICallback {
         );
 
         // amountIn must be at most type(int128).max
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         LibCall.callContract(
             CORE_ADDRESS,
             abi.encodePacked(

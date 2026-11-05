@@ -118,7 +118,7 @@ contract PancakeswapInfinityRobinhoodExecutor is IExecutor, ICallback {
             vault.sync(tokenIn);
         }
         // Vault re-enters the router with lockAcquired -> handleCallback.
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         vault.lock(abi.encodePacked(amountIn, receiver, data));
     }
 
@@ -241,7 +241,7 @@ contract PancakeswapInfinityRobinhoodExecutor is IExecutor, ICallback {
         // purpose: take amount comes from _getFullCredit. Sizing a transfer from a returned
         // delta is forbidden (executor checklist in crates/tycho-execution/CLAUDE.md).
         if (poolType == _POOL_TYPE_CL) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             IPancakeswapInfinityCLPoolManager(manager)
                 .swap(
                     key,
@@ -256,7 +256,7 @@ contract PancakeswapInfinityRobinhoodExecutor is IExecutor, ICallback {
                 );
         } else {
             // swapForY == zeroForOne: spend token0/X, receive token1/Y.
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             IPancakeswapInfinityBinPoolManager(manager)
                 .swap(key, zeroForOne, -swapAmountIn.toInt128(), "");
         }
@@ -282,10 +282,10 @@ contract PancakeswapInfinityRobinhoodExecutor is IExecutor, ICallback {
     function _settle(address currency, uint256 amount) internal {
         if (amount == 0) return;
         if (currency == address(0)) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return settle returns the amount paid, which is the amount just transferred.
             vault.settle{value: amount}();
         } else {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return settle returns the amount paid, which is the amount just transferred.
             vault.settle();
         }
     }

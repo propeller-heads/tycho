@@ -1255,7 +1255,6 @@ contract TychoSubsidizingWithPayerTest is TychoSubsidizingTestBase {
                 s.amount,
                 s.minAmountIn,
                 s.nonce,
-                // forge-lint: disable-next-line(unsafe-typecast)
                 uint48(s.deadline),
                 signature,
                 inner,

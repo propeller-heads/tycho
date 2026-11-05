@@ -112,7 +112,7 @@ contract LiquoriceExecutor is IExecutor {
         uint256 ethValue = tokenIn == ETH_ADDRESS ? amountIn : 0;
 
         // Execute the swap by forwarding calldata to settlement contract
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         liquoriceSettlement.functionCallWithValue(finalCalldata, ethValue);
     }
 

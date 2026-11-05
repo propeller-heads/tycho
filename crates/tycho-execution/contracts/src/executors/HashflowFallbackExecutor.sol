@@ -16,7 +16,7 @@ contract HashflowFallbackExecutor is FallbackExecutor {
 
     constructor(address fallbackRouter_) FallbackExecutor(fallbackRouter_) {}
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable

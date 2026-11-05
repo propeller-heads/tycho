@@ -9,7 +9,7 @@ error LiquidityPartyExecutor__InvalidDataLength();
 contract LiquidityPartyExecutor is IExecutor {
     /// @dev We avoid declaring any IERC20 types, since it is critical to use the router's transfer facility and never
     /// the inherent ERC20 transfer methods, not even the SafeERC20 versions.
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -18,7 +18,7 @@ contract LiquidityPartyExecutor is IExecutor {
         (IPartyPool pool,,, uint8 indexIn, uint8 indexOut) = _decodeData(data);
 
         // Perform the swap. Tokens have already been sent to the pool by the Dispatcher.
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         pool.swap(
             address(this), // pool requires msg.sender == payer for PREFUNDING
             Funding.PREFUNDING,

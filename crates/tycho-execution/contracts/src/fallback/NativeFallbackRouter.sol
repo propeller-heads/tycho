@@ -96,7 +96,7 @@ contract NativeFallbackRouter is TychoFallbackRouter {
         uint256 balanceBefore = tokenOut.balanceOf(address(this));
 
         tokenIn.forceApprove(nativeRouterV6, swap_.amountIn);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The output is measured by balance diff below.
         nativeRouterV6.functionCall(payload);
         tokenIn.forceApprove(nativeRouterV6, 0);
 

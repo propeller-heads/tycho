@@ -88,14 +88,14 @@ contract EtherfiExecutor is IExecutor {
             IEtherfiRedemptionManager(redemptionManagerAddress)
                 .redeemEEth(amountIn, receiver, ethAddress);
         } else if (direction == EtherfiDirection.EthToEeth) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             IEtherfiLiquidityPool(liquidityPoolAddress)
             .deposit{value: amountIn}();
         } else if (direction == EtherfiDirection.EethToWeeth) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             IWeETH(weethAddress).wrap(amountIn);
         } else if (direction == EtherfiDirection.WeethToEeth) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             IWeETH(weethAddress).unwrap(amountIn);
         } else {
             revert EtherfiExecutor__InvalidDirection();

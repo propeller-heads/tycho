@@ -27,7 +27,7 @@ contract MaverickV2Executor is IExecutor {
         return target;
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -48,7 +48,7 @@ contract MaverickV2Executor is IExecutor {
             tickLimit: tickLimit
         });
 
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         pool.swap(receiver, swapParams, "");
     }
 

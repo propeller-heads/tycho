@@ -263,7 +263,7 @@ contract TransferManager is Vault {
             // forge-lint: disable-next-line(calls-loop) Each split from the input token pulls its share from the user; a failing pull fails the route.
             permit2.transferFrom(sender, receiver, uint160(amount), token);
         } else {
-            // forge-lint: disable-next-line(arbitrary-send-erc20)
+            // forge-lint: disable-next-line(arbitrary-send-erc20) sender is the router's msg.sender, stored by the entry point.
             IERC20(token).safeTransferFrom(sender, receiver, amount);
         }
         uint256 balanceAfter = _balanceOf(token, receiver);

@@ -380,7 +380,7 @@ abstract contract TychoFallbackRouter is
         returns (uint256 amountOut)
     {
         (address dex, bool zero2one) = _decodeFluidV1(data);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The dex quotes by reverting with the amount; a call that returns quotes zero.
         try IFluidV1Dex(dex)
             .swapIn(zero2one, swap_.amountIn, 0, address(0xdEaD)) {
             return 0;
@@ -475,7 +475,7 @@ abstract contract TychoFallbackRouter is
         uint256 feeBps
     ) internal view returns (uint256 amountOut) {
         bool zeroForOne = swap_.tokenIn < swap_.tokenOut;
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return Pricing needs only the reserves, not their timestamp.
         (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
         return UniswapV2Math.getAmountOut(
             swap_.amountIn,
@@ -505,7 +505,7 @@ abstract contract TychoFallbackRouter is
         (bool zeroForOne, uint160 sqrtPriceLimit) = _uniswapV3Params(swap_);
 
         _setCallbackContext(pool, swap_.tokenIn, swap_.amountIn);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher measures the output at the receiver.
         IUniswapV3Pool(pool)
             .swap(
                 swap_.receiver,
@@ -544,7 +544,7 @@ abstract contract TychoFallbackRouter is
             hookData: data[26:]
         });
 
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher measures the output at the receiver.
         poolManager.unlock(abi.encode(v4Swap));
     }
 
@@ -591,7 +591,7 @@ abstract contract TychoFallbackRouter is
         (address dex, bool zero2one) = _decodeFluidV1(data);
 
         _setCallbackContext(dex, swap_.tokenIn, swap_.amountIn);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher measures the output at the receiver.
         IFluidV1Dex(dex)
             .swapInWithCallback(zero2one, swap_.amountIn, 0, swap_.receiver);
         _clearCallbackContext();
@@ -701,7 +701,7 @@ abstract contract TychoFallbackRouter is
 
         poolManager.sync(Currency.wrap(swap_.tokenIn));
         IERC20(swap_.tokenIn).safeTransfer(address(poolManager), swap_.amountIn);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return settle returns the amount paid, which is the amount just transferred.
         poolManager.settle();
 
         BalanceDelta delta = poolManager.swap(

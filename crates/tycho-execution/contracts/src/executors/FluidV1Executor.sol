@@ -53,11 +53,11 @@ contract FluidV1Executor is IExecutor, ICallback {
 
         if (!isNativeSell) {
             _setCurrentDex(dex);
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             dex.swapInWithCallback(zero2one, amountIn, 0, receiver);
         } else {
             // forge-lint: disable-next-item(arbitrary-send-eth) Sends the swap input to the dex the swap data names.
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             dex.swapIn{value: amountIn}(zero2one, amountIn, 0, receiver);
         }
     }

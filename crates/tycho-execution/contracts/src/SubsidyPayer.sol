@@ -149,7 +149,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         // Emitted after the transfer on purpose: only then is it paid. A
         // re-entering receiver cannot pay twice, because the nonce is
         // marked first and only the nonReentrant router can call `pay`.
-        // slither-disable-next-line reentrancy-events
+        // slither-disable-next-line reentrancy-events The event follows the transfer on purpose, see above.
         emit SubsidyPaid(
             nonce, subsidy.boundTo, to, subsidy.token, subsidy.amount
         );
@@ -278,9 +278,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         // Every Subsidy field is static, so `abi.encode` lays them out in
         // order, as EIP-712 `encodeData` requires
         bytes32 structHash = keccak256(abi.encode(SUBSIDY_TYPEHASH, subsidy));
-        // The ignored third return value only adds detail to `err`; `err`
-        // alone decides the rejection
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The third return value only adds detail to err, and err alone decides.
         (address recovered, ECDSA.RecoverError err,) =
             ECDSA.tryRecoverCalldata(_hashTypedDataV4(structHash), signature);
         return err == ECDSA.RecoverError.NoError && recovered == signer;

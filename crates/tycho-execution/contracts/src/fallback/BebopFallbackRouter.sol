@@ -104,7 +104,7 @@ contract BebopFallbackRouter is TychoFallbackRouter {
         uint256 balanceBefore = tokenOut.balanceOf(address(this));
 
         tokenIn.forceApprove(target, fillAmount);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The output is measured by balance diff below.
         target.functionCall(bebopCalldata);
         tokenIn.forceApprove(target, 0);
 

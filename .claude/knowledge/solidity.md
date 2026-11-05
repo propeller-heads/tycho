@@ -40,10 +40,11 @@ change something workspace-wide.
 ### Lint suppressions
 
 - Suppress a false positive in the tool that owns the check, on the line above it, with the reason
-  after the directive: `// forge-lint: disable-next-line(<lint>) <reason>` or
-  `// slither-disable-next-line <detector>`. Each tool only reads the line directly above the code,
-  so where both apply, or the finding is reported on a later line of a multi-line statement, use
-  `// forge-lint: disable-next-item(<lint>)` above the Slither directive
+  after the directive: `// forge-lint: disable-next-line(<lint>, ...) <reason>` or
+  `// slither-disable-next-line <detector>,... <reason>`. Each tool only reads the line directly
+  above the code, so where both apply, or the finding is reported on a later line of a multi-line
+  statement, use `// forge-lint: disable-next-item(<lint>, ...) <reason>` above the Slither
+  directive
 
 ### Assembly
 

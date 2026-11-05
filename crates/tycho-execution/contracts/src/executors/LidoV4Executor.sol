@@ -61,16 +61,14 @@ contract LidoV4Executor is IExecutor {
     {
         LidoV4Direction direction = _decodeData(data);
 
-        // The Dispatcher measures output via balance checks, so the minted or
-        // unwrapped amounts these calls return are not needed here.
         if (direction == LidoV4Direction.EthToStEth) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             stEth.submit{value: amountIn}(address(0));
         } else if (direction == LidoV4Direction.StEthToWstEth) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             wstEth.wrap(amountIn);
         } else if (direction == LidoV4Direction.WstEthToStEth) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             wstEth.unwrap(amountIn);
         } else if (direction == LidoV4Direction.EthToWstEth) {
             // wstETH's receive() submits the ETH and mints the wrapper's shares in one call.

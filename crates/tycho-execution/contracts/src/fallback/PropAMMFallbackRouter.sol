@@ -66,7 +66,7 @@ contract PropAMMFallbackRouter is TychoFallbackRouter {
         override
     {
         IERC20(swap_.tokenIn).safeTransfer(pamm, swap_.amountIn);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher measures the output at the receiver.
         IPropAMM(pamm)
             .swap(
                 swap_.tokenIn,

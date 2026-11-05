@@ -52,14 +52,14 @@ contract LunarBaseExecutor is IExecutor {
 
         if (tokenIn == ETH_ADDRESS) {
             // forge-lint: disable-next-item(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             ILunarBasePool(pool).swapExactInNative{value: amountIn}(
                 _toLunarBaseToken(tokenOut), receiver, 0, block.timestamp
             );
             return;
         }
 
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         ILunarBasePool(pool)
             .swapExactIn(
                 ILunarBasePool.ExactInputParams({
