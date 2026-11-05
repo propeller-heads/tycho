@@ -371,4 +371,12 @@ mod tests {
             Some("https://bnb.streamingfast.io:443")
         );
     }
+
+    #[test]
+    fn arbitrum_uses_streamingfast_substreams_endpoint() {
+        assert_eq!(
+            get_default_endpoint(&Chain::Arbitrum).as_deref(),
+            Some("https://arb-one.streamingfast.io:443")
+        );
+    }
 }

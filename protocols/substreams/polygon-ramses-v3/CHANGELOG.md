@@ -10,6 +10,8 @@
 
   The version bump is required to release the manifest at all: `polygon-ramses-v3-0.1.1`
   already exists, pointing at a commit that predates this manifest.
+- Set `package.version` to `v0.1.2` in all three manifests, so each spkg carries the version
+  it is released under.
 
 ## v0.1.1
 
