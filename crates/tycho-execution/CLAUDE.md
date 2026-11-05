@@ -145,7 +145,7 @@ simple: they just call the protocol. All balance tracking, output verification, 
 Dispatcher/TransferManager.
 
 Supported: UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3,
-Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Bebop (RFQ),
+Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, Tessera, RingSwapV2, Sky, Bebop (RFQ),
 Hashflow (RFQ), Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other
 native wrappers), PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface;
 the pAMM address travels in the swap data), Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
@@ -224,10 +224,11 @@ the signed amount makes the pull revert, and the fallback fills the whole leg.
 
 `TesseraFallbackRouter` runs Tessera through its immutable `tesseraSwap`, which finds the pair by its two tokens, so the
 primary carries no data. It quotes Tessera with the `tesseraSwapViewAmounts` view, priced for the router as the caller,
-as the swap is. The view leaves out the treasury's balance and the pair's fee module, which only the swap reads, so a
-quote the treasury cannot pay wins and then reverts in the swap, and the fallback fills. The router approves
-`tesseraSwap` for `amountIn`, calls `tesseraSwapWithAllowances` with empty `swapData`, and revokes the approval;
-Tessera's treasury pays the receiver directly. The pair reads its caller's code on both the quote and the swap, about
+as the swap is. The view leaves out the treasury's balance and the pair's fee module, which only the swap reads. The
+router keeps the quote in transient storage and passes it as the swap's `amountCheck`, so a treasury that cannot pay
+the quote, or a fee module that charges, reverts the swap and the fallback fills. The router approves `tesseraSwap`
+for `amountIn`, calls `tesseraSwapWithAllowances` with empty `swapData`, and revokes the approval; Tessera's treasury
+pays the receiver directly. The pair reads its caller's code on both the quote and the swap, about
 1.3M gas each for the router.
 
 The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
@@ -396,7 +397,7 @@ is the exception: `TychoFallbackRouter` transfers to the protocol itself, outsid
 
 | Category                   | Executors                                                                                                                                       | `outputToRouter` | Behavior                                                                                         |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|------------------|--------------------------------------------------------------------------------------------------|
-| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Metric, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
+| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, Tessera, RingSwapV2, Sky, Metric, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
 | **Output-lands-at-router** | Curve, NativeWrap, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice                                                                              | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
 
 **Two input categories**:
@@ -547,16 +548,19 @@ same `FallbackSwapData` `user_data`:
   inserts a length prefix before the venue data and appends the fallback; the Liquorice one drops the partial-fill
   fields and keeps the settlement calldata.
 
-`fallback:pamm:tessera` (`TESSERA_FALLBACK_PROTOCOL_SYSTEM`) is Tessera behind `TesseraFallbackRouter`. It has an
-exact executor-config entry too, and `get_encoder` keeps it out of the `fallback` family, whose encoder reads an
-`IPropAMM` from `pamm_address` that Tessera is not. `TesseraFallbackSwapEncoder` builds only on Base and writes the two
-tokens followed by the fallback from the same `FallbackSwapData` `user_data`.
+`fallback:pamm:tessera` (`TESSERA_FALLBACK_PROTOCOL_SYSTEM`) is Tessera behind `TesseraFallbackRouter`. Like the
+Metric and RFQ venues it is in `DEDICATED_FALLBACK_PROTOCOL_SYSTEMS`, which `get_encoder` keeps out of the `fallback`
+family, whose encoder reads an `IPropAMM` from `pamm_address` that Tessera is not. `TesseraFallbackSwapEncoder` builds
+only on Base, rejects a swap in or out of the native token, which the router cannot trade, and writes the two tokens
+followed by the fallback from the same `FallbackSwapData` `user_data`.
 
-The Metric router is deployed on Ethereum, Base, BSC, Robinhood, Arbitrum and Polygon, Bebop's on Ethereum and Base,
-and Hashflow's on Ethereum. The Native, Liquorice and Tessera routers are not deployed, so no chain lists their entries
-yet. The gas estimator charges a Metric leg its pool gas twice (the simulation runs the pool's swap), a Tessera leg its
-pool gas twice (the view quote reads the caller's code as the swap does) plus the router's approval, and a Bebop,
-Hashflow, Native or Liquorice leg the router's approval and output forward.
+The Metric router is deployed on Ethereum, Base, BSC, Robinhood, Arbitrum and Polygon, Native's on Ethereum, Base,
+Arbitrum, BSC and Robinhood, Bebop's on Ethereum and Base, and Hashflow's and Liquorice's on Ethereum. The Tessera
+router is not deployed: Base's `fallback:pamm:tessera` deployment entry holds the zero address and
+`executor_addresses.json` has no entry for it. The gas estimator charges a Metric leg its pool gas twice (the
+simulation runs the pool's swap), a Tessera leg its pool gas twice (the view quote reads the caller's code as the swap
+does; its pool gas is priced for the router as the caller, about half the `pamm:tessera` figure) plus the router's
+approval, and a Bebop, Hashflow, Native or Liquorice leg the router's approval and output forward.
 
 `SUPPORTED_PROTOCOLS` in `fallback.rs` lists the fallback protocols per chain, and `supported_on`
 reads it. A chain lists a protocol when its router has the protocol's singleton (Uniswap V4, Fluid

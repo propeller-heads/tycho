@@ -92,7 +92,7 @@ pub fn needs_approval(protocol_system: &str) -> bool {
 /// Extra gas a fallback router adds around a primary fill: the `executePrimary` try/catch
 /// self-call, paying the primary, the `nonReentrant` guard and the no-output balance check. The
 /// router is push-funded, so the input transfer is charged separately and this sits on top of it.
-/// Metric and Bebop legs add their own extras on top.
+/// Metric, Tessera and the signed-quote legs add their own extras on top.
 ///
 /// A swap that actually falls back pays for the fallback protocol on top.
 pub const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 40_000;
@@ -134,7 +134,11 @@ pub const ROUTER_FEES_ACTIVE: bool = true;
 /// group (or ungrouped swap), sums:
 ///
 /// - **Pool gas** (`group.estimated_gas`): the simulation-reported cost with intermediate transfer
-///   savings already subtracted for multi-swap groups (see `compute_group_gas`).
+///   savings already subtracted for multi-swap groups (see `compute_group_gas`). A
+///   `fallback:pamm:tessera` swap reports one Tessera call priced for `TesseraFallbackRouter` as
+///   the caller, and is charged it twice. That figure is not the one a `pamm:tessera` swap
+///   reports: the pair reads its caller's code, so the cost follows the caller's size, and the
+///   TychoRouter is about twice the router's.
 /// - **Transfer overhead**: the input transfer, approval, and output transfer gas that is NOT
 ///   captured by `get_amount_out`, computed via `estimate_transfer_overhead` once per group.
 /// - **Router overhead**: the user input transfer and — when `ROUTER_FEES_ACTIVE` — the extra
