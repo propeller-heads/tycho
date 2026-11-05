@@ -1,3 +1,14 @@
+## [0.502.1](https://github.com/propeller-heads/tycho/compare/0.502.0...0.502.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **integration-test:** execute etherfi and lido_v4 in the next block ([0251993](https://github.com/propeller-heads/tycho/commit/0251993e525df7e0633ccb7a4a3d99278bfd15f5))
+* **integration-test:** execute every apply_block protocol in the next block ([f01bdc4](https://github.com/propeller-heads/tycho/commit/f01bdc4500d1b2c68c926d4d2443634d70a6f376))
+* **integration-test:** execute native swaps in the block after the update ([92450e0](https://github.com/propeller-heads/tycho/commit/92450e084e855e3c6b6ea8c0073cddb9436e8af7))
+* **integration-test:** execute only listed protocols in the next block ([c46f0bd](https://github.com/propeller-heads/tycho/commit/c46f0bdd86dc9c71778e93d36aff4b3480f6172e))
+* **integration-test:** execute time-dependent protocols in the next block ([#1739](https://github.com/propeller-heads/tycho/issues/1739)) ([d8e7cfb](https://github.com/propeller-heads/tycho/commit/d8e7cfb02720cdbbe4aba07ac2ddf8e75ea3edd8))
+
 ## [0.502.0](https://github.com/propeller-heads/tycho/compare/0.501.0...0.502.0) (2026-11-05)
 
 
