@@ -42,6 +42,10 @@ pub enum CheckId {
 }
 
 impl CheckId {
+    /// Strict mode's three checks of each direction's limit.
+    pub const LIMITS: [CheckId; 3] =
+        [CheckId::LimitsAtLimit, CheckId::LimitsPastLimit, CheckId::LimitsMaxOutput];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             CheckId::Index => "index",
@@ -384,8 +388,16 @@ mod tests {
         checks.skip_component(CheckId::ExecLadder, "0xAbC", "no fork state");
         let (outcome, results) = checks.finish();
         assert!(outcome.is_ok());
-        assert_eq!(results[0].component.as_deref(), Some("0xabc"));
-        assert_eq!(results[0].outcome, Outcome::Skipped { reason: "no fork state".to_string() });
+        assert_eq!(
+            results,
+            vec![CheckResult {
+                test: "t".to_string(),
+                check: CheckId::ExecLadder,
+                component: Some("0xabc".to_string()),
+                direction: None,
+                outcome: Outcome::Skipped { reason: "no fork state".to_string() },
+            }]
+        );
     }
 
     #[test]
@@ -394,7 +406,7 @@ mod tests {
         checks
             .run(CheckId::StateComponents, || Ok(()))
             .unwrap();
-        checks.skip(CheckId::Balances, "skip_balance_check: true");
+        checks.skip(CheckId::Balances, "no address holds the pooled ether");
         assert!(checks.finish().0.is_ok());
     }
 
