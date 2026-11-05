@@ -1578,8 +1578,10 @@ impl TestRunner {
             self.chain,
             update,
             protocol_components,
-            &skip_reasons(expected_components, |c| &c.skip_simulation),
-            &skip_reasons(expected_components, |c| &c.skip_execution),
+            ladder::Skips {
+                simulation: &skip_reasons(expected_components, |c| &c.skip_simulation),
+                execution: &skip_reasons(expected_components, |c| &c.skip_execution),
+            },
             protocol_system,
             declared_limits,
         )
@@ -1685,7 +1687,13 @@ impl TestRunner {
         executes_nothing: Option<&str>,
         checks: &mut Checks,
     ) -> miette::Result<()> {
-        let LadderOutput { executions, at_limit, past_limit, .. } = output;
+        let LadderOutput {
+            executions,
+            at_limit,
+            past_limit,
+            limit_directions: _,
+            unchecked_limits: _,
+        } = output;
 
         let mut inputs = executions.clone();
         inputs.extend(at_limit.clone());
@@ -1976,9 +1984,9 @@ impl TestRunner {
                         for limits in &output.limit_directions {
                             coverage
                                 .quoted_directions
-                                .entry(limits.component.to_lowercase())
+                                .entry(limits.component().to_lowercase())
                                 .or_default()
-                                .insert(limits.direction.to_string());
+                                .insert(limits.direction().to_string());
                         }
                         coverage.simulated_blocks.push(block);
                         streamed.simulated.push((block, output));
@@ -2597,8 +2605,6 @@ mod tests {
         );
     }
 
-    /// A limit no swap could be executed with is capped; anything at or below the ceiling is the
-    /// size the venue reported, untouched.
     fn execution_input(component: &str, amount_in: u32, simulated: u32) -> TychoExecutionInput {
         TychoExecutionInput {
             solution: Solution::new(

@@ -1,14 +1,15 @@
 //! The quote ladder: for every direction of a component, its limits, spot price and quotes at
 //! 0.1%, 1% and 10% of its limit, and, where the package declares the limit, the checks at and
-//! past it. The ladder encodes each quote as a router swap; the runner executes them and judges
-//! the results.
+//! past it. [`run_ladder`] encodes each quote as a router swap, for the fixture executor
+//! protocol-testing overrides; the caller executes them, and [`judge_limits`] judges the limit
+//! checks from the results.
 
 use std::collections::{HashMap, HashSet};
 
 use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, WrapErr};
 use num_bigint::BigUint;
-use num_traits::{FromPrimitive, Zero};
+use num_traits::Zero;
 use serde_json::json;
 use tracing::{info, warn};
 use tycho_simulation::{
@@ -21,6 +22,7 @@ use crate::{
         execution::{execution_mismatch, missing_revert},
         limits::{self, Quote},
         outcome::{CheckId, Outcome},
+        sheet::LADDER_THOUSANDTHS,
     },
     execution::{
         encoding::{encode_swap, EXECUTOR_ADDRESS},
@@ -47,14 +49,14 @@ pub struct LadderOutput {
 /// Strict: a declared direction of a simulated component whose limit was not checked.
 pub struct UncheckedLimit {
     /// The component's id, as indexed.
-    pub component: String,
-    pub direction: Direction,
+    component: String,
+    direction: Direction,
     /// Why not. A zero limit is a skip; a direction the ladder never reached is a failure.
-    pub why: Unchecked,
+    why: Unchecked,
 }
 
 /// Why a declared direction's limit was not checked.
-pub enum Unchecked {
+enum Unchecked {
     /// `get_limits` reports zero: the venue does not trade this direction at this block.
     ZeroLimit,
     /// The ladder did not quote the direction, for example because the indexed tokens differ
@@ -63,30 +65,43 @@ pub enum Unchecked {
 }
 
 /// Strict: the limit checks of one direction of one component, before execution.
+///
+/// Built by [`run_ladder`] and judged by [`judge_limits`], which looks its executions up in the
+/// same [`LadderOutput`], so its fields stay private.
 pub struct LimitDirection {
     /// The component's id, as indexed.
-    pub component: String,
-    pub direction: Direction,
+    component: String,
+    direction: Direction,
     /// The declaration the direction is checked against.
-    pub limits: Limits,
+    limits: Limits,
     /// Whether the limit is at or above `int128::MAX`, the cap the runner applies to every
     /// protocol's executions.
-    pub capped: bool,
+    capped: bool,
     /// Whether `max_input` quoted. The past-limit swap and the max-output comparison need it.
-    pub quoted_at_limit: bool,
+    quoted_at_limit: bool,
     /// Why the component skips execution, if it does: the limit checks then run in simulation
     /// only.
-    pub execution_skipped: Option<String>,
+    execution_skipped: Option<String>,
     /// The checks that failed in simulation, with the reason.
-    pub failures: Vec<(CheckId, String)>,
+    failures: Vec<(CheckId, String)>,
     /// The id of the direction's execution in [`LadderOutput::at_limit`], when it was queued.
-    pub at_limit: Option<String>,
+    at_limit: Option<String>,
     /// The id of the direction's execution in [`LadderOutput::past_limit`], when it was queued.
-    pub past_limit: Option<String>,
+    past_limit: Option<String>,
 }
 
 impl LimitDirection {
-    pub fn failures_of(&self, check: CheckId) -> Vec<String> {
+    /// The component's id, as indexed.
+    pub fn component(&self) -> &str {
+        &self.component
+    }
+
+    /// The direction the limit is of.
+    pub fn direction(&self) -> &Direction {
+        &self.direction
+    }
+
+    fn failures_of(&self, check: CheckId) -> Vec<String> {
         self.failures
             .iter()
             .filter(|(id, _)| *id == check)
@@ -97,7 +112,7 @@ impl LimitDirection {
     /// What `limits.at_limit` records when nothing failed: a pass once the quote at the limit
     /// was executed, a skip when the component skips execution. Not run otherwise, which only a
     /// failed quote leads to, and that is recorded as a failure first.
-    pub fn at_limit_unfailed(&self) -> Outcome {
+    fn at_limit_unfailed(&self) -> Outcome {
         match (&self.at_limit, &self.execution_skipped) {
             (Some(_), _) => Outcome::Pass,
             (None, Some(reason)) => Outcome::Skipped {
@@ -116,7 +131,7 @@ impl LimitDirection {
     ///   either proves nothing.
     /// - Skipped when the component skips execution.
     /// - A pass once the swap past the limit was executed, and reverted.
-    pub fn past_limit_unfailed(&self, at_limit_executed: bool) -> Outcome {
+    fn past_limit_unfailed(&self, at_limit_executed: bool) -> Outcome {
         if let Some(reason) = self.limits.past_limit_skip_reason() {
             return Outcome::Skipped { reason };
         }
@@ -142,7 +157,7 @@ impl LimitDirection {
 
     /// What `limits.max_output` records when nothing failed: not run when the limit did not
     /// quote, since there is nothing to compare, and a pass otherwise.
-    pub fn max_output_unfailed(&self) -> Outcome {
+    fn max_output_unfailed(&self) -> Outcome {
         if self.quoted_at_limit {
             Outcome::Pass
         } else {
@@ -178,48 +193,42 @@ fn int128_ceiling() -> BigUint {
 /// Whether `limit` is at or above `int128::MAX`. Such a limit is the execution cap, not the venue's
 /// bound: even at exactly `int128::MAX`, one unit past it reverts in the executor's cast, whatever
 /// the venue allows.
-pub fn at_execution_cap(limit: &BigUint) -> bool {
+fn at_execution_cap(limit: &BigUint) -> bool {
     *limit >= int128_ceiling()
 }
 
-/// Runs simulations for all protocol components and swap directions.
+/// Which components skip the ladder, by lowercase id, each with its reason.
+#[derive(Clone, Copy)]
+pub struct Skips<'a> {
+    /// Components not simulated, nor executed.
+    pub simulation: &'a HashMap<String, &'a str>,
+    /// Components simulated but not executed.
+    pub execution: &'a HashMap<String, &'a str>,
+}
+
+/// Runs the ladder on every component of `update`, in id order, and encodes each quote as a
+/// router swap on `chain` for the fixture executor at [`EXECUTOR_ADDRESS`].
 ///
-/// This method performs comprehensive simulation testing on protocol components by:
-/// 1. Computing spot prices for all token pairs
-/// 2. Simulating swaps with different input amounts (0.1%, 1%, 10% of limits)
-/// 3. Testing all possible swap directions between tokens
-/// 4. Preparing execution data for each simulation
-///
-/// The simulation uses the Tycho SDK to calculate expected outputs and prepare
-/// transaction data for subsequent execution testing.
-///
-/// # Arguments
-/// * `chain` - The chain the swaps are encoded for
-/// * `update` - The decoded protocol state containing all component data
-/// * `protocol_components` - Mapping of component IDs to their ProtocolComponent models
-/// * `skip_simulation`, `skip_execution` - The lowercase ids of the components that skip simulation
-///   or execution, each with its reason
-/// * `protocol_system` - The protocol system identifier
-/// * `declared_limits` - Strict mode: the limit each direction of each component declares, keyed by
-///   `(lowercase component id, direction)`
-///
-/// # Returns
-/// The ladder's quotes, keyed by simulation id, for execution. With `declared_limits` also each
-/// declared direction's limit checks, the quote at the limit, and for a hard limit the input one
-/// unit past it, all for execution as well, and the declared directions whose limit was not
-/// checked.
+/// For each direction between a component's tokens it gets the limits, the spot price, and
+/// quotes at 0.1%, 1% and 10% of the limit (after the `int128` cap). A direction with a zero
+/// limit is passed over. With `declared_limits`, keyed by `(lowercase component id, direction)`,
+/// it also checks each declared direction's limit and queues the swap at the limit and, for a
+/// hard limit, one unit past it; a declared direction it passes over or never reaches is listed
+/// in [`LadderOutput::unchecked_limits`]. `skips` and `declared_limits` are looked up by the
+/// lowercase id, whatever case the update carries.
 ///
 /// # Errors
-/// Returns an error if:
-/// - Spot price calculation fails for any component
-/// - Simulation fails to calculate amount out
-/// - Transaction encoding fails
+/// On the first component that fails, which drops the rest of the update:
+/// - a component of the update is missing from `protocol_components`;
+/// - `get_limits`, `spot_price` or `get_amount_out` errors;
+/// - a ladder amount rounds to zero;
+/// - every direction of a component has a zero limit;
+/// - a swap cannot be encoded.
 pub fn run_ladder(
     chain: Chain,
     update: &Update,
     protocol_components: &HashMap<String, ProtocolComponent>,
-    skip_simulation: &HashMap<String, &str>,
-    skip_execution: &HashMap<String, &str>,
+    skips: Skips<'_>,
     protocol_system: &str,
     declared_limits: Option<&HashMap<(String, Direction), Limits>>,
 ) -> miette::Result<LadderOutput> {
@@ -234,7 +243,7 @@ pub fn run_ladder(
         // The skips and limits are keyed by lowercase id; the update keeps the id as indexed.
         let key = id.to_lowercase();
         // The caller logs a skip's reason once per component.
-        if skip_simulation.contains_key(&key) {
+        if skips.simulation.contains_key(&key) {
             continue;
         }
         let mut reached = HashSet::new();
@@ -243,14 +252,6 @@ pub fn run_ladder(
             .ok_or_else(|| miette!("Couldn't find protocol component {id}"))?;
 
         let tokens = component.tokens.clone();
-
-        // Test get_amount_out with different percentages of limits. The reserves or limits
-        // are relevant because we need to know how much to test with. We
-        // don't know if a pool is going to revert with 10 or 10 million
-        // USDC, for example, so by using the limits we can use "safe
-        // values" where the sim shouldn't break. We then retrieve the
-        // amount out for 0.1%, 1% and 10%.
-        let percentages = [0.001, 0.01, 0.1];
 
         // Test all permutations of swap directions
         let swap_directions: Vec<_> = tokens
@@ -329,19 +330,14 @@ pub fn run_ladder(
                 ))?;
             info!("[{}] Spot price {}/{}: {:?}", id, token_in.symbol, token_out.symbol, spot_price);
 
-            for percentage in percentages.iter() {
-                // For precision, multiply by 1000 then divide by 1000
-                let percentage_biguint =
-                    BigUint::from_f64(percentage * 1000.0).ok_or_else(|| {
-                        miette!("[{id}] Percentage {percentage} is not a non-negative number")
-                    })?;
-                let thousand = BigUint::from(1000u32);
-                let amount_in = (&max_input * &percentage_biguint) / &thousand;
-
-                // Skip if amount is zero
+            // The limit sizes the ladder: a venue may revert at 10 or at 10 million USDC, and a
+            // fraction of its own limit is safe for it.
+            for thousandths in LADDER_THOUSANDTHS {
+                let percentage = f64::from(thousandths) / 10.0;
+                let amount_in = &max_input * thousandths / 1000u32;
                 if amount_in.is_zero() {
                     return Err(miette!(
-                        "Amount in multiplied by percentage {percentage} is zero for pool {id}."
+                        "Amount in at {percentage}% of the limit is zero for pool {id}."
                     ));
                 }
 
@@ -349,15 +345,14 @@ pub fn run_ladder(
                         .get_amount_out(amount_in.clone(), token_in, token_out)
                         .into_diagnostic()
                         .wrap_err(format!(
-                            "Error calculating amount out for Pool {id:?} at {:.1}% with input of {amount_in} {}.",
-                            percentage * 100.0,
+                            "Error calculating amount out for Pool {id:?} at {percentage:.1}% with input of {amount_in} {}.",
                             token_in.symbol,
                         ))?;
 
                 info!(
                         "[{}] Simulated amount out for trading {:.1}% of max: ({} {} -> {} {}) (gas: {})",
                         id,
-                        percentage * 100.0,
+                        percentage,
                         amount_in,
                         token_in.symbol,
                         amount_out_result.amount,
@@ -367,7 +362,7 @@ pub fn run_ladder(
 
                 quoted_any_direction = true;
 
-                if skip_execution.contains_key(&key) {
+                if skips.execution.contains_key(&key) {
                     continue;
                 }
 
@@ -420,14 +415,16 @@ pub fn run_ladder(
                     limits: declared.clone(),
                     capped,
                     quoted_at_limit: checked.at_limit.is_some(),
-                    execution_skipped: skip_execution
+                    execution_skipped: skips
+                        .execution
                         .get(&key)
                         .map(|reason| reason.to_string()),
                     failures: checked.failures,
                     at_limit: None,
                     past_limit: None,
                 };
-                if let (Some(quote), false) = (&checked.at_limit, skip_execution.contains_key(&key))
+                if let (Some(quote), false) =
+                    (&checked.at_limit, skips.execution.contains_key(&key))
                 {
                     let simulation_id = format!("at_limit_{id}_{}", limits.direction);
                     output.at_limit.insert(
@@ -493,7 +490,7 @@ pub fn run_ladder(
 }
 
 /// Encodes the router swap that executes `quote` for `amount_in`.
-pub fn execution_input(
+fn execution_input(
     chain: Chain,
     component: &ProtocolComponent,
     token_in: &Token,
@@ -536,16 +533,19 @@ pub fn execution_input(
     })
 }
 
+/// The results of executing a ladder's swaps, by simulation id.
+type Results = HashMap<String, TychoExecutionResult>;
+
 /// Why one execution fails a limit check, if it does.
-type Judge<'a> = dyn Fn(&str, &TychoExecutionInput, &HashMap<String, TychoExecutionResult>) -> Option<String>
-    + 'a;
+type Judge<'a> = dyn Fn(&str, &TychoExecutionInput, &Results) -> Option<String> + 'a;
 
 /// The outcome of one limit check of one direction, as a report records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LimitJudgement {
     pub check: CheckId,
+    /// The component's id, as indexed.
     pub component: String,
-    /// `0x<token in>->0x<token out>`.
+    /// The direction, as [`Direction`] prints it.
     pub direction: String,
     /// What the check records when nothing failed: a pass, or why it did not run.
     pub unfailed: Outcome,
@@ -594,15 +594,15 @@ pub fn judge_limits(
         let not_executed_here =
             || Outcome::Skipped { reason: "the swap is not executed at this block".to_string() };
 
-        let mut at_limit = limits.failures_of(CheckId::LimitsAtLimit);
-        at_limit.extend(execution_failure(&limits.at_limit, &|id, input, results| {
+        let mut at_limit_failures = limits.failures_of(CheckId::LimitsAtLimit);
+        at_limit_failures.extend(execution_failure(&limits.at_limit, &|id, input, results| {
             execution_mismatch(id, input, results, tolerance)
         }));
         let at_limit_unfailed = match (executed, &limits.at_limit) {
             (None, Some(_)) => not_executed_here(),
             (Some(_), _) | (None, None) => limits.at_limit_unfailed(),
         };
-        judgements.push(judgement(CheckId::LimitsAtLimit, at_limit_unfailed, at_limit));
+        judgements.push(judgement(CheckId::LimitsAtLimit, at_limit_unfailed, at_limit_failures));
 
         // A revert past the limit proves the bound only if the swap at the limit executes.
         let at_limit_executed = matches!(
@@ -610,18 +610,20 @@ pub fn judge_limits(
             (Some(Ok(results)), Some(id))
                 if matches!(results.get(id), Some(TychoExecutionResult::Success { .. }))
         );
-        let mut past_limit = limits.failures_of(CheckId::LimitsPastLimit);
+        let mut past_limit_failures = limits.failures_of(CheckId::LimitsPastLimit);
         let batch_failed = matches!(executed, Some(Err(_)));
         if at_limit_executed || batch_failed {
-            past_limit.extend(execution_failure(&limits.past_limit, &|id, input, results| {
-                missing_revert(id, input, results)
-            }));
+            past_limit_failures.extend(execution_failure(&limits.past_limit, &missing_revert));
         }
         let past_limit_unfailed = match (executed, &limits.past_limit) {
             (None, Some(_)) => not_executed_here(),
             (Some(_), _) | (None, None) => limits.past_limit_unfailed(at_limit_executed),
         };
-        judgements.push(judgement(CheckId::LimitsPastLimit, past_limit_unfailed, past_limit));
+        judgements.push(judgement(
+            CheckId::LimitsPastLimit,
+            past_limit_unfailed,
+            past_limit_failures,
+        ));
 
         judgements.push(judgement(
             CheckId::LimitsMaxOutput,
@@ -884,6 +886,19 @@ mod tests {
             judge_limits(&soft, Some(Ok(&results)), Tolerance::EXACT)[1].unfailed,
             Outcome::Skipped { reason: "the limit is declared soft: constant product".to_string() }
         );
+        let mut under_cap = output();
+        under_cap.limit_directions[0].limits = Limits {
+            kind: LimitKind::UnderCap,
+            reason: Some("keeper-set rate".to_string()),
+            lost_capacity: Some("2%".to_string()),
+        };
+        assert_eq!(
+            judge_limits(&under_cap, Some(Ok(&results)), Tolerance::EXACT)[1].unfailed,
+            Outcome::Skipped {
+                reason: "the limit is declared under_cap: keeper-set rate; it gives up 2%"
+                    .to_string()
+            }
+        );
         let mut capped = output();
         capped.limit_directions[0].capped = true;
         assert!(matches!(
@@ -930,8 +945,7 @@ mod tests {
             Chain::Ethereum,
             &update,
             &components,
-            &skip,
-            &HashMap::new(),
+            Skips { simulation: &skip, execution: &HashMap::new() },
             "uniswap_v2",
             None,
         )
@@ -956,8 +970,7 @@ mod tests {
             Chain::Ethereum,
             &update,
             &components,
-            &HashMap::new(),
-            &skip,
+            Skips { simulation: &HashMap::new(), execution: &skip },
             "uniswap_v2",
             Some(&kinds),
         )
