@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {LibBytes} from "@solady/utils/LibBytes.sol";
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {
     ReentrancyGuardTransient
 } from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
@@ -15,6 +17,9 @@ import {
     IUniswapV3Pool
 } from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {
+    IUnlockCallback
+} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -46,6 +51,7 @@ error TychoFallbackRouter__ProtocolUnavailable(uint8 protocol);
 error TychoFallbackRouter__SimulatedAmountOut(uint256 amountOut);
 error TychoFallbackRouter__UnknownProtocol(uint8 protocol);
 
+// forge-lint: disable-next-item(missing-inheritance) Only the poolManager() getter matches Uniswap V4's IImmutableState.
 /// @title TychoFallbackRouter
 /// @notice Quotes a primary venue against the caller's chosen fallback protocol and runs whichever
 /// quotes more `tokenOut`. A primary that wins the quote but fails still falls through to the
@@ -62,7 +68,14 @@ error TychoFallbackRouter__UnknownProtocol(uint8 protocol);
 /// mistaken transfer) is claimable by anyone through a router's `swap` and is considered lost, which is also
 /// why a Curve approval is left in place rather than revoked. Native ETH, fee-on-transfer and
 /// rebasing tokens are unsupported.
-abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
+abstract contract TychoFallbackRouter is
+    ReentrancyGuardTransient,
+    IUnlockCallback
+{
+    // One directive per slot type: Slither 0.11.6 can fail to analyse a
+    // contract that uses `using TransientSlot for *`.
+    using TransientSlot for TransientSlot.AddressSlot;
+    using TransientSlot for TransientSlot.Uint256Slot;
     using SafeERC20 for IERC20;
 
     /// @notice The protocols a fallback may use.
@@ -101,15 +114,24 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         bytes hookData;
     }
 
-    // keccak256("TychoFallbackRouter#CALLBACK_SOURCE")
-    bytes32 private constant _CALLBACK_SOURCE_SLOT =
-        0xf69ae8e0008b818aeb91c2b052698e485056e760fad9d0aa28144b842debe4f7;
-    // keccak256("TychoFallbackRouter#CALLBACK_TOKEN")
-    bytes32 private constant _CALLBACK_TOKEN_SLOT =
-        0xbb428614797396c24d2ae21e3c7c9a28d69673f64cb7ba6433b600b67ed8541b;
-    // keccak256("TychoFallbackRouter#CALLBACK_AMOUNT")
-    bytes32 private constant _CALLBACK_AMOUNT_SLOT =
-        0xde66fd0ca9c728ba44ca7bab17a304d328bf9cf5d5c72b8bf8ea7cd13765e542;
+    // pool (20) + feeBps (1)
+    uint256 private constant _UNISWAP_V2_SWAP_LEN = 21;
+    // pool (20)
+    uint256 private constant _UNISWAP_V3_SWAP_LEN = 20;
+    // dex (20) + zero2one (1)
+    uint256 private constant _FLUID_V1_SWAP_LEN = 21;
+    // pool (20)
+    uint256 private constant _AERODROME_V1_SWAP_LEN = 20;
+
+    TransientSlot.AddressSlot private constant _CALLBACK_SOURCE_SLOT =
+        TransientSlot.AddressSlot
+            .wrap(keccak256("TychoFallbackRouter#CALLBACK_SOURCE"));
+    TransientSlot.AddressSlot private constant _CALLBACK_TOKEN_SLOT =
+        TransientSlot.AddressSlot
+            .wrap(keccak256("TychoFallbackRouter#CALLBACK_TOKEN"));
+    TransientSlot.Uint256Slot private constant _CALLBACK_AMOUNT_SLOT =
+        TransientSlot.Uint256Slot
+            .wrap(keccak256("TychoFallbackRouter#CALLBACK_AMOUNT"));
 
     /// @notice Uniswap V4's PoolManager, or `address(0)` on a chain without Uniswap V4.
     IPoolManager public immutable poolManager;
@@ -138,12 +160,11 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
     /// V3 fallbacks by simulation.
     constructor(
         IPoolManager poolManager_,
+        // forge-lint: disable-next-line(missing-zero-check) address(0) deploys without Fluid.
         address fluidLiquidity_,
         IUniswapV3StaticQuoter uniswapV3StaticQuoter_
     ) {
         poolManager = poolManager_;
-        // Zero is the documented way to deploy without Fluid on this chain.
-        // slither-disable-next-line missing-zero-check
         fluidLiquidity = fluidLiquidity_;
         uniswapV3StaticQuoter = uniswapV3StaticQuoter_;
     }
@@ -170,8 +191,6 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         }
 
         FallbackProtocol protocol = _executeFallback(swap_, fallbackSwap);
-        // Reentrancy cannot happen: `_swap` is nonReentrant.
-        // slither-disable-next-line reentrancy-events
         emit FallbackSwap(
             primary,
             swap_.tokenIn,
@@ -361,7 +380,7 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         returns (uint256 amountOut)
     {
         (address dex, bool zero2one) = _decodeFluidV1(data);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The dex quotes by reverting with the amount; a call that returns quotes zero.
         try IFluidV1Dex(dex)
             .swapIn(zero2one, swap_.amountIn, 0, address(0xdEaD)) {
             return 0;
@@ -379,10 +398,7 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         if (revertData.length != 36 || bytes4(revertData) != selector) {
             return 0;
         }
-        // slither-disable-next-line assembly
-        assembly {
-            amountOut := mload(add(revertData, 36))
-        }
+        amountOut = uint256(LibBytes.load(revertData, 4));
     }
 
     /// @dev Runs the tagged protocol, which pays or forwards to `swap_.receiver`. No output
@@ -459,7 +475,7 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         uint256 feeBps
     ) internal view returns (uint256 amountOut) {
         bool zeroForOne = swap_.tokenIn < swap_.tokenOut;
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return Pricing needs only the reserves, not their timestamp.
         (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
         return UniswapV2Math.getAmountOut(
             swap_.amountIn,
@@ -474,7 +490,7 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         pure
         returns (IUniswapV2Pair pair, uint256 feeBps)
     {
-        if (data.length != 21) {
+        if (data.length != _UNISWAP_V2_SWAP_LEN) {
             revert TychoFallbackRouter__InvalidSwapLength(data.length);
         }
         pair = IUniswapV2Pair(address(bytes20(data[0:20])));
@@ -489,7 +505,7 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         (bool zeroForOne, uint160 sqrtPriceLimit) = _uniswapV3Params(swap_);
 
         _setCallbackContext(pool, swap_.tokenIn, swap_.amountIn);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher measures the output at the receiver.
         IUniswapV3Pool(pool)
             .swap(
                 swap_.receiver,
@@ -506,7 +522,7 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         pure
         returns (address pool)
     {
-        if (data.length != 20) {
+        if (data.length != _UNISWAP_V3_SWAP_LEN) {
             revert TychoFallbackRouter__InvalidSwapLength(data.length);
         }
         pool = address(bytes20(data[0:20]));
@@ -528,7 +544,7 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
             hookData: data[26:]
         });
 
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher measures the output at the receiver.
         poolManager.unlock(abi.encode(v4Swap));
     }
 
@@ -575,7 +591,7 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         (address dex, bool zero2one) = _decodeFluidV1(data);
 
         _setCallbackContext(dex, swap_.tokenIn, swap_.amountIn);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher measures the output at the receiver.
         IFluidV1Dex(dex)
             .swapInWithCallback(zero2one, swap_.amountIn, 0, swap_.receiver);
         _clearCallbackContext();
@@ -586,7 +602,7 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         pure
         returns (address dex, bool zero2one)
     {
-        if (data.length != 21) {
+        if (data.length != _FLUID_V1_SWAP_LEN) {
             revert TychoFallbackRouter__InvalidSwapLength(data.length);
         }
         dex = address(bytes20(data[0:20]));
@@ -624,7 +640,7 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         pure
         returns (IAerodromeV1Pool pool)
     {
-        if (data.length != 20) {
+        if (data.length != _AERODROME_V1_SWAP_LEN) {
             revert TychoFallbackRouter__InvalidSwapLength(data.length);
         }
         pool = IAerodromeV1Pool(address(bytes20(data[0:20])));
@@ -685,18 +701,18 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
 
         poolManager.sync(Currency.wrap(swap_.tokenIn));
         IERC20(swap_.tokenIn).safeTransfer(address(poolManager), swap_.amountIn);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return settle returns the amount paid, which is the amount just transferred.
         poolManager.settle();
 
         BalanceDelta delta = poolManager.swap(
             key,
-            SwapParams(
-                zeroForOne,
-                -int256(swap_.amountIn),
-                zeroForOne
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(swap_.amountIn),
+                sqrtPriceLimitX96: zeroForOne
                     ? TickMath.MIN_SQRT_PRICE + 1
                     : TickMath.MAX_SQRT_PRICE - 1
-            ),
+            }),
             v4Swap.hookData
         );
 
@@ -725,12 +741,9 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
     function _setCallbackContext(address source, address token, uint256 amount)
         internal
     {
-        // slither-disable-next-line assembly
-        assembly {
-            tstore(_CALLBACK_SOURCE_SLOT, source)
-            tstore(_CALLBACK_TOKEN_SLOT, token)
-            tstore(_CALLBACK_AMOUNT_SLOT, amount)
-        }
+        _CALLBACK_SOURCE_SLOT.tstore(source);
+        _CALLBACK_TOKEN_SLOT.tstore(token);
+        _CALLBACK_AMOUNT_SLOT.tstore(amount);
     }
 
     /// @dev Rejects a `msg.sender` that is not the stored source, and clears the context so one
@@ -740,15 +753,12 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         returns (address token, uint256 amount)
     {
         address source;
-        // slither-disable-next-line assembly
-        assembly {
-            source := tload(_CALLBACK_SOURCE_SLOT)
-            token := tload(_CALLBACK_TOKEN_SLOT)
-            amount := tload(_CALLBACK_AMOUNT_SLOT)
-            tstore(_CALLBACK_SOURCE_SLOT, 0)
-            tstore(_CALLBACK_TOKEN_SLOT, 0)
-            tstore(_CALLBACK_AMOUNT_SLOT, 0)
-        }
+        source = _CALLBACK_SOURCE_SLOT.tload();
+        token = _CALLBACK_TOKEN_SLOT.tload();
+        amount = _CALLBACK_AMOUNT_SLOT.tload();
+        _CALLBACK_SOURCE_SLOT.tstore(address(0));
+        _CALLBACK_TOKEN_SLOT.tstore(address(0));
+        _CALLBACK_AMOUNT_SLOT.tstore(0);
         // An unset context has source == address(0), which no real sender matches.
         if (msg.sender != source) {
             revert TychoFallbackRouter__InvalidCallback();
