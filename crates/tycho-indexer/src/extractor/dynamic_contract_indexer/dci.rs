@@ -415,16 +415,21 @@ where
                             .contains_key(account);
 
                         // Determine which slots are new (not previously tracked)
-                        let new_slots: HashSet<StoreKey> = if let Some(tracked_slots) = self
+                        let new_slots: HashSet<StoreKey> = if let Some(layers) = self
                             .cache
                             .tracked_contracts
-                            .get(account)
+                            .get_all(account.clone())
                         {
-                            // Account is tracked
-                            // Filter out already tracked slots
+                            // Account is tracked. Each pending layer holds only the slots its
+                            // block added, so a slot is tracked if any layer holds it.
+                            let tracked_slots: Vec<&HashSet<StoreKey>> = layers.collect();
                             slots
                                 .iter()
-                                .filter(|slot| !tracked_slots.contains(*slot))
+                                .filter(|slot| {
+                                    !tracked_slots
+                                        .iter()
+                                        .any(|layer| layer.contains(*slot))
+                                })
                                 .cloned()
                                 .collect()
                         } else {
@@ -3021,6 +3026,109 @@ mod tests {
             .txs_with_update
             .first()
             .is_none_or(|tx| tx.account_deltas.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn test_process_block_update_fetches_only_slots_no_cache_layer_tracks() {
+        let gateway = get_mock_gateway();
+        let mut account_extractor = MockAccountExtractor::new();
+        let mut entrypoint_tracer = MockEntryPointTracer::new();
+
+        let token_address = Bytes::from("0xA0b86991c6218a36c1d19D4a2e9Eb0cE3606eB48"); // USDC
+        let finalized_slot = Bytes::from(0xAA_u8);
+        let pending_slot = Bytes::from(0xBB_u8);
+        let new_slot = Bytes::from(0xCC_u8);
+
+        entrypoint_tracer
+            .expect_trace()
+            .return_once({
+                let token_address = token_address.clone();
+                let finalized_slot = finalized_slot.clone();
+                let new_slot = new_slot.clone();
+                move |_, _| {
+                    vec![Ok(TracedEntryPoint::new(
+                        EntryPointWithTracingParams::new(get_entrypoint(9), get_tracing_params(9)),
+                        Bytes::zero(32),
+                        get_tracing_result_with_addresses_and_slots(vec![(
+                            token_address,
+                            vec![finalized_slot, new_slot],
+                        )]),
+                    ))]
+                }
+            });
+        account_extractor
+            .expect_get_accounts_at_block()
+            .with(
+                eq(testing::block(2)),
+                eq(vec![StorageSnapshotRequest {
+                    address: token_address.clone(),
+                    slots: Some(vec![new_slot.clone()]),
+                }]),
+            )
+            .times(1)
+            .return_once({
+                let token_address = token_address.clone();
+                let new_slot = new_slot.clone();
+                move |_, _| {
+                    Ok(HashMap::from([(
+                        token_address.clone(),
+                        AccountDelta::new(
+                            Chain::Ethereum,
+                            token_address,
+                            HashMap::from([(new_slot, Some(Bytes::from(0x01_u8)))]),
+                            Some(Bytes::from(0_u8).lpad(32, 0)),
+                            Some(Bytes::from("0x6000")),
+                            ChangeType::Creation,
+                        ),
+                    )]))
+                }
+            });
+
+        let mut dci = DynamicContractIndexer::new(
+            Chain::Ethereum,
+            "test".to_string(),
+            gateway,
+            account_extractor,
+            entrypoint_tracer,
+        );
+        dci.initialize().await.unwrap();
+
+        // One slot of the token is finalized; block 1, still pending, tracked another one.
+        dci.cache
+            .erc20_addresses
+            .insert_permanent(token_address.clone(), true);
+        dci.cache
+            .tracked_contracts
+            .insert_permanent(token_address.clone(), HashSet::from([finalized_slot]));
+        let pending_block = testing::block(1);
+        dci.cache
+            .try_insert_block_layer(&pending_block)
+            .unwrap();
+        dci.cache
+            .tracked_contracts
+            .pending_entry(&pending_block, &token_address)
+            .unwrap()
+            .or_insert(HashSet::from([pending_slot]));
+
+        let mut block_changes = get_block_changes(2);
+        dci.process_block_update(&mut block_changes)
+            .await
+            .unwrap();
+
+        let token_deltas: Vec<&AccountDelta> = block_changes
+            .txs_with_update
+            .iter()
+            .filter_map(|tx| tx.account_deltas.get(&token_address))
+            .collect();
+        assert_eq!(token_deltas.len(), 1);
+        assert_eq!(token_deltas[0].change_type(), ChangeType::Update);
+        assert_eq!(
+            token_deltas[0]
+                .slots
+                .keys()
+                .collect::<Vec<_>>(),
+            vec![&new_slot]
+        );
     }
 
     #[test]
