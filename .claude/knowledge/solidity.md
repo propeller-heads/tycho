@@ -5,21 +5,19 @@
 During development, from `crates/tycho-execution/contracts/`:
 
 ```bash
-forge build                      # compile
-forge test -vvv                  # run all tests (requires RPC_URL + BASE_RPC_URL)
-forge test -vvv --match-test foo # run a single test
-forge fmt                        # auto-format
-forge fmt --check                # format check (CI)
-forge snapshot                   # update gas snapshots
+forge build                                           # compile
+forge test -vvv                                       # run all tests (requires RPC_URL + BASE_RPC_URL)
+forge test -vvv --match-test foo                      # run a single test
+forge fmt                                             # auto-format
+forge fmt --check                                     # format check (CI)
+forge lint --report-unused-suppressions --deny notes  # lint (CI)
+forge snapshot                                        # update gas snapshots
+slither .                                             # static analysis (CI); mise installs Slither
 ```
 
-Static analysis (requires Python env — see
-[contributing guidelines](https://docs.propellerheads.xyz/tycho/for-dexs/protocol-integration/contributing-guidelines#contract-analysis)
-for setup):
-
-```bash
-slither .                        # run from contracts/
-```
+forge lint is the primary linter (`[lint]` in `foundry.toml`); Slither runs the checks forge lacks
+or handles worse (`slither.config.json`, reasons in `slither.md`). Each check has one owner, so a
+finding is suppressed in the tool that reports it.
 
 After a task is done, run `forge fmt` and the tests covering what you changed (e.g.
 `forge test --match-contract TychoRouterTest`). Save the `/run-ci` skill for when you open a PR or
@@ -38,9 +36,21 @@ change something workspace-wide.
 ### Formatting
 
 - `forge fmt` enforced in CI; line length 80 chars
-- Suppress Slither false positives with `// slither-disable-next-line` and a comment
+
+### Lint suppressions
+
+- Suppress a false positive in the tool that owns the check, on the line above it, with the reason
+  after the directive: `// forge-lint: disable-next-line(<lint>, ...) <reason>` or
+  `// slither-disable-next-line <detector>,... <reason>`. Each tool only reads the line directly
+  above the code, so where both apply, or the finding is reported on a later line of a multi-line
+  statement, use `// forge-lint: disable-next-item(<lint>, ...) <reason>` above the Slither
+  directive
+
+### Assembly
+
 - Avoid assembly (`assembly { ... }`) unless there is no viable alternative — prefer high-level
-  Solidity
+  Solidity or a library function (OpenZeppelin, solady). A remaining block carries a
+  `forge-lint: disable-next-line(inline-assembly)` with its reason
 
 ### Executor conventions
 
