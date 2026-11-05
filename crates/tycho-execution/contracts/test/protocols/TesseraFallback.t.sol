@@ -54,6 +54,22 @@ contract MockPartialTesseraSwap {
     }
 }
 
+contract TesseraFallbackRouterExposed is TesseraFallbackRouter {
+    constructor(
+        IPoolManager poolManager_,
+        IUniswapV3StaticQuoter uniswapV3StaticQuoter_,
+        address tesseraSwap_
+    )
+        TesseraFallbackRouter(
+            poolManager_, address(0), uniswapV3StaticQuoter_, tesseraSwap_
+        )
+    {}
+
+    function quotePrimary(Swap calldata swap_) external returns (uint256) {
+        return _quotePrimary(swap_, address(tesseraSwap), msg.data[0:0]);
+    }
+}
+
 /// @notice Runs the router against Tessera's live WETH/USDC pair on a Base fork, with the chain's
 /// Uniswap V3 pool as fallback. The paths Tessera cannot take at the fork block, a low quote, no
 /// quote or a failing swap, are forced by mocking `TesseraSwap`.
@@ -71,24 +87,14 @@ contract TesseraFallbackRouterTest is FallbackRouterAssertions, TestUtils {
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("base"), TESSERA_FORK_BLOCK);
-        router = new TesseraFallbackRouter(
-            IPoolManager(BASE_POOL_MANAGER),
-            address(0),
-            IUniswapV3StaticQuoter(BASE_STATIC_QUOTER),
-            TESSERA_SWAP
-        );
+        router = _newRouter(TESSERA_SWAP);
         executor = new TesseraFallbackExecutor(address(router));
         deal(BASE_WETH, address(router), WETH_IN);
     }
 
     function testConstructorRejectsZeroTesseraSwap() public {
         vm.expectRevert(TesseraFallbackRouter__AddressZero.selector);
-        new TesseraFallbackRouter(
-            IPoolManager(BASE_POOL_MANAGER),
-            address(0),
-            IUniswapV3StaticQuoter(BASE_STATIC_QUOTER),
-            address(0)
-        );
+        _newRouter(address(0));
     }
 
     /// A fallback pool with no code quotes zero, so Tessera fills, at exactly its view quote, and
@@ -110,12 +116,7 @@ contract TesseraFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     function testRevokesTheApprovalAfterTheSwap() public {
         MockPartialTesseraSwap tessera = new MockPartialTesseraSwap(1e6);
         deal(BASE_USDC, address(tessera), 1e6);
-        TesseraFallbackRouter partialRouter = new TesseraFallbackRouter(
-            IPoolManager(BASE_POOL_MANAGER),
-            address(0),
-            IUniswapV3StaticQuoter(BASE_STATIC_QUOTER),
-            address(tessera)
-        );
+        TesseraFallbackRouter partialRouter = _newRouter(address(tessera));
         deal(BASE_WETH, address(partialRouter), WETH_IN);
 
         partialRouter.swap(
@@ -210,6 +211,78 @@ contract TesseraFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         assertEq(IERC20(BASE_WETH).allowance(address(router), TESSERA_SWAP), 0);
     }
 
+    /// Tessera wins on its view quote but its swap pays less, as one charged by the pair's fee
+    /// module does: the swap requires the quote, reverts, and the fallback fills.
+    function testFallsBackWhenTesseraPaysLessThanItQuoted() public {
+        bytes memory v3 = FallbackSwaps.uniswapV3(BASE_USDC_WETH_USV3);
+        uint256 v3Out = _quoteFallback(v3);
+        _mockTesseraQuote(_tesseraQuote() + 1);
+
+        _expectFallbackSwap(TychoFallbackRouter.FallbackReason.PrimaryFailed);
+        router.swap(_swapStruct(), v3);
+
+        assertEq(IERC20(BASE_USDC).balanceOf(BOB), v3Out);
+        _assertRouterDrained(address(router), BASE_WETH, BASE_USDC);
+        assertEq(IERC20(BASE_WETH).allowance(address(router), TESSERA_SWAP), 0);
+    }
+
+    function testPaysTheHigherQuoteFromUsdcToWeth() public {
+        uint256 usdcIn = 25e6;
+        TychoFallbackRouter.Swap memory swap_ =
+            FallbackSwaps.swap(BASE_USDC, BASE_WETH, usdcIn, BOB);
+        bytes memory v3 = FallbackSwaps.uniswapV3(BASE_USDC_WETH_USV3);
+        vm.startPrank(address(router));
+        (, uint256 tesseraOut) = ITesseraSwap(TESSERA_SWAP)
+            .tesseraSwapViewAmounts(BASE_USDC, BASE_WETH, int256(usdcIn));
+        uint256 v3Out = router.quoteFallback(swap_, v3);
+        vm.stopPrank();
+        assertGt(tesseraOut, 0);
+        deal(BASE_WETH, address(router), 0);
+        deal(BASE_USDC, address(router), usdcIn);
+
+        router.swap(swap_, v3);
+
+        assertEq(
+            IERC20(BASE_WETH).balanceOf(BOB),
+            tesseraOut >= v3Out ? tesseraOut : v3Out
+        );
+        _assertRouterDrained(address(router), BASE_USDC, BASE_WETH);
+    }
+
+    /// A negative amount would quote exact-out, so an amount above int256's maximum quotes zero
+    /// without asking Tessera.
+    function testQuotesZeroAboveInt256Max() public {
+        TesseraFallbackRouterExposed exposed = _newExposedRouter();
+        vm.expectCall(
+            TESSERA_SWAP,
+            abi.encodeWithSelector(
+                ITesseraSwap.tesseraSwapViewAmounts.selector
+            ),
+            0
+        );
+
+        uint256 quote = exposed.quotePrimary(
+            FallbackSwaps.swap(
+                BASE_WETH, BASE_USDC, uint256(type(int256).max) + 1, BOB
+            )
+        );
+
+        assertEq(quote, 0);
+    }
+
+    function testQuotesZeroOnShortReturnData() public {
+        TesseraFallbackRouterExposed exposed = _newExposedRouter();
+        vm.mockCall(
+            TESSERA_SWAP,
+            abi.encodeWithSelector(
+                ITesseraSwap.tesseraSwapViewAmounts.selector
+            ),
+            abi.encode(WETH_IN)
+        );
+
+        assertEq(exposed.quotePrimary(_swapStruct()), 0);
+    }
+
     function testExecutorGetTransferData() public view {
         (
             TransferManager.TransferType transferType,
@@ -259,6 +332,48 @@ contract TesseraFallbackRouterTest is FallbackRouterAssertions, TestUtils {
             tesseraOut >= v3Out ? tesseraOut : v3Out
         );
         _assertRouterDrained(address(router), BASE_WETH, BASE_USDC);
+    }
+
+    /// The same swap data with Tessera quoting low, so the fallback the data names fills.
+    function testExecutorSwapsRustEncodedDataThroughTheFallback() public {
+        uint256 v3Out =
+            _quoteFallback(FallbackSwaps.uniswapV3(BASE_USDC_WETH_USV3));
+        _mockTesseraQuote(1);
+
+        _expectFallbackSwap(
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
+        );
+        executor.swap(
+            WETH_IN,
+            loadCallDataFromFile("test_encode_tessera_fallback_for_solidity"),
+            BOB
+        );
+
+        assertEq(IERC20(BASE_USDC).balanceOf(BOB), v3Out);
+        _assertRouterDrained(address(router), BASE_WETH, BASE_USDC);
+    }
+
+    function _newRouter(address tesseraSwap)
+        internal
+        returns (TesseraFallbackRouter)
+    {
+        return new TesseraFallbackRouter(
+            IPoolManager(BASE_POOL_MANAGER),
+            address(0),
+            IUniswapV3StaticQuoter(BASE_STATIC_QUOTER),
+            tesseraSwap
+        );
+    }
+
+    function _newExposedRouter()
+        internal
+        returns (TesseraFallbackRouterExposed)
+    {
+        return new TesseraFallbackRouterExposed(
+            IPoolManager(BASE_POOL_MANAGER),
+            IUniswapV3StaticQuoter(BASE_STATIC_QUOTER),
+            TESSERA_SWAP
+        );
     }
 
     /// Tessera's view quote, priced for the router as its caller, as the swap is.
