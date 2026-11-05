@@ -234,7 +234,6 @@ pub fn map_protocol_changes(
                             builder.add_entrypoint_params(&entrypoint_params);
                         }
                     }
-
                     builder.add_protocol_component(component);
                     let entity_change = EntityChanges {
                         component_id: component.id.clone(),
@@ -244,8 +243,46 @@ pub fn map_protocol_changes(
                 });
         });
 
+    // `SwapFeePercentageChanged` is emitted during the pool creation tx, so we don't need to
+    // set a static `fee` attribute in the pool factory. Instead, we rely on this event being
+    // picked up here in `map_protocol_changes` to set the fee as a dynamic attribute.
+    block.transactions().for_each(|tx| {
+        let mut logs_matched = Vec::new();
+        for (log, _) in tx.logs_with_calls() {
+            if let Some(ev) =
+                abi::base_pool::events::SwapFeePercentageChanged::match_and_decode(log)
+            {
+                let pool_addr_key = format!("pool:0x{}", hex::encode(&log.address));
+                if let Some(pool_id) = components_store.get_last(&pool_addr_key) {
+                    logs_matched.push((pool_id, ev));
+                }
+            }
+        }
+
+        if !logs_matched.is_empty() {
+            let tycho_tx: tycho_substreams::models::Transaction = tx.into();
+            let builder = transaction_changes
+                .entry(tycho_tx.index)
+                .or_insert_with(|| TransactionChangesBuilder::new(&tycho_tx));
+
+            for (pool_id, ev) in logs_matched {
+                let entity_change = EntityChanges {
+                    component_id: pool_id.clone(),
+                    attributes: vec![Attribute {
+                        name: "fee".to_string(),
+                        value: ev
+                            .swap_fee_percentage
+                            .to_signed_bytes_be(),
+                        change: ChangeType::Update.into(),
+                    }],
+                };
+                builder.add_entity_change(&entity_change);
+            }
+        }
+    });
+
     // Balance changes are gathered by the `StoreDelta` based on `PoolBalanceChanged` creating
-    //  `BlockBalanceDeltas`. We essentially just process the changes that occurred to the `store`
+    // `BlockBalanceDeltas`. We essentially just process the changes that occurred to the `store`
     // this  block. Then, these balance changes are merged onto the existing map of tx contract
     // changes,  inserting a new one if it doesn't exist.
     aggregate_balances_changes(balance_store, deltas)

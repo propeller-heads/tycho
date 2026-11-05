@@ -1,0 +1,24 @@
+substreams_yaml_path: ./arc-uniswap-v3.yaml
+protocol_system: "uniswap_v3"
+protocol_type_names:
+  - "uniswap_v3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # The first Arc Uniswap V3 pool is initialized in block 1954776, funded in 1954787,
+  # and first swapped in 1954794.
+  - name: test_first_traded_pool
+    start_block: 1954772
+    stop_block: 1954794
+    expected_components:
+      - id: "0x085dbfe12859a88a49dfa103dcbda542bdde708c"
+        tokens:
+          - "0x251d5cd5b8446806c405a5741f7c8c8bd5f0cbf8"
+          - "0x961cc5b47b4e49963070739e4e523166e7fef117"
+        static_attributes:
+          fee: "0x0bb8"
+          tick_spacing: "0x3c"
+        creation_tx: "0x6fee7b59cf20234f6c7d49f666de35d55508a861b67c164e4e0b4afcc06ba5fa"
+        skip_simulation: false
+        skip_execution: true

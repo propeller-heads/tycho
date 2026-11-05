@@ -139,7 +139,7 @@ use diesel_async::{
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use tracing::{debug, info};
 use tycho_common::{
-    models::{token::Token, Chain, TxHash},
+    models::{token::Token, Chain, PaginationParams, TxHash},
     storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -147,13 +147,17 @@ use unicode_segmentation::UnicodeSegmentation;
 pub mod builder;
 pub mod cache;
 mod chain;
+mod component_index;
 mod contract;
 pub mod direct;
 mod entry_point;
 mod extraction_state;
 mod orm;
+mod pool;
 mod protocol;
 mod schema;
+mod snapshot;
+pub mod token_cache;
 mod versioning;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/");
@@ -213,7 +217,7 @@ where
         self.map_id
             .get(val)
             .copied()
-            .ok_or(StorageError::NotFound(val.to_string(), "id".to_string()))
+            .ok_or_else(|| StorageError::NotFound(val.to_string(), "id".to_string()))
     }
 
     /// Retrieves the corresponding enum variant for a database ID. Returns a StorageError
@@ -226,7 +230,7 @@ where
         self.map_enum
             .get(id)
             .cloned()
-            .ok_or(StorageError::NotFound(id.to_string(), "enum".to_string()))
+            .ok_or_else(|| StorageError::NotFound(id.to_string(), "enum".to_string()))
     }
 
     /// Checks if an enum variant exists in the cache. Returns `true` if the variant is found,
@@ -356,6 +360,14 @@ impl From<StorageError> for PostgresError {
     }
 }
 
+/// True if `message` is the Postgres error of a transaction that aborted because it conflicted
+/// with a concurrent one: a serialization failure (SQLSTATE 40001) or a deadlock (40P01). Every
+/// 40001 message starts with "could not serialize access"; the check is a `contains` because one
+/// conversion path prefixes the message with `DieselError: `.
+fn is_transaction_conflict(message: &str) -> bool {
+    message.contains("deadlock detected") || message.contains("could not serialize access")
+}
+
 fn truncate_to_byte_limit(input: &str, limit: usize) -> String {
     let mut result = String::new();
     let mut byte_count = 0;
@@ -372,18 +384,47 @@ fn truncate_to_byte_limit(input: &str, limit: usize) -> String {
     result
 }
 
+/// Converts an integer between its domain type and its database column type.
+///
+/// Fails with [`StorageError::DecodeError`] naming `field` when the value does not fit the target
+/// type, e.g. a block number above `i64::MAX` on write or a negative column value on read.
+fn convert_int<T, U>(value: T, field: &str) -> Result<U, StorageError>
+where
+    T: Copy + std::fmt::Display,
+    U: TryFrom<T>,
+{
+    U::try_from(value).map_err(|_overflow| {
+        StorageError::DecodeError(format!(
+            "{field} value {value} is out of range for {}",
+            std::any::type_name::<U>()
+        ))
+    })
+}
+
+/// Converts a collection length to the `i64` of a database count.
+pub fn count_to_i64(count: usize) -> i64 {
+    i64::try_from(count).expect("a collection length is below isize::MAX and fits in i64")
+}
+
+/// The `(offset, limit)` item window of a page.
+///
+/// Fails with [`StorageError::DecodeError`] when the offset or the page size is negative or does
+/// not fit `usize`.
+pub fn page_window(params: &PaginationParams) -> Result<(usize, usize), StorageError> {
+    Ok((convert_int(params.offset(), "page offset")?, convert_int(params.page_size, "page size")?))
+}
+
 fn storage_error_from_diesel(
     err: diesel::result::Error,
     entity: &str,
     id: &str,
     fetch_args: Option<String>,
 ) -> PostgresError {
+    use diesel::result::{DatabaseErrorKind, Error};
+
     let err_string = err.to_string();
     match err {
-        diesel::result::Error::DatabaseError(
-            diesel::result::DatabaseErrorKind::UniqueViolation,
-            details,
-        ) => {
+        Error::DatabaseError(DatabaseErrorKind::UniqueViolation, details) => {
             if let Some(col) = details.column_name() {
                 if col == "id" {
                     return PostgresError(StorageError::DuplicateEntry(
@@ -394,7 +435,7 @@ fn storage_error_from_diesel(
             }
             PostgresError(StorageError::Unexpected(err_string))
         }
-        diesel::result::Error::NotFound => {
+        Error::NotFound => {
             if let Some(related_entitiy) = fetch_args {
                 return PostgresError(StorageError::NoRelatedEntity(
                     entity.to_owned(),
@@ -404,6 +445,16 @@ fn storage_error_from_diesel(
             }
             PostgresError(StorageError::NotFound(entity.to_owned(), id.to_owned()))
         }
+        Error::InvalidCString(_) |
+        Error::DatabaseError(..) |
+        Error::QueryBuilderError(_) |
+        Error::DeserializationError(_) |
+        Error::SerializationError(_) |
+        Error::RollbackErrorOnCommit { .. } |
+        Error::RollbackTransaction |
+        Error::AlreadyInTransaction |
+        Error::NotInTransaction |
+        Error::BrokenTransactionManager |
         _ => PostgresError(StorageError::Unexpected(err_string)),
     }
 }
@@ -448,6 +499,12 @@ pub(crate) struct PostgresGateway {
     protocol_system_id_cache: Arc<ProtocolSystemEnumCache>,
     chain_id_cache: Arc<ChainEnumCache>,
     native_token_id_cache: Arc<NativeTokenEnumCache>,
+    /// In-memory token store serving `get_tokens` without DB access. `None` means
+    /// token queries fall back to SQL (e.g. in the token analysis job).
+    pub(crate) token_cache: Option<Arc<token_cache::TokenCache>>,
+    /// In-memory index counting and paging `get_protocol_components` requests by protocol system.
+    /// `None` means those requests run entirely in SQL.
+    pub(crate) component_index: Option<Arc<component_index::ComponentIndex>>,
     /// Any versions dated before this date, as per their `valid_to` column, will be
     /// discarded and never be inserted into the db. We supply this as an absolute date
     /// since updating it must be done carefully. To avoid gaps in versions this can't
@@ -461,17 +518,21 @@ impl PostgresGateway {
         chain_cache: Arc<ChainEnumCache>,
         native_token_cache: Arc<NativeTokenEnumCache>,
         protocol_system_cache: Arc<ProtocolSystemEnumCache>,
+        token_cache: Option<Arc<token_cache::TokenCache>>,
+        component_index: Option<Arc<component_index::ComponentIndex>>,
         retention_horizon: NaiveDateTime,
     ) -> Self {
         Self {
             protocol_system_id_cache: protocol_system_cache,
             chain_id_cache: chain_cache,
             native_token_id_cache: native_token_cache,
+            token_cache,
+            component_index,
             retention_horizon,
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub async fn from_connection(conn: &mut AsyncPgConnection) -> Self {
         let chain_cache = ChainEnumCache::from_connection(conn)
             .await
@@ -487,6 +548,8 @@ impl PostgresGateway {
             Arc::new(chain_cache),
             Arc::new(native_token_cache),
             Arc::new(protocol_system_cache),
+            None,
+            None,
             NaiveDateTime::default(),
         )
     }
@@ -517,15 +580,35 @@ impl PostgresGateway {
     pub async fn new(
         pool: Pool<AsyncPgConnection>,
         retention_horizon: NaiveDateTime,
+        token_cache_chains: Option<&[Chain]>,
+        component_index_chain: Option<Chain>,
     ) -> Result<Self, StorageError> {
         let chain_cache = ChainEnumCache::from_pool(pool.clone()).await?;
         let native_token_cache = Self::native_cache_from_pool(pool.clone(), &chain_cache).await?;
         let protocol_system_cache: ValueIdTableCache<String> =
             ProtocolSystemEnumCache::from_pool(pool.clone()).await?;
+        let token_cache = match token_cache_chains {
+            Some(chains) => {
+                Some(Arc::new(token_cache::TokenCache::from_pool(pool.clone(), chains).await?))
+            }
+            None => None,
+        };
+        let component_index = match component_index_chain {
+            Some(chain) => {
+                let chain_db_id = chain_cache.try_get_id(&chain)?;
+                Some(Arc::new(
+                    component_index::ComponentIndex::from_pool(pool.clone(), chain, chain_db_id)
+                        .await?,
+                ))
+            }
+            None => None,
+        };
         let gw = PostgresGateway::with_cache(
             Arc::new(chain_cache),
             Arc::new(native_token_cache),
             Arc::new(protocol_system_cache),
+            token_cache,
+            component_index,
             retention_horizon,
         );
 
@@ -599,18 +682,23 @@ impl PostgresGateway {
 ///   successfully.
 /// - `Err`: Contains a `StorageError` if there was an issue creating the connection pool.
 async fn connect(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
-    let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(db_url);
-    let pool = Pool::builder(config)
-        .build()
-        .map_err(|err| StorageError::Unexpected(err.to_string()))?;
+    let pool = new_pool(db_url)?;
     run_migrations(db_url);
     Ok(pool)
+}
+
+/// Creates a connection pool without running migrations.
+fn new_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
+    let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(db_url);
+    Pool::builder(config)
+        .build()
+        .map_err(|err| StorageError::Unexpected(err.to_string()))
 }
 
 /// Ensures the given chain is present in the database, inserting it if absent.
 ///
 /// Inserts the chain into the `chain` table. If the chain already exists, does nothing.
-/// Also ensures the chain's native and wrapped native tokens are present.
+/// Also ensures every representation of the chain's native asset is present.
 ///
 /// # Arguments
 ///
@@ -655,8 +743,10 @@ async fn ensure_chain(chain: Chain, conn: &mut AsyncPgConnection) -> Result<(), 
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
-    ensure_token_with_price(chain_id, &chain.native_token(), conn).await;
-    ensure_token_with_price(chain_id, &chain.wrapped_native_token(), conn).await;
+    let native_asset = chain.native_asset();
+    for token in native_asset.representations() {
+        ensure_token_with_price(chain_id, token, conn).await;
+    }
 
     debug!("Ensured chain enum and native token presence for: {:?}", chain);
     Ok(())
@@ -690,7 +780,7 @@ pub(crate) async fn ensure_token_with_price(
         .values((
             schema::token::account_id.eq(account_id),
             schema::token::symbol.eq(&token.symbol),
-            schema::token::decimals.eq(token.decimals as i32),
+            schema::token::decimals.eq(i32::try_from(token.decimals).unwrap()),
             schema::token::gas.eq(Vec::<Option<i64>>::new()),
             schema::token::quality.eq(100),
         ))
@@ -706,7 +796,7 @@ pub(crate) async fn ensure_token_with_price(
         .await
         .expect("Token must exist after insert");
 
-    let price = 10.0_f64.powi(token.decimals as i32);
+    let price = 10.0_f64.powi(i32::try_from(token.decimals).unwrap());
     diesel::insert_into(schema::token_price::table)
         .values((schema::token_price::token_id.eq(token_id), schema::token_price::price.eq(price)))
         .on_conflict(schema::token_price::token_id)
@@ -1055,7 +1145,7 @@ pub mod db_fixtures {
                     schema::contract_storage::modify_tx.eq(modify_tx),
                     schema::contract_storage::valid_from.eq(valid_from),
                     schema::contract_storage::valid_to.eq(valid_to.unwrap_or(&MAX_TS)),
-                    schema::contract_storage::ordinal.eq(idx as i64),
+                    schema::contract_storage::ordinal.eq(i64::try_from(idx).unwrap()),
                 )
             })
             .collect::<Vec<_>>();
@@ -1169,7 +1259,7 @@ pub mod db_fixtures {
     }
 
     // Insert a new Component Balance
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "one argument per column of the inserted row")]
     pub async fn insert_component_balance(
         conn: &mut AsyncPgConnection,
         balance: Balance,
@@ -1254,7 +1344,7 @@ pub mod db_fixtures {
             .unwrap()
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "one argument per column of the inserted row")]
     // Insert a new Protocol Component
     pub async fn insert_protocol_component(
         conn: &mut AsyncPgConnection,
@@ -1300,7 +1390,7 @@ pub mod db_fixtures {
                                     .eq(component_id),
                                 schema::protocol_component_holds_token::token_id.eq(t_id),
                                 schema::protocol_component_holds_token::token_index
-                                    .eq(t_idx as i16),
+                                    .eq(i16::try_from(t_idx).unwrap()),
                             )
                         })
                         .collect::<Vec<_>>(),
@@ -1464,11 +1554,33 @@ pub mod db_fixtures {
 }
 
 #[cfg(test)]
+mod tests_transaction_conflict {
+    use super::is_transaction_conflict;
+
+    #[test]
+    fn test_is_transaction_conflict() {
+        let cases = [
+            ("deadlock detected", true),
+            ("DieselError: deadlock detected", true),
+            ("could not serialize access due to concurrent update", true),
+            ("DieselError: could not serialize access due to concurrent update", true),
+            ("could not serialize access due to read/write dependencies among transactions", true),
+            ("duplicate key value violates unique constraint \"token_pkey\"", false),
+            ("Failed to update tokens: connection reset", false),
+        ];
+        for (message, expected) in cases {
+            assert_eq!(is_transaction_conflict(message), expected, "{message}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests_ensure_chain {
-    use diesel_async::AsyncConnection;
+    use diesel::prelude::*;
+    use diesel_async::{AsyncConnection, RunQueryDsl};
     use tycho_common::models::Chain;
 
-    use super::ensure_chain;
+    use super::{ensure_chain, schema};
 
     async fn setup_conn() -> diesel_async::AsyncPgConnection {
         let db_url = std::env::var("DATABASE_URL").unwrap();
@@ -1498,6 +1610,53 @@ mod tests_ensure_chain {
         ensure_chain(Chain::Ethereum, &mut conn)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_arc_native_asset_bootstrap_is_idempotent_and_prices_both_representations() {
+        let mut conn = setup_conn().await;
+        ensure_chain(Chain::Arc, &mut conn)
+            .await
+            .unwrap();
+        ensure_chain(Chain::Arc, &mut conn)
+            .await
+            .unwrap();
+
+        let chain_id: i64 = schema::chain::table
+            .select(schema::chain::id)
+            .filter(schema::chain::name.eq("arc"))
+            .first(&mut conn)
+            .await
+            .unwrap();
+
+        let account_count: i64 = schema::account::table
+            .filter(schema::account::chain_id.eq(chain_id))
+            .count()
+            .get_result(&mut conn)
+            .await
+            .unwrap();
+        let token_count: i64 = schema::token::table
+            .inner_join(schema::account::table)
+            .filter(schema::account::chain_id.eq(chain_id))
+            .count()
+            .get_result(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(account_count, 2);
+        assert_eq!(token_count, 2);
+
+        let rows: Vec<(Vec<u8>, i32, f64)> = schema::account::table
+            .inner_join(schema::token::table.inner_join(schema::token_price::table))
+            .filter(schema::account::chain_id.eq(chain_id))
+            .select((schema::account::address, schema::token::decimals, schema::token_price::price))
+            .order(schema::account::address.asc())
+            .load(&mut conn)
+            .await
+            .unwrap();
+
+        let mut routable_address = vec![0u8; 20];
+        routable_address[0] = 0x36;
+        assert_eq!(rows, vec![(vec![0u8; 20], 18, 1e18), (routable_address, 6, 1e6)]);
     }
 
     #[tokio::test]
@@ -1599,6 +1758,71 @@ mod tests_transaction_cleanup {
                 remaining, expected,
                 "referenced transactions must survive, orphans must be deleted"
             );
+        })
+        .await;
+    }
+}
+
+#[cfg(test)]
+mod tests_partition_retention {
+    use diesel::prelude::*;
+    use diesel_async::{AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection};
+
+    use super::testing::run_against_db;
+
+    #[derive(QueryableByName)]
+    struct Presence {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        present: bool,
+    }
+
+    /// Whether the daily component_balance partition covering now() - 3 months exists.
+    async fn expired_partition_exists(conn: &mut AsyncPgConnection) -> bool {
+        diesel::sql_query(
+            "SELECT to_regclass('public.component_balance_p' ||
+                 to_char(now() - interval '3 months', 'YYYYMMDD')) IS NOT NULL AS present",
+        )
+        .get_result::<Presence>(conn)
+        .await
+        .expect("querying partition existence failed")
+        .present
+    }
+
+    #[tokio::test]
+    async fn test_drop_expired_partitions_serial_db() {
+        run_against_db(|connection_pool| async move {
+            let mut conn = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+
+            // Plant a partition well past the 1-month retention in partition_retention_config.
+            conn.batch_execute(
+                "SELECT partman.create_partition_time(
+                     'public.component_balance',
+                     ARRAY[now() - interval '3 months']);",
+            )
+            .await
+            .expect("creating expired partition failed");
+            assert!(expired_partition_exists(&mut conn).await, "planted partition must exist");
+
+            // The procedure commits internally, so it must run as a single autocommit
+            // statement rather than inside a transaction. p_retention is left at its default
+            // to cover the resolution from partition_retention_config; p_max_attempts is 1 so
+            // a real failure surfaces immediately instead of after 30s retry backoffs (there
+            // is no concurrent lock holder to retry past here).
+            conn.batch_execute("CALL drop_expired_partitions(p_max_attempts => 1);")
+                .await
+                .expect("drop procedure should run");
+            assert!(
+                !expired_partition_exists(&mut conn).await,
+                "expired partition must be dropped"
+            );
+
+            // A run with nothing to drop must succeed as a no-op.
+            conn.batch_execute("CALL drop_expired_partitions(p_max_attempts => 1);")
+                .await
+                .expect("no-work run should succeed");
         })
         .await;
     }

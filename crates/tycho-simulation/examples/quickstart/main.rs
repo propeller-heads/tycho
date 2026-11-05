@@ -25,7 +25,7 @@ use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Select};
 use futures::StreamExt;
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
+use num_traits::{FromPrimitive, ToPrimitive};
 use tracing_subscriber::EnvFilter;
 use tycho_common::{models::token::Token, simulation::protocol_sim::GetAmountOutResult, Bytes};
 use tycho_execution::encoding::{
@@ -90,29 +90,43 @@ struct Cli {
 
 impl Cli {
     fn with_defaults(mut self) -> Self {
-        // By default, we swap a small amount of USDC to WETH on whatever chain we choose
+        // By default, we swap a small amount of the chain's main stablecoin into its routable
+        // native representation, falling back to the native token when none exists.
 
         if self.buy_token.is_none() {
-            self.buy_token = Some(match self.chain.to_string().as_str() {
-                "ethereum" => "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
-                "base" => "0x4200000000000000000000000000000000000006".to_string(),
-                "unichain" => "0x4200000000000000000000000000000000000006".to_string(),
-                "arbitrum" => "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1".to_string(),
-                _ => panic!("Execution does not yet support chain {chain}", chain = self.chain),
-            });
+            let buy_token = self
+                .chain
+                .native_asset()
+                .routable_token()
+                .cloned()
+                .unwrap_or_else(|| self.chain.native_token());
+            self.buy_token = Some(buy_token.address.to_string());
         }
 
         if self.sell_token.is_none() {
-            self.sell_token = Some(match self.chain.to_string().as_str() {
-                "ethereum" => "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
-                "base" => "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".to_string(),
-                "unichain" => "0x078d782b760474a361dda0af3839290b0ef57ad6".to_string(),
-                "arbitrum" => "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(),
-                _ => panic!("Execution does not yet support chain {chain}", chain = self.chain),
-            });
+            self.sell_token = Some(default_stablecoin(self.chain).to_string());
         }
 
         self
+    }
+}
+
+/// Returns the stablecoin used as the default sell token on the given chain.
+///
+/// This is USDC everywhere except Robinhood Chain, whose canonical stablecoin is USDG.
+/// Panics on chains without a default — pass `--sell-token` for those.
+fn default_stablecoin(chain: Chain) -> &'static str {
+    match chain {
+        Chain::Ethereum => "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        Chain::Base => "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        Chain::Unichain => "0x078d782b760474a361dda0af3839290b0ef57ad6",
+        Chain::Arbitrum => "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        Chain::Bsc => "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+        Chain::Polygon => "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        Chain::Robinhood => "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+        Chain::Starknet | Chain::ZkSync | Chain::Plasma | Chain::Arc | Chain::Custom(_) | _ => {
+            panic!("No default sell token for chain {chain}. Please pass --sell-token.")
+        }
     }
 }
 
@@ -174,8 +188,8 @@ async fn main() {
         .get(&buy_token_address)
         .expect("Buy token not found")
         .clone();
-    let amount_in =
-        BigUint::from((cli.sell_amount * 10f64.powi(sell_token.decimals as i32)) as u128);
+    let amount_in = BigUint::from_f64(cli.sell_amount * 10f64.powf(f64::from(sell_token.decimals)))
+        .expect("sell amount must be finite and non-negative");
 
     println!(
         "Looking for pool with best price for {amount} {sell_symbol} -> {buy_symbol}",
@@ -220,6 +234,7 @@ async fn main() {
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV2State>("sushiswap_v2", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>(
                     "aerodrome_slipstreams",
                     tvl_filter.clone(),
@@ -249,10 +264,25 @@ async fn main() {
                 .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
         }
         Chain::Polygon => {
-            protocol_stream =
-                protocol_stream.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+            protocol_stream = protocol_stream
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
         }
-        _ => {}
+        Chain::Robinhood => {
+            protocol_stream = protocol_stream
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("sushiswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None)
+                .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+                .exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None)
+        }
+        Chain::Starknet | Chain::ZkSync | Chain::Plasma | Chain::Arc | Chain::Custom(_) | _ => {}
     }
 
     let protocol_stream = protocol_stream
@@ -287,9 +317,9 @@ async fn main() {
         let best_swap = get_best_swap(
             message,
             &mut pairs,
-            amount_in.clone(),
-            sell_token.clone(),
-            buy_token.clone(),
+            &amount_in,
+            &sell_token,
+            &buy_token,
             &mut amounts_out,
         );
 
@@ -343,10 +373,10 @@ async fn main() {
 
             let tx = encode_tycho_router_call(
                 chain.id(),
-                encoded_solution.clone(),
+                &encoded_solution,
                 &solution,
-                chain.native_token().address,
-                signer.clone(),
+                &chain.native_token().address,
+                &signer,
             )
             .expect("Failed to encode router call");
 
@@ -458,7 +488,6 @@ async fn main() {
                                 }
                             }
                             println!(); // Add empty line after simulation results
-                            continue;
                         }
                         Err(e) => {
                             eprintln!("\nSimulation failed: {e:?}");
@@ -509,10 +538,8 @@ async fn main() {
                                         continue;
                                     }
                                 }
-                            } else {
-                                println!("\nSkipping this swap...\n");
-                                continue;
                             }
+                            println!("\nSkipping this swap...\n");
                         }
                     }
                 }
@@ -550,39 +577,38 @@ async fn main() {
                         }
                         Err(e) => {
                             eprintln!("\nFailed to execute transaction: {e:?}\n");
-                            continue;
                         }
                     }
                 }
                 "skip" => {
                     println!("\nSkipping this swap...\n");
-                    continue;
                 }
                 _ => {
                     println!("\nInvalid input. Please choose 'simulate', 'execute' or 'skip'.\n");
-                    continue;
                 }
             }
         }
     }
 }
 
+#[expect(
+    clippy::unwrap_in_result,
+    reason = "every key of amounts_out was inserted from pairs in this function"
+)]
 fn get_best_swap(
     message: Update,
     pairs: &mut HashMap<String, ProtocolComponent>,
-    amount_in: BigUint,
-    sell_token: Token,
-    buy_token: Token,
+    amount_in: &BigUint,
+    sell_token: &Token,
+    buy_token: &Token,
     amounts_out: &mut HashMap<String, GetAmountOutResult>,
 ) -> Option<(String, GetAmountOutResult)> {
     println!(
         "\n==================== Received block {block:?} ====================",
-        block = message.block_number_or_timestamp
+        block = message.block_number
     );
-    for (id, comp) in message.new_pairs.iter() {
-        pairs
-            .entry(id.clone())
-            .or_insert_with(|| comp.clone());
+    for (id, comp) in message.new_pairs {
+        pairs.entry(id).or_insert(comp);
     }
     if message.states.is_empty() {
         println!("No pools of interest were updated this block. The best swap is the previous one");
@@ -591,11 +617,10 @@ fn get_best_swap(
     for (id, state) in message.states.iter() {
         if let Some(component) = pairs.get(id) {
             let tokens = &component.tokens;
-            if HashSet::from([&sell_token, &buy_token])
-                .is_subset(&HashSet::from_iter(tokens.iter()))
+            if HashSet::from([sell_token, buy_token]).is_subset(&HashSet::from_iter(tokens.iter()))
             {
                 let amount_out_result = state
-                    .get_amount_out(amount_in.clone(), &sell_token, &buy_token)
+                    .get_amount_out(amount_in.clone(), sell_token, buy_token)
                     .map_err(|e| eprintln!("Error calculating amount out for Pool {id:?}: {e:?}"))
                     .ok();
 
@@ -632,10 +657,10 @@ fn get_best_swap(
                 .protocol_system
         );
         println!("Pool address: {key:?}");
-        let formatted_in = format_token_amount(&amount_in, &sell_token);
-        let formatted_out = format_token_amount(&result.amount, &buy_token);
+        let formatted_in = format_token_amount(amount_in, sell_token);
+        let formatted_out = format_token_amount(&result.amount, buy_token);
         let (forward_price, reverse_price) =
-            format_price_ratios(&amount_in, &result.amount, &sell_token, &buy_token);
+            format_price_ratios(amount_in, &result.amount, sell_token, buy_token);
 
         println!(
             "Swap: {formatted_in} {sell_symbol} -> {formatted_out} {buy_symbol} \n
@@ -651,7 +676,6 @@ fn get_best_swap(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn create_solution(
     component: ProtocolComponent,
     sell_token: Token,
@@ -664,17 +688,6 @@ fn create_solution(
     // Prepare data to encode. First we need to create a swap object
     let simple_swap = Swap::new(component, sell_token.clone(), buy_token.clone(), gas_usage);
 
-    // Compute a minimum amount out
-    //
-    // # ⚠️ Important Responsibility Note
-    // For maximum security, in production code, this minimum amount out should be computed
-    // from a third-party source.
-    let slippage = 0.0025; // 0.25% slippage
-    let bps = BigUint::from(10_000u32);
-    let slippage_percent = BigUint::from((slippage * 10000.0) as u32);
-    let multiplier = &bps - slippage_percent;
-    let min_amount_out = (expected_amount * &multiplier) / &bps;
-
     // For native ETH we use TransferFrom (payable singleSwap);
     // for ERC20s we use Permit2.
     let is_native = sell_token.address == *ROUTER_ETH_ADDRESS || sell_token.address.is_zero();
@@ -684,6 +697,9 @@ fn create_solution(
         UserTransferType::TransferFromPermit2
     };
 
+    // 0.25% below the quote
+    let min_amount_out = &expected_amount * BigUint::from(9975u64) / BigUint::from(10_000u64);
+
     // Then we create a solution object with the previous swap
     Solution::new(
         user_address.clone(),
@@ -691,6 +707,7 @@ fn create_solution(
         sell_token.address,
         buy_token.address,
         sell_amount,
+        expected_amount,
         min_amount_out,
         vec![simple_swap],
     )
@@ -708,22 +725,24 @@ fn create_solution(
 /// This function is intended as **an illustrative example only**.
 /// **Users must implement their own encoding logic** to ensure:
 /// - Full control of parameters passed to the router.
-/// - Proper validation and setting of critical inputs such as `minAmountOut`.
+/// - Proper validation and setting of critical inputs such as `expectedAmountOut` and
+///   `minAmountOut`.
 fn encode_tycho_router_call(
     chain_id: u64,
-    encoded_solution: EncodedSolution,
+    encoded_solution: &EncodedSolution,
     solution: &Solution,
-    native_address: Bytes,
-    signer: PrivateKeySigner,
+    native_address: &Bytes,
+    signer: &PrivateKeySigner,
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
+    let amount_out = biguint_to_u256(solution.expected_amount_out());
     let min_amount_out = biguint_to_u256(solution.min_amount_out());
     let given_token = convert_to_router_token(Address::from_slice(solution.token_in()));
     let checked_token = convert_to_router_token(Address::from_slice(solution.token_out()));
     let receiver = Address::from_slice(solution.receiver());
 
     let is_native_in =
-        solution.token_in() == &native_address || *solution.token_in() == *ROUTER_ETH_ADDRESS;
+        solution.token_in() == native_address || *solution.token_in() == *ROUTER_ETH_ADDRESS;
 
     let client_fee_params = ClientFeeParams::default().into_abi_params();
 
@@ -733,6 +752,7 @@ fn encode_tycho_router_call(
             given_amount,
             given_token,
             checked_token,
+            amount_out,
             min_amount_out,
             receiver,
             client_fee_params,
@@ -749,13 +769,14 @@ fn encode_tycho_router_call(
             solution.amount_in(),
         )?;
         let permit = PermitSingle::try_from(&p)
-            .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?;
+            .map_err(|e| EncodingError::InvalidInput(format!("Invalid permit: {e}")))?;
         let signature = sign_permit(chain_id, &p, signer)?;
 
         (
             given_amount,
             given_token,
             checked_token,
+            amount_out,
             min_amount_out,
             receiver,
             client_fee_params,
@@ -789,10 +810,10 @@ fn encode_tycho_router_call(
 fn sign_permit(
     chain_id: u64,
     permit_single: &models::PermitSingle,
-    signer: PrivateKeySigner,
+    signer: &PrivateKeySigner,
 ) -> Result<Signature, EncodingError> {
     let permit2_address = Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3")
-        .map_err(|_| EncodingError::FatalError("Permit2 address not valid".to_string()))?;
+        .map_err(|e| EncodingError::FatalError(format!("Permit2 address not valid: {e}")))?;
     let domain = eip712_domain! {
         name: "Permit2",
         chain_id: chain_id,
@@ -895,7 +916,7 @@ async fn get_tx_requests(
 
 // Format token amounts to human-readable values
 fn format_token_amount(amount: &BigUint, token: &Token) -> String {
-    let decimal_amount = amount.to_f64().unwrap_or(0.0) / 10f64.powi(token.decimals as i32);
+    let decimal_amount = amount.to_f64().unwrap_or(0.0) / 10f64.powf(f64::from(token.decimals));
     format!("{decimal_amount:.6}")
 }
 
@@ -906,8 +927,9 @@ fn format_price_ratios(
     token_in: &Token,
     token_out: &Token,
 ) -> (f64, f64) {
-    let decimal_in = amount_in.to_f64().unwrap_or(0.0) / 10f64.powi(token_in.decimals as i32);
-    let decimal_out = amount_out.to_f64().unwrap_or(0.0) / 10f64.powi(token_out.decimals as i32);
+    let decimal_in = amount_in.to_f64().unwrap_or(0.0) / 10f64.powf(f64::from(token_in.decimals));
+    let decimal_out =
+        amount_out.to_f64().unwrap_or(0.0) / 10f64.powf(f64::from(token_out.decimals));
 
     if decimal_in > 0.0 && decimal_out > 0.0 {
         let forward = decimal_out / decimal_in;

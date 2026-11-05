@@ -1,0 +1,51 @@
+specVersion: v0.1.0
+package:
+  name: "base_sushiswap_v2"
+  version: v0.3.3
+  url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-uniswap-v2"
+
+network: base
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - uniswap.proto
+  importPaths:
+    - ./proto/v1
+    - ../../../proto/
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_uniswap_v2.wasm
+
+modules:
+  - name: map_pools_created
+    kind: map
+    initialBlock: 2631214 # UniswapV2Factory creation block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_pools
+    kind: store
+    initialBlock: 2631214
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.uniswap.v2.Pool
+    inputs:
+      - map: map_pools_created
+
+  - name: map_pool_events
+    kind: map
+    initialBlock: 2631214
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - store: store_pools
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_pools_created: factory_address=71524B4f93c58fcbF659783284E38825f0622859&protocol_type_name=sushiswap_v2_pool

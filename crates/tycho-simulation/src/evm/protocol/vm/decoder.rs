@@ -28,7 +28,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
     /// an `EVMPoolState`.
     ///
     /// Errors with a `InvalidSnapshotError`.
-    #[allow(deprecated)]
+    #[expect(
+        deprecated,
+        reason = "indexed snapshots may carry a balance_owner, which only the deprecated builder setter accepts"
+    )]
     async fn try_from_with_header(
         snapshot: ComponentWithState,
         _block: BlockHeader,
@@ -175,10 +178,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
             "{hex_protocol_name:0>40}",
             hex_protocol_name = hex::encode(protocol_name)
         ))
-        .map_err(|_| {
-            InvalidSnapshotError::ValueError(
-                "Error converting protocol name to address".to_string(),
-            )
+        .map_err(|e| {
+            InvalidSnapshotError::ValueError(format!(
+                "Error converting protocol name to address: {e}"
+            ))
         })?;
         let mut vm_traces = false;
         if let Some(trace) = &decoder_context.vm_traces {
@@ -194,7 +197,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
             .map(|block_number| {
                 <[u8; 8]>::try_from(block_number.as_ref())
                     .map(u64::from_be_bytes)
-                    .map_err(|_| {
+                    .map_err(|_wrong_length| {
                         InvalidSnapshotError::ValueError(
                             "override_block_number attribute must be an 8-byte big-endian u64"
                                 .to_string(),
@@ -209,7 +212,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
             .map(|block_timestamp| {
                 <[u8; 8]>::try_from(block_timestamp.as_ref())
                     .map(u64::from_be_bytes)
-                    .map_err(|_| {
+                    .map_err(|_wrong_length| {
                         InvalidSnapshotError::ValueError(
                             "override_block_timestamp attribute must be an 8-byte big-endian u64"
                                 .to_string(),
@@ -233,7 +236,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
                 .stateless_contracts(stateless_contracts)
                 .manual_updates(manual_updates)
                 .trace(vm_traces)
-                .block_overrides(block_overrides);
+                .block_overrides(block_overrides)
+                .spot_price_caller(spot_price_caller(protocol_name));
 
         if let Some(balance_owner) = balance_owner {
             pool_state_builder = pool_state_builder.balance_owner(balance_owner)
@@ -252,6 +256,15 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
 
         Ok(pool_state)
     }
+}
+
+/// The caller (`tx.origin`) for a protocol's adapter `price()` query.
+///
+/// Balancer V3's price path calls `querySwapExactIn`, which reverts with `NotStaticCall()` unless
+/// `tx.origin == address(0)` (its off-chain query-mode check). Every other adapter uses the
+/// default `EXTERNAL_ACCOUNT` caller (`None`).
+fn spot_price_caller(protocol_name: &str) -> Option<Address> {
+    (protocol_name == "balancer_v3").then_some(Address::ZERO)
 }
 
 #[cfg(test)]
@@ -428,9 +441,19 @@ mod tests {
             .insert(Address::from_str("0xBA12222222228d8Ba445958a75a0704d566BF2C8").unwrap());
         assert_eq!(res_pool.get_involved_contracts(), exp_involved_contracts);
         assert!(res_pool.get_manual_updates());
+        // vm_component() is vm:balancer_v2, so the price query uses the default caller.
+        assert_eq!(res_pool.get_spot_price_caller(), None);
         assert_eq!(
             res_pool.get_block_overrides(),
             Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) })
         );
+    }
+
+    #[test]
+    fn test_spot_price_caller() {
+        // Balancer V3 must query with tx.origin == address(0); everything else uses the default.
+        assert_eq!(spot_price_caller("balancer_v3"), Some(Address::ZERO));
+        assert_eq!(spot_price_caller("balancer_v2"), None);
+        assert_eq!(spot_price_caller("curve"), None);
     }
 }

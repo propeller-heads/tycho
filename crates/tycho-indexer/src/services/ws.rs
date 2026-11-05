@@ -18,7 +18,10 @@ use tycho_common::{
 };
 use uuid::Uuid;
 
-use crate::{extractor::runner::MessageSender, services::client_metadata};
+use crate::{
+    extractor::{runner::MessageSender, DeltaCommand},
+    services::client_metadata,
+};
 
 /// How often heartbeat pings are sent
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -154,7 +157,7 @@ impl WsActor {
     /// Helper method that sends heartbeat ping to client every 5 seconds (HEARTBEAT_INTERVAL)
     /// Also this method checks heartbeats from client
     #[instrument(level = "TRACE", skip_all, fields(WsActor.id = %self.id))]
-    fn heartbeat(&mut self, ctx: &mut <Self as Actor>::Context) {
+    fn heartbeat(&self, ctx: &mut <Self as Actor>::Context) {
         ctx.run_interval(HEARTBEAT_INTERVAL, |act, ctx| {
             // Check client heartbeats
             if Instant::now().duration_since(act.heartbeat) > CLIENT_TIMEOUT {
@@ -212,7 +215,7 @@ impl WsActor {
     /// 4. If the future fails, an error response is sent instead
     #[instrument(skip(self, ctx), fields(WsActor.id = %self.id, subscription_id))]
     fn subscribe(
-        &mut self,
+        &self,
         ctx: &mut ws::WebsocketContext<Self>,
         extractor_id: &ExtractorIdentity,
         include_state: bool,
@@ -266,18 +269,32 @@ impl WsActor {
         let actor_id = self.id;
         let extractor_id_for_future = extractor_id.clone();
         let extractor_id_for_error = extractor_id.clone();
+        let user_identity = self.user_identity.clone();
 
         // Step 3: Create async future for subscription setup
         // This future will run independently without blocking the actor's message processing
         // Use async operation instead of block_on to prevent runtime deadlocks
         let fut = async move {
-            match message_sender.subscribe().await {
+            match message_sender
+                .subscribe(subscription_id, user_identity)
+                .await
+            {
                 Ok(mut rx) => {
                     let elapsed = start_time.elapsed();
                     debug!(actor_id = %actor_id, elapsed_ms = elapsed.as_millis(), "subscribe completed successfully");
 
                     let stream = async_stream::stream! {
-                        while let Some(item) = rx.recv().await {
+                        while let Some(command) = rx.recv().await {
+                            let item = match command {
+                                DeltaCommand::Block(item) => item,
+                                DeltaCommand::ExtractorRestarted(_) => {
+                                    // The extractor lost its stream position; end the
+                                    // subscription so the client resubscribes and resyncs
+                                    // from a fresh snapshot.
+                                    break;
+                                }
+                            };
+
                             if item.revert {
                                 // For reverts
                                 // Exclude partials if the client requested full blocks
@@ -298,8 +315,10 @@ impl WsActor {
                                 item.drop_state().into()
                             };
 
-                            yield Ok((subscription_id, result));
+                            yield ExtractorEvent::Message(subscription_id, Box::new(result));
                         }
+                        // Extractor restarted or its channel closed: end the subscription.
+                        yield ExtractorEvent::ChannelClosed(subscription_id);
                     };
 
                     Some((subscription_id, stream, extractor_id_for_future.clone()))
@@ -449,19 +468,26 @@ impl Actor for WsActor {
     }
 }
 
-/// Handle incoming messages from the extractor and forward them to the WS connection
-impl StreamHandler<Result<(Uuid, BlockAggregatedChanges), ws::ProtocolError>> for WsActor {
-    #[instrument(skip_all, fields(WsActor.id = %self.id))]
-    fn handle(
-        &mut self,
-        msg: Result<(Uuid, BlockAggregatedChanges), ws::ProtocolError>,
-        ctx: &mut Self::Context,
-    ) {
-        trace!("Message received from extractor");
-        match msg {
-            Ok((subscription_id, deltas)) => {
+enum ExtractorEvent {
+    Message(Uuid, Box<BlockAggregatedChanges>),
+    ChannelClosed(Uuid),
+}
+
+/// Handle incoming messages from the extractor and forward them to the WS connection.
+///
+/// `ExtractorEvent::ChannelClosed` is emitted when the extractor's channel closes (e.g. after a
+/// restart). It lets the actor send `SubscriptionEnded` to the client and clean up the
+/// subscription without dropping the entire WebSocket connection.
+impl StreamHandler<ExtractorEvent> for WsActor {
+    // Debug level: the actor mailbox separates this from the block that produced the message,
+    // so at info it exports one parentless single-span trace per message per subscriber.
+    #[instrument(level = "debug", skip_all, fields(WsActor.id = %self.id))]
+    fn handle(&mut self, item: ExtractorEvent, ctx: &mut Self::Context) {
+        match item {
+            ExtractorEvent::Message(subscription_id, deltas) => {
                 trace!("Forwarding message to client");
-                let msg = WebSocketMessage::BlockAggregatedChanges { deltas, subscription_id };
+                let msg =
+                    WebSocketMessage::BlockAggregatedChanges { deltas: *deltas, subscription_id };
                 let json_str = serde_json::to_string(&msg).unwrap();
 
                 // Check if compression is enabled for this subscription
@@ -503,18 +529,52 @@ impl StreamHandler<Result<(Uuid, BlockAggregatedChanges), ws::ProtocolError>> fo
                     ctx.text(json_str);
                 }
             }
-            Err(e) => {
-                error!(error = %e, "Failed to receive message from extractor");
+            ExtractorEvent::ChannelClosed(subscription_id) => {
+                // Extractor channel closed — clean up this subscription and notify the client.
+                // Other subscriptions on this connection are unaffected.
+                warn!(
+                    %subscription_id,
+                    "Extractor channel closed; notifying client and ending subscription"
+                );
+                if let Some(sub) = self
+                    .subscriptions
+                    .remove(&subscription_id)
+                {
+                    self.compression_enabled
+                        .remove(&subscription_id);
+                    gauge!(
+                        "websocket_subscriptions_active",
+                        "user_identity" => self.user_identity.as_deref().unwrap_or("unknown").to_owned(),
+                        "chain" => sub.chain,
+                        "extractor" => sub.extractor,
+                        "partial_blocks" => sub.partial_blocks.to_string(),
+                    )
+                    .decrement(1);
+                }
+                let message = Response::SubscriptionEnded { subscription_id };
+                ctx.text(serde_json::to_string(&message).unwrap());
             }
+        }
+    }
+
+    fn finished(&mut self, ctx: &mut <Self as Actor>::Context) {
+        // If no subscriptions remain, close the connection. If other subscriptions are still
+        // active, keep the connection open; they were unaffected by this stream ending.
+        if self.subscriptions.is_empty() {
+            ctx.close(Some(ws::CloseReason {
+                code: ws::CloseCode::Normal,
+                description: Some("All subscriptions ended".into()),
+            }));
+            ctx.stop();
         }
     }
 }
 
 /// Handle incoming messages from the WS connection
 impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsActor {
-    fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
+    fn handle(&mut self, item: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         trace!("WsActor {}: StreamHandler::handle called", self.id);
-        match msg {
+        match item {
             Ok(ws::Message::Ping(msg)) => {
                 trace!("Websocket ping message received");
                 self.heartbeat = Instant::now();
@@ -620,7 +680,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::extractor::{runner::ControlMessage, ExtractorMsg};
+    use crate::extractor::runner::ControlMessage;
 
     pub struct MyMessageSender {
         extractor_id: ExtractorIdentity,
@@ -662,20 +722,26 @@ mod tests {
 
     #[async_trait]
     impl MessageSender for MyMessageSender {
-        async fn subscribe(&self) -> Result<Receiver<ExtractorMsg>, SendError<ControlMessage>> {
-            let (tx, rx) = mpsc::channel::<ExtractorMsg>(1);
+        async fn subscribe(
+            &self,
+            _subscription_id: Uuid,
+            _user_identity: Option<String>,
+        ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+            let (tx, rx) = mpsc::channel::<DeltaCommand>(1);
             let extractor_id = self.extractor_id.clone();
             let block_template = self.block_template.clone();
 
             // Spawn a task that sends messages every 100ms
             tokio::spawn(async move {
-                // clippy thinks applying `instrument` to a loop block is a mistake
-                #[allow(clippy::unit_arg)]
+                #[expect(
+                    clippy::unit_arg,
+                    reason = "the `()`-typed loop block is the receiver of `.instrument`"
+                )]
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     debug!("Sending DummyMessage");
                     if tx
-                        .send(Arc::new(block_template.clone()))
+                        .send(DeltaCommand::Block(Arc::new(block_template.clone())))
                         .await
                         .is_err()
                     {
@@ -707,7 +773,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
         debug!("Connecting to test server at {}", &url);
 
@@ -757,21 +822,20 @@ mod tests {
         loop {
             let response_msg = timeout(Duration::from_secs(5), connection.next())
                 .await
-                .map_err(|_| "Failed to receive message".to_string())?
-                .ok_or("Connection closed".to_string())?
-                .map_err(|_| "Failed to receive message".to_string())?;
+                .map_err(|_elapsed| "Timed out receiving a message".to_string())?
+                .ok_or_else(|| "Connection closed".to_string())?
+                .map_err(|e| format!("Failed to receive message: {e}"))?;
 
             if criteria(&response_msg) {
                 return Ok(response_msg);
-            } else {
-                debug!("Message did not meet criteria, waiting for the correct message");
             }
+            debug!("Message did not meet criteria, waiting for the correct message");
         }
     }
 
     #[derive(Deserialize)]
     struct DummyDelta {
-        #[allow(dead_code)]
+        #[expect(dead_code, reason = "deserialized to check the message shape but never read")]
         subscription_id: Uuid,
         deltas: dto::BlockAggregatedChanges,
     }
@@ -844,7 +908,7 @@ mod tests {
     }
 
     #[actix_rt::test]
-    async fn test_subscribe_and_unsubscribe() -> Result<(), String> {
+    async fn test_subscribe_and_unsubscribe() {
         tracing_subscriber::fmt()
             .with_test_writer()
             .try_init()
@@ -878,7 +942,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
         debug!(url = %url, "Connecting to test server");
 
@@ -992,12 +1055,10 @@ mod tests {
             .await
             .expect("Failed to send close message");
         debug!("Closed connection");
-
-        Ok(())
     }
 
     #[actix_rt::test]
-    async fn test_subscribe_with_compression() -> Result<(), String> {
+    async fn test_subscribe_with_compression() {
         tracing_subscriber::fmt()
             .with_test_writer()
             .try_init()
@@ -1026,7 +1087,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
         debug!(url = %url, "Connecting to test server");
 
@@ -1092,8 +1152,6 @@ mod tests {
             .await
             .expect("Failed to send close message");
         debug!("Closed connection");
-
-        Ok(())
     }
 
     #[test]
@@ -1124,20 +1182,24 @@ mod tests {
 
     #[async_trait]
     impl MessageSender for SlowMessageSender {
-        async fn subscribe(&self) -> Result<Receiver<ExtractorMsg>, SendError<ControlMessage>> {
+        async fn subscribe(
+            &self,
+            _subscription_id: Uuid,
+            _user_identity: Option<String>,
+        ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
             debug!("SlowMessageSender::subscribe() starting 200ms delay");
             // Add a delay to increase the window for deadlock
             tokio::time::sleep(Duration::from_millis(200)).await;
             debug!("SlowMessageSender::subscribe() delay completed, creating channel");
 
-            let (tx, rx) = mpsc::channel::<ExtractorMsg>(1);
+            let (tx, rx) = mpsc::channel::<DeltaCommand>(1);
             let extractor_id = self.extractor_id.clone();
 
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     if tx
-                        .send(Arc::new(BlockAggregatedChanges {
+                        .send(DeltaCommand::Block(Arc::new(BlockAggregatedChanges {
                             extractor: extractor_id.name.clone(),
                             block: Block::new(
                                 1,
@@ -1152,7 +1214,7 @@ mod tests {
                             finalized_block_height: 1,
                             revert: false,
                             ..Default::default()
-                        }))
+                        })))
                         .await
                         .is_err()
                     {
@@ -1196,7 +1258,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
 
         // Create multiple connections to trigger concurrent subscriptions
@@ -1289,7 +1350,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
 
         let (mut connection, _response) = tokio_tungstenite::connect_async(url)
@@ -1325,7 +1385,12 @@ mod tests {
                     tycho_common::dto::WebsocketError::ExtractorNotFound(reported_id) => {
                         assert_eq!(reported_id, extractor_id.into());
                     }
-                    _ => panic!("Expected ExtractorNotFound error, got: {:?}", error),
+                    other @ tycho_common::dto::WebsocketError::SubscriptionNotFound(_) |
+                    other @ tycho_common::dto::WebsocketError::ParseError(..) |
+                    other @ tycho_common::dto::WebsocketError::SubscribeError(_) |
+                    other @ tycho_common::dto::WebsocketError::CompressionError(..) => {
+                        panic!("Expected ExtractorNotFound error, got: {:?}", other)
+                    }
                 }
             } else {
                 panic!("Expected error response, got: {:?}", websocket_message);
@@ -1352,7 +1417,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
 
         let (mut connection, _response) = tokio_tungstenite::connect_async(url)
@@ -1383,7 +1447,12 @@ mod tests {
                     tycho_common::dto::WebsocketError::SubscriptionNotFound(reported_id) => {
                         assert_eq!(reported_id, fake_subscription_id);
                     }
-                    _ => panic!("Expected SubscriptionNotFound error, got: {:?}", error),
+                    other @ tycho_common::dto::WebsocketError::ExtractorNotFound(_) |
+                    other @ tycho_common::dto::WebsocketError::ParseError(..) |
+                    other @ tycho_common::dto::WebsocketError::SubscribeError(_) |
+                    other @ tycho_common::dto::WebsocketError::CompressionError(..) => {
+                        panic!("Expected SubscriptionNotFound error, got: {:?}", other)
+                    }
                 }
             } else {
                 panic!("Expected error response, got: {:?}", websocket_message);
@@ -1410,7 +1479,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
 
         let (mut connection, _response) = tokio_tungstenite::connect_async(url)
@@ -1442,7 +1510,12 @@ mod tests {
                         assert!(error.contains("EOF while parsing"));
                         assert_eq!(msg, malformed_json)
                     }
-                    _ => panic!("Expected ParseError, got: {:?}", error),
+                    other @ tycho_common::dto::WebsocketError::ExtractorNotFound(_) |
+                    other @ tycho_common::dto::WebsocketError::SubscriptionNotFound(_) |
+                    other @ tycho_common::dto::WebsocketError::SubscribeError(_) |
+                    other @ tycho_common::dto::WebsocketError::CompressionError(..) => {
+                        panic!("Expected ParseError, got: {:?}", other)
+                    }
                 }
             } else {
                 panic!("Expected error response, got: {:?}", websocket_message);
@@ -1469,7 +1542,11 @@ mod tests {
 
     #[async_trait]
     impl MessageSender for FailingMessageSender {
-        async fn subscribe(&self) -> Result<Receiver<ExtractorMsg>, SendError<ControlMessage>> {
+        async fn subscribe(
+            &self,
+            _subscription_id: Uuid,
+            _user_identity: Option<String>,
+        ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
             // Always return an error to simulate subscription failure
             Err(SendError(ControlMessage::Stop))
         }
@@ -1529,7 +1606,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
 
         let (mut connection, _) = tokio_tungstenite::connect_async(&url)
@@ -1562,11 +1638,10 @@ mod tests {
                     if serde_json::from_str::<DummyDelta>(&text).is_ok() {
                         received = true;
                         break;
-                    } else {
-                        panic!("Unexpected text message: {text}");
                     }
+                    panic!("Unexpected text message: {text}");
                 }
-                Ok(Some(Ok(_))) => continue, // Ping/pong, continue
+                Ok(Some(Ok(_))) => {} // Ping/pong, continue
                 Ok(Some(Err(e))) => panic!("Connection error: {e}"),
                 Ok(None) => panic!("Connection closed"),
                 Err(_) => break, // Timeout - no message received
@@ -1580,10 +1655,13 @@ mod tests {
         );
 
         // Clean up
-        connection
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort close at the end of the test; the server may have closed first"
+        )]
+        let _ = connection
             .send(Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() })))
-            .await
-            .ok();
+            .await;
     }
 
     #[test_log::test(actix_rt::test)]
@@ -1606,7 +1684,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
 
         let (mut connection, _response) = tokio_tungstenite::connect_async(url)
@@ -1641,7 +1718,12 @@ mod tests {
                     tycho_common::dto::WebsocketError::SubscribeError(reported_id) => {
                         assert_eq!(reported_id, extractor_id.into());
                     }
-                    _ => panic!("Expected SubscribeError, got: {:?}", error),
+                    other @ tycho_common::dto::WebsocketError::ExtractorNotFound(_) |
+                    other @ tycho_common::dto::WebsocketError::SubscriptionNotFound(_) |
+                    other @ tycho_common::dto::WebsocketError::ParseError(..) |
+                    other @ tycho_common::dto::WebsocketError::CompressionError(..) => {
+                        panic!("Expected SubscribeError, got: {:?}", other)
+                    }
                 }
             } else {
                 panic!("Expected error response, got: {:?}", websocket_message);
@@ -1654,5 +1736,284 @@ mod tests {
             .send(Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() })))
             .await
             .expect("Failed to send close message");
+    }
+
+    /// A sender that immediately closes the channel after subscribe, simulating an extractor
+    /// that fails or restarts right after the subscription is established.
+    pub struct ClosingMessageSender;
+
+    #[async_trait]
+    impl MessageSender for ClosingMessageSender {
+        async fn subscribe(
+            &self,
+            _subscription_id: Uuid,
+            _user_identity: Option<String>,
+        ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+            let (_tx, rx) = mpsc::channel::<DeltaCommand>(1);
+            // _tx is dropped here, closing the channel immediately.
+            Ok(rx)
+        }
+    }
+
+    /// Verifies that when an extractor's channel closes the client receives `SubscriptionEnded`
+    /// for that subscription and the WebSocket connection stays open.
+    #[actix_rt::test]
+    async fn test_subscription_ended_on_channel_close() -> Result<(), String> {
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .try_init()
+            .unwrap_or_else(|_| debug!("Subscriber already initialized"));
+
+        let closing_id = ExtractorIdentity::new(Chain::Ethereum, "closing_extractor");
+        let live_id = ExtractorIdentity::new(Chain::Ethereum, "live_extractor");
+
+        let mut subscribers_map = HashMap::new();
+        subscribers_map.insert(
+            closing_id.clone(),
+            Arc::new(ClosingMessageSender) as Arc<dyn MessageSender + Send + Sync>,
+        );
+        subscribers_map.insert(
+            live_id.clone(),
+            Arc::new(MyMessageSender::new(live_id.clone())) as Arc<dyn MessageSender + Send + Sync>,
+        );
+
+        let app_state = web::Data::new(WsData::new(subscribers_map));
+        let server = start_with(
+            TestServerConfig::default().client_request_timeout(Duration::from_secs(5)),
+            move || {
+                App::new()
+                    .wrap(RequestTracing::new())
+                    .app_data(app_state.clone())
+                    .service(web::resource("/ws/").route(web::get().to(WsActor::ws_index)))
+            },
+        );
+
+        let url = server
+            .url("/ws/")
+            .replacen("http://", "ws://", 1);
+        let (mut connection, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("Failed to connect");
+
+        // Subscribe to the live extractor first so we can verify the connection survives.
+        connection
+            .send(Message::Text(
+                serde_json::to_string(&Command::Subscribe {
+                    extractor_id: live_id.clone().into(),
+                    include_state: false,
+                    compression: false,
+                    partial_blocks: false,
+                })
+                .unwrap(),
+            ))
+            .await
+            .expect("Failed to send subscribe");
+        wait_for_new_subscription(&mut connection)
+            .await
+            .expect("Failed to get live subscription");
+
+        // Subscribe to the closing extractor — its channel closes immediately.
+        connection
+            .send(Message::Text(
+                serde_json::to_string(&Command::Subscribe {
+                    extractor_id: closing_id.clone().into(),
+                    include_state: false,
+                    compression: false,
+                    partial_blocks: false,
+                })
+                .unwrap(),
+            ))
+            .await
+            .expect("Failed to send subscribe");
+        wait_for_new_subscription(&mut connection)
+            .await
+            .expect("Failed to get closing subscription");
+
+        // The channel was already closed, so we should receive SubscriptionEnded.
+        wait_for_subscription_ended(&mut connection)
+            .await
+            .expect("Expected SubscriptionEnded when extractor channel closes");
+
+        // The live subscription must still be delivering messages — the connection is intact.
+        wait_for_dummy_message(&mut connection, live_id)
+            .await
+            .expect("Live extractor should still send messages after peer subscription ended");
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort close at the end of the test; the server may have closed first"
+        )]
+        let _ = connection
+            .send(Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() })))
+            .await;
+
+        Ok(())
+    }
+
+    /// A sender that emits one block, then an `ExtractorRestarted` command, and keeps the
+    /// channel open — simulating a supervisor restarting the extractor while subscribers stay
+    /// registered.
+    pub struct RestartingMessageSender {
+        extractor_id: ExtractorIdentity,
+    }
+
+    #[async_trait]
+    impl MessageSender for RestartingMessageSender {
+        async fn subscribe(
+            &self,
+            _subscription_id: Uuid,
+            _user_identity: Option<String>,
+        ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+            let (tx, rx) = mpsc::channel::<DeltaCommand>(2);
+            let name = self.extractor_id.name.clone();
+            tokio::spawn(async move {
+                let block = MyMessageSender::default_block(&name);
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the subscriber may have dropped its receiver already; the task only has to outlive it"
+                )]
+                let _ = tx
+                    .send(DeltaCommand::Block(Arc::new(block)))
+                    .await;
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the subscriber may have dropped its receiver already; the task only has to outlive it"
+                )]
+                let _ = tx
+                    .send(DeltaCommand::ExtractorRestarted(name))
+                    .await;
+                // Keep the channel open so the test proves the restart command (not a channel
+                // close) is what ends the subscription.
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            });
+            Ok(rx)
+        }
+    }
+
+    /// Verifies that an `ExtractorRestarted` command ends the client's subscription with
+    /// `SubscriptionEnded`, even though the extractor channel stays open.
+    #[actix_rt::test]
+    async fn test_subscription_ended_on_extractor_restart() -> Result<(), String> {
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .try_init()
+            .unwrap_or_else(|_| debug!("Subscriber already initialized"));
+
+        let extractor_id = ExtractorIdentity::new(Chain::Ethereum, "restarting_extractor");
+        let mut subscribers_map = HashMap::new();
+        subscribers_map.insert(
+            extractor_id.clone(),
+            Arc::new(RestartingMessageSender { extractor_id: extractor_id.clone() })
+                as Arc<dyn MessageSender + Send + Sync>,
+        );
+
+        let app_state = web::Data::new(WsData::new(subscribers_map));
+        let server = start_with(
+            TestServerConfig::default().client_request_timeout(Duration::from_secs(5)),
+            move || {
+                App::new()
+                    .wrap(RequestTracing::new())
+                    .app_data(app_state.clone())
+                    .service(web::resource("/ws/").route(web::get().to(WsActor::ws_index)))
+            },
+        );
+
+        let url = server
+            .url("/ws/")
+            .replacen("http://", "ws://", 1);
+        let (mut connection, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("Failed to connect");
+
+        connection
+            .send(Message::Text(
+                serde_json::to_string(&Command::Subscribe {
+                    extractor_id: extractor_id.clone().into(),
+                    include_state: false,
+                    compression: false,
+                    partial_blocks: false,
+                })
+                .unwrap(),
+            ))
+            .await
+            .expect("Failed to send subscribe");
+        wait_for_new_subscription(&mut connection)
+            .await
+            .expect("Failed to get subscription");
+
+        // The block sent before the restart must still be delivered.
+        wait_for_dummy_message(&mut connection, extractor_id)
+            .await
+            .expect("Expected the block emitted before the restart");
+
+        // The restart command must end the subscription.
+        wait_for_subscription_ended(&mut connection)
+            .await
+            .expect("Expected SubscriptionEnded after ExtractorRestarted");
+
+        Ok(())
+    }
+
+    /// Verifies that when the last subscription's channel closes, the WS connection itself
+    /// is closed — an idle connection with no subscriptions wastes a client connection slot.
+    #[actix_rt::test]
+    async fn test_connection_closed_when_last_subscription_ends() {
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .try_init()
+            .unwrap_or_else(|_| debug!("Subscriber already initialized"));
+
+        let closing_id = ExtractorIdentity::new(Chain::Ethereum, "only_extractor");
+        let mut subscribers_map = HashMap::new();
+        subscribers_map.insert(
+            closing_id.clone(),
+            Arc::new(ClosingMessageSender) as Arc<dyn MessageSender + Send + Sync>,
+        );
+
+        let app_state = web::Data::new(WsData::new(subscribers_map));
+        let server = start_with(
+            TestServerConfig::default().client_request_timeout(Duration::from_secs(5)),
+            move || {
+                App::new()
+                    .wrap(RequestTracing::new())
+                    .app_data(app_state.clone())
+                    .service(web::resource("/ws/").route(web::get().to(WsActor::ws_index)))
+            },
+        );
+
+        let url = server
+            .url("/ws/")
+            .replacen("http://", "ws://", 1);
+        let (mut connection, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("Failed to connect");
+
+        connection
+            .send(Message::Text(
+                serde_json::to_string(&Command::Subscribe {
+                    extractor_id: closing_id.clone().into(),
+                    include_state: false,
+                    compression: false,
+                    partial_blocks: false,
+                })
+                .unwrap(),
+            ))
+            .await
+            .expect("Failed to send subscribe");
+        wait_for_new_subscription(&mut connection)
+            .await
+            .expect("Failed to get subscription");
+
+        // The channel closes immediately, so we get SubscriptionEnded.
+        wait_for_subscription_ended(&mut connection)
+            .await
+            .expect("Expected SubscriptionEnded");
+
+        // With no subscriptions left the actor should stop, closing the connection.
+        let closed = timeout(Duration::from_secs(2), connection.next()).await;
+        match closed {
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {}
+            other => panic!("Expected connection close, got: {:?}", other),
+        }
     }
 }

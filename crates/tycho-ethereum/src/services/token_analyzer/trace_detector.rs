@@ -17,7 +17,9 @@ use tycho_common::{
     Bytes,
 };
 
-use super::{arbitrary_recipient, calculate_fee, call_request, map_block_tag};
+use super::{
+    arbitrary_recipient, calculate_fee_bps, call_request, map_block_tag, ObservedTransfer,
+};
 use crate::{
     erc20::{approveCall, balanceOfCall, transferCall},
     rpc::EthereumRpcClient,
@@ -48,7 +50,7 @@ pub struct TraceCallDetector {
     pub settlement_contract: Address,
 }
 
-#[allow(deprecated)]
+#[expect(deprecated, reason = "implements the analyzer for the deprecated TraceCallDetector")]
 #[async_trait::async_trait]
 impl TokenAnalyzer for TraceCallDetector {
     type Error = String;
@@ -60,8 +62,7 @@ impl TokenAnalyzer for TraceCallDetector {
     ) -> Result<(TokenQuality, Option<TransferCost>, Option<TransferTax>), String> {
         let (quality, transfer_cost, tax) = self
             .detect_impl(Address::from_bytes(&token), block)
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
         tracing::debug!(?token, ?quality, "determined token quality");
         Ok((
             quality,
@@ -71,12 +72,13 @@ impl TokenAnalyzer for TraceCallDetector {
     }
 }
 
+#[derive(Clone, Copy)]
 enum TraceRequestType {
     SimpleTransfer,
     DoubleTransfer(U256),
 }
 
-#[allow(deprecated)]
+#[expect(deprecated, reason = "implements the deprecated TraceCallDetector")]
 impl TraceCallDetector {
     pub fn new(
         rpc: &EthereumRpcClient,
@@ -99,8 +101,7 @@ impl TraceCallDetector {
         let (take_from, amount) = match self
             .finder
             .find_owner(token.to_bytes(), MIN_AMOUNT.into())
-            .await
-            .map_err(|e| e.to_string())?
+            .await?
         {
             Some((address, balance)) => {
                 // Don't use the full balance, but instead a portion of it. This
@@ -158,9 +159,8 @@ impl TraceCallDetector {
         information.\
         ";
         let bad = TokenQuality::Bad { reason: message.to_string() };
-        let middle_balance = match decode_u256(&simple_transfer_traces[2]) {
-            Some(balance) => balance,
-            None => return Ok((bad, None, None)),
+        let Some(middle_balance) = decode_u256(&simple_transfer_traces[2]) else {
+            return Ok((bad, None, None))
         };
 
         let request = self.create_trace_request(
@@ -175,7 +175,6 @@ impl TraceCallDetector {
             .await
             .map_err(|e| e.to_string())?;
         Self::handle_response(&double_transfer_traces, amount, middle_balance, take_from)
-            .map_err(|e| e.to_string())
     }
 
     fn create_trace_request(
@@ -273,34 +272,33 @@ impl TraceCallDetector {
             information.\
         ";
         let bad = TokenQuality::Bad { reason: message.to_string() };
-        let balance_before_in = match decode_u256(&traces[0]) {
-            Some(balance) => balance,
-            None => return Ok((bad, Some(gas_per_transfer), None)),
+        let Some(balance_before_in) = decode_u256(&traces[0]) else {
+            return Ok((bad, Some(gas_per_transfer), None))
         };
-        let balance_after_in = match decode_u256(&traces[2]) {
-            Some(balance) => balance,
-            None => return Ok((bad, Some(gas_per_transfer), None)),
+        let Some(balance_after_in) = decode_u256(&traces[2]) else {
+            return Ok((bad, Some(gas_per_transfer), None))
         };
-        let balance_after_out = match decode_u256(&traces[5]) {
-            Some(balance) => balance,
-            None => return Ok((bad, Some(gas_per_transfer), None)),
+        let Some(balance_after_out) = decode_u256(&traces[5]) else {
+            return Ok((bad, Some(gas_per_transfer), None))
         };
-        let balance_recipient_before = match decode_u256(&traces[3]) {
-            Some(balance) => balance,
-            None => return Ok((bad, Some(gas_per_transfer), None)),
+        let Some(balance_recipient_before) = decode_u256(&traces[3]) else {
+            return Ok((bad, Some(gas_per_transfer), None))
         };
-        let balance_recipient_after = match decode_u256(&traces[6]) {
-            Some(balance) => balance,
-            None => return Ok((bad, Some(gas_per_transfer), None)),
+        let Some(balance_recipient_after) = decode_u256(&traces[6]) else {
+            return Ok((bad, Some(gas_per_transfer), None))
         };
 
-        let fees = calculate_fee(
-            amount,
-            middle_amount,
-            balance_before_in,
-            balance_after_in,
-            balance_recipient_before,
-            balance_recipient_after,
+        let fees = calculate_fee_bps(
+            &ObservedTransfer {
+                sent: amount,
+                balance_before: balance_before_in,
+                balance_after: balance_after_in,
+            },
+            &ObservedTransfer {
+                sent: middle_amount,
+                balance_before: balance_recipient_before,
+                balance_after: balance_recipient_after,
+            },
         );
 
         tracing::debug!(%amount, %balance_before_in, %balance_after_in, %balance_after_out);
@@ -319,17 +317,14 @@ impl TraceCallDetector {
             }
         };
 
-        let computed_balance_after_in = match balance_before_in.checked_add(amount) {
-            Some(amount) => amount,
-            None => {
-                return Ok((
-                    TokenQuality::bad(format!(
+        let Some(computed_balance_after_in) = balance_before_in.checked_add(amount) else {
+            return Ok((
+                TokenQuality::bad(format!(
                     "Transferring {amount} into settlement contract would overflow its balance."
                 )),
-                    Some(gas_per_transfer),
-                    Some(fees),
-                ))
-            }
+                Some(gas_per_transfer),
+                Some(fees),
+            ))
         };
         if balance_after_in != computed_balance_after_in {
             return Ok((
@@ -354,18 +349,16 @@ impl TraceCallDetector {
                 Some(fees),
             ));
         }
-        let computed_balance_recipient_after = match balance_recipient_before.checked_add(amount) {
-            Some(amount) => amount,
-            None => {
-                return Ok((
-                    TokenQuality::bad(format!(
+        let Some(computed_balance_recipient_after) = balance_recipient_before.checked_add(amount)
+        else {
+            return Ok((
+                TokenQuality::bad(format!(
                     "Transferring {amount} into arbitrary recipient {arbitrary:?} would overflow \
                      its balance."
                 )),
-                    Some(gas_per_transfer),
-                    Some(fees),
-                ))
-            }
+                Some(gas_per_transfer),
+                Some(fees),
+            ))
         };
         if computed_balance_recipient_after != balance_recipient_after {
             return Ok((
@@ -411,15 +404,14 @@ fn ensure_transaction_ok_and_get_gas(trace: &TraceResults) -> Result<Result<U256
     if let Some(error) = &first.error {
         return Ok(Err(format!("transaction failed: {error}")));
     }
-    let call_result = match &first.result {
-        Some(TraceOutput::Call(call)) => call,
-        _ => return Err("no error but also no call result".to_string()),
+    let Some(TraceOutput::Call(call_result)) = &first.result else {
+        return Err("no error but also no call result".to_string())
     };
     Ok(Ok(U256::from(call_result.gas_used)))
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
+#[expect(deprecated, reason = "tests the deprecated TraceCallDetector")]
 mod tests {
     use std::{str::FromStr, sync::Arc};
 

@@ -1,10 +1,10 @@
 pragma solidity ^0.8.26;
 
 import {
-    TychoRouter,
+    TychoRouterV3,
     TransferManager,
     ClientFeeParams
-} from "@src/TychoRouter.sol";
+} from "@src/TychoRouterV3.sol";
 import "./TychoRouterTestSetup.sol";
 import {Vault__UnexpectedNonZeroCount} from "@src/Vault.sol";
 
@@ -103,10 +103,8 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
         vm.startPrank(ALICE);
         IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
         bytes[] memory swaps = _getSplitSwaps();
-        // Set transient storage to allow transferFrom from ALICE
-        tychoRouter.tstoreExposed(WETH_ADDR, amountIn, false, false);
-        tychoRouter.exposedSplitSwap(
-            amountIn, 4, pleEncode(swaps), tychoRouterAddr, false
+        tychoRouter.exposedSplitSwapWithTransferFrom(
+            WETH_ADDR, amountIn, 4, pleEncode(swaps), tychoRouterAddr, false
         );
         vm.stopPrank();
 
@@ -137,7 +135,8 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             USDC_ADDR,
-            1, // min amount,
+            1, // expected amount out
+            1, // min amount out
             4,
             ALICE,
             noClientFee(),
@@ -177,7 +176,8 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             USDC_ADDR,
-            1000_000000, // min amount
+            1000_000000, // expected amount out
+            (1000_000000 * 9800) / 10000, // min amount out
             4,
             ALICE,
             noClientFee(),
@@ -207,12 +207,13 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
 
         bytes[] memory swaps = _getSplitSwaps();
 
-        vm.expectRevert(TychoRouter__UndefinedMinAmountOut.selector);
+        vm.expectRevert(TychoRouter__AmountOutZero.selector);
         tychoRouter.splitSwap(
             amountIn,
             WETH_ADDR,
             USDC_ADDR,
-            0, // min amount
+            0, // expected amount out
+            0, // min amount out
             4,
             ALICE,
             noClientFee(),
@@ -229,6 +230,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             0,
             WETH_ADDR,
             USDC_ADDR,
+            1,
             1,
             4,
             ALICE,
@@ -252,7 +254,8 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             USDC_ADDR,
-            1000_000000, // min amount
+            1000_000000, // expected amount out
+            (1000_000000 * 9800) / 10000, // min amount out
             2,
             ALICE,
             noClientFee(),
@@ -308,7 +311,8 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             WBTC_ADDR,
-            200_000000, // min amount (2 WBTC)
+            200_000000, // expected amount out (2 WBTC)
+            (200_000000 * 9800) / 10000, // min amount out
             4,
             ALICE,
             noClientFee(),
@@ -342,6 +346,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
+            minAmountOut,
             minAmountOut,
             4,
             ALICE,
@@ -408,10 +413,8 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             address(usv2Executor),
             wethUsdcV2OneZeroData
         );
-        // Set transient storage to allow transferFrom from ALICE
-        tychoRouter.tstoreExposed(USDC_ADDR, amountIn, false, false);
-        tychoRouter.exposedSplitSwap(
-            amountIn, 2, pleEncode(swaps), tychoRouterAddr, false
+        tychoRouter.exposedSplitSwapWithTransferFrom(
+            USDC_ADDR, amountIn, 2, pleEncode(swaps), tychoRouterAddr, false
         );
         vm.stopPrank();
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 99654537);
@@ -420,7 +423,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
 
     function testSplitMultipleTransferFromProtocolDebit() public {
         // This test attempts to perform multiple `transferFrom`s - which is not
-        // permitted by the TychoRouter.
+        // permitted by the TychoRouterV3.
         //
         // The flow is:
         //            ┌─ (BALANCER V2, 60% split) ──┐
@@ -469,6 +472,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             BAL_ADDR,
+            1, // expected amount out
             1, // min amount out
             2, // number of tokens
             ALICE, // receiver
@@ -536,7 +540,8 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             WBTC_ADDR,
-            1, // min amount
+            1, // expected amount out
+            1, // min amount out
             4,
             ALICE,
             noClientFee(),
@@ -591,10 +596,8 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             usdcWethV3Pool2OneZeroData
         );
 
-        // Set transient storage to allow transferFrom from ALICE
-        tychoRouter.tstoreExposed(USDC_ADDR, amountIn, false, false);
-        tychoRouter.exposedSplitSwap(
-            amountIn, 2, pleEncode(swaps), tychoRouterAddr, true
+        tychoRouter.exposedSplitSwapWithTransferFrom(
+            USDC_ADDR, amountIn, 2, pleEncode(swaps), tychoRouterAddr, true
         );
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 99444510);
         assertEq(IERC20(USDC_ADDR).balanceOf(ALICE), 0);
@@ -681,6 +684,36 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
         vm.stopPrank();
     }
 
+    function testSplitSwapNativeAndWrappedBranchesIntegration() public {
+        // A split solution with parallel WETH and ETH branches feeding the same
+        // output token. The unwrap sits immediately before the WETH -> USDC swap;
+        // the encoder must not insert a bridging swap between them and the solution
+        // must execute unchanged.
+        //
+        //         ┌──[40%]── unwrap to ETH ──(USV4)──> USDC
+        //   WETH ─┤
+        //         └──[rem]── (USV2) ─────────────────> USDC
+        deal(WETH_ADDR, ALICE, 1 ether);
+        uint256 balanceBefore = IERC20(USDC_ADDR).balanceOf(ALICE);
+
+        // Approve permit2
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(PERMIT2_ADDRESS, type(uint256).max);
+        bytes memory callData =
+            loadCallDataFromFile("test_split_swap_native_and_wrapped_branches");
+        (bool success,) = tychoRouterAddr.call(callData);
+        vm.stopPrank();
+
+        assertTrue(success, "Call Failed");
+
+        uint256 balanceAfter = IERC20(USDC_ADDR).balanceOf(ALICE);
+
+        assertGe(balanceAfter - balanceBefore, 2019_058447);
+        assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), 0);
+        assertEq(IERC20(WETH_ADDR).balanceOf(tychoRouterAddr), 0);
+        assertEq(tychoRouterAddr.balance, 0);
+    }
+
     function testHackedPoolTokenInjectionBlocked() public {
         // A split swap where one leg routes through a pool that pool sends a
         // malicious callback requesting a transfer of PEPE (a different token) from
@@ -744,6 +777,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             USDC_ADDR,
+            1, // expected amount out
             1, // extremely low min amount to make swap pass
             3, // nTokens
             ALICE,
@@ -802,7 +836,8 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             amountIn,
             DAI_ADDR,
             USDC_ADDR,
-            1, // min amount
+            1, // expected amount out
+            1, // min amount out
             2, // nTokens
             ALICE,
             noClientFee(),

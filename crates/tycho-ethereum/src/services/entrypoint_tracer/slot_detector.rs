@@ -4,15 +4,18 @@ use std::{
 };
 
 use alloy::{
-    primitives::{Address as AlloyAddress, B256, U256},
-    rpc::types::trace::geth::{FourByteFrame, GethTrace, PreStateFrame},
+    primitives::{Address as AlloyAddress, U256},
+    rpc::types::{
+        trace::geth::{FourByteFrame, GethTrace, PreStateFrame},
+        BlockId,
+    },
     transports::TransportResult,
 };
 use serde_json::Value;
 use thiserror::Error;
 use tracing::{debug, error, warn};
 use tycho_common::{
-    models::{blockchain::RPCTracerParams, Address, BlockHash},
+    models::{blockchain::RPCTracerParams, Address},
     Bytes,
 };
 
@@ -123,12 +126,15 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
         self
     }
 
-    /// Detect slots for tokens using batched requests (debug_traceCall + eth_call per token)
+    /// Detect slots for tokens using batched requests (debug_traceCall + eth_call per token).
+    ///
+    /// All requests query the latest block: results are cached across blocks anyway, and pinning
+    /// a fresh block hash makes detection fail on RPC backends that have not made that block
+    /// canonical yet.
     async fn detect_token_slots(
         &self,
         tokens: &[Address],
         params: &S::Params,
-        block_hash: &BlockHash,
     ) -> HashMap<Address, Result<(Address, Bytes), SlotDetectorError>> {
         if tokens.is_empty() {
             return HashMap::new();
@@ -156,12 +162,12 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
 
         // Create batched request: 2 requests per token (debug_traceCall + eth_call)
         let calldata = S::encode_calldata(params);
-        let requests = self.create_value_requests(&request_tokens, &calldata, block_hash);
+        let requests = Self::create_value_requests(&request_tokens, &calldata);
 
         // Send the batched request
         let responses = match self
             .rpc
-            .slot_detector_trace(requests, &calldata, &B256::from_bytes(block_hash))
+            .slot_detector_trace(requests, &calldata)
             .await
         {
             Ok(responses) => responses,
@@ -175,11 +181,11 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
         };
 
         // Process the batched response to extract slots
-        let token_slots = self.process_batched_response(&request_tokens, responses);
+        let token_slots = Self::process_batched_response(&request_tokens, responses);
 
         // Detect the correct slot by testing candidates with storage overrides
         let detected_results = self
-            .detect_correct_slots(token_slots, &calldata, block_hash)
+            .detect_correct_slots(token_slots, &calldata)
             .await;
 
         // Update cache and prepare final results
@@ -204,12 +210,12 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
         final_results
     }
 
-    /// Detect slots for multiple tokens in chunks
+    /// Detect slots for multiple tokens in chunks. Detection always queries the latest block —
+    /// see [`Self::detect_token_slots`].
     pub async fn detect_slots_chunked(
         &self,
         tokens: &[Address],
         params: &S::Params,
-        block_hash: &BlockHash,
     ) -> HashMap<Address, Result<(Address, Bytes), SlotDetectorError>> {
         let mut all_results = HashMap::new();
 
@@ -220,7 +226,7 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
             debug!("Processing chunk {} with {} tokens", chunk_idx, chunk.len());
 
             let chunk_results = self
-                .detect_token_slots(chunk, params, block_hash)
+                .detect_token_slots(chunk, params)
                 .await;
             all_results.extend(chunk_results);
         }
@@ -233,10 +239,8 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
     /// function. Currently, debug_traceCall does not support preStateTracer + returning the
     /// value in the same request.
     pub(crate) fn create_value_requests(
-        &self,
         tokens: &[Address],
         calldata: &Bytes,
-        block_hash: &BlockHash,
     ) -> Vec<SlotDetectorValueRequest> {
         let tracer_params = RPCTracerParams::new(None, calldata.clone());
 
@@ -246,7 +250,7 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
                 let tracer_params = EVMEntrypointService::create_trace_call_params(
                     token,
                     &tracer_params,
-                    block_hash,
+                    BlockId::latest(),
                 );
 
                 SlotDetectorValueRequest { token: AlloyAddress::from_bytes(token), tracer_params }
@@ -256,14 +260,13 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
 
     /// Process batched responses and extract storage slots for each token
     fn process_batched_response(
-        &self,
         tokens: &[Address],
         responses: Vec<(GethTrace, U256)>,
     ) -> DetectedSlotsResults {
         let mut token_slots = HashMap::new();
 
         for ((debug_trace, expected_value), token) in responses.into_iter().zip(tokens.iter()) {
-            match self.extract_slot_values_from_trace_response(debug_trace) {
+            match Self::extract_slot_values_from_trace_response(debug_trace) {
                 Ok(all_slots) => {
                     debug!(
                         token = %token,
@@ -287,7 +290,6 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
         &self,
         slots_to_test: Vec<SlotMetadata>,
         calldata: &Bytes,
-        block_hash: &BlockHash,
     ) -> TokenSlotResults {
         let mut detected_results = HashMap::new();
         let mut current_attempts = slots_to_test;
@@ -303,7 +305,7 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
                 break;
             }
 
-            let requests = match self.create_slot_test_requests(&current_attempts) {
+            let requests = match Self::create_slot_test_requests(&current_attempts) {
                 Ok(requests) => requests,
                 Err(e) => {
                     for metadata in current_attempts {
@@ -320,7 +322,7 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
 
             let responses = match self
                 .rpc
-                .slot_detector_tests(&requests, calldata, &B256::from_bytes(block_hash))
+                .slot_detector_tests(&requests, calldata)
                 .await
             {
                 Ok(responses) => responses,
@@ -338,7 +340,7 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
             };
 
             current_attempts = self.process_slot_test_responses(
-                responses,
+                &responses,
                 current_attempts,
                 &mut detected_results,
             );
@@ -360,6 +362,10 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
         });
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn extract_u256_from_call_response(
         &self,
         response: &Value,
@@ -385,7 +391,6 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
     /// Extract accessed slots with their values from debug_traceCall response for better slot
     /// selection
     fn extract_slot_values_from_trace_response(
-        &self,
         response: GethTrace,
     ) -> Result<SlotValues, SlotDetectorError> {
         // The debug_traceCall with prestateTracer returns the result directly as a hashmap
@@ -402,7 +407,14 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
                     ));
                 }
             }
-            _ => {
+            GethTrace::Default(_) |
+            GethTrace::Erc7562Tracer(_) |
+            GethTrace::CallTracer(_) |
+            GethTrace::FlatCallTracer(_) |
+            GethTrace::PreStateTracer(_) |
+            GethTrace::NoopTracer(_) |
+            GethTrace::MuxTracer(_) |
+            GethTrace::JS(_) => {
                 error!("Failed to parse trace result as hashmap: unexpected format");
                 return Err(SlotDetectorError::ParseError(
                     "Failed to parse trace result as hashmap: unexpected format".to_string(),
@@ -433,7 +445,6 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
         &self,
         token_slots: DetectedSlotsResults,
         calldata: &Bytes,
-        block_hash: &BlockHash,
     ) -> TokenSlotResults {
         let mut detected_results = HashMap::new();
         let mut slots_to_test = Vec::new();
@@ -467,7 +478,7 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
 
         // Test all slot candidates, trying alternate slots if needed
         let test_results = self
-            .test_slots_with_fallback(slots_to_test, calldata, block_hash)
+            .test_slots_with_fallback(slots_to_test, calldata)
             .await;
         detected_results.extend(test_results);
 
@@ -487,7 +498,6 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
     }
 
     fn create_slot_test_requests(
-        &self,
         slots_to_test: &[SlotMetadata],
     ) -> Result<Vec<SlotDetectorSlotTestRequest>, SlotDetectorError> {
         slots_to_test
@@ -511,7 +521,7 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
 
     fn process_slot_test_responses(
         &self,
-        responses: Vec<TransportResult<Value>>,
+        responses: &[TransportResult<Value>],
         slots_to_test: Vec<SlotMetadata>,
         results: &mut TokenSlotResults,
     ) -> Vec<SlotMetadata> {
@@ -648,10 +658,7 @@ mod tests {
         transports::TransportResult,
     };
     use serde_json::{json, Value};
-    use tycho_common::{
-        models::{Address, BlockHash},
-        Bytes,
-    };
+    use tycho_common::{models::Address, Bytes};
 
     use crate::{
         rpc::EthereumRpcClient,
@@ -765,7 +772,6 @@ mod tests {
 
     #[test]
     fn test_extract_slot_values_from_trace_response() {
-        let detector = TestFixture::create_slot_detector_without_rpc();
         // Test valid trace with storage
         let response = serde_json::from_value(json!({
                 "0x1234567890123456789012345678901234567890": {
@@ -777,9 +783,9 @@ mod tests {
             }
         )).unwrap();
 
-        let slot_values = detector
-            .extract_slot_values_from_trace_response(response)
-            .unwrap();
+        let slot_values =
+            SlotDetector::<TestFixtureStrategy>::extract_slot_values_from_trace_response(response)
+                .unwrap();
         assert_eq!(slot_values.len(), 2);
 
         // Verify first slot
@@ -792,13 +798,13 @@ mod tests {
 
         // Test missing result
         let response = serde_json::from_value(json!({})).unwrap();
-        let result = detector.extract_slot_values_from_trace_response(response);
+        let result =
+            SlotDetector::<TestFixtureStrategy>::extract_slot_values_from_trace_response(response);
         assert!(result.ok().unwrap().is_empty());
     }
 
     #[test]
     fn test_process_batched_response() {
-        let detector = TestFixture::create_slot_detector_without_rpc();
         let token1 = Address::from([0x11u8; 20]);
         let token2 = Address::from([0x22u8; 20]);
 
@@ -825,7 +831,8 @@ mod tests {
         ];
 
         let tokens = vec![token1.clone(), token2.clone()];
-        let result = detector.process_batched_response(&tokens, responses);
+        let result =
+            SlotDetector::<TestFixtureStrategy>::process_batched_response(&tokens, responses);
 
         assert_eq!(result.len(), 2);
         assert!(result.contains_key(&token1));
@@ -842,15 +849,14 @@ mod tests {
 
     #[test]
     fn test_create_balance_requests() {
-        let detector = TestFixture::create_slot_detector_without_rpc();
         let token1 = Address::from([0x11u8; 20]);
         let token2 = Address::from([0x22u8; 20]);
         let owner = Address::from([0x33u8; 20]);
-        let block_hash = BlockHash::from([0x44u8; 32]);
 
         let tokens = vec![token1.clone(), token2.clone()];
         let calldata = BalanceStrategy::encode_calldata(&owner);
-        let requests = detector.create_value_requests(&tokens, &calldata, &block_hash);
+        let requests =
+            SlotDetector::<TestFixtureStrategy>::create_value_requests(&tokens, &calldata);
 
         // Should create one joint requests per token
         let array = requests;
@@ -877,7 +883,7 @@ mod tests {
 
         let mut results = HashMap::new();
         let retry_data =
-            detector.process_slot_test_responses(responses, slot_candidates, &mut results);
+            detector.process_slot_test_responses(&responses, slot_candidates, &mut results);
 
         assert_eq!(results.len(), 2);
 
@@ -900,7 +906,6 @@ mod tests {
 
         let token = Address::from([0x11u8; 20]);
         let holder = Address::from([0x22u8; 20]);
-        let block_hash = BlockHash::from([0x33u8; 32]);
 
         let trace_response = json!([
             {
@@ -950,7 +955,7 @@ mod tests {
 
         // First call - should populate the cache
         let results1 = detector
-            .detect_slots_chunked(std::slice::from_ref(&token), &holder, &block_hash)
+            .detect_slots_chunked(std::slice::from_ref(&token), &holder)
             .await;
         assert!(results1[&token].is_ok(), "First call should succeed: {:?}", results1[&token]);
 
@@ -960,7 +965,7 @@ mod tests {
 
         // Second call - should use the cache
         let results2 = detector
-            .detect_slots_chunked(std::slice::from_ref(&token), &holder, &block_hash)
+            .detect_slots_chunked(std::slice::from_ref(&token), &holder)
             .await;
         assert!(results2[&token].is_ok(), "Second call should succeed from cache");
 
@@ -1014,9 +1019,9 @@ mod tests {
         // slot_b and slot_c are at the token address with farther values.
         // Token-address slots must come before foreign-address slots regardless of distance.
         let mut slots: SlotValues = vec![
-            ((foreign.clone(), slot_a.clone()), U256::from(999u64)), // distance 1, but foreign
-            ((token.clone(), slot_b.clone()), U256::from(1500u64)),  // distance 500, token
-            ((token.clone(), slot_c.clone()), U256::from(5000u64)),  // distance 4000, token
+            ((foreign, slot_a.clone()), U256::from(999u64)), // distance 1, but foreign
+            ((token.clone(), slot_b.clone()), U256::from(1500u64)), // distance 500, token
+            ((token.clone(), slot_c.clone()), U256::from(5000u64)), // distance 4000, token
         ];
 
         SlotDetector::<TestFixtureStrategy>::sort_slots_by_priority(
@@ -1044,8 +1049,8 @@ mod tests {
             original_value: U256::from(1000u64),
             test_value: U256::from(2000u64),
             all_slots: vec![
-                ((token.clone(), slot_a.clone()), U256::from(1000u64)),
-                ((token.clone(), slot_b.clone()), U256::from(900u64)),
+                ((token.clone(), slot_a), U256::from(1000u64)),
+                ((token, slot_b.clone()), U256::from(900u64)),
             ],
         }];
 
@@ -1055,7 +1060,7 @@ mod tests {
 
         let mut results = HashMap::new();
         let retry_data =
-            detector.process_slot_test_responses(responses, slots_to_test, &mut results);
+            detector.process_slot_test_responses(&responses, slots_to_test, &mut results);
 
         // Should schedule a retry with the remaining slot (slot_b)
         assert_eq!(retry_data.len(), 1);
@@ -1080,8 +1085,8 @@ mod tests {
             original_value: U256::ZERO,
             test_value: U256::from(1_000_000_000_000_000_000u64),
             all_slots: vec![
-                ((token.clone(), slot_a.clone()), U256::ZERO),
-                ((token.clone(), slot_b.clone()), U256::ZERO),
+                ((token.clone(), slot_a), U256::ZERO),
+                ((token, slot_b.clone()), U256::ZERO),
             ],
         }];
 
@@ -1092,7 +1097,7 @@ mod tests {
 
         let mut results = HashMap::new();
         let retry_data =
-            detector.process_slot_test_responses(responses, slots_to_test, &mut results);
+            detector.process_slot_test_responses(&responses, slots_to_test, &mut results);
 
         assert_eq!(retry_data.len(), 1, "Should schedule retry with remaining slot");
         assert_eq!(retry_data[0].all_slots.len(), 1);
@@ -1111,7 +1116,7 @@ mod tests {
             token: token.clone(),
             original_value: U256::ZERO,
             test_value: U256::from(1_000_000_000_000_000_000u64),
-            all_slots: vec![((token.clone(), slot_a.clone()), U256::ZERO)],
+            all_slots: vec![((token.clone(), slot_a), U256::ZERO)],
         }];
 
         let responses: Vec<TransportResult<Value>> =
@@ -1121,7 +1126,7 @@ mod tests {
 
         let mut results = HashMap::new();
         let retry_data =
-            detector.process_slot_test_responses(responses, slots_to_test, &mut results);
+            detector.process_slot_test_responses(&responses, slots_to_test, &mut results);
 
         assert!(retry_data.is_empty(), "No more slots to retry");
         assert!(results.contains_key(&token));

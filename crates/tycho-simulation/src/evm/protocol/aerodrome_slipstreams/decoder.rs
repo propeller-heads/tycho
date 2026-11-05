@@ -2,12 +2,19 @@ use std::collections::HashMap;
 
 use alloy::primitives::U256;
 use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
-use tycho_common::{models::token::Token, Bytes};
+use tycho_common::{
+    models::token::Token,
+    simulation::protocol_sim::{BlockContext, ProtocolSim},
+    Bytes,
+};
 
 use super::state::AerodromeSlipstreamsState;
 use crate::{
     evm::protocol::utils::{
-        slipstreams::{dynamic_fee_module::DynamicFeeConfig, observations::Observation},
+        slipstreams::{
+            aero_hook_fee::AeroHookFee, dynamic_fee_module::DynamicFeeConfig,
+            observations::Observation,
+        },
         uniswap::{i24_be_bytes_to_i32, tick_list::TickInfo},
     },
     protocol::{
@@ -27,7 +34,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
         block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
         _all_tokens: &HashMap<Bytes, Token>,
-        _decoder_context: &DecoderContext,
+        decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
         let liq = snapshot
             .state
@@ -52,7 +59,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
             liq
         };
 
-        let liquidity = u128::from(liq_16_bytes);
+        let liquidity = u128::try_from(liq_16_bytes)?;
 
         let sqrt_price = U256::from_be_slice(
             snapshot
@@ -62,7 +69,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
                 .ok_or_else(|| InvalidSnapshotError::MissingAttribute("sqrt_price".to_string()))?,
         );
 
-        let observation_index = u16::from(
+        let observation_index = u16::try_from(
             snapshot
                 .state
                 .attributes
@@ -71,9 +78,9 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
                     InvalidSnapshotError::MissingAttribute("observationIndex".to_string())
                 })?
                 .clone(),
-        );
+        )?;
 
-        let observation_cardinality = u16::from(
+        let observation_cardinality = u16::try_from(
             snapshot
                 .state
                 .attributes
@@ -82,36 +89,18 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
                     InvalidSnapshotError::MissingAttribute("observationCardinality".to_string())
                 })?
                 .clone(),
-        );
+        )?;
 
-        let dfc_base_fee = u32::from(
-            snapshot
-                .state
-                .attributes
-                .get("dfc_baseFee")
-                .ok_or_else(|| InvalidSnapshotError::MissingAttribute("dfc_baseFee".to_string()))?
-                .clone(),
-        );
-
-        let dfc_scaling_factor = u64::from(
-            snapshot
-                .state
-                .attributes
-                .get("dfc_scalingFactor")
-                .ok_or_else(|| {
-                    InvalidSnapshotError::MissingAttribute("dfc_scalingFactor".to_string())
-                })?
-                .clone(),
-        );
-
-        let dfc_fee_cap = u32::from(
-            snapshot
-                .state
-                .attributes
-                .get("dfc_feeCap")
-                .ok_or_else(|| InvalidSnapshotError::MissingAttribute("dfc_feeCap".to_string()))?
-                .clone(),
-        );
+        let dynamic_fee_config = DynamicFeeConfig::from_attributes(&snapshot.state.attributes)
+            .map_err(InvalidSnapshotError::ValueError)?;
+        // `aero_cl` components carry the AERO swap hook's settings instead of a fee module's.
+        let aero_hook = snapshot
+            .state
+            .attributes
+            .contains_key("hook_seconds_ago")
+            .then(|| AeroHookFee::from_attributes(&snapshot.state.attributes))
+            .transpose()
+            .map_err(InvalidSnapshotError::ValueError)?;
 
         let tick_spacing = snapshot
             .component
@@ -135,14 +124,14 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
 
         let tick_spacing = i24_be_bytes_to_i32(&tick_spacing_4_bytes);
 
-        let default_fee = u32::from(
+        let default_fee = u32::try_from(
             snapshot
                 .component
                 .static_attributes
                 .get("default_fee")
                 .ok_or_else(|| InvalidSnapshotError::MissingAttribute("default_fee".to_string()))?
                 .clone(),
-        );
+        )?;
 
         let tick = snapshot
             .state
@@ -180,7 +169,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
                             .parse::<i32>()
                             .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
                             .and_then(|tick_index| {
-                                TickInfo::new(tick_index, i128::from(value.clone())).map_err(
+                                TickInfo::new(tick_index, i128::try_from(value.clone())?).map_err(
                                     |err| InvalidSnapshotError::ValueError(err.to_string()),
                                 )
                             }),
@@ -225,7 +214,9 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
         observations.sort_by_key(|observation| observation.index);
 
         AerodromeSlipstreamsState::new(
-            snapshot.component.id.clone(),
+            snapshot.component.id,
+            // Seed value only: the stream decoder points every block-sensitive state at the
+            // execution block before the snapshot reaches a consumer.
             block.timestamp,
             liquidity,
             sqrt_price,
@@ -236,8 +227,136 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
             tick,
             ticks,
             observations,
-            DynamicFeeConfig::new(dfc_base_fee, dfc_fee_cap, dfc_scaling_factor),
+            dynamic_fee_config,
         )
+        .map(|state| {
+            let mut state = match aero_hook {
+                Some(hook) => state.with_aero_hook(hook),
+                None => state,
+            }
+            .with_position_assumption(decoder_context.block_position);
+            state.apply_block(&BlockContext::new(block.number, block.timestamp));
+            state
+        })
         .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::U256;
+    use rstest::rstest;
+    use tycho_client::feed::synchronizer::ComponentWithState;
+    use tycho_common::{
+        models::protocol::{ProtocolComponent, ProtocolComponentState},
+        Bytes,
+    };
+
+    use super::*;
+    use crate::evm::protocol::{
+        test_utils::try_decode_snapshot_with_defaults,
+        utils::{
+            slipstreams::{dynamic_fee_module::DynamicFeeConfig, observations::Observation},
+            uniswap::{tick_list::TickInfo, tick_math::get_sqrt_ratio_at_tick},
+        },
+    };
+
+    const STALE_DYNAMIC_FEE_MODULE: [u8; 20] =
+        hex_literal::hex!("DB45818A6db280ecfeB33cbeBd445423d0216b5D");
+    fn snapshot(dynamic_fee_module: Option<Bytes>) -> ComponentWithState {
+        let sqrt_price = get_sqrt_ratio_at_tick(0).expect("tick zero should have a sqrt price");
+        let initialized_observation = (U256::from(1) << 248_u32).to_be_bytes::<32>();
+        let mut attributes = HashMap::from([
+            ("liquidity".to_string(), Bytes::from(100_u128.to_be_bytes())),
+            ("sqrt_price_x96".to_string(), Bytes::from(sqrt_price.to_be_bytes::<32>())),
+            ("observationIndex".to_string(), Bytes::from(0_u16.to_be_bytes())),
+            ("observationCardinality".to_string(), Bytes::from(1_u16.to_be_bytes())),
+            ("dfc_baseFee".to_string(), Bytes::from(500_u32.to_be_bytes())),
+            ("dfc_scalingFactor".to_string(), Bytes::from(6_000_000_u64.to_be_bytes())),
+            ("dfc_feeCap".to_string(), Bytes::from(700_u32.to_be_bytes())),
+            ("dfc_initialFeeEnabled".to_string(), Bytes::from([1_u8])),
+            ("dfc_initialFee".to_string(), Bytes::from(30_u32.to_be_bytes())),
+            ("tick".to_string(), Bytes::from(0_i32.to_be_bytes())),
+            ("ticks/-1".to_string(), Bytes::from(1_i128.to_be_bytes())),
+            ("ticks/1".to_string(), Bytes::from((-1_i128).to_be_bytes())),
+            ("observations/0".to_string(), Bytes::from(initialized_observation)),
+        ]);
+        if let Some(dynamic_fee_module) = dynamic_fee_module {
+            attributes.insert("dynamic_fee_module".to_string(), dynamic_fee_module);
+        }
+
+        ComponentWithState {
+            state: ProtocolComponentState::new("test-pool", attributes, HashMap::new()),
+            component: ProtocolComponent {
+                id: "test-pool".to_string(),
+                static_attributes: HashMap::from([
+                    ("default_fee".to_string(), Bytes::from(100_u32.to_be_bytes())),
+                    ("tick_spacing".to_string(), Bytes::from(1_i32.to_be_bytes())),
+                ]),
+                ..Default::default()
+            },
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        }
+    }
+
+    fn expected_state(dfc: DynamicFeeConfig) -> AerodromeSlipstreamsState {
+        AerodromeSlipstreamsState::new(
+            "test-pool".to_string(),
+            0,
+            100,
+            get_sqrt_ratio_at_tick(0).expect("tick zero should have a sqrt price"),
+            0,
+            1,
+            100,
+            1,
+            0,
+            vec![TickInfo::new(-1, 1).unwrap(), TickInfo::new(1, -1).unwrap()],
+            vec![Observation { initialized: true, index: 0, ..Default::default() }],
+            dfc,
+        )
+        .expect("test state should be valid")
+    }
+
+    #[rstest]
+    #[case::missing_module(None)]
+    #[case::stale_module(Some(Bytes::from(STALE_DYNAMIC_FEE_MODULE)))]
+    #[tokio::test]
+    async fn missing_or_unsupported_module_falls_back_to_default_config(
+        #[case] dynamic_fee_module: Option<Bytes>,
+    ) {
+        // Still decodable with a default config, not dropped: these pools quote their default_fee.
+        let decoded = try_decode_snapshot_with_defaults::<AerodromeSlipstreamsState>(snapshot(
+            dynamic_fee_module,
+        ))
+        .await
+        .expect("pools without a supported marker should remain decodable");
+
+        assert_eq!(decoded, expected_state(DynamicFeeConfig::default()));
+    }
+
+    #[rstest]
+    #[case::factory_5e7b(hex_literal::hex!("090b2A6bb475c00e2256e2095A60887cD710803b"))]
+    #[case::factory_ade6(hex_literal::hex!("F4Ecd78EBEB6d36CF7f80B5B6B41453515fe2785"))]
+    #[case::factory_f8f2(hex_literal::hex!("87D8f999BBa9343E8099552426775B51C338E8CB"))]
+    #[tokio::test]
+    async fn supported_module_defaults_missing_initial_fee_attributes(
+        #[case] dynamic_fee_module: [u8; 20],
+    ) {
+        let mut snapshot = snapshot(Some(Bytes::from(dynamic_fee_module)));
+        snapshot
+            .state
+            .attributes
+            .remove("dfc_initialFeeEnabled");
+        snapshot
+            .state
+            .attributes
+            .remove("dfc_initialFee");
+
+        let decoded = try_decode_snapshot_with_defaults::<AerodromeSlipstreamsState>(snapshot)
+            .await
+            .expect("new module updates should work with pre-upgrade pool state");
+
+        assert_eq!(decoded, expected_state(DynamicFeeConfig::new(500, 700, 6_000_000, false, 0)));
     }
 }

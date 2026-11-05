@@ -75,7 +75,11 @@ impl EkuboPool for OraclePool {
             .liquidity = liquidity;
     }
 
-    fn quote(&self, token_amount: TokenAmount) -> Result<EkuboPoolQuote, SimulationError> {
+    fn quote(
+        &self,
+        token_amount: TokenAmount,
+        sqrt_ratio_limit: Option<U256>,
+    ) -> Result<EkuboPoolQuote, SimulationError> {
         // Not actual timestamps but the Ekubo SDK only cares about the existence of time
         // differences
         let timestamp = if self.swapped_this_block {
@@ -88,7 +92,7 @@ impl EkuboPool for OraclePool {
             .imp
             .quote(QuoteParams {
                 token_amount,
-                sqrt_ratio_limit: None,
+                sqrt_ratio_limit,
                 override_state: Some(self.state),
                 meta: timestamp,
             })

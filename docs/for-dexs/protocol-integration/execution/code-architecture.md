@@ -13,12 +13,12 @@ The following diagram summarizes the code architecture:
 
 ### Encoding
 
-The `TychoRouterEncoder` validates solutions and produces a list of transactions to execute against the `TychoRouter`.
+The `TychoRouterEncoder` validates solutions and produces a list of transactions to execute against the `TychoRouterV3`.
 
-The `TychoRouterEncoder` uses a `StrategyEncoder` that it chooses automatically based on the solution (see more about strategies [here](../../../concepts.md#strategy)).
+The `TychoRouterEncoder` chooses a strategy encoder automatically based on the solution (see more about strategies [here](../../../concepts.md#strategy)).
 
 Internally, all encoders choose the appropriate `SwapEncoder`(s) to encode the individual swaps, which depend on the protocols used in the solution.
 
 ### Execution
 
-The `TychoRouter` calls one or more `Executor`s (corresponding with the output of the `SwapEncoder`s) to interact with the correct protocol and perform each swap of the solution. The `TychoRouter` verifies that the user receives a minimum amount of the output token.
+The `TychoRouterV3` calls one or more `Executor`s (corresponding with the output of the `SwapEncoder`s) to interact with the correct protocol and perform each swap of the solution. The `TychoRouterV3` verifies that the user receives a minimum amount of the output token.

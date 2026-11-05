@@ -113,12 +113,16 @@ impl EkuboPool for TwammPool {
             .liquidity = liquidity;
     }
 
-    fn quote(&self, token_amount: TokenAmount) -> Result<EkuboPoolQuote, SimulationError> {
+    fn quote(
+        &self,
+        token_amount: TokenAmount,
+        sqrt_ratio_limit: Option<U256>,
+    ) -> Result<EkuboPoolQuote, SimulationError> {
         let quote = self
             .imp
             .quote(QuoteParams {
                 token_amount,
-                sqrt_ratio_limit: None,
+                sqrt_ratio_limit,
                 override_state: Some(self.state),
                 meta: self.estimate_block_timestamp()?,
             })
@@ -208,16 +212,16 @@ impl EkuboPool for TwammPool {
         deleted_attributes: HashSet<String>,
     ) -> Result<(), TransitionError> {
         if let Some(token0_sale_rate) = updated_attributes.get("token0_sale_rate") {
-            self.state.token0_sale_rate = token0_sale_rate.clone().into();
+            self.state.token0_sale_rate = token0_sale_rate.clone().try_into()?;
         }
 
         if let Some(token1_sale_rate) = updated_attributes.get("token1_sale_rate") {
-            self.state.token1_sale_rate = token1_sale_rate.clone().into();
+            self.state.token1_sale_rate = token1_sale_rate.clone().try_into()?;
         }
 
         let first_active_virtual_order_idx =
             if let Some(last_execution_time) = updated_attributes.get("last_execution_time") {
-                let last_execution_time = last_execution_time.clone().into();
+                let last_execution_time = last_execution_time.clone().try_into()?;
 
                 self.state.last_execution_time = last_execution_time;
 
@@ -282,6 +286,10 @@ impl EkuboPool for TwammPool {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "matches the signature of the non-test current_timestamp, which reads the system clock"
+)]
 fn current_timestamp() -> Result<u64, SimulationError> {
     Ok(crate::evm::protocol::ekubo::test_cases::TEST_TIMESTAMP)
 }

@@ -1,0 +1,47 @@
+# Older mise versions write mise.lock differently and would keep rewriting the lockfile.
+min_version = "2026.10.25"
+
+[settings]
+lockfile = true
+locked = true
+
+[env]
+# The toolchain for rustfmt and clippy, because the formatter configuration uses unstable
+# options. Commands pass it explicitly as `cargo +$RUST_NIGHTLY`.
+RUST_NIGHTLY = "nightly-2026-06-28"
+
+[tools]
+# Rust is deliberately absent. Its toolchains are pinned in the rust-toolchain.toml files, which
+# rustup reads in every context, including the ones without mise: IDEs, Docker builds, CI and
+# contributors who do not use mise. A `rust` entry here would break that: mise selects the
+# toolchain by exporting RUSTUP_TOOLCHAIN for the whole shell, and that variable takes precedence
+# over every rust-toolchain.toml. rustup exports the same variable, but only to the processes one
+# cargo invocation spawns, set to the toolchain it resolved for that directory. mise updates it
+# only when the shell changes directory, so a script that builds in a directory with its own
+# toolchain file would use this file's version instead. mise would also shim every
+# cargo-installed binary, and it would add nothing in return: mise.lock records no checksum for
+# Rust, since rustup verifies its own downloads.
+
+# Solidity: forge, cast, anvil. solc is pinned per project in each foundry.toml.
+foundry = "1.9.0"
+"pipx:slither-analyzer" = "0.11.4"
+node = "26.12.1"
+
+# Substreams
+"github:streamingfast/substreams" = "1.26.0"
+"github:streamingfast/substreams-sink-sql" = "4.13.1"
+buf = "1.75.0"
+
+# Cargo subcommands and database tooling
+"github:nextest-rs/nextest" = { version = "0.9.129", version_prefix = "cargo-nextest-" }
+"github:diesel-rs/diesel" = "2.3.14"
+"github:rustsec/rustsec" = { version = "0.22.2", version_prefix = "cargo-audit/v" }
+"github:bnjbvr/cargo-machete" = "0.9.2"
+"github:LukeMathWalker/cargo-chef" = "0.1.78"
+
+# Scripts
+shellcheck = "0.11.0"
+shfmt = "3.14.1"
+jq = "1.8.1"
+python = "3.14.4"
+uv = "0.13.6"

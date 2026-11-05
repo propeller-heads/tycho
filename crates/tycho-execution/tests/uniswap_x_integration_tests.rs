@@ -76,9 +76,10 @@ fn test_evm_sequential_swap_usx() {
         filler.clone(),
         filler.clone(),
         dai.clone(),
-        usdt.clone(),
+        usdt,
         BigUint::from_str("2000000000000000000000").unwrap(),
         BigUint::from_str("1990000000").unwrap(),
+        BigUint::from_str("1950200000").unwrap(),
         vec![swap_dai_usdc, swap_usdc_usdt],
     );
 
@@ -89,13 +90,13 @@ fn test_evm_sequential_swap_usx() {
 
     let tycho_calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;

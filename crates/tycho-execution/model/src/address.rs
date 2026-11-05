@@ -6,7 +6,7 @@ pub enum Address {
     /// `address(0)`
     #[serde(rename = "address(0)")]
     Zero,
-    #[serde(rename = "TychoRouter")]
+    #[serde(rename = "TychoRouterV3")]
     /// The router's address. `address(this)` inside the router.
     Router,
     #[serde(rename = "msg.sender")]
@@ -20,8 +20,9 @@ pub enum Address {
     /// this makes it much easier to determine whether a user
     /// managed to steal value in scenarios that involve both
     /// ERC20 and the native token
+    #[expect(clippy::upper_case_acronyms, reason = "public API; renaming is a breaking change")]
     WETH,
-    /// The canonical ETH marker address used by the TychoRouter.
+    /// The canonical ETH marker address used by the TychoRouterV3.
     /// <https://etherscan.io/address/0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE>
     NativeETH,
     /// Address chosen by sender to receive client fee.

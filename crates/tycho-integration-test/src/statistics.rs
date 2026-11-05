@@ -102,8 +102,12 @@ impl TestStatistics {
         }
     }
 
-    pub fn record_block_processed(&mut self) {
-        self.blocks_processed += 1;
+    /// Count `block_number` toward `blocks_processed`, once: a block already counted (e.g. seen
+    /// through another stream) does not count again.
+    pub fn record_block_processed(&mut self, block_number: u64) {
+        if self.blocks_seen.insert(block_number) {
+            self.blocks_processed += 1;
+        }
     }
 
     pub fn print_summary(&self) {
@@ -189,5 +193,19 @@ impl TestStatistics {
         }
 
         println!("\n{}", "=".repeat(80));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TestStatistics;
+
+    #[test]
+    fn blocks_are_counted_once_across_streams() {
+        let mut stats = TestStatistics::default();
+        stats.record_block_processed(100);
+        stats.record_block_processed(100); // same block via a second stream
+        stats.record_block_processed(101);
+        assert_eq!(stats.blocks_processed, 2);
     }
 }

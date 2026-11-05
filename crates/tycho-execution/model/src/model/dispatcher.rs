@@ -14,7 +14,10 @@ use crate::{
 };
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/Dispatcher.sol#L89>
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the parameters of Dispatcher._callSwapOnExecutor"
+)]
 pub fn _call_swap_on_executor(
     params: &Params,
     state: &mut State,
@@ -168,21 +171,4 @@ pub fn _call_handle_callback_on_executor(
     state.tstore("is_split_swap", false);
 
     Ok(())
-}
-
-/// <https://github.com/propeller-heads/tycho-execution/blob/9b0512c9580617224c7a0d7de781674a2cdc6b62/foundry/src/Dispatcher.sol#L337>
-///
-/// <https://github.com/propeller-heads/tycho-execution/blob/9b0512c9580617224c7a0d7de781674a2cdc6b62/foundry/src/FeeCalculator.sol#L223>
-pub fn _call_get_effective_router_fee_on_output(
-    params: &Params,
-    _state: &mut State,
-) -> Result<i64, Error> {
-    Ok(if crate::config::ENABLE_NONZERO_FEE_BPS {
-        params.request(
-            ParamKey::String("router_fee_on_output_bps"),
-            [0, crate::model::fee_calculator::MAX_FEE_BPS],
-        )?
-    } else {
-        0
-    })
 }

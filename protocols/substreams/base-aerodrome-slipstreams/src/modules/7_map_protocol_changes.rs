@@ -1,8 +1,8 @@
 use crate::{
     events::get_log_changed_attributes,
     modules::utils::{
-        dynamic_fee_config_initialized_key, dynamic_fee_config_key,
-        should_process_dynamic_fee_config, DynamicFeeEvent, Params, DYNAMIC_FEE_CONFIG_ATTRIBUTES,
+        dynamic_fee_config_initialized_key, dynamic_fee_config_key, DynamicFeeEvent, Params,
+        DYNAMIC_FEE_CONFIG_ATTRIBUTES,
     },
     pb::tycho::evm::aerodrome::Pool,
 };
@@ -42,6 +42,7 @@ pub fn map_protocol_changes(
         .iter()
         .map(|f| hex::decode(f).expect("Invalid dynamic_fee_module hex"))
         .collect::<Vec<Vec<u8>>>();
+    let processes_dynamic_fee_config = params.processes_dynamic_fee_config(block.number);
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
 
     for change in protocol_components.changes.into_iter() {
@@ -108,9 +109,7 @@ pub fn map_protocol_changes(
                     });
                 }
             }
-            if should_process_dynamic_fee_config(block.number) &&
-                dynamic_fee_modules.contains(&log.address)
-            {
+            if processes_dynamic_fee_config && dynamic_fee_modules.contains(&log.address) {
                 let Some(event) = DynamicFeeEvent::match_and_decode(log) else {
                     continue;
                 };

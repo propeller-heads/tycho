@@ -5,30 +5,45 @@ Currently, Tycho supports the following protocols:
 <table data-full-width="true">
 <thead><tr><th width="204.7578125">Protocol</th><th width="251.88671875">Integration Type</th><th width="156.2734375">Simulation Time</th><th width="148.26953125">Chains</th><th width="261.26953125">Partial Support Notes</th></tr></thead>
 <tbody>
-<tr><td><code>uniswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>1 μs (0.001 ms)</td><td>Ethereum, Base, Unichain</td><td></td></tr>
-<tr><td><code>uniswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Ethereum, Base, Unichain</td><td></td></tr>
-<tr><td><code>uniswap_v4</code></td><td>Native (<code>UniswapV4State</code>)</td><td>3 μs (0.003 ms)</td><td>Ethereum, Base, Unichain</td><td>Only core uniswap V4 pools are supported on this native implementation.</td></tr>
-<tr><td><code>uniswap_v4_hooks</code></td><td>Hybrid (<code>UniswapV4State</code>)<br>[DCI indexed]</td><td>1 ms</td><td>Ethereum, Unichain</td><td>All composable hooks are supported.<br><strong>Angstrom</strong>: see more details <a href="supported-protocols.md#angstrom-uniswap-v4-hook">below</a>.<br><em>recommended</em>: set a high startup timeout on the stream builder: <code>.startup_timeout(Duration::from_secs(120))</code></td></tr>
+<tr><td><code>uniswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>1 μs (0.001 ms)</td><td>Ethereum, Base, Unichain, Arbitrum, Polygon, BSC, Robinhood</td><td></td></tr>
+<tr><td><code>uniswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Ethereum, Base, Unichain, Arbitrum, Polygon, BSC, Robinhood</td><td></td></tr>
+<tr><td><code>uniswap_v4</code></td><td>Native (<code>UniswapV4State</code>)</td><td>3 μs (0.003 ms)</td><td>Ethereum, Base, Unichain, Arbitrum, Polygon, BSC, Robinhood</td><td>Only core uniswap V4 pools are supported on this native implementation.</td></tr>
+<tr><td><code>uniswap_v4_hooks</code></td><td>Hybrid (<code>UniswapV4State</code>)<br>[DCI indexed]</td><td>1 ms</td><td>Ethereum, Robinhood</td><td>Ethereum: all composable hooks are supported.<br>Robinhood: only Pons V2 MemeHook pools are supported. Pools with other hooks fail to decode and stop the stream. Set <code>.skip_state_decode_failures(true)</code> on the stream builder to skip them.<br><strong>Angstrom</strong>: see more details <a href="supported-protocols.md#angstrom-uniswap-v4-hook">below</a>.<br><em>recommended</em>: set a high startup timeout on the stream builder: <code>.startup_timeout(Duration::from_secs(120))</code></td></tr>
 <tr><td><code>vm:balancer_v2</code></td><td>VM (<code>EVMPoolState</code>)<br>[DCI indexed]</td><td>0.5 ms</td><td>Ethereum</td><td>A few pools are currently unsupported. Use <code>balancer_v2_pool_filter</code></td></tr>
-<tr><td><code>vm:curve</code></td><td>Hybrid (<code>CurveState</code>)<br>[DCI indexed]</td><td>30 μs (0.03 ms)</td><td>Ethereum</td><td>Pools with rate-bearing or rebasing coins are unsupported. Use <code>curve_filter</code>.<br>NOTE: curve requires a node RPC to fetch some code at startup. Please set the <code>RPC_URL</code> env var.</td></tr>
-<tr><td><code>sushiswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>1 μs (0.001 ms)</td><td>Ethereum</td><td></td></tr>
-<tr><td><code>pancakeswap_v2</code></td><td>Native (<code>PancakeswapV2State</code>)</td><td>1 μs (0.001 ms)</td><td>Ethereum</td><td></td></tr>
-<tr><td><code>pancakeswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Ethereum, Base</td><td></td></tr>
+<tr><td><code>vm:curve</code></td><td>Hybrid (<code>CurveState</code>)<br>[DCI indexed]</td><td>30 μs (0.03 ms)</td><td>Ethereum, Unichain</td><td>Use <code>curve_filter</code>. It excludes pools with rate-bearing or rebasing coins, unless an allowlist trusts the rate source of each such coin: its oracle rate provider, its ERC4626 vault, or, for rebasing coins, the pool itself. An allowlist entry must give the same rate to a quote as to a swap, and DCI must index every storage slot that the rate read touches.<br>NOTE: curve requires a node RPC to fetch some code at startup. Please set the <code>RPC_URL</code> env var.</td></tr>
+<tr><td><code>sushiswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>1 μs (0.001 ms)</td><td>Ethereum, Base</td><td></td></tr>
+<tr><td><code>pancakeswap_v2</code></td><td>Native (<code>PancakeswapV2State</code>)</td><td>1 μs (0.001 ms)</td><td>Ethereum, BSC</td><td></td></tr>
+<tr><td><code>pancakeswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Ethereum, Base, Arbitrum, BSC</td><td></td></tr>
+<tr><td><code>pancakeswap_infinity_cl</code></td><td>Native (<code>UniswapV4State</code>)</td><td>-</td><td>Base, BSC, Robinhood</td><td>Pools whose hook takes part in swaps are not in this system. On BSC, they are in <code>pancakeswap_infinity_cl_hooks</code>.</td></tr>
+<tr><td><code>pancakeswap_infinity_cl_hooks</code></td><td>Native (<code>UniswapV4State</code>)</td><td>-</td><td>BSC</td><td>Only pools with the CLAlphaHook are supported. Pools with other hooks fail to decode and stop the stream. Set <code>.skip_state_decode_failures(true)</code> on the stream builder to skip them.</td></tr>
+<tr><td><code>sushiswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Robinhood</td><td></td></tr>
+<tr><td><code>robinswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Robinhood</td><td></td></tr>
+<tr><td><code>gigadex_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Robinhood</td><td></td></tr>
+<tr><td><code>ramses_v3</code></td><td>Native (<code>RamsesV3State</code>)</td><td>-</td><td>Polygon, Robinhood</td><td></td></tr>
 <tr><td><code>quickswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>3 μs (0.003 ms)</td><td>Polygon</td><td></td></tr>
 <tr><td><code>ekubo_v2</code></td><td>Native (<code>EkuboState</code>)</td><td>1.5 μs (0.0015 ms)</td><td>Ethereum</td><td></td></tr>
-<tr><td><code>ekubo_v3</code></td><td>Native (<code>EkuboV3State</code>)</td><td>9μs</td><td>Ethereum</td><td>Some extensions are unsupported. Use <code>ekubo_v3_extension_filter</code>.</td></tr>
+<tr><td><code>ekubo_v3</code></td><td>Native (<code>EkuboV3State</code>)</td><td>9μs</td><td>Ethereum, BSC, Robinhood</td><td>Some extensions are unsupported. Use <code>ekubo_v3_extension_filter</code>. It also drops SignedExclusiveSwap pools, which need a per-swap signature passed to the encoder as <code>user_data</code>. If you can supply that signature, use <code>ekubo_v3_extension_filter_with_signed_exclusive_swap</code> instead to keep those pools.</td></tr>
 <tr><td><code>vm:maverick_v2</code></td><td>VM (<code>EVMPoolState</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
-<tr><td><code>vm:bopamm</code></td><td>VM (<code>EVMPoolState</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
-<tr><td><code>vm:fermiswap</code></td><td>VM (<code>EVMPoolState</code>)</td><td>4 ms</td><td>Ethereum</td><td></td></tr>
-<tr><td><code>aerodrome_slipstreams</code></td><td><p>Native</p><p>(<code>AerodromeSlipstreamsState</code>)</p></td><td>-</td><td>Base</td><td></td></tr>
-<tr><td><code>lunarbase</code></td><td>Native (<code>LunarBaseState</code>)</td><td>7 μs (0.007 ms)</td><td>Base</td><td></td></tr>
+<tr><td><code>aerodrome_v1</code></td><td>Native (<code>AerodromeV1State</code>)</td><td>3 μs (0.003 ms)</td><td>Base</td><td></td></tr>
+<tr><td><code>aerodrome_slipstreams</code></td><td><p>Native</p><p>(<code>AerodromeSlipstreamsState</code>)</p></td><td>-</td><td>Base</td><td>Dynamic-fee pools untouched so far in the execution block quote the worse of the initial and dynamic fee, so the output is never over-quoted. If your submission path lands the swap first in the block, opt in per registration: <code>exchange_with_decoder_context</code> with <code>DecoderContext::new().assume_first_in_block(true)</code>.</td></tr>
+<tr><td><code>velodrome_slipstreams</code></td><td><p>Native</p><p>(<code>VelodromeSlipstreamsState</code>)</p></td><td>-</td><td>Unichain</td><td></td></tr>
+<tr><td><code>aero_basic</code></td><td>Native (<code>AeroBasicState</code>)</td><td>-</td><td>Ethereum, Base, Arbitrum, Robinhood</td><td>Quotes assume that the swap pays no MEV tax. The MEV tax applies only to transactions with a priority fee above a threshold.</td></tr>
+<tr><td><code>aero_cl</code></td><td>Native (<code>AerodromeSlipstreamsState</code>)</td><td>-</td><td>Ethereum, Base, Arbitrum, Robinhood</td><td>Quotes assume that the swap gets no caller discount and pays no MEV tax. A discount only makes the fee lower. The MEV tax applies only to transactions with a priority fee above a threshold.</td></tr>
+<tr><td><code>up_v3</code></td><td>Native (<code>AerodromeSlipstreamsState</code>)</td><td>-</td><td>Robinhood</td><td></td></tr>
 <tr><td><code>rocketpool</code></td><td>Native (<code>RocketpoolState</code>)</td><td>-</td><td>Ethereum</td><td>Note: the DepositPool was recently updated to v1.4. This new version is supported by tycho_simulation <a href="https://github.com/propeller-heads/tycho-simulation/releases/tag/0.248.0" target="_blank" rel="noopener noreferrer">> v0.248.0</a> and above.</td></tr>
-<tr><td><code>fluid_v1</code></td><td>Native (<code>FluidV1</code>)</td><td>-</td><td>Ethereum</td><td>Note: paused pools are still indexed. To filter them out use <code>fluid_v1_paused_pools_filter</code>.</td></tr>
-<tr><td><code>cowamm</code></td><td>Native (<code>CowAMMState</code>)</td><td>-</td><td>Ethereum</td><td><p>CoWAMM doesn't have a Tycho Execution component. This is because of CoWAMM's unique design where only cowswap solvers can unlock the liquidity pools after sharing a quote.</p><p>You will have to integrate execution yourself (see <a href="https://docs.cow.fi/cow-amm/tutorials/cow-amm-for-solvers#creating-cow-amm-orders-with-the-helper-contract" target="_blank" rel="noopener noreferrer">cowamm docs</a> and <a href="https://github.com/adpthegreat/cowamm-execution/blob/main/examples/example.rs" target="_blank" rel="noopener noreferrer">example</a>).</p></td></tr>
+<tr><td><code>fluid_v1</code></td><td>Native (<code>FluidV1</code>)<br>[DCI indexed]</td><td>-</td><td>Ethereum</td><td>Note: paused pools are still indexed. To filter them out use <code>fluid_v1_paused_pools_filter</code>.</td></tr>
+<tr><td><code>erc4626</code></td><td>Native (<code>ERC4626State</code>)<br>[DCI indexed]</td><td>-</td><td>Ethereum</td><td>A few vaults are unsupported. Use <code>erc4626_filter</code></td></tr>
+<tr><td><code>vm:balancer_v3</code></td><td>Hybrid (<code>BalancerV3State</code>)<br>[DCI indexed]</td><td>-</td><td>Ethereum</td><td>Only weighted, stable and reCLAMM pools are supported. Pools with a swap hook and Gyro, QuantAMM and LBP pools are unsupported. The decoder rejects them.</td></tr>
+<tr><td><code>vm:liquidityparty</code></td><td>VM (<code>EVMPoolState</code>)</td><td>-</td><td>Ethereum</td><td>A swap on a killed pool reverts. Use <code>liquidityparty_killed_pools_filter</code>.</td></tr>
+<tr><td><code>ring_swap_v2</code></td><td>Native (<code>RingSwapV2State</code>)</td><td>-</td><td>Ethereum, BSC</td><td></td></tr>
+<tr><td><code>sky</code></td><td>Native (<code>SkyState</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
+<tr><td><code>lido_v4</code></td><td>Native (<code>LidoV4State</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
+<tr><td><code>etherfi</code></td><td>Native (<code>EtherfiState</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
+<tr><td><code>lunarbase</code></td><td>Native (<code>LunarBaseState</code>)</td><td>-</td><td>Base, BSC</td><td>The venue's maker sets the pool price. While the maker does not refresh it, the pool reports a stale price and quotes fail.</td></tr>
 </tbody>
 </table>
 
-For RFQ protocols that fetch prices from market makers via WebSocket or API, see [Request for Quote Protocols](request-for-quote-protocols.md).
+For venues that price off the chain — the RFQ market makers and the off-chain-priced pAMMs, whose books arrive over a WebSocket or an API — see [Off-Chain Priced Venues](request-for-quote-protocols.md).
 
 {% hint style="info" %}
 **Live tracker & Upcoming protocols**
@@ -62,8 +77,17 @@ fn register_exchanges(
                 .exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(ekubo_v3_extension_filter))
                 .exchange::<CurveState>("vm:curve", tvl_filter.clone(), Some(curve_filter))
                 .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None)
-                .exchange::<EVMPoolState<PreCachedDB>>("vm:bopamm", tvl_filter.clone(), None)
-                .exchange::<EVMPoolState<PreCachedDB>>("vm:fermiswap", tvl_filter.clone(), None)
+                .exchange::<FluidV1>("fluid_v1", tvl_filter.clone(), Some(fluid_v1_paused_pools_filter))
+                .exchange::<ERC4626State>("erc4626", tvl_filter.clone(), Some(erc4626_filter))
+                .exchange::<RocketpoolState>("rocketpool", tvl_filter.clone(), None)
+                .exchange::<BalancerV3State>("vm:balancer_v3", tvl_filter.clone(), None)
+                .exchange::<EVMPoolState<PreCachedDB>>("vm:liquidityparty", tvl_filter.clone(), Some(liquidityparty_killed_pools_filter))
+                .exchange::<RingSwapV2State>("ring_swap_v2", tvl_filter.clone(), None)
+                .exchange::<SkyState>("sky", tvl_filter.clone(), None)
+                .exchange::<LidoV4State>("lido_v4", tvl_filter.clone(), None)
+                .exchange::<EtherfiState>("etherfi", tvl_filter.clone(), None)
+                .exchange::<AeroBasicState>("aero_basic", tvl_filter.clone(), None)
+                .exchange::<AerodromeSlipstreamsState>("aero_cl", tvl_filter.clone(), None)
         }
         Chain::Base => {
             builder = builder
@@ -71,18 +95,66 @@ fn register_exchanges(
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV2State>("sushiswap_v2", tvl_filter.clone(), None)
+                .exchange::<AerodromeV1State>("aerodrome_v1", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("aerodrome_slipstreams", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)
                 .exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None)
+                .exchange::<AeroBasicState>("aero_basic", tvl_filter.clone(), None)
+                .exchange::<AerodromeSlipstreamsState>("aero_cl", tvl_filter.clone(), None)
         }
         Chain::Unichain => {
             builder = builder
                 .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<VelodromeSlipstreamsState>("velodrome_slipstreams", tvl_filter.clone(), None)
+                .exchange::<CurveState>("vm:curve", tvl_filter.clone(), Some(curve_filter))
+        }
+        Chain::Arbitrum => {
+            builder = builder
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<AeroBasicState>("aero_basic", tvl_filter.clone(), None)
+                .exchange::<AerodromeSlipstreamsState>("aero_cl", tvl_filter.clone(), None)
+        }
+        Chain::Bsc => {
+            builder = builder
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<PancakeswapV2State>("pancakeswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("pancakeswap_infinity_cl_hooks", tvl_filter.clone(), None)
+                .exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(ekubo_v3_extension_filter))
+                .exchange::<RingSwapV2State>("ring_swap_v2", tvl_filter.clone(), None)
+                .exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None)
         }
         Chain::Polygon => {
             builder = builder
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+        }
+        Chain::Robinhood => {
+            builder = builder
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("sushiswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None)
+                .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+                .exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None)
+                .exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(ekubo_v3_extension_filter))
+                .exchange::<AeroBasicState>("aero_basic", tvl_filter.clone(), None)
+                .exchange::<AerodromeSlipstreamsState>("aero_cl", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)
         }
         _ => {}
     }
@@ -107,13 +179,20 @@ Interested in adding a protocol? Refer to the [Tycho Simulation for DEXs](../for
 
 While most protocols work out of the box, some require additional configuration or have specific considerations you should be aware of.
 
-#### Angstrom (Uniswap V4 Hook)
+#### Angstrom (Uniswap V4 Hook) <a href="#angstrom-uniswap-v4-hook" id="angstrom-uniswap-v4-hook"></a>
 
-Angstrom requires querying their <a href="https://docs.angstrom.xyz/l1/core-mechanisms/pool-unlock#2-user-initiated-off-chain-signature-unlock" target="_blank" rel="noopener noreferrer">API for attestations</a> per block to unlock their contract. If execution comes too late, the contract can no longer be unlocked for that block.
+Angstrom locks its pools at the start of every block. A swap that trades against one in the same block must carry a pool unlock <a href="https://docs.angstrom.xyz/l1/core-mechanisms/pool-unlock#2-user-initiated-off-chain-signature-unlock" target="_blank" rel="noopener noreferrer">attestation</a>, which Tycho fetches from Angstrom's API, as its hook data. If the transaction lands after the attested blocks have passed, the attestation no longer unlocks the pool.
 
 **Required configuration**:
 
 * Set the `ANGSTROM_API_KEY` environment variable (request one from the Angstrom team directly)
-* Set `ANGSTROM_BLOCKS_IN_FUTURE` environment variable (if you want to override the <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/src/encoding/evm/constants.rs" target="_blank" rel="noopener noreferrer">default value</a> of 5 blocks). **Important trade-off**: The more blocks you fetch, the more calldata will be sent to the Tycho Router, making execution more gas expensive.
+* Set `ANGSTROM_BLOCKS_IN_FUTURE` environment variable (if you want to override the <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/src/encoding/evm/constants.rs" target="_blank" rel="noopener noreferrer">default value</a> of 10 blocks). **Important trade-off**: The more blocks you fetch, the more calldata will be sent to the Tycho Router, making execution more gas expensive.
 
 If `ANGSTROM_API_KEY` is not set, `ProtocolStreamBuilder` excludes Angstrom pools from `uniswap_v4_hooks` by default (unless you pass your own filter function), since routes over these pools would fail at encoding without attestations.
+
+**Attestations are prefetched**, so encoding an Angstrom swap makes no API call. A background thread refreshes the attestation window twice per block and encoding reads the result from a process-wide cache. The thread starts when you build a `SwapEncoderRegistry` for Ethereum with `ANGSTROM_API_KEY` set, and it reads all three environment variables once, at that point.
+
+Two consequences for your setup:
+
+* **Build the encoder once at startup and reuse it.** Encoding still works if you build a new encoder per quote, but the first Angstrom swap it encodes waits for the first fetch to finish.
+* **Watch your logs for `Angstrom attestation cache is cold or stale`.** When the cached window is more than one block old, encoding fetches a fresh one inline and logs that warning. Encoding then pays the API round trip, so a steady stream of these means the background refresh is failing — the refresh logs its own error alongside them.

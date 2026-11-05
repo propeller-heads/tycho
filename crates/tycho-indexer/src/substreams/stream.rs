@@ -9,7 +9,6 @@ use anyhow::{anyhow, Error};
 use async_stream::try_stream;
 use futures03::{Stream, StreamExt};
 use metrics::{counter, gauge};
-use once_cell::sync::Lazy;
 use prost::Message as ProstMessage;
 use tokio::time::sleep;
 use tokio_retry::strategy::ExponentialBackoff;
@@ -26,7 +25,10 @@ use crate::{
     substreams::SubstreamsEndpoint,
 };
 
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "values are moved straight through the stream, so boxing the large variant would only add an allocation"
+)]
 pub enum BlockResponse {
     New(BlockScopedData),
     Undo(BlockUndoSignal),
@@ -38,7 +40,10 @@ pub struct SubstreamsStream {
 }
 
 impl SubstreamsStream {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "forwards the stream parameters one-to-one to `stream_blocks`"
+    )]
     pub fn new(
         endpoint: Arc<SubstreamsEndpoint>,
         cursor: Option<String>,
@@ -66,11 +71,43 @@ impl SubstreamsStream {
     }
 }
 
-static DEFAULT_BACKOFF: Lazy<ExponentialBackoff> =
-    Lazy::new(|| ExponentialBackoff::from_millis(500).max_delay(Duration::from_secs(45)));
+/// Delays between reconnection attempts: none before the first, then 200ms, 400ms, 800ms, 1.6s,
+/// 3.2s, 6.4s, 12.8s, 25.6s, then 30s before every further attempt.
+///
+/// The first attempt costs nothing because nearly every disconnect here is a transport drop the
+/// endpoint is already able to serve again, and consumers see the whole delay as a hole in the
+/// block feed. The ladder is rebuilt whenever a block arrives, so the free attempt is spent once
+/// per disconnect and an endpoint that is genuinely down still falls back to the delays.
+///
+/// [`ExponentialBackoff`] raises its base to the n-th power, so `from_millis(n)` alone jumps
+/// straight from `n` to `n²` milliseconds. Building the ladder from a base of 2 and a factor of
+/// 100 keeps the doubling that the cap implies, which a base of 500 does not: that yields 500ms
+/// followed by 250s, and every attempt after the first therefore waits the whole `max_delay`.
+fn retry_delays() -> impl Iterator<Item = Duration> {
+    std::iter::once(Duration::ZERO).chain(
+        ExponentialBackoff::from_millis(2)
+            .factor(100)
+            .max_delay(Duration::from_secs(30)),
+    )
+}
+
+/// Consecutive `Unauthenticated` retries allowed once the endpoint has proven the credential by
+/// delivering a block. With [`retry_delays`] these span about two and a half minutes.
+const MAX_UNAUTHENTICATED_RETRIES: u32 = 12;
+
+/// Whether an `Unauthenticated` status from the endpoint should be retried.
+///
+/// Returns false while `block_received` is false: a credential that has never delivered a block
+/// cannot be distinguished from a misconfigured one, and the token is read once at startup, so
+/// retrying it would hide the problem rather than fix it. Once a block has arrived the credential
+/// is proven, so a later rejection is the endpoint's and is retried up to
+/// `MAX_UNAUTHENTICATED_RETRIES` times.
+fn should_retry_unauthenticated(block_received: bool, retries_used: u32) -> bool {
+    block_received && retries_used < MAX_UNAUTHENTICATED_RETRIES
+}
 
 async fn wait_for_next_retry(
-    backoff: &mut ExponentialBackoff,
+    backoff: &mut impl Iterator<Item = Duration>,
     retry_count: &mut u32,
     extractor_id: &str,
 ) -> Result<(), Error> {
@@ -92,7 +129,10 @@ async fn wait_for_next_retry(
 // `latest_cursor` is populated from the response. On any subsequent reconnection
 // (hot reconnect within the same process), `latest_cursor` is sent as
 // `start_cursor` which takes precedence over `start_block_num`.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is an independent Substreams request parameter"
+)]
 fn stream_blocks(
     endpoint: Arc<SubstreamsEndpoint>,
     cursor: Option<String>,
@@ -105,9 +145,11 @@ fn stream_blocks(
     partial_blocks: bool,
 ) -> impl Stream<Item = Result<BlockResponse, Error>> {
     let mut latest_cursor = cursor.unwrap_or_default();
-    let mut latest_block = start_block_num as u64;
+    let mut latest_block: Option<u64> = None;
     let mut retry_count = 0;
-    let mut backoff = DEFAULT_BACKOFF.clone();
+    let mut backoff = retry_delays();
+    let mut block_received = false;
+    let mut unauthenticated_retries = 0;
 
     try_stream! {
         'retry_loop: loop {
@@ -150,17 +192,24 @@ fn stream_blocks(
                                     if !block_scoped_data.is_partial || block_scoped_data.is_last_partial.is_some_and(|last_partial| last_partial) {
                                         if let Some(block_ts) = block.timestamp {
                                             let now = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards!?").as_millis();
-                                            let lag = now.saturating_sub((block_ts.seconds * 1000) as u128);
+                                            let block_millis = u128::try_from(block_ts.seconds * 1000)
+                                                .map_err(|_overflow| anyhow::anyhow!("Block timestamp {} is negative", block_ts.seconds))?;
+                                            let lag = now.saturating_sub(block_millis);
                                             gauge!("substreams_lag_millis", "extractor" => extractor_id.clone()).set(lag as f64);
                                         }
                                     }
-                                    latest_block = block.number;
+                                    latest_block = Some(block.number);
                                 };
 
                                 gauge!("block_message_size_bytes", "extractor" => extractor_id.clone()).set(block_scoped_data.encoded_len() as f64);
 
                                 // Reset backoff because we got a good value from the stream
-                                backoff = DEFAULT_BACKOFF.clone();
+                                backoff = retry_delays();
+
+                                // The endpoint accepted the credential, so any later rejection of
+                                // it is the endpoint's problem, not a misconfiguration.
+                                block_received = true;
+                                unauthenticated_retries = 0;
 
                                 let cursor = block_scoped_data.cursor.clone();
                                 yield BlockResponse::New(block_scoped_data);
@@ -169,14 +218,14 @@ fn stream_blocks(
                             },
                             BlockProcessedResult::BlockUndoSignal(block_undo_signal) => {
                                 // Reset backoff because we got a good value from the stream
-                                backoff = DEFAULT_BACKOFF.clone();
+                                backoff = retry_delays();
 
                                 let to_block = block_undo_signal.last_valid_block.clone().unwrap_or_default().number;
                                 counter!(
                                     "chain_reorg",
                                     "extractor" => extractor_id.clone(),
                                     "to_block" => to_block.to_string(),
-                                    "from_block" => latest_block.to_string()
+                                    "from_block" => latest_block.map_or_else(|| start_block_num.to_string(), |number| number.to_string())
                                 )
                                 .increment(1);
 
@@ -187,11 +236,19 @@ fn stream_blocks(
                             },
                             BlockProcessedResult::Skip() => {},
                             BlockProcessedResult::TonicError(status) => {
-                                // Unauthenticated errors are not retried, we forward the error back to the
-                                // stream consumer which handles it
                                 if status.code() == tonic::Code::Unauthenticated {
                                     counter!("substreams_failure", "extractor" => extractor_id.clone(), "cause" => "unauthenticated").increment(1);
-                                    return Err(anyhow::Error::new(status.clone()))?;
+
+                                    // Forward the error to the stream consumer, which treats it as fatal
+                                    if !should_retry_unauthenticated(block_received, unauthenticated_retries) {
+                                        error!("Endpoint rejected the credential, giving up: {:#}", status);
+                                        return Err(anyhow::Error::new(status.clone()))?;
+                                    }
+
+                                    unauthenticated_retries += 1;
+                                    warn!(unauthenticated_retries, "Endpoint rejected a proven credential, reconnecting");
+                                    wait_for_next_retry(&mut backoff, &mut retry_count, &extractor_id).await?;
+                                    continue 'retry_loop;
                                 }
 
                                 error!("Received tonic error {:#}", status);
@@ -209,7 +266,26 @@ fn stream_blocks(
                     return;
                 },
                 Err(e) => {
-                    counter!("substreams_failure", "module" => output_module_name.clone(), "cause" => "connection_error").increment(1);
+                    // An endpoint that rejects the credential before opening the stream surfaces it
+                    // here rather than as a stream error.
+                    let unauthenticated = e
+                        .downcast_ref::<tonic::Status>()
+                        .is_some_and(|status| status.code() == tonic::Code::Unauthenticated);
+
+                    if unauthenticated {
+                        counter!("substreams_failure", "extractor" => extractor_id.clone(), "cause" => "unauthenticated").increment(1);
+
+                        if !should_retry_unauthenticated(block_received, unauthenticated_retries) {
+                            error!("Endpoint rejected the credential, giving up: {:#}", e);
+                            return Err(e)?;
+                        }
+
+                        unauthenticated_retries += 1;
+                        warn!(unauthenticated_retries, "Endpoint rejected a proven credential, reconnecting");
+                    } else {
+                        counter!("substreams_failure", "module" => output_module_name.clone(), "cause" => "connection_error").increment(1);
+                    }
+
                     error!("Unable to connect to endpoint: {:#}", e);
 
                     // If we reach this point, we must wait a bit before retrying
@@ -220,7 +296,6 @@ fn stream_blocks(
     }
 }
 
-#[allow(clippy::large_enum_variant)]
 enum BlockProcessedResult {
     Skip(),
     BlockScopedData(BlockScopedData),
@@ -304,5 +379,133 @@ impl Stream for SubstreamsStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.stream.poll_next_unpin(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::substreams::mock::{start_scripted_mock_substreams, MockResponse};
+
+    async fn stream_against(script: Vec<MockResponse>) -> (SubstreamsStream, MockRequests) {
+        let (captured, addr) = start_scripted_mock_substreams(script).await;
+        let endpoint = SubstreamsEndpoint::new(format!("http://{addr}"), Some("token".to_string()))
+            .await
+            .expect("endpoint");
+        let stream = SubstreamsStream::new(
+            Arc::new(endpoint),
+            None,
+            None,
+            "test_module".to_string(),
+            42,
+            0,
+            false,
+            "test_extractor".to_string(),
+            false,
+        );
+        (stream, captured)
+    }
+
+    type MockRequests = std::sync::Arc<std::sync::Mutex<Vec<Request>>>;
+
+    #[tokio::test]
+    async fn test_unauthenticated_before_first_block_is_fatal() {
+        let (mut stream, captured) = stream_against(vec![MockResponse::Unauthenticated]).await;
+
+        let item = stream
+            .next()
+            .await
+            .expect("stream should yield an item");
+        let Err(err) = item else {
+            panic!("a credential that never worked must not be retried");
+        };
+
+        assert!(
+            err.to_string()
+                .contains("Unauthenticated"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(captured.lock().unwrap().len(), 1, "the endpoint must not be dialled again");
+    }
+
+    #[tokio::test]
+    async fn test_unauthenticated_after_first_block_reconnects() {
+        let (mut stream, captured) = stream_against(vec![
+            MockResponse::BlockThenUnauthenticated { cursor: "cursor-1".to_string() },
+            MockResponse::Ok,
+        ])
+        .await;
+
+        let block = stream
+            .next()
+            .await
+            .expect("stream should yield a block")
+            .expect("first block should not error");
+        assert!(matches!(block, BlockResponse::New(_)));
+
+        let ended = stream
+            .next()
+            .await
+            .expect("stream should yield an item")
+            .expect("a proven credential must be retried, not surfaced as an error");
+        assert!(matches!(ended, BlockResponse::Ended));
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2, "the stream should have reconnected once");
+        assert_eq!(
+            requests[1].start_cursor, "cursor-1",
+            "the reconnect should resume from the last cursor"
+        );
+    }
+
+    #[test]
+    fn test_unauthenticated_not_retried_before_first_block() {
+        assert!(!should_retry_unauthenticated(false, 0));
+    }
+
+    #[test]
+    fn test_unauthenticated_retried_after_first_block() {
+        assert!(should_retry_unauthenticated(true, 0));
+    }
+
+    #[test]
+    fn test_unauthenticated_retries_are_bounded() {
+        assert!(should_retry_unauthenticated(true, MAX_UNAUTHENTICATED_RETRIES - 1));
+        assert!(!should_retry_unauthenticated(true, MAX_UNAUTHENTICATED_RETRIES));
+    }
+
+    /// The first attempt is free, and a single missed reconnect used to cost the whole cap, which
+    /// is longer than the window a consumer waits before it treats the feed as broken.
+    #[test]
+    fn test_retry_delays_are_free_then_double_up_to_the_cap() {
+        let steps: Vec<Duration> = retry_delays().take(10).collect();
+
+        assert_eq!(
+            steps,
+            vec![
+                Duration::ZERO,
+                Duration::from_millis(200),
+                Duration::from_millis(400),
+                Duration::from_millis(800),
+                Duration::from_millis(1_600),
+                Duration::from_millis(3_200),
+                Duration::from_millis(6_400),
+                Duration::from_millis(12_800),
+                Duration::from_millis(25_600),
+                Duration::from_secs(30),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_unauthenticated_retries_span_about_two_and_a_half_minutes() {
+        let total: Duration = retry_delays()
+            .take(MAX_UNAUTHENTICATED_RETRIES as usize)
+            .sum();
+
+        assert!(
+            (Duration::from_secs(120)..=Duration::from_secs(165)).contains(&total),
+            "the documented ~2.5 minute window is now {total:?}"
+        );
     }
 }

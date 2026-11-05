@@ -20,6 +20,16 @@ interface IFermiSwapCallback {
 contract FermiSwapAdapter is ISwapAdapter, IFermiSwapCallback {
     using SafeERC20 for IERC20;
 
+    /// Bounds the `getLimits` binary search for the largest engine-serviceable
+    /// buy amount; 6 iterations resolve the limit to within ~1.6% of the vault
+    /// balance.
+    uint256 private constant LIMIT_SEARCH_ITERATIONS = 6;
+
+    /// Fraction of the traded size used to probe the post-trade pool price;
+    /// small enough to approximate the marginal price, large enough to clear
+    /// the engine's minimum quote size for realistic trades.
+    uint256 private constant PRICE_PROBE_DIVISOR = 1000;
+
     IFermiSwapper public immutable fermiSwapper;
 
     constructor(address fermiSwapper_) {
@@ -99,11 +109,25 @@ contract FermiSwapAdapter is ISwapAdapter, IFermiSwapCallback {
 
         trade.calculatedAmount = side == OrderSide.Sell ? amountOut : amountIn;
         trade.gasUsed = gasBefore - gasleft();
-        trade.price = priceAt(
-            sellToken,
-            buyToken,
-            side == OrderSide.Sell ? specifiedAmount : trade.calculatedAmount
-        );
+        // Trade.price is the pool price after the trade: probe with a small
+        // fraction of the traded size, since a full-size re-quote would
+        // return the average price of a second trade instead. On a consumed
+        // corridor the engine refuses the probe (e.g. "COR") or quotes zero
+        // output; either way the pool price is reported as zero instead of
+        // reverting an already-executed swap.
+        uint256 tradedAmount =
+            side == OrderSide.Sell ? specifiedAmount : trade.calculatedAmount;
+        uint256 probeAmount = tradedAmount / PRICE_PROBE_DIVISOR;
+        if (probeAmount == 0) {
+            probeAmount = tradedAmount;
+        }
+        try this.priceAt(sellToken, buyToken, probeAmount) returns (
+            Fraction memory postTradePrice
+        ) {
+            trade.price = postTradePrice;
+        } catch {
+            trade.price = Fraction(0, 1);
+        }
         return trade;
     }
 
@@ -144,11 +168,48 @@ contract FermiSwapAdapter is ISwapAdapter, IFermiSwapCallback {
             buyLimit = uint256(type(int256).max);
         }
 
-        (uint256 amountIn, uint256 amountOut) = fermiSwapper.quoteAmounts(
-            sellToken, buyToken, _amountSpecified(OrderSide.Buy, buyLimit)
-        );
-        limits[0] = amountIn;
-        limits[1] = amountOut;
+        bool ok;
+        (ok, limits[0], limits[1]) = _tryQuoteBuy(sellToken, buyToken, buyLimit);
+        if (ok) {
+            return limits;
+        }
+
+        // The engine refuses exact-output requests beyond the pair's currently
+        // serviceable size (reverting with e.g. "IL" or "COR") and that size is
+        // not directly readable, so binary-search the largest buy amount it
+        // still quotes and report that as the limit. Zero limits mean nothing
+        // was serviceable.
+        uint256 lo = 0;
+        uint256 hi = buyLimit;
+        for (uint256 i = 0; i < LIMIT_SEARCH_ITERATIONS; i++) {
+            uint256 mid = lo + (hi - lo) / 2;
+            if (mid == lo) {
+                break;
+            }
+            (bool quoted, uint256 amountIn, uint256 amountOut) =
+                _tryQuoteBuy(sellToken, buyToken, mid);
+            if (quoted) {
+                limits[0] = amountIn;
+                limits[1] = amountOut;
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+    }
+
+    function _tryQuoteBuy(
+        address sellToken,
+        address buyToken,
+        uint256 buyAmount
+    ) internal view returns (bool ok, uint256 amountIn, uint256 amountOut) {
+        try fermiSwapper.quoteAmounts(
+            sellToken, buyToken, _amountSpecified(OrderSide.Buy, buyAmount)
+        ) returns (
+            uint256 quotedIn, uint256 quotedOut
+        ) {
+            (ok, amountIn, amountOut) = (true, quotedIn, quotedOut);
+        } catch {}
     }
 
     /// @inheritdoc ISwapAdapter

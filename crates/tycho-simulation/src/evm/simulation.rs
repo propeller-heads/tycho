@@ -15,7 +15,8 @@ use revm::{
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use strum_macros::Display;
 use tokio::runtime::{Handle, Runtime};
-use tracing::debug;
+use tracing::{debug, warn};
+use tycho_common::models::contract::AccountDelta;
 
 use super::{
     account_storage::StateUpdate,
@@ -97,13 +98,21 @@ where
         // db, the db is simply a reference wrapper. To avoid lifetimes leaking we don't let the evm
         // struct outlive this scope.
 
-        // We protect the state from being consumed.
-        let overrides = params
-            .overrides
-            .clone()
-            .unwrap_or_default();
-
-        let db_ref = OverriddenSimulationDB { inner_db: &self.state, overrides: &overrides };
+        // Borrowed, not cloned: an override map can hold every storage slot a pending block
+        // touched, and this runs once per pool.
+        let no_storage_overrides = HashMap::new();
+        let no_balance_overrides = HashMap::new();
+        let db_ref = OverriddenSimulationDB {
+            inner_db: &self.state,
+            overrides: params
+                .overrides
+                .as_ref()
+                .unwrap_or(&no_storage_overrides),
+            native_balance_overrides: params
+                .native_balance_overrides
+                .as_ref()
+                .unwrap_or(&no_balance_overrides),
+        };
 
         let tx_env = TxEnv {
             caller: params.caller,
@@ -114,12 +123,14 @@ where
             ..Default::default()
         };
 
-        let mut block =
-            self.state
-                .get_current_block()
-                .ok_or(SimulationEngineError::StorageError(
+        let mut block = self
+            .state
+            .get_current_block()
+            .ok_or_else(|| {
+                SimulationEngineError::StorageError(
                     "Current block not set in SimulationEngine.".into(),
-                ))?;
+                )
+            })?;
 
         if let Some(overrides) = &params.block_overrides {
             if let Some(number) = overrides.number {
@@ -156,7 +167,9 @@ where
                 if let Some(overrides) = &params.overrides {
                     for (address, storage) in overrides {
                         let keys = storage.keys().copied();
-                        let _ = journal.warm_account_and_storage(*address, keys);
+                        if let Err(e) = journal.warm_account_and_storage(*address, keys) {
+                            warn!(%address, error = ?e, "Failed to warm overridden account");
+                        }
                     }
                 }
             });
@@ -171,7 +184,7 @@ where
                     "Starting simulation with tx parameters: {:#?} {:#?}",
                     vm.ctx.tx, vm.ctx.block
                 );
-                vm.inspect_tx(tx_env.clone())
+                vm.inspect_tx(tx_env)
             };
 
             Self::print_traces(tracer, res.as_ref().ok())?;
@@ -233,6 +246,10 @@ where
             gas_used,
         };
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "trace printing, a debugging aid, works outside a runtime and on a multi-thread one; on a current-thread runtime it panics"
+        )]
         tokio::task::block_in_place(|| -> Result<(), SimulationEngineError> {
             let future = async {
                 handle_traces(
@@ -378,7 +395,7 @@ fn interpret_evm_success(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 /// Data needed to invoke a transaction simulation
 pub struct SimulationParameters {
     /// Address of the sending account
@@ -399,6 +416,8 @@ pub struct SimulationParameters {
     pub transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
     /// Per-call block context overrides.
     pub block_overrides: Option<BlockEnvOverrides>,
+    /// Native balance overrides. Same per-call scoping as `overrides`.
+    pub native_balance_overrides: Option<HashMap<Address, U256>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -407,9 +426,210 @@ pub struct BlockEnvOverrides {
     pub timestamp: Option<u64>,
 }
 
+/// State a view call runs against, overriding what the engine's database holds.
+///
+/// `Default` means no overrides, so a call reads the engine's confirmed state.
+#[derive(Debug, Clone, Default)]
+pub struct PendingOverrides {
+    pub storage: Option<HashMap<Address, HashMap<U256, U256>>>,
+    pub native_balances: Option<HashMap<Address, U256>>,
+    pub block: Option<BlockEnvOverrides>,
+}
+
+impl PendingOverrides {
+    /// The state `accounts` would leave behind, under the `block` environment.
+    ///
+    /// Only the accounts given appear, so every slot they did not write keeps its confirmed
+    /// value. A cleared slot is stored as `None` and reads back as zero, which is what the EVM
+    /// would see. Values shorter than 32 bytes are left-padded, which is how the indexer stores
+    /// slots and balances with leading zeros trimmed.
+    pub fn from_account_deltas(
+        accounts: &HashMap<tycho_common::Bytes, AccountDelta>,
+        block: Option<BlockEnvOverrides>,
+    ) -> Self {
+        let mut storage: HashMap<Address, HashMap<U256, U256>> = HashMap::new();
+        let mut native_balances: HashMap<Address, U256> = HashMap::new();
+        for (address, delta) in accounts {
+            if address.len() != 20 {
+                continue;
+            }
+            let address = Address::from_slice(address.as_ref());
+            let slots: HashMap<U256, U256> = delta
+                .slots
+                .iter()
+                .map(|(slot, value)| {
+                    (
+                        U256::from_be_slice(slot.as_ref()),
+                        value
+                            .as_ref()
+                            .map_or(U256::ZERO, |v| U256::from_be_slice(v.as_ref())),
+                    )
+                })
+                .collect();
+            if !slots.is_empty() {
+                storage.insert(address, slots);
+            }
+            if let Some(balance) = &delta.balance {
+                native_balances.insert(address, U256::from_be_slice(balance.as_ref()));
+            }
+        }
+        PendingOverrides {
+            storage: (!storage.is_empty()).then_some(storage),
+            native_balances: (!native_balances.is_empty()).then_some(native_balances),
+            block,
+        }
+    }
+
+    /// Parameters for a `data` view call to `to` from the zero address, under these overrides.
+    ///
+    /// Clones the override maps, which `SimulationParameters` owns. Callers that issue many
+    /// calls per pending block pay that clone per call.
+    pub fn view_call(&self, to: Address, data: Vec<u8>) -> SimulationParameters {
+        SimulationParameters {
+            caller: Address::ZERO,
+            to,
+            data,
+            overrides: self.storage.clone(),
+            native_balance_overrides: self.native_balances.clone(),
+            block_overrides: self.block.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod pending_overrides_tests {
+    use std::collections::HashMap;
+
+    use alloy::primitives::{Address, U256};
+    use tycho_common::{
+        models::{contract::AccountDelta, Chain, ChangeType},
+        Bytes,
+    };
+
+    use super::{BlockEnvOverrides, PendingOverrides};
+
+    fn account_delta(
+        address: [u8; 20],
+        slots: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        balance: Option<Vec<u8>>,
+    ) -> (Bytes, AccountDelta) {
+        let address = Bytes::from(address.to_vec());
+        (
+            address.clone(),
+            AccountDelta::new(
+                Chain::Ethereum,
+                address,
+                slots
+                    .into_iter()
+                    .map(|(slot, value)| (Bytes::from(slot), value.map(Bytes::from)))
+                    .collect(),
+                balance.map(Bytes::from),
+                None,
+                ChangeType::Update,
+            ),
+        )
+    }
+
+    #[test]
+    fn test_slots_and_balances_reach_the_overrides() {
+        let account = [0xaau8; 20];
+        let block = BlockEnvOverrides { number: Some(3), timestamp: Some(4) };
+        let overrides = PendingOverrides::from_account_deltas(
+            &HashMap::from([account_delta(
+                account,
+                vec![(vec![3], Some(vec![7]))],
+                Some(vec![0x0d, 0xe0]),
+            )]),
+            Some(block.clone()),
+        );
+
+        let address = Address::from_slice(&account);
+        assert_eq!(
+            overrides
+                .storage
+                .as_ref()
+                .and_then(|s| s.get(&address))
+                .and_then(|slots| slots.get(&U256::from(3))),
+            Some(&U256::from(7)),
+            "a written slot must be overridden"
+        );
+        assert_eq!(
+            overrides
+                .native_balances
+                .as_ref()
+                .and_then(|b| b.get(&address)),
+            Some(&U256::from(0x0de0)),
+            "a native balance must be overridden"
+        );
+        assert_eq!(overrides.block, Some(block));
+    }
+
+    #[test]
+    fn test_cleared_slot_reads_as_zero() {
+        let account = [0xbbu8; 20];
+        let overrides = PendingOverrides::from_account_deltas(
+            &HashMap::from([account_delta(account, vec![(vec![1], None)], None)]),
+            None,
+        );
+
+        assert_eq!(
+            overrides
+                .storage
+                .as_ref()
+                .and_then(|s| s.get(&Address::from_slice(&account)))
+                .and_then(|slots| slots.get(&U256::from(1))),
+            Some(&U256::ZERO),
+            "a cleared slot must override to zero, not vanish"
+        );
+        assert!(overrides.native_balances.is_none());
+    }
+
+    #[test]
+    fn test_no_accounts_means_no_overrides() {
+        let overrides = PendingOverrides::from_account_deltas(&HashMap::new(), None);
+        assert!(overrides.storage.is_none());
+        assert!(overrides.native_balances.is_none());
+        assert!(overrides.block.is_none());
+    }
+
+    /// Every override a caller sets must reach the parameters, or a pool would silently be
+    /// priced against confirmed state.
+    #[test]
+    fn test_view_call_carries_every_override() {
+        let account = Address::repeat_byte(7);
+        let overrides = PendingOverrides {
+            storage: Some(HashMap::from([(account, HashMap::from([(U256::ZERO, U256::from(1))]))])),
+            native_balances: Some(HashMap::from([(account, U256::from(2))])),
+            block: Some(BlockEnvOverrides { number: Some(3), timestamp: Some(4) }),
+        };
+
+        let params = overrides.view_call(account, vec![0xab]);
+
+        assert_eq!(params.overrides, overrides.storage);
+        assert_eq!(params.native_balance_overrides, overrides.native_balances);
+        assert_eq!(params.block_overrides, overrides.block);
+        assert_eq!(params.caller, Address::ZERO, "A view call must not impersonate an account.");
+        assert_eq!(params.to, account);
+        assert_eq!(params.data, vec![0xab]);
+        assert_eq!(params.value, U256::ZERO, "A view call must not transfer value.");
+    }
+
+    #[test]
+    fn test_default_view_call_overrides_nothing() {
+        let params = PendingOverrides::default().view_call(Address::ZERO, Vec::new());
+
+        assert!(params.overrides.is_none());
+        assert!(params
+            .native_balance_overrides
+            .is_none());
+        assert!(params.block_overrides.is_none());
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, str::FromStr, time::Instant};
+    use std::{str::FromStr, time::Instant};
 
     use alloy::{
         primitives::{Address, Bytes, Keccak256, B256},
@@ -423,12 +643,12 @@ mod tests {
         },
     };
     use tycho_client::feed::BlockHeader;
-    use tycho_common::simulation::errors::SimulationError;
 
     use super::*;
     use crate::evm::engine_db::{
         engine_db_interface::EngineDatabaseInterface,
         simulation_db::{EVMProvider, SimulationDB},
+        tycho_db::PreCachedDB,
         utils::{get_client, get_runtime},
     };
 
@@ -536,7 +756,9 @@ mod tests {
                 );
                 assert_eq!(gas_used, Some(100));
             }
-            _ => panic!("Wrong type of SimulationError!"),
+            SimulationEngineError::StorageError(_) |
+            SimulationEngineError::OutOfGas(..) |
+            SimulationEngineError::TraceError(_) => panic!("Wrong type of SimulationError!"),
         }
     }
 
@@ -559,7 +781,9 @@ mod tests {
                 assert_eq!(data, "OutOfGas(Basic)");
                 assert_eq!(gas_used, Some(100));
             }
-            _ => panic!("Wrong type of SimulationError!"),
+            SimulationEngineError::StorageError(_) |
+            SimulationEngineError::OutOfGas(..) |
+            SimulationEngineError::TraceError(_) => panic!("Wrong type of SimulationError!"),
         }
     }
 
@@ -577,7 +801,9 @@ mod tests {
                 assert_eq!(data, "EVM error: PriorityFeeGreaterThanMaxFee");
                 assert_eq!(gas_used, None);
             }
-            _ => panic!("Wrong type of SimulationError!"),
+            SimulationEngineError::StorageError(_) |
+            SimulationEngineError::OutOfGas(..) |
+            SimulationEngineError::TraceError(_) => panic!("Wrong type of SimulationError!"),
         }
     }
 
@@ -595,7 +821,9 @@ mod tests {
             SimulationEngineError::StorageError(msg) => {
                 assert_eq!(msg, "Storage error: Transport(Custom(\"boo\"))")
             }
-            _ => panic!("Wrong type of SimulationError!"),
+            SimulationEngineError::OutOfGas(..) |
+            SimulationEngineError::TransactionError { .. } |
+            SimulationEngineError::TraceError(_) => panic!("Wrong type of SimulationError!"),
         }
     }
     fn new_state() -> SimulationDB<EVMProvider> {
@@ -605,9 +833,10 @@ mod tests {
     }
 
     #[test]
-    fn test_simulate_applies_block_env_overrides() -> Result<(), Box<dyn Error>> {
-        let mut state = new_state();
-        let contract = Address::from_str("0x0000000000000000000000000000000000001234")?;
+    fn test_simulate_applies_block_env_overrides() {
+        let state = PreCachedDB::new().expect("PreCachedDB creation succeeds");
+        let contract =
+            Address::from_str("0x0000000000000000000000000000000000001234").expect("valid address");
         // Minimal runtime bytecode equivalent to the following Solidity contract:
         //
         // // SPDX-License-Identifier: UNLICENSED
@@ -627,19 +856,23 @@ mod tests {
             0xf3, // RETURN
         ]));
         let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
-        state.init_account(contract, account, None, true)?;
-        state.init_account(Address::ZERO, AccountInfo::default(), None, true)?;
-        state.set_block(Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }));
+        state
+            .init_account(contract, account, None, true)
+            .expect("contract account init succeeds");
+        state
+            .init_account(Address::ZERO, AccountInfo::default(), None, true)
+            .expect("caller account init succeeds");
+        state
+            .update(Vec::new(), Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }))
+            .expect("block header update succeeds");
 
         let sim_params = SimulationParameters {
             caller: Address::ZERO,
             to: contract,
             data: Vec::new(),
             value: U256::ZERO,
-            overrides: None,
-            gas_limit: None,
-            transient_storage: None,
             block_overrides: Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) }),
+            ..Default::default()
         };
 
         let engine = SimulationEngine::new(state, false);
@@ -648,18 +881,59 @@ mod tests {
             .expect("simulation should apply block env overrides");
 
         assert_eq!(U256::from_be_slice(result.result.as_ref()), U256::from(123));
-        Ok(())
     }
 
     #[test]
-    fn test_integration_revm_v2_swap() -> Result<(), Box<dyn Error>> {
+    fn test_simulate_applies_native_balance_overrides() {
+        let state = PreCachedDB::new().expect("PreCachedDB creation succeeds");
+        let contract =
+            Address::from_str("0x0000000000000000000000000000000000001234").expect("valid address");
+        let bytecode = Bytecode::new_raw(Bytes::from_static(&[
+            0x47, // SELFBALANCE
+            0x60, 0x00, // PUSH1 0
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 32
+            0x60, 0x00, // PUSH1 0
+            0xf3, // RETURN
+        ]));
+        let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
+        state
+            .init_account(contract, account, None, true)
+            .expect("contract account init succeeds");
+        state
+            .init_account(Address::ZERO, AccountInfo::default(), None, true)
+            .expect("caller account init succeeds");
+        state
+            .update(Vec::new(), Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }))
+            .expect("block header update succeeds");
+        let expected_balance = U256::from(4_200_000_000_000_000_000u64);
+        let sim_params = SimulationParameters {
+            caller: Address::ZERO,
+            to: contract,
+            native_balance_overrides: Some(HashMap::from([(contract, expected_balance)])),
+            ..Default::default()
+        };
+
+        let result = SimulationEngine::new(state, false)
+            .simulate(&sim_params)
+            .expect("simulation should apply the native balance override");
+
+        assert_eq!(U256::from_be_slice(result.result.as_ref()), expected_balance);
+    }
+
+    #[test]
+    fn test_integration_revm_v2_swap() {
         let state = new_state();
 
         // any random address will work
-        let caller = Address::from_str("0x0000000000000000000000000000000000000000")?;
-        let router_addr = Address::from_str("0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D")?;
-        let weth_addr = Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")?;
-        let usdc_addr = Address::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")?;
+        let caller = Address::from_str("0x0000000000000000000000000000000000000000")
+            .expect("valid caller address");
+        let router_addr = Address::from_str("0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D")
+            .expect("valid router address");
+        let weth_addr = Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+            .expect("valid WETH address");
+        let usdc_addr = Address::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+            .expect("valid USDC address");
 
         // Define the function selector and input arguments
         let selector = "getAmountsOut(uint256,address[])";
@@ -688,16 +962,8 @@ mod tests {
         };
 
         // Simulation parameters
-        let sim_params = SimulationParameters {
-            caller,
-            to: router_addr,
-            data: encoded,
-            value: U256::from(0u64),
-            overrides: None,
-            gas_limit: None,
-            transient_storage: None,
-            block_overrides: None,
-        };
+        let sim_params =
+            SimulationParameters { caller, to: router_addr, data: encoded, ..Default::default() };
         let mut eng = SimulationEngine::new(state, true);
 
         let block = BlockHeader {
@@ -714,11 +980,8 @@ mod tests {
         let result = eng.simulate(&sim_params);
         type BalanceReturn = Vec<U256>;
         let amounts_out: Vec<U256> = match result {
-            Ok(SimulationResult { result, .. }) => {
-                BalanceReturn::abi_decode(&result).map_err(|e| {
-                    SimulationError::FatalError(format!("Failed to decode result: {e:?}"))
-                })?
-            }
+            Ok(SimulationResult { result, .. }) => BalanceReturn::abi_decode(&result)
+                .unwrap_or_else(|e| panic!("Failed to decode result: {e:?}")),
             _ => panic!("Execution reverted!"),
         };
 
@@ -739,17 +1002,16 @@ mod tests {
         println!("Using revm:");
         println!("Total Duration [n_iter={n_iter}]: {duration:?}");
         println!("Single get_amount_out call: {per_call:?}", per_call = duration / n_iter);
-
-        Ok(())
     }
 
     #[test]
-    fn test_contract_deployment() -> Result<(), Box<dyn Error>> {
+    fn test_contract_deployment() {
         let readonly_state = new_state();
         let state = new_state();
 
         let selector = "balanceOf(address)";
-        let eoa_address = Address::from_str("0xDFd5293D8e347dFe59E90eFd55b2956a1343963d")?;
+        let eoa_address = Address::from_str("0xDFd5293D8e347dFe59E90eFd55b2956a1343963d")
+            .expect("valid EOA address");
         let calldata = {
             let args = eoa_address;
             let mut hasher = Keccak256::new();
@@ -770,9 +1032,9 @@ mod tests {
         //     "/home/mdank/repos/datarevenue/DEFI/defibot-solver/defibot/swaps/pool_state/dodo/
         // compiled/ERC20.bin-runtime" ).unwrap();
         // let deploy_bytecode = revm::precompile::Bytes::from(mocked_bytecode);
-        let _ = Bytes::from(hex::decode("608060405234801562000010575f80fd5b5060405162000a6b38038062000a6b83398101604081905262000033916200012c565b600362000041848262000237565b50600462000050838262000237565b506005805460ff191660ff9290921691909117905550620002ff9050565b634e487b7160e01b5f52604160045260245ffd5b5f82601f83011262000092575f80fd5b81516001600160401b0380821115620000af57620000af6200006e565b604051601f8301601f19908116603f01168101908282118183101715620000da57620000da6200006e565b81604052838152602092508683858801011115620000f6575f80fd5b5f91505b83821015620001195785820183015181830184015290820190620000fa565b5f93810190920192909252949350505050565b5f805f606084860312156200013f575f80fd5b83516001600160401b038082111562000156575f80fd5b620001648783880162000082565b945060208601519150808211156200017a575f80fd5b50620001898682870162000082565b925050604084015160ff81168114620001a0575f80fd5b809150509250925092565b600181811c90821680620001c057607f821691505b602082108103620001df57634e487b7160e01b5f52602260045260245ffd5b50919050565b601f82111562000232575f81815260208120601f850160051c810160208610156200020d5750805b601f850160051c820191505b818110156200022e5782815560010162000219565b5050505b505050565b81516001600160401b038111156200025357620002536200006e565b6200026b81620002648454620001ab565b84620001e5565b602080601f831160018114620002a1575f8415620002895750858301515b5f19600386901b1c1916600185901b1785556200022e565b5f85815260208120601f198616915b82811015620002d157888601518255948401946001909101908401620002b0565b5085821015620002ef57878501515f19600388901b60f8161c191681555b5050505050600190811b01905550565b61075e806200030d5f395ff3fe608060405234801561000f575f80fd5b50600436106100a6575f3560e01c8063395093511161006e578063395093511461011f57806370a082311461013257806395d89b411461015a578063a457c2d714610162578063a9059cbb14610175578063dd62ed3e14610188575f80fd5b806306fdde03146100aa578063095ea7b3146100c857806318160ddd146100eb57806323b872dd146100fd578063313ce56714610110575b5f80fd5b6100b261019b565b6040516100bf91906105b9565b60405180910390f35b6100db6100d636600461061f565b61022b565b60405190151581526020016100bf565b6002545b6040519081526020016100bf565b6100db61010b366004610647565b610244565b604051601281526020016100bf565b6100db61012d36600461061f565b610267565b6100ef610140366004610680565b6001600160a01b03165f9081526020819052604090205490565b6100b2610288565b6100db61017036600461061f565b610297565b6100db61018336600461061f565b6102f2565b6100ef6101963660046106a0565b6102ff565b6060600380546101aa906106d1565b80601f01602080910402602001604051908101604052809291908181526020018280546101d6906106d1565b80156102215780601f106101f857610100808354040283529160200191610221565b820191905f5260205f20905b81548152906001019060200180831161020457829003601f168201915b5050505050905090565b5f33610238818585610329565b60019150505b92915050565b5f336102518582856103dc565b61025c85858561043e565b506001949350505050565b5f3361023881858561027983836102ff565b6102839190610709565b610329565b6060600480546101aa906106d1565b5f33816102a482866102ff565b9050838110156102e557604051632983c0c360e21b81526001600160a01b038616600482015260248101829052604481018590526064015b60405180910390fd5b61025c8286868403610329565b5f3361023881858561043e565b6001600160a01b039182165f90815260016020908152604080832093909416825291909152205490565b6001600160a01b0383166103525760405163e602df0560e01b81525f60048201526024016102dc565b6001600160a01b03821661037b57604051634a1406b160e11b81525f60048201526024016102dc565b6001600160a01b038381165f8181526001602090815260408083209487168084529482529182902085905590518481527f8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b92591015b60405180910390a3505050565b5f6103e784846102ff565b90505f198114610438578181101561042b57604051637dc7a0d960e11b81526001600160a01b038416600482015260248101829052604481018390526064016102dc565b6104388484848403610329565b50505050565b6001600160a01b03831661046757604051634b637e8f60e11b81525f60048201526024016102dc565b6001600160a01b0382166104905760405163ec442f0560e01b81525f60048201526024016102dc565b61049b8383836104a0565b505050565b6001600160a01b0383166104ca578060025f8282546104bf9190610709565b9091555061053a9050565b6001600160a01b0383165f908152602081905260409020548181101561051c5760405163391434e360e21b81526001600160a01b038516600482015260248101829052604481018390526064016102dc565b6001600160a01b0384165f9081526020819052604090209082900390555b6001600160a01b03821661055657600280548290039055610574565b6001600160a01b0382165f9081526020819052604090208054820190555b816001600160a01b0316836001600160a01b03167fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef836040516103cf91815260200190565b5f6020808352835180828501525f5b818110156105e4578581018301518582016040015282016105c8565b505f604082860101526040601f19601f8301168501019250505092915050565b80356001600160a01b038116811461061a575f80fd5b919050565b5f8060408385031215610630575f80fd5b61063983610604565b946020939093013593505050565b5f805f60608486031215610659575f80fd5b61066284610604565b925061067060208501610604565b9150604084013590509250925092565b5f60208284031215610690575f80fd5b61069982610604565b9392505050565b5f80604083850312156106b1575f80fd5b6106ba83610604565b91506106c860208401610604565b90509250929050565b600181811c90821680620001c057607f821691505b602082108103620001df57634e487b7160e01b5f52602260045260245ffd5b50919050565b8082018082111561023e57634e487b7160e01b5f52601160045260245ffdfea2646970667358221220dfc123d5852c9246ea16b645b377b4436e2f778438195cc6d6c435e8c73a20e764736f6c63430008140033000000000000000000000000000000000000000000000000000000000000000000")?);
+        hex::decode("608060405234801562000010575f80fd5b5060405162000a6b38038062000a6b83398101604081905262000033916200012c565b600362000041848262000237565b50600462000050838262000237565b506005805460ff191660ff9290921691909117905550620002ff9050565b634e487b7160e01b5f52604160045260245ffd5b5f82601f83011262000092575f80fd5b81516001600160401b0380821115620000af57620000af6200006e565b604051601f8301601f19908116603f01168101908282118183101715620000da57620000da6200006e565b81604052838152602092508683858801011115620000f6575f80fd5b5f91505b83821015620001195785820183015181830184015290820190620000fa565b5f93810190920192909252949350505050565b5f805f606084860312156200013f575f80fd5b83516001600160401b038082111562000156575f80fd5b620001648783880162000082565b945060208601519150808211156200017a575f80fd5b50620001898682870162000082565b925050604084015160ff81168114620001a0575f80fd5b809150509250925092565b600181811c90821680620001c057607f821691505b602082108103620001df57634e487b7160e01b5f52602260045260245ffd5b50919050565b601f82111562000232575f81815260208120601f850160051c810160208610156200020d5750805b601f850160051c820191505b818110156200022e5782815560010162000219565b5050505b505050565b81516001600160401b038111156200025357620002536200006e565b6200026b81620002648454620001ab565b84620001e5565b602080601f831160018114620002a1575f8415620002895750858301515b5f19600386901b1c1916600185901b1785556200022e565b5f85815260208120601f198616915b82811015620002d157888601518255948401946001909101908401620002b0565b5085821015620002ef57878501515f19600388901b60f8161c191681555b5050505050600190811b01905550565b61075e806200030d5f395ff3fe608060405234801561000f575f80fd5b50600436106100a6575f3560e01c8063395093511161006e578063395093511461011f57806370a082311461013257806395d89b411461015a578063a457c2d714610162578063a9059cbb14610175578063dd62ed3e14610188575f80fd5b806306fdde03146100aa578063095ea7b3146100c857806318160ddd146100eb57806323b872dd146100fd578063313ce56714610110575b5f80fd5b6100b261019b565b6040516100bf91906105b9565b60405180910390f35b6100db6100d636600461061f565b61022b565b60405190151581526020016100bf565b6002545b6040519081526020016100bf565b6100db61010b366004610647565b610244565b604051601281526020016100bf565b6100db61012d36600461061f565b610267565b6100ef610140366004610680565b6001600160a01b03165f9081526020819052604090205490565b6100b2610288565b6100db61017036600461061f565b610297565b6100db61018336600461061f565b6102f2565b6100ef6101963660046106a0565b6102ff565b6060600380546101aa906106d1565b80601f01602080910402602001604051908101604052809291908181526020018280546101d6906106d1565b80156102215780601f106101f857610100808354040283529160200191610221565b820191905f5260205f20905b81548152906001019060200180831161020457829003601f168201915b5050505050905090565b5f33610238818585610329565b60019150505b92915050565b5f336102518582856103dc565b61025c85858561043e565b506001949350505050565b5f3361023881858561027983836102ff565b6102839190610709565b610329565b6060600480546101aa906106d1565b5f33816102a482866102ff565b9050838110156102e557604051632983c0c360e21b81526001600160a01b038616600482015260248101829052604481018590526064015b60405180910390fd5b61025c8286868403610329565b5f3361023881858561043e565b6001600160a01b039182165f90815260016020908152604080832093909416825291909152205490565b6001600160a01b0383166103525760405163e602df0560e01b81525f60048201526024016102dc565b6001600160a01b03821661037b57604051634a1406b160e11b81525f60048201526024016102dc565b6001600160a01b038381165f8181526001602090815260408083209487168084529482529182902085905590518481527f8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b92591015b60405180910390a3505050565b5f6103e784846102ff565b90505f198114610438578181101561042b57604051637dc7a0d960e11b81526001600160a01b038416600482015260248101829052604481018390526064016102dc565b6104388484848403610329565b50505050565b6001600160a01b03831661046757604051634b637e8f60e11b81525f60048201526024016102dc565b6001600160a01b0382166104905760405163ec442f0560e01b81525f60048201526024016102dc565b61049b8383836104a0565b505050565b6001600160a01b0383166104ca578060025f8282546104bf9190610709565b9091555061053a9050565b6001600160a01b0383165f908152602081905260409020548181101561051c5760405163391434e360e21b81526001600160a01b038516600482015260248101829052604481018390526064016102dc565b6001600160a01b0384165f9081526020819052604090209082900390555b6001600160a01b03821661055657600280548290039055610574565b6001600160a01b0382165f9081526020819052604090208054820190555b816001600160a01b0316836001600160a01b03167fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef836040516103cf91815260200190565b5f6020808352835180828501525f5b818110156105e4578581018301518582016040015282016105c8565b505f604082860101526040601f19601f8301168501019250505092915050565b80356001600160a01b038116811461061a575f80fd5b919050565b5f8060408385031215610630575f80fd5b61063983610604565b946020939093013593505050565b5f805f60608486031215610659575f80fd5b61066284610604565b925061067060208501610604565b9150604084013590509250925092565b5f60208284031215610690575f80fd5b61069982610604565b9392505050565b5f80604083850312156106b1575f80fd5b6106ba83610604565b91506106c860208401610604565b90509250929050565b600181811c90821680620001c057607f821691505b602082108103620001df57634e487b7160e01b5f52602260045260245ffd5b50919050565b8082018082111561023e57634e487b7160e01b5f52601160045260245ffdfea2646970667358221220dfc123d5852c9246ea16b645b377b4436e2f778438195cc6d6c435e8c73a20e764736f6c63430008140033000000000000000000000000000000000000000000000000000000000000000000").expect("valid hex bytecode");
 
-        let onchain_bytecode = Bytes::from(hex::decode("608060405234801561000f575f80fd5b50600436106100a6575f3560e01c8063395093511161006e578063395093511461011f57806370a082311461013257806395d89b411461015a578063a457c2d714610162578063a9059cbb14610175578063dd62ed3e14610188575f80fd5b806306fdde03146100aa578063095ea7b3146100c857806318160ddd146100eb57806323b872dd146100fd578063313ce56714610110575b5f80fd5b6100b261019b565b6040516100bf91906105b9565b60405180910390f35b6100db6100d636600461061f565b61022b565b60405190151581526020016100bf565b6002545b6040519081526020016100bf565b6100db61010b366004610647565b610244565b604051601281526020016100bf565b6100db61012d36600461061f565b610267565b6100ef610140366004610680565b6001600160a01b03165f9081526020819052604090205490565b6100b2610288565b6100db61017036600461061f565b610297565b6100db61018336600461061f565b6102f2565b6100ef6101963660046106a0565b6102ff565b6060600380546101aa906106d1565b80601f01602080910402602001604051908101604052809291908181526020018280546101d6906106d1565b80156102215780601f106101f857610100808354040283529160200191610221565b820191905f5260205f20905b81548152906001019060200180831161020457829003601f168201915b5050505050905090565b5f33610238818585610329565b60019150505b92915050565b5f336102518582856103dc565b61025c85858561043e565b506001949350505050565b5f3361023881858561027983836102ff565b6102839190610709565b610329565b6060600480546101aa906106d1565b5f33816102a482866102ff565b9050838110156102e557604051632983c0c360e21b81526001600160a01b038616600482015260248101829052604481018590526064015b60405180910390fd5b61025c8286868403610329565b5f3361023881858561043e565b6001600160a01b039182165f90815260016020908152604080832093909416825291909152205490565b6001600160a01b0383166103525760405163e602df0560e01b81525f60048201526024016102dc565b6001600160a01b03821661037b57604051634a1406b160e11b81525f60048201526024016102dc565b6001600160a01b038381165f8181526001602090815260408083209487168084529482529182902085905590518481527f8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b92591015b60405180910390a3505050565b5f6103e784846102ff565b90505f198114610438578181101561042b57604051637dc7a0d960e11b81526001600160a01b038416600482015260248101829052604481018390526064016102dc565b6104388484848403610329565b50505050565b6001600160a01b03831661046757604051634b637e8f60e11b81525f60048201526024016102dc565b6001600160a01b0382166104905760405163ec442f0560e01b81525f60048201526024016102dc565b61049b8383836104a0565b505050565b6001600160a01b0383166104ca578060025f8282546104bf9190610709565b9091555061053a9050565b6001600160a01b0383165f908152602081905260409020548181101561051c5760405163391434e360e21b81526001600160a01b038516600482015260248101829052604481018390526064016102dc565b6001600160a01b0384165f9081526020819052604090209082900390555b6001600160a01b03821661055657600280548290039055610574565b6001600160a01b0382165f9081526020819052604090208054820190555b816001600160a01b0316836001600160a01b03167fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef836040516103cf91815260200190565b5f6020808352835180828501525f5b818110156105e4578581018301518582016040015282016105c8565b505f604082860101526040601f19601f8301168501019250505092915050565b80356001600160a01b038116811461061a575f80fd5b919050565b5f8060408385031215610630575f80fd5b61063983610604565b946020939093013593505050565b5f805f60608486031215610659575f80fd5b61066284610604565b925061067060208501610604565b9150604084013590509250925092565b5f60208284031215610690575f80fd5b61069982610604565b9392505050565b5f80604083850312156106b1575f80fd5b6106ba83610604565b91506106c860208401610604565b90509250929050565b600181811c908216806106e557607f821691505b60208210810361070357634e487b7160e01b5f52602260045260245ffd5b50919050565b8082018082111561023e57634e487b7160e01b5f52601160045260245ffdfea2646970667358221220dfc123d5852c9246ea16b645b377b4436e2f778438195cc6d6c435e8c73a20e764736f6c63430008140033000000000000000000000000000000000000000000000000000000000000000000")?);
+        let onchain_bytecode = Bytes::from(hex::decode("608060405234801561000f575f80fd5b50600436106100a6575f3560e01c8063395093511161006e578063395093511461011f57806370a082311461013257806395d89b411461015a578063a457c2d714610162578063a9059cbb14610175578063dd62ed3e14610188575f80fd5b806306fdde03146100aa578063095ea7b3146100c857806318160ddd146100eb57806323b872dd146100fd578063313ce56714610110575b5f80fd5b6100b261019b565b6040516100bf91906105b9565b60405180910390f35b6100db6100d636600461061f565b61022b565b60405190151581526020016100bf565b6002545b6040519081526020016100bf565b6100db61010b366004610647565b610244565b604051601281526020016100bf565b6100db61012d36600461061f565b610267565b6100ef610140366004610680565b6001600160a01b03165f9081526020819052604090205490565b6100b2610288565b6100db61017036600461061f565b610297565b6100db61018336600461061f565b6102f2565b6100ef6101963660046106a0565b6102ff565b6060600380546101aa906106d1565b80601f01602080910402602001604051908101604052809291908181526020018280546101d6906106d1565b80156102215780601f106101f857610100808354040283529160200191610221565b820191905f5260205f20905b81548152906001019060200180831161020457829003601f168201915b5050505050905090565b5f33610238818585610329565b60019150505b92915050565b5f336102518582856103dc565b61025c85858561043e565b506001949350505050565b5f3361023881858561027983836102ff565b6102839190610709565b610329565b6060600480546101aa906106d1565b5f33816102a482866102ff565b9050838110156102e557604051632983c0c360e21b81526001600160a01b038616600482015260248101829052604481018590526064015b60405180910390fd5b61025c8286868403610329565b5f3361023881858561043e565b6001600160a01b039182165f90815260016020908152604080832093909416825291909152205490565b6001600160a01b0383166103525760405163e602df0560e01b81525f60048201526024016102dc565b6001600160a01b03821661037b57604051634a1406b160e11b81525f60048201526024016102dc565b6001600160a01b038381165f8181526001602090815260408083209487168084529482529182902085905590518481527f8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b92591015b60405180910390a3505050565b5f6103e784846102ff565b90505f198114610438578181101561042b57604051637dc7a0d960e11b81526001600160a01b038416600482015260248101829052604481018390526064016102dc565b6104388484848403610329565b50505050565b6001600160a01b03831661046757604051634b637e8f60e11b81525f60048201526024016102dc565b6001600160a01b0382166104905760405163ec442f0560e01b81525f60048201526024016102dc565b61049b8383836104a0565b505050565b6001600160a01b0383166104ca578060025f8282546104bf9190610709565b9091555061053a9050565b6001600160a01b0383165f908152602081905260409020548181101561051c5760405163391434e360e21b81526001600160a01b038516600482015260248101829052604481018390526064016102dc565b6001600160a01b0384165f9081526020819052604090209082900390555b6001600160a01b03821661055657600280548290039055610574565b6001600160a01b0382165f9081526020819052604090208054820190555b816001600160a01b0316836001600160a01b03167fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef836040516103cf91815260200190565b5f6020808352835180828501525f5b818110156105e4578581018301518582016040015282016105c8565b505f604082860101526040601f19601f8301168501019250505092915050565b80356001600160a01b038116811461061a575f80fd5b919050565b5f8060408385031215610630575f80fd5b61063983610604565b946020939093013593505050565b5f805f60608486031215610659575f80fd5b61066284610604565b925061067060208501610604565b9150604084013590509250925092565b5f60208284031215610690575f80fd5b61069982610604565b9392505050565b5f80604083850312156106b1575f80fd5b6106ba83610604565b91506106c860208401610604565b90509250929050565b600181811c908216806106e557607f821691505b60208210810361070357634e487b7160e01b5f52602260045260245ffd5b50919050565b8082018082111561023e57634e487b7160e01b5f52601160045260245ffdfea2646970667358221220dfc123d5852c9246ea16b645b377b4436e2f778438195cc6d6c435e8c73a20e764736f6c63430008140033000000000000000000000000000000000000000000000000000000000000000000").expect("valid hex bytecode"));
         let code = Bytecode::new_raw(onchain_bytecode);
         let contract_acc_info = AccountInfo::new(
             U256::from(0),
@@ -830,15 +1092,13 @@ mod tests {
         overrides.insert(usdt_address, storage_overwrite);
 
         let sim_params = SimulationParameters {
-            caller: Address::from_str("0x0000000000000000000000000000000000000000")?,
+            caller: Address::from_str("0x0000000000000000000000000000000000000000")
+                .expect("valid caller address"),
             to: usdt_address,
             // to: Address::from(deployed_contract_address),
             data: calldata,
-            value: U256::from(0u64),
             overrides: Some(overrides),
-            gas_limit: None,
-            transient_storage: None,
-            block_overrides: None,
+            ..Default::default()
         };
 
         let mut eng = SimulationEngine::new(state, false);
@@ -869,11 +1129,11 @@ mod tests {
         println!("Executing balanceOf");
         let result = eng.simulate(&sim_params);
         let balance = match result {
-            Ok(SimulationResult { result, .. }) => U256::abi_decode(&result)?,
+            Ok(SimulationResult { result, .. }) => {
+                U256::abi_decode(&result).expect("valid ABI-encoded balance")
+            }
             Err(error) => panic!("{error:?}"),
         };
         println!("Balance: {balance}");
-
-        Ok(())
     }
 }

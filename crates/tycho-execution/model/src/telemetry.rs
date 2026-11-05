@@ -238,6 +238,10 @@ impl std::fmt::Display for Telemetry {
                     }
                 }
             }
+            #[expect(
+                clippy::unimplemented,
+                reason = "Display::fmt cannot return a model error; SWAP_COUNT is a build-time constant"
+            )]
             _ => unimplemented!("SWAP_COUNT > 2 is not implemented"),
         }
         for executors in combinations.iter() {

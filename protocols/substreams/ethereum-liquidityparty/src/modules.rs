@@ -4,7 +4,7 @@ use crate::{
     pool_factories,
 };
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use substreams::{pb::substreams::StoreDeltas, prelude::*};
 use substreams_ethereum::{pb::eth, Event};
 use tycho_substreams::{
@@ -43,20 +43,7 @@ fn map_protocol_components(
     })
 }
 
-/// Stores all protocol components in a store.
-///
-/// Stores information about components in a key value store. This is only necessary if
-/// you need to access the whole set of components within your indexing logic.
-///
-/// Popular use cases are:
-/// - Checking if a contract belongs to a component. In this case suggest to use an address as the
-///   store key so lookup operations are O(1).
-/// - Tallying up relative balances changes to calcualte absolute erc20 token balances per
-///   component.
-///
-/// Usually you can skip this step if:
-/// - You are interested in a static set of components only
-/// - Your protocol emits balance change events with absolute values
+/// Stores all protocol components.
 #[substreams::handlers::store]
 fn store_protocol_components(
     map_protocol_components: BlockTransactionProtocolComponents,
@@ -79,6 +66,26 @@ fn store_protocol_components(
         });
 }
 
+/// Records killed pool addresses so downstream modules can skip them.
+#[substreams::handlers::store]
+fn store_killed_components(
+    map_killed_components: BlockTransactionProtocolComponents,
+    store: StoreSetInt64,
+) {
+    map_killed_components
+        .tx_components
+        .into_iter()
+        .for_each(|tx_pc| {
+            tx_pc
+                .components
+                .into_iter()
+                .for_each(|pc| {
+                    store.set(0, pc.id, &1);
+                })
+        });
+}
+
+/// Tracks killed pools that can no longer swap
 #[substreams::handlers::map]
 fn map_killed_components(
     block: eth::v2::Block,
@@ -114,61 +121,62 @@ fn map_killed_components(
     })
 }
 
-/// Extracts balance changes per component
+/// Tracks balance changes per component by scanning ERC20 `Transfer` events.
 ///
-/// This template function uses ERC20 transfer events to extract balance changes. It
-/// assumes that each component is deployed at a dedicated contract address. If a
-/// transfer to the component is detected, its balance is increased and if a transfer
-/// from the component is detected its balance is decreased.
-///
-/// ## Note:
-/// Changes are necessary if your protocol uses native ETH, uses a vault contract or if
-/// your component burn or mint tokens without emitting transfer events.
-///
-/// You may want to ignore LP tokens if your protocol emits transfer events for these
-/// here.
+/// We deliberately do NOT derive balances from PartyPool events (Mint/Burn/Swap/etc.).
+/// A pool's true reserve is simply its on-chain ERC20 balance, and that balance can change
+/// without any pool event ever being emitted: anyone can make an unsolicited donation by
+/// transferring tokens directly to the pool address. Such a donation moves the real balance
+/// but produces no Mint/Swap/Burn log, so an event-derived balance would silently drift away
+/// from the truth. Scanning `Transfer` events with the pool as `to`/`from` is therefore the
+/// only way to reconstruct the actual balance: every balance change of an ERC20 token — pool
+/// operations, donations, or anything else — necessarily emits a `Transfer` touching the pool.
 #[substreams::handlers::map]
 fn map_relative_component_balance(
     block: eth::v2::Block,
     store: StoreGetString,
+    killed_store: StoreGetInt64,
 ) -> Result<BlockBalanceDeltas, anyhow::Error> {
-    let res = block
-        .logs()
-        .filter_map(|log| {
-            erc20::events::Transfer::match_and_decode(log).map(|transfer| {
-                let to_addr = encode_addr(transfer.to.as_slice());
-                let from_addr = encode_addr(transfer.from.as_slice());
-                let tx = log.receipt.transaction;
-                if let Some(val) = store.get_last(&to_addr) {
-                    let component_tokens: Vec<Vec<u8>> = decode_addrs(&val).unwrap();
-                    if component_tokens.contains(&log.address().to_vec()) {
-                        return Some(BalanceDelta {
-                            ord: log.ordinal(),
-                            tx: Some(tx.into()),
-                            token: log.address().to_vec(),
-                            delta: transfer.value.to_signed_bytes_be(),
-                            component_id: to_addr.as_bytes().to_vec(),
-                        });
-                    }
-                } else if let Some(val) = store.get_last(&from_addr) {
-                    let component_tokens: Vec<Vec<u8>> = decode_addrs(&val).unwrap();
-                    if component_tokens.contains(&log.address().to_vec()) {
-                        return Some(BalanceDelta {
-                            ord: log.ordinal(),
-                            tx: Some(tx.into()),
-                            token: log.address().to_vec(),
-                            delta: (transfer.value.neg()).to_signed_bytes_be(),
-                            component_id: from_addr.as_bytes().to_vec(),
-                        });
-                    }
-                }
-                None
-            })
-        })
-        .flatten()
-        .collect::<Vec<_>>();
+    let mut deltas: Vec<BalanceDelta> = Vec::new();
 
-    Ok(BlockBalanceDeltas { balance_deltas: res })
+    for log in block.logs() {
+        let Some(transfer) = erc20::events::Transfer::match_and_decode(log) else { continue };
+        let token = log.address().to_vec();
+        let tx = log.receipt.transaction;
+        let ord = log.ordinal();
+
+        // The transferred value flows out of `from` and into `to`. Either (or both, for a
+        // pool-to-pool transfer) may be one of our pools, so evaluate each side independently.
+        for (pool, delta) in
+            [(&transfer.from, transfer.value.clone().neg()), (&transfer.to, transfer.value.clone())]
+        {
+            let pool_addr = encode_addr(pool);
+            // Short circuit if the address doesn't match any of our pools
+            let Some(tokens_str) = store.get_last(&pool_addr) else { continue };
+            // Short circuit if the pool has been killed
+            if killed_store
+                .get_last(&pool_addr)
+                .is_some()
+            {
+                continue;
+            }
+            // Only track tokens that belong to the pool's basket; ignore any other token
+            // that happens to be transferred to or from the pool address.
+            let component_tokens = decode_addrs(&tokens_str)?;
+            if !component_tokens.contains(&token) {
+                continue;
+            }
+            deltas.push(BalanceDelta {
+                ord,
+                tx: Some(tx.into()),
+                token: token.clone(),
+                delta: delta.to_signed_bytes_be(),
+                component_id: pool_addr.into_bytes(),
+            });
+        }
+    }
+
+    Ok(BlockBalanceDeltas { balance_deltas: deltas })
 }
 
 /// Aggregates relative balances values into absolute values
@@ -196,7 +204,7 @@ fn map_protocol_changes(
     param_string: String,
     block: eth::v2::Block,
     new_components: BlockTransactionProtocolComponents,
-    _killed_components: BlockTransactionProtocolComponents, // PC delete events not yet supported
+    killed_components: BlockTransactionProtocolComponents,
     deltas: BlockBalanceDeltas,
     components_store: StoreGetString,
     balance_store: StoreDeltas, // Note, this map module is using the `deltas` mode for the store.
@@ -227,27 +235,32 @@ fn map_protocol_changes(
                 });
         });
 
-    // Aggregate killed components per tx
-    /* Protocol component deletion events not yet supported
+    // We mark killed components with a `killed` dynamic attribute, then
+    // tycho-simulation uses a stream filter to remove the pool. See
+    // `liquidityparty_killed_pools_filter` in protocol_stream_processor.rs
     killed_components
         .tx_components
         .iter()
         .for_each(|tx_component| {
-            // initialise builder if not yet present for this tx
             let tx = tx_component.tx.as_ref().unwrap();
             let builder = transaction_changes
                 .entry(tx.index)
                 .or_insert_with(|| TransactionChangesBuilder::new(tx));
 
-            // iterate over individual components killed within this tx
             tx_component
                 .components
                 .iter()
                 .for_each(|component| {
-                    builder.add_protocol_component(component);
+                    builder.add_entity_change(&EntityChanges {
+                        component_id: component.id.clone(),
+                        attributes: vec![Attribute {
+                            name: "killed".to_string(),
+                            value: vec![1u8],
+                            change: ChangeType::Update.into(),
+                        }],
+                    });
                 });
         });
-     */
 
     // Aggregate absolute balances per transaction.
     aggregate_balances_changes(balance_store, deltas)
@@ -265,6 +278,16 @@ fn map_protocol_changes(
                 });
         });
 
+    // Contracts created alongside components in this block (e.g. each pool's immutable BFStore).
+    // These are immutable SSTORE2 data contracts, so capturing their creation code once in the
+    // block they are deployed is sufficient — no cross-block store persistence is needed.
+    let new_component_contracts: HashSet<Vec<u8>> = new_components
+        .tx_components
+        .iter()
+        .flat_map(|tx_pc| tx_pc.components.iter())
+        .flat_map(|c| c.contracts.iter().cloned())
+        .collect();
+
     // Extract and insert any storage changes that happened for any of the components.
     extract_contract_changes_builder(
         &block,
@@ -275,8 +298,9 @@ fn map_protocol_changes(
             components_store
                 .get_last(addr_str)
                 .is_some() ||
-                addr == params.mint_impl.as_slice() ||
-                addr == params.swap_impl.as_slice() ||
+                new_component_contracts.contains(addr) ||
+                addr == params.extra_impl1.as_slice() ||
+                addr == params.extra_impl2.as_slice() ||
                 addr == params.planner.as_slice() ||
                 addr == params.info.as_slice()
         },

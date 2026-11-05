@@ -30,12 +30,13 @@ fn get_tick_spacing_to_fees(
     tick_spacing_to_fees: &mut TickSpacingFees,
 ) {
     let mut on_tick_spacing_enabled =
-        |event: TickSpacingEnabled, _tx: &eth::TransactionTrace, _log: &eth::Log| {
+        |event: TickSpacingEnabled, _tx: &eth::TransactionTrace, log: &eth::Log| {
             tick_spacing_to_fees
                 .tick_spacing_fees
                 .push(TickSpacingFee {
                     tick_spacing: event.tick_spacing.to_i32(),
                     fee: event.fee.to_u64(),
+                    factory: log.address.clone(),
                 })
         };
 

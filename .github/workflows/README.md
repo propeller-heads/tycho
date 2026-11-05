@@ -2,6 +2,8 @@
 
 This monorepo contains three language ecosystems — **Rust crates**, **Solidity/Foundry contracts**, and **Substreams** — each with their own CI workflows, plus a shared CD pipeline for Docker image delivery.
 
+Jobs install the Rust toolchains from the `rust-toolchain.toml` files (`rustup toolchain install` in the workspace's directory) and every other tool through `jdx/mise-action`, which installs the versions pinned in the root `mise.toml` and `mise.lock` and exports `RUST_NIGHTLY`, the toolchain for `cargo fmt` and `cargo clippy`. A workflow therefore runs the same tool versions a developer gets from `mise install`.
+
 Reusable build/deploy steps are delegated to [propeller-heads/ci-cd-templates](https://github.com/propeller-heads/ci-cd-templates).
 
 ---
@@ -10,11 +12,13 @@ Reusable build/deploy steps are delegated to [propeller-heads/ci-cd-templates](h
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `main-workflow.yaml` | push to `main` | Orchestrates full CI → release → Docker build → dev deploy |
+| `main-workflow.yaml` | push to `main` | Orchestrates full CI → release → Docker build → dev deploy, and Grafana dashboard sync |
 | `ci-rust.yaml` | PR (Rust paths), push to `main`, `workflow_call` | Rust lint, test, and doc checks |
 | `ci-foundry.yaml` | PR/push (`foundry/`), manual | Solidity fmt, tests, gas snapshot, static analysis |
 | `ci-substreams.yaml` | PR (`substreams/`), manual | Lint and unit tests for changed substreams packages |
 | `ci-substreams-integration.yaml` | PR (`protocols/substreams/`, `protocols/testing/`), manual | Full protocol integration tests against a live DB |
+| `ci-router-trades.yaml` | PR/push (`crates/tycho-execution/substreams/`), manual | Router-trades lint, WASM build, unit tests, and PostgreSQL pricing integration |
+| `release-router-trades.yaml` | Manual | Build and publish one router-trades `.spkg` per chain to S3, where the sink containers fetch the version pinned in helm |
 | `cd-deploy-dev.yaml` | Manual | Build a branch image and deploy it to dev |
 | `promote-to-prod.yaml` | Manual | Promote a tagged dev image to production |
 | `release.yaml` | GitHub Release published, manual | Upload binaries to GitHub + S3, publish crates to crates.io |
@@ -38,6 +42,10 @@ The entry point for all automated delivery. Runs only on pushes to `main`.
 
 Steps 4 and 5 are gated on `release` completing, so no image is built on dry-run commits.
 
+**`sync-router-trades-dashboards`** runs independently of the jobs above. It calls `sync-grafana-dashboards.yaml` from ci-cd-templates, which pushes the dashboard JSON files under `crates/tycho-execution/substreams/tycho-router-trades/grafana/` to the `tycho` folder in Grafana. Only files changed by the push are sent; if none changed, nothing is sent. It uses the `GRAFANA_SA_TOKEN` secret.
+
+These files are the source of truth: an edit made in the Grafana UI is overwritten the next time its file changes. To change a dashboard, edit it in Grafana, export it (*Export → Export as JSON*), and commit the result over the file. Keep the `uid` unchanged.
+
 ---
 
 ### `ci-rust.yaml` — Rust CI
@@ -46,7 +54,7 @@ Covers all Rust crates under `crates/` and `protocols/testing/`. Triggered on PR
 
 **Jobs (all run in parallel):**
 
-- **`lint`** — `cargo fmt` and `cargo clippy` on nightly toolchain.
+- **`lint`** — `cargo fmt` and `cargo clippy` on the `RUST_NIGHTLY` toolchain.
 - **`test-unit`** — Unit tests excluding anything requiring a database, RPC, or anvil.
 - **`test-db`** — Tests requiring a live Postgres instance. Spins up a custom Postgres Docker image (built from `docker/postgres.Dockerfile`) with pg_cron. Runs parallel and serial DB test suites separately.
 - **`doc`** — `cargo doc` with broken intra-doc link detection.
@@ -83,7 +91,7 @@ Covers Rust-based Substreams packages under `protocols/substreams/`. Only proces
 
 **Jobs:**
 
-- **`lint`** — Detects changed packages via a custom action, then runs `cargo fmt` and `cargo clippy` (nightly) for each.
+- **`lint`** — Detects changed packages via a custom action, then runs `cargo fmt` and `cargo clippy` (`RUST_NIGHTLY`) for each.
 - **`test`** — Builds each changed package targeting `wasm32-unknown-unknown` and runs its unit tests.
 
 ---

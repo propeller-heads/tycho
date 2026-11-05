@@ -18,18 +18,18 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for FluidV1 {
     type Error = InvalidSnapshotError;
 
     async fn try_from_with_header(
-        value: ComponentWithState,
+        snapshot: ComponentWithState,
         _block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
         all_tokens: &HashMap<Bytes, Token>,
         decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
-        let pool_address = Bytes::from_str(value.component.id.as_str()).map_err(|e| {
+        let pool_address = Bytes::from_str(snapshot.component.id.as_str()).map_err(|e| {
             InvalidSnapshotError::ValueError(format!(
                 "Expected component id to be pool contract address: {e}"
             ))
         })?;
-        let token0_address = value
+        let token0_address = snapshot
             .component
             .tokens
             .first()
@@ -43,7 +43,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for FluidV1 {
                     "Missing token0 in state: {token0_address}"
                 ))
             })?;
-        let token1_address = value
+        let token1_address = snapshot
             .component
             .tokens
             .get(1)
@@ -57,7 +57,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for FluidV1 {
                     "Missing token1 in state: {token1_address}"
                 ))
             })?;
-        let resolver_address = value
+        let resolver_address = snapshot
             .component
             .static_attributes
             .get("reserves_resolver_address")
@@ -73,8 +73,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for FluidV1 {
                 .unwrap_or_default(),
         )
         .expect("Infallible");
-        let state =
-            vm::decode_from_vm(&pool_address, token0, token1, resolver_address.as_ref(), engine)?;
+        let state = vm::decode_from_vm(&pool_address, token0, token1, resolver_address, &engine)?;
 
         Ok(state)
     }

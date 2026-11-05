@@ -102,7 +102,7 @@ struct AccountState {
 }
 
 /// Default Titan pAMM quote-stream WebSocket endpoint serving all known pAMM venues.
-const TITAN_URL: &str = "wss://eu.rpc.titanbuilder.xyz/ws/pamm_quote_stream";
+const TITAN_URL: &str = "wss://eu.data.titanbuilder.xyz/ws/pamm_quote_stream";
 /// Environment variable that overrides the default endpoint when no custom URL is passed.
 const TITAN_URL_ENV: &str = "TITAN_PAMM_STREAM_URL";
 
@@ -293,6 +293,10 @@ impl TitanProvider {
                                                 // dropped; the check after this loop stops the
                                                 // task, so ignoring it here is safe.
                                                 Ok(Some(snapshot)) => {
+                                                    #[expect(
+                                                        clippy::let_underscore_must_use,
+                                                        reason = "a send error means every receiver is gone, which the check after this loop handles"
+                                                    )]
                                                     let _ = sender.send(snapshot);
                                                 }
                                                 // No alias present in this frame — nothing to do.

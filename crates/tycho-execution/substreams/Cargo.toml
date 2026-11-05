@@ -1,0 +1,8 @@
+[workspace]
+members = ["tycho-router-trades"]
+resolver = "2"
+
+[profile.release]
+lto = true
+opt-level = 's'
+strip = "debuginfo"

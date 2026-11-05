@@ -9,10 +9,11 @@ message Pool {
   bytes created_tx_hash = 4;
 }
 
-// A tick spacing and fee.
+// A tick spacing and the fee the emitting factory charges for it.
 message TickSpacingFee {
     int32 tick_spacing = 1;
     uint64 fee = 2;
+    bytes factory = 3;
 }
 
 // A group of TickSpacingFee

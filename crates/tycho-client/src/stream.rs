@@ -6,7 +6,11 @@ use std::{
 };
 
 use thiserror::Error;
-use tokio::{sync::mpsc::Receiver, task::JoinHandle};
+use tokio::{
+    sync::{mpsc::Receiver, Semaphore},
+    task::JoinHandle,
+    time::timeout,
+};
 use tracing::{info, warn};
 use tycho_common::{
     dto::{PaginationLimits, ProtocolSystemsRequestBody},
@@ -18,16 +22,18 @@ use tycho_common::{
 
 use crate::{
     client_metadata::serialize_client_metadata,
-    deltas::DeltasClient,
+    deltas::{DeltasClient, DeltasError, DEFAULT_RECONNECTING_SUBSCRIPTION_BUFFER_SIZE},
     feed::{
-        component_tracker::ComponentFilter, synchronizer::ProtocolStateSynchronizer, BlockHeader,
-        BlockSynchronizer, BlockSynchronizerError, FeedMessage,
+        component_tracker::ComponentFilter,
+        synchronizer::{ProtocolStateSynchronizer, StateSynchronizer, DEFAULT_SNAPSHOT_JITTER},
+        BlockHeader, BlockSynchronizer, BlockSynchronizerError, FeedMessage,
     },
     rpc::{HttpRPCClientOptions, ProtocolSystemsParams, RPCClient},
     HttpRPCClient, WsDeltasClient,
 };
 
 #[derive(Error, Debug)]
+#[expect(clippy::enum_variant_names, reason = "public API; renaming is a breaking change")]
 pub enum StreamError {
     #[error("Error during stream set up: {0}")]
     SetUpError(String),
@@ -66,10 +72,34 @@ pub struct ConstantRetryConfiguration {
 fn validate_chain_config() -> Result<(), StreamError> {
     let registry = ChainConfigRegistry::load_default()
         .map_err(|e| StreamError::SetUpError(format!("failed to load custom chain config: {e}")))?;
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "an already-installed registry is the intended outcome of a prior lazy access"
+    )]
     let _ = init_chain_registry(registry);
     Ok(())
 }
 
+fn validate_subscription_buffer_size(subscription_buffer_size: usize) -> Result<(), StreamError> {
+    if subscription_buffer_size == 0 {
+        return Err(StreamError::SetUpError(
+            "subscription buffer size must be greater than zero".to_string(),
+        ));
+    }
+
+    if subscription_buffer_size > Semaphore::MAX_PERMITS {
+        return Err(StreamError::SetUpError(format!(
+            "subscription buffer size must not exceed {} (Tokio's maximum channel capacity); \
+             choose a value between 1 and {}",
+            Semaphore::MAX_PERMITS,
+            Semaphore::MAX_PERMITS,
+        )));
+    }
+
+    Ok(())
+}
+
+#[expect(clippy::struct_excessive_bools, reason = "each bool is an independent feature toggle")]
 pub struct TychoStreamBuilder {
     tycho_url: String,
     chain: Chain,
@@ -81,6 +111,7 @@ pub struct TychoStreamBuilder {
     max_missed_blocks: u64,
     state_sync_retry_config: RetryConfiguration,
     websockets_retry_config: RetryConfiguration,
+    snapshot_jitter: Duration,
     no_state: bool,
     auth_key: Option<String>,
     no_tls: bool,
@@ -89,13 +120,15 @@ pub struct TychoStreamBuilder {
     partial_blocks: bool,
     max_messages: Option<usize>,
     client_metadata: HashMap<String, String>,
+    subscription_buffer_size: usize,
 }
 
 impl TychoStreamBuilder {
     /// Creates a new `TychoStreamBuilder` with the given Tycho URL and blockchain network.
     /// Initializes the builder with default values for block time and timeout based on the chain.
     pub fn new(tycho_url: &str, chain: Chain) -> Self {
-        let (block_time, timeout, max_missed_blocks) = Self::default_timing(&chain);
+        let (block_time, timeout, max_missed_blocks, startup_timeout) =
+            Self::default_timing(&chain);
         Self {
             tycho_url: tycho_url.to_string(),
             chain,
@@ -103,7 +136,7 @@ impl TychoStreamBuilder {
             blocklisted_ids: HashSet::new(),
             block_time,
             timeout,
-            startup_timeout: Duration::from_secs(block_time * max_missed_blocks),
+            startup_timeout: Duration::from_secs(startup_timeout),
             max_missed_blocks,
             state_sync_retry_config: RetryConfiguration::constant(
                 32,
@@ -113,6 +146,7 @@ impl TychoStreamBuilder {
                 128,
                 Duration::from_secs(max(block_time / 6, 1)),
             ),
+            snapshot_jitter: DEFAULT_SNAPSHOT_JITTER,
             no_state: false,
             auth_key: None,
             no_tls: true,
@@ -121,25 +155,34 @@ impl TychoStreamBuilder {
             partial_blocks: false,
             max_messages: None,
             client_metadata: HashMap::new(),
+            subscription_buffer_size: DEFAULT_RECONNECTING_SUBSCRIPTION_BUFFER_SIZE,
         }
     }
 
-    /// Returns the default block_time, timeout and max_missed_blocks values for the given
-    /// blockchain network.
-    fn default_timing(chain: &Chain) -> (u64, u64, u64) {
+    /// Returns the default `(block_time, timeout, max_missed_blocks, startup_timeout)` for the
+    /// given blockchain network. Times are in seconds.
+    ///
+    /// A silent synchronizer holds every round while it is Delayed, and stays Delayed for
+    /// `block_time * max_missed_blocks`. The consumer falls about that far behind the chain head
+    /// before the synchronizer goes stale and stops holding rounds. Chains whose blocks come
+    /// faster than their one-second `block_time` therefore use 20 missed blocks, keeping that
+    /// lag near 20 s. The startup timeout is set apart, so large first snapshots keep their time.
+    fn default_timing(chain: &Chain) -> (u64, u64, u64, u64) {
         match chain {
-            Chain::Ethereum => (12, 36, 50),
-            Chain::Starknet => (2, 8, 50),
-            Chain::ZkSync => (3, 12, 50),
-            Chain::Arbitrum => (1, 2, 100), // Typically closer to 0.25s
-            Chain::Base => (2, 12, 50),
-            Chain::Bsc => (1, 12, 50),
-            Chain::Unichain => (1, 10, 100),
-            Chain::Polygon => (2, 12, 50), // ~2s block time
-            Chain::Plasma => (1, 10, 100), // ~1s block time
-            _ => {
+            Chain::Ethereum => (12, 36, 50, 600),
+            Chain::Starknet => (2, 8, 50, 100),
+            Chain::ZkSync => (3, 12, 50, 150),
+            Chain::Arbitrum => (1, 9, 20, 100), // Typically closer to 0.25s
+            Chain::Base => (2, 12, 50, 100),
+            Chain::Bsc => (1, 12, 50, 50),
+            Chain::Unichain => (1, 10, 20, 100),
+            Chain::Polygon => (2, 12, 50, 100),  // ~2s block time
+            Chain::Plasma => (1, 10, 20, 100),   // ~1s block time
+            Chain::Robinhood => (1, 5, 20, 100), // Typically closer to 0.1s
+            Chain::Arc => (1, 5, 20, 100),       // Typically closer to 0.5s
+            Chain::Custom(_) | _ => {
                 let block_time = chain.block_time_secs();
-                (block_time, block_time * 3, 50)
+                (block_time, block_time * 3, 50, block_time * 50)
             }
         }
     }
@@ -182,6 +225,16 @@ impl TychoStreamBuilder {
     pub fn state_synchronizer_retry_config(mut self, retry_config: &RetryConfiguration) -> Self {
         self.state_sync_retry_config = retry_config.clone();
         self.warn_on_potential_timing_issues();
+        self
+    }
+
+    /// Sets the maximum random delay before a restarted synchronizer requests a snapshot.
+    ///
+    /// After a restart that needs a snapshot, each synchronizer waits a random time in
+    /// `[0, jitter]` before it requests the snapshot. The first start has no delay. Defaults to
+    /// 60 seconds. A `jitter` below 5 seconds is raised to 5 seconds.
+    pub fn snapshot_jitter(mut self, jitter: Duration) -> Self {
+        self.snapshot_jitter = jitter;
         self
     }
 
@@ -263,6 +316,15 @@ impl TychoStreamBuilder {
         self
     }
 
+    /// Sets the number of deltas buffered for each WebSocket subscription.
+    ///
+    /// The default is 128. Values outside Tokio's supported channel range are rejected as setup
+    /// errors when [`build`](Self::build) is called, before any network I/O begins.
+    pub fn subscription_buffer_size(mut self, subscription_buffer_size: usize) -> Self {
+        self.subscription_buffer_size = subscription_buffer_size;
+        self
+    }
+
     /// Stops the stream after emitting this many messages. Useful for testing or
     /// triggering a periodic restart after a fixed number of blocks.
     pub fn max_messages(mut self, n: usize) -> Self {
@@ -289,6 +351,31 @@ impl TychoStreamBuilder {
         self
     }
 
+    /// Constructs the WebSocket delta client from this builder's retry, buffer, and metadata
+    /// configuration.
+    pub(crate) fn build_ws_deltas_client(
+        &self,
+        ws_uri: &str,
+        auth_key: Option<&str>,
+        client_metadata_header: Option<String>,
+    ) -> Result<WsDeltasClient, StreamError> {
+        validate_subscription_buffer_size(self.subscription_buffer_size)?;
+
+        let ws_client = match &self.websockets_retry_config {
+            RetryConfiguration::Constant(config) => WsDeltasClient::new_with_reconnects(
+                ws_uri,
+                auth_key,
+                config.max_attempts,
+                config.cooldown,
+            ),
+        }
+        .map_err(|e| StreamError::SetUpError(e.to_string()))?
+        .with_subscription_buffer_size(self.subscription_buffer_size)
+        .with_client_metadata_header(client_metadata_header);
+
+        Ok(ws_client)
+    }
+
     /// Builds and starts the Tycho client, connecting to the Tycho server and
     /// setting up the synchronization of exchange components.
     pub async fn build(
@@ -297,6 +384,8 @@ impl TychoStreamBuilder {
         (JoinHandle<()>, Receiver<Result<FeedMessage<BlockHeader>, BlockSynchronizerError>>),
         StreamError,
     > {
+        validate_subscription_buffer_size(self.subscription_buffer_size)?;
+
         if self.exchanges.is_empty() {
             return Err(StreamError::SetUpError(
                 "At least one exchange must be registered.".to_string(),
@@ -335,17 +424,11 @@ impl TychoStreamBuilder {
             (tycho_ws_url, tycho_rpc_url)
         };
 
-        // Initialize the WebSocket client
-        let ws_client = match &self.websockets_retry_config {
-            RetryConfiguration::Constant(config) => WsDeltasClient::new_with_reconnects(
-                &tycho_ws_url,
-                auth_key.as_deref(),
-                config.max_attempts,
-                config.cooldown,
-            ),
-        }
-        .map_err(|e| StreamError::SetUpError(e.to_string()))?
-        .with_client_metadata_header(metadata_header.clone());
+        let ws_client = self.build_ws_deltas_client(
+            &tycho_ws_url,
+            auth_key.as_deref(),
+            metadata_header.clone(),
+        )?;
         let rpc_client = HttpRPCClient::new(
             &tycho_rpc_url,
             HttpRPCClientOptions::new()
@@ -354,10 +437,6 @@ impl TychoStreamBuilder {
                 .with_client_metadata_header(metadata_header),
         )
         .map_err(|e| StreamError::SetUpError(e.to_string()))?;
-        let ws_jh = ws_client
-            .connect()
-            .await
-            .map_err(|e| StreamError::WebSocketConnectionError(e.to_string()))?;
 
         // Create and configure the BlockSynchronizer
         let mut block_sync = BlockSynchronizer::new(
@@ -365,6 +444,7 @@ impl TychoStreamBuilder {
             Duration::from_secs(self.timeout),
             self.max_missed_blocks,
         );
+        block_sync.startup_timeout(self.startup_timeout);
         if let Some(n) = self.max_messages {
             block_sync.max_messages(n);
         }
@@ -405,33 +485,86 @@ impl TychoStreamBuilder {
                     self.block_time + self.timeout,
                 )
                 .with_dci(uses_dci)
-                .with_partial_blocks(self.partial_blocks),
+                .with_partial_blocks(self.partial_blocks)
+                .with_snapshot_jitter(self.snapshot_jitter),
             };
             block_sync = block_sync.register_synchronizer(id, sync);
         }
 
-        // Start the BlockSynchronizer and monitor for disconnections
-        let (sync_jh, rx) = block_sync
-            .run()
-            .await
-            .map_err(|e| StreamError::BlockSynchronizerError(e.to_string()))?;
+        Self::start_stream(ws_client, block_sync).await
+    }
 
-        // Monitor WebSocket and BlockSynchronizer futures
+    /// Connects `ws_client`, starts `block_sync` over it, and spawns a task that closes the
+    /// websocket once it or the block synchronizer ends.
+    ///
+    /// Returns the monitor task and the feed receiver. When the block synchronizer fails to
+    /// start, the websocket is closed before the error is returned.
+    async fn start_stream<S: StateSynchronizer>(
+        ws_client: WsDeltasClient,
+        block_sync: BlockSynchronizer<S>,
+    ) -> Result<
+        (JoinHandle<()>, Receiver<Result<FeedMessage<BlockHeader>, BlockSynchronizerError>>),
+        StreamError,
+    > {
+        let mut ws_jh = ws_client
+            .connect()
+            .await
+            .map_err(|e| StreamError::WebSocketConnectionError(e.to_string()))?;
+
+        // Only the `Err` arm closes the websocket. A caller that drops this future while `run`
+        // is pending, for example under `tokio::time::timeout`, still leaks the connection.
+        let (sync_jh, rx) = match block_sync.run().await {
+            Ok(started) => started,
+            Err(e) => {
+                Self::close_websocket(&ws_client, ws_jh).await;
+                return Err(StreamError::BlockSynchronizerError(e.to_string()));
+            }
+        };
+
         let handle = tokio::spawn(async move {
             tokio::select! {
-                res = ws_jh => {
-                    let _ = res.map_err(|e| StreamError::WebSocketConnectionError(e.to_string()));
+                res = &mut ws_jh => {
+                    match res {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => warn!(?e, "WebSocket task ended with an error"),
+                        Err(e) => warn!(?e, "WebSocket task panicked"),
+                    }
+                    // The task has ended, so its handle must not be polled again.
+                    if let Err(e) = ws_client.close().await {
+                        warn!(?e, "Failed to close WebSocket client");
+                    }
                 }
                 res = sync_jh => {
+                    Self::close_websocket(&ws_client, ws_jh).await;
                     res.map_err(|e| StreamError::BlockSynchronizerError(e.to_string())).unwrap();
                 }
-            }
-            if let Err(e) = ws_client.close().await {
-                warn!(?e, "Failed to close WebSocket client");
             }
         });
 
         Ok((handle, rx))
+    }
+
+    /// Closes the websocket and waits up to one second for its task to end, then aborts it.
+    ///
+    /// The close command only reaches the task while it is connected; one between reconnection
+    /// attempts is aborted instead, so it cannot open another connection after the caller has
+    /// given up on it.
+    async fn close_websocket(
+        ws_client: &WsDeltasClient,
+        mut ws_jh: JoinHandle<Result<(), DeltasError>>,
+    ) {
+        if let Err(e) = ws_client.close().await {
+            warn!(?e, "Failed to close WebSocket client");
+        }
+        match timeout(Duration::from_secs(1), &mut ws_jh).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(e))) => warn!(?e, "WebSocket task ended with an error"),
+            Ok(Err(e)) => warn!(?e, "WebSocket task panicked"),
+            Err(_) => {
+                warn!("WebSocket task did not stop after close; aborting it");
+                ws_jh.abort();
+            }
+        }
     }
 }
 
@@ -532,7 +665,84 @@ impl ProtocolSystemsInfo {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
+    use futures03::StreamExt;
+    use tokio::{net::TcpListener, sync::oneshot};
+
     use super::*;
+
+    /// Accepts one websocket connection and reports when the client closes it.
+    async fn mock_ws_reporting_close() -> (SocketAddr, oneshot::Receiver<()>) {
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("localhost bind failed");
+        let addr = server.local_addr().unwrap();
+        let (closed_tx, closed_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let (stream, _) = server
+                .accept()
+                .await
+                .expect("accept failed");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("websocket handshake failed");
+            while let Some(Ok(msg)) = websocket.next().await {
+                if msg.is_close() {
+                    break;
+                }
+            }
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the test may have dropped the receiver before the connection closes"
+            )]
+            let _ = closed_tx.send(());
+        });
+        (addr, closed_rx)
+    }
+
+    /// A failed `start_stream` must close the websocket it opened. Nothing else can reach it
+    /// once `build` has returned.
+    #[tokio::test]
+    async fn test_start_stream_run_failure() {
+        let (addr, closed_rx) = mock_ws_reporting_close().await;
+        let ws_client = WsDeltasClient::new(&format!("ws://{addr}"), None).unwrap();
+        // No synchronizers registered, so `run` fails with `NoSynchronizers`.
+        let block_sync: BlockSynchronizer<
+            ProtocolStateSynchronizer<HttpRPCClient, WsDeltasClient>,
+        > = BlockSynchronizer::new(Duration::from_secs(1), Duration::from_secs(1), 1);
+
+        let start = tokio::spawn(TychoStreamBuilder::start_stream(ws_client, block_sync));
+
+        // Timed from the start of `start_stream` and shorter than the one-second abort window, so
+        // only a graceful close passes.
+        timeout(Duration::from_millis(500), closed_rx)
+            .await
+            .expect("server should observe the websocket closing")
+            .expect("mock server exited without reporting");
+        let res = start.await.unwrap();
+        assert!(matches!(res, Err(StreamError::BlockSynchronizerError(_))), "got {res:?}");
+    }
+
+    /// A websocket task that ignores the close command, as one between reconnection attempts
+    /// does, is aborted.
+    #[tokio::test(start_paused = true)]
+    async fn test_close_websocket_aborts_unresponsive_task() {
+        let ws_client = WsDeltasClient::new("ws://127.0.0.1:1", None).unwrap();
+        let (alive_tx, alive_rx) = oneshot::channel::<()>();
+        let ws_jh = tokio::spawn(async move {
+            let _alive_tx = alive_tx;
+            std::future::pending::<Result<(), DeltasError>>().await
+        });
+
+        TychoStreamBuilder::close_websocket(&ws_client, ws_jh).await;
+
+        let res = timeout(Duration::from_secs(5), alive_rx)
+            .await
+            .expect("the task should be aborted");
+        assert!(res.is_err(), "the aborted task should drop its sender");
+    }
 
     #[test]
     fn test_validate_chain_config_errors_on_broken_file() {
@@ -592,10 +802,29 @@ mod tests {
     }
 
     #[test]
+    fn test_stream_builder_snapshot_jitter() {
+        let builder = TychoStreamBuilder::new("localhost:4242", Chain::Ethereum);
+        assert_eq!(builder.snapshot_jitter, Duration::from_secs(60));
+
+        let builder = builder.snapshot_jitter(Duration::from_secs(10));
+        assert_eq!(builder.snapshot_jitter, Duration::from_secs(10));
+    }
+
+    #[test]
     fn test_default_stream_builder() {
         let builder = TychoStreamBuilder::new("localhost:4242", Chain::Ethereum);
         assert!(builder.compression, "Compression should be enabled by default.");
         assert!(!builder.partial_blocks, "partial_blocks should be disabled by default.");
+    }
+
+    #[test]
+    fn arc_uses_fast_chain_default_timing() {
+        assert_eq!(TychoStreamBuilder::default_timing(&Chain::Arc), (1, 5, 20, 100));
+    }
+
+    #[test]
+    fn arbitrum_default_timing_outlasts_substreams_reconnect() {
+        assert_eq!(TychoStreamBuilder::default_timing(&Chain::Arbitrum), (1, 9, 20, 100));
     }
 
     #[tokio::test]
@@ -605,6 +834,42 @@ mod tests {
             .build()
             .await;
         assert!(receiver.is_err(), "Client should fail to build when no exchanges are registered.");
+    }
+
+    #[tokio::test]
+    async fn test_zero_subscription_buffer_size_fails_before_network_io() {
+        let error = TychoStreamBuilder::new("not a valid endpoint", Chain::Ethereum)
+            .exchange("uniswap_v2", ComponentFilter::with_tvl_range(100.0, 100.0))
+            .subscription_buffer_size(0)
+            .build()
+            .await
+            .expect_err("a zero subscription buffer size must be rejected during setup");
+
+        assert!(matches!(error, StreamError::SetUpError(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("subscription buffer size must be greater than zero"),
+            "error should explain how to correct the configuration: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_too_large_subscription_buffer_size_fails_before_network_io() {
+        let error = TychoStreamBuilder::new("not a valid endpoint", Chain::Ethereum)
+            .exchange("uniswap_v2", ComponentFilter::with_tvl_range(100.0, 100.0))
+            .subscription_buffer_size(usize::MAX)
+            .build()
+            .await
+            .expect_err("an oversized subscription buffer size must be rejected during setup");
+
+        assert!(matches!(error, StreamError::SetUpError(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("subscription buffer size must not exceed"),
+            "error should name the maximum supported capacity: {error}"
+        );
     }
 
     #[test]

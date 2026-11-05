@@ -4,11 +4,17 @@ on:
   pull_request:
     paths:
       - 'protocols/substreams/**'
+      - 'mise.toml'
+      - 'mise.lock'
       - '!**/Cargo.lock'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
   lint:
@@ -28,11 +34,15 @@ jobs:
         with:
           files: protocols/substreams/**
 
-      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # nightly
+      - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e  # v5.2.3
         if: steps.substreams-files-changed.outputs.any_changed == 'true'
         with:
-          toolchain: nightly
-          components: clippy, rustfmt
+          version: 2026.10.25
+          install: false
+
+      - name: Install the fmt and clippy nightly from mise.toml
+        if: steps.substreams-files-changed.outputs.any_changed == 'true'
+        run: rustup toolchain install --no-self-update "$RUST_NIGHTLY" --profile minimal --component rustfmt,clippy
 
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
         if: steps.substreams-files-changed.outputs.any_changed == 'true'
@@ -54,8 +64,8 @@ jobs:
           if [ -n "${{ steps.changed_packages.outputs.package_names }}" ]; then
             for package in ${{ steps.changed_packages.outputs.package_names }}; do
               echo "Running checks for package: $package"
-              cargo +nightly fmt --package "$package" -- --check
-              cargo +nightly clippy --package "$package" -- -D warnings
+              cargo +"$RUST_NIGHTLY" fmt --package "$package" -- --check
+              cargo +"$RUST_NIGHTLY" clippy --package "$package" -- -D warnings
             done
           else
             echo "No packages to check"
@@ -82,11 +92,10 @@ jobs:
         with:
           files: protocols/substreams/**
 
-      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1  # stable
+      - name: Install the Rust toolchain from protocols/substreams/rust-toolchain.toml
         if: steps.substreams-files-changed.outputs.any_changed == 'true'
-        with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
+        working-directory: protocols/substreams
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
         if: steps.substreams-files-changed.outputs.any_changed == 'true'
@@ -118,3 +127,58 @@ jobs:
       - name: Skip check
         if: steps.substreams-files-changed.outputs.any_changed != 'true'
         run: echo "No changes to substreams directory, skipping test check"
+
+  test-release:
+    name: Substreams Release Script Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+          submodules: false
+          fetch-depth: 0
+
+      - name: Check if any shell script changed
+        id: shell-files-changed
+        uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
+        with:
+          files: |
+            protocols/substreams/*.sh
+            protocols/substreams/tests/**
+            mise.toml
+            mise.lock
+
+      - name: Install the Rust toolchain from protocols/substreams/rust-toolchain.toml
+        if: steps.shell-files-changed.outputs.any_changed == 'true'
+        working-directory: protocols/substreams
+        run: rustup toolchain install --no-self-update --profile minimal
+
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
+        if: steps.shell-files-changed.outputs.any_changed == 'true'
+        with:
+          cache-on-failure: true
+
+      - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e  # v5.2.3
+        if: steps.shell-files-changed.outputs.any_changed == 'true'
+        with:
+          version: 2026.10.25
+          install_args: shellcheck shfmt jq
+
+      - name: Lint shell scripts
+        if: steps.shell-files-changed.outputs.any_changed == 'true'
+        shell: bash
+        run: |
+          shellcheck protocols/substreams/*.sh protocols/substreams/tests/*.sh
+          shfmt -i 4 -d protocols/substreams/*.sh protocols/substreams/tests/*.sh
+
+      # The harness copies the substreams tree into a throwaway git repository under $TMPDIR and
+      # runs release.sh there, so it needs bash, git, jq and cargo metadata but uploads nothing.
+      - name: Test release.sh
+        if: steps.shell-files-changed.outputs.any_changed == 'true'
+        shell: bash
+        run: RELEASE_DRY_RUN=1 bash protocols/substreams/tests/release_sh_test.sh
+
+      - name: Skip check
+        if: steps.shell-files-changed.outputs.any_changed != 'true'
+        run: echo "No changes to substreams shell scripts, skipping release script check"

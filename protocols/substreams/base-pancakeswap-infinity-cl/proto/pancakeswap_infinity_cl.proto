@@ -1,0 +1,119 @@
+syntax = "proto3";
+
+// Intermediate messages passed between this package's modules. Mirrors
+// ethereum-uniswap-v4/shared/proto/uniswap.proto; the Infinity-specific addition is
+// Initialize.parameters.
+package pancakeswap.infinity.cl;
+
+message Pool {
+  // The bytes32 PoolId, keccak256 of the 6-word PoolKey (infinity-core src/types/PoolId.sol:10-15).
+  bytes id = 1;
+  bytes currency0 = 2;
+  bytes currency1 = 3;
+  bytes created_tx_hash = 4;
+}
+
+message Transaction {
+  bytes hash = 1;
+  bytes from = 2;
+  bytes to = 3;
+  uint64 index = 4;
+}
+
+// A change to a pool's tick net liquidity.
+message TickDelta {
+  // The raw 32-byte pool id.
+  bytes pool_address = 1;
+  int32 tick_index = 2;
+  // Bigint encoded as signed big endian bytes.
+  bytes liquidity_net_delta = 3;
+  uint64 ordinal = 4;
+  Transaction transaction = 5;
+}
+
+message TickDeltas {
+  repeated TickDelta deltas = 1;
+}
+
+message LiquidityChange {
+  bytes pool_address = 1;
+  // Bigint encoded as signed big endian bytes.
+  bytes value = 2;
+  LiquidityChangeType change_type = 3;
+  uint64 ordinal = 4;
+  Transaction transaction = 5;
+}
+
+message LiquidityChanges {
+  repeated LiquidityChange changes = 1;
+}
+
+enum LiquidityChangeType {
+  DELTA = 0;
+  ABSOLUTE = 1;
+}
+
+message Events {
+  repeated PoolEvent pool_events = 3;
+
+  message PoolEvent {
+    oneof type {
+      Initialize initialize = 1;
+      ModifyLiquidity modify_liquidity = 2;
+      Swap swap = 3;
+      Donate donate = 4;
+      ProtocolFeeUpdated protocol_fee_updated = 5;
+    }
+    uint64 log_ordinal = 100;
+    // 0x-prefixed hex of the bytes32 pool id; also the Tycho component id.
+    string pool_id = 102;
+    string currency0 = 103;
+    string currency1 = 104;
+    Transaction transaction = 105;
+
+    message Initialize {
+      string sqrt_price_x96 = 1;
+      int32 tick = 2;
+      // PoolKey.fee: LP fee in pips, or 0x800000 for a dynamic fee (LPFeeLibrary.sol:19).
+      uint32 fee = 3;
+      // Decoded from parameters bits [16, 40) (CLPoolParametersHelper.sol:19-32).
+      int32 tick_spacing = 4;
+      string hooks = 5;
+      // Raw PoolKey.parameters (hook bitmap in bits [0, 16)).
+      bytes parameters = 6;
+    }
+
+    message ModifyLiquidity {
+      string sender = 1;
+      int32 tick_lower = 2;
+      int32 tick_upper = 3;
+      // Signed int256 as decimal string.
+      string liquidity_delta = 4;
+      string salt = 5;
+    }
+
+    message Swap {
+      string sender = 1;
+      // Signed int128 as decimal string.
+      string amount0 = 2;
+      string amount1 = 3;
+      string sqrt_price_x96 = 4;
+      string liquidity = 5;
+      int32 tick = 6;
+      // Composite swap fee actually charged (protocol + LP), pips.
+      uint32 fee = 7;
+    }
+
+    message Donate {
+      string sender = 1;
+      string amount0 = 2;
+      string amount1 = 3;
+    }
+
+    message ProtocolFeeUpdated {
+      string pool_id = 1;
+      // uint24: bits [0,12) zero-for-one, bits [12,24) one-for-zero (ProtocolFeeLibrary.sol:22-31).
+      uint32 protocol_fee = 2;
+    }
+  }
+}

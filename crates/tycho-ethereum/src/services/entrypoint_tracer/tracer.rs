@@ -91,7 +91,7 @@ impl EVMEntrypointService {
     pub(crate) fn create_trace_call_params(
         target: &Address,
         params: &RPCTracerParams,
-        block_hash: &BlockHash,
+        block_id: BlockId,
     ) -> Value {
         let caller = params.caller.as_ref().map(|addr| {
             AlloyAddress::try_from(addr.as_ref())
@@ -108,8 +108,6 @@ impl EVMEntrypointService {
             input: TransactionInput::new(AlloyBytes::from(params.calldata.to_vec())),
             ..Default::default()
         };
-
-        let block_id = BlockId::Hash(AlloyBlockHash::from_slice(block_hash.as_ref()).into());
 
         // Check if we have non-empty state overrides
         let has_state_overrides = params
@@ -154,7 +152,11 @@ impl EVMEntrypointService {
         block_hash: &BlockHash,
     ) -> Result<(HashMap<Address, HashSet<Bytes>>, GethTrace), RPCError> {
         let access_list_params = Self::create_access_list_params(target, params, block_hash);
-        let trace_call_params = Self::create_trace_call_params(target, params, block_hash);
+        let trace_call_params = Self::create_trace_call_params(
+            target,
+            params,
+            BlockId::Hash(AlloyBlockHash::from_slice(block_hash.as_ref()).into()),
+        );
 
         let (access_list_data, pre_state_trace) = self
             .rpc
@@ -226,10 +228,14 @@ impl EVMEntrypointService {
                 called_addresses.contains(&address)
             })
         {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "offset indexes into a 32-byte B256, so it fits into u8"
+            )]
+            let offset = offset as u8;
             return Some(AddressStorageLocation::new(
                 tycho_common::Bytes::from(slot.as_slice()),
-                // This is safe since indices into B256 will always fit into u8
-                offset as u8,
+                offset,
             ));
         }
         None
@@ -1170,6 +1176,10 @@ mod tests {
                             response
                         );
 
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "the mock server may lose the client before the reply is written"
+                        )]
                         let _ = socket
                             .write_all(http_response.as_bytes())
                             .await;
@@ -1761,8 +1771,11 @@ mod tests {
         let params =
             RPCTracerParams::new(None, Bytes::from("0x00")).with_state_overrides(state_overrides);
 
-        let json_params =
-            EVMEntrypointService::create_trace_call_params(&target, &params, &block_hash);
+        let json_params = EVMEntrypointService::create_trace_call_params(
+            &target,
+            &params,
+            BlockId::Hash(AlloyBlockHash::from_slice(block_hash.as_ref()).into()),
+        );
 
         // Extract the stateOverrides from the JSON
         let tracing_options = json_params

@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use alloy::{
     eips::BlockNumberOrTag,
     hex,
-    primitives::{keccak256, Bytes, B256},
+    primitives::{keccak256, Bytes, B256, U256},
     rpc::{
         client::ClientBuilder,
-        types::{Block, BlockId},
+        types::{Block, BlockId, BlockOverrides},
     },
     sol_types::SolValue,
 };
@@ -49,11 +49,7 @@ impl SolidityError {
             return format!("{}()", self.name);
         }
 
-        // Try to decode the arguments
-        match self.decode_error_args(&data[4..]) {
-            Ok(args_str) => format!("{}({})", self.name, args_str),
-            Err(_) => format!("{}(<decode error>)", self.name),
-        }
+        format!("{}({})", self.name, self.decode_error_args(&data[4..]))
     }
 
     /// Decodes the actual arguments from the error using the previously-decoded arg types.
@@ -61,7 +57,7 @@ impl SolidityError {
     /// This ensures that we have as much information regarding the error as possible (for example,
     /// the values of the negative slippage as opposed to just the fact that there was
     /// NegativeSlippage.
-    pub fn decode_error_args(&self, data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    pub fn decode_error_args(&self, data: &[u8]) -> String {
         // This is a simplified version. For full ABI decoding, you'd need alloy-sol-types
         let mut args = Vec::new();
         let mut offset = 0;
@@ -113,7 +109,7 @@ impl SolidityError {
             }
         }
 
-        Ok(args.join(", "))
+        args.join(", ")
     }
 
     /// Decodes innermost error of recursive error string.
@@ -156,6 +152,64 @@ impl SolidityError {
     }
 }
 
+/// The chain state a simulation runs on. A pending block, whose hash is zero, always simulates on
+/// the pending state, whichever variant is passed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "each variant names where the simulation sits relative to the block"
+)]
+pub enum SimulationBase {
+    /// The state after the block, in the block's own context.
+    AfterBlock,
+    /// The state the block was built on — its parent's — with the block's number and timestamp:
+    /// the call a client makes before the block exists, when those two are all it knows of it.
+    BeforeBlock,
+    /// The state after the block, in the context of the block after it: the next number, and a
+    /// timestamp `block_time_secs` later. A swap quoted on the block's state executes there at the
+    /// earliest, and the tycho-simulation decoder prices states that implement
+    /// `ProtocolSim::apply_block` for it.
+    NextBlock { block_time_secs: u64 },
+}
+
+impl SimulationBase {
+    /// The block whose state a simulation for `block` reads. The parent is named by its hash, so a
+    /// reorg between fetching `block` and simulating cannot move the call onto another parent.
+    pub(crate) fn state_block_id(self, block: &Block) -> BlockId {
+        // Pending (flashblock) blocks have a zero hash — simulate against the pending state
+        // so the RPC uses the sequencer's pre-confirmed block rather than a specific number.
+        if block.header.hash == B256::ZERO {
+            return BlockId::from(BlockNumberOrTag::Pending);
+        }
+        match self {
+            SimulationBase::AfterBlock | SimulationBase::NextBlock { .. } => {
+                BlockId::from(block.number())
+            }
+            SimulationBase::BeforeBlock => BlockId::from(block.header.parent_hash),
+        }
+    }
+
+    /// The block overrides a simulation for `block` runs with: `block`'s number and timestamp when
+    /// the state is its parent's, the next block's when it runs in that block, and none otherwise.
+    fn block_overrides(self, block: &Block) -> Option<BlockOverrides> {
+        if block.header.hash == B256::ZERO {
+            return None;
+        }
+        let (number, time) = match self {
+            SimulationBase::AfterBlock => return None,
+            SimulationBase::BeforeBlock => (block.number(), block.header.timestamp),
+            SimulationBase::NextBlock { block_time_secs } => {
+                (block.number() + 1, block.header.timestamp + block_time_secs)
+            }
+        };
+        Some(BlockOverrides {
+            number: Some(U256::from(number)),
+            time: Some(time),
+            ..Default::default()
+        })
+    }
+}
+
 /// Simulated the execution with meaningful revert reason decoding.
 pub struct ExecutionSimulator {
     rpc_url: String,
@@ -180,11 +234,13 @@ impl ExecutionSimulator {
         }
     }
 
-    /// Simulate a transaction with trace and return the SimulationResult.
+    /// Simulate a transaction with trace on the state `base` names (see [`SimulationBase`]), and
+    /// return the SimulationResult.
     pub async fn batch_simulate_with_trace(
         &mut self,
         inputs: HashMap<String, SimulationInput>,
         block: &Block,
+        base: SimulationBase,
     ) -> Result<HashMap<String, SimulationResult>, Box<dyn std::error::Error>> {
         // Configure tracing options - use callTracer for better formatted results
         let tracing_options = GethDebugTracingOptions {
@@ -199,13 +255,8 @@ impl ExecutionSimulator {
         let (simulation_ids, simulation_inputs): (Vec<String>, Vec<SimulationInput>) =
             inputs.into_iter().unzip();
 
-        // Pending (flashblock) blocks have a zero hash — simulate against the pending state
-        // so the RPC uses the sequencer's pre-confirmed block rather than a specific number.
-        let block_id = if block.header.hash == B256::ZERO {
-            BlockId::from(BlockNumberOrTag::Pending)
-        } else {
-            BlockId::from(block.number())
-        };
+        let block_id = base.state_block_id(block);
+        let block_overrides = base.block_overrides(block);
 
         let client = ClientBuilder::default().http(self.rpc_url.parse()?);
 
@@ -216,7 +267,7 @@ impl ExecutionSimulator {
             let trace_options = GethDebugTracingCallOptions {
                 tracing_options: tracing_options.clone(),
                 state_overrides: input.state_overwrites.clone(),
-                block_overrides: None,
+                block_overrides: block_overrides.clone(),
                 tx_index: None,
             };
             let fut =
@@ -388,7 +439,7 @@ impl ExecutionSimulator {
         }
 
         // Parse signature like "Error(string)" or "Panic(uint256)"
-        let re = regex::Regex::new(r"(.*?)\((.*?)\)").unwrap();
+        let re = regex::Regex::new(r"(.*?)\((.*?)\)")?;
         let captures = re
             .captures(signature)
             .ok_or("Failed to parse signature")?;

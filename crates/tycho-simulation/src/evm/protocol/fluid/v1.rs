@@ -14,7 +14,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use alloy::primitives::U256;
+use alloy::primitives::{U256, U512};
 use num_bigint::{BigUint, ToBigUint};
 use num_traits::Euclid;
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,10 @@ use tycho_common::{
     models::token::Token,
     simulation::{
         errors::{SimulationError, TransitionError},
-        protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        protocol_sim::{
+            Balances, GetAmountOutResult, PoolSwap, Price, ProtocolSim, QueryPoolSwapParams,
+            SwapConstraint,
+        },
     },
     Bytes,
 };
@@ -34,9 +37,11 @@ use crate::evm::{
     engine_db::{create_engine, SHARED_TYCHO_DB},
     protocol::{
         fluid::{v1::constant::RESERVES_RESOLVER, vm},
+        safe_math::sqrt_u512,
         u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
         utils::add_fee_markup,
     },
+    query_pool_swap::price_to_f64_with_decimals,
 };
 
 mod constant {
@@ -125,7 +130,10 @@ impl From<SwapError> for SimulationError {
     }
 }
 impl FluidV1 {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "parameters mirror the Fluid liquidity-layer swap inputs"
+    )]
     pub(super) fn new(
         pool_address: &Bytes,
         token0: &Token,
@@ -138,14 +146,14 @@ impl FluidV1 {
         sync_time: u64,
     ) -> Self {
         let pool_reserve0 = get_max_reserves(
-            token0.decimals as u8,
+            token0.decimals,
             &dex_limits.withdrawable_token0,
             &dex_limits.borrowable_token0,
             &collateral_reserves.token0_real_reserves,
             &debt_reserves.token0_real_reserves,
         );
         let pool_reserve1 = get_max_reserves(
-            token1.decimals as u8,
+            token1.decimals,
             &dex_limits.withdrawable_token1,
             &dex_limits.borrowable_token1,
             &collateral_reserves.token1_real_reserves,
@@ -184,6 +192,122 @@ impl FluidV1 {
             address
         }
     }
+
+    /// Returns the input amount, fee included, that moves both sub-pools' marginal prices to
+    /// `target`, treating each as a constant-product AMM over its imaginary reserves. Returns
+    /// `None` on overflow or a zero target.
+    fn closed_form_amount_in(
+        &self,
+        target: &Price,
+        token_in: &Token,
+        token_out: &Token,
+    ) -> Option<BigUint> {
+        let (col, debt) = (&self.collateral_reserves, &self.debt_reserves);
+        let sub_pools = if token_in.address == self.token0.address {
+            [
+                (col.token0_imaginary_reserves, col.token1_imaginary_reserves),
+                (debt.token0_imaginary_reserves, debt.token1_imaginary_reserves),
+            ]
+        } else {
+            [
+                (col.token1_imaginary_reserves, col.token0_imaginary_reserves),
+                (debt.token1_imaginary_reserves, debt.token0_imaginary_reserves),
+            ]
+        };
+        let ten_pow = |exponent: i64| U512::from(10u64).pow(U512::from(exponent.unsigned_abs()));
+        let fee_den = U512::from(constant::SIX_DECIMALS);
+        let fee_num = U512::from(constant::SIX_DECIMALS - self.fee);
+
+        // `spot_price` reports the reserve ratio divided by `1 - fee`.
+        let mut ratio_num =
+            U512::try_from_be_slice(&target.numerator.to_bytes_be())?.checked_mul(fee_num)?;
+        let mut ratio_den =
+            U512::try_from_be_slice(&target.denominator.to_bytes_be())?.checked_mul(fee_den)?;
+        // Imaginary reserves hold both tokens at 12 decimals.
+        let decimals_shift = token_in.decimals as i64 - token_out.decimals as i64;
+        if decimals_shift >= 0 {
+            ratio_num = ratio_num.checked_mul(ten_pow(decimals_shift))?;
+        } else {
+            ratio_den = ratio_den.checked_mul(ten_pow(decimals_shift))?;
+        }
+
+        let mut amount_adjusted = U512::ZERO;
+        for (reserve_in, reserve_out) in sub_pools {
+            let reserve_in = U512::from(reserve_in);
+            // The marginal price is k / reserve_in^2, so the new reserve_in is sqrt(k / price).
+            let k = reserve_in.checked_mul(U512::from(reserve_out))?;
+            let new_reserve_in = sqrt_u512(
+                k.checked_mul(ratio_den)?
+                    .checked_div(ratio_num)?,
+            );
+            amount_adjusted =
+                amount_adjusted.checked_add(new_reserve_in.saturating_sub(reserve_in))?;
+        }
+
+        let dex_shift = token_in.decimals as i64 - constant::DEX_AMOUNT_DECIMALS;
+        let amount_after_fee = if dex_shift >= 0 {
+            amount_adjusted.checked_mul(ten_pow(dex_shift))?
+        } else {
+            amount_adjusted / ten_pow(dex_shift)
+        };
+        let amount_in = amount_after_fee.checked_mul(fee_den)? / fee_num;
+        Some(u256_to_biguint(U256::checked_from_limbs_slice(amount_in.as_limbs())?))
+    }
+
+    /// Returns the swap that moves the spot price down into `[target, target * (1 + tolerance)]`.
+    /// A target equal to the spot price gives a zero swap. A target above it is `InvalidInput`.
+    fn swap_to_target_price(
+        &self,
+        params: &QueryPoolSwapParams,
+        target: &Price,
+        tolerance: f64,
+    ) -> Result<PoolSwap, SimulationError> {
+        let (token_in, token_out) = (params.token_in(), params.token_out());
+        let spot = self.spot_price(token_in, token_out)?;
+        let target_f64 = price_to_f64_with_decimals(target, token_in.decimals, token_out.decimals)?;
+        if target_f64 > spot {
+            return Err(SimulationError::InvalidInput(
+                format!("Target price {target_f64} is above spot price {spot}"),
+                None,
+            ));
+        }
+        if target_f64 == spot {
+            return Ok(PoolSwap::new(BigUint::ZERO, BigUint::ZERO, self.clone_box(), None));
+        }
+
+        // The numerical search reports pool limit errors, and it corrects the closed form when
+        // the sub-pools start at different prices.
+        if let Some(amount_in) = self.closed_form_amount_in(target, token_in, token_out) {
+            if let Ok(result) = self.get_amount_out(amount_in.clone(), token_in, token_out) {
+                let new_spot = result
+                    .new_state
+                    .spot_price(token_in, token_out)?;
+                // Allow f64 rounding noise on both sides of the band.
+                let lowest = target_f64 * (1.0 - 1e-12);
+                let highest = target_f64 * (1.0 + tolerance) * (1.0 + 1e-12);
+                if (lowest..=highest).contains(&new_spot) {
+                    return Ok(PoolSwap::new(amount_in, result.amount, result.new_state, None));
+                }
+            }
+        }
+        crate::evm::query_pool_swap::query_pool_swap(self, params)
+    }
+}
+
+fn decode_block_timestamp(attributes: &HashMap<String, Bytes>) -> Result<u64, TransitionError> {
+    let bytes = attributes
+        .get(vm::BLOCK_TIMESTAMP_ATTRIBUTE)
+        .ok_or_else(|| {
+            TransitionError::MissingAttribute(vm::BLOCK_TIMESTAMP_ATTRIBUTE.to_string())
+        })?;
+    let timestamp = <[u8; 8]>::try_from(bytes.as_ref()).map_err(|_wrong_length| {
+        TransitionError::DecodeError(format!(
+            "{} must be an 8-byte big-endian u64, got {} bytes",
+            vm::BLOCK_TIMESTAMP_ATTRIBUTE,
+            bytes.len()
+        ))
+    })?;
+    Ok(u64::from_be_bytes(timestamp))
 }
 
 #[typetag::serde]
@@ -362,21 +486,27 @@ impl ProtocolSim for FluidV1 {
         ))
     }
 
+    /// Decodes `pool_reserves_adjusted` with its eight-byte `block_timestamp` when present.
+    /// A missing timestamp fails; only missing reserves fall back to confirmed state.
     fn delta_transition(
         &mut self,
-        _delta: ProtocolStateDelta,
+        delta: ProtocolStateDelta,
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
-
-        let state = vm::decode_from_vm(
-            &self.pool_address,
-            &self.token0,
-            &self.token1,
-            RESERVES_RESOLVER,
-            engine,
-        )?;
+        let state = match delta
+            .updated_attributes
+            .get(vm::POOL_RESERVES_ADJUSTED_ATTRIBUTE)
+        {
+            Some(reserves) => {
+                let sync_time = decode_block_timestamp(&delta.updated_attributes)?;
+                vm::decode_reserves(reserves, sync_time)?
+            }
+            None => {
+                let engine = create_engine(SHARED_TYCHO_DB.clone(), false)?;
+                vm::fetch_pool_state(&self.pool_address, RESERVES_RESOLVER, &engine)?
+            }
+        };
 
         trace!(?state, "Calling delta transition for {}", &self.pool_address);
 
@@ -388,7 +518,7 @@ impl ProtocolSim for FluidV1 {
         self.sync_time = state.sync_time;
 
         self.pool_reserve0 = get_max_reserves(
-            self.token0.decimals as u8,
+            self.token0.decimals,
             &self.dex_limits.withdrawable_token0,
             &self.dex_limits.borrowable_token0,
             &self
@@ -397,7 +527,7 @@ impl ProtocolSim for FluidV1 {
             &self.debt_reserves.token0_real_reserves,
         );
         self.pool_reserve1 = get_max_reserves(
-            self.token1.decimals as u8,
+            self.token1.decimals,
             &self.dex_limits.withdrawable_token1,
             &self.dex_limits.borrowable_token1,
             &self
@@ -428,11 +558,15 @@ impl ProtocolSim for FluidV1 {
         }
     }
 
-    fn query_pool_swap(
-        &self,
-        params: &tycho_common::simulation::protocol_sim::QueryPoolSwapParams,
-    ) -> Result<tycho_common::simulation::protocol_sim::PoolSwap, SimulationError> {
-        crate::evm::query_pool_swap::query_pool_swap(self, params)
+    fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        match params.swap_constraint() {
+            SwapConstraint::PoolTargetPrice { target, tolerance, .. } => {
+                self.swap_to_target_price(params, target, *tolerance)
+            }
+            SwapConstraint::TradeLimitPrice { .. } => {
+                crate::evm::query_pool_swap::query_pool_swap(self, params)
+            }
+        }
     }
 }
 
@@ -473,7 +607,10 @@ where
     (best, best_result)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "parameters mirror the Fluid liquidity-layer swap inputs"
+)]
 fn swap_in_adjusted(
     swap0_to_1: bool,
     amount_to_swap: U256,
@@ -692,7 +829,11 @@ fn swap_in_adjusted(
     Ok(from_adjusted_amount(amount_out_collateral + amount_out_debt, out_decimals))
 }
 
-#[allow(clippy::too_many_arguments, dead_code)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "parameters mirror the Fluid liquidity-layer swap inputs"
+)]
+#[cfg(test)]
 fn swap_out_adjusted(
     swap0_to_1: bool,
     amount_to_receive: U256,
@@ -954,7 +1095,7 @@ fn swap_routing_in(t: U256, x: U256, y: U256, x2: U256, y2: U256) -> U256 {
 /// - If `a < 0` → entire trade goes through debt pool.
 /// - If `a > t` → entire trade goes through collateral pool.
 /// - If `0 < a < t` → swap routes through both pools.
-#[allow(dead_code)]
+#[cfg(test)]
 fn swap_routing_out(t: U256, x: U256, y: U256, x2: U256, y2: U256) -> U256 {
     let xy_root = (x * y * constant::B_I1E18).root(2);
     let x2y2_root = (x2 * y2 * constant::B_I1E18).root(2);
@@ -972,7 +1113,7 @@ fn get_amount_out(amount_in: U256, i_reserve_in: U256, i_reserve_out: U256) -> U
 /// Given an output amount of asset and reserves, returns the input amount of the other asset.
 ///
 /// Formula: (amount_out * iReserveIn) / (iReserveOut - amount_out)
-#[allow(dead_code)]
+#[cfg(test)]
 fn get_amount_in(amount_out: U256, i_reserve_in: U256, i_reserve_out: U256) -> U256 {
     amount_out * i_reserve_in / (i_reserve_out - amount_out)
 }
@@ -1014,7 +1155,7 @@ fn from_adjusted_amount(adjusted_amount: U256, decimals: i64) -> U256 {
 }
 
 fn ten_pow(v: i64) -> U256 {
-    U256::from(10u64).pow(U256::from((v) as u64))
+    U256::from(10u64).pow(U256::from(u64::try_from(v).expect("ten_pow exponent is non-negative")))
 }
 
 /// Checks if token0 reserves are sufficient compared to token1 reserves.
@@ -1205,7 +1346,7 @@ fn update_debt_reserves_and_limits(
 }
 
 fn get_max_reserves(
-    decimals: u8,
+    decimals: u32,
     withdrawable_limit: &TokenLimit,
     borrowable_limit: &TokenLimit,
     real_col_reserves: &U256,
@@ -1221,12 +1362,11 @@ fn get_max_reserves(
     // Step 2: Calculate maxRealReserves
     let mut max_real_reserves = *real_col_reserves + *real_debt_reserves;
 
-    if decimals > constant::DEX_AMOUNT_DECIMALS as u8 {
-        let diff = decimals as i64 - constant::DEX_AMOUNT_DECIMALS;
-        max_real_reserves *= ten_pow(diff);
-    } else if decimals < constant::DEX_AMOUNT_DECIMALS as u8 {
-        let diff = constant::DEX_AMOUNT_DECIMALS - decimals as i64;
-        max_real_reserves /= ten_pow(diff);
+    let decimals_shift = i64::from(decimals) - constant::DEX_AMOUNT_DECIMALS;
+    if decimals_shift > 0 {
+        max_real_reserves *= ten_pow(decimals_shift);
+    } else if decimals_shift < 0 {
+        max_real_reserves /= ten_pow(-decimals_shift);
     }
 
     // Step 3: Return the smaller of the two
@@ -1244,9 +1384,11 @@ mod test {
     use alloy::primitives::I256;
     use anyhow::bail;
     use num_traits::Num;
+    use rstest::rstest;
     use tycho_common::models::Chain;
 
     use super::*;
+    use crate::evm::query_pool_swap::test_helpers::{target_price_params, to_price};
 
     fn setup_fluid_pool(center_price: U256) -> (Token, Token, FluidV1) {
         let wsteth = Token::new(
@@ -1563,6 +1705,111 @@ mod test {
     }
 
     #[test]
+    fn test_delta_transition_from_attribute() {
+        let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
+        let sync_time: u64 = 1_700_000_000;
+        let delta = ProtocolStateDelta {
+            updated_attributes: HashMap::from(vm::pending_state_attributes(
+                alloy::sol_types::SolValue::abi_encode(&vm::sample_pool_with_reserves()),
+                sync_time,
+            )),
+            ..Default::default()
+        };
+
+        pool.delta_transition(delta, &HashMap::new(), &Balances::default())
+            .expect("delta transition from attribute failed");
+
+        // Values must come from the attribute bytes; a VM call would fail here because the
+        // shared engine has no block set.
+        assert_eq!(
+            pool.collateral_reserves
+                .token0_real_reserves,
+            U256::from(1u64)
+        );
+        assert_eq!(
+            pool.collateral_reserves
+                .token1_imaginary_reserves,
+            U256::from(4u64)
+        );
+        assert_eq!(pool.debt_reserves.token0_real_reserves, U256::from(13u64));
+        assert_eq!(
+            pool.debt_reserves
+                .token1_imaginary_reserves,
+            U256::from(16u64)
+        );
+        assert_eq!(
+            pool.dex_limits
+                .withdrawable_token0
+                .available,
+            U256::from(21u64)
+        );
+        assert_eq!(
+            pool.dex_limits
+                .borrowable_token1
+                .expand_duration,
+            U256::from(32u64)
+        );
+        assert_eq!(pool.fee, U256::from(41u64));
+        assert_eq!(pool.center_price, U256::from(42u64));
+        assert_eq!(pool.sync_time, sync_time);
+        // Pool reserves are recomputed from the new limits and reserves:
+        // withdrawable + borrowable expands_to caps the summed real reserves.
+        assert_eq!(pool.pool_reserve0, U256::from(22u64 + 28u64));
+        assert_eq!(pool.pool_reserve1, U256::from(25u64 + 31u64));
+    }
+
+    #[test]
+    fn test_delta_transition_attribute_without_timestamp() {
+        let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
+        let delta = ProtocolStateDelta {
+            updated_attributes: HashMap::from([(
+                vm::POOL_RESERVES_ADJUSTED_ATTRIBUTE.to_string(),
+                Bytes::from(alloy::sol_types::SolValue::abi_encode(
+                    &vm::sample_pool_with_reserves(),
+                )),
+            )]),
+            ..Default::default()
+        };
+
+        let result = pool.delta_transition(delta, &HashMap::new(), &Balances::default());
+
+        match result {
+            Err(TransitionError::MissingAttribute(attr)) => {
+                assert_eq!(attr, vm::BLOCK_TIMESTAMP_ATTRIBUTE)
+            }
+            other => panic!("expected MissingAttribute error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_delta_transition_rejects_malformed_timestamp() {
+        for timestamp in [vec![0; 7], vec![0; 9], vec![0; 32]] {
+            let delta = ProtocolStateDelta {
+                updated_attributes: HashMap::from([
+                    (
+                        vm::POOL_RESERVES_ADJUSTED_ATTRIBUTE.to_string(),
+                        Bytes::from(alloy::sol_types::SolValue::abi_encode(
+                            &vm::sample_pool_with_reserves(),
+                        )),
+                    ),
+                    (vm::BLOCK_TIMESTAMP_ATTRIBUTE.to_string(), Bytes::from(timestamp.clone())),
+                ]),
+                ..Default::default()
+            };
+            let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
+
+            let result = pool.delta_transition(delta, &HashMap::new(), &Balances::default());
+
+            match result {
+                Err(TransitionError::DecodeError(message)) => {
+                    assert!(message.contains(&format!("got {} bytes", timestamp.len())));
+                }
+                other => panic!("expected DecodeError, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn test_calc_amount_out_zero2one() {
         let (wsteth, eth, pool) = setup_fluid_pool(U256::ONE);
         let cases = [
@@ -1592,6 +1839,111 @@ mod test {
 
             assert_eq!(res.amount, exp_out);
         }
+    }
+
+    fn setup_pool_with_decimals(center_price: U256, decimals: u32) -> (Token, Token, FluidV1) {
+        let (mut token0, mut token1, pool) = setup_fluid_pool(center_price);
+        token0.decimals = decimals;
+        token1.decimals = decimals;
+        let pool = FluidV1::new(
+            &pool.pool_address,
+            &token0,
+            &token1,
+            pool.collateral_reserves.clone(),
+            pool.debt_reserves.clone(),
+            limits_wide(),
+            pool.center_price,
+            pool.fee,
+            pool.sync_time,
+        );
+        (token0, token1, pool)
+    }
+
+    // Real reserves cap the move at a few bps. The tolerance is below the move, so a wrong
+    // amount leaves the band. One2zero needs a different center price to stay within limits.
+    #[rstest]
+    #[case::zero2one(true, U256::ONE, 18, 0.9998)]
+    #[case::one2zero(false, U256::from(12u64) * U256::from(10u64).pow(U256::from(26u64)), 18, 0.99995)]
+    #[case::six_decimals(true, U256::ONE, 6, 0.9998)]
+    fn test_swap_to_price_lands_in_band(
+        #[case] zero2one: bool,
+        #[case] center_price: U256,
+        #[case] decimals: u32,
+        #[case] multiplier: f64,
+    ) {
+        let (token0, token1, pool) = setup_pool_with_decimals(center_price, decimals);
+        let (token_in, token_out) = if zero2one { (token0, token1) } else { (token1, token0) };
+        let target = pool
+            .spot_price(&token_in, &token_out)
+            .unwrap() *
+            multiplier;
+        let params = target_price_params(
+            &token_in,
+            &token_out,
+            to_price(target, &token_in, &token_out),
+            1e-5,
+        );
+
+        let swap = pool.query_pool_swap(&params).unwrap();
+
+        assert!(swap.price_points().is_none(), "expected the closed form");
+        let new_spot = swap
+            .new_state()
+            .spot_price(&token_in, &token_out)
+            .unwrap();
+        assert!(
+            new_spot >= target * (1.0 - 1e-12) && new_spot <= target * (1.0 + 1e-5),
+            "{new_spot}"
+        );
+    }
+
+    #[test]
+    fn test_swap_to_price_target_above_spot() {
+        let (wsteth, eth, pool) = setup_fluid_pool(U256::ONE);
+        let spot = pool.spot_price(&wsteth, &eth).unwrap();
+        let params =
+            target_price_params(&wsteth, &eth, to_price(spot * 1.01, &wsteth, &eth), 0.001);
+
+        let result = pool.query_pool_swap(&params);
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
+    }
+
+    #[test]
+    fn test_swap_to_price_target_equal_to_spot() {
+        let (wsteth, eth, pool) = setup_fluid_pool(U256::ONE);
+        let spot = pool.spot_price(&wsteth, &eth).unwrap();
+        // spot is in [1, 2), so spot * 2^52 is an exact integer.
+        let scale = 1u128 << 52;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the scaled spot is a positive exact integer below 2^53"
+        )]
+        let target_numerator = (spot * scale as f64) as u128;
+        let target = Price::new(BigUint::from(target_numerator), BigUint::from(scale));
+        let params = target_price_params(&wsteth, &eth, target, 0.001);
+
+        let swap = pool.query_pool_swap(&params).unwrap();
+
+        assert_eq!(swap.amount_in(), &BigUint::ZERO);
+        assert!(swap.new_state().eq(&pool));
+    }
+
+    #[test]
+    fn test_swap_to_price_outside_band_uses_numerical_search() {
+        // With 6 decimals the closed-form input rounds down, so the new spot price misses a zero
+        // tolerance band.
+        let (token0, token1, pool) = setup_pool_with_decimals(U256::ONE, 6);
+        let spot = pool
+            .spot_price(&token0, &token1)
+            .unwrap();
+        let params =
+            target_price_params(&token0, &token1, to_price(spot * 0.9998, &token0, &token1), 0.0);
+
+        let swap = pool.query_pool_swap(&params).unwrap();
+
+        assert!(swap.price_points().is_some(), "expected the numerical search");
     }
 
     #[test]
@@ -1702,7 +2054,10 @@ mod test {
     /// - `out_decimals`: Decimals for the output token.
     /// - `limits`: Dex limits.
     /// - `sync_time`: Timestamp for syncing.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test helper takes every input and expected output of a swap case"
+    )]
     fn assert_swap_in_result(
         swap0_to_1: bool,
         amount_in: U256,
@@ -1734,7 +2089,10 @@ mod test {
         assert_eq!(expected_amount_out, out_amt.to_string(), "Amount out mismatch");
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test helper takes every input and expected output of a swap case"
+    )]
     fn assert_swap_out_result(
         swap0_to_1: bool,
         amount_out: U256,
@@ -1759,7 +2117,7 @@ mod test {
             out_decimals,
             &mut limits,
             price,
-            sync_time as u64,
+            u64::try_from(sync_time).unwrap(),
         )
         .expect("swap_out_adjusted failed");
 
@@ -1967,10 +2325,13 @@ mod test {
 
     #[test]
     fn test_swap_out() {
-        let sync_time = (SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64) -
+        let sync_time = (i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap()) -
             10;
 
         assert_swap_out_result(
@@ -2152,10 +2513,13 @@ mod test {
 
     #[test]
     fn test_swap_out_empty_debt() {
-        let sync_time = (SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64) -
+        let sync_time = (i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap()) -
             10;
 
         // swap0To1 = true
@@ -2187,10 +2551,13 @@ mod test {
 
     #[test]
     fn test_swap_out_empty_collateral() {
-        let sync_time = (SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64) -
+        let sync_time = (i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap()) -
             10;
 
         // swap0To1 = true

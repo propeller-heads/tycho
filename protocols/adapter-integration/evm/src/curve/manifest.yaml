@@ -9,7 +9,6 @@ constants:
   # minimum capabilities we can expect, individual pools may extend these
   capabilities:
     - SellSide
-    - PriceFunction
 
 # The file containing the adapter contract
 contract: CurveAdapter.sol

@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
-license.workspace = true
+license-file.workspace = true
 categories.workspace = true
 readme = "README.md"
 
@@ -23,13 +23,19 @@ hex.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true
 lru.workspace = true
+num-bigint.workspace = true
+metrics = "0.24"
 diesel-derive-enum = { version = "2.1.0", features = ["postgres"] }
 diesel_migrations = "2.1.0"
 itertools = "0.12.1"
 lazy_static = "1.4.0"
+roaring.workspace = true
 
 
 [dev-dependencies]
 pretty_assertions.workspace = true
 rstest.workspace = true
 test-log = { version = "0.2.14", features = ["trace"] }
+
+[lints]
+workspace = true

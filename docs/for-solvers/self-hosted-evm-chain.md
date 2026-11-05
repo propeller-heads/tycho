@@ -13,8 +13,20 @@ Some EVM chains have no hosted Substreams endpoint. To index one of those, run y
 Choose self-hosted when **no hosted Substreams endpoint exists for your chain**. If a hosted endpoint exists, prefer it — it needs no extra infrastructure.
 
 {% hint style="warning" %}
-The `substreams-endpoint` profile is a single-machine deployment: every Firehose component runs in one container. It suits development and testing, not production workloads that need high availability. For a distributed, fault-tolerant setup see the <a href="https://firehose.streamingfast.io/firehose/overview/deployment-and-scaling" target="_blank" rel="noopener noreferrer">Firehose deployment and scaling guide</a>.
+The RPC poller produces **base blocks** (no contract storage — VM protocols and DCI do not work). Read [Limitations](#limitations) first.
 {% endhint %}
+
+## Limitations
+
+### Base block model — VM protocols and DCI do not work
+
+The poller reads blocks over plain JSON-RPC, which exposes logs and receipts but not storage writes or internal calls. It therefore produces <a href="https://docs.substreams.dev/reference-material/chain-support/chains-and-endpoints#evm-extended-vs-base-block-model" target="_blank" rel="noopener noreferrer">base blocks</a> — the protobuf fields for storage and call data arrive empty. Hosted endpoints backed by instrumented nodes serve **extended** blocks that carry all of it.
+
+To overcome it, run your own instrumented node: a <a href="https://github.com/streamingfast/go-ethereum/releases" target="_blank" rel="noopener noreferrer">Firehose-patched build</a> of the chain's execution client (available for geth, op-geth, BNB, Polygon, Arbitrum) under `fireeth start reader-node`, in place of the poller — see the <a href="https://firehose.streamingfast.io/firehose/overview/chains/ethereum" target="_blank" rel="noopener noreferrer">Firehose EVM node setup guide</a>.
+
+### Single machine — meant for dev/test usage
+
+This limitation comes from the compose profile, not Firehose: it starts every Firehose component in one container against one RPC endpoint — no high availability, no failover. For production, replace the profile with a distributed topology following the <a href="https://firehose.streamingfast.io/firehose/overview/distributed-deployment" target="_blank" rel="noopener noreferrer">Firehose deployment and scaling guide</a>.
 
 ## Prerequisites
 
@@ -121,7 +133,7 @@ chains:
       symbol: "ETH"
       decimals: 18
     wrapped_native:                   # wrapped native token (e.g. WETH)
-      address: "0x0000000000000000000000000000000000000000"
+      address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # Ethereum WETH; replace with your chain's wrapper
       symbol: "WETH"
       decimals: 18
     default_tvl_thresholds:           # TVL gates (in native token units) for component tracking
@@ -134,13 +146,13 @@ chains:
 <tr><td><code>chain_id</code></td><td>EVM chain id.</td></tr>
 <tr><td><code>block_time_secs</code></td><td>Average block time in seconds.</td></tr>
 <tr><td><code>native</code></td><td>Native gas token: <code>address</code>, <code>symbol</code>, <code>decimals</code>.</td></tr>
-<tr><td><code>wrapped_native</code></td><td>Wrapped native token (e.g. WETH): <code>address</code>, <code>symbol</code>, <code>decimals</code>.</td></tr>
+<tr><td><code>wrapped_native</code></td><td>Wrapped native token (e.g. WETH): <code>address</code>, <code>symbol</code>, <code>decimals</code>. Use the wrapper deployed on your chain. If <code>wrapped_native.address</code> equals <code>native.address</code>, Tycho treats the chain as having no wrapper and injects no <code>native_wrapper</code> component.</td></tr>
 <tr><td><code>default_tvl_thresholds</code></td><td>Liquidity gates in <strong>native-token units</strong> (e.g. ETH), read by downstream consumers (solvers, tycho-simulation) to decide which components to track — not by the indexer. Size <code>low</code>/<code>medium</code> to the USD floor you want at the native token's price; the Ethereum defaults target roughly $20k / $200k.</td></tr>
 </tbody></table>
 
 ### Building a Substreams package
 
-Tycho ships the Substreams module sources in <a href="https://github.com/propeller-heads/tycho/tree/main/protocols/substreams" target="_blank" rel="noopener noreferrer"><code>protocols/substreams/</code></a>. Each directory holds one WASM module plus a manifest per chain and fork that reuses it — for example <code>ethereum-uniswap-v2/</code> also carries the PancakeSwap manifests and the Arbitrum, BSC, Base, and Unichain variants. The WASM logic is chain-agnostic; each manifest pins the chain-specific factory address and start block. A chain Tycho has never indexed has no prebuilt `.spkg`, so you build one.
+Tycho ships the Substreams module sources in <a href="https://github.com/propeller-heads/tycho/tree/main/protocols/substreams" target="_blank" rel="noopener noreferrer"><code>protocols/substreams/</code></a>. Each directory holds one WASM module plus a manifest per chain and fork that reuses it — for example <code>ethereum-uniswap-v2/</code> also carries the PancakeSwap manifests and the Arbitrum, BSC, Base, and Unichain variants. The WASM logic is chain-agnostic; each manifest pins the chain-specific factory address and start block. A chain Tycho has never indexed has no prebuilt `.spkg`, so you build one — from a logs-only module such as `ethereum-uniswap-v2` or `ethereum-uniswap-v3-logs-only` (see [Limitations](#limitations)).
 
 To index a Uniswap-V2-style DEX on a new chain, reuse the `ethereum-uniswap-v2` module and add a manifest for your chain:
 

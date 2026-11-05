@@ -7,15 +7,19 @@ PostgreSQL backend implementing the storage traits defined in `tycho-common`.
 ```
 postgres/
 ├── mod.rs              — PostgresGateway (internal); shared enum caches; DB init helpers
+├── pool.rs             — checkout helper (span, wait histogram) and `db_pool_*` status gauges
 ├── builder.rs          — GatewayBuilder: configures + constructs public gateways
 ├── cache.rs            — CachedGateway + DBCacheWriteExecutor: buffered write path
 ├── direct.rs           — DirectGateway: unbuffered read/write path (testing, auditing)
 ├── chain.rs            — block & transaction persistence
 ├── contract.rs         — account, code, storage slot, and native-balance persistence
 ├── protocol.rs         — protocol component, attribute, and token-balance persistence
+├── token_cache.rs      — in-memory token store answering get_tokens without SQL (opt-in)
+├── component_index.rs  — in-memory id/TVL index counting and paging get_protocol_components
 ├── entry_point.rs      — entry point + tracing param/result persistence
 ├── extraction_state.rs — extractor checkpoint (cursor, block hash) persistence
-├── versioning.rs       — VersionedRow / StoredVersionedRow traits + apply_versioning()
+├── snapshot.rs         — one-transaction read of all live contracts and components for the entity cache (StateSnapshotGateway)
+├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
 ├── orm.rs              — Diesel Queryable/Insertable structs for every table
 └── schema.rs           — auto-generated Diesel table! macros
 ```
@@ -26,15 +30,46 @@ All public DB operations go through one of two gateway structs:
 
 - **`CachedGateway`** (normal path): sends `WriteOp` messages over an async channel to
   `DBCacheWriteExecutor`, which batches by block and flushes in a fixed order when the next
-  block arrives. Reads bypass the cache and hit the DB directly.
+  block arrives. Most reads hit the DB directly; the exceptions are `get_tokens` (served from
+  `token_cache` when enabled), `get_protocol_components` (counted and paged by `component_index`
+  when enabled) and `get_delta` (small LRU). The executor runs a batch up to
+  three times when Postgres reports a transaction conflict (deadlock or serialization
+  failure); each attempt re-runs from scratch with a fresh snapshot.
 - **`DirectGateway`** (testing / low-throughput): same trait surface, no buffering.
 
+`GatewayBuilder::build` requires **exactly one** chain (`ensure_chain`) — an instance is
+single-chain; it hard-fails otherwise.
+
 Both delegate every actual SQL call to `PostgresGateway` (unexported). Domain logic lives in
-`chain`, `contract`, `protocol`, `entry_point`, and `extraction_state`—each adding methods to
-`PostgresGateway` via `impl` blocks in their own file.
+`chain`, `contract`, `protocol`, `entry_point`, `extraction_state`, and `snapshot`—each adding
+methods to `PostgresGateway` via `impl` blocks in their own file.
 
 `versioning` is the only module without a DB table of its own; it provides the shared traits
-and `apply_versioning()` utility consumed by `contract` and `protocol`.
+and utilities consumed by `contract` and `protocol`. Two paths: `apply_versioning()` for plain
+versioned tables, and `apply_partitioned_versioning()` for the partitioned ones — protocol state,
+component balances, and contract storage.
+
+`token_cache` holds an in-memory copy of the token tables so `get_tokens` never touches SQL.
+Opt-in via `GatewayBuilder::enable_token_cache()` (the `index` and `rpc` commands enable it;
+the token-analysis job does not). Kept fresh by write-through on token/balance writes plus a
+periodic `modified_ts` delta poll for out-of-process writers. See the module docs for design.
+
+`component_index` holds the id and TVL of every component, per protocol system, so
+`get_protocol_components` requests with a protocol system and no ids skip the SQL `COUNT` and
+`OFFSET` scan; Postgres only loads the components on the page, by primary key. Enabled via
+`GatewayBuilder::set_component_index` (the `--component-index` flag / `COMPONENT_INDEX` env var of
+the `index` and `rpc` commands, on by default). Kept fresh by a 1 s poll of new component ids and
+of `component_tvl` rows with a newer `modified_ts` (`idx_component_tvl_modified_ts`), and a full
+reload every hour. See the module docs for design and for the unexpected cases only the full
+reload corrects.
+
+Every gateway checkout and the DB writer checkout go through `pool::checkout`. It opens a
+`db_pool_checkout` span and records the wait in `db_pool_checkout_duration_seconds{pool}`. The
+`pool` label is `extraction`, `rpc` or `direct`. A 1 s sampler sets
+`db_pool_connections{pool,state}`, `db_pool_waiting{pool}` and `db_pool_max_size{pool}`. Traced
+entry point reads load rows with a connection (`load_traced_entry_point_rows`) and return the
+connection before they decode the JSON (`decode_traced_entry_points`). Do not hold a connection
+during a decode.
 
 ## Write Order
 
@@ -51,3 +86,9 @@ and `apply_versioning()` utility consumed by `contract` and `protocol`.
 Every mutable entity carries `valid_from` / `valid_to` timestamps enabling time-travel
 queries. `versioning::apply_versioning()` sets `valid_to` on the previous row when a new
 version is inserted. Historical rows are never mutated.
+
+History is bounded, though: pg_cron jobs prune it outside the Rust code. `drop_expired_partitions()`
+drops expired partitions of `protocol_state`, `component_balance` and `contract_storage`, and
+`cleanup_orphaned_transactions()` deletes transaction rows nothing references any more (tracked via
+`transaction_cleanup_progress`). Both read the horizon from the `partition_retention_config` table
+(default 1 month). See `scripts/prune_transaction_table.md`.

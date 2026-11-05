@@ -92,7 +92,13 @@ impl EthereumTokenPreProcessor {
 
 #[async_trait]
 impl TokenPreProcessor for EthereumTokenPreProcessor {
-    #[instrument(skip_all, fields(n_addresses=addresses.len(), block = ?block))]
+    // Named explicitly: this span is an on-chain metadata fetch and would otherwise
+    // be indistinguishable in traces from the storage-layer `get_tokens` spans.
+    #[instrument(
+        name = "fetch_onchain_token_metadata",
+        skip_all,
+        fields(n_addresses = addresses.len(), block = ?block)
+    )]
     async fn get_tokens(
         &self,
         addresses: Vec<Bytes>,

@@ -1,45 +1,44 @@
 use crate::{
     abi::vault_contract::{
-        events::{LiquidityAdded, LiquidityRemoved, PoolPausedStateChanged, Swap},
+        events::{LiquidityAddedToBuffer, PoolPausedStateChanged},
         functions::{Erc4626BufferWrapOrUnwrap, SendTo, Settle},
     },
-    pool_factories,
+    params::DeploymentConfig,
+    pool_balances, pool_factories,
+    utils::{
+        address_id, buffer_mapping_key, decode_address_from_storage_word,
+        mapping_storage_key_for_address, pool_store_key,
+    },
 };
 use anyhow::Result;
 use itertools::Itertools;
-use keccak_hash::keccak;
 use std::collections::HashMap;
-use substreams::{
-    hex, log,
-    pb::substreams::StoreDeltas,
-    store::{
-        StoreAddBigInt, StoreGet, StoreGetInt64, StoreGetProto, StoreNew, StoreSetIfNotExists,
-        StoreSetIfNotExistsInt64, StoreSetIfNotExistsProto,
-    },
+use substreams::store::{
+    StoreGet, StoreGetInt64, StoreGetProto, StoreGetString, StoreNew, StoreSetIfNotExists,
+    StoreSetIfNotExistsInt64, StoreSetIfNotExistsProto, StoreSetIfNotExistsString,
 };
 use substreams_ethereum::{
     pb::eth::{self, v2::StorageChange},
     Event, Function,
 };
 use tycho_substreams::{
-    attributes::json_deserialize_address_list, balances::aggregate_balances_changes,
-    block_storage::get_block_storage_changes, contract::extract_contract_changes_builder,
-    entrypoint::create_entrypoint, models::entry_point_params::TraceData, prelude::*,
+    attributes::json_deserialize_address_list, block_storage::get_block_storage_changes,
+    contract::extract_contract_changes_builder, entrypoint::create_entrypoint,
+    models::entry_point_params::TraceData, prelude::*,
 };
 
-pub const VAULT_ADDRESS: &[u8] = &hex!("bA1333333333a1BA1108E8412f11850A5C319bA9");
-pub const VAULT_EXTENSION_ADDRESS: &[u8; 20] = &hex!("0E8B07657D719B86e06bF0806D6729e3D528C9A9");
-pub const BATCH_ROUTER_ADDRESS: &[u8; 20] = &hex!("136f1efcc3f8f88516b9e94110d56fdbfb1778d1");
-pub const PERMIT_2_ADDRESS: &[u8; 20] = &hex!("000000000022D473030F116dDEE9F6B43aC78BA3");
-
 #[substreams::handlers::map]
-pub fn map_components(block: eth::v2::Block) -> Result<BlockTransactionProtocolComponents> {
+pub fn map_components(
+    params: String,
+    block: eth::v2::Block,
+) -> Result<BlockTransactionProtocolComponents> {
+    let config = DeploymentConfig::parse(&params)?;
     let mut tx_components = Vec::new();
     for tx in block.transactions() {
         let mut components = Vec::new();
         for (log, call) in tx.logs_with_calls() {
             if let Some(component) =
-                pool_factories::address_map(log.address.as_slice(), log, call.call)
+                pool_factories::address_map(log.address.as_slice(), log, call.call, &config)
             {
                 components.push(component);
             }
@@ -63,7 +62,7 @@ pub fn store_components(
             tx_pc
                 .components
                 .into_iter()
-                .for_each(|pc| store.set_if_not_exists(0, format!("pool:{0}", pc.id), &pc))
+                .for_each(|pc| store.set_if_not_exists(0, format!("pool:{}", pc.id), &pc))
         });
 }
 
@@ -85,121 +84,37 @@ pub fn store_token_set(map: BlockTransactionProtocolComponents, store: StoreSetI
         });
 }
 
-#[substreams::handlers::map]
-pub fn map_relative_balances(
-    block: eth::v2::Block,
-    store: StoreGetProto<ProtocolComponent>,
-) -> Result<BlockBalanceDeltas, anyhow::Error> {
-    let balance_deltas = block
-        .logs()
-        .filter(|log| log.address() == VAULT_ADDRESS)
-        .flat_map(|vault_log| {
-            let mut deltas = Vec::new();
-
-            if let Some(Swap { pool, token_in, token_out, amount_in, amount_out, .. }) =
-                Swap::match_and_decode(vault_log.log)
-            {
-                let component_id = format!("0x{}", hex::encode(pool));
-                log::info!(
-                    "swap at component id: {:?} with key: {:?}",
-                    component_id,
-                    format!("pool:{}", &component_id)
-                );
-
-                if store
-                    .get_last(format!("pool:{}", component_id))
-                    .is_some()
-                {
-                    deltas.extend_from_slice(&[
-                        BalanceDelta {
-                            ord: vault_log.ordinal(),
-                            tx: Some(vault_log.receipt.transaction.into()),
-                            token: token_in.to_vec(),
-                            delta: amount_in.to_signed_bytes_be(),
-                            component_id: component_id.as_bytes().to_vec(),
-                        },
-                        BalanceDelta {
-                            ord: vault_log.ordinal(),
-                            tx: Some(vault_log.receipt.transaction.into()),
-                            token: token_out.to_vec(),
-                            delta: amount_out.neg().to_signed_bytes_be(),
-                            component_id: component_id.as_bytes().to_vec(),
-                        },
-                    ]);
-                }
-            }
-            if let Some(LiquidityAdded { pool, amounts_added_raw, .. }) =
-                LiquidityAdded::match_and_decode(vault_log.log)
-            {
-                let component_id = format!("0x{}", hex::encode(pool));
-                if let Some(component) = store.get_last(format!("pool:{}", component_id)) {
-                    if component.tokens.len() != amounts_added_raw.len() {
-                        panic!(
-                            "liquidity added to pool with different number of tokens than expected"
-                        );
-                    }
-                    log::info!(
-                        "liquidity added at component id: {:?} with key: {:?} with tokens: {:?}",
-                        component_id,
-                        format!("pool:{}", &component_id),
-                        component.tokens
-                    );
-                    let deltas_from_added_liquidity = amounts_added_raw
-                        .into_iter()
-                        .zip(component.tokens.iter())
-                        .map(|(amount, token)| BalanceDelta {
-                            ord: vault_log.ordinal(),
-                            tx: Some(vault_log.receipt.transaction.into()),
-                            token: token.to_vec(),
-                            delta: amount.to_signed_bytes_be(),
-                            component_id: component_id.as_bytes().to_vec(),
-                        })
-                        .collect::<Vec<_>>();
-                    deltas.extend_from_slice(&deltas_from_added_liquidity);
-                }
-            }
-            if let Some(LiquidityRemoved { pool, amounts_removed_raw, .. }) =
-                LiquidityRemoved::match_and_decode(vault_log.log)
-            {
-                let component_id = format!("0x{}", hex::encode(pool));
-                log::info!(
-                    "liquidity removed at component id: {:?} with key: {:?}",
-                    component_id,
-                    format!("pool:{}", &component_id)
-                );
-                if let Some(component) = store.get_last(format!("pool:{}", component_id)) {
-                    if component.tokens.len() != amounts_removed_raw.len() {
-                        panic!(
-                            "liquidity removed from pool with different number of tokens than expected"
-                        );
-                    }
-                    let deltas_from_removed_liquidity = amounts_removed_raw
-                        .into_iter()
-                        .zip(component.tokens.iter())
-                        .map(|(amount, token)| BalanceDelta {
-                            ord: vault_log.ordinal(),
-                            tx: Some(vault_log.receipt.transaction.into()),
-                            token: token.to_vec(),
-                            delta: amount.neg().to_signed_bytes_be(),
-                            component_id: component_id.as_bytes().to_vec(),
-                        })
-                        .collect::<Vec<_>>();
-                    deltas.extend_from_slice(&deltas_from_removed_liquidity);
-                }
-            }
-
-            deltas
-        })
-        .collect::<Vec<_>>();
-
-    Ok(BlockBalanceDeltas { balance_deltas })
-}
-
-/// It's significant to include both the `pool_id` and the `token_id` for each balance delta as the
-///  store key to ensure that there's a unique balance being tallied for each.
 #[substreams::handlers::store]
-pub fn store_balances(deltas: BlockBalanceDeltas, store: StoreAddBigInt) {
-    tycho_substreams::balances::store_balance_changes(deltas, store);
+pub fn store_token_mapping(
+    params: String,
+    block: eth::v2::Block,
+    store: StoreSetIfNotExistsString,
+) {
+    let config = DeploymentConfig::parse(&params).expect("invalid deployment params");
+    let vault_address = config.vault.as_slice();
+    block.transactions().for_each(|tx| {
+        tx.logs_with_calls()
+            .filter(|(log, _)| log.address.as_slice() == vault_address)
+            .for_each(|(log, call)| {
+                // The first liquidity add initializes an ERC4626 buffer and emits the wrapped
+                // token. The underlying token is not part of the event, so we read the
+                // `_bufferAssets[wrapped_token]` storage write from the same Vault call and
+                // persist that relationship for later reserve updates.
+                if let Some(LiquidityAddedToBuffer { wrapped_token, .. }) =
+                    LiquidityAddedToBuffer::match_and_decode(log)
+                {
+                    if let Some(underlying_token) =
+                        find_underlying_token(call.call, &wrapped_token, vault_address)
+                    {
+                        store.set_if_not_exists(
+                            0,
+                            buffer_mapping_key(&wrapped_token),
+                            &hex::encode(underlying_token),
+                        );
+                    }
+                }
+            })
+    });
 }
 
 /// This is the main map that handles most of the indexing of this substream.
@@ -210,13 +125,15 @@ pub fn store_balances(deltas: BlockBalanceDeltas, store: StoreAddBigInt) {
 /// `BlockChanges`  is ordered by transactions properly.
 #[substreams::handlers::map]
 pub fn map_protocol_changes(
+    params: String,
     block: eth::v2::Block,
     grouped_components: BlockTransactionProtocolComponents,
-    deltas: BlockBalanceDeltas,
     components_store: StoreGetProto<ProtocolComponent>,
     tokens_store: StoreGetInt64,
-    balance_store: StoreDeltas, // Note, this map module is using the `deltas` mode for the store.
+    token_mapping_store: StoreGetString,
 ) -> Result<BlockChanges> {
+    let config = DeploymentConfig::parse(&params)?;
+    let vault_address = config.vault.as_slice();
     // We merge contract changes by transaction (identified by transaction index) making it easy to
     //  sort them at the very end.
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
@@ -224,34 +141,22 @@ pub fn map_protocol_changes(
     // Handle pool pause state changes
     block
         .logs()
-        .filter(|log| log.address() == VAULT_ADDRESS)
+        .filter(|log| log.address() == vault_address)
         .for_each(|log| {
             if let Some(PoolPausedStateChanged { pool, paused }) =
                 PoolPausedStateChanged::match_and_decode(log)
             {
-                let component_id = format!("0x{}", hex::encode(&pool));
+                let component_id = address_id(&pool);
                 let tx: Transaction = log.receipt.transaction.into();
                 if components_store
-                    .get_last(format!("pool:{}", component_id))
+                    .get_last(format!("pool:{component_id}"))
                     .is_some()
                 {
                     let builder = transaction_changes
                         .entry(tx.index)
                         .or_insert_with(|| TransactionChangesBuilder::new(&tx));
 
-                    let entity_change = EntityChanges {
-                        component_id,
-                        attributes: vec![Attribute {
-                            name: "paused".to_string(),
-                            value: vec![1u8],
-                            change: if paused {
-                                ChangeType::Creation.into()
-                            } else {
-                                ChangeType::Deletion.into()
-                            },
-                        }],
-                    };
-                    builder.add_entity_change(&entity_change);
+                    builder.change_component_pause_state(&component_id, paused);
                 }
             }
         });
@@ -262,27 +167,22 @@ pub fn map_protocol_changes(
         Attribute {
             // TODO: remove this and track account_balances instead
             name: "balance_owner".to_string(),
-            value: VAULT_ADDRESS.to_vec(),
+            value: config.vault.clone(),
             change: ChangeType::Creation.into(),
         },
         Attribute {
             name: "stateless_contract_addr_0".into(),
-            value: address_to_bytes_with_0x(VAULT_EXTENSION_ADDRESS),
+            value: address_id(&config.vault_extension).into_bytes(),
             change: ChangeType::Creation.into(),
         },
         Attribute {
             name: "stateless_contract_addr_1".into(),
-            value: address_to_bytes_with_0x(BATCH_ROUTER_ADDRESS),
+            value: address_id(&config.batch_router).into_bytes(),
             change: ChangeType::Creation.into(),
         },
         Attribute {
             name: "stateless_contract_addr_2".into(),
-            value: address_to_bytes_with_0x(PERMIT_2_ADDRESS),
-            change: ChangeType::Creation.into(),
-        },
-        Attribute {
-            name: "update_marker".to_string(),
-            value: vec![1u8],
+            value: address_id(&config.permit2).into_bytes(),
             change: ChangeType::Creation.into(),
         },
     ];
@@ -333,24 +233,19 @@ pub fn map_protocol_changes(
                 });
         });
 
-    // Balance changes are gathered by the `StoreDelta` based on `PoolBalanceChanged` creating
-    //  `BlockBalanceDeltas`. We essentially just process the changes that occurred to the `store`
-    // this  block. Then, these balance changes are merged onto the existing map of tx contract
-    // changes,  inserting a new one if it doesn't exist.
-    aggregate_balances_changes(balance_store, deltas)
-        .iter()
-        .for_each(|(_, (tx, balances))| {
+    // Pool token balances are read as absolute values from the Vault's `_poolTokenBalances`
+    // storage writes and merged onto the existing map of tx changes, inserting a new one if
+    // it doesn't exist.
+    pool_balances::absolute_pool_balances(&block, &components_store, vault_address)
+        .into_iter()
+        .for_each(|(tx, balances)| {
             let builder = transaction_changes
                 .entry(tx.index)
-                .or_insert_with(|| TransactionChangesBuilder::new(tx));
+                .or_insert_with(|| TransactionChangesBuilder::new(&tx));
 
-            balances
-                .values()
-                .for_each(|token_bc_map| {
-                    token_bc_map.values().for_each(|bc| {
-                        builder.add_balance_change(bc);
-                    })
-                });
+            for balance_change in &balances {
+                builder.add_balance_change(balance_change);
+            }
         });
 
     // Extract and insert any storage changes that happened for any of the components.
@@ -358,9 +253,9 @@ pub fn map_protocol_changes(
         &block,
         |addr| {
             components_store
-                .get_last(format!("pool:0x{0}", hex::encode(addr)))
+                .get_last(pool_store_key(addr))
                 .is_some() ||
-                addr.eq(VAULT_ADDRESS)
+                addr.eq(vault_address)
         },
         &mut transaction_changes,
     );
@@ -371,7 +266,7 @@ pub fn map_protocol_changes(
         .iter()
         .for_each(|tx| {
             let vault_balance_change_per_tx =
-                get_vault_reserves(tx, &components_store, &tokens_store);
+                get_vault_reserves(tx, &tokens_store, &token_mapping_store, vault_address);
 
             if !vault_balance_change_per_tx.is_empty() {
                 let tycho_tx = Transaction::from(tx);
@@ -380,39 +275,13 @@ pub fn map_protocol_changes(
                     .or_insert_with(|| TransactionChangesBuilder::new(&tycho_tx));
 
                 let mut vault_contract_tlv_changes =
-                    InterimContractChange::new(VAULT_ADDRESS, false);
+                    InterimContractChange::new(vault_address, false);
                 for (token_addr, reserve_value) in vault_balance_change_per_tx {
-                    vault_contract_tlv_changes.upsert_token_balance(
-                        token_addr.as_slice(),
-                        reserve_value.value.as_slice(),
-                    );
+                    vault_contract_tlv_changes
+                        .upsert_token_balance(token_addr.as_slice(), reserve_value.as_slice());
                 }
                 builder.add_contract_changes(&vault_contract_tlv_changes);
             }
-        });
-
-    transaction_changes
-        .iter_mut()
-        .for_each(|(_, change)| {
-            // this indirection is necessary due to borrowing rules.
-            let addresses = change
-                .changed_contracts()
-                .map(|e| e.to_vec())
-                .collect::<Vec<_>>();
-
-            addresses
-                .into_iter()
-                .for_each(|address| {
-                    if address != VAULT_ADDRESS {
-                        // We reconstruct the component_id from the address here
-                        let id = components_store
-                            .get_last(format!("pool:0x{}", hex::encode(address)))
-                            .map(|c| c.id)
-                            .unwrap(); // Shouldn't happen because we filter by known components
-                                       // in `extract_contract_changes_builder`
-                        change.mark_component_as_updated(&id);
-                    }
-                })
         });
 
     let block_storage_changes = get_block_storage_changes(&block);
@@ -430,81 +299,86 @@ pub fn map_protocol_changes(
     })
 }
 
-/// Converts address bytes into a Vec<u8> containing a leading `0x`.
-fn address_to_bytes_with_0x(address: &[u8; 20]) -> Vec<u8> {
-    address_to_string_with_0x(address).into_bytes()
-}
-
-/// Converts address bytes into a string containing a leading `0x`.
-fn address_to_string_with_0x(address: &[u8]) -> String {
-    format!("0x{}", hex::encode(address))
-}
-
-// function needed to match reservesOf in vault storage, which by definition
-// they should always be equal to the `token.balanceOf(this)` except during unlock
-fn get_vault_reserves(
-    transaction: &eth::v2::TransactionTrace,
-    store: &StoreGetProto<ProtocolComponent>,
-    token_store: &StoreGetInt64,
-) -> HashMap<Vec<u8>, ReserveValue> {
-    // reservesOf mapping for the current block Address -> Balance
-    let mut reserves_of = HashMap::new();
-    transaction
-        .calls
-        .iter()
-        .filter(|call| !call.state_reverted)
-        .filter(|call| call.address == VAULT_ADDRESS)
-        .for_each(|call| {
-            if let Some(Settle { token, .. }) = Settle::match_and_decode(call) {
-                for change in &call.storage_changes {
-                    add_change_if_accounted(
-                        &mut reserves_of,
-                        change,
-                        token.as_slice(),
-                        token_store,
-                    );
-                }
-            }
-            if let Some(SendTo { token, .. }) = SendTo::match_and_decode(call) {
-                for change in &call.storage_changes {
-                    add_change_if_accounted(
-                        &mut reserves_of,
-                        change,
-                        token.as_slice(),
-                        token_store,
-                    );
-                }
-            }
-            if let Some(Erc4626BufferWrapOrUnwrap { params }) =
-                Erc4626BufferWrapOrUnwrap::match_and_decode(call)
-            {
-                for change in &call.storage_changes {
-                    let wrapped_token = params.2.clone();
-                    let component_id = format!("0x{}", hex::encode(&wrapped_token));
-                    if let Some(component) = store.get_last(component_id) {
-                        let underlying_token = component.tokens[1].clone();
-                        add_change_if_accounted(
-                            &mut reserves_of,
-                            change,
-                            wrapped_token.as_slice(),
-                            token_store,
-                        );
-                        add_change_if_accounted(
-                            &mut reserves_of,
-                            change,
-                            underlying_token.as_slice(),
-                            token_store,
-                        );
-                    }
-                }
-            }
-        });
-    reserves_of
-}
+const RESERVES_OF_SLOT: u8 = 8;
+const BUFFER_ASSETS_SLOT: u8 = 14;
 
 struct ReserveValue {
     ordinal: u64,
     value: Vec<u8>,
+}
+
+// Match reservesOf in Vault storage. By definition this should equal
+// `token.balanceOf(address(this))`, except during Vault unlock execution.
+fn get_vault_reserves(
+    transaction: &eth::v2::TransactionTrace,
+    token_store: &StoreGetInt64,
+    token_mapping_store: &StoreGetString,
+    vault_address: &[u8],
+) -> HashMap<Vec<u8>, Vec<u8>> {
+    let mut reserves_of = HashMap::new();
+
+    transaction
+        .calls
+        .iter()
+        .filter(|call| !call.state_reverted)
+        .filter(|call| call.address == vault_address)
+        .for_each(|call| {
+            if let Some(Settle { token, .. }) = Settle::match_and_decode(call) {
+                add_accounted_changes_for_token(
+                    &mut reserves_of,
+                    &call.storage_changes,
+                    token.as_slice(),
+                    token_store,
+                );
+            }
+            if let Some(SendTo { token, .. }) = SendTo::match_and_decode(call) {
+                add_accounted_changes_for_token(
+                    &mut reserves_of,
+                    &call.storage_changes,
+                    token.as_slice(),
+                    token_store,
+                );
+            }
+            if let Some(Erc4626BufferWrapOrUnwrap { params }) =
+                Erc4626BufferWrapOrUnwrap::match_and_decode(call)
+            {
+                let wrapped_token = params.2;
+                add_accounted_changes_for_token(
+                    &mut reserves_of,
+                    &call.storage_changes,
+                    wrapped_token.as_slice(),
+                    token_store,
+                );
+
+                if let Some(underlying_token) = token_mapping_store
+                    .get_last(buffer_mapping_key(&wrapped_token))
+                    .and_then(|underlying_token| hex::decode(underlying_token).ok())
+                {
+                    add_accounted_changes_for_token(
+                        &mut reserves_of,
+                        &call.storage_changes,
+                        underlying_token.as_slice(),
+                        token_store,
+                    );
+                }
+            }
+        });
+
+    reserves_of
+        .into_iter()
+        .map(|(token, reserve_value)| (token, reserve_value.value))
+        .collect()
+}
+
+fn add_accounted_changes_for_token(
+    reserves_of: &mut HashMap<Vec<u8>, ReserveValue>,
+    storage_changes: &[StorageChange],
+    token_address: &[u8],
+    token_store: &StoreGetInt64,
+) {
+    for change in storage_changes {
+        add_change_if_accounted(reserves_of, change, token_address, token_store);
+    }
 }
 
 fn add_change_if_accounted(
@@ -513,7 +387,9 @@ fn add_change_if_accounted(
     token_address: &[u8],
     token_store: &StoreGetInt64,
 ) {
-    let slot_key = get_storage_key_for_token(token_address);
+    // token_addr -> keccak256(abi.encode(token_address, 8)) as 8 is the order in which reserves of
+    // are declared.
+    let slot_key = mapping_storage_key_for_address(token_address, RESERVES_OF_SLOT);
     // record changes happening on vault contract at reserves_of storage key
     if change.key == slot_key && token_store.has_last(hex::encode(token_address)) {
         reserves_of
@@ -528,14 +404,21 @@ fn add_change_if_accounted(
     }
 }
 
-// token_addr -> keccak256(abi.encode(token_address, 8)) as 8 is the order in which reserves of are
-// declared
-fn get_storage_key_for_token(token_address: &[u8]) -> Vec<u8> {
-    let mut input = [0u8; 64];
-    input[12..32].copy_from_slice(token_address);
-    input[63] = 8u8;
-    let result = keccak(input.as_slice())
-        .as_bytes()
-        .to_vec();
-    result
+fn find_underlying_token(
+    call: &eth::v2::Call,
+    wrapped_token: &[u8],
+    vault_address: &[u8],
+) -> Option<Vec<u8>> {
+    // Balancer stores the underlying asset for an ERC4626 buffer in `_bufferAssets`:
+    // https://github.com/balancer/balancer-v3-monorepo/blob/80fd29ce4eb627139694db7fef5aba355759d303/pkg/vault/contracts/VaultStorage.sol#L163-L164
+    //
+    // mapping(IERC4626 wrappedToken => address underlyingToken) internal _bufferAssets;
+    //
+    // wrapped_token -> keccak256(abi.encode(wrapped_token, 14)) as 14 is the order in
+    // which _bufferAssets is declared.
+    let buffer_asset_key = mapping_storage_key_for_address(wrapped_token, BUFFER_ASSETS_SLOT);
+    call.storage_changes
+        .iter()
+        .find(|change| change.address == vault_address && change.key == buffer_asset_key)
+        .and_then(|change| decode_address_from_storage_word(&change.new_value))
 }

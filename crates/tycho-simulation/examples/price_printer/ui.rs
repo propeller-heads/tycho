@@ -25,7 +25,7 @@ const INFO_TEXT: [&str; 2] = [
     "(f) Filter by Protocol | (c) Clear Filter | Quote: Press ↵ to show/hide | Use +/- to adjust | = to enter custom amount",
 ];
 
-const ITEM_HEIGHT: usize = 3;
+const ITEM_HEIGHT: u16 = 3;
 
 struct TableColors {
     buffer_bg: Color,
@@ -72,6 +72,7 @@ impl Data {
     }
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "independent UI toggles that can be on together")]
 pub struct App {
     state: TableState,
     show_popup: bool,
@@ -139,8 +140,11 @@ impl App {
         // Calculate the new index based on direction
         let new_index = match self.state.selected() {
             Some(i) => {
-                ((i as isize + direction + current_items_len as isize) % current_items_len as isize)
-                    as usize
+                if direction.is_positive() {
+                    (i + 1) % current_items_len
+                } else {
+                    (i + current_items_len - 1) % current_items_len
+                }
             }
             None => 0,
         };
@@ -149,7 +153,7 @@ impl App {
         self.state.select(Some(new_index));
         self.scroll_state = self
             .scroll_state
-            .position(new_index * ITEM_HEIGHT);
+            .position(new_index * usize::from(ITEM_HEIGHT));
 
         // Adjust quote amount if decimals have changed
         if let Some(prev_decimals) = current_decimals {
@@ -172,7 +176,7 @@ impl App {
     pub fn update_data(&mut self, update: Update) {
         info!("Got {} new pairs", update.new_pairs.len());
         info!("Total pairs: {}", self.items.len());
-        for (id, comp) in update.new_pairs.iter() {
+        for (id, comp) in update.new_pairs {
             let name = format!("{comp_id:#042x}", comp_id = comp.id);
             let tokens = comp
                 .tokens
@@ -180,13 +184,13 @@ impl App {
                 .map(|a| a.symbol.clone())
                 .join("/");
 
-            match update.states.get(id) {
+            match update.states.get(&id) {
                 Some(state) => {
                     // Check if spot_price calculation is successful
                     match state.spot_price(&comp.tokens[0], &comp.tokens[1]) {
                         Ok(price) => {
                             self.items.push(Data {
-                                component: comp.clone(),
+                                component: comp,
                                 state: state.clone(),
                                 name,
                                 tokens,
@@ -305,18 +309,17 @@ impl App {
                                         self.input_mode = false;
                                         self.input_buffer.clear();
                                     },
-                                    _ => {}
+                                    KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Tab | KeyCode::BackTab | KeyCode::Delete | KeyCode::Insert | KeyCode::F(_) | KeyCode::Char(_) | KeyCode::Null | KeyCode::CapsLock | KeyCode::ScrollLock | KeyCode::NumLock | KeyCode::PrintScreen | KeyCode::Pause | KeyCode::Menu | KeyCode::KeypadBegin | KeyCode::Media(_) | KeyCode::Modifier(_) => {}
                                 }
                             } else {
                                 match key.code {
                                     KeyCode::Char('q') | KeyCode::Esc => {
                                         if !self.show_popup && !self.show_details && !self.filter_mode {
                                             return Ok(())
-                                        } else {
-                                            self.show_popup = false;
-                                            self.show_details = false;
-                                            self.filter_mode = false;
                                         }
+                                        self.show_popup = false;
+                                        self.show_details = false;
+                                        self.filter_mode = false;
                                     },
                                     KeyCode::Char('j') | KeyCode::Down => self.move_row(1),
                                     KeyCode::Char('+') => {
@@ -348,7 +351,7 @@ impl App {
                                             self.show_popup = !self.show_popup;
                                         }
                                     },
-                                    _ => {}
+                                    KeyCode::Backspace | KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Tab | KeyCode::BackTab | KeyCode::Delete | KeyCode::Insert | KeyCode::F(_) | KeyCode::Char(_) | KeyCode::Null | KeyCode::CapsLock | KeyCode::ScrollLock | KeyCode::NumLock | KeyCode::PrintScreen | KeyCode::Pause | KeyCode::Menu | KeyCode::KeypadBegin | KeyCode::Media(_) | KeyCode::Modifier(_) => {}
                                 }
                             }
                         }
@@ -385,7 +388,7 @@ impl App {
                     self.quote_amount = self
                         .quote_amount
                         .checked_sub(&BigUint::from(10u64).pow(decimals))
-                        .unwrap_or(BigUint::one());
+                        .unwrap_or_else(BigUint::one);
                 }
             }
         }
@@ -399,7 +402,7 @@ impl App {
         self.render_scrollbar(frame, rects[0]);
         self.render_footer(frame, rects[1]);
         if self.items.is_empty() {
-            self.render_loading(frame);
+            Self::render_loading(frame);
         }
         if self.show_popup {
             self.render_quote_popup(frame);
@@ -451,7 +454,7 @@ impl App {
                             .fg(self.colors.row_fg)
                             .bg(color),
                     )
-                    .height(ITEM_HEIGHT as u16)
+                    .height(ITEM_HEIGHT)
             });
         let bar = " █ ";
         let t = Table::new(
@@ -520,7 +523,7 @@ impl App {
         frame.render_widget(pool_count, count_area);
     }
 
-    fn render_loading(&self, frame: &mut Frame) {
+    fn render_loading(frame: &mut Frame) {
         let area = frame.area();
 
         let block = Block::bordered();

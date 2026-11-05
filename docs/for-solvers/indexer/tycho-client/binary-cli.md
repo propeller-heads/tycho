@@ -116,7 +116,7 @@ tycho-client --auth-key {your_token}
 
 Now, you're all set up!
 
-Before consuming the data, you first need to choose which protocols you want to track. You can find a list of[#available-protocols](../../hosted-endpoints.md#available-protocols "mention") here. \
+Before consuming the data, you first need to choose which protocols you want to track. You can find a list of [supported-protocols.md](../../supported-protocols.md "mention") here. \
 For example, to track the Uniswap V2 and V3 pools on Mainnet, with a minimum value locked of 100 ETH, run:
 
 ```bash
@@ -124,18 +124,28 @@ tycho-client --exchange uniswap_v2 --exchange uniswap_v3 --min-tvl 100 --tycho-u
 tycho-beta.propellerheads.xyz
 ```
 
-Or skip secure connections entirely with `--no-tls` for local setups \[coming soon].
+Or skip secure connections entirely with `--no-tls` for local setups.
 
 ### Debugging
 
-Since all messages are sent directly to stdout in a single line, logs are saved to a file: `./logs/dev_logs.log`. You can configure the directory with the `--log-dir` option.
+Since all messages are sent directly to stdout in a single line, logs are saved to a file: `./logs/dev_logs.log`. You can configure the directory with the `--log-folder` option.
 
 ### Configuring the client
 
 For more details on using the CLI and its parameters, run:
 
 ```bash
-tycho client --help
+tycho-client --help
 ```
 
 For extended explanation on how each parameter works, check our [#usage](./#usage "mention")guide.
+
+### Snapshot jitter
+
+When the Tycho server or one of its extractors restarts, every client reconnects at the same moment. To spread the load, the client waits a random time between 0 and `--snapshot-jitter` seconds before it requests a new snapshot. The client discards deltas during the wait and takes the snapshot at the next block. The default is 60 seconds and the minimum is 5 seconds.
+
+The first start has no delay. A restart that continues from the next expected block, or a stream with `--no-state`, requests no snapshot and has no delay. To shorten the wait, set a lower value:
+
+```bash
+tycho-client --exchange uniswap_v2 --snapshot-jitter 10
+```

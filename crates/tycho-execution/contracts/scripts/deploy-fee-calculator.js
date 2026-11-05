@@ -1,17 +1,24 @@
 require('dotenv').config();
 const {ethers} = require("hardhat");
 const hre = require("hardhat");
-const {resolveRolesNetwork} = require("./utils");
+const {resolveRolesNetwork, verifyOnExplorer} = require("./utils");
 
 async function main() {
     const network = hre.network.name;
 
     // The routerFeeSetter is the address that will be granted
     // ROUTER_FEE_SETTER_ROLE to manage fee configuration.
-    const routerFeeSetter = resolveRolesNetwork(network).ROUTER_FEE_SETTER[0];
+    const networkRoles = resolveRolesNetwork(network);
+    const routerFeeSetter = networkRoles.ROUTER_FEE_SETTER[0];
+    // The routerFeeReceiver owns the vault balance every router fee is credited
+    // to. It must be an address that can call withdraw() on the router — the
+    // CREATE2 factory below deploys the contract but cannot withdraw, which is
+    // why the receiver is a constructor argument rather than the deployer.
+    const routerFeeReceiver = networkRoles.ROUTER_FEE_RECEIVER[0];
 
     console.log(`Deploying FeeCalculator to ${network} with:`);
     console.log(`- routerFeeSetter: ${routerFeeSetter}`);
+    console.log(`- routerFeeReceiver: ${routerFeeReceiver}`);
 
     const [deployer] = await ethers.getSigners();
     console.log(`Deploying with account: ${deployer.address}`);
@@ -28,7 +35,7 @@ async function main() {
     const FeeCalculator =
         await ethers.getContractFactory("FeeCalculator");
     const deployTx =
-        FeeCalculator.getDeployTransaction(routerFeeSetter);
+        FeeCalculator.getDeployTransaction(routerFeeSetter, routerFeeReceiver);
     const bytecode = deployTx.data;
 
     const salt = ethers.utils.id(`FeeCalculator-${network}`);
@@ -41,14 +48,23 @@ async function main() {
     );
     console.log(`FeeCalculator will be deployed to: ${computedAddress}`);
 
-    const deploymentData = ethers.utils.concat([salt, bytecode]);
-    const tx = await deployer.sendTransaction({
-        to: create2FactoryAddress,
-        data: deploymentData,
-        gasLimit: 3_000_000,
-    });
-    await tx.wait();
-    console.log(`FeeCalculator deployed to: ${computedAddress}`);
+    // The address is derived from the bytecode, so an existing contract there is
+    // this exact build. Skipping the deployment makes the script re-runnable,
+    // which matters when verification has to be retried.
+    const deployed =
+        (await ethers.provider.getCode(computedAddress)) !== "0x";
+    if (deployed) {
+        console.log("FeeCalculator already deployed, skipping deployment");
+    } else {
+        const deploymentData = ethers.utils.concat([salt, bytecode]);
+        const tx = await deployer.sendTransaction({
+            to: create2FactoryAddress,
+            data: deploymentData,
+            gasLimit: 3_000_000,
+        });
+        await tx.wait();
+        console.log(`FeeCalculator deployed to: ${computedAddress}`);
+    }
 
     // Verify on Tenderly
     try {
@@ -61,16 +77,20 @@ async function main() {
         console.error("Error during contract verification:", error);
     }
 
-    console.log(
-        "Waiting for 1 minute before verifying the contract..."
-    );
-    await new Promise(resolve => setTimeout(resolve, 60000));
+    if (!deployed) {
+        console.log(
+            "Waiting for 1 minute before verifying the contract..."
+        );
+        await new Promise(resolve => setTimeout(resolve, 60000));
+    }
 
-    // Verify on Etherscan
+    // Verify on the block explorer
     try {
-        await hre.run("verify:verify", {
+        await verifyOnExplorer({
+            network,
             address: computedAddress,
-            constructorArguments: [routerFeeSetter],
+            contractFqn: "src/FeeCalculator.sol:FeeCalculator",
+            constructorArgs: [routerFeeSetter, routerFeeReceiver],
         });
         console.log(
             "FeeCalculator verified successfully on blockchain explorer!"

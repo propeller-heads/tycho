@@ -1,6 +1,7 @@
 mod adapter_builder;
 mod config;
 mod execution;
+mod report;
 mod rpc;
 mod state_registry;
 mod test_runner;
@@ -16,7 +17,7 @@ use miette::{miette, IntoDiagnostic, WrapErr};
 use tracing_subscriber::EnvFilter;
 use tycho_simulation::tycho_common::models::Chain;
 
-use crate::test_runner::{TestRunner, TestType, TestTypeFull, TestTypeRange};
+use crate::test_runner::{RunnerConfig, TestRunner, TestType, TestTypeFull, TestTypeRange};
 
 #[derive(Parser)]
 #[command(version, long_version = Version::clap_long(), subcommand_required = false, arg_required_else_help = true)]
@@ -38,25 +39,18 @@ pub struct FullTestCommand {
     common_args: CommonArgs,
 
     /// Start the test from this block number.
-    /// If not provided, it will use the first initial block defined in the protocol's substream
-    /// configuration.
+    /// If not provided, it will use the lowest initialBlock defined by any module in the
+    /// protocol's substreams configuration.
     #[arg(long)]
     initial_block: Option<u64>,
 }
 
 impl FullTestCommand {
     fn run(self) -> miette::Result<()> {
-        let args = self.common_args;
+        let test_type = TestType::Full(TestTypeFull { initial_block: self.initial_block });
         TestRunner::new(
-            TestType::Full(TestTypeFull { initial_block: self.initial_block }),
-            args.root_path()?,
-            args.chain,
-            args.package,
-            args.db_url,
-            args.rpc_url,
-            args.tycho_server_port,
-            args.vm_simulation_traces,
-            args.reuse_last_sync,
+            self.common_args
+                .into_config(test_type)?,
         )?
         .run()
     }
@@ -71,21 +65,19 @@ pub struct RangeTestCommand {
     /// If provided, only run the tests with a matching name
     #[arg(long)]
     match_test: Option<String>,
+
+    /// Write every check's outcome, per test, to this file as JSON
+    #[arg(long)]
+    report: Option<PathBuf>,
 }
 
 impl RangeTestCommand {
     fn run(self) -> miette::Result<()> {
-        let args = self.common_args;
+        let test_type =
+            TestType::Range(TestTypeRange { match_test: self.match_test, report: self.report });
         TestRunner::new(
-            TestType::Range(TestTypeRange { match_test: self.match_test.clone() }),
-            args.root_path()?,
-            args.chain,
-            args.package,
-            args.db_url,
-            args.rpc_url,
-            args.tycho_server_port,
-            args.vm_simulation_traces,
-            args.reuse_last_sync,
+            self.common_args
+                .into_config(test_type)?,
         )?
         .run()
     }
@@ -125,9 +117,10 @@ struct CommonArgs {
     #[arg(long, default_value_t = false)]
     vm_simulation_traces: bool,
 
-    /// Enable tracing during execution simulations
+    /// Pack the Substreams WASM binaries that are already present instead of compiling them. Set
+    /// by the Docker image's entrypoint, whose runtime stage carries no Rust toolchain.
     #[arg(long, default_value_t = false)]
-    execution_traces: bool,
+    prebuilt_wasm: bool,
 
     /// If false (default), clears the DB and re-syncs from start. If true:
     ///   - for the ranged test, it skips indexing and uses the current state
@@ -137,6 +130,21 @@ struct CommonArgs {
 }
 
 impl CommonArgs {
+    fn into_config(self, test_type: TestType) -> miette::Result<RunnerConfig> {
+        Ok(RunnerConfig {
+            test_type,
+            root_path: self.root_path()?,
+            chain: self.chain,
+            protocol: self.package,
+            db_url: self.db_url,
+            rpc_url: self.rpc_url,
+            tycho_server_port: self.tycho_server_port,
+            vm_simulation_traces: self.vm_simulation_traces,
+            reuse_last_sync: self.reuse_last_sync,
+            prebuilt_wasm: self.prebuilt_wasm,
+        })
+    }
+
     fn root_path(&self) -> miette::Result<PathBuf> {
         match self.root_path.as_ref() {
             Some(path) => Ok(path.clone()),
@@ -173,20 +181,19 @@ struct Version {
 }
 
 impl Version {
-    fn from_env() -> miette::Result<Self> {
+    fn from_env() -> Self {
         let version = option_env!("CARGO_PKG_VERSION")
             .unwrap_or("unknown")
             .to_string();
         let hash = option_env!("GIT_HASH")
             .unwrap_or("unknown")
             .to_string();
-        Ok(Self { version, hash })
+        Self { version, hash }
     }
 
     fn clap_long() -> &'static str {
         Box::leak(
             Self::from_env()
-                .expect("Failed to get binary version")
                 .to_string()
                 .into_boxed_str(),
         )
@@ -200,7 +207,11 @@ impl Display for Version {
 }
 
 fn main() -> miette::Result<()> {
-    dotenv().ok();
+    match dotenv() {
+        Ok(_) => {}
+        Err(e) if e.not_found() => {}
+        Err(e) => return Err(miette::miette!("Failed to load .env file: {e}")),
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())

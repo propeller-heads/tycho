@@ -1,156 +1,249 @@
-use std::{
-    collections::{HashMap, HashSet},
-    str::FromStr,
-    time::SystemTime,
-};
+use std::{collections::HashMap, str::FromStr};
 
-use alloy::primitives::{utils::keccak256, Address};
-use async_trait::async_trait;
-use futures::{stream::BoxStream, StreamExt};
-use http::Request;
+use ::http::{Request, Uri};
 use num_bigint::BigUint;
-use prost::Message as ProstMessage;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, timeout, Duration};
-use tokio_tungstenite::{
-    connect_async_with_config,
-    tungstenite::{handshake::client::generate_key, Message},
+use tokio_tungstenite::tungstenite::{
+    client::IntoClientRequest, ClientRequestBuilder, Error as TungsteniteError,
 };
-use tracing::{error, info, warn};
+use tracing::{instrument, warn};
 use tycho_common::{
-    models::{protocol::GetAmountOutParams, Chain},
-    simulation::indicatively_priced::SignedQuote,
-    Bytes,
+    models::protocol::GetAmountOutParams, simulation::indicatively_priced::SignedQuote, Bytes,
 };
 
 use crate::{
+    evm::protocol::utils::bytes_to_address,
     rfq::{
-        client::RFQClient,
         errors::RFQError,
-        models::TimestampHeader,
-        protocols::bebop::models::{
-            BebopOrderToSign, BebopPriceData, BebopPricingUpdate, BebopQuoteResponse,
-        },
+        protocols::bebop::models::{BebopOrderToSign, BebopQuoteResponse, BebopSupportedChain},
     },
-    tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
-    tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
+    snapshot_feed::http::{nothing_refused, read_json},
 };
 
-fn bytes_to_address(address: &Bytes) -> Result<Address, RFQError> {
-    if address.len() == 20 {
-        Ok(Address::from_slice(address))
-    } else {
-        Err(RFQError::InvalidInput(format!("Invalid ERC20 token address: {address:?}")))
-    }
-}
+/// Host serving Bebop's PMM API; every per-chain path hangs off it.
+const BEBOP_API_HOST: &str = "api.bebop.xyz";
 
-/// Maps a Chain to its corresponding Bebop WebSocket URL
-fn chain_to_bebop_url(chain: Chain) -> Result<String, RFQError> {
-    let chain_path = match chain {
-        Chain::Ethereum => "ethereum",
-        Chain::Base => "base",
-        _ => return Err(RFQError::FatalError(format!("Unsupported chain: {chain:?}"))),
-    };
-    let url = format!("api.bebop.xyz/pmm/{chain_path}/v3");
-    Ok(url)
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Requests binding Bebop quotes. One instance is shared (via `Arc`) by every state a
+/// [`BebopFeed`](super::feed::BebopFeed) emits, so all of them reuse the same HTTP
+/// connection pool.
+#[derive(derive_more::Debug)]
 pub struct BebopClient {
-    chain: Chain,
-    price_ws: String,
     quote_endpoint: String,
-    // Tokens that we want prices for
-    tokens: HashSet<Bytes>,
-    // Min tvl value in the quote token.
-    tvl: f64,
     // key header for authentication
-    #[serde(skip_serializing, default)]
-    ws_key: String,
-    // quote tokens to normalize to for TVL purposes. Should have the same prices.
-    quote_tokens: HashSet<Bytes>,
+    #[debug(skip)]
+    key: String,
     quote_timeout: Duration,
+    origin: QuoteOrigin,
+    http: Client,
+}
+
+/// Who a binding quote is for, which Bebop screens the request by. Every field it has is sent
+/// with the request and every field it has not is left out of it.
+///
+/// Bebop uses these for abuse prevention and address screening, and can configure an API
+/// account to require them, refusing a quote request that leaves a required one out. See
+/// <https://docs.bebop.xyz/rfq-api/guides/best-practices#6-pass-origin-so-we-can-identify-legitimate-flow>.
+#[derive(Clone, Debug, Default)]
+pub struct QuoteOrigin {
+    /// The real end-user's EOA when the taker is not the end-user's own wallet.
+    pub address: Option<Bytes>,
+    /// The `to` address of the resulting transaction when a contract executes the swap.
+    pub target: Option<Bytes>,
+    /// Stable identifier for the upstream flow source when aggregating multiple sources.
+    pub source: Option<String>,
+}
+
+/// The path every endpoint Bebop serves `chain` under hangs off.
+fn chain_path(chain: BebopSupportedChain) -> String {
+    format!("{BEBOP_API_HOST}/pmm/{}/v3", chain.as_str())
+}
+
+/// Opens Bebop's pricing WebSocket on one chain. It never requests a quote, so it carries no
+/// quote timeout or origin. `Debug` output omits the API key.
+#[derive(derive_more::Debug, Clone)]
+pub struct BebopPricingClient {
+    pricing_ws_endpoint: String,
+    #[debug(skip)]
+    key: String,
+}
+
+impl BebopPricingClient {
+    /// A client for the pricing WebSocket of `chain`, authenticated with `key`.
+    pub fn new(chain: BebopSupportedChain, key: String) -> Self {
+        BebopPricingClient {
+            pricing_ws_endpoint: format!("wss://{}/pricing?format=protobuf", chain_path(chain)),
+            key,
+        }
+    }
+
+    /// The authenticated handshake for the pricing WebSocket. The feed opens one connection at
+    /// a time and builds a fresh handshake for each, since the `Sec-WebSocket-Key` the builder
+    /// generates is per connection; the rest of the handshake comes from the endpoint.
+    ///
+    /// Only a malformed endpoint or header value fails, which is the caller's to classify.
+    pub fn pricing_handshake(&self) -> Result<Request<()>, TungsteniteError> {
+        ClientRequestBuilder::new(Uri::from_str(&self.pricing_ws_endpoint)?)
+            .with_header("Authorization", format!("Bearer {}", self.key))
+            .into_client_request()
+    }
 }
 
 impl BebopClient {
-    pub const PROTOCOL_SYSTEM: &'static str = "rfq:bebop";
-
+    /// A client for Bebop's public API on `chain`, whose quote endpoint sits on the chain's own
+    /// path.
     pub fn new(
-        chain: Chain,
-        tokens: HashSet<Bytes>,
-        tvl: f64,
-        ws_key: String,
-        quote_tokens: HashSet<Bytes>,
+        chain: BebopSupportedChain,
+        key: String,
         quote_timeout: Duration,
-    ) -> Result<Self, RFQError> {
-        let url = chain_to_bebop_url(chain)?;
-        Ok(Self {
-            price_ws: "wss://".to_string() + &url + "/pricing?format=protobuf",
-            quote_endpoint: "https://".to_string() + &url + "/quote",
-            tokens,
-            chain,
-            tvl,
-            ws_key,
-            quote_tokens,
+        origin: QuoteOrigin,
+    ) -> Self {
+        BebopClient {
+            quote_endpoint: format!("https://{}/quote", chain_path(chain)),
+            key,
             quote_timeout,
-        })
+            origin,
+            http: Client::new(),
+        }
     }
 
-    fn create_component_with_state(
+    #[instrument(
+        name = "quote_request",
+        level = "error",
+        skip_all,
+        fields(token_in = %params.token_in, token_out = %params.token_out, amount_in = %params.amount_in)
+    )]
+    pub async fn request_binding_quote(
         &self,
-        component_id: String,
-        tokens: Vec<tycho_common::Bytes>,
-        price_data: &BebopPriceData,
-        tvl: f64,
-    ) -> ComponentWithState {
-        let protocol_component = ProtocolComponent {
-            id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
-            protocol_type_name: "bebop_pool".to_string(),
-            chain: self.chain,
-            tokens,
-            contract_addresses: vec![], // empty for RFQ
-            static_attributes: Default::default(),
-            change: Default::default(),
-            creation_tx: Default::default(),
-            created_at: Default::default(),
-        };
+        params: &GetAmountOutParams,
+    ) -> Result<SignedQuote, RFQError> {
+        let sell_token = bytes_to_address(&params.token_in)
+            .map_err(|e| RFQError::InvalidInput(e.to_string()))?
+            .to_string();
+        let buy_token = bytes_to_address(&params.token_out)
+            .map_err(|e| RFQError::InvalidInput(e.to_string()))?
+            .to_string();
+        let sell_amount = params.amount_in.to_string();
+        let sender = bytes_to_address(&params.sender)
+            .map_err(|e| RFQError::InvalidInput(e.to_string()))?
+            .to_string();
+        let receiver = bytes_to_address(&params.receiver)
+            .map_err(|e| RFQError::InvalidInput(e.to_string()))?
+            .to_string();
 
-        let mut attributes = HashMap::new();
+        let url = self.quote_endpoint.clone();
 
-        // Store all bids and asks as JSON strings, since we cannot store arrays
-        // Convert flat arrays [price1, size1, price2, size2, ...] to pairs [(price1, size1),
-        // (price2, size2), ...]
-        if !price_data.bids.is_empty() {
-            let bids_pairs: Vec<(f32, f32)> = price_data
-                .bids
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|chunk| (chunk[0], chunk[1]))
-                .collect();
-            let bids_json = serde_json::to_string(&bids_pairs).unwrap_or_default();
-            attributes.insert("bids".to_string(), bids_json.as_bytes().to_vec().into());
+        let mut query = vec![
+            ("sell_tokens", sell_token),
+            ("buy_tokens", buy_token),
+            ("sell_amounts", sell_amount),
+            ("taker_address", sender),
+            ("receiver_address", receiver),
+            ("approval_type", "Standard".into()),
+            ("skip_validation", "true".into()),
+            ("skip_taker_checks", "true".into()),
+            ("gasless", "false".into()),
+            ("expiry_type", "standard".into()),
+            ("fee", "0".into()),
+            ("is_ui", "false".into()),
+        ];
+
+        // The request's own origin names the end user this trade is for; the builder's is the
+        // one flow behind every request a feed makes.
+        if let Some(origin_address) = params
+            .origin
+            .as_ref()
+            .or(self.origin.address.as_ref())
+        {
+            query.push((
+                "origin_address",
+                bytes_to_address(origin_address)
+                    .map_err(|e| RFQError::InvalidInput(e.to_string()))?
+                    .to_string(),
+            ));
         }
-        if !price_data.asks.is_empty() {
-            let asks_pairs: Vec<(f32, f32)> = price_data
-                .asks
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|chunk| (chunk[0], chunk[1]))
-                .collect();
-            let asks_json = serde_json::to_string(&asks_pairs).unwrap_or_default();
-            attributes.insert("asks".to_string(), asks_json.as_bytes().to_vec().into());
+        if let Some(origin_target) = &self.origin.target {
+            query.push((
+                "origin_target",
+                bytes_to_address(origin_target)
+                    .map_err(|e| RFQError::InvalidInput(e.to_string()))?
+                    .to_string(),
+            ));
+        }
+        if let Some(origin_source) = &self.origin.source {
+            query.push(("origin_source", origin_source.clone()));
         }
 
-        ComponentWithState {
-            state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
-            component: protocol_component,
-            component_tvl: Some(tvl),
-            entrypoints: vec![],
+        let start_time = std::time::Instant::now();
+        const MAX_RETRIES: u32 = 3;
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRIES {
+            // Check if we have time remaining for this attempt
+            let elapsed = start_time.elapsed();
+            if elapsed >= self.quote_timeout {
+                return Err(last_error.unwrap_or_else(|| {
+                    RFQError::ConnectionError(format!(
+                        "Bebop quote request timed out after {:?}",
+                        self.quote_timeout
+                    ))
+                }));
+            }
+
+            let remaining_time = self.quote_timeout - elapsed;
+
+            let request = self
+                .http
+                .get(&url)
+                .query(&query)
+                .header("accept", "application/json")
+                .bearer_auth(&self.key);
+
+            let response = match timeout(remaining_time, request.send()).await {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(e)) => {
+                    warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, error = %e, "quote request failed");
+                    last_error = Some(RFQError::ConnectionError(format!(
+                        "Failed to send Bebop quote request: {e}"
+                    )));
+                    if attempt < MAX_RETRIES - 1 {
+                        continue;
+                    }
+                    return Err(last_error.unwrap());
+                }
+                Err(_) => {
+                    return Err(RFQError::ConnectionError(format!(
+                        "Bebop quote request timed out after {:?}",
+                        self.quote_timeout
+                    )));
+                }
+            };
+
+            let quote_response = match read_json::<BebopQuoteResponse>(
+                response,
+                "Bebop quote",
+                nothing_refused,
+            )
+            .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, error = %e, "quote response failed");
+                    last_error = Some(RFQError::from(e));
+                    if attempt < MAX_RETRIES - 1 {
+                        sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    return Err(last_error.unwrap());
+                }
+            };
+
+            return Self::process_quote_response(quote_response, params);
         }
+
+        Err(last_error.unwrap_or_else(|| {
+            RFQError::ConnectionError("Bebop quote request failed after retries".to_string())
+        }))
     }
 
     fn process_quote_response(
@@ -179,15 +272,15 @@ impl BebopClient {
                     BebopOrderToSign::Single(ref single) => SignedQuote {
                         base_token: params.token_in.clone(),
                         quote_token: params.token_out.clone(),
-                        amount_in: BigUint::from_str(&single.taker_amount).map_err(|_| {
+                        amount_in: BigUint::from_str(&single.taker_amount).map_err(|e| {
                             RFQError::ParsingError(format!(
-                                "Failed to parse amount in string: {}",
+                                "Failed to parse amount in string: {} ({e})",
                                 single.taker_amount
                             ))
                         })?,
-                        amount_out: BigUint::from_str(&single.maker_amount).map_err(|_| {
+                        amount_out: BigUint::from_str(&single.maker_amount).map_err(|e| {
                             RFQError::ParsingError(format!(
-                                "Failed to parse amount out string: {}",
+                                "Failed to parse amount out string: {} ({e})",
                                 single.maker_amount
                             ))
                         })?,
@@ -244,723 +337,103 @@ impl BebopClient {
 
                 Ok(signed_quote)
             }
-            BebopQuoteResponse::Error(err) => Err(RFQError::FatalError(format!(
-                "Bebop API error: code {} - {} (requestId: {})",
-                err.error.error_code, err.error.message, err.error.request_id
-            ))),
-        }
-    }
-}
-
-#[async_trait]
-impl RFQClient for BebopClient {
-    fn stream(
-        &self,
-    ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>> {
-        let tokens = self.tokens.clone();
-        let url = self.price_ws.clone();
-        let tvl_threshold = self.tvl;
-        let authorization = format!("Bearer {}", self.ws_key);
-        let client = self.clone();
-
-        Box::pin(async_stream::stream! {
-            let mut current_components: HashMap<String, ComponentWithState> = HashMap::new();
-            let mut reconnect_attempts = 0;
-            const MAX_RECONNECT_ATTEMPTS: u32 = 10;
-
-            loop {
-                let request = Request::builder()
-                    .method("GET")
-                    .uri(&url)
-                    .header("Host", "api.bebop.xyz")
-                    .header("Upgrade", "websocket")
-                    .header("Connection", "Upgrade")
-                    .header("Sec-WebSocket-Key", generate_key())
-                    .header("Sec-WebSocket-Version", "13")
-                    .header("Authorization", &authorization)
-                    .body(())
-                    .map_err(|_| RFQError::FatalError("Failed to build request".into()))?;
-
-                // Connect to Bebop WebSocket with custom headers
-                let (ws_stream, _) = match connect_async_with_config(request, None, false).await {
-                    Ok(connection) => {
-                        info!("Successfully connected to Bebop WebSocket");
-                        reconnect_attempts = 0; // Reset counter on successful connection
-                        connection
-                    },
-                    Err(e) => {
-                        reconnect_attempts += 1;
-                        error!("Failed to connect to Bebop WebSocket (attempt {}): {}", reconnect_attempts, e);
-
-                        if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
-                            yield Err(RFQError::ConnectionError(format!("Failed to connect after {MAX_RECONNECT_ATTEMPTS} attempts: {e}")));
-                            return;
-                        }
-
-                        let backoff_duration = Duration::from_secs(2_u64.pow(reconnect_attempts.min(5)));
-                        info!("Retrying connection in {} seconds...", backoff_duration.as_secs());
-                        sleep(backoff_duration).await;
-                        continue;
-                    }
-                };
-
-                let (_, mut ws_receiver) = ws_stream.split();
-
-                // Message processing loop
-                while let Some(msg) = ws_receiver.next().await {
-                    match msg {
-                        Ok(Message::Binary(data)) => {
-                            match BebopPricingUpdate::decode(&data[..]) {
-                                Ok(protobuf_update) => {
-                                    let mut new_components = HashMap::new();
-
-                                    // Process all pairs directly from protobuf
-                                    for price_data in &protobuf_update.pairs {
-                                        let base_bytes = Bytes::from(price_data.base.clone());
-                                        let quote_bytes = Bytes::from(price_data.quote.clone());
-                                        if tokens.contains(&base_bytes) && tokens.contains(&quote_bytes) {
-                                            let pair_tokens = vec![
-                                                base_bytes.clone(), quote_bytes.clone()
-                                            ];
-
-                                            let mut quote_price_data: Option<&BebopPriceData> = None;
-                                            // The quote token is not one of the approved quote tokens
-                                            // Get the price, so we can normalize our TVL calculation
-                                            if !client.quote_tokens.contains(&quote_bytes) {
-                                                for approved_quote_token in &client.quote_tokens {
-                                                    // Look for a pair containing both our quote token and an approved token
-                                                    // Can be either QUOTE/APPROVED or APPROVED/QUOTE
-                                                    if let Some(quote_data) = protobuf_update.pairs.iter()
-                                                        .find(|p| {
-                                                            (p.base == quote_bytes.as_ref() && p.quote == approved_quote_token.as_ref()) ||
-                                                            (p.quote == quote_bytes.as_ref() && p.base == approved_quote_token.as_ref())
-                                                        }) {
-                                                        quote_price_data = Some(quote_data);
-                                                        break;
-                                                    }
-                                                }
-
-                                                // Quote token doesn't have price levels in approved quote tokens.
-                                                // Skip.
-                                                if quote_price_data.is_none() {
-                                                    warn!("Quote token {} does not have price levels in approved quote token. Skipping.", hex::encode(&quote_bytes));
-                                                    continue;
-                                                }
-                                            }
-
-                                            let tvl = price_data.calculate_tvl(quote_price_data);
-                                            if tvl < tvl_threshold {
-                                                continue;
-                                            }
-
-                                            let pair_str = format!("bebop_{}/{}", hex::encode(&base_bytes), hex::encode(&quote_bytes));
-                                            let component_id = format!("{}", keccak256(pair_str.as_bytes()));
-                                            let component_with_state = client.create_component_with_state(
-                                                component_id.clone(),
-                                                pair_tokens,
-                                                price_data,
-                                                tvl
-                                            );
-                                            new_components.insert(component_id, component_with_state);
-                                        }
-                                    }
-
-                                    // Find components that were removed (existed before but not in this update)
-                                    // This includes components with no bids or asks, since they are filtered
-                                    // out by the tvl threshold.
-                                    let removed_components: HashMap<String, ProtocolComponent> = current_components
-                                        .iter()
-                                        .filter(|&(id, _)| !new_components.contains_key(id))
-                                        .map(|(k, v)| (k.clone(), v.component.clone()))
-                                        .collect();
-
-                                    // Update our current state
-                                    current_components = new_components.clone();
-
-                                    let snapshot = Snapshot {
-                                        states: new_components,
-                                        vm_storage: HashMap::new(),
-                                    };
-                                    let timestamp = SystemTime::now().duration_since(
-                                        SystemTime::UNIX_EPOCH
-                                    ).map_err(
-                                        |_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".into())
-                                    )?.as_secs();
-
-                                    let msg = StateSyncMessage::<TimestampHeader> {
-                                        header: TimestampHeader { timestamp },
-                                        snapshots: snapshot,
-                                        deltas: None, // Deltas are always None - all the changes are absolute
-                                        removed_components,
-                                    };
-
-                                    // Yield one message containing all updated pairs
-                                    yield Ok(("bebop".to_string(), msg));
-                                },
-                                Err(e) => {
-                                    error!("Failed to parse protobuf message: {}", e);
-                                    break;
-                                }
-                            }
-                        }
-                        Ok(Message::Close(_)) => {
-                            info!("WebSocket connection closed by server");
-                            break;
-                        }
-                        Err(e) => {
-                            error!("WebSocket error: {}", e);
-                            break;
-                        }
-                        _ => {} // Ignore other message types
-                    }
-                }
-
-                // If we're here, the message loop exited - always attempt to reconnect
-                reconnect_attempts += 1;
-                if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
-                    yield Err(RFQError::ConnectionError(format!("Connection failed after {MAX_RECONNECT_ATTEMPTS} attempts")));
-                    return;
-                }
-
-                let backoff_duration = Duration::from_secs(2_u64.pow(reconnect_attempts.min(5)));
-                info!("Reconnecting in {} seconds (attempt {})...", backoff_duration.as_secs(), reconnect_attempts);
-                sleep(backoff_duration).await;
-                // Continue to the next iteration of the main loop
+            BebopQuoteResponse::Error(err) => {
+                let message = format!(
+                    "Bebop API error: code {} - {} (requestId: {})",
+                    err.error.error_code, err.error.message, err.error.request_id
+                );
+                // A code the venue has not been seen to decline a trade with is taken to be
+                // the request itself being wrong.
+                Err(if err.error.declines_the_trade() {
+                    RFQError::QuoteNotFound(message)
+                } else {
+                    RFQError::FatalError(message)
+                })
             }
-        })
-    }
-
-    async fn request_binding_quote(
-        &self,
-        params: &GetAmountOutParams,
-    ) -> Result<SignedQuote, RFQError> {
-        let sell_token = bytes_to_address(&params.token_in)?.to_string();
-        let buy_token = bytes_to_address(&params.token_out)?.to_string();
-        let sell_amount = params.amount_in.to_string();
-        let sender = bytes_to_address(&params.sender)?.to_string();
-        let receiver = bytes_to_address(&params.receiver)?.to_string();
-
-        let url = self.quote_endpoint.clone();
-
-        let client = Client::new();
-
-        let start_time = std::time::Instant::now();
-        const MAX_RETRIES: u32 = 3;
-        let mut last_error = None;
-
-        for attempt in 0..MAX_RETRIES {
-            // Check if we have time remaining for this attempt
-            let elapsed = start_time.elapsed();
-            if elapsed >= self.quote_timeout {
-                return Err(last_error.unwrap_or_else(|| {
-                    RFQError::ConnectionError(format!(
-                        "Bebop quote request timed out after {} seconds",
-                        self.quote_timeout.as_secs()
-                    ))
-                }));
-            }
-
-            let remaining_time = self.quote_timeout - elapsed;
-
-            let request = client
-                .get(&url)
-                .query(&[
-                    ("sell_tokens", sell_token.clone()),
-                    ("buy_tokens", buy_token.clone()),
-                    ("sell_amounts", sell_amount.clone()),
-                    ("taker_address", sender.clone()),
-                    ("receiver_address", receiver.clone()),
-                    ("approval_type", "Standard".into()),
-                    ("skip_validation", "true".into()),
-                    ("skip_taker_checks", "true".into()),
-                    ("gasless", "false".into()),
-                    ("expiry_type", "standard".into()),
-                    ("fee", "0".into()),
-                    ("is_ui", "false".into()),
-                ])
-                .header("accept", "application/json")
-                .bearer_auth(&self.ws_key);
-
-            let response = match timeout(remaining_time, request.send()).await {
-                Ok(Ok(resp)) => resp,
-                Ok(Err(e)) => {
-                    warn!(
-                        "Bebop quote request failed (attempt {}/{}): {}",
-                        attempt + 1,
-                        MAX_RETRIES,
-                        e
-                    );
-                    last_error = Some(RFQError::ConnectionError(format!(
-                        "Failed to send Bebop quote request: {e}"
-                    )));
-                    if attempt < MAX_RETRIES - 1 {
-                        continue;
-                    } else {
-                        return Err(last_error.unwrap());
-                    }
-                }
-                Err(_) => {
-                    return Err(RFQError::ConnectionError(format!(
-                        "Bebop quote request timed out after {} seconds",
-                        self.quote_timeout.as_secs()
-                    )));
-                }
-            };
-
-            let quote_response = match response
-                .json::<BebopQuoteResponse>()
-                .await
-            {
-                Ok(resp) => resp,
-                Err(e) => {
-                    warn!(
-                        "Bebop quote response parsing failed (attempt {}/{}): {}",
-                        attempt + 1,
-                        MAX_RETRIES,
-                        e
-                    );
-                    last_error = Some(RFQError::ParsingError(format!(
-                        "Failed to parse Bebop quote response: {e}"
-                    )));
-                    if attempt < MAX_RETRIES - 1 {
-                        sleep(Duration::from_millis(100)).await;
-                        continue;
-                    } else {
-                        return Err(last_error.unwrap());
-                    }
-                }
-            };
-
-            return Self::process_quote_response(quote_response, params);
         }
-
-        Err(last_error.unwrap_or_else(|| {
-            RFQError::ConnectionError("Bebop quote request failed after retries".to_string())
-        }))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{Arc, Mutex},
-        time::Duration,
+        str::FromStr,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
     };
 
-    use dotenv::dotenv;
-    use futures::SinkExt;
-    use tokio::{net::TcpListener, time::timeout};
-    use tokio_tungstenite::accept_async;
+    use rstest::rstest;
+    use tycho_common::models::protocol::GetAmountOutParams;
 
     use super::*;
-    use crate::rfq::constants::get_bebop_auth;
+    use crate::{
+        rfq::errors::RFQError,
+        snapshot_feed::http::test_support::{spawn_http_server, MockResponse},
+    };
 
-    #[tokio::test]
-    #[ignore] // Requires network access and setting proper env vars
-    async fn test_bebop_websocket_connection() {
-        // We test with quote tokens that are not USDC in order to ensure our normalization works
-        // fine
-        let wbtc = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
-        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+    /// Quote responses recorded from Bebop's API.
+    const AGGREGATE_ORDER: &str = include_str!("test_responses/aggregate_order.json");
+    const AGGREGATE_ORDER_ROUTER_MODE: &str =
+        include_str!("test_responses/aggregate_order_router_mode.json");
+    const AGGREGATE_ORDER_WITH_MULTIHOP: &str =
+        include_str!("test_responses/aggregate_order_with_multihop.json");
+    const SINGLE_ORDER: &str = include_str!("test_responses/single_order.json");
+    const SINGLE_ORDER_ROUTER_MODE: &str =
+        include_str!("test_responses/single_order_router_mode.json");
 
-        dotenv().expect("Missing .env file");
-        let auth = get_bebop_auth().expect("Failed to get Bebop authentication");
+    /// BebopSettlement.swapSingle
+    const SWAP_SINGLE_SELECTOR: [u8; 4] = [0x4d, 0xce, 0xbc, 0xba];
+    /// BebopRouter.swap
+    const ROUTER_SWAP_SELECTOR: [u8; 4] = [0x95, 0x86, 0xd0, 0xe8];
 
-        let quote_tokens = HashSet::from([
-            // Use addresses we forgot to checksum (to test checksumming)
-            Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(), // USDC
-            Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap(), // USDT
-        ]);
-
-        let client = BebopClient::new(
-            Chain::Ethereum,
-            HashSet::from_iter(vec![weth.clone(), wbtc.clone()]),
-            10.0, // $10 minimum TVL
-            auth.key,
-            quote_tokens,
+    fn test_client() -> BebopClient {
+        BebopClient::new(
+            BebopSupportedChain::Ethereum,
+            "secret_key".to_string(),
             Duration::from_secs(30),
+            QuoteOrigin::default(),
         )
-        .unwrap();
-
-        let mut stream = client.stream();
-
-        // Test connection and message reception with timeout
-        // Receiving a single decodable pricing message is enough to prove the authenticated
-        // handshake and protobuf decoding work. Bebop only pushes on price changes, so
-        // requiring more messages makes the test flaky against market cadence.
-        let result = timeout(Duration::from_secs(10), async {
-            let mut message_count = 0;
-            let max_messages = 1;
-
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok((component_id, msg)) => {
-                        println!("Received message with ID: {component_id}");
-
-                        assert!(!component_id.is_empty());
-                        assert_eq!(component_id, "bebop");
-                        assert!(msg.header.timestamp > 0);
-                        assert!(!msg.snapshots.states.is_empty());
-
-                        let snapshot = &msg.snapshots;
-
-                        // We got at least one component
-                        assert!(!snapshot.states.is_empty());
-
-                        println!("Received {} components in this message", snapshot.states.len());
-                        for (id, component_with_state) in &snapshot.states {
-                            assert_eq!(
-                                component_with_state
-                                    .component
-                                    .protocol_system,
-                                "rfq:bebop"
-                            );
-                            assert_eq!(
-                                component_with_state
-                                    .component
-                                    .protocol_type_name,
-                                "bebop_pool"
-                            );
-                            assert_eq!(component_with_state.component.chain, Chain::Ethereum);
-
-                            let attributes = &component_with_state.state.attributes;
-
-                            // Check that bids and asks exist and have non-empty byte strings
-                            assert!(attributes.contains_key("bids"));
-                            assert!(attributes.contains_key("asks"));
-                            assert!(!attributes["bids"].is_empty());
-                            assert!(!attributes["asks"].is_empty());
-
-                            if let Some(tvl) = component_with_state.component_tvl {
-                                assert!(tvl >= 0.0);
-                                println!("Component {id} TVL: ${tvl:.2}");
-                            }
-                        }
-
-                        message_count += 1;
-                        if message_count >= max_messages {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        panic!("Stream error: {e}");
-                    }
-                }
-            }
-
-            assert!(message_count > 0, "Should have received at least one message");
-            println!("Successfully received {message_count} messages");
-        })
-        .await;
-
-        match result {
-            Ok(_) => println!("Test completed successfully"),
-            Err(_) => panic!("Test timed out - no messages received within 10 seconds"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_websocket_reconnection() {
-        // Start a mock WebSocket server that will drop connections intermittently
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        // Creates a thread-safe counter.
-        let connection_count = Arc::new(Mutex::new(0u32));
-
-        // We must clone - since we want to read the original value at the end of the test.
-        let connection_count_clone = connection_count.clone();
-
-        tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                *connection_count_clone.lock().unwrap() += 1;
-                let count = *connection_count_clone.lock().unwrap();
-                println!("Mock server: Connection #{count} established");
-
-                tokio::spawn(async move {
-                    if let Ok(ws_stream) = accept_async(stream).await {
-                        let (mut ws_sender, _ws_receiver) = ws_stream.split();
-
-                        // Create test protobuf message
-                        let weth_addr =
-                            hex::decode("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
-                        let usdc_addr =
-                            hex::decode("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
-
-                        let test_price_data = BebopPriceData {
-                            base: weth_addr,
-                            quote: usdc_addr,
-                            last_update_ts: 1752617378,
-                            bids: vec![3070.05f32, 0.325717f32],
-                            asks: vec![3070.527f32, 0.325717f32],
-                        };
-
-                        let pricing_update = BebopPricingUpdate { pairs: vec![test_price_data] };
-
-                        let test_message = pricing_update.encode_to_vec();
-
-                        if count == 1 {
-                            // First connection: Send message successfully, then drop
-                            println!("Mock server: Connection #1 - sending message then dropping.");
-                            let _ = ws_sender
-                                .send(Message::Binary(test_message.clone().into()))
-                                .await;
-
-                            // Give time for message to be processed, then drop the connection.
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            println!("Mock server: Dropping connection #1");
-                            let _ = ws_sender.close().await;
-                        } else if count == 2 {
-                            // Second connection: Send message successfully and maintain connection
-                            println!("Mock server: Connection #2 - maintaining stable connection.");
-                            let _ = ws_sender
-                                .send(Message::Binary(test_message.clone().into()))
-                                .await;
-                        }
-                    }
-                });
-            }
-        });
-
-        // Wait a moment for the server to start
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let mut test_quote_tokens = HashSet::new();
-        test_quote_tokens
-            .insert(Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap());
-
-        let tokens_formatted = vec![
-            Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
-            Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
-        ];
-
-        // Bypass the new() constructor to mock the URL to point to our mock server.
-        let client = BebopClient {
-            chain: Chain::Ethereum,
-            price_ws: format!("ws://127.0.0.1:{}", addr.port()),
-            tokens: tokens_formatted.into_iter().collect(),
-            tvl: 1000.0,
-            ws_key: "test_key".to_string(),
-            quote_tokens: test_quote_tokens,
-            quote_endpoint: "".to_string(),
-            quote_timeout: Duration::from_secs(5),
-        };
-
-        let start_time = std::time::Instant::now();
-        let mut successful_messages = 0;
-        let mut connection_errors = 0;
-        let mut first_message_received = false;
-        let mut second_message_received = false;
-
-        // Expected flow:
-        // 1. Receive first message successfully
-        // 2. Connection drops
-        // 3. Client reconnects
-        // 4. Receive second message successfully
-        // Timeout if two messages are not received within 5 seconds.
-        while start_time.elapsed() < Duration::from_secs(5) && successful_messages < 2 {
-            match timeout(Duration::from_millis(1000), client.stream().next()).await {
-                Ok(Some(result)) => match result {
-                    Ok((_component_id, _message)) => {
-                        successful_messages += 1;
-                        println!("Received successful message {successful_messages}");
-
-                        if successful_messages == 1 {
-                            first_message_received = true;
-                            println!("First message received - connection should drop after this.");
-                        } else if successful_messages == 2 {
-                            second_message_received = true;
-                            println!("Second message received after reconnection.");
-                        }
-                    }
-                    Err(e) => {
-                        connection_errors += 1;
-                        println!("Connection error during reconnection: {e:?}");
-                    }
-                },
-                Ok(None) => {
-                    panic!("Stream ended unexpectedly");
-                }
-                Err(_) => {
-                    println!("Timeout waiting for message (normal during reconnections)");
-                    continue;
-                }
-            }
-        }
-
-        let final_connection_count = *connection_count.lock().unwrap();
-
-        // 1. Exactly 2 connection attempts (initial + reconnect)
-        // 2. Exactly 2 successful messages (one before drop, one after reconnect)
-
-        assert_eq!(final_connection_count, 2);
-        assert!(first_message_received);
-        assert!(second_message_received);
-        assert_eq!(connection_errors, 0);
-        assert_eq!(successful_messages, 2);
-    }
-
-    #[tokio::test]
-    #[ignore] // Requires network access and setting proper env vars
-    async fn test_bebop_quote_single_order() {
-        let token_in = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
-        let token_out = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
-        dotenv().expect("Missing .env file");
-        let auth = get_bebop_auth().expect("Failed to get Bebop authentication");
-
-        let client = BebopClient::new(
-            Chain::Ethereum,
-            HashSet::from_iter(vec![token_in.clone(), token_out.clone()]),
-            10.0, // $10 minimum TVL
-            auth.key,
-            HashSet::new(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-
-        let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
-
-        let params = GetAmountOutParams {
-            amount_in: BigUint::from(1_000000000000000000u64),
-            token_in: token_in.clone(),
-            token_out: token_out.clone(),
-            sender: router.clone(),
-            receiver: router,
-        };
-        let quote = client
-            .request_binding_quote(&params)
-            .await
-            .unwrap();
-
-        assert_eq!(quote.base_token, token_in);
-        assert_eq!(quote.quote_token, token_out);
-        assert_eq!(quote.amount_in, BigUint::from(1_000000000000000000u64));
-
-        // Conservative sanity bound (0.01 WBTC for 1 WETH) — proves a real, non-dust quote came
-        // back without depending closely on the live WETH/WBTC price.
-        assert!(quote.amount_out > BigUint::from(1_000_000u64));
-
-        // SWAP_SINGLE_SELECTOR = 0x4dcebcba;
-        assert_eq!(
-            quote
-                .quote_attributes
-                .get("calldata")
-                .unwrap()[..4],
-            Bytes::from_str("0x4dcebcba")
-                .unwrap()
-                .to_vec()
-        );
-        let partial_fill_offset_slice = quote
-            .quote_attributes
-            .get("partial_fill_offset")
-            .unwrap()
-            .as_ref();
-        let mut partial_fill_offset_array = [0u8; 8];
-        partial_fill_offset_array.copy_from_slice(partial_fill_offset_slice);
-
-        assert_eq!(u64::from_be_bytes(partial_fill_offset_array), 12);
-    }
-
-    #[tokio::test]
-    #[ignore] // Requires network access and setting proper env vars
-    async fn test_bebop_quote_aggregate_order() {
-        // This will make a quote request similar to the previous test but with a very big amount
-        // We expect the Bebop Quote to have an aggregate order (split between different mms)
-        let token_in = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
-        let token_out = Bytes::from_str("0xfAbA6f8e4a5E8Ab82F62fe7C39859FA577269BE3").unwrap();
-        dotenv().expect("Missing .env file");
-        let auth = get_bebop_auth().expect("Failed to get Bebop authentication");
-
-        let client = BebopClient::new(
-            Chain::Ethereum,
-            HashSet::from_iter(vec![token_in.clone(), token_out.clone()]),
-            10.0, // $10 minimum TVL
-            auth.key,
-            HashSet::new(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-
-        let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
-
-        let amount_in = BigUint::from_str("20_000_000_000").unwrap(); // 20k USDC
-        let params = GetAmountOutParams {
-            amount_in: amount_in.clone(),
-            token_in: token_in.clone(),
-            token_out: token_out.clone(),
-            sender: router.clone(),
-            receiver: router,
-        };
-        let quote = client
-            .request_binding_quote(&params)
-            .await
-            .unwrap();
-
-        assert_eq!(quote.base_token, token_in);
-        assert_eq!(quote.quote_token, token_out);
-        assert_eq!(quote.amount_in, amount_in);
-
-        // Assuming the USDC - ONDO price doesn't change too much at the time of running this
-        assert!(quote.amount_out > BigUint::from_str("18000000000000000000000").unwrap()); // ~19k ONDO
-
-        // SWAP_AGGREGATE_SELECTOR = 0xa2f74893;
-        assert_eq!(
-            quote
-                .quote_attributes
-                .get("calldata")
-                .unwrap()[..4],
-            Bytes::from_str("0xa2f74893")
-                .unwrap()
-                .to_vec()
-        );
-        let partial_fill_offset_slice = quote
-            .quote_attributes
-            .get("partial_fill_offset")
-            .unwrap()
-            .as_ref();
-        let mut partial_fill_offset_array = [0u8; 8];
-        partial_fill_offset_array.copy_from_slice(partial_fill_offset_slice);
-
-        // This is the only attribute that is significantly different for the Single and Aggregate
-        // Order
-        assert_eq!(u64::from_be_bytes(partial_fill_offset_array), 2);
     }
 
     #[test]
-    fn test_process_bebop_quote_response_aggregate_order() {
-        let json =
-            std::fs::read_to_string("src/rfq/protocols/bebop/test_responses/aggregate_order.json")
-                .unwrap();
-        let quote_response: BebopQuoteResponse = serde_json::from_str(&json).unwrap();
+    fn debug_output_omits_credentials() {
+        let rendered = format!("{:?}", test_client());
+
+        assert!(!rendered.contains("secret_key"));
+        assert!(rendered.contains("quote_endpoint"));
+    }
+
+    #[test]
+    fn process_bebop_quote_response_aggregate_order() {
+        let quote_response: BebopQuoteResponse = serde_json::from_str(AGGREGATE_ORDER).unwrap();
         let params = GetAmountOutParams {
-            amount_in: BigUint::from_str("43067495979235520920162").unwrap(),
+            amount_in: BigUint::from_str("20000000000").unwrap(),
             token_in: Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
             token_out: Bytes::from_str("0xfAbA6f8e4a5E8Ab82F62fe7C39859FA577269BE3").unwrap(),
             sender: Bytes::from_str("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35").unwrap(),
             receiver: Bytes::from_str("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35").unwrap(),
+            origin: None,
         };
         let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
-        assert_eq!(res.amount_out, BigUint::from_str("21700473797683400419007").unwrap());
+        assert_eq!(res.amount_out, BigUint::from_str("52571055094221715780641").unwrap());
         assert_eq!(res.amount_in, BigUint::from_str("20000000000").unwrap());
         assert_eq!(res.base_token, params.token_in);
         assert_eq!(res.quote_token, params.token_out);
     }
 
     #[test]
-    fn test_process_bebop_quote_response_aggregate_order_with_multihop() {
-        let json = std::fs::read_to_string(
-            "src/rfq/protocols/bebop/test_responses/aggregate_order_with_multihop.json",
-        )
-        .unwrap();
-        let quote_response: BebopQuoteResponse = serde_json::from_str(&json).unwrap();
+    fn process_bebop_quote_response_aggregate_order_with_multihop() {
+        let quote_response: BebopQuoteResponse =
+            serde_json::from_str(AGGREGATE_ORDER_WITH_MULTIHOP).unwrap();
         let params = GetAmountOutParams {
             amount_in: BigUint::from_str("43067495979235520920162").unwrap(),
             token_in: Bytes::from_str("0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB").unwrap(),
             token_out: Bytes::from_str("0xdAC17F958D2ee523a2206206994597C13D831ec7").unwrap(),
             sender: Bytes::from_str("0x809305d724B6E79C71e10a097ABadd1274B9C279").unwrap(),
             receiver: Bytes::from_str("0x809305d724B6E79C71e10a097ABadd1274B9C279").unwrap(),
+            origin: None,
         };
         let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
         assert_eq!(res.amount_out, BigUint::from_str("11186653890").unwrap());
@@ -969,56 +442,178 @@ mod tests {
         assert_eq!(res.quote_token, params.token_out);
     }
 
-    /// Helper function to create a mock server that responds after a delay
-    async fn create_delayed_response_server(delay_ms: u64) -> std::net::SocketAddr {
-        use tokio::io::AsyncWriteExt;
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let json_response =
-            std::fs::read_to_string("src/rfq/protocols/bebop/test_responses/aggregate_order.json")
-                .unwrap();
-
-        tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let json_response_clone = json_response.clone();
-                tokio::spawn(async move {
-                    sleep(Duration::from_millis(delay_ms)).await;
-
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                        json_response_clone.len(),
-                        json_response_clone
-                    );
-                    let _ = stream
-                        .write_all(response.as_bytes())
-                        .await;
-                    let _ = stream.flush().await;
-                    let _ = stream.shutdown().await;
-                });
-            }
-        });
-
-        addr
+    #[test]
+    fn process_bebop_quote_response_single_order() {
+        // Captured from a settlement-mode API account: the signed order's taker and receiver
+        // are the requested sender/receiver and the calldata targets the settlement contract.
+        let quote_response: BebopQuoteResponse = serde_json::from_str(SINGLE_ORDER).unwrap();
+        let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
+        let params = GetAmountOutParams {
+            amount_in: BigUint::from_str("1000000000000000000").unwrap(),
+            token_in: Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+            token_out: Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
+            sender: router.clone(),
+            receiver: router,
+            origin: None,
+        };
+        let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
+        assert_eq!(res.amount_in, BigUint::from_str("1000000000000000000").unwrap());
+        assert_eq!(res.amount_out, BigUint::from_str("2915408").unwrap());
+        let settlement = Bytes::from_str("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F").unwrap();
+        assert_eq!(
+            res.quote_attributes
+                .get("tx_to")
+                .unwrap(),
+            &settlement
+        );
+        assert_eq!(
+            res.quote_attributes
+                .get("calldata")
+                .unwrap()[..4],
+            SWAP_SINGLE_SELECTOR
+        );
     }
 
-    fn create_test_bebop_client(quote_endpoint: String, quote_timeout: Duration) -> BebopClient {
-        let token_in = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
-        let token_out = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
+    #[test]
+    fn process_bebop_quote_response_single_order_router_mode() {
+        // Captured from an API account configured for router-mode settlement: the signed
+        // order's taker and receiver are the Bebop router contract (= tx.to), not the
+        // requested sender/receiver.
+        let quote_response: BebopQuoteResponse =
+            serde_json::from_str(SINGLE_ORDER_ROUTER_MODE).unwrap();
+        let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
+        let params = GetAmountOutParams {
+            amount_in: BigUint::from_str("1000000000000000000").unwrap(),
+            token_in: Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+            token_out: Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
+            sender: router.clone(),
+            receiver: router,
+            origin: None,
+        };
+        let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
+        assert_eq!(res.amount_in, BigUint::from_str("1000000000000000000").unwrap());
+        assert_eq!(res.amount_out, BigUint::from_str("2926296").unwrap());
+        let bebop_router = Bytes::from_str("0xBeb0009ACa35087ce7cCF11637E24dd1Aad3bf2A").unwrap();
+        assert_eq!(
+            res.quote_attributes
+                .get("tx_to")
+                .unwrap(),
+            &bebop_router
+        );
+        assert_eq!(
+            res.quote_attributes
+                .get("calldata")
+                .unwrap()[..4],
+            ROUTER_SWAP_SELECTOR
+        );
+    }
 
+    /// A client whose quotes go to a server of the test's own, with everything else as
+    /// [`BebopClient::new`] builds it for Ethereum.
+    fn create_test_client(quote_endpoint: String, quote_timeout: Duration) -> BebopClient {
         BebopClient {
-            chain: Chain::Ethereum,
-            price_ws: "ws://example.com".to_string(),
             quote_endpoint,
-            tokens: HashSet::from([token_in, token_out]),
-            tvl: 10.0,
-            ws_key: "test_key".to_string(),
-            quote_tokens: HashSet::new(),
-            quote_timeout,
+            ..BebopClient::new(
+                BebopSupportedChain::Ethereum,
+                "test_key".to_string(),
+                quote_timeout,
+                QuoteOrigin::default(),
+            )
         }
+    }
+
+    /// Sends one binding quote request and asserts the server received `expected` as its only
+    /// `origin_address`.
+    async fn assert_origin_sent(
+        client_origin: Option<Bytes>,
+        request_origin: Option<Bytes>,
+        expected: &Bytes,
+    ) {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .match_query(mockito::Matcher::UrlEncoded(
+                "origin_address".into(),
+                bytes_to_address(expected)
+                    .unwrap()
+                    .to_string(),
+            ))
+            .with_body(include_str!("test_responses/aggregate_order.json"))
+            .create_async()
+            .await;
+        let client = BebopClient {
+            origin: QuoteOrigin { address: client_origin, ..Default::default() },
+            ..create_test_client(server.url(), Duration::from_secs(5))
+        };
+        let params = GetAmountOutParams { origin: request_origin, ..create_test_quote_params() };
+
+        client
+            .request_binding_quote(&params)
+            .await
+            .unwrap();
+
+        mock.assert_async().await;
+    }
+
+    /// The end user a quote is for is the trade's own, where the feed's origin stands for every
+    /// trade it quotes.
+    #[tokio::test]
+    async fn the_requests_origin_is_the_one_bebop_is_told() {
+        let request_origin = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
+        let client_origin = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
+
+        assert_origin_sent(
+            Some(client_origin.clone()),
+            Some(request_origin.clone()),
+            &request_origin,
+        )
+        .await;
+        assert_origin_sent(Some(client_origin.clone()), None, &client_origin).await;
+    }
+
+    /// Bebop names the trade it will not do in an error body under HTTP 200; the two codes and
+    /// their wording are what the production error log records. A size past its depth or below
+    /// its minimum leaves the route to be priced elsewhere, where a code it has not been seen to
+    /// decline with is the request being wrong.
+    #[rstest]
+    #[case::insufficient_liquidity(
+        102,
+        "InsufficientLiquidity: Insufficient liquidity for pair",
+        true
+    )]
+    #[case::min_size(104, "MinSize: Request quotes over $1.", true)]
+    #[case::a_code_it_has_not_declined_with(1, "Something else went wrong", false)]
+    #[tokio::test]
+    async fn only_a_code_that_is_not_a_decline_is_fatal(
+        #[case] code: u32,
+        #[case] says: &'static str,
+        #[case] declined: bool,
+    ) {
+        let server = spawn_http_server(move |_| {
+            Some((
+                "200 OK",
+                format!(
+                    r#"{{"error":{{"errorCode":{code},"message":"{says}","requestId":"abc"}}}}"#
+                ),
+            ))
+        })
+        .await;
+        let client = create_test_client(format!("{}/quote", server.url()), Duration::from_secs(1));
+
+        let error = client
+            .request_binding_quote(&create_test_quote_params())
+            .await
+            .unwrap_err();
+
+        assert!(
+            if declined {
+                matches!(error, RFQError::QuoteNotFound(_))
+            } else {
+                matches!(error, RFQError::FatalError(_))
+            },
+            "{error}"
+        );
+        assert!(error.to_string().contains(says), "{error}");
     }
 
     /// Helper function to create test quote params matching aggregate_order.json
@@ -1028,23 +623,29 @@ mod tests {
         let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
 
         GetAmountOutParams {
-            amount_in: BigUint::from_str("43067495979235520920162").unwrap(),
+            amount_in: BigUint::from_str("20000000000").unwrap(),
             token_in,
             token_out,
             sender: router.clone(),
             receiver: router,
+            origin: None,
         }
     }
 
     #[tokio::test]
-    async fn test_bebop_quote_timeout() {
-        let addr = create_delayed_response_server(500).await;
+    async fn bebop_quote_timeout() {
+        let server = spawn_http_server(|_| {
+            Some(MockResponse {
+                status: "200 OK",
+                body: AGGREGATE_ORDER.to_string(),
+                delay: Duration::from_millis(500),
+            })
+        })
+        .await;
 
         // Test 1: Client with short timeout (200ms) - should timeout
-        let client_short_timeout = create_test_bebop_client(
-            format!("http://127.0.0.1:{}/quote", addr.port()),
-            Duration::from_millis(200),
-        );
+        let client_short_timeout =
+            create_test_client(format!("{}/quote", server.url()), Duration::from_millis(200));
         let params = create_test_quote_params();
 
         let start = std::time::Instant::now();
@@ -1059,7 +660,10 @@ mod tests {
             RFQError::ConnectionError(msg) => {
                 assert!(msg.contains("timed out"), "Expected timeout error, got: {}", msg);
             }
-            _ => panic!("Expected ConnectionError, got: {:?}", err),
+            RFQError::ParsingError(_) |
+            RFQError::FatalError(_) |
+            RFQError::InvalidInput(_) |
+            RFQError::QuoteNotFound(_) => panic!("Expected ConnectionError, got: {:?}", err),
         }
         assert!(
             elapsed.as_millis() >= 200 && elapsed.as_millis() < 400,
@@ -1070,10 +674,8 @@ mod tests {
         // Test 2: Client with long timeout (1 seconds) - should wait and receive response
         // Note: With retry logic, we may need multiple attempts if the response is malformed,
         // so we need a longer timeout to account for retries
-        let client_long_timeout = create_test_bebop_client(
-            format!("http://127.0.0.1:{}/quote", addr.port()),
-            Duration::from_secs(1),
-        );
+        let client_long_timeout =
+            create_test_client(format!("{}/quote", server.url()), Duration::from_secs(1));
 
         let result = client_long_timeout
             .request_binding_quote(&params)
@@ -1088,65 +690,22 @@ mod tests {
         assert_eq!(quote.quote_token, params.token_out);
     }
 
-    /// Helper function to create a mock server that fails twice, then succeeds with
-    /// aggregate_order.json
-    async fn create_retry_server() -> (std::net::SocketAddr, Arc<Mutex<u32>>) {
-        use std::sync::{Arc, Mutex};
-
-        use tokio::io::AsyncWriteExt;
-
-        let request_count = Arc::new(Mutex::new(0u32));
-        let request_count_clone = request_count.clone();
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let json_response =
-            std::fs::read_to_string("src/rfq/protocols/bebop/test_responses/aggregate_order.json")
-                .unwrap();
-
-        tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let count_clone = request_count_clone.clone();
-                let json_response_clone = json_response.clone();
-                tokio::spawn(async move {
-                    *count_clone.lock().unwrap() += 1;
-                    let count = *count_clone.lock().unwrap();
-                    println!("Mock server: Received request #{count}");
-
-                    if count <= 2 {
-                        let response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 21\r\n\r\nInternal Server Error";
-                        let _ = stream
-                            .write_all(response.as_bytes())
-                            .await;
-                    } else {
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            json_response_clone.len(),
-                            json_response_clone
-                        );
-                        let _ = stream
-                            .write_all(response.as_bytes())
-                            .await;
-                    }
-                    let _ = stream.flush().await;
-                    let _ = stream.shutdown().await;
-                });
-            }
-        });
-        (addr, request_count)
-    }
-
     #[tokio::test]
-    async fn test_bebop_quote_retry_on_bad_response() {
-        let (addr, request_count) = create_retry_server().await;
+    async fn bebop_quote_retry_on_bad_response() {
+        // The venue answers the first two attempts with a server error and the third with a
+        // quote.
+        // The route counts its own attempts, so one test's retries never reach another's.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let server = spawn_http_server(move |_| {
+            Some(if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                ("500 Internal Server Error", "Internal Server Error".to_string())
+            } else {
+                ("200 OK", AGGREGATE_ORDER.to_string())
+            })
+        })
+        .await;
 
-        let client = create_test_bebop_client(
-            format!("http://127.0.0.1:{}/quote", addr.port()),
-            Duration::from_secs(5),
-        );
+        let client = create_test_client(format!("{}/quote", server.url()), Duration::from_secs(5));
         let params = create_test_quote_params();
         let result = client
             .request_binding_quote(&params)
@@ -1157,65 +716,61 @@ mod tests {
 
         // Verify the quote (amounts from aggregate_order.json)
         assert_eq!(quote.amount_in, BigUint::from_str("20000000000").unwrap());
-        assert_eq!(quote.amount_out, BigUint::from_str("21700473797683400419007").unwrap());
+        assert_eq!(quote.amount_out, BigUint::from_str("52571055094221715780641").unwrap());
 
         // Verify exactly 3 requests were made (2 failures + 1 success)
-        let final_count = *request_count.lock().unwrap();
-        assert_eq!(final_count, 3, "Expected 3 requests, got {}", final_count);
+        assert_eq!(server.request_count(), 3);
     }
 
     #[test]
-    fn test_bebop_client_serialize_deserialize_roundtrip() {
-        let token_in = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
-        let token_out = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
-        let quote_token = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
-
-        let original = BebopClient {
-            chain: Chain::Ethereum,
-            price_ws: "wss://api.bebop.xyz/pricing".to_string(),
-            quote_endpoint: "https://api.bebop.xyz/quote".to_string(),
-            tokens: HashSet::from([token_in.clone(), token_out.clone()]),
-            tvl: 50.5,
-            ws_key: "secret_key".to_string(),
-            quote_tokens: HashSet::from([quote_token.clone()]),
-            quote_timeout: Duration::from_millis(5500),
+    fn process_bebop_quote_response_aggregate_order_router_mode() {
+        // Captured from a router-mode API account: an aggregate order split across three
+        // makers where the signed order's taker and receiver are the Bebop router (= tx.to).
+        let quote_response: BebopQuoteResponse =
+            serde_json::from_str(AGGREGATE_ORDER_ROUTER_MODE).unwrap();
+        let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
+        let params = GetAmountOutParams {
+            amount_in: BigUint::from_str("20000000000").unwrap(),
+            token_in: Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
+            token_out: Bytes::from_str("0xfAbA6f8e4a5E8Ab82F62fe7C39859FA577269BE3").unwrap(),
+            sender: router.clone(),
+            receiver: router,
+            origin: None,
         };
-
-        let serialized = serde_json::to_string(&original).unwrap();
-        let deserialized: BebopClient = serde_json::from_str(&serialized).unwrap();
-
-        // Fields that should round-trip correctly
-        assert_eq!(deserialized.chain, original.chain);
-        assert_eq!(deserialized.price_ws, original.price_ws);
-        assert_eq!(deserialized.quote_endpoint, original.quote_endpoint);
-        assert_eq!(deserialized.tokens, original.tokens);
-        assert_eq!(deserialized.tvl, original.tvl);
-        assert_eq!(deserialized.quote_tokens, original.quote_tokens);
-        assert_eq!(deserialized.quote_timeout, original.quote_timeout);
-
-        // ws_key should NOT round-trip (skip_serializing + default)
-        assert_eq!(deserialized.ws_key, "");
-        assert_ne!(deserialized.ws_key, original.ws_key);
+        let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
+        assert_eq!(res.amount_in, BigUint::from_str("20000000000").unwrap());
+        assert_eq!(res.amount_out, BigUint::from_str("52577858553072299423490").unwrap());
+        let bebop_router = Bytes::from_str("0xBeb0009ACa35087ce7cCF11637E24dd1Aad3bf2A").unwrap();
+        assert_eq!(
+            res.quote_attributes
+                .get("tx_to")
+                .unwrap(),
+            &bebop_router
+        );
+        assert_eq!(
+            res.quote_attributes
+                .get("calldata")
+                .unwrap()[..4],
+            ROUTER_SWAP_SELECTOR
+        );
     }
 
+    /// Both endpoints Bebop serves a chain under hang off that chain's own path.
     #[test]
-    fn test_bebop_client_deserialize_with_credentials() {
-        // When ws_key is provided in JSON, it should be deserialized
-        // (skip_serializing only affects serialization, not deserialization)
-        let json = r#"{
-            "chain": "ethereum",
-            "price_ws": "wss://api.bebop.xyz/pricing",
-            "quote_endpoint": "https://api.bebop.xyz/quote",
-            "tokens": [],
-            "tvl": 10.0,
-            "ws_key": "provided_key",
-            "quote_tokens": [],
-            "quote_timeout": {"secs": 30, "nanos": 0}
-        }"#;
+    fn the_endpoints_carry_the_chain_the_client_prices_on() {
+        let client = BebopClient::new(
+            BebopSupportedChain::Base,
+            "secret_key".to_string(),
+            Duration::from_secs(30),
+            QuoteOrigin::default(),
+        );
+        let pricing_client =
+            BebopPricingClient::new(BebopSupportedChain::Base, "secret_key".to_string());
 
-        let client: BebopClient = serde_json::from_str(json).unwrap();
-
-        // Credentials should be deserialized from JSON
-        assert_eq!(client.ws_key, "provided_key");
+        assert_eq!(client.quote_endpoint, "https://api.bebop.xyz/pmm/base/v3/quote");
+        assert_eq!(
+            pricing_client.pricing_ws_endpoint,
+            "wss://api.bebop.xyz/pmm/base/v3/pricing?format=protobuf"
+        );
     }
 }

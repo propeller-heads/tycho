@@ -3,11 +3,15 @@ pragma solidity ^0.8.13;
 
 import "./AdapterTest.sol";
 import "openzeppelin-contracts/contracts/interfaces/IERC20.sol";
+import "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import "src/fermiswap/FermiSwapAdapter.sol";
 import "src/interfaces/ISwapAdapterTypes.sol";
 
 contract FermiSwapAdapterTest is AdapterTest {
+    using SafeERC20 for IERC20;
+
     FermiSwapAdapter adapter;
+    address fermiEngine;
 
     address constant FERMI_SWAPPER = 0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e;
     address constant PRIO_UPDATE_REGISTRY =
@@ -16,14 +20,20 @@ contract FermiSwapAdapterTest is AdapterTest {
     address constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
     address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
     address constant USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
+    address constant WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
+    address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
 
     uint256 constant WETH_BALANCE = 10 ether;
     uint256 constant SELL_WETH_AMOUNT = 0.1 ether;
     uint256 constant BUY_USDC_AMOUNT = 1_00e6;
 
     function setUp() public {
-        vm.createSelectFork(vm.rpcUrl("mainnet"), 25295257);
-        address fermiEngine = address(IFermiSwapper(FERMI_SWAPPER).fermi());
+        // At this block the trader vault holds ~1.0M USDT (1,005,855.43),
+        // more than the USDT lanes can service — the precondition for the
+        // IL/COR refusals exercised in testGetLimitsThinLaneDoesNotRevert
+        // and testGetLimitsAfterSwapDoesNotRevert.
+        vm.createSelectFork(vm.rpcUrl("mainnet"), 25596060);
+        fermiEngine = address(IFermiSwapper(FERMI_SWAPPER).fermi());
         _refreshFermiPair(fermiEngine, WETH, USDC);
 
         adapter = new FermiSwapAdapter(FERMI_SWAPPER);
@@ -45,17 +55,19 @@ contract FermiSwapAdapterTest is AdapterTest {
     function testGetPoolIds() public view {
         bytes32[] memory poolIds = adapter.getPoolIds(0, 10);
 
-        assertEq(poolIds.length, 5);
+        // Pair registration order on the 0x90f73fEA engine (blocks
+        // 25581596-25581615).
+        assertEq(poolIds.length, 8);
         assertEq(poolIds[0], _poolId(WETH, USDC));
         assertEq(poolIds[1], _poolId(WETH, USDT));
-        assertEq(poolIds[2], _poolId(USDC, USDT));
+        assertEq(poolIds[2], _poolId(WBTC, USDT));
 
         bytes32[] memory offsetPoolIds = adapter.getPoolIds(1, 10);
-        assertEq(offsetPoolIds.length, 4);
+        assertEq(offsetPoolIds.length, 7);
         assertEq(offsetPoolIds[0], _poolId(WETH, USDT));
-        assertEq(offsetPoolIds[1], _poolId(USDC, USDT));
+        assertEq(offsetPoolIds[1], _poolId(WBTC, USDT));
 
-        bytes32[] memory emptyPoolIds = adapter.getPoolIds(5, 10);
+        bytes32[] memory emptyPoolIds = adapter.getPoolIds(8, 10);
         assertEq(emptyPoolIds.length, 0);
     }
 
@@ -157,6 +169,70 @@ contract FermiSwapAdapterTest is AdapterTest {
         assertGt(trade.price.denominator, 0);
     }
 
+    /// The engine refuses exact-output quotes beyond a pair's serviceable
+    /// size (reverting with `IL`), so the full-vault probe is not always
+    /// quotable. `getLimits` must return a usable clamped limit instead of
+    /// surfacing the revert.
+    function testGetLimitsThinLaneDoesNotRevert() public {
+        _refreshFermiPair(fermiEngine, WBTC, USDT);
+
+        // The engine refuses an exact-output buy of the entire vault USDT
+        // holding on this pair.
+        uint256 vaultUsdt = IERC20(USDT).balanceOf(TRADER_VAULT);
+        vm.expectRevert(bytes("IL"));
+        IFermiSwapper(FERMI_SWAPPER)
+            .quoteAmounts(WBTC, USDT, -int256(vaultUsdt));
+
+        uint256[] memory limits =
+            adapter.getLimits(_poolId(WBTC, USDT), WBTC, USDT);
+
+        assertEq(limits.length, 2);
+        assertGt(limits[0], 0);
+        assertGt(limits[1], 0);
+        assertLt(limits[1], vaultUsdt);
+    }
+
+    /// A swap that consumes the pair's corridor makes a full-size re-quote
+    /// revert with `COR` and the pool price unquotable. The swap must still
+    /// complete, reporting a zero price, and `getLimits` must stay callable
+    /// in both directions afterwards.
+    function testGetLimitsAfterSwapDoesNotRevert() public {
+        _refreshFermiPair(fermiEngine, USDC, USDT);
+
+        // Pre-swap the pool is fully quotable in this direction.
+        uint256[] memory limits =
+            adapter.getLimits(_poolId(USDC, USDT), USDT, USDC);
+        assertGt(limits[0], 0);
+
+        // Sell USDT into the pool up to the quoted limit: consumes the
+        // traded direction's corridor and drains the vault's USDC.
+        uint256 sellAmount = limits[0];
+        deal(USDT, address(this), sellAmount);
+        IERC20(USDT).forceApprove(address(adapter), sellAmount);
+        Trade memory trade = adapter.swap(
+            _poolId(USDC, USDT), USDT, USDC, OrderSide.Sell, sellAmount
+        );
+
+        // A full-size re-quote is refused and the pool price is unquotable,
+        // reported as a zero price.
+        vm.expectRevert(bytes("COR"));
+        adapter.priceAt(USDT, USDC, sellAmount);
+        assertEq(trade.price.numerator, 0);
+
+        // Limits stay computable in both directions after the swap. The
+        // traded direction may legitimately report zero (vault USDC drained);
+        // the reverse direction must stay quotable.
+        uint256[] memory tradedDirection =
+            adapter.getLimits(_poolId(USDC, USDT), USDT, USDC);
+        assertEq(tradedDirection.length, 2);
+
+        uint256[] memory reverseDirection =
+            adapter.getLimits(_poolId(USDC, USDT), USDC, USDT);
+        assertEq(reverseDirection.length, 2);
+        assertGt(reverseDirection[0], 0);
+        assertGt(reverseDirection[1], 0);
+    }
+
     function testRevertsOnPoolTokenMismatch() public {
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = SELL_WETH_AMOUNT;
@@ -174,14 +250,12 @@ contract FermiSwapAdapterTest is AdapterTest {
     }
 
     function _refreshFermiPair(
-        address fermiEngine,
+        address engine,
         address baseAsset,
         address quoteAsset
     ) internal {
         bytes32 laneSlot = keccak256(
-            abi.encode(
-                fermiEngine, uint256(_fermiPairKey(baseAsset, quoteAsset))
-            )
+            abi.encode(engine, uint256(_fermiPairKey(baseAsset, quoteAsset)))
         );
         uint256 storedLane = uint256(vm.load(PRIO_UPDATE_REGISTRY, laneSlot));
         uint256 storedSlotCount = (storedLane >> 216) & 0xff;

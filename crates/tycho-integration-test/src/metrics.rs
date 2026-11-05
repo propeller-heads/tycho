@@ -44,6 +44,21 @@ pub fn initialize_metrics() {
         "tycho_integration_simulation_execution_reverts_total",
         "Total number of reverted execution simulations"
     );
+    describe_counter!(
+        "tycho_integration_execution_stale_quotes_total",
+        "Price level stream swaps simulated without simulation overrides that reverted on the \
+         venue's freshness guard (expected outcome; the execution comparison is skipped)"
+    );
+    describe_counter!(
+        "tycho_integration_price_level_target_block_misses_total",
+        "Price level stream updates dropped because the RPC did not serve the quoted target \
+         block within the poll window"
+    );
+    describe_counter!(
+        "tycho_integration_price_level_simulation_overrides_missing_total",
+        "Price level stream swaps simulated without simulation overrides, because the stream \
+         attached none to the quote's state"
+    );
     describe_histogram!(
         "tycho_integration_simulation_execution_slippage_ratio",
         "Slippage ratio between simulated and actual execution amounts"
@@ -155,6 +170,16 @@ pub fn record_simulation_execution_revert(protocol: &str, error_category: &str) 
     .increment(1);
 }
 
+/// Record a price level stream swap that was simulated without simulation overrides and reverted
+/// on the venue's freshness guard.
+pub fn record_execution_stale_quote(protocol: &str) {
+    counter!(
+        "tycho_integration_execution_stale_quotes_total",
+        "protocol" => protocol.to_string(),
+    )
+    .increment(1);
+}
+
 /// Record a failed execution simulation
 pub fn record_simulation_execution_failure(protocol: &str, error_category: &str) {
     counter!(
@@ -200,16 +225,41 @@ pub fn record_protocol_pool_count(protocol: &str, count: usize) {
     .set(count as f64);
 }
 
-/// Record that an update was skipped because the RPC block was ahead of the update block.
+/// Record that an update was skipped because the RPC did not serve its block: the RPC was
+/// already ahead of the update block, or never reached it within the poll attempts.
 ///
 /// The protocol's `SynchronizerState` may report Ready in this case — the lag is only
-/// observable by comparing the update block against the RPC's latest block.
+/// observable by comparing the update block against the RPC's block.
 pub fn record_protocol_sync_state_skipped(protocol: &str) {
     gauge!(
         "tycho_integration_protocol_sync_state",
         "protocol" => protocol.to_string()
     )
     .set(7.0);
+}
+
+/// Mark a protocol as Ready, for streams that carry no `SynchronizerState`.
+pub fn mark_protocol_ready(protocol: &str) {
+    gauge!(
+        "tycho_integration_protocol_sync_state",
+        "protocol" => protocol.to_string()
+    )
+    .set(2.0); // 2 = Ready
+}
+
+/// Record a price level stream update dropped because the RPC never served its target block.
+pub fn record_price_level_target_block_miss() {
+    counter!("tycho_integration_price_level_target_block_misses_total").increment(1);
+}
+
+/// Record a swap of `protocol` simulated without simulation overrides, because the stream attached
+/// none to its quote's state.
+pub fn record_price_level_simulation_overrides_missing(protocol: &str) {
+    counter!(
+        "tycho_integration_price_level_simulation_overrides_missing_total",
+        "protocol" => protocol.to_string()
+    )
+    .increment(1);
 }
 
 /// Explicitly mark a protocol as stale when no update has been received within the expected window.
@@ -227,6 +277,14 @@ pub fn mark_protocol_stale(protocol: &str) {
 /// Record when a protocol update is skipped because it's behind the current block
 pub fn record_protocol_update_skipped() {
     counter!("tycho_integration_protocol_updates_skipped_total").increment(1);
+}
+
+/// Record a protocol update not selected by `--test-every-n-updates` sampling.
+///
+/// Deliberately separate from `tycho_integration_protocol_updates_skipped_total`: skipped means
+/// the harness wanted to test the block but could not; sampled-out is a configured decision.
+pub fn record_protocol_update_sampled_out() {
+    counter!("tycho_integration_protocol_updates_sampled_out_total").increment(1);
 }
 
 /// Record the block delay of protocol updates
@@ -345,8 +403,18 @@ pub async fn create_metrics_exporter(port: u16) -> Result<tokio::task::JoinHandl
 
     // Wrap the thread handle in a tokio task
     let join_handle = tokio::spawn(async move {
-        task.join()
-            .map_err(|_| miette::miette!("Metrics server thread panicked"))?
+        task.join().map_err(|payload| {
+            let message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                })
+                .unwrap_or("non-string panic payload");
+            miette::miette!("Metrics server thread panicked: {message}")
+        })?
     });
 
     Ok(join_handle)

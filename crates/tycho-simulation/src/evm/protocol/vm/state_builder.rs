@@ -98,6 +98,7 @@ where
     disable_overwrite_tokens: HashSet<Address>,
     self_contained_tokens: HashSet<Address>,
     block_overrides: Option<BlockEnvOverrides>,
+    spot_price_caller: Option<Address>,
 }
 
 impl<D> EVMPoolStateBuilder<D>
@@ -125,6 +126,7 @@ where
             disable_overwrite_tokens: HashSet::new(),
             self_contained_tokens: HashSet::new(),
             block_overrides: None,
+            spot_price_caller: None,
         }
     }
 
@@ -207,6 +209,12 @@ where
         self
     }
 
+    /// Sets [`EVMPoolState::spot_price_caller`] (the `price()` query caller); defaults to `None`.
+    pub fn spot_price_caller(mut self, spot_price_caller: Option<Address>) -> Self {
+        self.spot_price_caller = spot_price_caller;
+        self
+    }
+
     /// Build the final EVMPoolState object
     pub async fn build(mut self, db: D) -> Result<EVMPoolState<D>, SimulationError> {
         let engine = if let Some(engine) = &self.engine {
@@ -228,7 +236,7 @@ where
                     .ok_or_else(|| {
                         SimulationError::FatalError("Adapter contract bytecode not set".to_string())
                     })?,
-                engine.clone(),
+                engine,
             )?)
         };
 
@@ -260,6 +268,7 @@ where
             self.disable_overwrite_tokens,
             self.self_contained_tokens,
             self.block_overrides,
+            self.spot_price_caller,
         ))
     }
 
@@ -290,9 +299,7 @@ where
                 let mut addr_str = address.clone();
                 let (code, code_hash) = if bytecode.is_none() {
                     if addr_str.starts_with("call") {
-                        addr_str = self
-                            .get_address_from_call(&engine, &addr_str)?
-                            .to_string();
+                        addr_str = Self::get_address_from_call(&engine, &addr_str)?.to_string();
                     }
                     let code = get_code_for_contract(&addr_str, None).await?;
                     (Some(code.clone()), code.hash_slow())
@@ -305,9 +312,9 @@ where
                         })?));
                     (Some(code.clone()), code.hash_slow())
                 };
-                let account_address: Address = addr_str.parse().map_err(|_| {
+                let account_address: Address = addr_str.parse().map_err(|e| {
                     SimulationError::FatalError(format!(
-                        "Failed to get default engine: Couldn't parse address string {address}"
+                        "Failed to get default engine: Couldn't parse address string {address}: {e}"
                     ))
                 })?;
                 engine.state.init_account(
@@ -325,7 +332,7 @@ where
         Ok(engine)
     }
 
-    fn get_default_capabilities(&mut self) -> Result<HashSet<Capability>, SimulationError> {
+    fn get_default_capabilities(&self) -> Result<HashSet<Capability>, SimulationError> {
         let mut capabilities = Vec::new();
 
         // Generate all permutations of tokens and retrieve capabilities
@@ -378,7 +385,6 @@ where
     /// # See Also
     /// [Dynamic Address Resolution Example](https://github.com/propeller-heads/propeller-protocol-lib/blob/main/docs/indexing/reserved-attributes.md#description-2)
     fn get_address_from_call(
-        &self,
         engine: &SimulationEngine<D>,
         decoded: &str,
     ) -> Result<Address, SimulationError> {
@@ -408,9 +414,9 @@ where
                 )
             })?;
 
-        let parsed_address: Address = to_address.parse().map_err(|_| {
+        let parsed_address: Address = to_address.parse().map_err(|e| {
             SimulationError::FatalError(format!(
-                "Failed to get address from call: Invalid address format: {to_address}"
+                "Failed to get address from call: Invalid address format: {to_address}: {e}"
             ))
         })?;
 
@@ -419,10 +425,7 @@ where
             to: parsed_address,
             overrides: Some(HashMap::new()),
             caller: *EXTERNAL_ACCOUNT,
-            value: U256::from(0u64),
-            gas_limit: None,
-            transient_storage: None,
-            block_overrides: None,
+            ..Default::default()
         };
 
         let sim_result = engine
@@ -463,7 +466,9 @@ mod tests {
             SimulationError::FatalError(field) => {
                 assert_eq!(field, "Adapter contract bytecode not set")
             }
-            _ => panic!("Unexpected error type"),
+            SimulationError::InvalidInput(..) | SimulationError::RecoverableError(_) => {
+                panic!("Unexpected error type")
+            }
         }
     }
 
@@ -472,7 +477,7 @@ mod tests {
         let id = "pool_1".to_string();
         let token2 = TychoBytes::from_str("0000000000000000000000000000000000000002").unwrap();
         let token3 = TychoBytes::from_str("0000000000000000000000000000000000000003").unwrap();
-        let tokens = vec![token2.clone(), token3.clone()];
+        let tokens = vec![token2, token3];
         let balances = HashMap::new();
         let adapter_address =
             Address::from_str("0xA2C5C98A892fD6656a7F39A2f63228C0Bc846270").unwrap();

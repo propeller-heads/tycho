@@ -30,7 +30,7 @@ use crate::extractor::{
     ExtractionError, ExtractorExtension,
 };
 
-pub(crate) struct DynamicContractIndexer<AE, T, G>
+pub struct DynamicContractIndexer<AE, T, G>
 where
     AE: AccountExtractor + Send + Sync,
     T: EntryPointTracer + Send + Sync,
@@ -399,6 +399,7 @@ where
 
             let mut new_account_addr_to_slots: HashMap<Address, HashSet<StoreKey>> = HashMap::new();
             let mut new_account_addr_to_tx: HashMap<Address, &Transaction> = HashMap::new();
+            let mut refetched_accounts: HashSet<Address> = HashSet::new();
 
             for (tx, traced_entrypoints) in tx_to_traced_entrypoint {
                 for traced_entrypoint in traced_entrypoints.iter() {
@@ -435,6 +436,9 @@ where
                         if is_new_account ||
                             (!new_slots.is_empty() && self.should_skip_full_indexing(account))
                         {
+                            if !is_new_account {
+                                refetched_accounts.insert(account.clone());
+                            }
                             // Only add new slots to new_account_addr_to_slots (might be empty for
                             // new accounts)
                             new_account_addr_to_slots
@@ -534,13 +538,27 @@ where
 
             // Update the block changes
             for (account, tx) in new_account_addr_to_tx.into_iter() {
-                let account_delta = new_accounts
+                let mut account_delta = new_accounts
                     .remove(&account)
                     .ok_or_else(|| {
                         ExtractionError::Unknown(format!(
                             "Account {account} not found in the result. All accounts in request should have a result"
                         ))
                     })?;
+
+                // The account extractor labels every result a creation, but a tracked account
+                // only gains slots here.
+                if refetched_accounts.contains(&account) {
+                    let code = account_delta.code().clone();
+                    account_delta = AccountDelta::new(
+                        account_delta.chain,
+                        account_delta.address,
+                        account_delta.slots,
+                        account_delta.balance,
+                        code,
+                        ChangeType::Update,
+                    );
+                }
 
                 match block_changes
                     .txs_with_update
@@ -609,7 +627,7 @@ where
         self.cache
             .ep_id_to_entrypoint
             .extend_pending(
-                block_changes.block.clone(),
+                &block_changes.block,
                 new_entrypoints
                     .into_values()
                     .map(|ep| (ep.external_id.clone(), ep)),
@@ -703,7 +721,7 @@ where
     /// let mut dci = DynamicContractIndexer::new(...);
     /// dci.with_max_retry_count(10); // Allow up to 10 retries
     /// ```
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn with_max_retry_count(&mut self, count: u32) {
         self.max_retry_count = count;
     }
@@ -1104,7 +1122,7 @@ where
             self.cache
                 .entrypoint_results
                 .insert_pending(
-                    block.clone(),
+                    block,
                     (
                         traced_entry_point
                             .entry_point_with_params
@@ -1137,7 +1155,7 @@ where
             // Store the failed trace result
             self.cache
                 .entrypoint_results
-                .insert_pending(block.clone(), key.clone(), None)?;
+                .insert_pending(block, key.clone(), None)?;
 
             // Increment retry counter: read across all layers, then write to current layer
             let current_count = self
@@ -1148,7 +1166,7 @@ where
                 .unwrap_or(0);
             self.cache
                 .tracing_retry_counts
-                .insert_pending(block.clone(), key, current_count + 1)?;
+                .insert_pending(block, key, current_count + 1)?;
         }
 
         Ok(())
@@ -2275,7 +2293,7 @@ mod tests {
                         token_address.clone(),
                         AccountDelta::new(
                             Chain::Ethereum,
-                            token_address.clone(),
+                            token_address,
                             HashMap::new(),
                             None,
                             None,
@@ -2514,7 +2532,7 @@ mod tests {
             .insert_permanent(token_address.clone(), tracked_slots.clone());
         dci.cache
             .tracked_contracts
-            .insert_permanent(normal_address.clone(), tracked_slots.clone());
+            .insert_permanent(normal_address.clone(), tracked_slots);
 
         // Create block changes with storage updates
         let block_changes = BlockChanges::new(
@@ -2792,9 +2810,9 @@ mod tests {
                             Chain::Ethereum,
                             token_address,
                             HashMap::new(),
-                            None,
-                            None,
-                            ChangeType::Update,
+                            Some(Bytes::from(0_u8).lpad(32, 0)),
+                            Some(Bytes::from("0x6000")),
+                            ChangeType::Creation,
                         ),
                     )]))
                 }
@@ -2826,6 +2844,15 @@ mod tests {
         // Verify the update was processed
         assert!(!block_changes.txs_with_update.is_empty());
         assert!(!block_changes.trace_results.is_empty());
+        let token_deltas: Vec<_> = block_changes
+            .txs_with_update
+            .iter()
+            .filter_map(|tx| tx.account_deltas.get(&token_address))
+            .collect();
+        assert!(!token_deltas.is_empty());
+        assert!(token_deltas
+            .iter()
+            .all(|delta| delta.change_type() == ChangeType::Update));
     }
 
     #[tokio::test]
@@ -2854,7 +2881,7 @@ mod tests {
                         Bytes::zero(32),
                         // Account with empty slots - this is the key scenario
                         get_tracing_result_with_addresses_and_slots(vec![
-                            (new_account.clone(), vec![]), // No slots!
+                            (new_account, vec![]), // No slots!
                         ]),
                     ))]
                 }
@@ -2884,9 +2911,9 @@ mod tests {
                             Chain::Ethereum,
                             new_account,
                             HashMap::new(),
-                            None,
-                            None,
-                            ChangeType::Update,
+                            Some(Bytes::from(0_u8).lpad(32, 0)),
+                            Some(Bytes::from("0x6000")),
+                            ChangeType::Creation,
                         ),
                     )]))
                 }
@@ -2913,6 +2940,10 @@ mod tests {
             .account_deltas
             .contains_key(&new_account));
         assert!(!block_changes.trace_results.is_empty());
+        assert_eq!(
+            block_changes.txs_with_update[0].account_deltas[&new_account].change_type(),
+            ChangeType::Creation
+        );
     }
 
     #[tokio::test]

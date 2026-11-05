@@ -5,8 +5,8 @@ use serde::Deserialize;
 struct StringParams {
     planner: String,
     info: String,
-    mint_impl: String,
-    swap_impl: String,
+    extra_impl1: String,
+    extra_impl2: String,
 }
 
 impl StringParams {
@@ -17,10 +17,9 @@ impl StringParams {
 
 pub(crate) struct Params {
     pub planner: Vec<u8>,
-    #[allow(dead_code)] // We keep the unused info field for future pricing/view operations
     pub info: Vec<u8>,
-    pub mint_impl: Vec<u8>,
-    pub swap_impl: Vec<u8>,
+    pub extra_impl1: Vec<u8>,
+    pub extra_impl2: Vec<u8>,
 }
 
 pub fn encode_addr(bytes: &[u8]) -> String {
@@ -63,8 +62,8 @@ impl Params {
         Ok(Self {
             planner: decode_addr(&params.planner)?,
             info: decode_addr(&params.info)?,
-            mint_impl: decode_addr(&params.mint_impl)?,
-            swap_impl: decode_addr(&params.swap_impl)?,
+            extra_impl1: decode_addr(&params.extra_impl1)?,
+            extra_impl2: decode_addr(&params.extra_impl2)?,
         })
     }
 }

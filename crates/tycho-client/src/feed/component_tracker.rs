@@ -41,7 +41,10 @@ impl ComponentFilter {
     ///
     /// * `min_tvl` - The minimum TVL required for a component to be tracked. This is denominated in
     ///   native token of the chain.
-    #[allow(non_snake_case)] // for backwards compatibility
+    #[expect(
+        non_snake_case,
+        reason = "named after the enum variant it stands for; renaming the public constructor is a breaking change"
+    )]
     #[deprecated(since = "0.9.2", note = "Please use with_tvl_range instead")]
     pub fn MinimumTVL(min_tvl: f64) -> ComponentFilter {
         ComponentFilter {
@@ -82,7 +85,10 @@ impl ComponentFilter {
     ///
     /// * `ids` - A vector of component IDs to include in the filter. Only components with these IDs
     ///   will be tracked.
-    #[allow(non_snake_case)] // for backwards compatibility
+    #[expect(
+        non_snake_case,
+        reason = "named after the enum variant it stands for; renaming the public constructor is a breaking change"
+    )]
     pub fn Ids(ids: Vec<ComponentId>) -> ComponentFilter {
         ComponentFilter {
             variant: ComponentFilterVariant::Ids(
@@ -138,6 +144,10 @@ struct EntrypointRelations {
 }
 
 /// Helper struct to determine which components and contracts are being tracked atm.
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; making `components` and `contracts` private or the rest public is a breaking change"
+)]
 pub struct ComponentTracker<R: RPCClient> {
     chain: Chain,
     protocol_system: ProtocolSystem,

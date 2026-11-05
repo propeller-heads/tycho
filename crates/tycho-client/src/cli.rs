@@ -1,4 +1,4 @@
-use std::{path::Path, str::FromStr};
+use std::{path::Path, str::FromStr, time::Duration};
 
 use clap::Parser;
 use tracing::info;
@@ -16,6 +16,7 @@ use crate::{
 /// providing real-time updates about their state.
 #[derive(Parser, Debug, Clone, PartialEq)]
 #[clap(version = env!("CARGO_PKG_VERSION"))]
+#[expect(clippy::struct_excessive_bools, reason = "each bool is an independent CLI flag")]
 struct CliArgs {
     /// Tycho server URL, without protocol. Example: localhost:4242
     #[clap(long, default_value = "localhost:4242", env = "TYCHO_URL")]
@@ -32,7 +33,7 @@ struct CliArgs {
 
     /// The blockchain to index on
     #[clap(short = 'c', long, default_value = "ethereum")]
-    pub chain: String,
+    chain: String,
 
     /// Specifies exchanges. Optionally also supply a pool address in the format
     /// {exchange}-{pool_address}
@@ -120,6 +121,12 @@ struct CliArgs {
     /// Maximum number of retry attempts for failed startups
     #[clap(long, default_value = "32")]
     max_retries: u64,
+
+    /// Maximum random delay in seconds before a restarted synchronizer requests a snapshot.
+    /// Spreads snapshot requests after a server or extractor restart. The first start has no
+    /// delay. The minimum is 5.
+    #[clap(long, default_value = "60", value_parser = clap::value_parser!(u64).range(5..))]
+    snapshot_jitter: u64,
 
     /// Path to a TOML file containing component IDs to exclude from tracking.
     #[clap(long)]
@@ -229,7 +236,7 @@ async fn run(exchanges: Vec<(String, Option<String>)>, args: CliArgs) -> Result<
     };
 
     let chain = Chain::from_str(&args.chain)
-        .map_err(|_| format!("Unknown chain: {chain}", chain = args.chain))?;
+        .map_err(|e| format!("Unknown chain: {chain}: {e}", chain = args.chain))?;
 
     let mut builder = TychoStreamBuilder::new(&args.tycho_url, chain)
         .auth_key(args.auth_key)
@@ -237,6 +244,7 @@ async fn run(exchanges: Vec<(String, Option<String>)>, args: CliArgs) -> Result<
         .no_state(args.no_state)
         .include_tvl(args.include_tvl)
         .max_retries(args.max_retries)
+        .snapshot_jitter(Duration::from_secs(args.snapshot_jitter))
         .blocklisted_ids(blocklist);
 
     if let Some(bt) = args.block_time {
@@ -307,7 +315,7 @@ async fn run(exchanges: Vec<(String, Option<String>)>, args: CliArgs) -> Result<
 
     Err(format!(
         "{failed_task} task terminated: {}",
-        shutdown_reason.unwrap_or("unknown reason".to_string())
+        shutdown_reason.unwrap_or_else(|| "unknown reason".to_string())
     ))
 }
 
@@ -359,6 +367,25 @@ mod cli_tests {
         assert!(args.example);
         assert_eq!(args.disable_compression, false);
         assert_eq!(args.partial_blocks, false);
+        assert_eq!(args.snapshot_jitter, 60);
         assert_eq!(args.blocklist_config, Some(std::path::PathBuf::from("blocklist.toml")));
+
+        let args = CliArgs::parse_from([
+            "tycho-client",
+            "--exchange",
+            "uniswap_v2",
+            "--snapshot-jitter",
+            "5",
+        ]);
+        assert_eq!(args.snapshot_jitter, 5);
+
+        let res = CliArgs::try_parse_from([
+            "tycho-client",
+            "--exchange",
+            "uniswap_v2",
+            "--snapshot-jitter",
+            "4",
+        ]);
+        assert!(res.is_err(), "A snapshot jitter below 5 should be rejected");
     }
 }

@@ -273,6 +273,20 @@ contract BalancerV3SwapAdapterTest is AdapterTest, ERC20, BalancerV3Errors {
         vm.label(permit2, "Permit2");
     }
 
+    function testGetCapabilitiesFuzz(
+        bytes32 pool,
+        address token0,
+        address token1
+    ) public view {
+        Capability[] memory res = adapter.getCapabilities(pool, token0, token1);
+
+        assertEq(res.length, 4);
+        assertEq(uint256(res[0]), uint256(Capability.SellOrder));
+        assertEq(uint256(res[1]), uint256(Capability.BuyOrder));
+        assertEq(uint256(res[2]), uint256(Capability.PriceFunction));
+        assertEq(uint256(res[3]), uint256(Capability.HardLimits));
+    }
+
     ///////////////////////////////////////// ERC4626_ERC20_DIRECT
     //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 

@@ -106,10 +106,11 @@ contract BalancerV3SwapAdapter is BalancerSwapHelpers {
         override
         returns (Capability[] memory capabilities)
     {
-        capabilities = new Capability[](3);
+        capabilities = new Capability[](4);
         capabilities[0] = Capability.SellOrder;
         capabilities[1] = Capability.BuyOrder;
-        capabilities[2] = Capability.HardLimits;
+        capabilities[2] = Capability.PriceFunction;
+        capabilities[3] = Capability.HardLimits;
     }
 
     /// @inheritdoc ISwapAdapter

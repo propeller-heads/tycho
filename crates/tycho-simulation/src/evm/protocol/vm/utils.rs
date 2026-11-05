@@ -1,18 +1,25 @@
-use std::{collections::HashMap, env, str::FromStr};
+use std::{collections::HashMap, env, fmt::Debug, str::FromStr};
 
 use alloy::{
-    primitives::{Address, Bytes, U256},
+    primitives::{Address, Bytes, Keccak256, U256},
     providers::{Provider, ProviderBuilder},
     sol_types::SolValue,
     transports::{RpcError, TransportErrorKind},
 };
 use hex::FromHex;
 use num_bigint::BigInt;
-use revm::state::Bytecode;
+use revm::{
+    state::{AccountInfo, Bytecode},
+    DatabaseRef,
+};
 use serde_json::Value;
 use tycho_common::simulation::errors::SimulationError;
 
-use crate::evm::{simulation::SimulationEngineError, ContractCompiler, SlotId};
+use crate::evm::{
+    engine_db::engine_db_interface::EngineDatabaseInterface,
+    simulation::{SimulationEngine, SimulationEngineError, SimulationParameters},
+    ContractCompiler, SlotId,
+};
 
 pub(crate) fn coerce_error(
     err: &SimulationEngineError,
@@ -74,17 +81,17 @@ pub(crate) fn coerce_error(
         SimulationEngineError::StorageError(message) => {
             SimulationError::RecoverableError(message.clone())
         }
-        _ => SimulationError::FatalError(err.clone().to_string()), /* Otherwise return the
-                                                                    * original error */
+        SimulationEngineError::OutOfGas(..) | SimulationEngineError::TraceError(_) => {
+            SimulationError::FatalError(err.clone().to_string())
+        }
     }
 }
 
 fn parse_solidity_error_message(data: &str) -> String {
     // 10 for "0x" + 8 hex chars error signature
     if data.len() >= 10 {
-        let data_bytes = match Vec::from_hex(&data[2..]) {
-            Ok(bytes) => bytes,
-            Err(_) => return format!("Failed to decode: {data}"),
+        let Ok(data_bytes) = Vec::from_hex(&data[2..]) else {
+            return format!("Failed to decode: {data}")
         };
 
         // Check for specific error selectors:
@@ -224,17 +231,15 @@ pub(crate) async fn get_code_for_contract(
     // Get the connection string, defaulting to the RPC_URL environment variable
     let connection_string = connection_string.or_else(|| env::var("RPC_URL").ok());
 
-    let connection_string = match connection_string {
-        Some(url) => url,
-        None => {
-            return Err(SimulationError::FatalError(
-                "RPC_URL environment variable is not set".to_string(),
-            ))
-        }
+    let Some(connection_string) = connection_string else {
+        return Err(SimulationError::FatalError(
+            "RPC_URL environment variable is not set".to_string(),
+        ))
     };
 
-    let addr = Address::from_str(address)
-        .map_err(|_| SimulationError::FatalError(format!("Invalid address format: {address}")))?;
+    let addr = Address::from_str(address).map_err(|e| {
+        SimulationError::FatalError(format!("Invalid address format: {address}: {e}"))
+    })?;
     // Call eth_getCode to get the bytecode of the contract
     match sync_get_code(&connection_string, addr) {
         Ok(code) if code.is_empty() => {
@@ -248,13 +253,22 @@ pub(crate) async fn get_code_for_contract(
             RpcError::Transport(err) => Err(SimulationError::RecoverableError(format!(
                 "Failed to get code for contract due to internal RPC error: {err:?}"
             ))),
-            _ => Err(SimulationError::FatalError(format!(
+            RpcError::ErrorResp(_) |
+            RpcError::NullResp |
+            RpcError::UnsupportedFeature(_) |
+            RpcError::LocalUsageError(_) |
+            RpcError::SerError(_) |
+            RpcError::DeserError { .. } => Err(SimulationError::FatalError(format!(
                 "Failed to get code for contract. Invalid response from RPC: {e:?}"
             ))),
         },
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "keeps alloy's non-Sync provider future out of the Send + Sync future TryFromWithBlock requires; panics on a current-thread runtime"
+)]
 fn sync_get_code(
     connection_string: &str,
     addr: Address,
@@ -347,15 +361,15 @@ pub fn string_to_bytes32(pool_id: &str) -> Result<[u8; 32], SimulationError> {
 /// ```
 pub fn json_deserialize_address_list(input: &[u8]) -> Result<Vec<Vec<u8>>, SimulationError> {
     let json_value: Value = serde_json::from_slice(input)
-        .map_err(|_| SimulationError::FatalError(format!("Invalid JSON: {input:?}")))?;
+        .map_err(|e| SimulationError::FatalError(format!("Invalid JSON: {input:?}: {e}")))?;
 
     if let Value::Array(hex_strings) = json_value {
         let mut result = Vec::new();
 
         for val in hex_strings {
             if let Value::String(hexstring) = val {
-                let bytes = hex::decode(hexstring.trim_start_matches("0x")).map_err(|_| {
-                    SimulationError::FatalError(format!("Invalid hex string: {hexstring}"))
+                let bytes = hex::decode(hexstring.trim_start_matches("0x")).map_err(|e| {
+                    SimulationError::FatalError(format!("Invalid hex string: {hexstring}: {e}"))
                 })?;
                 result.push(bytes);
             } else {
@@ -402,15 +416,15 @@ pub fn json_deserialize_address_list(input: &[u8]) -> Result<Vec<Vec<u8>>, Simul
 /// ```
 pub fn json_deserialize_be_bigint_list(input: &[u8]) -> Result<Vec<BigInt>, SimulationError> {
     let json_value: Value = serde_json::from_slice(input)
-        .map_err(|_| SimulationError::FatalError(format!("Invalid JSON: {input:?}")))?;
+        .map_err(|e| SimulationError::FatalError(format!("Invalid JSON: {input:?}: {e}")))?;
 
     if let Value::Array(hex_strings) = json_value {
         let mut result = Vec::new();
 
         for val in hex_strings {
             if let Value::String(hexstring) = val {
-                let bytes = hex::decode(hexstring.trim_start_matches("0x")).map_err(|_| {
-                    SimulationError::FatalError(format!("Invalid hex string: {hexstring}"))
+                let bytes = hex::decode(hexstring.trim_start_matches("0x")).map_err(|e| {
+                    SimulationError::FatalError(format!("Invalid hex string: {hexstring}: {e}"))
                 })?;
                 let bigint = BigInt::from_signed_bytes_be(&bytes);
                 result.push(bigint);
@@ -425,6 +439,117 @@ pub fn json_deserialize_be_bigint_list(input: &[u8]) -> Result<Vec<BigInt>, Simu
     }
 }
 
+/// Load the pool's stateless/implementation contracts (the `stateless_contract_addr_{i}` state
+/// attributes) into the engine's DB so getter calls on proxy pools resolve their delegatecall
+/// targets. Curve pools are commonly EIP-1167 proxies whose implementation code is not part of the
+/// indexed pool storage; without this, getters delegatecall into empty code and revert.
+///
+/// Addresses may be static (`0x…`) or dynamic (`call:0x<factory>:method()`), and code is fetched
+/// via RPC unless provided inline as `stateless_contract_code_{i}`. The engine shares its DB with
+/// `SHARED_TYCHO_DB`, so accounts loaded here persist for later `delta_transition` rebuilds.
+pub(crate) async fn load_stateless_contracts<D: EngineDatabaseInterface + Clone + Debug>(
+    engine: &SimulationEngine<D>,
+    attributes: &HashMap<String, tycho_common::Bytes>,
+) -> Result<(), SimulationError>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    let mut index = 0;
+    while let Some(encoded) = attributes.get(&format!("stateless_contract_addr_{index}")) {
+        let address = String::from_utf8(encoded.to_vec()).map_err(|e| {
+            SimulationError::FatalError(format!("stateless contract address is not UTF-8: {e}"))
+        })?;
+        let inline_code = attributes
+            .get(&format!("stateless_contract_code_{index}"))
+            .map(|value| value.to_vec());
+        index += 1;
+
+        let (account, code) = match inline_code {
+            Some(bytecode) => (address, Bytecode::new_raw(bytecode.into())),
+            None => {
+                let resolved = if address.starts_with("call") {
+                    resolve_call_address(engine, &address)?
+                } else {
+                    address
+                };
+                let code = get_code_for_contract(&resolved, None).await?;
+                (resolved, code)
+            }
+        };
+        let account: Address = account.parse().map_err(|e| {
+            SimulationError::FatalError(format!(
+                "stateless contract has an invalid address {account}: {e}"
+            ))
+        })?;
+        engine
+            .state
+            .init_account(
+                account,
+                AccountInfo {
+                    balance: U256::ZERO,
+                    nonce: 0,
+                    code_hash: code.hash_slow(),
+                    code: Some(code),
+                },
+                None,
+                false,
+            )
+            .map_err(|e| {
+                SimulationError::FatalError(format!(
+                    "stateless contract init_account failed: {e:?}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
+/// Resolve a dynamic `call:0x<address>:method()` directive to a concrete implementation address by
+/// simulating the parameterless `method()` view and decoding its returned address.
+pub(crate) fn resolve_call_address<D: EngineDatabaseInterface + Clone + Debug>(
+    engine: &SimulationEngine<D>,
+    directive: &str,
+) -> Result<String, SimulationError>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    let method = directive
+        .split(':')
+        .next_back()
+        .ok_or_else(|| {
+            SimulationError::FatalError(format!("malformed stateless call directive {directive}"))
+        })?;
+    let to: Address = directive
+        .split(':')
+        .nth(1)
+        .ok_or_else(|| {
+            SimulationError::FatalError(format!(
+                "stateless call directive is missing its target {directive}"
+            ))
+        })?
+        .parse()
+        .map_err(|e| {
+            SimulationError::FatalError(format!(
+                "stateless call directive has an invalid target {directive}: {e}"
+            ))
+        })?;
+    let mut hasher = Keccak256::new();
+    hasher.update(method.as_bytes());
+    let selector = hasher.finalize()[..4].to_vec();
+    let res = engine
+        .simulate(&SimulationParameters {
+            caller: Address::ZERO,
+            to,
+            data: selector,
+            ..Default::default()
+        })
+        .map_err(|e| SimulationError::FatalError(format!("stateless call failed: {e}")))?;
+    let address = Address::abi_decode(res.result.as_ref())
+        .map_err(|e| SimulationError::FatalError(format!("stateless call decode failed: {e}")))?;
+    Ok(address.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use dotenv::dotenv;
@@ -433,7 +558,7 @@ mod tests {
     use crate::utils::hexstring_to_vec;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[cfg_attr(not(feature = "network_tests"), ignore)]
+    #[cfg_attr(not(feature = "network_tests"), ignore = "requires RPC_URL")]
     async fn test_get_code_for_address() {
         let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| {
             dotenv().expect("Missing .env file");

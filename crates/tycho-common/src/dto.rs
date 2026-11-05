@@ -4,7 +4,10 @@
 //! be very simple and ideally not contain any business logic.
 //!
 //! Structs in here implement utoipa traits so they can be used to derive an OpenAPI schema.
-#![allow(deprecated)]
+#![expect(
+    deprecated,
+    reason = "DTOs that are deprecated for consumers are still defined and used within this module"
+)]
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
@@ -46,6 +49,8 @@ pub enum Chain {
     Unichain,
     Polygon,
     Plasma,
+    Robinhood,
+    Arc,
     #[schema(value_type = String)]
     Custom(ArrayString<32>),
 }
@@ -113,6 +118,8 @@ impl From<models::Chain> for Chain {
             models::Chain::Unichain => Chain::Unichain,
             models::Chain::Polygon => Chain::Polygon,
             models::Chain::Plasma => Chain::Plasma,
+            models::Chain::Robinhood => Chain::Robinhood,
+            models::Chain::Arc => Chain::Arc,
             models::Chain::Custom(id) => Chain::Custom(
                 ArrayString::from(id.as_str())
                     .expect("custom chain name is already within 32 bytes"),
@@ -258,7 +265,10 @@ pub enum Response {
 }
 
 /// A message sent from the server to the client
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "public API; boxing the large variant is a breaking change"
+)]
 #[derive(Serialize, Deserialize, Debug, Display, Clone)]
 #[serde(untagged)]
 pub enum WebSocketMessage {
@@ -353,7 +363,10 @@ pub struct BlockAggregatedChanges {
 }
 
 impl BlockAggregatedChanges {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         extractor: &str,
         chain: Chain,
@@ -703,21 +716,24 @@ pub struct ProtocolComponent {
 
 // Manual impl as `NaiveDateTime` structure referenced in `created_at` does not implement DeepSizeOf
 impl DeepSizeOf for ProtocolComponent {
-    fn deep_size_of_children(&self, ctx: &mut Context) -> usize {
-        self.id.deep_size_of_children(ctx) +
+    fn deep_size_of_children(&self, context: &mut Context) -> usize {
+        self.id.deep_size_of_children(context) +
             self.protocol_system
-                .deep_size_of_children(ctx) +
+                .deep_size_of_children(context) +
             self.protocol_type_name
-                .deep_size_of_children(ctx) +
-            self.chain.deep_size_of_children(ctx) +
-            self.tokens.deep_size_of_children(ctx) +
+                .deep_size_of_children(context) +
+            self.chain
+                .deep_size_of_children(context) +
+            self.tokens
+                .deep_size_of_children(context) +
             self.contract_ids
-                .deep_size_of_children(ctx) +
+                .deep_size_of_children(context) +
             self.static_attributes
-                .deep_size_of_children(ctx) +
-            self.change.deep_size_of_children(ctx) +
+                .deep_size_of_children(context) +
+            self.change
+                .deep_size_of_children(context) +
             self.creation_tx
-                .deep_size_of_children(ctx)
+                .deep_size_of_children(context)
     }
 }
 
@@ -944,6 +960,10 @@ impl StateRequestBody {
         Self { contract_ids, protocol_system, version, chain, pagination }
     }
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "public API; taking `&BlockParam` is a breaking change"
+    )]
     pub fn from_block(protocol_system: &str, block: BlockParam) -> Self {
         Self {
             contract_ids: None,
@@ -1029,7 +1049,10 @@ pub struct ResponseAccount {
 }
 
 impl ResponseAccount {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         chain: Chain,
         address: Bytes,
@@ -1130,9 +1153,9 @@ pub struct VersionParam {
 }
 
 impl DeepSizeOf for VersionParam {
-    fn deep_size_of_children(&self, ctx: &mut Context) -> usize {
+    fn deep_size_of_children(&self, context: &mut Context) -> usize {
         if let Some(block) = &self.block {
-            return block.deep_size_of_children(ctx);
+            return block.deep_size_of_children(context);
         }
 
         0
@@ -1148,7 +1171,14 @@ impl VersionParam {
         Self::new(
             None,
             Some({
-                #[allow(deprecated)]
+                #[expect(
+                    deprecated,
+                    reason = "BlockParam is deprecated for consumers but still constructed by this crate"
+                )]
+                #[expect(
+                    clippy::cast_possible_wrap,
+                    reason = "public API; returning a Result for block numbers above i64::MAX is a breaking change"
+                )]
                 BlockParam { hash: None, chain: Some(chain), number: Some(block_number as i64) }
             }),
         )
@@ -1993,7 +2023,9 @@ fn deserialize_retriggers_from_value(
                                 format!("Failed to deserialize AddressStorageLocation: {}", e)
                             })?
                         }
-                        _ => return Err("Invalid retrigger format".to_string()),
+                        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Array(_) => {
+                            return Err("Invalid retrigger format".to_string())
+                        }
                     };
 
                     result.insert((key, addr_storage));
@@ -2257,10 +2289,10 @@ mod test {
 
     #[rstest]
     #[case::legacy_format(None, None)]
-    #[case::full_block(Some(None), None)]
-    #[case::partial_block(Some(Some(1)), Some(1))]
+    #[case::full_block(Some(serde_json::Value::Null), None)]
+    #[case::partial_block(Some(serde_json::json!(1)), Some(1))]
     fn test_block_changes_is_partial_backward_compatibility(
-        #[case] has_partial_value: Option<Option<u32>>,
+        #[case] has_partial_value: Option<serde_json::Value>,
         #[case] expected: Option<u32>,
     ) {
         use serde_json::json;
@@ -2294,7 +2326,7 @@ mod test {
 
         // Add is_partial field only if specified
         if let Some(partial_value) = has_partial_value {
-            json_value["partial_block_index"] = json!(partial_value);
+            json_value["partial_block_index"] = partial_value;
         }
 
         let block_changes: BlockAggregatedChanges = serde_json::from_value(json_value)
@@ -3246,7 +3278,7 @@ mod test {
         assert_eq!(error, deserialized);
 
         // Test SubscribeError serialization
-        let error = WebsocketError::SubscribeError(extractor_id.clone());
+        let error = WebsocketError::SubscribeError(extractor_id);
         let json = serde_json::to_string(&error).unwrap();
         let deserialized: WebsocketError = serde_json::from_str(&json).unwrap();
         assert_eq!(error, deserialized);
@@ -3350,8 +3382,8 @@ mod memory_size_tests {
         let create_response_with_slots = |slot_count: usize| {
             let mut slots = HashMap::new();
             for i in 0..slot_count {
-                let key = vec![i as u8; 32]; // 32-byte key
-                let value = vec![(i + 100) as u8; 32]; // 32-byte value
+                let key = vec![u8::try_from(i).unwrap(); 32]; // 32-byte key
+                let value = vec![u8::try_from(i + 100).unwrap(); 32]; // 32-byte value
                 slots.insert(key.into(), value.into());
             }
 

@@ -660,6 +660,45 @@ impl EthereumRpcClient {
             })
     }
 
+    /// Executes the `eth_call` requests in one batch request at `block`, whatever the batching
+    /// config.
+    ///
+    /// Returns one result per request, in request order. A call that fails, e.g. one that
+    /// reverts, gives an error for that request only. Only a failed batch request is retried.
+    #[instrument(level = "debug", skip(self, requests), fields(call_count = requests.len()))]
+    pub(crate) async fn batch_eth_call(
+        &self,
+        requests: &[TransactionRequest],
+        block: BlockNumberOrTag,
+    ) -> Result<Vec<Result<Bytes, RPCError>>, RPCError> {
+        let results = self
+            .retry_policy
+            .call_with_retry(|| async {
+                let mut batch = self.inner.new_batch();
+                let calls = requests
+                    .iter()
+                    .map(|request| batch.add_call::<_, Bytes>("eth_call", &(request, block)))
+                    .collect::<Result<Vec<_>, RpcError<TransportErrorKind>>>()?;
+                batch.send().await?;
+                Ok(join_all(calls).await)
+            })
+            .await
+            .map_err(|e| {
+                RPCError::from_alloy(
+                    format!("Failed to send an eth_call batch request for block {block}"),
+                    e,
+                )
+            })?;
+        Ok(results
+            .into_iter()
+            .map(|result| {
+                result.map_err(|e| {
+                    RPCError::from_alloy(format!("eth_call in batch for block {block} failed"), e)
+                })
+            })
+            .collect())
+    }
+
     /// Executes `eth_call` with EVM state overrides.
     ///
     /// Injects arbitrary bytecode or storage at specified addresses before the call executes.
@@ -687,9 +726,7 @@ impl EthereumRpcClient {
                 }
             })
             .await
-            .map_err(|e| {
-                RPCError::from_alloy("eth_call with state overrides failed".to_string(), e)
-            })
+            .map_err(|e| RPCError::from_alloy("eth_call with state overrides failed", e))
     }
 
     #[instrument(level = "debug", skip(self, access_list_params, trace_call_params))]
@@ -775,10 +812,9 @@ impl EthereumRpcClient {
         &self,
         requests: Vec<SlotDetectorValueRequest>,
         calldata: &Bytes,
-        block_hash: &B256,
     ) -> Result<Vec<(GethTrace, U256)>, RPCError> {
         if let Some(max_batch_size) = self.batching.max_batch_size() {
-            self.batch_slot_detector_trace(requests, calldata, block_hash, max_batch_size)
+            self.batch_slot_detector_trace(requests, calldata, max_batch_size)
                 .await
         } else {
             Err(RPCError::SetupError(
@@ -794,7 +830,6 @@ impl EthereumRpcClient {
         &self,
         requests: Vec<SlotDetectorValueRequest>,
         calldata: &Bytes,
-        block_hash: &B256,
         batch_size: usize,
     ) -> Result<Vec<(GethTrace, U256)>, RPCError> {
         let chunk_size = batch_size / 2; // we make 2 requests in a batch call: trace + eth_call
@@ -822,7 +857,7 @@ impl EthereumRpcClient {
                                 "to": token.to_string(),
                                 "data": calldata.to_string()
                             },
-                            block_hash.to_string()
+                            "latest"
                         ]);
                         let eth_call = batch.add_call::<_, U256>("eth_call", &eth_call_param)?;
 
@@ -851,12 +886,7 @@ impl EthereumRpcClient {
                 .call_with_retry(|| async { batch_call().await })
                 .await
                 .map_err(|e| {
-                    RPCError::from_alloy(
-                        format!(
-                    "Failed to send batch request for slot detector traces for block {block_hash}"
-                ),
-                        e,
-                    )
+                    RPCError::from_alloy("Failed to send batch request for slot detector traces", e)
                 })?;
 
             result.extend(chunk_results);
@@ -872,10 +902,9 @@ impl EthereumRpcClient {
         &self,
         requests: &[SlotDetectorSlotTestRequest],
         calldata: &Bytes,
-        block_hash: &B256,
     ) -> Result<Vec<TransportResult<Value>>, RPCError> {
         if let Some(max_batch_size) = self.batching.max_batch_size() {
-            self.batch_slot_detector_tests(requests, calldata, block_hash, max_batch_size)
+            self.batch_slot_detector_tests(requests, calldata, max_batch_size)
                 .await
         } else {
             Err(RPCError::SetupError(
@@ -891,7 +920,6 @@ impl EthereumRpcClient {
         &self,
         requests: &[SlotDetectorSlotTestRequest],
         calldata: &Bytes,
-        block_hash: &B256,
         batch_size: usize,
     ) -> Result<Vec<TransportResult<Value>>, RPCError> {
         let chunk_size = batch_size; // we make 1 request per test
@@ -919,7 +947,7 @@ impl EthereumRpcClient {
                                     "to": token,
                                     "data": calldata
                                 },
-                                block_hash.to_string(),
+                                "latest",
                                 {
                                     storage_address.to_string(): {
                                         "stateDiff": {
@@ -1004,13 +1032,8 @@ impl EthereumRpcClient {
             }
 
             let chunk_results = last_batch_result.map_err(|e| {
-                    RPCError::from_alloy(
-                        format!(
-                            "Failed to send batch request for slot detector tests for block {block_hash}"
-                        ),
-                        e,
-                    )
-                })?;
+                RPCError::from_alloy("Failed to send batch request for slot detector tests", e)
+            })?;
 
             result.extend(chunk_results);
         }
@@ -1173,7 +1196,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
-    async fn test_ethereum_rpc_client_creation() -> Result<(), RPCError> {
+    async fn test_ethereum_rpc_client_creation() {
         let url = std::env::var("RPC_URL").expect("RPC_URL must be set for testing");
 
         // Test with valid URL
@@ -1183,8 +1206,6 @@ mod tests {
         // Test with invalid URL
         let result = EthereumRpcClient::new("invalid_url");
         assert!(result.is_err());
-
-        Ok(())
     }
 
     #[tokio::test]
@@ -1221,11 +1242,14 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
-    async fn test_get_block_number() -> Result<(), RPCError> {
+    async fn test_get_block_number() {
         let fixture = TestFixture::new();
         let client = fixture.create_rpc_client(false);
 
-        let block_number = client.get_block_number().await?;
+        let block_number = client
+            .get_block_number()
+            .await
+            .expect("Failed to get block number");
 
         // For Ethereum mainnet, we know block numbers are in the millions
         // This is a sanity check to ensure we're not getting garbage data
@@ -1234,8 +1258,6 @@ mod tests {
             "Block number seems too low for Ethereum mainnet: {}",
             block_number
         );
-
-        Ok(())
     }
 
     #[rstest]
@@ -1400,7 +1422,7 @@ mod tests {
     #[traced_test]
     #[tokio::test]
     #[ignore = "require RPC connection"]
-    async fn test_fetch_account_storage_without_specific_slots() -> Result<(), RPCError> {
+    async fn test_fetch_account_storage_without_specific_slots() {
         let fixture = TestFixture::new();
         let client = fixture.create_rpc_client(false);
 
@@ -1409,7 +1431,8 @@ mod tests {
                 parse_address(BALANCER_VAULT_STR),
                 B256::from_bytes(&fixture.block.hash),
             )
-            .await?;
+            .await
+            .expect("Failed to fetch account storage");
 
         // Verify that we got the storage for all requested slots
         assert_eq!(storage.len(), BALANCER_VAULT_EXPECTED_SLOTS);
@@ -1420,8 +1443,6 @@ mod tests {
             assert!(storage.contains_key(key));
             assert_eq!(storage.get(key), Some(value)); // Storage value exists and matches
         }
-
-        Ok(())
     }
 
     #[rstest]
@@ -1465,7 +1486,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
-    async fn test_trace_call_many() -> Result<(), RPCError> {
+    async fn test_trace_call_many() {
         let fixture = TestFixture::new();
         let client = fixture.create_rpc_client(false);
 
@@ -1481,7 +1502,8 @@ mod tests {
 
         let traces = client
             .trace_call_many(vec![request], BlockNumberOrTag::Number(TEST_BLOCK_NUMBER))
-            .await?;
+            .await
+            .expect("trace_call_many failed");
 
         // Verify we got a response
         assert_eq!(traces.len(), 1);
@@ -1509,13 +1531,11 @@ mod tests {
             "USDC balance from trace mismatch. Expected: {}, Got: {}",
             expected_balance, balance
         );
-
-        Ok(())
     }
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
-    async fn test_eth_call() -> Result<(), RPCError> {
+    async fn test_eth_call() {
         use alloy::{
             primitives::U256,
             rpc::types::{TransactionInput, TransactionRequest},
@@ -1539,7 +1559,8 @@ mod tests {
 
         let result = client
             .eth_call(request, BlockNumberOrTag::Number(TEST_BLOCK_NUMBER))
-            .await?;
+            .await
+            .expect("eth_call failed");
 
         // Verify we got a response
         assert!(!result.is_empty(), "eth_call should return non-empty data");
@@ -1555,8 +1576,6 @@ mod tests {
             "USDC balance mismatch. Expected: {}, Got: {}",
             expected_balance, balance
         );
-
-        Ok(())
     }
 
     /// Note: We support `"storage": null` as a temporary workaround for Unichain nodes that
@@ -1614,15 +1633,14 @@ mod tests {
         let usdc = parse_address(USDC_STR);
         let usdt = parse_address(USDT_STR);
 
-        // Holder address that has balances in all three tokens
-        let holder = parse_address(USDC_HOLDER_ADDR);
+        // Use the USDT token contract itself as the holder: tokens mistakenly sent to it are
+        // stuck (it has no rescue path), so its balances of USDT, WETH, and USDC form a permanent
+        // non-zero floor that cannot drain to zero. For USDT this is self-referential (holder ==
+        // token), which is fine for balance-slot detection.
+        let holder = parse_address(USDT_STR);
         let calldata: Bytes = balanceOfCall { _owner: holder }
             .abi_encode()
             .into();
-
-        // Verified block hash where all tokens have non-zero balances
-        let block_hash_str = "0x658814e4cb074359f10dd71237cc57b1ae6791fc9de59fde570e724bd884cbb0";
-        let block_hash = B256::from_str(block_hash_str).expect("Failed to parse block hash");
 
         // Create requests with different tokens to test order preservation
         // The eth_call uses the same calldata, but we call different token contracts
@@ -1635,9 +1653,7 @@ mod tests {
                         "to": token.to_string(),
                         "input": calldata.to_string()
                     },
-                    {
-                        "blockHash": block_hash_str
-                    },
+                    "latest",
                     {
                         "tracer": "prestateTracer",
                         "enableReturnData": true
@@ -1648,31 +1664,23 @@ mod tests {
             .collect();
 
         let results = client
-            .slot_detector_trace(requests.clone(), &calldata, &block_hash)
+            .slot_detector_trace(requests.clone(), &calldata)
             .await
             .expect("Batch slot detector trace failed");
 
         // Verify all results returned and order preserved
         assert_eq!(results.len(), tokens.len(), "Should receive result for each request");
 
-        let expected_balances = [
-            U256::from_str("911262488844363150815").unwrap(), // WETH balance
-            U256::from(69346617579396u64),                    // USDC balance
-            U256::from(52511836228219u64),                    // USDT balance
-        ];
-
-        // Each token should return a result in expected order with the correct balance
+        // Each token should return a result in expected order with a non-zero balance (the USDT
+        // contract permanently holds all three tokens). Balances are queried at the latest block,
+        // so exact values cannot be asserted.
         for (idx, (trace, value)) in results.iter().enumerate() {
             assert!(
                 matches!(trace, GethTrace::PreStateTracer(_)),
                 "Request {} should return PreStateTracer",
                 idx
             );
-            assert_eq!(
-                *value, expected_balances[idx],
-                "Request {} balance mismatch. Expected: {}, Got: {}",
-                idx, expected_balances[idx], *value
-            );
+            assert!(!value.is_zero(), "Request {} should return a non-zero balance", idx);
         }
     }
 
@@ -1707,12 +1715,8 @@ mod tests {
             "Calldata should match verified test case"
         );
 
-        // Verified block hash where all slots contain actual balances
-        let block_hash_str = "0x658814e4cb074359f10dd71237cc57b1ae6791fc9de59fde570e724bd884cbb0";
-        let block_hash = B256::from_str(block_hash_str).expect("Failed to parse block hash");
-
         // Create test requests with verified slot locations and test values
-        // These are real balance storage slots for the holder at this block
+        // These are real balance storage slots for the holder
         let requests = vec![
             // USDT: slot and test_value verified to work
             SlotDetectorSlotTestRequest {
@@ -1747,7 +1751,7 @@ mod tests {
         ];
 
         let results = client
-            .slot_detector_tests(&requests, &calldata, &block_hash)
+            .slot_detector_tests(&requests, &calldata)
             .await
             .expect("Batch slot detector tests failed");
 
@@ -1781,7 +1785,7 @@ mod tests {
     }
 
     async fn mock_batch_slot_detector_tests_call(
-        server: &mut ServerGuard,
+        server: &ServerGuard,
     ) -> Result<Vec<TransportResult<Value>>, RPCError> {
         let policy = retry::tests::mock_retry_policy();
 
@@ -1803,7 +1807,7 @@ mod tests {
         let calldata: Bytes = Bytes::new();
 
         let result = rpc_client
-            .slot_detector_tests(&batch_request, &calldata, &B256::ZERO)
+            .slot_detector_tests(&batch_request, &calldata)
             .await;
 
         result
@@ -1850,7 +1854,7 @@ mod tests {
         // At this point the id counter should be 2 as it increments per request starting from 0
         let m_success = mock_success_at(&mut server, MOCK_RETRY_POLICY_MAX_ATTEMPTS).await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         assert!(result.is_ok());
 
@@ -1875,7 +1879,7 @@ mod tests {
         }
         let m_failure = mock_retryable_failure(&mut server).await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         assert!(result.is_err());
         // The error can be either RequestError (if the request itself fails) or
@@ -1914,7 +1918,7 @@ mod tests {
         // Second attempt: success
         let m2 = mock_success_at(&mut server, 1).await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         assert!(result.is_ok());
         let responses = result.unwrap();
@@ -1952,7 +1956,7 @@ mod tests {
         // Second attempt: success (after retry for safety)
         let m2 = mock_success_at(&mut server, 1).await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         // Should succeed after retry (safety measure)
         assert!(result.is_ok());
@@ -1984,7 +1988,7 @@ mod tests {
             .create_async()
             .await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         // Should return mixed results without retrying (not all failed)
         assert!(result.is_ok());
@@ -2001,6 +2005,82 @@ mod tests {
         }
 
         m.assert();
+    }
+
+    fn mock_batch_eth_call_client(server: &ServerGuard) -> EthereumRpcClient {
+        EthereumRpcClient::new(&server.url())
+            .expect("Failed to create EthereumRpcClient")
+            .with_retry((&retry::tests::mock_retry_policy()).into())
+    }
+
+    fn batch_eth_call_requests() -> Vec<TransactionRequest> {
+        vec![TransactionRequest::default(); 3]
+    }
+
+    #[tokio::test]
+    async fn test_batch_eth_call_returns_one_result_per_request() {
+        let mut server = Server::new_async().await;
+        let m = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_body(
+                r#"[
+                {"jsonrpc":"2.0","id":0,"result":"0x01"},
+                {"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted","data":"0x"}},
+                {"jsonrpc":"2.0","id":2,"result":"0x02"}
+            ]"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let results = mock_batch_eth_call_client(&server)
+            .batch_eth_call(&batch_eth_call_requests(), BlockNumberOrTag::Latest)
+            .await
+            .expect("batch request failed");
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].as_ref().unwrap(), &Bytes::from("0x01"));
+        assert!(results[1]
+            .as_ref()
+            .is_err_and(RPCError::is_execution_reverted));
+        assert_eq!(results[2].as_ref().unwrap(), &Bytes::from("0x02"));
+        m.assert();
+    }
+
+    #[tokio::test]
+    async fn test_batch_eth_call_retries_failed_batch_request() {
+        let mut server = Server::new_async().await;
+        let failure = mock_retryable_failure(&mut server).await;
+        // Ids count up per request: the first attempt used 0 to 2.
+        let success = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_body(
+                r#"[
+                {"jsonrpc":"2.0","id":3,"result":"0x01"},
+                {"jsonrpc":"2.0","id":4,"result":"0x02"},
+                {"jsonrpc":"2.0","id":5,"result":"0x03"}
+            ]"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let results = mock_batch_eth_call_client(&server)
+            .batch_eth_call(&batch_eth_call_requests(), BlockNumberOrTag::Latest)
+            .await
+            .expect("batch request failed");
+
+        assert_eq!(
+            results
+                .into_iter()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>(),
+            vec![Bytes::from("0x01"), Bytes::from("0x02"), Bytes::from("0x03")]
+        );
+        failure.assert();
+        success.assert();
     }
 
     #[tokio::test]
@@ -2114,20 +2194,26 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
-    async fn test_get_gas_price() -> Result<(), RPCError> {
+    async fn test_get_gas_price() {
         use tycho_common::traits::FeePriceGetter;
 
         let fixture = TestFixture::new();
         let client = fixture.create_rpc_client(false);
 
-        let gas_price = client.get_gas_price().await?;
+        let gas_price = client
+            .get_gas_price()
+            .await
+            .expect("Failed to get gas price");
 
         assert!(
             gas_price.effective_gas_price() > num_bigint::BigUint::from(0u128),
             "Gas price should be positive"
         );
 
-        let gas_price_via_trait = client.get_latest_fee_price().await?;
+        let gas_price_via_trait = client
+            .get_latest_fee_price()
+            .await
+            .expect("Failed to get latest fee price");
         assert!(
             gas_price_via_trait.effective_gas_price() > num_bigint::BigUint::from(0u128),
             "Gas price from trait should be positive"
@@ -2143,8 +2229,6 @@ mod tests {
         } else if matches!(gas_price.pricing, crate::gas::GasPrice::Legacy { .. }) {
             println!("Detected legacy chain");
         }
-
-        Ok(())
     }
 
     #[test]
@@ -2199,7 +2283,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
-    async fn test_simulate_txs_with_trace_state_override() -> Result<(), RPCError> {
+    async fn test_simulate_txs_with_trace_state_override() {
         let fixture = TestFixture::new();
         let client = fixture.create_rpc_client(true);
 
@@ -2238,7 +2322,8 @@ mod tests {
 
         let results = client
             .simulate_txs_with_trace(BlockNumberOrTag::Number(TEST_BLOCK_NUMBER), tx_requests)
-            .await?;
+            .await
+            .expect("simulate_txs_with_trace failed");
 
         assert_eq!(results.len(), 2);
 
@@ -2257,7 +2342,5 @@ mod tests {
             override_balance,
             "With override should return overridden balance"
         );
-
-        Ok(())
     }
 }

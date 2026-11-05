@@ -81,7 +81,7 @@ contract RocketpoolExecutorTest is TestUtils, Constants {
         ) = rocketpoolExecutor.getTransferData(params);
 
         // receiver is msg.sender (this test contract) since getTransferData
-        // is called via staticcall in production (msg.sender = TychoRouter)
+        // is called via staticcall in production (msg.sender = TychoRouterV3)
         assertEq(
             uint8(transferType),
             uint8(TransferManager.TransferType.TransferNativeInExecutor)
@@ -106,7 +106,7 @@ contract RocketpoolExecutorTest is TestUtils, Constants {
         ) = rocketpoolExecutor.getTransferData(params);
 
         // receiver is msg.sender (this test contract) since getTransferData
-        // is called via staticcall in production (msg.sender = TychoRouter)
+        // is called via staticcall in production (msg.sender = TychoRouterV3)
         assertEq(
             uint8(transferType),
             uint8(TransferManager.TransferType.ProtocolWillDebit)
@@ -222,7 +222,7 @@ contract RocketpoolExecutorTest is TestUtils, Constants {
 // Rocketpool deposit and burn tests are separated into different contracts because they
 // require different fork blocks to test against real historical transactions.
 
-/// @notice Tests Rocketpool deposit (ETH -> rETH) via TychoRouter
+/// @notice Tests Rocketpool deposit (ETH -> rETH) via TychoRouterV3
 /// Tx 0xe0f1db165b621cb1e50b629af9d47e064be464fbcc7f2bcba3df1d27dbb916be at block 24480105contract
 contract RocketpoolDepositTest is TychoRouterTestSetup {
     function getForkBlock() public pure override returns (uint256) {
@@ -256,7 +256,7 @@ contract RocketpoolDepositTest is TychoRouterTestSetup {
     }
 }
 
-/// @notice Tests Rocketpool burn (rETH -> ETH) via TychoRouter
+/// @notice Tests Rocketpool burn (rETH -> ETH) via TychoRouterV3
 /// Block 24481338: user burned 2515686112138065226
 contract RocketpoolBurnTest is TychoRouterTestSetup {
     function getForkBlock() public pure override returns (uint256) {
@@ -290,7 +290,7 @@ contract RocketpoolBurnTest is TychoRouterTestSetup {
     }
 
     function testSingleSwapBurnNoApproval() public {
-        /// Verifies that burning rETH via TychoRouter does not emit any
+        /// Verifies that burning rETH via TychoRouterV3 does not emit any
         /// Approval event from the RETH token, since we are interacting directly
         /// with the token contract.
         IRocketTokenRETH RETH = IRocketTokenRETH(RETH_ADDR);

@@ -13,7 +13,7 @@ in [schema.rs](./src/postgres/schema.rs).
 
 Below is the Entity Relationship (ER) diagram illustrating the tables used for this project:
 
-[![Entity Relation Diagram](../assets/tycho_db_er.png)](https://drive.google.com/file/d/1IQvdsfwRtg-AqtLuJjyGM2s6bqJGuciK/view?usp=sharing)
+[![Entity Relation Diagram](../../docs/assets/tycho_db_er.png)](https://drive.google.com/file/d/1IQvdsfwRtg-AqtLuJjyGM2s6bqJGuciK/view?usp=sharing)
 
 ### Gateways
 
@@ -57,10 +57,10 @@ brew install libpq
 export LIBRARY_PATH=<PATH-TO-LIB>:$LIBRARY_PATH
 ```
 
-2. Install the Diesel CLI:
+2. Install the Diesel CLI (pinned in the repository's `mise.toml`):
 
 ```bash
-cargo install diesel_cli --no-default-features --features postgres
+mise install github:diesel-rs/diesel
 ```
 
 3. Start the Postgres Service:

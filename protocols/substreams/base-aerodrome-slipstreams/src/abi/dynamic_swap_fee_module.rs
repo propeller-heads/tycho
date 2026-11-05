@@ -3512,4 +3512,105 @@ pub mod events {
             Self::decode(log)
         }
     }
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct SetCustomFee {
+        pub pool: Vec<u8>,
+        pub fee: substreams::scalar::BigInt,
+    }
+    impl SetCustomFee {
+        const TOPIC_ID: [u8; 32] = [
+            212u8,
+            68u8,
+            225u8,
+            177u8,
+            10u8,
+            42u8,
+            12u8,
+            97u8,
+            225u8,
+            14u8,
+            233u8,
+            240u8,
+            22u8,
+            120u8,
+            32u8,
+            149u8,
+            93u8,
+            243u8,
+            67u8,
+            7u8,
+            79u8,
+            22u8,
+            182u8,
+            150u8,
+            20u8,
+            149u8,
+            44u8,
+            174u8,
+            243u8,
+            77u8,
+            226u8,
+            29u8,
+        ];
+        pub fn match_log(log: &substreams_ethereum::pb::eth::v2::Log) -> bool {
+            if log.topics.len() != 3usize {
+                return false;
+            }
+            if log.data.len() != 0usize {
+                return false;
+            }
+            return log.topics.get(0).expect("bounds already checked").as_ref()
+                == Self::TOPIC_ID;
+        }
+        pub fn decode(
+            log: &substreams_ethereum::pb::eth::v2::Log,
+        ) -> Result<Self, String> {
+            Ok(Self {
+                pool: ethabi::decode(
+                        &[ethabi::ParamType::Address],
+                        log.topics[1usize].as_ref(),
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "unable to decode param 'pool' from topic of type 'address': {:?}",
+                            e
+                        )
+                    })?
+                    .pop()
+                    .expect(INTERNAL_ERR)
+                    .into_address()
+                    .expect(INTERNAL_ERR)
+                    .as_bytes()
+                    .to_vec(),
+                fee: {
+                    let mut v = [0 as u8; 32];
+                    ethabi::decode(
+                            &[ethabi::ParamType::Uint(24usize)],
+                            log.topics[2usize].as_ref(),
+                        )
+                        .map_err(|e| {
+                            format!(
+                                "unable to decode param 'fee' from topic of type 'uint24': {:?}",
+                                e
+                            )
+                        })?
+                        .pop()
+                        .expect(INTERNAL_ERR)
+                        .into_uint()
+                        .expect(INTERNAL_ERR)
+                        .to_big_endian(v.as_mut_slice());
+                    substreams::scalar::BigInt::from_unsigned_bytes_be(&v)
+                },
+            })
+        }
+    }
+    impl substreams_ethereum::Event for SetCustomFee {
+        const NAME: &'static str = "SetCustomFee";
+        fn match_log(log: &substreams_ethereum::pb::eth::v2::Log) -> bool {
+            Self::match_log(log)
+        }
+        fn decode(log: &substreams_ethereum::pb::eth::v2::Log) -> Result<Self, String> {
+            Self::decode(log)
+        }
+    }
 }

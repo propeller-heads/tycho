@@ -148,7 +148,7 @@ pub mod block_transaction_events {
             /// bytes32
             #[prost(bytes="vec", tag="2")]
             pub pool_id: ::prost::alloc::vec::Vec<u8>,
-            #[prost(oneof="pool_log::Event", tags="3, 4, 5, 6, 7")]
+            #[prost(oneof="pool_log::Event", tags="3, 4, 5, 6, 7, 8")]
             pub event: ::core::option::Option<pool_log::Event>,
         }
         /// Nested message and enum types in `PoolLog`.
@@ -239,6 +239,13 @@ pub mod block_transaction_events {
                 pub token1_rate_delta: ::prost::alloc::vec::Vec<u8>,
             }
             #[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct SwapFeeUpdated {
+                /// uint64
+                #[prost(bytes="vec", tag="1")]
+                pub swap_fee: ::prost::alloc::vec::Vec<u8>,
+            }
+            #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Oneof)]
             pub enum Event {
                 #[prost(message, tag="3")]
@@ -251,6 +258,8 @@ pub mod block_transaction_events {
                 VirtualExecution(VirtualExecution),
                 #[prost(message, tag="7")]
                 RateUpdated(RateUpdated),
+                #[prost(message, tag="8")]
+                SwapFeeUpdated(SwapFeeUpdated),
             }
         }
     }

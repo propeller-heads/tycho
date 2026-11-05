@@ -1,5 +1,63 @@
 # Changelog
 
+## v0.2.6
+
+- Point the Ethereum manifest's `signed_exclusive_swap_address` at the
+  SignedExclusiveSwap v3.3.0 deployment (`0x550CFe…1D09`), the address the
+  other chains use. Pools on the old extension (`0x55b703…05A3`) no longer get
+  the `is_exclusive` attribute.
+- Remove the `signed_exclusive_swap` integration test, because its pool uses
+  the old extension. No pool on the new extension exists on Ethereum yet.
+
+## v0.2.5
+
+- Add `bsc-ekubo-v3.yaml` and `base-ekubo-v3.yaml` manifests that pass the
+  chains' SignedExclusiveSwap address (`0x550CFe…1D09`) to `map_components`, so
+  their exclusive pools get the `is_exclusive` attribute. Neither chain has a
+  Ve33 deployment.
+
+## v0.2.4
+
+- Read the SignedExclusiveSwap extension address from the `map_components`
+  params (`signed_exclusive_swap_address=0x...`) instead of a hardcoded
+  constant, so each chain tags `is_exclusive` on its own deployment. The
+  Ethereum and Robinhood manifests each carry their deployment's address;
+  omitting the param disables the `is_exclusive` attribute.
+
+## v0.2.3
+
+- Track Ve33 pool swap-fee changes for accurate off-chain quotes. The Ve33
+  extension address is chain-specific and passed via the module params
+  query string (`ve33_address=0x...`, serde_qs like the other packages);
+  omitting it (e.g. on Ethereum) disables Ve33 handling.
+- Add a `robinhood-ekubo-v3.yaml` manifest with the Robinhood Ve33 extension
+  address baked into the module params, plus a Robinhood integration test
+  config covering the first Ve33 pool.
+
+## v0.2.2
+
+- Track the second TWAMM extension deployment
+  (`0xd47f1b1edcfeabb08f6ebd8fc337c27e636c75ba`), first used in block 24995117.
+  Both deployments are now recognized as TWAMM emitters and as extensions
+  carrying time-rate deltas.
+
+## v0.2.1
+
+- Align the `Cargo.toml` package version with the `substreams.yaml` manifest
+  version, which has been `v0.2.1` since the CI fix. No behavior change.
+
+## v0.1.3
+
+- Replace the `SIGNED_EXCLUSIVE_SWAP_ADDRESS` placeholder with the deployed
+  SignedExclusiveSwap extension address, so `is_exclusive` tagging matches
+  real signed pools on-chain.
+
+## v0.1.2
+
+- Tag SignedExclusiveSwap pools with the reserved `is_exclusive` static attribute
+  (value `[1u8]`) at component creation, so consumers can keep pools requiring
+  off-chain swap authorization out of public routing.
+
 ## v0.1.1
 
 - Pin the Rust toolchain to 1.96.0 for reproducible wasm builds. The package

@@ -3,8 +3,11 @@ pub use map_protocol_components::map_protocol_components;
 pub use store_protocol_components::store_protocol_components;
 
 mod config {
+    use std::collections::HashMap;
+
     use anyhow::{anyhow, Result};
 
+    use super::bootstrap::{parse_snapshots, BootstrapState};
     use crate::lunarbase;
 
     const LIVE_POOL: lunarbase::Address = [
@@ -28,6 +31,7 @@ mod config {
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Config {
         pub pools: Vec<PoolConfig>,
+        pub bootstrap_states: HashMap<lunarbase::Address, BootstrapState>,
     }
 
     impl Default for Config {
@@ -39,6 +43,7 @@ mod config {
                     token_y: BASE_USDC,
                     bootstrap_block: None,
                 }],
+                bootstrap_states: HashMap::new(),
             }
         }
     }
@@ -47,6 +52,7 @@ mod config {
         pub fn parse(params: &str) -> Result<Self> {
             let mut config = Self::default();
             let mut single_pool = config.pools[0];
+            let mut bootstrap_states = None;
             for pair in params
                 .split('&')
                 .filter(|part| !part.is_empty())
@@ -61,6 +67,7 @@ mod config {
                     "token_y" => single_pool.token_y = parse_address(value)?,
                     "bootstrap_block" => single_pool.bootstrap_block = Some(value.parse()?),
                     "pools" => config.pools = parse_pools(value)?,
+                    "bootstrap_states" => bootstrap_states = Some(value),
                     _ => return Err(anyhow!("unknown LunarBase Substreams param `{key}`")),
                 }
             }
@@ -70,6 +77,9 @@ mod config {
                 .all(|(key, _)| key != "pools")
             {
                 config.pools = vec![single_pool];
+            }
+            if let Some(value) = bootstrap_states {
+                config.bootstrap_states = parse_snapshots(value, &config.pools)?;
             }
             Ok(config)
         }
@@ -117,7 +127,7 @@ mod config {
         Ok(PoolConfig { pool, token_x, token_y, bootstrap_block })
     }
 
-    fn parse_address(value: &str) -> Result<lunarbase::Address> {
+    pub(super) fn parse_address(value: &str) -> Result<lunarbase::Address> {
         let trimmed = value
             .strip_prefix("0x")
             .unwrap_or(value);
@@ -128,6 +138,8 @@ mod config {
             .map_err(|_| anyhow!("address `{value}` is not 20 bytes"))
     }
 }
+
+mod bootstrap;
 
 #[path = "3_map_protocol_changes.rs"]
 mod map_protocol_changes;
@@ -177,6 +189,12 @@ mod tests {
         assert_eq!(config.pools[1].token_x, address(5));
         assert_eq!(config.pools[1].token_y, address(6));
         assert_eq!(config.pools[1].bootstrap_block, Some(20));
+    }
+
+    #[test]
+    fn uses_default_pool_without_a_caller_parameter() {
+        let config = Config::parse("bootstrap_block=10").unwrap();
+        assert_eq!(config.pools[0].bootstrap_block, Some(10));
     }
 
     fn address(last_byte: u8) -> [u8; 20] {

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
@@ -369,7 +369,8 @@ contract UniswapV4Executor is IExecutor, ICallback {
 
         uint128 amountOut = _swap(
                 poolKey, zeroForOne, -int256(swapAmountIn), hookData
-            ).toUint128();
+            )
+            .toUint128();
 
         Currency currencyOut =
             zeroForOne ? poolKey.currency1 : poolKey.currency0;
@@ -409,7 +410,8 @@ contract UniswapV4Executor is IExecutor, ICallback {
                         zeroForOne,
                         -int256(uint256(swapAmountIn)),
                         pathKey.hookData
-                    ).toUint128();
+                    )
+                    .toUint128();
 
                 swapAmountIn = amountOut;
                 swapCurrencyIn = pathKey.intermediateCurrency;

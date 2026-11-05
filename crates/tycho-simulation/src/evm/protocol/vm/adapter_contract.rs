@@ -55,6 +55,12 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
+    /// `caller` sets the simulation's `tx.origin`/`msg.sender`; `None` defaults to
+    /// `EXTERNAL_ACCOUNT`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn price(
         &self,
         pair_id: &str,
@@ -62,24 +68,37 @@ where
         buy_token: Address,
         amounts: Vec<U256>,
         overwrites: Option<HashMap<Address, Overwrites>>,
+        caller: Option<Address>,
         block_overrides: Option<BlockEnvOverrides>,
     ) -> Result<Vec<f64>, SimulationError> {
         let args = (string_to_bytes32(pair_id)?, sell_token, buy_token, amounts);
         let selector = "price(bytes32,address,address,uint256[])";
 
         let res = self
-            .call(selector, args, overwrites, None, U256::from(0u64), None, block_overrides)?
+            .call(
+                selector,
+                args,
+                overwrites,
+                caller,
+                U256::from(0u64),
+                None,
+                block_overrides,
+                None,
+            )?
             .return_value;
 
         let decoded: PriceReturn = PriceReturn::abi_decode(&res).map_err(|e| {
             SimulationError::FatalError(format!("Failed to decode price return value: {e:?}"))
         })?;
 
-        let price = self.calculate_price(decoded)?;
+        let price = Self::calculate_price(decoded)?;
         Ok(price)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn swap(
         &self,
         pair_id: &str,
@@ -93,20 +112,27 @@ where
         let args = (string_to_bytes32(pair_id)?, sell_token, buy_token, is_buy, amount);
         let selector = "swap(bytes32,address,address,uint8,uint256)";
 
-        let res =
-            self.call(selector, args, overwrites, None, U256::from(0u64), None, block_overrides)?;
+        let res = self.call(
+            selector,
+            args,
+            overwrites,
+            None,
+            U256::from(0u64),
+            None,
+            block_overrides,
+            None,
+        )?;
 
-        let decoded: SwapReturn = SwapReturn::abi_decode(&res.return_value).map_err(|_| {
+        let decoded: SwapReturn = SwapReturn::abi_decode(&res.return_value).map_err(|e| {
             SimulationError::FatalError(format!(
-                "Adapter swap call failed: Failed to decode return value. Expected amount, gas, and price elements in the format (U256, U256, (U256, U256)). Found {:?}",
+                "Adapter swap call failed: Failed to decode return value. Expected amount, gas, and price elements in the format (U256, U256, (U256, U256)). Found {:?}: {e}",
                         &res.return_value[..],
             ))
         })?;
 
         let (received_amount, gas_used, price_elements) = decoded;
 
-        let price = self
-            .calculate_price(vec![price_elements])?
+        let price = Self::calculate_price(vec![price_elements])?
             .first()
             .cloned()
             .ok_or_else(|| {
@@ -130,7 +156,7 @@ where
         let selector = "getLimits(bytes32,address,address)";
 
         let res = self
-            .call(selector, args, overwrites, None, U256::from(0u64), None, block_overrides)?
+            .call(selector, args, overwrites, None, U256::from(0u64), None, block_overrides, None)?
             .return_value;
 
         let decoded: LimitsReturn = LimitsReturn::abi_decode(&res).map_err(|e| {
@@ -152,7 +178,7 @@ where
         let selector = "getCapabilities(bytes32,address,address)";
 
         let res = self
-            .call(selector, args, None, None, U256::from(0u64), None, None)?
+            .call(selector, args, None, None, U256::from(0u64), None, None, None)?
             .return_value;
         let decoded: CapabilitiesReturn = CapabilitiesReturn::abi_decode(&res).map_err(|e| {
             SimulationError::FatalError(format!(
@@ -168,13 +194,12 @@ where
         Ok(capabilities)
     }
 
-    #[allow(dead_code)]
     pub fn min_gas_usage(&self) -> Result<u64, SimulationError> {
         let args = ();
         let selector = "minGasUsage()";
 
         let res = self
-            .call(selector, args, None, None, U256::from(0u64), None, None)?
+            .call(selector, args, None, None, U256::from(0u64), None, None, None)?
             .return_value;
 
         let decoded: MinGasUsageReturn = MinGasUsageReturn::abi_decode(&res).map_err(|e| {
@@ -182,12 +207,12 @@ where
                 "Adapter min gas usage call failed: Failed to decode return value: {e:?}"
             ))
         })?;
-        decoded
-            .try_into()
-            .map_err(|_| SimulationError::FatalError("Decoded value exceeds u64 range".to_string()))
+        decoded.try_into().map_err(|e| {
+            SimulationError::FatalError(format!("Decoded value exceeds u64 range: {e}"))
+        })
     }
 
-    fn calculate_price(&self, fractions: Vec<(U256, U256)>) -> Result<Vec<f64>, SimulationError> {
+    fn calculate_price(fractions: Vec<(U256, U256)>) -> Result<Vec<f64>, SimulationError> {
         fractions
             .into_iter()
             .map(|(numerator, denominator)| {

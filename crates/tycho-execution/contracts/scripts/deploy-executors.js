@@ -1,6 +1,7 @@
 require('dotenv').config();
 const {ethers} = require("hardhat");
 const hre = require("hardhat");
+const {verifyOnExplorer} = require("./utils");
 
 // Constructor args for each executor live in the shared config.
 // See config/executor_deployments.json.
@@ -10,7 +11,9 @@ const executorDeployments = require("../../config/executor_deployments.json");
 // don't want to deploy.
 const deploy_protocols = {
     "ethereum": [
+        "aero_basic",
         "uniswap_v2",
+        "ring_swap_v2",
         "pancakeswap_v2",
         "uniswap_v3",
         "uniswap_v4",
@@ -28,19 +31,40 @@ const deploy_protocols = {
         "native_wrapper",
         "rfq:liquorice",
         "vm:fermiswap",
+        "vm:liquidityparty",
         "vm:bopamm",
         "rfq:metric",
+        "pricelevelstream",
+        "rfq:native",
+        "sky",
+        "lido_v4",
+        "etherfi",
+        "fallback",
+        "fallback:rfq:metric",
+        "fallback:rfq:bebop",
+        "fallback:rfq:hashflow",
+        "fallback:rfq:native",
+        "fallback:rfq:liquorice",
     ],
     "base": [
+        "aero_basic",
         "uniswap_v2",
         "uniswap_v3",
         "uniswap_v4",
+        "ekubo_v3",
         "rfq:bebop",
         "aerodrome_slipstreams",
         "aerodrome_v1",
         "native_wrapper",
         "lunarbase",
+        "biconomy",
         "rfq:metric",
+        "rfq:native",
+        "fallback",
+        "fallback:rfq:metric",
+        "fallback:rfq:bebop",
+        "fallback:rfq:native",
+        "pancakeswap_infinity_cl",
     ],
     "unichain": [
         "uniswap_v2",
@@ -51,11 +75,15 @@ const deploy_protocols = {
         "native_wrapper",
     ],
     "arbitrum": [
+        "aero_basic",
         "uniswap_v2",
         "uniswap_v3",
         "uniswap_v4",
         "native_wrapper",
         "rfq:metric",
+        "rfq:native",
+        "fallback:rfq:metric",
+        "fallback:rfq:native",
     ],
     "polygon": [
         "uniswap_v2",
@@ -63,20 +91,47 @@ const deploy_protocols = {
         "uniswap_v4",
         "native_wrapper",
         "rfq:metric",
+        "fallback:rfq:metric"
     ],
     "bsc": [
+        "ring_swap_v2",
         "uniswap_v2",
         "pancakeswap_v2",
         "uniswap_v3",
         "uniswap_v4",
+        "ekubo_v3",
         "native_wrapper",
+        "pancakeswap_infinity_cl",
         "rfq:metric",
+        "rfq:native",
+        "fallback:rfq:metric",
+        "fallback:rfq:native",
+        "lunarbase",
     ],
     "plasma": [
         "uniswap_v3",
         "fluid_v1",
         "vm:curve",
         "native_wrapper",
+    ],
+    "robinhood": [
+        "aero_basic",
+        "uniswap_v2",
+        "uniswap_v3",
+        "uniswap_v4",
+        "ekubo_v3",
+        "pancakeswap_infinity_cl",
+        "native_wrapper",
+        "rfq:metric",
+        "rfq:native",
+        "fallback:rfq:metric",
+        "fallback:rfq:native",
+    ],
+    "arc": [
+        "aero_basic",
+        "uniswap_v2",
+        "uniswap_v3",
+        "uniswap_v4",
     ],
 };
 
@@ -111,6 +166,8 @@ async function main() {
         }
         const {contract: contractName, args} = deployment;
         const Executor = await ethers.getContractFactory(contractName);
+        // The Blockscout verification path needs the fully qualified name.
+        const {sourceName} = await hre.artifacts.readArtifact(contractName);
 
         // Get bytecode with constructor arguments
         const deployTx = Executor.getDeployTransaction(...args);
@@ -125,13 +182,30 @@ async function main() {
         const computedAddress = ethers.utils.getCreate2Address(create2FactoryAddress, salt, bytecodeHash);
         console.log(`${contractName} (${protocol}) will be deployed to: ${computedAddress}`);
 
-        const deploymentData = ethers.utils.concat([salt, bytecode]);
-        const tx = await deployer.sendTransaction({
-            to: create2FactoryAddress,
-            data: deploymentData,
-        });
-        await tx.wait();
-        console.log(`${contractName} deployed to: ${computedAddress}`);
+        // The address is derived from the bytecode and the constructor
+        // arguments, so an existing contract there is this exact build.
+        // Skipping the deployment makes the script re-runnable, which matters
+        // when verification has to be retried.
+        const deployed =
+            (await ethers.provider.getCode(computedAddress)) !== "0x";
+        if (deployed) {
+            console.log(`${contractName} already deployed, skipping deployment`);
+        } else {
+            const deploymentData = ethers.utils.concat([salt, bytecode]);
+            // Some RPC nodes estimate the exact gas the CREATE2 factory call
+            // used in simulation, and that limit runs out of gas on chain.
+            const gasEstimate = await deployer.estimateGas({
+                to: create2FactoryAddress,
+                data: deploymentData,
+            });
+            const tx = await deployer.sendTransaction({
+                to: create2FactoryAddress,
+                data: deploymentData,
+                gasLimit: gasEstimate.mul(120).div(100),
+            });
+            await tx.wait();
+            console.log(`${contractName} deployed to: ${computedAddress}`);
+        }
 
         // Verify on Tenderly
         try {
@@ -144,13 +218,18 @@ async function main() {
             console.error("Error during contract verification:", error);
         }
 
-        console.log("Waiting for 1 minute before verifying the contract...");
-        await new Promise(resolve => setTimeout(resolve, 60000));
-        // Verify on Etherscan
+        if (!deployed) {
+            console.log("Waiting for 1 minute before verifying the contract...");
+            await new Promise(resolve => setTimeout(resolve, 60000));
+        }
+
+        // Verify on the block explorer
         try {
-            await hre.run("verify:verify", {
+            await verifyOnExplorer({
+                network,
                 address: computedAddress,
-                constructorArguments: args,
+                contractFqn: `${sourceName}:${contractName}`,
+                constructorArgs: args,
             });
             console.log(`${contractName} verified successfully on blockchain explorer!`);
         } catch (error) {

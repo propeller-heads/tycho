@@ -2,11 +2,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use tracing::{debug, info};
-use tycho_common::{
-    models::{Address, BlockHash},
-    traits::BalanceSlotDetector,
-    Bytes,
-};
+use tycho_common::{models::Address, traits::BalanceSlotDetector, Bytes};
 
 use crate::services::entrypoint_tracer::slot_detector::{
     SlotDetectionStrategy, SlotDetector, SlotDetectorError,
@@ -50,7 +46,6 @@ impl BalanceSlotDetector for EVMBalanceSlotDetector {
         &self,
         tokens: &[Address],
         holder: Address,
-        block_hash: BlockHash,
     ) -> HashMap<Address, Result<(Address, Bytes), Self::Error>> {
         info!("Starting balance slot detection for {} tokens", tokens.len());
 
@@ -71,7 +66,7 @@ impl BalanceSlotDetector for EVMBalanceSlotDetector {
         }
 
         let results = self
-            .detect_slots_chunked(&filtered_tokens, &holder, &block_hash)
+            .detect_slots_chunked(&filtered_tokens, &holder)
             .await;
 
         info!("Balance slot detection completed. Found results for {} tokens", results.len());
@@ -86,6 +81,7 @@ mod tests {
     use alloy::{primitives::U256, transports::http::reqwest};
     use rstest::rstest;
     use serde_json::json;
+    use tycho_common::models::BlockHash;
 
     use super::{BalanceStrategy, SlotDetectionStrategy, *};
     use crate::test_fixtures::{
@@ -148,13 +144,9 @@ mod tests {
 
         let tokens = vec![weth.clone(), usdc.clone(), usdt.clone()];
 
-        // Use a recent block
-        let block_hash = BlockHash::from_str(BLOCK_HASH).expect("Invalid block hash");
-        println!("Block hash: {block_hash}");
-
         let detector = TestFixture::create_balance_detector();
         let results = detector
-            .detect_balance_slots(&tokens, holder_address, block_hash)
+            .detect_balance_slots(&tokens, holder_address)
             .await;
 
         // We should get results for the tokens
@@ -237,7 +229,7 @@ mod tests {
 
         let detector = TestFixture::create_balance_detector();
         let results = detector
-            .detect_balance_slots(&tokens, balance_owner.clone(), block_hash.clone())
+            .detect_balance_slots(&tokens, balance_owner.clone())
             .await;
 
         // For rebasing tokens like stETH, we expect multiple slots to be accessed
@@ -351,7 +343,7 @@ mod tests {
 
         let detector = TestFixture::create_arb_balance_detector();
         let results = detector
-            .detect_balance_slots(&tokens, holder_address, block_hash)
+            .detect_balance_slots(&tokens, holder_address)
             .await;
 
         assert!(!results.is_empty(), "Expected results for at least one token, but got none");

@@ -470,6 +470,7 @@ contract TychoRouterForUniswapV4Test is TychoRouterTestSetup {
             USDE_ADDR,
             USDT_ADDR,
             99943850,
+            (99943850 * 9800) / 10000,
             ALICE,
             noClientFee(),
             permitSingle,
@@ -513,8 +514,16 @@ contract TychoRouterForUniswapV4Test is TychoRouterTestSetup {
 
         vm.startPrank(ALICE);
         IERC20(USDE_ADDR).approve(tychoRouterAddr, amountIn);
+        uint256 expectedAmountOut = 118280;
         tychoRouter.singleSwap(
-            amountIn, USDE_ADDR, WBTC_ADDR, 118280, ALICE, noClientFee(), swap
+            amountIn,
+            USDE_ADDR,
+            WBTC_ADDR,
+            expectedAmountOut,
+            (expectedAmountOut * 9800) / 10000,
+            ALICE,
+            noClientFee(),
+            swap
         );
 
         assertEq(IERC20(WBTC_ADDR).balanceOf(ALICE), 118281);
@@ -634,7 +643,7 @@ contract TychoRouterUSV4FeeTokenTest is TychoRouterTestSetup {
     }
 
     function testSwapTWIFToUSDCViaV4() public {
-        // Full TychoRouter swap of TWIF (6% fee-on-transfer) to
+        // Full TychoRouterV3 swap of TWIF (6% fee-on-transfer) to
         // USDC through a real UniswapV4 pool.
         //
         //   TWIF ───(USV4, fee=10000, tick=200)──> USDC
@@ -662,12 +671,12 @@ contract TychoRouterUSV4FeeTokenTest is TychoRouterTestSetup {
 
         uint256 usdcReceived = IERC20(USDC_ADDR).balanceOf(ALICE);
 
-        assertTrue(success, "TychoRouter swap failed");
+        assertTrue(success, "TychoRouterV3 swap failed");
         assertGt(usdcReceived, 0, "Should receive USDC");
     }
 
     function testSwapUSDCToTWIFViaV4() public {
-        // Full TychoRouter swap of USDC to TWIF (6% fee-on-transfer)
+        // Full TychoRouterV3 swap of USDC to TWIF (6% fee-on-transfer)
         // through a real UniswapV4 pool.
         //
         //   USDC ───(USV4, fee=10000, tick=200)──> TWIF
@@ -692,7 +701,7 @@ contract TychoRouterUSV4FeeTokenTest is TychoRouterTestSetup {
 
         uint256 twifReceived = IERC20(TWIF).balanceOf(ALICE);
 
-        assertTrue(success, "TychoRouter swap failed");
+        assertTrue(success, "TychoRouterV3 swap failed");
         assertGt(twifReceived, 0, "Should receive TWIF");
     }
 
@@ -718,7 +727,7 @@ contract TychoRouterUSV4FeeTokenTest is TychoRouterTestSetup {
         uint256 usdcReceived = IERC20(USDC_ADDR).balanceOf(ALICE);
         uint256 reportedAmountOut = abi.decode(returnData, (uint256));
 
-        assertTrue(success, "TychoRouter grouped TWIF swap failed");
+        assertTrue(success, "TychoRouterV3 grouped TWIF swap failed");
         assertGt(usdcReceived, 0, "Should receive USDC back");
         assertEq(
             reportedAmountOut,
@@ -734,7 +743,7 @@ struct Loan {
 }
 
 /// @title Example filler that takes PM loans and routes swaps
-///   through TychoRouter with skipUnlock=true.
+///   through TychoRouterV3 with skipUnlock=true.
 contract ExternalSettlerMock {
     using SafeERC20 for IERC20;
 
@@ -778,7 +787,7 @@ contract ExternalSettlerMock {
         //    from the router's input token.
         poolManager.sync(Currency.wrap(v4SyncToken));
 
-        // 3. Route through TychoRouter (replaces the old
+        // 3. Route through TychoRouterV3 (replaces the old
         //    direct executor call + safeTransfer pattern)
         // slither-disable-next-line low-level-calls
         (bool success, bytes memory result) = tychoRouter.call(tychoCalldata);
@@ -821,7 +830,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
         // External settler with loan + skipUnlock:
         //   1. Take USDE loan from PM
         //   2. Sync USDE (required for skipUnlock)
-        //   3. Swap loaned USDE → USDT via TychoRouter
+        //   3. Swap loaned USDE → USDT via TychoRouterV3
         //      (Dispatcher transfers from settler to PM)
         //   4. Repay USDE loan from settler's own capital
 
@@ -854,6 +863,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 USDE_ADDR,
                 USDT_ADDR,
                 1,
+                1,
                 address(settler),
                 noClientFee(),
                 swap
@@ -882,7 +892,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
         // External settler with loan + skipUnlock on a sequential route:
         //   1. Take WETH loan from PM
         //   2. Sync WBTC — the V4 hop's input, deposited into PM by the V2 hop
-        //   3. Sequential swap loaned WETH → USDT via TychoRouter
+        //   3. Sequential swap loaned WETH → USDT via TychoRouterV3
         //   4. Repay WETH loan from settler's own capital
 
         uint256 swapAmount = 1 ether;
@@ -918,6 +928,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 swapAmount,
                 WETH_ADDR,
                 USDT_ADDR,
+                1,
                 1,
                 address(settler),
                 noClientFee(),
@@ -980,6 +991,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 swapAmount,
                 USDT_ADDR,
                 WETH_ADDR,
+                1,
                 1,
                 address(settler),
                 noClientFee(),
@@ -1055,6 +1067,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 swapAmount,
                 USDE_ADDR,
                 WBTC_ADDR,
+                1,
                 1,
                 address(settler),
                 noClientFee(),
@@ -1140,6 +1153,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 USDE_ADDR,
                 USDC_ADDR,
                 1,
+                1,
                 address(settler),
                 noClientFee(),
                 pleEncode(swaps)
@@ -1153,4 +1167,3 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
         settler.settle(loans, USDE_ADDR, USDE_ADDR, swapAmount, tychoCalldata);
     }
 }
-

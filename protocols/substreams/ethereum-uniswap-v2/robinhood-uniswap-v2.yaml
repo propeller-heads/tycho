@@ -1,0 +1,49 @@
+specVersion: v0.1.0
+package:
+  name: "robinhood_uniswap_v2"
+  version: v0.3.2
+  url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-uniswap-v2"
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - uniswap.proto
+  importPaths:
+    - ./proto/v1
+    - ../../../proto/
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_uniswap_v2.wasm
+
+modules:
+  - name: map_pools_created
+    kind: map
+    initialBlock: 8928
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_pools
+    kind: store
+    initialBlock: 8928
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.uniswap.v2.Pool
+    inputs:
+      - map: map_pools_created
+
+  - name: map_pool_events
+    kind: map
+    initialBlock: 8928
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - store: store_pools
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_pools_created: factory_address=8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f&protocol_type_name=uniswap_v2_pool

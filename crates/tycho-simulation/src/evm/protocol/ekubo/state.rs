@@ -5,7 +5,10 @@ use std::{
 };
 
 use evm_ekubo_sdk::{
-    math::uint::U256,
+    math::{
+        tick::{MAX_SQRT_RATIO, MIN_SQRT_RATIO},
+        uint::U256,
+    },
     quoting::types::{NodeKey, TokenAmount},
 };
 use num_bigint::BigUint;
@@ -15,7 +18,10 @@ use tycho_common::{
     models::token::Token,
     simulation::{
         errors::{SimulationError, TransitionError},
-        protocol_sim::{Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams},
+        protocol_sim::{
+            Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
+            SwapConstraint,
+        },
     },
     Bytes,
 };
@@ -23,8 +29,14 @@ use tycho_common::{
 use super::pool::{
     base::BasePool, full_range::FullRangePool, oracle::OraclePool, twamm::TwammPool, EkuboPool,
 };
-use crate::evm::protocol::{
-    ekubo::pool::mev_resist::MevResistPool, u256_num::u256_to_f64, utils::add_fee_markup,
+use crate::{
+    evm::protocol::{
+        ekubo::pool::mev_resist::MevResistPool,
+        ekubo_common::{swap_to_target_price, EkuboSwapToPrice},
+        u256_num::u256_to_f64,
+        utils::add_fee_markup,
+    },
+    utils::decimals_exponent,
 };
 
 #[enum_delegate::implement(EkuboPool)]
@@ -39,12 +51,41 @@ pub enum EkuboState {
 
 fn sqrt_price_q128_to_f64(
     x: U256,
-    (token0_decimals, token1_decimals): (usize, usize),
+    (token0_decimals, token1_decimals): (u32, u32),
 ) -> Result<f64, SimulationError> {
-    let token_correction = 10f64.powi(token0_decimals as i32 - token1_decimals as i32);
+    let token_correction = 10f64.powi(decimals_exponent(token0_decimals, token1_decimals)?);
 
     let price = u256_to_f64(alloy::primitives::U256::from_limbs(x.0))? / 2.0f64.powi(128);
     Ok(price.powi(2) * token_correction)
+}
+
+impl EkuboSwapToPrice for EkuboState {
+    type SqrtRatio = U256;
+
+    fn sqrt_ratio_in_range(sqrt_ratio: &BigUint) -> Option<U256> {
+        if sqrt_ratio.bits() > 256 {
+            return None;
+        }
+        let sqrt_ratio = U256::from_big_endian(&sqrt_ratio.to_bytes_be());
+        (MIN_SQRT_RATIO..=MAX_SQRT_RATIO)
+            .contains(&sqrt_ratio)
+            .then_some(sqrt_ratio)
+    }
+
+    fn current_sqrt_ratio(&self) -> U256 {
+        self.sqrt_ratio()
+    }
+
+    fn quote_to_limit(
+        &self,
+        token_in: &Token,
+        amount: i128,
+        sqrt_ratio_limit: Option<U256>,
+    ) -> Result<(i128, u128, Self), SimulationError> {
+        let token_amount = TokenAmount { token: U256::from_big_endian(&token_in.address), amount };
+        let quote = self.quote(token_amount, sqrt_ratio_limit)?;
+        Ok((quote.consumed_amount, quote.calculated_amount, quote.new_state))
+    }
 }
 
 #[typetag::serde]
@@ -55,7 +96,7 @@ impl ProtocolSim for EkuboState {
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         let sqrt_ratio = self.sqrt_ratio();
-        let (base_decimals, quote_decimals) = (base.decimals as usize, quote.decimals as usize);
+        let (base_decimals, quote_decimals) = (base.decimals, quote.decimals);
 
         let price = if base < quote {
             sqrt_price_q128_to_f64(sqrt_ratio, (base_decimals, quote_decimals))?
@@ -73,12 +114,17 @@ impl ProtocolSim for EkuboState {
     ) -> Result<GetAmountOutResult, SimulationError> {
         let token_amount = TokenAmount {
             token: U256::from_big_endian(&token_in.address),
-            amount: amount_in.try_into().map_err(|_| {
-                SimulationError::InvalidInput("amount in must fit into a i128".to_string(), None)
-            })?,
+            amount: amount_in
+                .try_into()
+                .map_err(|_out_of_range| {
+                    SimulationError::InvalidInput(
+                        "amount in must fit into a i128".to_string(),
+                        None,
+                    )
+                })?,
         };
 
-        let quote = self.quote(token_amount)?;
+        let quote = self.quote(token_amount, None)?;
 
         if quote.calculated_amount > i128::MAX as u128 {
             return Err(SimulationError::RecoverableError(
@@ -112,7 +158,7 @@ impl ProtocolSim for EkuboState {
             .updated_attributes
             .get("liquidity")
         {
-            self.set_liquidity(liquidity.clone().into());
+            self.set_liquidity(liquidity.clone().try_into()?);
         }
 
         if let Some(sqrt_price) = delta
@@ -153,7 +199,7 @@ impl ProtocolSim for EkuboState {
 
         // TODO Update once exact out is supported
         Ok((
-            BigUint::try_from(consumed_amount).map_err(|_| {
+            BigUint::try_from(consumed_amount).map_err(|_out_of_range| {
                 SimulationError::FatalError(format!(
                     "Failed to convert consumed amount `{consumed_amount}` into BigUint"
                 ))
@@ -162,8 +208,17 @@ impl ProtocolSim for EkuboState {
         ))
     }
 
+    /// Solves [`SwapConstraint::PoolTargetPrice`] natively with a sqrt ratio limit. This path
+    /// ignores `min_amount_in`, `max_amount_in` and `tolerance`, and returns no price points.
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
-        crate::evm::query_pool_swap::query_pool_swap(self, params)
+        match params.swap_constraint() {
+            SwapConstraint::TradeLimitPrice { .. } => {
+                crate::evm::query_pool_swap::query_pool_swap(self, params)
+            }
+            SwapConstraint::PoolTargetPrice { target, .. } => {
+                swap_to_target_price(self, params, target, self.key().config.fee)
+            }
+        }
     }
 }
 
@@ -177,7 +232,10 @@ mod tests {
     use rstest_reuse::apply;
 
     use super::*;
-    use crate::evm::protocol::ekubo::{pool::base::BasePool, test_cases::*};
+    use crate::evm::protocol::{
+        ekubo::{pool::base::BasePool, test_cases::*},
+        ekubo_common::test_helpers::*,
+    };
 
     #[apply(all_cases)]
     fn test_delta_transition(case: TestCase) {
@@ -270,5 +328,53 @@ mod tests {
 
         // Limit should be 0 for pool with no liquidity at current price
         assert_eq!(limit, BigUint::ZERO);
+    }
+
+    #[rstest]
+    #[case::full_range(full_range(), 0.95)]
+    #[case::mev_resist_with_fee(mev_resist(), 0.999_995)]
+    #[case::oracle(oracle(), 0.99)]
+    #[case::twamm(twamm(), 0.99)]
+    fn test_query_pool_swap_target_price_lands_in_band(
+        #[case] case: TestCase,
+        #[case] multiplier: f64,
+    ) {
+        assert_lands_in_band(
+            &case.state_after_transition,
+            &case.token0(),
+            &case.token1(),
+            multiplier,
+        );
+    }
+
+    #[rstest]
+    fn test_query_pool_swap_target_price_above_spot(full_range: TestCase) {
+        let state = &full_range.state_after_transition;
+        assert_target_above_spot_rejected(state, &full_range.token0(), &full_range.token1());
+    }
+
+    #[rstest]
+    fn test_query_pool_swap_target_price_at_spot(full_range: TestCase) {
+        let state = &full_range.state_after_transition;
+        assert_target_at_spot_gives_zero_swap(state, &full_range.token0(), &full_range.token1());
+    }
+
+    #[rstest]
+    fn test_query_pool_swap_target_price_out_of_range(full_range: TestCase) {
+        let state = &full_range.state_after_transition;
+        assert_out_of_range_falls_back(state, &full_range.token0(), &full_range.token1());
+    }
+
+    #[rstest]
+    fn test_query_pool_swap_target_price_empty_pool(full_range: TestCase) {
+        let state = empty_full_range_state();
+        assert_missed_limit_falls_back(&state, &full_range.token0(), &full_range.token1());
+    }
+
+    #[test]
+    fn test_query_pool_swap_target_price_virtual_orders_past_target() {
+        let case = twamm();
+        let state = &case.state_after_transition;
+        assert_virtual_orders_applied_before_direction_check(state, &case.token0(), &case.token1());
     }
 }

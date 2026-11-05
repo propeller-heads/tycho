@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroUsize,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
@@ -20,8 +23,8 @@ use tycho_common::{
     models::{
         self,
         blockchain::{
-            Block, EntryPoint, EntryPointWithTracingParams, TracedEntryPoint, TracingParams,
-            TracingResult, Transaction,
+            Block, EntryPoint, EntryPointWithTracingParams, TracedEntryPoint, TracedEntryPoints,
+            TracingParams, TracingResult, Transaction,
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
@@ -34,13 +37,18 @@ use tycho_common::{
     },
     storage::{
         BlockIdentifier, BlockOrTimestamp, ChainGateway, ContractStateGateway, EntryPointFilter,
-        EntryPointGateway, ExtractionStateGateway, Gateway, ProtocolGateway, StorageError, Version,
-        WithTotal,
+        EntryPointGateway, ExtractionStateGateway, Gateway, ProtocolGateway, StateSnapshot,
+        StateSnapshotGateway, StorageError, Version, WithTotal,
     },
     Bytes,
 };
 
-use super::{PostgresError, PostgresGateway};
+use super::{
+    is_transaction_conflict,
+    pool::{self, PooledConnection, EXTRACTION_POOL},
+    snapshot::{bound_snapshot_reads, snapshot_transaction},
+    PostgresError, PostgresGateway,
+};
 
 /// Represents different types of database write operations.
 #[derive(PartialEq, Clone, Debug)]
@@ -62,7 +70,10 @@ pub(crate) enum WriteOp {
     // Simply merge
     InsertTokens(Vec<models::token::Token>),
     // Currently unused but supported, please see `CacheGateway.update_tokens` docs.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "handled by the cache writer but never constructed by the gateway"
+    )]
     UpdateTokens(Vec<models::token::Token>),
     // Simply merge
     InsertComponentBalances(Vec<models::protocol::ComponentBalance>),
@@ -161,62 +172,62 @@ impl DBTransaction {
     /// transaction.
     ///
     /// PERF: Use an array instead of a vec since the order is static.
-    fn add_operation(&mut self, op: WriteOp) -> Result<(), StorageError> {
+    fn add_operation(&mut self, op: WriteOp) {
         for existing_op in self.operations.iter_mut() {
             match (existing_op, &op) {
                 (WriteOp::UpsertBlock(l), WriteOp::UpsertBlock(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpsertTx(l), WriteOp::UpsertTx(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::SaveExtractionState(l), WriteOp::SaveExtractionState(r)) => {
                     l.clone_from(r);
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertContract(l), WriteOp::InsertContract(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpdateContracts(l), WriteOp::UpdateContracts(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertAccountBalances(l), WriteOp::InsertAccountBalances(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertProtocolComponents(l), WriteOp::InsertProtocolComponents(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertTokens(l), WriteOp::InsertTokens(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpdateTokens(l), WriteOp::InsertTokens(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertComponentBalances(l), WriteOp::InsertComponentBalances(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpsertProtocolState(l), WriteOp::UpsertProtocolState(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertEntryPoints(l), WriteOp::InsertEntryPoints(r)) => {
                     for (component_id, entry_points) in r.iter() {
@@ -227,7 +238,7 @@ impl DBTransaction {
                         entry.extend(entry_points.iter().cloned());
                         self.size += entry.len() - len_before;
                     }
-                    return Ok(());
+                    return;
                 }
                 (
                     WriteOp::InsertEntryPointTracingParams(l),
@@ -241,20 +252,19 @@ impl DBTransaction {
                         entry.extend(params.iter().cloned());
                         self.size += entry.len() - len_before;
                     }
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpsertTracedEntryPoints(l), WriteOp::UpsertTracedEntryPoints(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
-                _ => continue,
+                _ => {}
             }
         }
         // not quite accurate but currently all WriteOps are created with a single entry.
         self.size += 1;
         self.operations.push(op);
-        Ok(())
     }
 }
 
@@ -312,6 +322,7 @@ pub(crate) struct DBCacheWriteExecutor {
     state_gateway: PostgresGateway,
     persisted_block: Option<models::blockchain::Block>,
     msg_receiver: mpsc::Receiver<DBCacheMessage>,
+    max_retries: u64,
 }
 
 impl DBCacheWriteExecutor {
@@ -334,7 +345,7 @@ impl DBCacheWriteExecutor {
 
         debug!("Persisted block: {:?}", persisted_block);
 
-        Self { name, chain, pool, state_gateway, persisted_block, msg_receiver }
+        Self { name, chain, pool, state_gateway, persisted_block, msg_receiver, max_retries: 3 }
     }
 
     /// Spawns a task to process incoming database messages (write requests or flush commands).
@@ -360,14 +371,12 @@ impl DBCacheWriteExecutor {
             tracing::Span::current().record("extractor_id", extractor_id);
         }
 
-        let mut conn = self
-            .pool
-            .get()
+        let mut conn = pool::checkout(&self.pool, EXTRACTION_POOL)
             .await
             .expect("pool should be connected");
 
         let mut retry_count = 0;
-        let max_retries = 3;
+        let max_retries = self.max_retries;
         let mut res =
             Err(PostgresError(StorageError::Unexpected("default response error".to_string())));
 
@@ -403,19 +412,19 @@ impl DBCacheWriteExecutor {
             match res {
                 Ok(_) => break,
                 Err(PostgresError(StorageError::Unexpected(ref e)))
-                    if e.contains("deadlock detected") =>
+                    if is_transaction_conflict(e) =>
                 {
                     retry_count += 1;
                     if retry_count < max_retries {
                         let delay = std::time::Duration::from_secs(retry_count);
                         warn!(
-                            "Deadlock detected, retrying in {:?} (attempt {}/{})",
+                            "Transaction conflict, retrying in {:?} (attempt {}/{}): {}",
                             delay,
                             retry_count + 1,
-                            max_retries
+                            max_retries,
+                            e
                         );
                         tokio::time::sleep(delay).await;
-                        continue;
                     }
                 }
                 _ => break,
@@ -441,6 +450,10 @@ impl DBCacheWriteExecutor {
         }
 
         // Forward the result to the sender
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the caller may have stopped waiting for the result; the write has been executed either way"
+        )]
         let _ = new_db_tx
             .tx
             .send(res.map_err(Into::into));
@@ -452,7 +465,7 @@ impl DBCacheWriteExecutor {
     /// upserts, updates, and reverts, ensuring data consistency in the database.
     #[instrument(skip_all, fields(op=operation.variant_name()))]
     async fn execute_write_op(
-        &mut self,
+        &self,
         operation: &WriteOp,
         conn: &mut AsyncPgConnection,
     ) -> Result<(), PostgresError> {
@@ -575,8 +588,12 @@ pub struct CachedGateway {
 
     // TODO: Remove Mutex. It is not needed but avoids changing the Extractor trait.
     open_tx: Arc<Mutex<Option<OpenTx>>>,
+    /// Height of the newest block whose staged writes reached the store. `0` means
+    /// nothing flushed yet, so a real flushed height of 0 reads as `None`.
+    flushed_block_height: AtomicU64,
     tx: mpsc::Sender<DBCacheMessage>,
     pool: Pool<AsyncPgConnection>,
+    pool_label: &'static str,
     state_gateway: PostgresGateway,
     lru_cache: Arc<Mutex<DeltasCache>>,
 }
@@ -586,8 +603,11 @@ impl Clone for CachedGateway {
         Self {
             // create a separate open tx state for new instances
             open_tx: Arc::new(Mutex::new(None)),
+            // each instance tracks the flush progress of its own transactions
+            flushed_block_height: AtomicU64::new(0),
             tx: self.tx.clone(),
             pool: self.pool.clone(),
+            pool_label: self.pool_label,
             state_gateway: self.state_gateway.clone(),
             lru_cache: self.lru_cache.clone(),
         }
@@ -624,9 +644,21 @@ impl CachedGateway {
                 Err(StorageError::Unexpected("Usage error: No transaction started".to_string()))
             }
             Some((tx, _)) => {
-                tx.add_operation(op)?;
+                tx.add_operation(op);
                 Ok(())
             }
+        }
+    }
+
+    /// Returns the height of the newest block whose staged writes reached the store, or
+    /// `None` when this instance has not flushed anything yet.
+    pub fn flushed_block_height(&self) -> Option<u64> {
+        match self
+            .flushed_block_height
+            .load(Ordering::Acquire)
+        {
+            0 => None,
+            height => Some(height),
         }
     }
 
@@ -638,6 +670,7 @@ impl CachedGateway {
             }
             Some((mut db_txn, rx)) => {
                 if db_txn.size > min_ops_batch_size {
+                    let flushed_block_height = db_txn.block_range.end.number;
                     let span = info_span!("DatabaseCommit", size = db_txn.size);
                     db_txn.caller_span = tracing::Span::current();
                     async move {
@@ -657,13 +690,17 @@ impl CachedGateway {
                             .send(DBCacheMessage::Write(db_txn))
                             .await
                             .expect("Send message to receiver ok");
-                        rx.await
-                            .map_err(|_| StorageError::WriteCacheGoneAway())??;
+                        rx.await.map_err(|_closed| {
+                            error!("Write cache dropped the result channel");
+                            StorageError::WriteCacheGoneAway()
+                        })??;
 
                         Ok::<(), StorageError>(())
                     }
                     .instrument(span)
                     .await?;
+                    self.flushed_block_height
+                        .store(flushed_block_height, Ordering::Release);
                 } else {
                     // if we are not ready to commit, give the OpenTx struct back.
                     *open_tx = Some((db_txn, rx));
@@ -673,8 +710,7 @@ impl CachedGateway {
         }
     }
 
-    #[allow(private_interfaces)]
-    pub fn new(
+    pub(crate) fn new(
         tx: mpsc::Sender<DBCacheMessage>,
         pool: Pool<AsyncPgConnection>,
         state_gateway: PostgresGateway,
@@ -682,10 +718,45 @@ impl CachedGateway {
         CachedGateway {
             tx,
             open_tx: Arc::new(Mutex::new(None)),
+            flushed_block_height: AtomicU64::new(0),
             pool,
+            pool_label: EXTRACTION_POOL,
             state_gateway,
             lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
         }
+    }
+
+    /// Creates a fresh gateway instance sharing the same write channel and connection pool,
+    /// but with its own `open_tx`, `flushed_block_height` and `lru_cache`.
+    ///
+    /// Use this instead of `clone()` when the intent is to create an independent writer
+    /// (e.g. for a restarted extractor) rather than sharing cache state.
+    pub fn new_instance(&self) -> Self {
+        CachedGateway {
+            tx: self.tx.clone(),
+            open_tx: Arc::new(Mutex::new(None)),
+            // a fresh writer has not flushed anything yet
+            flushed_block_height: AtomicU64::new(0),
+            pool: self.pool.clone(),
+            pool_label: self.pool_label,
+            state_gateway: self.state_gateway.clone(),
+            lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
+        }
+    }
+
+    /// Creates a gateway that shares this one's write channel and state caches but takes its
+    /// connections from `pool`.
+    pub(crate) fn with_pool(&self, pool: Pool<AsyncPgConnection>, label: &'static str) -> Self {
+        CachedGateway { pool, pool_label: label, ..self.new_instance() }
+    }
+
+    async fn checkout(&self) -> Result<PooledConnection, StorageError> {
+        pool::checkout(&self.pool, self.pool_label).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pool(&self) -> &Pool<AsyncPgConnection> {
+        &self.pool
     }
 
     pub async fn get_delta(
@@ -722,7 +793,7 @@ impl CachedGateway {
         tracing::debug!("Cache didn't hit delta. Getting delta for {:?}", key);
 
         // Fetch the delta from the database
-        let mut db = self.pool.get().await.unwrap();
+        let mut db = self.checkout().await.unwrap();
         let accounts_delta = self
             .state_gateway
             .get_accounts_delta(chain, start_version, end_version, &mut db)
@@ -748,10 +819,7 @@ impl CachedGateway {
 impl ExtractionStateGateway for CachedGateway {
     #[instrument(skip_all)]
     async fn get_state(&self, name: &str, chain: &Chain) -> Result<ExtractionState, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_state(name, chain, &mut conn)
             .await
@@ -775,10 +843,7 @@ impl ChainGateway for CachedGateway {
 
     #[instrument(skip_all)]
     async fn get_block(&self, id: &BlockIdentifier) -> Result<Block, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_block(id, &mut conn)
             .await
@@ -792,10 +857,7 @@ impl ChainGateway for CachedGateway {
 
     #[instrument(skip_all)]
     async fn get_tx(&self, hash: &TxHash) -> Result<Transaction, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_tx(hash, &mut conn)
             .await
@@ -803,10 +865,7 @@ impl ChainGateway for CachedGateway {
 
     #[instrument(skip_all)]
     async fn revert_state(&self, to: &BlockIdentifier) -> Result<(), StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .revert_state(to, &mut conn)
             .await
@@ -822,10 +881,7 @@ impl ContractStateGateway for CachedGateway {
         version: Option<&Version>,
         include_slots: bool,
     ) -> Result<Account, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_contract(id, version, include_slots, &mut conn)
             .await
@@ -840,10 +896,7 @@ impl ContractStateGateway for CachedGateway {
         include_slots: bool,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<Account>>, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_contracts(chain, addresses, version, include_slots, pagination_params, &mut conn)
             .await
@@ -865,10 +918,7 @@ impl ContractStateGateway for CachedGateway {
 
     #[instrument(skip_all)]
     async fn delete_contract(&self, id: &ContractId, at_tx: &TxHash) -> Result<(), StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .delete_contract(id, at_tx, &mut conn)
             .await
@@ -881,10 +931,7 @@ impl ContractStateGateway for CachedGateway {
         start_version: Option<&BlockOrTimestamp>,
         end_version: &BlockOrTimestamp,
     ) -> Result<Vec<AccountDelta>, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_accounts_delta(chain, start_version, end_version, &mut conn)
             .await
@@ -907,10 +954,7 @@ impl ContractStateGateway for CachedGateway {
         addresses: Option<&[Address]>,
         version: Option<&Version>,
     ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_account_balances(chain, addresses, version, false, &mut conn)
             .await
@@ -928,10 +972,7 @@ impl ProtocolGateway for CachedGateway {
         min_tvl: Option<f64>,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<ProtocolComponent>>, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_protocol_components(chain, system, ids, min_tvl, pagination_params, &mut conn)
             .await
@@ -944,10 +985,7 @@ impl ProtocolGateway for CachedGateway {
         tokens: &[Address],
         min_balance: Option<f64>,
     ) -> Result<HashMap<Address, (ComponentId, Bytes)>, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_token_owners(chain, tokens, min_balance, &mut conn)
             .await
@@ -966,10 +1004,7 @@ impl ProtocolGateway for CachedGateway {
         to_delete: &[ProtocolComponent],
         block_ts: NaiveDateTime,
     ) -> Result<(), StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .delete_protocol_components(to_delete, block_ts, &mut conn)
             .await
@@ -980,10 +1015,7 @@ impl ProtocolGateway for CachedGateway {
         &self,
         new_protocol_types: &[ProtocolType],
     ) -> Result<(), StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .add_protocol_types(new_protocol_types, &mut conn)
             .await
@@ -999,10 +1031,7 @@ impl ProtocolGateway for CachedGateway {
         retrieve_balances: bool,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<ProtocolComponentState>>, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_protocol_states(
                 chain,
@@ -1035,10 +1064,7 @@ impl ProtocolGateway for CachedGateway {
         traded_n_days_ago: Option<NaiveDateTime>,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<Token>>, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_tokens(chain, address, quality, traded_n_days_ago, pagination_params, &mut conn)
             .await
@@ -1072,10 +1098,7 @@ impl ProtocolGateway for CachedGateway {
     /// for these use cases that creates a single transactions and emits them immediately.
     #[instrument(skip_all)]
     async fn update_tokens(&self, tokens: &[Token]) -> Result<(), StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
 
         conn.transaction(|conn| {
             async {
@@ -1097,10 +1120,7 @@ impl ProtocolGateway for CachedGateway {
         start_version: Option<&BlockOrTimestamp>,
         end_version: &BlockOrTimestamp,
     ) -> Result<Vec<ProtocolComponentStateDelta>, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_protocol_states_delta(chain, start_version, end_version, &mut conn)
             .await
@@ -1113,10 +1133,7 @@ impl ProtocolGateway for CachedGateway {
         start_version: Option<&BlockOrTimestamp>,
         target_version: &BlockOrTimestamp,
     ) -> Result<Vec<ComponentBalance>, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_balance_deltas(chain, start_version, target_version, &mut conn)
             .await
@@ -1129,10 +1146,7 @@ impl ProtocolGateway for CachedGateway {
         ids: Option<&[&str]>,
         version: Option<&Version>,
     ) -> Result<HashMap<String, HashMap<Bytes, ComponentBalance>>, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_component_balances(chain, ids, version, &mut conn)
             .await
@@ -1140,10 +1154,7 @@ impl ProtocolGateway for CachedGateway {
 
     #[instrument(skip_all)]
     async fn get_token_prices(&self, chain: &Chain) -> Result<HashMap<Bytes, f64>, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_token_prices(chain, &mut conn)
             .await
@@ -1156,10 +1167,7 @@ impl ProtocolGateway for CachedGateway {
         chain: &Chain,
         tvl_values: &HashMap<String, f64>,
     ) -> Result<(), StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .upsert_component_tvl(chain, tvl_values, &mut conn)
             .await
@@ -1184,10 +1192,7 @@ impl ProtocolGateway for CachedGateway {
         ids: Option<&[&str]>,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<HashMap<String, f64>>, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_component_tvls(chain, system, ids, pagination_params, &mut conn)
             .await
@@ -1222,10 +1227,7 @@ impl EntryPointGateway for CachedGateway {
         filter: EntryPointFilter,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<HashMap<ComponentId, HashSet<EntryPoint>>>, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_entry_points(filter, pagination_params, &mut conn)
             .await
@@ -1238,10 +1240,7 @@ impl EntryPointGateway for CachedGateway {
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<HashMap<ComponentId, HashSet<EntryPointWithTracingParams>>>, StorageError>
     {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_entry_points_tracing_params(filter, pagination_params, &mut conn)
             .await
@@ -1262,26 +1261,71 @@ impl EntryPointGateway for CachedGateway {
         &self,
         entry_points: &HashSet<EntryPointId>,
     ) -> Result<HashMap<EntryPointId, HashMap<TracingParams, TracingResult>>, StorageError> {
-        let mut conn =
-            self.pool.get().await.map_err(|e| {
-                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
-            })?;
+        let mut conn = self.checkout().await?;
         self.state_gateway
             .get_tracing_results(entry_points, &mut conn)
             .await
+    }
+
+    #[instrument(skip_all)]
+    async fn get_traced_entry_points_by_component(
+        &self,
+        filter: EntryPointFilter,
+        pagination_params: Option<&PaginationParams>,
+    ) -> Result<WithTotal<TracedEntryPoints>, StorageError> {
+        let rows = {
+            let mut conn = self.checkout().await?;
+            self.state_gateway
+                .load_traced_entry_point_rows(filter, pagination_params, &mut conn)
+                .await?
+        };
+        PostgresGateway::decode_traced_entry_points(rows)
     }
 }
 
 impl Gateway for CachedGateway {}
 
+#[async_trait]
+impl StateSnapshotGateway for CachedGateway {
+    /// Reads on one pooled connection in one [`snapshot_transaction`], so every part of the
+    /// result comes from the same database snapshot. The reads are bounded by
+    /// [`bound_snapshot_reads`]: a read that runs too long, or outlives its client, is cancelled
+    /// by Postgres.
+    async fn state_snapshot(&self, chain: &Chain) -> Result<StateSnapshot, StorageError> {
+        let mut conn = self.checkout().await?;
+        snapshot_transaction(&mut conn)
+            .run(|conn| {
+                async move {
+                    bound_snapshot_reads(conn).await?;
+                    let accounts = self
+                        .state_gateway
+                        .account_snapshots(chain, conn)
+                        .await?;
+                    let components = self
+                        .state_gateway
+                        .component_snapshots(chain, conn)
+                        .await?;
+                    Result::<_, PostgresError>::Ok(StateSnapshot { accounts, components })
+                }
+                .scope_boxed()
+            })
+            .await
+            .map_err(StorageError::from)
+    }
+}
+
 #[cfg(test)]
 mod test_serial_db {
     use std::{collections::HashSet, slice, str::FromStr, time::Duration};
 
+    use diesel::{sql_query, QueryableByName};
+    use diesel_async::RunQueryDsl;
     use tycho_common::models::ChangeType;
 
     use super::*;
-    use crate::postgres::{db_fixtures, db_fixtures::yesterday_one_am, testing::run_against_db};
+    use crate::postgres::{
+        db_fixtures, db_fixtures::yesterday_one_am, orm, testing::run_against_db,
+    };
 
     #[tokio::test]
     async fn test_write_and_flush() {
@@ -1335,6 +1379,165 @@ mod test_serial_db {
                 .expect("Failed to fetch extraction state");
 
             assert_eq!(fetched_block, block);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_write_retries_serialization_failure() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            let eth_address = "0000000000000000000000000000000000000000";
+            db_fixtures::insert_token(&mut connection, chain_id, eth_address, "ETH", 18, Some(100))
+                .await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, rx) = mpsc::channel(10);
+            let write_executor = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await;
+
+            let handle = write_executor.run();
+
+            let mut blocker = start_blocking_token_update().await;
+
+            let block = get_sample_block(1);
+            let token = models::token::Token::new(
+                &Bytes::from_str(eth_address).expect("Invalid address"),
+                "ETH",
+                18,
+                0,
+                &[Some(100)],
+                Chain::Ethereum,
+                100,
+            );
+            let next_block_id = sql_query("SELECT nextval('block_id_seq') AS value")
+                .get_result::<BigIntRow>(&mut connection)
+                .await
+                .expect("Failed to read the block id sequence")
+                .value;
+
+            let os_rx = send_write_message(
+                &tx,
+                block.clone(),
+                vec![WriteOp::UpsertBlock(vec![block.clone()]), WriteOp::InsertTokens(vec![token])],
+            )
+            .await;
+
+            // The block upsert takes the REPEATABLE READ snapshot, then the token insert waits on
+            // the row the blocker updated. After the commit below that row is newer than the
+            // snapshot, so Postgres raises 40001 and the executor re-runs the batch; the re-run
+            // sees the committed row and the insert is a no-op.
+            await_lock_waiter(&mut connection).await;
+            sql_query("COMMIT")
+                .execute(&mut blocker)
+                .await
+                .expect("Failed to commit the blocking transaction");
+
+            os_rx
+                .await
+                .expect("Response from channel ok")
+                .expect("Transaction cached");
+
+            handle.abort();
+
+            // The sequence does not roll back: the aborted first attempt consumed one value and
+            // the successful re-run the next one.
+            let stored_block = orm::Block::by_hash(&block.hash, &mut connection)
+                .await
+                .expect("Failed to fetch the block");
+            assert_eq!(stored_block.id, next_block_id + 2, "the batch must run exactly twice");
+
+            let stored_token =
+                db_fixtures::get_token_by_symbol(&mut connection, "ETH".to_string()).await;
+            assert_eq!(
+                stored_token.quality, 50,
+                "the re-run must not overwrite the concurrent update"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_write_fails_after_exhausted_conflict_retries() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            let eth_address = "0000000000000000000000000000000000000000";
+            db_fixtures::insert_token(&mut connection, chain_id, eth_address, "ETH", 18, Some(100))
+                .await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, rx) = mpsc::channel(10);
+            let mut write_executor = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await;
+            write_executor.max_retries = 1;
+
+            let handle = write_executor.run();
+
+            let mut blocker = start_blocking_token_update().await;
+
+            let block = get_sample_block(1);
+            let token = models::token::Token::new(
+                &Bytes::from_str(eth_address).expect("Invalid address"),
+                "ETH",
+                18,
+                0,
+                &[Some(100)],
+                Chain::Ethereum,
+                100,
+            );
+            let os_rx = send_write_message(
+                &tx,
+                block.clone(),
+                vec![WriteOp::UpsertBlock(vec![block.clone()]), WriteOp::InsertTokens(vec![token])],
+            )
+            .await;
+
+            await_lock_waiter(&mut connection).await;
+            sql_query("COMMIT")
+                .execute(&mut blocker)
+                .await
+                .expect("Failed to commit the blocking transaction");
+
+            let err = os_rx
+                .await
+                .expect("Response from channel ok")
+                .expect_err("The single attempt must fail on the conflict");
+
+            handle.abort();
+
+            let StorageError::Unexpected(message) = err else {
+                panic!("Expected the conflict as Unexpected, got {err:?}");
+            };
+            assert!(is_transaction_conflict(&message), "{message}");
+
+            let block_id = BlockIdentifier::Number((Chain::Ethereum, 1));
+            assert!(
+                matches!(
+                    gateway
+                        .get_block(&block_id, &mut connection)
+                        .await,
+                    Err(StorageError::NotFound(_, _))
+                ),
+                "the failed batch must not persist the block"
+            );
         })
         .await;
     }
@@ -1621,6 +1824,85 @@ mod test_serial_db {
         .await;
     }
 
+    #[test_log::test(tokio::test)]
+    async fn test_cached_gateway_flushed_block_height() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            // `from_connection` builds the native-token cache and panics without this row.
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, rx) = mpsc::channel(10);
+
+            let write_executor = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await;
+
+            let handle = write_executor.run();
+            let cached_gw = CachedGateway::new(tx, connection_pool.clone(), gateway.clone());
+            assert_eq!(cached_gw.flushed_block_height(), None);
+
+            let block_1 = get_sample_block(1);
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+
+            // Below the batch threshold: the op stays staged and the height stays unset.
+            cached_gw
+                .commit_transaction(100)
+                .await
+                .expect("committing tx failed");
+            assert_eq!(cached_gw.flushed_block_height(), None);
+
+            // Stage a second block so the open transaction spans blocks 1–2: the
+            // recorded height must be the range end, not its start.
+            let block_2 = get_sample_block(2);
+            cached_gw
+                .start_transaction(&block_2, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_2))
+                .await
+                .expect("Upsert block 2 ok");
+
+            // Forcing the commit flushes the staged ops and records the range-end height.
+            cached_gw
+                .commit_transaction(0)
+                .await
+                .expect("committing tx failed");
+            assert_eq!(cached_gw.flushed_block_height(), Some(block_2.number));
+
+            let fetched_block = gateway
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut connection)
+                .await
+                .expect("Failed to fetch block");
+            assert_eq!(fetched_block, block_1);
+
+            handle.abort();
+        })
+        .await;
+    }
+
     fn get_sample_block(version: usize) -> models::blockchain::Block {
         let ts1 = yesterday_one_am();
         let ts2 = ts1 + Duration::from_secs(3600);
@@ -1713,159 +1995,54 @@ mod test_serial_db {
         os_rx
     }
 
-    //noinspection SpellCheckingInspection
-    #[allow(dead_code)]
-    async fn setup_data(conn: &mut AsyncPgConnection) {
-        // set up blocks and txns
-        let chain_id = db_fixtures::insert_chain(conn, "ethereum").await;
-        let blk = db_fixtures::insert_blocks(conn, chain_id).await;
-        let ts = chrono::Local::now().naive_utc() - Duration::from_secs(3600);
-        let tx_hashes = [
-            "0xbb7e16d797a9e2fbc537e30f91ed3d27a254dd9578aa4c3af3e5f0d3e8130945".to_string(),
-            "0x794f7df7a3fe973f1583fbb92536f9a8def3a89902439289315326c04068de54".to_string(),
-            "0x3108322284d0a89a7accb288d1a94384d499504fe7e04441b0706c7628dee7b7".to_string(),
-            "0x50449de1973d86f21bfafa7c72011854a7e33a226709dc3e2e4edcca34188388".to_string(),
-        ];
+    #[derive(QueryableByName)]
+    struct BigIntRow {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        value: i64,
+    }
 
-        let txn = db_fixtures::insert_txns(
-            conn,
-            &[
-                (blk[0], 1i64, &tx_hashes[0]),
-                (blk[0], 2i64, &tx_hashes[1]),
-                // ----- Block 01 LAST
-                (blk[1], 1i64, &tx_hashes[2]),
-                (blk[1], 2i64, &tx_hashes[3]),
-                // ----- Block 02 LAST
-            ],
-        )
-        .await;
-        let (_, native_token) = db_fixtures::insert_token(
-            conn,
-            chain_id,
-            "0000000000000000000000000000000000000000",
-            "ETH",
-            18,
-            Some(100),
-        )
-        .await;
+    /// Waits until a backend of this database blocks on another transaction's row lock.
+    async fn await_lock_waiter(conn: &mut AsyncPgConnection) {
+        const TIMEOUT: Duration = Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        loop {
+            let waiters = sql_query(
+                "SELECT count(*) AS value FROM pg_stat_activity
+                 WHERE wait_event_type = 'Lock' AND wait_event = 'transactionid'
+                 AND datname = current_database()",
+            )
+            .get_result::<BigIntRow>(conn)
+            .await
+            .expect("Failed to query lock waiters");
+            if waiters.value >= 1 {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "No backend blocked on a row lock within {TIMEOUT:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 
-        // set up contract data
-        let c0 = db_fixtures::insert_account(
-            conn,
-            "6B175474E89094C44Da98b954EedeAC495271d0F",
-            "account0",
-            chain_id,
-            Some(txn[0]),
-        )
-        .await;
-        db_fixtures::insert_account_balance(conn, 0, native_token, txn[0], Some(&ts), c0).await;
-        db_fixtures::insert_contract_code(conn, c0, txn[0], Bytes::from_str("C0C0C0").unwrap())
-            .await;
-        db_fixtures::insert_account_balance(
-            conn,
-            100,
-            native_token,
-            txn[1],
-            Some(&(ts + Duration::from_secs(3600))),
-            c0,
-        )
-        .await;
-        db_fixtures::insert_slots(conn, c0, txn[1], &ts, None, &[(2, 1, None)]).await;
-        db_fixtures::insert_slots(
-            conn,
-            c0,
-            txn[1],
-            &ts,
-            Some(&(ts + Duration::from_secs(3600))),
-            &[(0, 1, None), (1, 5, None)],
-        )
-        .await;
-        db_fixtures::insert_account_balance(conn, 101, native_token, txn[3], None, c0).await;
-        db_fixtures::insert_slots(
-            conn,
-            c0,
-            txn[3],
-            &(ts + Duration::from_secs(3600)),
-            None,
-            &[(0, 2, Some(1)), (1, 3, Some(5)), (5, 25, None), (6, 30, None)],
-        )
-        .await;
-
-        let c1 = db_fixtures::insert_account(
-            conn,
-            "73BcE791c239c8010Cd3C857d96580037CCdd0EE",
-            "c1",
-            chain_id,
-            Some(txn[2]),
-        )
-        .await;
-        db_fixtures::insert_account_balance(conn, 50, native_token, txn[2], None, c1).await;
-        db_fixtures::insert_contract_code(conn, c1, txn[2], Bytes::from_str("C1C1C1").unwrap())
-            .await;
-        db_fixtures::insert_slots(
-            conn,
-            c1,
-            txn[3],
-            &(ts + Duration::from_secs(3600)),
-            None,
-            &[(0, 128, None), (1, 255, None)],
-        )
-        .await;
-
-        let c2 = db_fixtures::insert_account(
-            conn,
-            "94a3F312366b8D0a32A00986194053C0ed0CdDb1",
-            "c2",
-            chain_id,
-            Some(txn[1]),
-        )
-        .await;
-        db_fixtures::insert_account_balance(conn, 25, native_token, txn[1], None, c2).await;
-        db_fixtures::insert_contract_code(conn, c2, txn[1], Bytes::from_str("C2C2C2").unwrap())
-            .await;
-        db_fixtures::insert_slots(
-            conn,
-            c2,
-            txn[1],
-            &(ts + Duration::from_secs(3600)),
-            None,
-            &[(1, 2, None), (2, 4, None)],
-        )
-        .await;
-        db_fixtures::delete_account(conn, c2, &(ts + Duration::from_secs(3600))).await;
-
-        // set up protocol state data
-        let protocol_system_id =
-            db_fixtures::insert_protocol_system(conn, "ambient".to_owned()).await;
-        let protocol_type_id = db_fixtures::insert_protocol_type(
-            conn,
-            "Pool",
-            Some(models::FinancialType::Swap),
-            None,
-            Some(models::ImplementationType::Custom),
-        )
-        .await;
-        let protocol_component_id = db_fixtures::insert_protocol_component(
-            conn,
-            "state1",
-            chain_id,
-            protocol_system_id,
-            protocol_type_id,
-            txn[0],
-            None,
-            None,
-        )
-        .await;
-        // protocol state for state1-reserve1
-        db_fixtures::insert_protocol_state(
-            conn,
-            protocol_component_id,
-            txn[0],
-            "reserve1".to_owned(),
-            Bytes::from(1100u64).lpad(32, 0),
-            None,
-            Some(txn[2]),
-        )
-        .await;
+    /// Opens a transaction that updates the ETH token row and leaves it uncommitted. The caller
+    /// releases the row lock with `COMMIT` on the returned connection.
+    async fn start_blocking_token_update() -> AsyncPgConnection {
+        let db_url = std::env::var("DATABASE_URL").expect("Database URL must be set for testing");
+        // A dedicated connection: when the test panics before the commit, dropping it closes the
+        // socket and Postgres rolls the transaction back. A pooled connection would return to the
+        // pool with the transaction open and block the teardown on the row lock.
+        let mut conn = AsyncPgConnection::establish(&db_url)
+            .await
+            .expect("Failed to connect to the database");
+        sql_query("BEGIN")
+            .execute(&mut conn)
+            .await
+            .expect("Failed to begin the blocking transaction");
+        sql_query("UPDATE token SET quality = 50 WHERE symbol = 'ETH'")
+            .execute(&mut conn)
+            .await
+            .expect("Failed to update the token quality");
+        conn
     }
 }

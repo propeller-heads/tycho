@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.2
+
+### Fixed
+
+- `extract_contract_changes` and `extract_contract_changes_builder` now take native balance changes from every call of a transaction instead of only the calls executed by a tracked contract. Firehose records a value transfer on the callee's call frame, so the native balance a tracked contract sent to an untracked address was never emitted and stayed stale in the indexer.
+
 ## 0.8.1
 
 ### Fixed

@@ -35,11 +35,17 @@ use super::{pool::concentrated::ConcentratedPool, state::EkuboV3State};
 use crate::evm::protocol::ekubo_v3::{
     addresses::{
         BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
-        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS,
+        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS_V2, VE33_ROBINHOOD_ADDRESS,
     },
     pool::{
-        boosted_fees::BoostedFeesPool, full_range::FullRangePool, mev_capture::MevCapturePool,
-        oracle::OraclePool, stableswap::StableswapPool, twamm::TwammPool, EkuboPool as _,
+        boosted_fees::BoostedFeesPool,
+        full_range::FullRangePool,
+        mev_capture::MevCapturePool,
+        oracle::OraclePool,
+        stableswap::StableswapPool,
+        twamm::TwammPool,
+        ve33::{Ve33Pool, Ve33UnderlyingPool},
+        EkuboPool as _,
     },
 };
 
@@ -209,6 +215,21 @@ pub fn concentrated() -> TestCase {
     }
 }
 
+/// A full-range pool at price 1 with no liquidity.
+pub fn empty_full_range_state() -> EkuboV3State {
+    let key = EvmFullRangePoolKey {
+        token0: TOKEN0,
+        token1: TOKEN1,
+        config: EvmFullRangePoolConfig {
+            fee: 0,
+            pool_type_config: FullRangePoolTypeConfig,
+            extension: Address::ZERO,
+        },
+    };
+    let state = EvmFullRangePoolState { sqrt_ratio: U256::from_limbs([0, 0, 1, 0]), liquidity: 0 };
+    EkuboV3State::FullRange(FullRangePool::new(key, state).unwrap())
+}
+
 #[fixture]
 pub fn full_range() -> TestCase {
     const POOL_KEY: EvmFullRangePoolKey = EvmFullRangePoolKey {
@@ -364,6 +385,95 @@ pub fn stableswap() -> TestCase {
     }
 }
 
+#[fixture]
+pub fn ve33() -> TestCase {
+    const POOL_KEY: EvmFullRangePoolKey = EvmFullRangePoolKey {
+        token0: TOKEN0,
+        token1: TOKEN1,
+        config: EvmFullRangePoolConfig {
+            fee: 0,
+            pool_type_config: FullRangePoolTypeConfig,
+            extension: VE33_ROBINHOOD_ADDRESS,
+        },
+    };
+
+    const SQRT_RATIO: U256 = U256::from_limbs([0, 0, 1, 0]);
+    const LIQUIDITY: u128 = 100_000_000;
+    const SWAP_FEE: u64 = u64::MAX / 16;
+
+    let pool = |sqrt_ratio, swap_fee| {
+        EkuboV3State::Ve33(
+            Ve33Pool::new(
+                Ve33UnderlyingPool::FullRange(
+                    FullRangePool::new(
+                        POOL_KEY,
+                        EvmFullRangePoolState { sqrt_ratio, liquidity: LIQUIDITY },
+                    )
+                    .unwrap(),
+                ),
+                swap_fee,
+            )
+            .unwrap(),
+        )
+    };
+
+    TestCase {
+        component: ProtocolComponent {
+            chain: Chain::Robinhood,
+            ..component([
+                ("token0".to_string(), POOL_KEY.token0.into_array().into()),
+                ("token1".to_string(), POOL_KEY.token1.into_array().into()),
+                ("fee".to_string(), POOL_KEY.config.fee.into()),
+                (
+                    "pool_type_config".to_string(),
+                    B32::from(EvmPoolTypeConfig::FullRange(POOL_KEY.config.pool_type_config))
+                        .0
+                        .into(),
+                ),
+                (
+                    "extension".to_string(),
+                    POOL_KEY
+                        .config
+                        .extension
+                        .into_array()
+                        .into(),
+                ),
+            ])
+        },
+        state_before_transition: pool(EVM_MIN_SQRT_RATIO, 0),
+        state_after_transition: pool(SQRT_RATIO, SWAP_FEE),
+        required_attributes: [
+            "token0".to_string(),
+            "token1".to_string(),
+            "fee".to_string(),
+            "pool_type_config".to_string(),
+            "extension".to_string(),
+            "liquidity".to_string(),
+            "sqrt_ratio".to_string(),
+            "swap_fee".to_string(),
+        ]
+        .into(),
+        transition_attributes: [
+            ("sqrt_ratio".to_string(), SQRT_RATIO.to_be_bytes_vec().into()),
+            ("swap_fee".to_string(), SWAP_FEE.to_be_bytes().into()),
+        ]
+        .into(),
+        state_attributes: [
+            (
+                "sqrt_ratio".to_string(),
+                EVM_MIN_SQRT_RATIO
+                    .to_be_bytes_vec()
+                    .into(),
+            ),
+            ("liquidity".to_string(), LIQUIDITY.to_be_bytes().into()),
+            ("swap_fee".to_string(), 0_u64.to_be_bytes().into()),
+        ]
+        .into(),
+        swap_token0: (100_u8.into(), 92_u8.into()),
+        expected_limit_token0: 1844629699405272373941016055_u128.into(),
+    }
+}
+
 pub fn oracle() -> TestCase {
     const POOL_KEY: EvmOraclePoolKey = EvmOraclePoolKey {
         token0: TOKEN0,
@@ -449,7 +559,7 @@ pub fn twamm() -> TestCase {
         config: EvmTwammPoolConfig {
             fee: 0,
             pool_type_config: FullRangePoolTypeConfig,
-            extension: TWAMM_ADDRESS,
+            extension: TWAMM_ADDRESS_V2,
         },
     };
 
@@ -498,13 +608,13 @@ pub fn twamm() -> TestCase {
                 vec![
                     TimeRateDelta {
                         time: FIRST_ORDER_START_TIME,
-                        rate_delta0: TOKEN0_SALE_RATE as i128,
-                        rate_delta1: TOKEN1_SALE_RATE as i128,
+                        rate_delta0: i128::try_from(TOKEN0_SALE_RATE).unwrap(),
+                        rate_delta1: i128::try_from(TOKEN1_SALE_RATE).unwrap(),
                     },
                     TimeRateDelta {
                         time: FIRST_ORDER_END_TIME,
-                        rate_delta0: (TOKEN0_SALE_RATE as i128).neg(),
-                        rate_delta1: (TOKEN1_SALE_RATE as i128).neg(),
+                        rate_delta0: (i128::try_from(TOKEN0_SALE_RATE).unwrap()).neg(),
+                        rate_delta1: (i128::try_from(TOKEN1_SALE_RATE).unwrap()).neg(),
                     },
                 ],
             )
@@ -525,18 +635,18 @@ pub fn twamm() -> TestCase {
                 vec![
                     TimeRateDelta {
                         time: FIRST_ORDER_END_TIME,
-                        rate_delta0: (TOKEN0_SALE_RATE as i128).neg(),
-                        rate_delta1: (TOKEN1_SALE_RATE as i128).neg(),
+                        rate_delta0: (i128::try_from(TOKEN0_SALE_RATE).unwrap()).neg(),
+                        rate_delta1: (i128::try_from(TOKEN1_SALE_RATE).unwrap()).neg(),
                     },
                     TimeRateDelta {
                         time: SECOND_ORDER_START_TIME,
-                        rate_delta0: TOKEN0_SALE_RATE as i128,
-                        rate_delta1: TOKEN1_SALE_RATE as i128,
+                        rate_delta0: i128::try_from(TOKEN0_SALE_RATE).unwrap(),
+                        rate_delta1: i128::try_from(TOKEN1_SALE_RATE).unwrap(),
                     },
                     TimeRateDelta {
                         time: SECOND_ORDER_END_TIME,
-                        rate_delta0: (TOKEN0_SALE_RATE as i128).neg(),
-                        rate_delta1: (TOKEN1_SALE_RATE as i128).neg(),
+                        rate_delta0: (i128::try_from(TOKEN0_SALE_RATE).unwrap()).neg(),
+                        rate_delta1: (i128::try_from(TOKEN1_SALE_RATE).unwrap()).neg(),
                     },
                 ],
             )
@@ -567,26 +677,26 @@ pub fn twamm() -> TestCase {
             ("last_time".to_string(), LAST_EXECUTION_TIME.to_be_bytes().into()),
             (
                 format!("rate_delta/token0/{SECOND_ORDER_START_TIME}"),
-                (TOKEN0_SALE_RATE as i128)
+                (i128::try_from(TOKEN0_SALE_RATE).unwrap())
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("rate_delta/token1/{SECOND_ORDER_START_TIME}"),
-                (TOKEN1_SALE_RATE as i128)
+                (i128::try_from(TOKEN1_SALE_RATE).unwrap())
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("rate_delta/token0/{SECOND_ORDER_END_TIME}"),
-                (TOKEN0_SALE_RATE as i128)
+                (i128::try_from(TOKEN0_SALE_RATE).unwrap())
                     .neg()
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("rate_delta/token1/{SECOND_ORDER_END_TIME}"),
-                (TOKEN1_SALE_RATE as i128)
+                (i128::try_from(TOKEN1_SALE_RATE).unwrap())
                     .neg()
                     .to_be_bytes()
                     .into(),
@@ -606,26 +716,26 @@ pub fn twamm() -> TestCase {
             ("last_time".to_string(), 0_u64.to_be_bytes().into()),
             (
                 format!("rate_delta/token0/{FIRST_ORDER_START_TIME}"),
-                (TOKEN0_SALE_RATE as i128)
+                (i128::try_from(TOKEN0_SALE_RATE).unwrap())
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("rate_delta/token1/{FIRST_ORDER_START_TIME}"),
-                (TOKEN1_SALE_RATE as i128)
+                (i128::try_from(TOKEN1_SALE_RATE).unwrap())
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("rate_delta/token0/{FIRST_ORDER_END_TIME}"),
-                (TOKEN0_SALE_RATE as i128)
+                (i128::try_from(TOKEN0_SALE_RATE).unwrap())
                     .neg()
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("rate_delta/token1/{FIRST_ORDER_END_TIME}"),
-                (TOKEN1_SALE_RATE as i128)
+                (i128::try_from(TOKEN1_SALE_RATE).unwrap())
                     .neg()
                     .to_be_bytes()
                     .into(),
@@ -698,13 +808,13 @@ pub fn boosted_fees() -> TestCase {
                 vec![
                     TimeRateDelta {
                         time: FIRST_DONATE_START_TIME,
-                        rate_delta0: DONATE_RATE0 as i128,
-                        rate_delta1: DONATE_RATE1 as i128,
+                        rate_delta0: i128::try_from(DONATE_RATE0).unwrap(),
+                        rate_delta1: i128::try_from(DONATE_RATE1).unwrap(),
                     },
                     TimeRateDelta {
                         time: FIRST_DONATE_END_TIME,
-                        rate_delta0: (DONATE_RATE0 as i128).neg(),
-                        rate_delta1: (DONATE_RATE1 as i128).neg(),
+                        rate_delta0: (i128::try_from(DONATE_RATE0).unwrap()).neg(),
+                        rate_delta1: (i128::try_from(DONATE_RATE1).unwrap()).neg(),
                     },
                 ],
                 vec![],
@@ -726,18 +836,18 @@ pub fn boosted_fees() -> TestCase {
                 vec![
                     TimeRateDelta {
                         time: FIRST_DONATE_END_TIME,
-                        rate_delta0: (DONATE_RATE0 as i128).neg(),
-                        rate_delta1: (DONATE_RATE1 as i128).neg(),
+                        rate_delta0: (i128::try_from(DONATE_RATE0).unwrap()).neg(),
+                        rate_delta1: (i128::try_from(DONATE_RATE1).unwrap()).neg(),
                     },
                     TimeRateDelta {
                         time: SECOND_DONATE_START_TIME,
-                        rate_delta0: DONATE_RATE0 as i128,
-                        rate_delta1: DONATE_RATE1 as i128,
+                        rate_delta0: i128::try_from(DONATE_RATE0).unwrap(),
+                        rate_delta1: i128::try_from(DONATE_RATE1).unwrap(),
                     },
                     TimeRateDelta {
                         time: SECOND_DONATE_END_TIME,
-                        rate_delta0: (DONATE_RATE0 as i128).neg(),
-                        rate_delta1: (DONATE_RATE1 as i128).neg(),
+                        rate_delta0: (i128::try_from(DONATE_RATE0).unwrap()).neg(),
+                        rate_delta1: (i128::try_from(DONATE_RATE1).unwrap()).neg(),
                     },
                 ],
                 vec![LOWER_TICK, UPPER_TICK],
@@ -784,26 +894,26 @@ pub fn boosted_fees() -> TestCase {
             ("last_time".to_string(), LAST_DONATE_TIME.to_be_bytes().into()),
             (
                 format!("rate_delta/token0/{SECOND_DONATE_START_TIME}"),
-                (DONATE_RATE0 as i128)
+                (i128::try_from(DONATE_RATE0).unwrap())
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("rate_delta/token1/{SECOND_DONATE_START_TIME}"),
-                (DONATE_RATE1 as i128)
+                (i128::try_from(DONATE_RATE1).unwrap())
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("rate_delta/token0/{SECOND_DONATE_END_TIME}"),
-                (DONATE_RATE0 as i128)
+                (i128::try_from(DONATE_RATE0).unwrap())
                     .neg()
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("rate_delta/token1/{SECOND_DONATE_END_TIME}"),
-                (DONATE_RATE1 as i128)
+                (i128::try_from(DONATE_RATE1).unwrap())
                     .neg()
                     .to_be_bytes()
                     .into(),
@@ -824,26 +934,26 @@ pub fn boosted_fees() -> TestCase {
             ("last_time".to_string(), 0_u64.to_be_bytes().into()),
             (
                 format!("rate_delta/token0/{FIRST_DONATE_START_TIME}"),
-                (DONATE_RATE0 as i128)
+                (i128::try_from(DONATE_RATE0).unwrap())
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("rate_delta/token1/{FIRST_DONATE_START_TIME}"),
-                (DONATE_RATE1 as i128)
+                (i128::try_from(DONATE_RATE1).unwrap())
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("rate_delta/token0/{FIRST_DONATE_END_TIME}"),
-                (DONATE_RATE0 as i128)
+                (i128::try_from(DONATE_RATE0).unwrap())
                     .neg()
                     .to_be_bytes()
                     .into(),
             ),
             (
                 format!("rate_delta/token1/{FIRST_DONATE_END_TIME}"),
-                (DONATE_RATE1 as i128)
+                (i128::try_from(DONATE_RATE1).unwrap())
                     .neg()
                     .to_be_bytes()
                     .into(),
@@ -1082,6 +1192,7 @@ pub fn signed_exclusive_swap() -> TestCase {
 #[case::concentrated(concentrated())]
 #[case::full_range(full_range())]
 #[case::stableswap(stableswap())]
+#[case::ve33(ve33())]
 #[case::oracle(oracle())]
 #[case::twamm(twamm())]
 #[case::mev_capture(mev_capture())]

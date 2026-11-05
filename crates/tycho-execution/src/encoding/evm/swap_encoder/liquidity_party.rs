@@ -23,7 +23,7 @@ pub struct LiquidityPartySwapEncoder {
 }
 
 impl LiquidityPartySwapEncoder {
-    fn get_token_indexes(&self, swap: &Swap) -> Result<(Bytes, Bytes, u8, u8), EncodingError> {
+    fn get_token_indexes(swap: &Swap) -> Result<(Bytes, Bytes, u8, u8), EncodingError> {
         let token_addresses: &Vec<Address> = &swap.component().tokens;
         let token_in = &swap.token_in().address;
         let token_out = &swap.token_out().address;
@@ -31,14 +31,23 @@ impl LiquidityPartySwapEncoder {
         let token_in_idx = token_addresses
             .iter()
             .position(|addr| addr == token_in)
-            .ok_or(EncodingError::FatalError("Token in not found in pool tokens".to_string()))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError("Token in not found in pool tokens".to_string())
+            })?;
 
         let token_out_idx = token_addresses
             .iter()
             .position(|addr| addr == token_out)
-            .ok_or(EncodingError::FatalError("Token out not found in pool tokens".to_string()))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError("Token out not found in pool tokens".to_string())
+            })?;
 
-        Ok((token_in.clone(), token_out.clone(), token_in_idx as u8, token_out_idx as u8))
+        let to_u8 = |idx: usize| {
+            u8::try_from(idx).map_err(|_out_of_range| {
+                EncodingError::InvalidInput(format!("Pool token index {idx} exceeds u8"))
+            })
+        };
+        Ok((token_in.clone(), token_out.clone(), to_u8(token_in_idx)?, to_u8(token_out_idx)?))
     }
 }
 
@@ -56,11 +65,11 @@ impl SwapEncoder for LiquidityPartySwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let pool_addr = Address::from_str(&swap.component().id).map_err(|_| {
-            EncodingError::FatalError("LiqP swap encoder: invalid component id".to_string())
+        let pool_addr = Address::from_str(&swap.component().id).map_err(|e| {
+            EncodingError::FatalError(format!("LiqP swap encoder: invalid component id: {e}"))
         })?;
 
-        let (token_in, token_out, token_in_idx, token_out_idx) = self.get_token_indexes(swap)?;
+        let (token_in, token_out, token_in_idx, token_out_idx) = Self::get_token_indexes(swap)?;
 
         let args = (
             bytes_to_address(&pool_addr)?,
@@ -94,32 +103,19 @@ mod tests {
     #[test]
     fn test_encode_liquidityparty() {
         let liqp_pool = ProtocolComponent {
-            // mainnet test
-            id: String::from("0xfA0be6148F66A6499666cf790d647D00daB76904"),
+            // mainnet test pool — 3-token USDC/WETH/AAVE pool
+            id: String::from("0x1270Da05Cf1d047763CEEfDe25a4a5438b26fdA6"),
             tokens: [
-                Address::from("0xdAC17F958D2ee523a2206206994597C13D831ec7"),
-                Address::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
-                Address::from("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"),
-                Address::from("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
-                Address::from("0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984"),
-                Address::from("0xD31a59c85aE9D8edEFeC411D448f90841571b89c"),
-                Address::from("0x50327c6c5a14DCaDE707ABad2E27eB517df87AB5"),
-                Address::from("0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9"),
-                Address::from("0x6982508145454Ce325dDbE47a25d4ec3d2311933"),
-                Address::from("0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE"),
+                Address::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"), // USDC [0]
+                Address::from("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH [1]
+                Address::from("0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9"), // AAVE [2]
             ]
             .to_vec(),
             ..Default::default()
         };
-        // Pool Tokens:
-        // [0xdAC17F958D2ee523a2206206994597C13D831ec7, 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48,
-        // 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599, 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2,
-        // 0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984, 0xD31a59c85aE9D8edEFeC411D448f90841571b89c,
-        // 0x50327c6c5a14DCaDE707ABad2E27eB517df87AB5, 0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9,
-        // 0x6982508145454Ce325dDbE47a25d4ec3d2311933, 0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE]
 
-        let token_in = Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC (index 1)
-        let token_out = Bytes::from("0xD31a59c85aE9D8edEFeC411D448f90841571b89c"); // WSOL (index 5)
+        let token_in = Bytes::from("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH (index 1)
+        let token_out = Bytes::from("0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9"); // AAVE (index 2)
         let swap = Swap::new(
             liqp_pool,
             default_token(token_in.clone()),
@@ -128,8 +124,9 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
         };
         let encoder = LiquidityPartySwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
@@ -145,15 +142,15 @@ mod tests {
             hex_swap,
             String::from(concat!(
                 // pool address
-                "fa0be6148f66a6499666cf790d647d00dab76904",
-                // in token address
-                "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-                // out token address
-                "d31a59c85ae9d8edefec411d448f90841571b89c",
-                // in token index
+                "1270da05cf1d047763ceefde25a4a5438b26fda6",
+                // in token address (WETH)
+                "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                // out token address (AAVE)
+                "7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+                // in token index (WETH = 1)
                 "01",
-                // out token index
-                "05",
+                // out token index (AAVE = 2)
+                "02",
             ))
         );
         write_calldata_to_file("test_encode_liquidityparty", hex_swap.as_str());

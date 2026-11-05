@@ -6,6 +6,10 @@ if you actually read them. Respond like this:
 > Knowledge docs: Rust: [yes/no], Python: [yes/no], Solidity: [yes/no], Version-control: [yes/no], GitBook: [yes/no]
 > Files loaded in context: [list of loaded documents]
 
+All commands in this repo assume mise is activated and its tools are installed (`mise install`), so the
+tools and environment variables defined in `mise.toml` are available. In a shell without it, prefix
+commands with `mise exec --`.
+
 By default, don't use the Explore agent as a first step in a conversation. The first step should always be to identify
 and read the relevant documentation files.
 
@@ -26,6 +30,7 @@ you've exhausted the path of documentation.
 | Python          | Python code, tycho-client-py, changes to dto.rs or rpc.rs               | `.claude/knowledge/python.md`          |
 | Solidity        | Solidity contracts, Foundry, forge, executors, tycho-execution          | `.claude/knowledge/solidity.md`        |
 | GitBook         | Writing, editing, or reviewing docs under `docs/`                       | `.claude/knowledge/gitbook.md`         |
+| Router trades   | Adding a chain to, or changing, the router trades substreams or its pricing | `crates/tycho-execution/substreams/README.md` |
 
 When spawning subagents, pass the relevant knowledge document contents to them.
 
@@ -34,8 +39,9 @@ When spawning subagents, pass the relevant knowledge document contents to them.
 - `plan`: Guided feature planning with iterative user input. Gathers requirements, validates assumptions, proposes a
   solution. **Always use this skill** when the user wants to plan, design, or architect a feature before coding. Trigger
   words: "plan", "design", "architect", "think through", "figure out how to".
-- `run-ci`: Run the full CI pipeline locally (format, clippy, tests). Optionally DB and node RPC dependent checks.
-  Trigger words: "run ci", "check ci", "run tests", "lint", "will ci pass".
+- `run-ci`: Run the full CI pipeline locally (format, clippy, tests). Optionally DB and node RPC dependent checks. Use it
+  for PRs and workspace-wide changes, not for routine pushes — those need only a format run and the tests covering the
+  change. Trigger words: "run ci", "check ci", "full ci", "will ci pass".
 - `sync-docs`: Review all codebase documentation files under `.claude/` and per-crate `CLAUDE.md` files, fix any that
   have drifted from the actual code. Documentation-only — does not modify source code.
 - `gas-compare`: Compare per-test gas between the current branch and a base branch (default: main). Produces per-test

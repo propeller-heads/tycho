@@ -72,8 +72,9 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::default()),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
         };
         let encoder = WrapSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
@@ -110,8 +111,9 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::default()),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
         };
         let encoder = WrapSwapEncoder::new(
             Bytes::from("0x13aa49bAc059d709dd0a18D6bb63290076a702D7"),

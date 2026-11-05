@@ -1,5 +1,6 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Instant};
 
+use chrono::NaiveDateTime;
 use futures03::{future::try_join_all, FutureExt};
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
@@ -7,14 +8,17 @@ use tycho_common::{
     models::{
         blockchain::BlockTag,
         protocol::QualityRange,
-        token::{Token, TokenOwnerStore, TokenQuality},
+        token::{Token, TokenQuality, TransferCost, TransferTax},
         Chain, PaginationParams,
     },
     storage::ProtocolGateway,
     traits::TokenAnalyzer,
     Bytes,
 };
-use tycho_ethereum::{rpc::EthereumRpcClient, services::token_analyzer::EthCallDetector};
+use tycho_ethereum::{
+    rpc::EthereumRpcClient,
+    services::token_analyzer::{EthCallDetector, OnChainTokenOwners},
+};
 
 use crate::cli::AnalyzeTokenArgs;
 
@@ -23,51 +27,129 @@ pub async fn analyze_tokens(
     rpc: &EthereumRpcClient,
     gw: Arc<dyn ProtocolGateway + Send + Sync>,
 ) -> anyhow::Result<()> {
-    let mut tokens = Vec::new();
-    let mut page = 0;
-    let page_size = analyze_args.fetch_batch_size as i64;
-    loop {
-        let start = Instant::now();
-        let pagination_params = PaginationParams::new(page, page_size);
-        tokens.clone_from(
-            &(gw.get_tokens(
-                analyze_args.chain,
-                None,
-                // Skip tokens that failed previously and ones we already analyzed successfully
-                QualityRange::new(6, 10),
-                None,
-                Some(&pagination_params),
-            )
-            .await?
-            .entity),
-        );
-        let sem = Arc::new(Semaphore::new(analyze_args.concurrency));
-        let tasks = tokens
-            .chunks(analyze_args.update_batch_size)
-            .map(|chunk| {
-                analyze_batch(
-                    analyze_args.chain,
-                    rpc,
-                    chunk.to_vec(),
-                    sem.clone(),
-                    gw.clone(),
-                    analyze_args.settlement_contract,
-                )
-                .boxed()
-            })
-            .collect::<Vec<_>>();
+    // Skip tokens that failed previously and ones we already analyzed successfully
+    run_analysis_pass(
+        &analyze_args,
+        rpc,
+        gw.clone(),
+        QualityRange::new(6, 10),
+        None,
+        AnalysisPass::Retry,
+    )
+    .await?;
 
-        _ = try_join_all(tasks).await?;
-        let duration = Instant::now().duration_since(start);
-        info!(processed = tokens.len(), page = page, duration = duration.as_secs(), "Progress");
-
-        page += 1;
-        if tokens.len() < (page_size as usize) {
-            break;
-        }
+    if analyze_args.recovery_lookback_days > 0 {
+        // Quality 5 is the analysis floor: the pass above never revisits it. Re-check
+        // floored tokens that traded recently — their behavior may have changed since
+        // analysis gave up (e.g. launch transfer restrictions lifted). A Bad verdict
+        // keeps them at 5 instead of demoting further.
+        let traded_since = chrono::Utc::now().naive_utc() -
+            chrono::Duration::days(analyze_args.recovery_lookback_days as i64);
+        run_analysis_pass(
+            &analyze_args,
+            rpc,
+            gw,
+            QualityRange::new(5, 5),
+            Some(traded_since),
+            AnalysisPass::Recovery,
+        )
+        .await?;
     }
 
     Ok(())
+}
+
+/// The retry pass demotes on a Bad verdict so tokens eventually leave the 6–10 retry
+/// window. The recovery pass re-checks floored (quality-5) tokens, which stay at the
+/// floor on Bad.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AnalysisPass {
+    Retry,
+    Recovery,
+}
+
+async fn run_analysis_pass(
+    analyze_args: &AnalyzeTokenArgs,
+    rpc: &EthereumRpcClient,
+    gw: Arc<dyn ProtocolGateway + Send + Sync>,
+    quality_range: QualityRange,
+    traded_since: Option<NaiveDateTime>,
+    pass: AnalysisPass,
+) -> anyhow::Result<()> {
+    // Fetch every matching token before analyzing: analysis promotes tokens out of the
+    // quality filter, which shifts OFFSET pages and would skip rows mid-run.
+    let mut tokens = Vec::new();
+    let mut page = 0;
+    let page_size = i64::try_from(analyze_args.fetch_batch_size)
+        .map_err(|err| anyhow::anyhow!("fetch batch size does not fit i64: {err}"))?;
+    loop {
+        let pagination_params = PaginationParams::new(page, page_size);
+        let page_tokens = gw
+            .get_tokens(
+                analyze_args.chain,
+                None,
+                quality_range.clone(),
+                traded_since,
+                Some(&pagination_params),
+            )
+            .await?
+            .entity;
+        let page_len = page_tokens.len();
+        tokens.extend(page_tokens);
+        page += 1;
+        if page_len < analyze_args.fetch_batch_size {
+            break;
+        }
+    }
+    info!(matched = tokens.len(), ?pass, "Starting analysis pass");
+
+    let start = Instant::now();
+    let sem = Arc::new(Semaphore::new(analyze_args.concurrency));
+    let tasks = tokens
+        .chunks(analyze_args.update_batch_size)
+        .map(|chunk| {
+            analyze_batch(
+                analyze_args.chain,
+                rpc,
+                chunk.to_vec(),
+                sem.clone(),
+                gw.clone(),
+                analyze_args.settlement_contract,
+                pass,
+            )
+            .boxed()
+        })
+        .collect::<Vec<_>>();
+
+    let outcomes = try_join_all(tasks).await?;
+    let mut totals = PassOutcome::default();
+    for outcome in outcomes {
+        totals.promoted += outcome.promoted;
+        totals.demoted += outcome.demoted;
+        totals.unchanged += outcome.unchanged;
+        totals.failed += outcome.failed;
+    }
+    let duration = Instant::now().duration_since(start);
+    info!(
+        ?pass,
+        analyzed = tokens.len(),
+        promoted = totals.promoted,
+        demoted = totals.demoted,
+        unchanged = totals.unchanged,
+        failed = totals.failed,
+        duration = duration.as_secs(),
+        "Analysis pass complete"
+    );
+
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct PassOutcome {
+    promoted: usize,
+    demoted: usize,
+    unchanged: usize,
+    failed: usize,
 }
 
 async fn analyze_batch(
@@ -77,7 +159,8 @@ async fn analyze_batch(
     sem: Arc<Semaphore>,
     gw: Arc<dyn ProtocolGateway + Send + Sync>,
     settlement_contract: alloy::primitives::Address,
-) -> anyhow::Result<()> {
+    pass: AnalysisPass,
+) -> anyhow::Result<PassOutcome> {
     let _guard = sem.acquire().await?;
     let addresses = tokens
         .iter()
@@ -112,79 +195,122 @@ async fn analyze_batch(
         })
         .collect::<HashMap<_, _>>();
 
-    let liquidity_token_owners = token_owner
+    let candidates_per_token = token_owner
         .into_iter()
-        .filter_map(|(address, (cid, balance))| {
-            if let Some(pc) = components.get(&cid) {
-                let liq_owner = balance_owners
-                    .get(&pc.id)
-                    .cloned()
-                    .or_else(|| {
-                        pc.contract_addresses
-                            // TODO: Currently, it's assumed that the pool is always the first
-                            // contract in the protocol component. This approach is a temporary
-                            // workaround and needs to be revisited for a more robust solution.
-                            .first()
-                            .cloned()
-                            .or_else(|| Bytes::from_str(&pc.id).ok())
-                    });
-
-                liq_owner.map(|liq_owner| (address, (liq_owner, balance)))
-            } else {
+        .filter_map(|(address, (cid, _))| {
+            let Some(pc) = components.get(&cid) else {
                 warn!(component_id=?cid, "Failed to find component for id!");
-                None
-            }
+                return None;
+            };
+            let candidates =
+                pool_holder_candidates(balance_owners.get(&pc.id), &pc.contract_addresses, &pc.id);
+            Some((address, candidates))
         })
         .collect::<HashMap<_, _>>();
     let analyzer = EthCallDetector::new(
         rpc,
-        Arc::new(TokenOwnerStore::new(liquidity_token_owners)),
+        Arc::new(OnChainTokenOwners::new(rpc, BlockTag::Latest, candidates_per_token)),
         settlement_contract,
     );
+    let mut outcome = PassOutcome::default();
     for t in tokens.iter_mut() {
         debug!(?t.address, "Analyzing token");
         let (token_quality, gas, tax) = match analyzer
             .analyze(t.address.clone(), BlockTag::Latest)
             .await
         {
-            Ok(t) => t,
+            Ok(res) => res,
             Err(error) => {
-                warn!(?error, "Token quality detection failed");
+                warn!(?t.address, ?error, "Token quality detection failed");
+                outcome.failed += 1;
                 continue;
             }
         };
 
-        match token_quality {
-            TokenQuality::Good => {
-                t.quality = 100;
-            }
-            TokenQuality::Bad { reason } => {
-                debug!(?t.address, ?reason, "Token quality detected as bad!");
-                // Remove 1 to the quality for each attempt. If it fails 5 times we won't try again.
-                t.quality -= 1;
-            }
+        let quality_before = t.quality;
+        apply_analysis(t, token_quality, gas, tax, pass);
+        if t.quality > quality_before {
+            outcome.promoted += 1;
+        } else if t.quality < quality_before {
+            outcome.demoted += 1;
+        } else {
+            outcome.unchanged += 1;
         }
-
-        // If it's a fee token, set quality to 50
-        if tax.is_some_and(|tax_value| tax_value > 0) {
-            t.quality = 50;
-        }
-
-        t.tax = tax.unwrap_or(0);
-        t.gas = gas
-            .map(|g| vec![Some(g)])
-            .unwrap_or_else(Vec::new);
     }
 
     if !tokens.is_empty() {
         gw.update_tokens(&tokens).await?;
     }
-    Ok(())
+    Ok(outcome)
+}
+
+/// Applies an analysis verdict to the token's quality, gas and tax fields.
+///
+/// Good tokens go to 100 and fee tokens to 50. A Bad verdict lowers quality by one in the
+/// retry pass so the token eventually leaves the 6–10 retry window; the recovery pass
+/// keeps quality-5 tokens at the floor.
+fn apply_analysis(
+    t: &mut Token,
+    token_quality: TokenQuality,
+    gas: Option<TransferCost>,
+    tax: Option<TransferTax>,
+    pass: AnalysisPass,
+) {
+    match token_quality {
+        TokenQuality::Good => {
+            t.quality = 100;
+        }
+        TokenQuality::Bad { reason } => {
+            debug!(?t.address, ?reason, "Token quality detected as bad!");
+            match pass {
+                // Remove 1 per attempt; after 5 failures the token leaves the retry window.
+                AnalysisPass::Retry => t.quality -= 1,
+                // Already at the quality-5 floor.
+                AnalysisPass::Recovery => {}
+            }
+        }
+    }
+
+    // If it's a fee token, set quality to 50
+    if tax.is_some_and(|tax_value| tax_value > 0) {
+        t.quality = 50;
+    }
+
+    t.tax = tax.unwrap_or(0);
+    t.gas = gas
+        .map(|g| vec![Some(g)])
+        .unwrap_or_default();
+}
+
+/// Lists the addresses that may hold a pool's tokens, in preference order: the pool's
+/// `balance_owner`, then its id, then its contract addresses. Indexed data does not say which
+/// of these holds the tokens (a Curve pool lists its factory too), so the caller checks them
+/// on-chain; the order only breaks ties between equal balances. Values that are not 20-byte
+/// addresses (e.g. 32-byte Uniswap V4 pool ids) are left out.
+fn pool_holder_candidates(
+    balance_owner: Option<&Bytes>,
+    contract_addresses: &[Bytes],
+    component_id: &str,
+) -> Vec<Bytes> {
+    let id = Bytes::from_str(component_id).ok();
+    let mut candidates: Vec<Bytes> = Vec::new();
+    for candidate in balance_owner
+        .into_iter()
+        .chain(id.as_ref())
+        .chain(contract_addresses)
+    {
+        if candidate.len() == 20 && !candidates.contains(candidate) {
+            candidates.push(candidate.clone());
+        }
+    }
+    candidates
 }
 
 #[cfg(test)]
 mod test {
     use chrono::NaiveDateTime;
+    use mockall::Sequence;
+    use rstest::rstest;
     use tycho_common::{
         models::{protocol::ProtocolComponent, ChangeType},
         storage::WithTotal,
@@ -192,6 +318,231 @@ mod test {
 
     use super::*;
     use crate::testing;
+
+    fn test_token(quality: u32) -> Token {
+        Token::new(
+            &Bytes::from("0xe172e9b6cfbeeb5593bdce3f077356fdb33af904"),
+            "FOLD",
+            18,
+            0,
+            &[],
+            Chain::Ethereum,
+            quality,
+        )
+    }
+
+    fn test_token_at(address: &str, quality: u32) -> Token {
+        Token::new(&Bytes::from(address), "TEST", 18, 0, &[], Chain::Ethereum, quality)
+    }
+
+    #[rstest]
+    #[case::good_promotes(TokenQuality::Good, 8, AnalysisPass::Retry, 100)]
+    #[case::bad_demotes(TokenQuality::bad("transfer failed"), 8, AnalysisPass::Retry, 7)]
+    #[case::bad_keeps_quality_in_recovery_pass(
+        TokenQuality::bad("transfer failed"),
+        5,
+        AnalysisPass::Recovery,
+        5
+    )]
+    #[case::good_promotes_in_recovery_pass(TokenQuality::Good, 5, AnalysisPass::Recovery, 100)]
+    fn test_apply_analysis_quality(
+        #[case] verdict: TokenQuality,
+        #[case] initial_quality: u32,
+        #[case] pass: AnalysisPass,
+        #[case] expected_quality: u32,
+    ) {
+        let mut t = test_token(initial_quality);
+
+        apply_analysis(&mut t, verdict, Some(30_000), Some(0), pass);
+
+        assert_eq!(t.quality, expected_quality);
+        assert_eq!(t.gas, vec![Some(30_000)]);
+        assert_eq!(t.tax, 0);
+    }
+
+    #[rstest]
+    #[case::good_in_retry_pass(TokenQuality::Good, AnalysisPass::Retry)]
+    #[case::good_in_recovery_pass(TokenQuality::Good, AnalysisPass::Recovery)]
+    #[case::bad_in_retry_pass(TokenQuality::bad("transfer failed"), AnalysisPass::Retry)]
+    #[case::bad_in_recovery_pass(TokenQuality::bad("transfer failed"), AnalysisPass::Recovery)]
+    fn test_apply_analysis_fee_token_sets_50(
+        #[case] verdict: TokenQuality,
+        #[case] pass: AnalysisPass,
+    ) {
+        let mut t = test_token(5);
+
+        apply_analysis(&mut t, verdict, Some(30_000), Some(250), pass);
+
+        assert_eq!(t.quality, 50);
+        assert_eq!(t.tax, 250);
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_pass_fetches_all_pages_before_analyzing() {
+        let rpc = EthereumRpcClient::new("http://localhost:1").expect("url parses");
+        let args = AnalyzeTokenArgs {
+            chain: Chain::Ethereum,
+            settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
+                .parse()
+                .unwrap(),
+            concurrency: 1,
+            update_batch_size: 2,
+            fetch_batch_size: 2,
+            recovery_lookback_days: 0,
+        };
+        let mut seq = Sequence::new();
+        let mut gw = testing::MockGateway::new();
+        gw.expect_get_tokens()
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async {
+                    Ok(WithTotal {
+                        entity: vec![
+                            test_token_at("0x0000000000000000000000000000000000000001", 8),
+                            test_token_at("0x0000000000000000000000000000000000000002", 8),
+                        ],
+                        total: Some(2),
+                    })
+                })
+            });
+        gw.expect_get_tokens()
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(2) }) })
+            });
+        gw.expect_get_token_owners()
+            .returning(|_, _, _| Box::pin(async { Ok(HashMap::new()) }));
+        gw.expect_get_protocol_components()
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        gw.expect_get_protocol_states()
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        gw.expect_update_tokens()
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        analyze_tokens(args, &rpc, Arc::new(gw))
+            .await
+            .expect("analyze tokens failed");
+    }
+
+    fn wiring_args(recovery_lookback_days: u32) -> AnalyzeTokenArgs {
+        AnalyzeTokenArgs {
+            chain: Chain::Ethereum,
+            settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
+                .parse()
+                .unwrap(),
+            concurrency: 1,
+            update_batch_size: 10,
+            fetch_batch_size: 10,
+            recovery_lookback_days,
+        }
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_analyze_tokens_runs_recovery_pass_after_retry_pass() {
+        let rpc = EthereumRpcClient::new("http://localhost:1").expect("url parses");
+        let mut seq = Sequence::new();
+        let mut gw = testing::MockGateway::new();
+        gw.expect_get_tokens()
+            .withf(|_, _, quality, traded_since, _| {
+                quality.min == Some(6) && quality.max == Some(10) && traded_since.is_none()
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        gw.expect_get_tokens()
+            .withf(|_, _, quality, traded_since, _| {
+                quality.min == Some(5) && quality.max == Some(5) && traded_since.is_some()
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+
+        analyze_tokens(wiring_args(1), &rpc, Arc::new(gw))
+            .await
+            .expect("analyze tokens failed");
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_recovery_pass_disabled_at_zero() {
+        let rpc = EthereumRpcClient::new("http://localhost:1").expect("url parses");
+        let mut gw = testing::MockGateway::new();
+        gw.expect_get_tokens()
+            .withf(|_, _, quality, traded_since, _| {
+                quality.min == Some(6) && quality.max == Some(10) && traded_since.is_none()
+            })
+            .times(1)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+
+        analyze_tokens(wiring_args(0), &rpc, Arc::new(gw))
+            .await
+            .expect("analyze tokens failed");
+    }
+
+    fn outcome_test_gateway() -> testing::MockGateway {
+        let mut gw = testing::MockGateway::new();
+        gw.expect_get_token_owners()
+            .returning(|_, _, _| Box::pin(async { Ok(HashMap::new()) }));
+        gw.expect_get_protocol_components()
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        gw.expect_get_protocol_states()
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        gw.expect_update_tokens()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+        gw
+    }
+
+    async fn run_outcome_batch(pass: AnalysisPass, initial_quality: u32) -> PassOutcome {
+        let rpc = EthereumRpcClient::new("http://localhost:1").expect("url parses");
+        let tokens = vec![
+            test_token_at("0x0000000000000000000000000000000000000001", initial_quality),
+            test_token_at("0x0000000000000000000000000000000000000002", initial_quality),
+        ];
+        analyze_batch(
+            Chain::Ethereum,
+            &rpc,
+            tokens,
+            Arc::new(Semaphore::new(1)),
+            Arc::new(outcome_test_gateway()),
+            "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
+                .parse()
+                .unwrap(),
+            pass,
+        )
+        .await
+        .expect("analyze batch failed")
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_retry_pass_counts_demotions() {
+        // No owner in the store -> analyzer returns Bad without RPC -> retry pass demotes.
+        let outcome = run_outcome_batch(AnalysisPass::Retry, 8).await;
+        assert_eq!(outcome, PassOutcome { demoted: 2, ..Default::default() });
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_recovery_pass_counts_unchanged() {
+        let outcome = run_outcome_batch(AnalysisPass::Recovery, 5).await;
+        assert_eq!(outcome, PassOutcome { unchanged: 2, ..Default::default() });
+    }
 
     // requires a running ethereum node
     #[ignore = "require RPC connection"]
@@ -208,6 +559,7 @@ mod test {
             concurrency: 10,
             update_batch_size: 100,
             fetch_batch_size: 100,
+            recovery_lookback_days: 0,
         };
         let mut gw = testing::MockGateway::new();
         gw.expect_get_tokens()
@@ -312,5 +664,106 @@ mod test {
         analyze_tokens(args, &rpc, Arc::new(gw))
             .await
             .expect("analyze tokens failed");
+    }
+
+    const FACTORY: &str = "0x6a8cbed756804b16e05e741edabd5cb544ae21bf";
+    const POOL: &str = "0xc2921134073151490193ac7369313c8e0b08e1e7";
+    const POOL_MANAGER: &str = "0x000000000004444c5dc75cb358380d2e3de08a90";
+    const V4_POOL_ID: &str = "0x59314e0cea576298222ac289dcf684c0a76758329c8bf164bbc759816dc4efa3";
+
+    #[rstest]
+    #[case::id_before_contract_addresses(None, &[FACTORY, POOL], POOL, &[POOL, FACTORY])]
+    #[case::balance_owner_first(Some(POOL_MANAGER), &[POOL], POOL, &[POOL_MANAGER, POOL])]
+    #[case::v4_pool_id_is_not_an_address(Some(POOL_MANAGER), &[], V4_POOL_ID, &[POOL_MANAGER])]
+    #[case::native_pool_falls_back_to_id(None, &[], POOL, &[POOL])]
+    #[case::malformed_balance_owner_dropped(Some("0x1234"), &[], POOL, &[POOL])]
+    fn test_pool_holder_candidates(
+        #[case] balance_owner: Option<&str>,
+        #[case] contracts: &[&str],
+        #[case] component_id: &str,
+        #[case] expected: &[&str],
+    ) {
+        let balance_owner = balance_owner.map(Bytes::from);
+        let contracts = contracts
+            .iter()
+            .map(|c| Bytes::from(*c))
+            .collect::<Vec<_>>();
+
+        let res = pool_holder_candidates(balance_owner.as_ref(), &contracts, component_id);
+
+        assert_eq!(
+            res,
+            expected
+                .iter()
+                .map(|e| Bytes::from(*e))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // requires a running ethereum node
+    #[ignore = "require RPC connection"]
+    #[test_log::test(tokio::test)]
+    async fn test_recovery_pass_promotes_usdtb_from_curve_pool() {
+        let rpc_url = std::env::var("RPC_URL").expect("RPC URL must be set for testing");
+        let rpc = EthereumRpcClient::new(&rpc_url).expect("failed to create rpc client");
+        let usdtb = "0xc139190f447e929f090edeb554d95abb8b18ac1c";
+        let usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+
+        let mut gw = testing::MockGateway::new();
+        gw.expect_get_token_owners()
+            .returning(move |_, _, _| {
+                Box::pin(async move {
+                    Ok(HashMap::from([(
+                        Bytes::from(usdtb),
+                        (POOL.to_string(), Bytes::from("0x08c7be39eaf21f5b7efb68")),
+                    )]))
+                })
+            });
+        gw.expect_get_protocol_components()
+            .returning(move |_, _, _, _, _| {
+                Box::pin(async move {
+                    Ok(WithTotal {
+                        entity: vec![ProtocolComponent::new(
+                            POOL,
+                            "vm:curve",
+                            "pool",
+                            Chain::Ethereum,
+                            vec![Bytes::from(usdc), Bytes::from(usdtb)],
+                            vec![Bytes::from(FACTORY), Bytes::from(POOL)],
+                            HashMap::new(),
+                            ChangeType::Creation,
+                            Bytes::from("0x00"),
+                            NaiveDateTime::default(),
+                        )],
+                        total: Some(1),
+                    })
+                })
+            });
+        gw.expect_get_protocol_states()
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        gw.expect_update_tokens()
+            .once()
+            .returning(|updated| {
+                assert_eq!(updated[0].quality, 100, "USDtb should be promoted: {updated:?}");
+                Box::pin(async { Ok(()) })
+            });
+
+        let outcome = analyze_batch(
+            Chain::Ethereum,
+            &rpc,
+            vec![test_token_at(usdtb, 5)],
+            Arc::new(Semaphore::new(1)),
+            Arc::new(gw),
+            "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
+                .parse()
+                .unwrap(),
+            AnalysisPass::Recovery,
+        )
+        .await
+        .expect("analyze batch failed");
+
+        assert_eq!(outcome, PassOutcome { promoted: 1, ..Default::default() });
     }
 }

@@ -1,14 +1,17 @@
-//! <https://github.com/propeller-heads/tycho-execution/blob/main/foundry/src/TychoRouter.sol>
-#![allow(clippy::too_many_arguments)]
+//! <https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/TychoRouterV3.sol>
+#![expect(
+    clippy::too_many_arguments,
+    reason = "functions mirror the Solidity entry points of TychoRouterV3, whose signatures are fixed by the ABI"
+)]
 use crate::{
     address::Address,
     error::Error,
     log::{Event, Log},
     math::checked_subtract,
     model::{
-        dispatcher::{_call_get_effective_router_fee_on_output, _call_swap_on_executor},
+        dispatcher::_call_swap_on_executor,
         executors::Executor,
-        fee_calculator::calculate_fee,
+        fee_calculator::{calculate_fee, must_output_through_router},
         transfer_manager::{_transfer_out, _tstore_transfer_from_info},
         vault::Vault,
     },
@@ -25,6 +28,7 @@ pub fn split_swap(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
+    expected_amount_out: i64,
     min_amount_out: i64,
     n_tokens: i64,
     receiver: Address,
@@ -40,6 +44,7 @@ pub fn split_swap(
         amount_in,
         token_in,
         token_out,
+        expected_amount_out,
         min_amount_out,
         n_tokens,
         receiver,
@@ -55,6 +60,7 @@ pub fn split_swap_using_vault(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
+    expected_amount_out: i64,
     min_amount_out: i64,
     n_tokens: i64,
     receiver: Address,
@@ -69,6 +75,7 @@ pub fn split_swap_using_vault(
         amount_in,
         token_in,
         token_out,
+        expected_amount_out,
         min_amount_out,
         n_tokens,
         receiver,
@@ -84,6 +91,7 @@ pub fn split_swap_permit2(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
+    expected_amount_out: i64,
     min_amount_out: i64,
     n_tokens: i64,
     receiver: Address,
@@ -101,6 +109,7 @@ pub fn split_swap_permit2(
         amount_in,
         token_in,
         token_out,
+        expected_amount_out,
         min_amount_out,
         n_tokens,
         receiver,
@@ -116,6 +125,7 @@ pub fn sequential_swap(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
+    expected_amount_out: i64,
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
@@ -130,6 +140,7 @@ pub fn sequential_swap(
         amount_in,
         token_in,
         token_out,
+        expected_amount_out,
         min_amount_out,
         receiver,
     )
@@ -144,6 +155,7 @@ pub fn sequential_swap_using_vault(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
+    expected_amount_out: i64,
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
@@ -157,6 +169,7 @@ pub fn sequential_swap_using_vault(
         amount_in,
         token_in,
         token_out,
+        expected_amount_out,
         min_amount_out,
         receiver,
     )
@@ -171,6 +184,7 @@ pub fn sequential_swap_permit2(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
+    expected_amount_out: i64,
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
@@ -187,6 +201,7 @@ pub fn sequential_swap_permit2(
         amount_in,
         token_in,
         token_out,
+        expected_amount_out,
         min_amount_out,
         receiver,
     )
@@ -201,6 +216,7 @@ pub fn single_swap(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
+    expected_amount_out: i64,
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
@@ -219,6 +235,7 @@ pub fn single_swap(
         amount_in,
         token_in,
         token_out,
+        expected_amount_out,
         min_amount_out,
         receiver,
     )
@@ -233,6 +250,7 @@ pub fn single_swap_using_vault(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
+    expected_amount_out: i64,
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
@@ -246,6 +264,7 @@ pub fn single_swap_using_vault(
         amount_in,
         token_in,
         token_out,
+        expected_amount_out,
         min_amount_out,
         receiver,
     )
@@ -260,6 +279,7 @@ pub fn single_swap_permit2(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
+    expected_amount_out: i64,
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
@@ -276,6 +296,7 @@ pub fn single_swap_permit2(
         amount_in,
         token_in,
         token_out,
+        expected_amount_out,
         min_amount_out,
         receiver,
     )
@@ -290,35 +311,28 @@ fn _split_swap_checked(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
+    expected_amount_out: i64,
     min_amount_out: i64,
     n_tokens: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    if amount_in == 0 {
-        return Err(Error::revert("_split_swap_checked: amount_in == 0"));
-    }
-    if receiver == Address::Zero {
-        return Err(Error::revert("_split_swap_checked: receiver == address(0)"));
-    }
-    if min_amount_out == 0 {
-        return Err(Error::revert("_split_swap_checked: min_amount_out == 0"));
-    }
-
-    let router_fee_on_output_bps = _call_get_effective_router_fee_on_output(params, state)?;
+    _validate_amounts(amount_in, expected_amount_out, min_amount_out)?;
+    _validate_addresses(receiver, token_in, token_out)?;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
             ParamKey::String("client_fee_bps"),
-            [0, crate::model::fee_calculator::MAX_FEE_BPS],
+            [0, crate::model::fee_calculator::MAX_BPS],
         )?
     } else {
         0
     };
 
-    let final_receiver =
-        determine_final_receiver(receiver, client_fee_bps, router_fee_on_output_bps)?;
+    let must_output_through_router = must_output_through_router(params, client_fee_bps)?;
 
-    let amount_out_before_fees = _split_swap(
+    let final_receiver = if must_output_through_router { Address::Router } else { receiver };
+
+    let actual_amount_out = _split_swap(
         params,
         state,
         vault,
@@ -329,25 +343,21 @@ fn _split_swap_checked(
         token_in == token_out,
     )?;
 
-    let amount_out = if client_fee_bps == 0 && router_fee_on_output_bps == 0 {
-        amount_out_before_fees
-    } else {
-        _take_fees(params, vault, log, token_out, amount_out_before_fees, client_fee_bps)?
-    };
-
-    let amount_out = _maybe_add_client_contribution(
+    _finalize_swap(
         params,
         state,
         vault,
         log,
-        amount_out,
+        must_output_through_router,
+        actual_amount_out,
+        expected_amount_out,
+        amount_in,
         min_amount_out,
+        token_in,
         token_out,
         receiver,
-    )?;
-
-    _settle_output(state, vault, log, amount_out, amount_in, token_in, token_out, receiver)?;
-    Ok(())
+        client_fee_bps,
+    )
 }
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TychoRouter.sol#L651>
@@ -359,37 +369,30 @@ fn _single_swap(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
+    expected_amount_out: i64,
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    if amount_in == 0 {
-        return Err(Error::revert("_single_swap: amount_in == 0"));
-    }
-    if receiver == Address::Zero {
-        return Err(Error::revert("_single_swap: receiver == address(0)"));
-    }
-    if min_amount_out == 0 {
-        return Err(Error::revert("_single_swap: min_amount_out == 0"));
-    }
-
-    let router_fee_on_output_bps = _call_get_effective_router_fee_on_output(params, state)?;
+    _validate_amounts(amount_in, expected_amount_out, min_amount_out)?;
+    _validate_addresses(receiver, token_in, token_out)?;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
             ParamKey::String("client_fee_bps"),
-            [0, crate::model::fee_calculator::MAX_FEE_BPS],
+            [0, crate::model::fee_calculator::MAX_BPS],
         )?
     } else {
         0
     };
 
-    let final_receiver =
-        determine_final_receiver(receiver, client_fee_bps, router_fee_on_output_bps)?;
+    let must_output_through_router = must_output_through_router(params, client_fee_bps)?;
+
+    let final_receiver = if must_output_through_router { Address::Router } else { receiver };
 
     let swap_index = 0;
     let executor = params.request(ParamKey::Executor { swap_index }, Executor::VARIANTS)?;
 
-    let amount_out_before_fees = _call_swap_on_executor(
+    let actual_amount_out = _call_swap_on_executor(
         params,
         state,
         vault,
@@ -402,25 +405,21 @@ fn _single_swap(
         swap_index,
     )?;
 
-    let amount_out = if client_fee_bps == 0 && router_fee_on_output_bps == 0 {
-        amount_out_before_fees
-    } else {
-        _take_fees(params, vault, log, token_out, amount_out_before_fees, client_fee_bps)?
-    };
-
-    let amount_out = _maybe_add_client_contribution(
+    _finalize_swap(
         params,
         state,
         vault,
         log,
-        amount_out,
+        must_output_through_router,
+        actual_amount_out,
+        expected_amount_out,
+        amount_in,
         min_amount_out,
+        token_in,
         token_out,
         receiver,
-    )?;
-
-    _settle_output(state, vault, log, amount_out, amount_in, token_in, token_out, receiver)?;
-    Ok(())
+        client_fee_bps,
+    )
 }
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TychoRouter.sol#L717>
@@ -432,40 +431,104 @@ fn _sequential_swap_checked(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
+    expected_amount_out: i64,
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    if amount_in == 0 {
-        return Err(Error::revert("_sequential_swap_checked: amount_in == 0"));
-    }
-    if receiver == Address::Zero {
-        return Err(Error::revert("_sequential_swap_checked: receiver == address(0)"));
-    }
-    if min_amount_out == 0 {
-        return Err(Error::revert("_sequential_swap_checked: min_amount_out == 0"));
-    }
-
-    let router_fee_on_output_bps = _call_get_effective_router_fee_on_output(params, state)?;
+    _validate_amounts(amount_in, expected_amount_out, min_amount_out)?;
+    _validate_addresses(receiver, token_in, token_out)?;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
             ParamKey::String("client_fee_bps"),
-            [0, crate::model::fee_calculator::MAX_FEE_BPS],
+            [0, crate::model::fee_calculator::MAX_BPS],
         )?
     } else {
         0
     };
 
-    let final_receiver =
-        determine_final_receiver(receiver, client_fee_bps, router_fee_on_output_bps)?;
+    let must_output_through_router = must_output_through_router(params, client_fee_bps)?;
 
-    let amount_out_before_fees =
-        _sequential_swap(params, state, vault, log, amount_in, final_receiver)?;
+    let final_receiver = if must_output_through_router { Address::Router } else { receiver };
 
-    let amount_out = if client_fee_bps == 0 && router_fee_on_output_bps == 0 {
-        amount_out_before_fees
+    let actual_amount_out = _sequential_swap(params, state, vault, log, amount_in, final_receiver)?;
+
+    _finalize_swap(
+        params,
+        state,
+        vault,
+        log,
+        must_output_through_router,
+        actual_amount_out,
+        expected_amount_out,
+        amount_in,
+        min_amount_out,
+        token_in,
+        token_out,
+        receiver,
+        client_fee_bps,
+    )
+}
+
+/// Mirrors `TychoRouter._validateAmounts` in Solidity.
+fn _validate_amounts(
+    amount_in: i64,
+    expected_amount_out: i64,
+    min_amount_out: i64,
+) -> Result<(), Error> {
+    if amount_in == 0 {
+        return Err(Error::revert("_validate_amounts: amount_in == 0"));
+    }
+    if expected_amount_out == 0 {
+        return Err(Error::revert("_validate_amounts: expected_amount_out == 0"));
+    }
+    if min_amount_out == 0 || min_amount_out > expected_amount_out {
+        return Err(Error::revert("_validate_amounts: invalid min_amount_out"));
+    }
+    Ok(())
+}
+
+/// Mirrors `TychoRouter._validateAddresses` in Solidity.
+fn _validate_addresses(
+    receiver: Address,
+    token_in: Address,
+    token_out: Address,
+) -> Result<(), Error> {
+    if receiver == Address::Zero || token_in == Address::Zero || token_out == Address::Zero {
+        return Err(Error::revert("_validate_addresses: address(0)"));
+    }
+    Ok(())
+}
+
+/// Mirrors `TychoRouter._finalizeSwap` in Solidity: shared post-swap
+/// finalization (fees, client contribution top-up, output settlement).
+fn _finalize_swap(
+    params: &Params,
+    state: &mut State,
+    vault: &mut Vault,
+    log: &mut impl Log,
+    must_output_through_router: bool,
+    actual_amount_out: i64,
+    expected_amount_out: i64,
+    amount_in: i64,
+    min_amount_out: i64,
+    token_in: Address,
+    token_out: Address,
+    receiver: Address,
+    client_fee_bps: i64,
+) -> Result<(), Error> {
+    let amount_out = if !must_output_through_router {
+        actual_amount_out
     } else {
-        _take_fees(params, vault, log, token_out, amount_out_before_fees, client_fee_bps)?
+        _take_fees(
+            params,
+            vault,
+            log,
+            token_out,
+            actual_amount_out,
+            expected_amount_out,
+            client_fee_bps,
+        )?
     };
 
     let amount_out = _maybe_add_client_contribution(
@@ -479,7 +542,17 @@ fn _sequential_swap_checked(
         receiver,
     )?;
 
-    _settle_output(state, vault, log, amount_out, amount_in, token_in, token_out, receiver)?;
+    _settle_output(
+        state,
+        vault,
+        log,
+        amount_out,
+        min_amount_out,
+        amount_in,
+        token_in,
+        token_out,
+        receiver,
+    )?;
     Ok(())
 }
 
@@ -489,6 +562,7 @@ fn _settle_output(
     vault: &mut Vault,
     log: &mut impl Log,
     mut amount_out: i64,
+    min_amount_out: i64,
     amount_in: i64,
     token_in: Address,
     token_out: Address,
@@ -524,7 +598,18 @@ fn _settle_output(
 
     vault._finalize_balances(state, state.msg_sender(), token_in, amount_in)?;
 
+    if amount_out < min_amount_out {
+        return Err(Error::revert("_settle_output: slippage exceeded"));
+    }
+
     Ok(amount_out)
+}
+
+/// Converts a non-negative model value into a vector index.
+fn to_index(value: i64) -> Result<usize, Error> {
+    usize::try_from(value).map_err(|_out_of_range| {
+        Error::warning(format!("index {value} is not a valid vector index"))
+    })
 }
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/d27e2a6f4d9ea6f4cba53b2fc1f54cd6676b60d2/foundry/src/TychoRouter.sol#L862>
@@ -539,11 +624,11 @@ fn _split_swap(
     is_cyclical: bool,
 ) -> Result<i64, Error> {
     // assumption: reverts if `swap_count = 0`
-    let swap_count =
-        u8::try_from(params.request("swap_count", [crate::config::SWAP_COUNT])?).unwrap();
+    let swap_count = u8::try_from(params.request("swap_count", [crate::config::SWAP_COUNT])?)
+        .map_err(|_out_of_range| Error::warning("swap_count does not fit u8".to_string()))?;
 
-    let mut remaining_amounts = vec![0i64; usize::try_from(n_tokens).unwrap()];
-    let mut amounts = vec![0i64; usize::try_from(n_tokens).unwrap()];
+    let mut remaining_amounts = vec![0i64; to_index(n_tokens)?];
+    let mut amounts = vec![0i64; to_index(n_tokens)?];
     let mut cyclic_swap_amount_out: i64 = 0;
     amounts[0] = amount_in;
     remaining_amounts[0] = amount_in;
@@ -563,9 +648,9 @@ fn _split_swap(
 
         // TODO check overflow for multiplication
         let current_amount_in = if split > 0 {
-            amounts[usize::try_from(token_in_index).unwrap()] * split / 0xffffff
+            amounts[to_index(token_in_index)?] * split / 0xffffff
         } else {
-            remaining_amounts[usize::try_from(token_in_index).unwrap()]
+            remaining_amounts[to_index(token_in_index)?]
         };
 
         let mut swap_receiver = Address::Router;
@@ -591,15 +676,16 @@ fn _split_swap(
         if token_out_index == 0 {
             cyclic_swap_amount_out += current_amount_out;
         } else {
-            amounts[usize::try_from(token_out_index).unwrap()] += current_amount_out;
+            amounts[to_index(token_out_index)?] += current_amount_out;
         }
-        remaining_amounts[usize::try_from(token_out_index).unwrap()] += current_amount_out;
-        remaining_amounts[usize::try_from(token_in_index).unwrap()] -= current_amount_out;
+        remaining_amounts[to_index(token_out_index)?] += current_amount_out;
+        remaining_amounts[to_index(token_in_index)?] =
+            checked_subtract(remaining_amounts[to_index(token_in_index)?], current_amount_in)?;
     }
     Ok(if is_cyclical {
         cyclic_swap_amount_out
     } else {
-        amounts[usize::try_from(checked_subtract(n_tokens, 1)?).unwrap()]
+        amounts[to_index(checked_subtract(n_tokens, 1)?)?]
     })
 }
 
@@ -615,8 +701,8 @@ fn _sequential_swap(
     let mut calculated_amount = amount_in;
 
     // assumption: reverts if `swap_count = 0`
-    let swap_count =
-        u8::try_from(params.request("swap_count", [crate::config::SWAP_COUNT])?).unwrap();
+    let swap_count = u8::try_from(params.request("swap_count", [crate::config::SWAP_COUNT])?)
+        .map_err(|_out_of_range| Error::warning("swap_count does not fit u8".to_string()))?;
 
     for swap_index in 0..swap_count {
         let is_last_swap = swap_index == swap_count - 1;
@@ -655,12 +741,22 @@ fn _take_fees(
     vault: &mut Vault,
     log: &mut impl Log,
     token: Address,
-    amount_in: i64,
+    actual_amount_out: i64,
+    expected_amount_out: i64,
     client_fee_bps: i64,
 ) -> Result<i64, Error> {
-    let (amount_out, fees) = calculate_fee(params, amount_in, client_fee_bps)?;
+    let fees = calculate_fee(
+        params,
+        actual_amount_out,
+        expected_amount_out,
+        client_fee_bps,
+        Address::Zero,
+        Address::Zero,
+        0,
+    )?;
 
-    for fee in fees {
+    let mut total_fees = 0i64;
+    for fee in &fees {
         if fee.fee_amount > 0 {
             vault._update_delta_accounting(token, -fee.fee_amount);
             log.append(Event::UpdateDeltaAccounting {
@@ -677,10 +773,12 @@ fn _take_fees(
                 amount: fee.fee_amount,
                 context_hint: "_take_fees: fee_amount > 0",
             });
+
+            total_fees += fee.fee_amount;
         }
     }
 
-    Ok(amount_out)
+    checked_subtract(actual_amount_out, total_fees)
 }
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TychoRouter.sol#L1063>
@@ -788,17 +886,4 @@ fn _maybe_add_client_contribution(
     } else {
         Ok(amount_out)
     }
-}
-
-/// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TychoRouter.sol#L1125>
-fn determine_final_receiver(
-    receiver: Address,
-    client_fee_bps: i64,
-    router_fee_on_output_bps: i64,
-) -> Result<Address, Error> {
-    Ok(if client_fee_bps == 0 && router_fee_on_output_bps == 0 {
-        receiver
-    } else {
-        Address::Router
-    })
 }

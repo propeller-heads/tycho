@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     collections::{hash_map::Entry, HashMap, HashSet},
     future::Future,
     pin::Pin,
@@ -13,14 +14,13 @@ use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader, FeedMess
 use tycho_common::{
     dto::{ChangeType, ProtocolStateDelta},
     models::{blockchain::BlockAggregatedChanges, token::Token, Chain},
-    simulation::protocol_sim::{Balances, ProtocolSim},
+    simulation::protocol_sim::{Balances, BlockContext, ProtocolSim},
     Bytes,
 };
 #[cfg(test)]
 use {
     mockall::mock,
     num_bigint::BigUint,
-    std::any::Any,
     tycho_common::simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::GetAmountOutResult,
@@ -35,6 +35,7 @@ use crate::{
             utils::bytes_to_address,
             vm::{constants::ERC20_PROXY_BYTECODE, erc20_token::IMPLEMENTATION_SLOT},
         },
+        simulation::{BlockEnvOverrides, PendingOverrides},
         tycho_models::{AccountUpdate, ResponseAccount},
     },
     protocol::{
@@ -100,19 +101,18 @@ where
     skip_state_decode_failures: bool,
     min_token_quality: u32,
     registry: HashMap<String, Box<RegistryFn<H>>>,
-    inclusion_filters: HashMap<String, FilterFn>,
+    inclusion_filters: HashMap<String, Vec<FilterFn>>,
+    /// Protocols whose components drop an unknown token and keep the rest.
+    protocols_skip_unknown_tokens: HashSet<String>,
     /// Live override providers keyed by `protocol_system`. A pool of that protocol subscribes to
     /// its provider at creation time and reads fresh overrides on every simulation.
     override_providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
-}
-
-impl<H> Default for TychoStreamDecoder<H>
-where
-    H: HeaderLike + Clone + Sync + Send + 'static + std::fmt::Debug,
-{
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Seconds between blocks, used to project a confirmed block header onto the next block when
+    /// deriving the execution block for block-sensitive states.
+    block_time_secs: u64,
+    /// Chain every component this decoder handles lives on. Stamped into each registered
+    /// [`DecoderContext`] so chain-specific decoders cannot be pointed at the wrong chain.
+    chain: Chain,
 }
 
 /// Curve migrated from the generic VM adapter (`EVMPoolState`) to the native [`CurveState`]
@@ -128,14 +128,65 @@ impl<H> TychoStreamDecoder<H>
 where
     H: HeaderLike + Clone + Sync + Send + 'static + std::fmt::Debug,
 {
-    pub fn new() -> Self {
+    /// Creates a decoder for `chain`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `chain` is a custom chain with no registered config.
+    pub fn new(chain: Chain) -> Self {
         Self {
             state: Arc::new(RwLock::new(DecoderState::default())),
             skip_state_decode_failures: false,
             min_token_quality: 100,
             registry: HashMap::new(),
             inclusion_filters: HashMap::new(),
+            protocols_skip_unknown_tokens: HashSet::new(),
             override_providers: HashMap::new(),
+            block_time_secs: chain.block_time_secs(),
+            chain,
+        }
+    }
+
+    /// The block a quote produced from `header` is expected to execute in.
+    ///
+    /// A partial (flashblock) header describes a block that is still open, so a quote can still
+    /// land in it. A confirmed header describes a closed block, so the quote targets the next one.
+    fn execution_block(&self, header: &BlockHeader) -> BlockContext {
+        if header.partial_block_index.is_some() {
+            BlockContext::new(header.number, header.timestamp)
+        } else {
+            BlockContext::new(header.number + 1, header.timestamp + self.block_time_secs)
+        }
+    }
+
+    /// Advances every state to `execution_block` via [`ProtocolSim::apply_block`].
+    ///
+    /// States already being emitted are advanced in place. Stored states absent from this
+    /// message are advanced in place under the write guard and cloned into `updated_states`
+    /// only when their quoting behavior changed — so an idle block-sensitive pool costs one
+    /// virtual call per message and zero clones, and consumers are only told about pools whose
+    /// quotes actually moved. Stored states of failed or removed components are left untouched,
+    /// so a component the consumer was told is gone is never re-emitted.
+    fn refresh_execution_block<C>(
+        updated_states: &mut HashMap<String, Box<dyn ProtocolSim>>,
+        stored_states: &mut HashMap<String, Box<dyn ProtocolSim>>,
+        failed_components: &HashSet<String>,
+        removed_components: &HashMap<String, C>,
+        execution_block: &BlockContext,
+    ) {
+        for state in updated_states.values_mut() {
+            state.apply_block(execution_block);
+        }
+        for (id, state) in stored_states.iter_mut() {
+            if failed_components.contains(id) ||
+                removed_components.contains_key(id) ||
+                updated_states.contains_key(id)
+            {
+                continue;
+            }
+            if state.apply_block(execution_block) {
+                updated_states.insert(id.clone(), state.clone_box());
+            }
         }
     }
 
@@ -187,13 +238,29 @@ where
     /// `register_decoder_with_context::<UniswapV2State>("uniswap_v2", context)`.
     /// This ensures that the exchange ID `uniswap_v2` is properly associated with the
     /// `UniswapV2State` decoder for use in the protocol stream.
-    pub fn register_decoder_with_context<T>(&mut self, exchange: &str, context: DecoderContext)
+    ///
+    /// The decoder's own chain is stamped into `context`, overriding any chain the caller set.
+    pub fn register_decoder_with_context<T>(&mut self, exchange: &str, mut context: DecoderContext)
     where
         T: ProtocolSim
             + TryFromWithBlock<ComponentWithState, H, Error = InvalidSnapshotError>
             + Send
             + 'static,
     {
+        if let Some(requested) = context
+            .chain
+            .filter(|requested| *requested != self.chain)
+        {
+            warn!(
+                exchange,
+                requested_chain = %requested,
+                decoder_chain = %self.chain,
+                "DecoderContext declares a different chain than the decoder; using the decoder's \
+                 chain"
+            );
+        }
+        context.chain = Some(self.chain);
+
         if is_deprecated_curve_registration::<T>(exchange) {
             warn!(
                 registered_type = std::any::type_name::<T>(),
@@ -250,6 +317,21 @@ where
         self.register_decoder_with_context::<T>(exchange, context);
     }
 
+    /// Registers a decoder for `exchange` that drops a token it does not know, or whose address it
+    /// cannot decode, and keeps the component. Other registrations fail the component. Use it for
+    /// a component with a fixed id, such as an all-pairs RFQ component: a failed one stays failed.
+    pub fn register_decoder_dropping_unknown_tokens<T>(&mut self, exchange: &str)
+    where
+        T: ProtocolSim
+            + TryFromWithBlock<ComponentWithState, H, Error = InvalidSnapshotError>
+            + Send
+            + 'static,
+    {
+        self.register_decoder::<T>(exchange);
+        self.protocols_skip_unknown_tokens
+            .insert(exchange.to_string());
+    }
+
     /// Registers a client-side filter function for a given exchange.
     ///
     /// Associates a filter function with an exchange ID, enabling custom filtering of protocol
@@ -265,9 +347,23 @@ where
     /// For example, you might use a filter to exclude pools that are not fully supported in the
     /// protocol, or to ignore pools with certain attributes that are irrelevant to your
     /// application.
+    ///
+    /// Filters accumulate: registering a second predicate for the same exchange keeps the first,
+    /// and a component is admitted only when every registered predicate accepts it.
     pub fn register_filter(&mut self, exchange: &str, predicate: FilterFn) {
         self.inclusion_filters
-            .insert(exchange.to_string(), predicate);
+            .entry(exchange.to_string())
+            .or_default()
+            .push(predicate);
+    }
+
+    /// Whether every filter registered for `exchange` accepts `snapshot`. An exchange with no
+    /// registered filter admits every component.
+    fn admits(&self, exchange: &str, snapshot: &ComponentWithState) -> bool {
+        let Some(predicates) = self.inclusion_filters.get(exchange) else { return true };
+        predicates
+            .iter()
+            .all(|predicate| predicate(snapshot))
     }
 
     /// Decodes a `FeedMessage` into a `BlockUpdate` containing the updated states of protocol
@@ -288,7 +384,7 @@ where
             .header
             .clone();
 
-        let block_number_or_timestamp = header
+        let block_number = header
             .clone()
             .block_number_or_timestamp();
         let current_block = header.clone().block();
@@ -298,6 +394,9 @@ where
             .unwrap_or(false);
 
         for (protocol, protocol_msg) in msg.state_msgs.iter() {
+            let drops_unknown_tokens = self
+                .protocols_skip_unknown_tokens
+                .contains(protocol.as_str());
             // Add any new tokens
             if let Some(deltas) = protocol_msg.deltas.as_ref() {
                 let mut state_guard = self.state.write().await;
@@ -415,7 +514,7 @@ where
 
                                 // Assign original token contract to new address
                                 let impl_addr = generate_proxy_token_address(
-                                    state_guard.proxy_token_addresses.len() as u32,
+                                    state_guard.proxy_token_addresses.len(),
                                 )?;
                                 state_guard
                                     .proxy_token_addresses
@@ -516,11 +615,7 @@ where
                     .clone()
                 {
                     // Skip any unsupported pools
-                    if self
-                        .inclusion_filters
-                        .get(protocol.as_str())
-                        .is_some_and(|predicate| !predicate(&snapshot))
-                    {
+                    if !self.admits(protocol.as_str(), &snapshot) {
                         continue;
                     }
 
@@ -530,12 +625,17 @@ where
                     for token in snapshot.component.tokens.clone() {
                         match state_guard.tokens.get(&token) {
                             Some(token) => {
-                                component_tokens.push(token.clone());
-
                                 // If the token is not an existing proxy token, we need to add it to
                                 // the simulation engine
                                 let token_address = match bytes_to_address(&token.address) {
                                     Ok(addr) => addr,
+                                    Err(_) if drops_unknown_tokens => {
+                                        warn!(
+                                            "Token address could not be decoded {}, ignoring the token in component {:x?}",
+                                            token.address, id
+                                        );
+                                        continue;
+                                    }
                                     Err(_) => {
                                         count_token_skips += 1;
                                         msg_failed_components.insert(id.clone());
@@ -546,6 +646,7 @@ where
                                         continue 'snapshot_loop;
                                     }
                                 };
+                                component_tokens.push(token.clone());
                                 // Deploy a proxy account without an implementation set
                                 if !state_guard
                                     .proxy_token_addresses
@@ -562,6 +663,12 @@ where
                                         ),
                                     );
                                 }
+                            }
+                            None if drops_unknown_tokens => {
+                                warn!(
+                                    "Token not found {}, ignoring the token in component {:x?}",
+                                    token, id
+                                );
                             }
                             None => {
                                 count_token_skips += 1;
@@ -640,16 +747,14 @@ where
                                     warn!(pool = id, error = %e, "StateDecodingFailure");
                                     msg_failed_components.insert(id.clone());
                                     continue 'snapshot_loop;
-                                } else {
-                                    error!(pool = id, error = %e, "StateDecodingFailure");
-                                    return Err(StreamDecodeError::Fatal(format!("{e}")));
                                 }
+                                error!(pool = id, error = %e, "StateDecodingFailure");
+                                return Err(StreamDecodeError::Fatal(format!("{e}")));
                             }
                         }
                     } else if self.skip_state_decode_failures {
                         warn!(pool = id, "MissingDecoderRegistration");
                         msg_failed_components.insert(id.clone());
-                        continue 'snapshot_loop;
                     } else {
                         error!(pool = id, "MissingDecoderRegistration");
                         return Err(StreamDecodeError::Fatal(format!(
@@ -735,7 +840,7 @@ where
                                 // Assign original token (implementation) contract to new proxy
                                 // address
                                 let impl_addr = generate_proxy_token_address(
-                                    state_guard.proxy_token_addresses.len() as u32,
+                                    state_guard.proxy_token_addresses.len(),
                                 )?;
                                 state_guard
                                     .proxy_token_addresses
@@ -953,11 +1058,23 @@ where
                 .contains(id)
         });
 
+        if let Some(header) = current_block.as_ref() {
+            let execution_block = self.execution_block(header);
+            let decoder_state = &mut *state_guard;
+            Self::refresh_execution_block(
+                &mut updated_states,
+                &mut decoder_state.states,
+                &decoder_state.failed_components,
+                &removed_pairs,
+                &execution_block,
+            );
+        }
+
         state_guard
             .states
             .extend(updated_states.clone());
 
-        state_guard.current_block_number = block_number_or_timestamp;
+        state_guard.current_block_number = block_number;
 
         // Add new components to persistent state
         for (id, component) in new_pairs.iter() {
@@ -980,7 +1097,7 @@ where
         }
 
         // Send the tick with all updated states
-        Ok(Update::new(block_number_or_timestamp, updated_states, new_pairs)
+        Ok(Update::new(block_number, updated_states, new_pairs)
             .set_is_partial(is_partial)
             .set_removed_pairs(removed_pairs)
             .set_sync_states(msg.sync_states.clone()))
@@ -993,9 +1110,10 @@ where
     /// supplied `pending_deltas`, and returns the result — **without writing back** to
     /// `DecoderState`. Calling this method twice with the same input produces identical results.
     ///
-    /// Only native protocols are supported. VM protocols (extractor prefix `"vm:"`) are rejected
-    /// at registration time in
-    /// [`with_pending_indexer`](crate::evm::stream::ProtocolStreamBuilder::with_pending_indexer).
+    /// Every state is rebuilt from `state_deltas` alone; nothing here writes to the VM database.
+    /// A protocol decoding into the generic VM adapter therefore cannot take part: it re-reads
+    /// pool state from that database, so its storage-derived values stay at the confirmed block —
+    /// even though the delta's balance and block-environment attributes do get applied.
     ///
     /// # Parameters
     /// * `pending_deltas` — map from extractor name to the `BlockAggregatedChanges` produced by the
@@ -1009,7 +1127,7 @@ where
         pending_deltas: &HashMap<String, BlockAggregatedChanges>,
         header: H,
     ) -> Result<Update, StreamDecodeError> {
-        let block_number_or_timestamp = header
+        let block_number = header
             .clone()
             .block_number_or_timestamp();
         let current_block = header.block();
@@ -1048,9 +1166,84 @@ where
                     warn!(pool = id, error = %e, "EphemeralDeltaTransitionError");
                 }
             }
+
+            if !deltas.account_deltas.is_empty() {
+                Self::apply_pending_overrides(
+                    deltas,
+                    current_block.as_ref(),
+                    &mut updated_states,
+                    &state_guard,
+                    &all_balances,
+                )?;
+            }
         }
 
-        Ok(Update::new(block_number_or_timestamp, updated_states, HashMap::new()))
+        // `header` is the block being built, so it already *is* the execution block — unlike
+        // `decode`, there is nothing to project forward here. Only the delta-applied clones need
+        // advancing: this path is read-only, and the stored states were already advanced to this
+        // block by `decode()` on the confirmed stream.
+        if let Some(header) = current_block.as_ref() {
+            let execution_block = BlockContext::new(header.number, header.timestamp);
+            for state in updated_states.values_mut() {
+                state.apply_block(&execution_block);
+            }
+        }
+
+        Ok(Update::new(block_number, updated_states, HashMap::new()))
+    }
+
+    /// Sets the pending block's account deltas as overrides on every pool linked to a written
+    /// account.
+    ///
+    /// A hooked pool prices from its hook's storage, which only the account deltas carry. An
+    /// override for an account a hook never reads is inert.
+    ///
+    /// # Errors
+    /// Fails when a pool rejects the overrides' type, since its quotes would silently run
+    /// against confirmed state.
+    fn apply_pending_overrides(
+        deltas: &BlockAggregatedChanges,
+        current_block: Option<&BlockHeader>,
+        updated_states: &mut HashMap<String, Box<dyn ProtocolSim>>,
+        state_guard: &RwLockReadGuard<'_, DecoderState>,
+        all_balances: &Balances,
+    ) -> Result<(), StreamDecodeError> {
+        let mut linked_pools: HashSet<&String> = HashSet::new();
+        for account in deltas.account_deltas.keys() {
+            if let Some(pools) = state_guard.contracts_map.get(account) {
+                linked_pools.extend(pools);
+            }
+        }
+
+        let block = current_block
+            .map(|h| BlockEnvOverrides { number: Some(h.number), timestamp: Some(h.timestamp) });
+        let overrides: Arc<dyn Any + Send + Sync> =
+            Arc::new(PendingOverrides::from_account_deltas(&deltas.account_deltas, block));
+        for id in linked_pools {
+            // Add pools that are affected by account_deltas, but don't have their own
+            // state_deltas, to `updated_states`. Pools with a state delta already have their
+            // copies in `updated_states`.
+            if !updated_states.contains_key(id) {
+                let empty_delta = Self::add_block_info_to_delta(
+                    ProtocolStateDelta { component_id: id.clone(), ..Default::default() },
+                    current_block.cloned(),
+                );
+                if let Err(e) =
+                    Self::apply_update(id, empty_delta, updated_states, state_guard, all_balances)
+                {
+                    warn!(pool = id, error = %e, "EphemeralDeltaTransitionError");
+                    continue;
+                }
+            }
+            if let Some(state) = updated_states.get_mut(id) {
+                state
+                    .set_pending_overrides(Arc::clone(&overrides))
+                    .map_err(|e| {
+                        StreamDecodeError::Fatal(format!("Pending overrides for pool {id}: {e}"))
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     /// Add current block information (number and timestamp) to a ProtocolStateDelta.
@@ -1114,7 +1307,7 @@ where
 }
 
 /// Generate a proxy token address for a given token index
-fn generate_proxy_token_address(idx: u32) -> Result<Address, StreamDecodeError> {
+fn generate_proxy_token_address(idx: usize) -> Result<Address, StreamDecodeError> {
     let padded_idx = format!("{idx:x}");
     let padded_zeroes = "0".repeat(33 - padded_idx.len());
     let proxy_token_address = format!("{padded_zeroes}{padded_idx}BAdbaBe");
@@ -1161,32 +1354,46 @@ fn create_proxy_token_account(
 }
 
 #[cfg(test)]
-mock! {
-    #[derive(Debug)]
-    pub ProtocolSim {
-        pub fn fee(&self) -> f64;
-        pub fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError>;
-        pub fn get_amount_out(
-            &self,
-            amount_in: BigUint,
-            token_in: &Token,
-            token_out: &Token,
-        ) -> Result<GetAmountOutResult, SimulationError>;
-        pub fn get_limits(
-            &self,
-            sell_token: Bytes,
-            buy_token: Bytes,
-        ) -> Result<(BigUint, BigUint), SimulationError>;
-        pub fn delta_transition(
-            &mut self,
-            delta: ProtocolStateDelta,
-            tokens: &HashMap<Bytes, Token>,
-            balances: &Balances,
-        ) -> Result<(), TransitionError>;
-        pub fn clone_box(&self) -> Box<dyn ProtocolSim>;
-        pub fn eq(&self, other: &dyn ProtocolSim) -> bool;
+#[expect(
+    clippy::same_name_method,
+    reason = "mockall generates the inherent methods the ProtocolSim impl forwards to"
+)]
+mod protocol_sim_mock {
+    use super::*;
+
+    mock! {
+        #[derive(Debug)]
+        pub ProtocolSim {
+            pub fn fee(&self) -> f64;
+            pub fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError>;
+            pub fn get_amount_out(
+                &self,
+                amount_in: BigUint,
+                token_in: &Token,
+                token_out: &Token,
+            ) -> Result<GetAmountOutResult, SimulationError>;
+            pub fn get_limits(
+                &self,
+                sell_token: Bytes,
+                buy_token: Bytes,
+            ) -> Result<(BigUint, BigUint), SimulationError>;
+            pub fn delta_transition(
+                &mut self,
+                delta: ProtocolStateDelta,
+                tokens: &HashMap<Bytes, Token>,
+                balances: &Balances,
+            ) -> Result<(), TransitionError>;
+            pub fn clone_box(&self) -> Box<dyn ProtocolSim>;
+            pub fn eq(&self, other: &dyn ProtocolSim) -> bool;
+            pub fn base_token(&self) -> &Token;
+            pub fn quote_token(&self) -> &Token;
+            pub fn directions(&self) -> Vec<(Bytes, Bytes)>;
+        }
     }
 }
+
+#[cfg(test)]
+pub use protocol_sim_mock::MockProtocolSim;
 
 #[cfg(test)]
 crate::impl_non_serializable_protocol!(MockProtocolSim, "test protocol");
@@ -1244,11 +1451,30 @@ impl ProtocolSim for MockProtocolSim {
     }
 
     fn typetag_name(&self) -> &'static str {
-        unreachable!()
+        // typetag reads the tag before Serialize, so a panic here would hide Serialize's error.
+        "MockProtocolSim"
     }
 
+    #[expect(clippy::unreachable, reason = "the mock is never deserialized through its typetag")]
     fn typetag_deserialize(&self) {
         unreachable!()
+    }
+}
+
+/// Lets the mock stand in for a book's state wherever one pair's tokens and directions are
+/// what the code under test reads.
+#[cfg(test)]
+impl crate::book::component::PairState for MockProtocolSim {
+    fn base_token(&self) -> &Token {
+        self.base_token()
+    }
+
+    fn quote_token(&self) -> &Token {
+        self.quote_token()
+    }
+
+    fn directions(&self) -> Vec<(Bytes, Bytes)> {
+        self.directions()
     }
 }
 
@@ -1263,6 +1489,174 @@ mod tests {
     use tycho_common::{models::Chain, Bytes};
 
     use super::*;
+
+    fn header_at(number: u64, timestamp: u64, partial: Option<u32>) -> BlockHeader {
+        BlockHeader {
+            hash: Bytes::from([0u8; 32]),
+            number,
+            parent_hash: Bytes::from([0u8; 32]),
+            revert: false,
+            timestamp,
+            partial_block_index: partial,
+        }
+    }
+
+    /// A block-sensitive state whose execution timestamp we can read back.
+    fn block_sensitive_state() -> Box<dyn ProtocolSim> {
+        use crate::evm::protocol::{
+            aerodrome_slipstreams::state::AerodromeSlipstreamsState,
+            utils::{
+                slipstreams::{dynamic_fee_module::DynamicFeeConfig, observations::Observation},
+                uniswap::{tick_list::TickInfo, tick_math::get_sqrt_ratio_at_tick},
+            },
+        };
+
+        Box::new(
+            AerodromeSlipstreamsState::new(
+                "block-sensitive".to_string(),
+                0,
+                1_000_000_000_000_000_000,
+                get_sqrt_ratio_at_tick(0).unwrap(),
+                0,
+                1,
+                3000,
+                1,
+                0,
+                vec![TickInfo::new(-120, 0).unwrap(), TickInfo::new(120, 0).unwrap()],
+                vec![Observation { block_timestamp: 500, initialized: true, ..Default::default() }],
+                DynamicFeeConfig::new(2700, 30_000, 0, true, 750),
+            )
+            .expect("state should build")
+            // These fixtures exercise the fee-flip path, which needs the optimistic mode:
+            // under the worst-case default a flat-fee pool never flips.
+            .with_position_assumption(crate::protocol::models::BlockPositionAssumption::First),
+        )
+    }
+
+    #[test]
+    fn confirmed_header_targets_the_next_block() {
+        let decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Base);
+
+        let execution_block = decoder.execution_block(&header_at(100, 1_000, None));
+
+        assert_eq!(execution_block.number(), 101);
+        assert_eq!(execution_block.timestamp(), 1_000 + Chain::Base.block_time_secs());
+    }
+
+    #[test]
+    fn partial_header_targets_the_block_that_is_still_open() {
+        let decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Ethereum);
+
+        let execution_block = decoder.execution_block(&header_at(100, 1_000, Some(3)));
+
+        assert_eq!(execution_block.number(), 100);
+        assert_eq!(execution_block.timestamp(), 1_000);
+    }
+
+    #[test]
+    fn refresh_re_emits_a_state_whose_fee_flipped_without_a_delta() {
+        // The pool traded in block 100 and has no delta afterwards. Crossing into block 101
+        // flips its fee branch (dynamic -> initial), so the refresh must advance the stored
+        // state in place and emit a copy to consumers.
+        let mut stored = HashMap::from([("block-sensitive".to_string(), {
+            let mut state = block_sensitive_state();
+            state.apply_block(&BlockContext::new(100, 500));
+            state
+        })]);
+        let mut updated: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+
+        TychoStreamDecoder::<BlockHeader>::refresh_execution_block(
+            &mut updated,
+            &mut stored,
+            &HashSet::new(),
+            &HashMap::<String, ()>::new(),
+            &BlockContext::new(101, 502),
+        );
+
+        let emitted = updated
+            .get("block-sensitive")
+            .expect("a fee flip must be emitted even without a delta");
+        assert_eq!(emitted.fee(), 750.0 / 1_000_000.0);
+        // The stored copy was advanced in place as well.
+        assert_eq!(stored["block-sensitive"].fee(), 750.0 / 1_000_000.0);
+    }
+
+    #[test]
+    fn refresh_never_re_emits_failed_components() {
+        // A failed component's stored state may linger; the sweep must not resurrect it for
+        // consumers that were told the component was removed — even when its fee flipped.
+        let mut stored = HashMap::from([("zombie".to_string(), {
+            let mut state = block_sensitive_state();
+            state.apply_block(&BlockContext::new(100, 500));
+            state
+        })]);
+        let failed = HashSet::from(["zombie".to_string()]);
+        let mut updated: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+
+        TychoStreamDecoder::<BlockHeader>::refresh_execution_block(
+            &mut updated,
+            &mut stored,
+            &failed,
+            &HashMap::<String, ()>::new(),
+            &BlockContext::new(101, 502),
+        );
+
+        assert!(updated.is_empty());
+    }
+
+    #[test]
+    fn refresh_never_re_emits_removed_components() {
+        // The stored state of a component reported in `removed_pairs` stays in place; the sweep
+        // must not surface it again, even when its fee flipped in the execution block.
+        let mut stored = HashMap::from([("gone".to_string(), {
+            let mut state = block_sensitive_state();
+            state.apply_block(&BlockContext::new(100, 500));
+            state
+        })]);
+        let removed = HashMap::from([("gone".to_string(), ())]);
+        let mut updated: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+
+        TychoStreamDecoder::<BlockHeader>::refresh_execution_block(
+            &mut updated,
+            &mut stored,
+            &HashSet::new(),
+            &removed,
+            &BlockContext::new(101, 502),
+        );
+
+        assert!(updated.is_empty());
+    }
+
+    #[test]
+    fn refresh_stays_quiet_when_no_fee_changed() {
+        // An idle block-sensitive pool (fee branch unchanged) and a block-insensitive pool:
+        // neither must be re-emitted.
+        let mut stored: HashMap<String, Box<dyn ProtocolSim>> = HashMap::from([
+            ("idle-sensitive".to_string(), {
+                let mut state = block_sensitive_state();
+                state.apply_block(&BlockContext::new(101, 502));
+                state
+            }),
+            (
+                "univ2".to_string(),
+                Box::new(crate::evm::protocol::uniswap_v2::state::UniswapV2State::new(
+                    U256::from(1_000_000u64),
+                    U256::from(1_000_000u64),
+                )) as Box<dyn ProtocolSim>,
+            ),
+        ]);
+        let mut updated: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+
+        TychoStreamDecoder::<BlockHeader>::refresh_execution_block(
+            &mut updated,
+            &mut stored,
+            &HashSet::new(),
+            &HashMap::<String, ()>::new(),
+            &BlockContext::new(102, 504),
+        );
+
+        assert!(updated.is_empty());
+    }
     use crate::evm::protocol::{curve::CurveState, uniswap_v2::state::UniswapV2State};
 
     #[test]
@@ -1276,7 +1670,7 @@ mod tests {
     }
 
     async fn setup_decoder(set_tokens: bool) -> TychoStreamDecoder<BlockHeader> {
-        let mut decoder = TychoStreamDecoder::new();
+        let mut decoder = TychoStreamDecoder::new(Chain::Ethereum);
         decoder.register_decoder::<UniswapV2State>("uniswap_v2");
         if set_tokens {
             let tokens = [
@@ -1373,6 +1767,53 @@ mod tests {
             .expect("decode failure");
 
         assert_eq!(res1.states.len(), 0);
+    }
+
+    #[rstest]
+    #[case::unknown_token(false)]
+    #[case::undecodable_address(true)]
+    #[tokio::test]
+    async fn test_dropping_decoder_keeps_component(#[case] bad_address: bool) {
+        let weth = Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").lpad(20, 0);
+        // The unknown token is not in the decoder. The bad address is, but 21 bytes are no address.
+        let other = match bad_address {
+            true => Bytes::from([1u8; 21].to_vec()),
+            false => Bytes::from("0xdac17f958d2ee523a2206206994597c13d831ec7").lpad(20, 0),
+        };
+        let mut decoder = TychoStreamDecoder::new(Chain::Ethereum);
+        decoder.register_decoder_dropping_unknown_tokens::<UniswapV2State>("uniswap_v2");
+        let token = |address: &Bytes, symbol| {
+            let token =
+                Token::new(address, symbol, 18, 100, &[Some(100_000)], Chain::Ethereum, 100);
+            (address.clone(), token)
+        };
+        let mut known = HashMap::from([token(&weth, "WETH")]);
+        if bad_address {
+            known.extend([token(&other, "OTHER")]);
+        }
+        decoder.set_tokens(known).await;
+        let mut msg = load_test_msg("uniswap_v2_snapshot");
+        let (id, snapshot) = msg
+            .state_msgs
+            .get_mut("uniswap_v2")
+            .unwrap()
+            .snapshots
+            .states
+            .iter_mut()
+            .next()
+            .unwrap();
+        snapshot.component.tokens = vec![weth, other];
+        let id = id.clone();
+
+        let update = decoder.decode(&msg).await.unwrap();
+
+        let symbols: Vec<_> = update.new_pairs[&id]
+            .tokens
+            .iter()
+            .map(|token| token.symbol.as_str())
+            .collect();
+        assert_eq!(symbols, ["WETH"]);
+        assert_eq!(update.states.len(), 1);
     }
 
     #[tokio::test]
@@ -1472,6 +1913,111 @@ mod tests {
         // The mock framework will assert that `delta_transition` was called exactly once
     }
 
+    /// The pending block's account deltas must reach the clone of every pool linked to a written
+    /// account, and never the stored confirmed state.
+    #[tokio::test]
+    async fn test_apply_deltas_ephemeral_sets_pending_overrides_on_the_clone_only() {
+        use tycho_common::models::{
+            blockchain::BlockAggregatedChanges, contract::AccountDelta,
+            protocol::ProtocolComponentStateDelta, ChangeType as ModelChangeType,
+        };
+
+        use crate::evm::protocol::uniswap_v4::state::{UniswapV4Fees, UniswapV4State};
+
+        let decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Ethereum);
+        let pool_id = "0xhooked".to_string();
+        let quiet_pool_id = "0xhooked-no-log".to_string();
+        let pool = UniswapV4State::new(
+            1000,
+            U256::from(1u8) << 96,
+            UniswapV4Fees::new(0, 0, 3000),
+            0,
+            60,
+            vec![],
+        )
+        .unwrap();
+        let hook = Bytes::from(vec![7u8; 20]);
+        {
+            let mut state = decoder.state.write().await;
+            state
+                .states
+                .insert(pool_id.clone(), Box::new(pool.clone()));
+            state
+                .states
+                .insert(quiet_pool_id.clone(), Box::new(pool));
+            state
+                .contracts_map
+                .insert(hook.clone(), HashSet::from([pool_id.clone(), quiet_pool_id.clone()]));
+        }
+
+        let deltas = BlockAggregatedChanges {
+            extractor: "uniswap_v4_hooks".to_string(),
+            state_deltas: HashMap::from([(
+                pool_id.clone(),
+                ProtocolComponentStateDelta {
+                    component_id: pool_id.clone(),
+                    updated_attributes: HashMap::from([(
+                        "liquidity".to_string(),
+                        Bytes::from(2000_u64.to_be_bytes().to_vec()),
+                    )]),
+                    deleted_attributes: HashSet::new(),
+                    created_attributes: HashSet::new(),
+                },
+            )]),
+            account_deltas: HashMap::from([(
+                hook.clone(),
+                AccountDelta::new(
+                    Chain::Ethereum,
+                    hook.clone(),
+                    HashMap::from([(Bytes::from(vec![0u8]), Some(Bytes::from(vec![9u8])))]),
+                    None,
+                    None,
+                    ModelChangeType::Update,
+                ),
+            )]),
+            ..Default::default()
+        };
+        let header = BlockHeader { number: 10, timestamp: 20, ..Default::default() };
+
+        let update = decoder
+            .apply_deltas_ephemeral(
+                &HashMap::from([("uniswap_v4_hooks".to_string(), deltas)]),
+                header,
+            )
+            .await
+            .unwrap();
+
+        let clone = update.states[&pool_id]
+            .as_any()
+            .downcast_ref::<UniswapV4State>()
+            .unwrap();
+        let pending = clone
+            .pending_overrides()
+            .expect("the clone carries the pending block's overrides");
+        assert_eq!(
+            pending.block,
+            Some(BlockEnvOverrides { number: Some(10), timestamp: Some(20) })
+        );
+        assert_eq!(
+            pending.storage.as_ref().unwrap()[&Address::from_slice(&hook)][&U256::ZERO],
+            U256::from(9)
+        );
+        let quiet = update.states[&quiet_pool_id]
+            .as_any()
+            .downcast_ref::<UniswapV4State>()
+            .expect("a pool whose hook was written is cloned without a delta of its own");
+        assert!(quiet.pending_overrides().is_some());
+
+        let stored = decoder.state.read().await;
+        for id in [&pool_id, &quiet_pool_id] {
+            let stored = stored.states[id]
+                .as_any()
+                .downcast_ref::<UniswapV4State>()
+                .unwrap();
+            assert!(stored.pending_overrides().is_none(), "confirmed state is never overlaid");
+        }
+    }
+
     #[test]
     fn test_generate_proxy_token_address() {
         let idx = 1;
@@ -1485,9 +2031,116 @@ mod tests {
         assert_eq!(generated_address, address!("00000000000000000000000000001e240badbabe"));
     }
 
+    /// A single-block feed message holding one tokenless Uniswap V4 pool whose `hooks` attribute
+    /// points at an address no native handler is registered for.
+    ///
+    /// The component has no tokens and the message no VM storage, so decoding it neither reads
+    /// nor writes the process-wide simulation engine and cannot disturb other tests.
+    fn hooked_v4_msg() -> FeedMessage<BlockHeader> {
+        use tycho_client::feed::synchronizer::{Snapshot, StateSyncMessage};
+        use tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState};
+
+        let id = "0x00000000000000000000000000000000000000000000000000000000000000c4";
+        let static_attributes = HashMap::from([
+            ("key_lp_fee".to_string(), Bytes::from(500_i32.to_be_bytes().to_vec())),
+            ("tick_spacing".to_string(), Bytes::from(60_i32.to_be_bytes().to_vec())),
+            (
+                "hooks".to_string(),
+                Bytes::from_str("0x00000000000000000000000000000000000000c4").unwrap(),
+            ),
+        ]);
+        let attributes = HashMap::from([
+            ("liquidity".to_string(), Bytes::from(100_u64.to_be_bytes().to_vec())),
+            ("tick".to_string(), Bytes::from(300_i32.to_be_bytes().to_vec())),
+            (
+                "sqrt_price_x96".to_string(),
+                Bytes::from(
+                    79228162514264337593543950336_u128
+                        .to_be_bytes()
+                        .to_vec(),
+                ),
+            ),
+            ("protocol_fees/zero2one".to_string(), Bytes::from(0_u32.to_be_bytes().to_vec())),
+            ("protocol_fees/one2zero".to_string(), Bytes::from(0_u32.to_be_bytes().to_vec())),
+            ("ticks/60/net_liquidity".to_string(), Bytes::from(400_i128.to_be_bytes().to_vec())),
+        ]);
+
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState::new(id, attributes, HashMap::new()),
+            component: ProtocolComponent {
+                id: id.to_string(),
+                static_attributes,
+                ..Default::default()
+            },
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        FeedMessage {
+            state_msgs: HashMap::from([(
+                "uniswap_v4_hooks".to_string(),
+                StateSyncMessage {
+                    header: header_at(1, 1_000, None),
+                    snapshots: Snapshot {
+                        states: HashMap::from([(id.to_string(), snapshot)]),
+                        vm_storage: HashMap::new(),
+                    },
+                    deltas: None,
+                    removed_components: HashMap::new(),
+                },
+            )]),
+            sync_states: HashMap::new(),
+        }
+    }
+
+    /// A decoder for `chain` that decodes [`hooked_v4_msg`].
+    fn hooked_v4_decoder(chain: Chain, context: DecoderContext) -> TychoStreamDecoder<BlockHeader> {
+        let mut decoder = TychoStreamDecoder::new(chain);
+        decoder.register_decoder_with_context::<crate::evm::protocol::uniswap_v4::state::UniswapV4State>(
+            "uniswap_v4_hooks", context
+        );
+        decoder
+    }
+
+    #[tokio::test]
+    async fn test_unregistered_hook_is_rejected_off_the_generic_vm_chains() {
+        let decoder = hooked_v4_decoder(Chain::Robinhood, DecoderContext::new());
+
+        let Err(StreamDecodeError::Fatal(message)) = decoder.decode(&hooked_v4_msg()).await else {
+            panic!("a hooked pool on robinhood must not decode");
+        };
+
+        assert!(message.contains("unsupported uniswap v4 hook"), "{message}");
+        assert!(message.contains("robinhood"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn test_decoder_chain_overrides_the_registered_context_chain() {
+        let decoder =
+            hooked_v4_decoder(Chain::Robinhood, DecoderContext::new().chain(Chain::Ethereum));
+
+        let Err(StreamDecodeError::Fatal(message)) = decoder.decode(&hooked_v4_msg()).await else {
+            panic!("the decoder's chain must win over the context's");
+        };
+
+        assert!(message.contains("robinhood"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn test_unregistered_hook_takes_the_generic_path_on_ethereum() {
+        let decoder = hooked_v4_decoder(Chain::Ethereum, DecoderContext::new());
+
+        let Err(StreamDecodeError::Fatal(message)) = decoder.decode(&hooked_v4_msg()).await else {
+            panic!("the generic VM creator has no balance_owner attribute to work from");
+        };
+
+        assert!(!message.contains("unsupported uniswap v4 hook"), "{message}");
+        assert!(message.contains("balance_owner"), "{message}");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_euler_hook_low_pool_manager_balance() {
-        let mut decoder = TychoStreamDecoder::new();
+        let mut decoder = TychoStreamDecoder::new(Chain::Ethereum);
 
         decoder.register_decoder_with_context::<crate::evm::protocol::uniswap_v4::state::UniswapV4State>(
             "uniswap_v4_hooks", DecoderContext::new().vm_traces(true)
@@ -1527,5 +2180,156 @@ mod tests {
             .expect("Get amount out failed");
 
         assert_eq!(amount_out.amount, BigUint::from_str("1216190190361759119").unwrap());
+    }
+
+    /// A single-block feed message carrying `snapshot` as a `uniswap_v4_hooks` component.
+    fn pons_feed_message(snapshot: ComponentWithState) -> FeedMessage<BlockHeader> {
+        use tycho_client::feed::synchronizer::{Snapshot, StateSyncMessage};
+
+        use crate::evm::protocol::uniswap_v4::pons_fixture;
+
+        FeedMessage {
+            state_msgs: HashMap::from([(
+                "uniswap_v4_hooks".to_string(),
+                StateSyncMessage {
+                    header: pons_fixture::header(),
+                    snapshots: Snapshot {
+                        states: HashMap::from([(pons_fixture::POOL_ID.to_string(), snapshot)]),
+                        vm_storage: HashMap::new(),
+                    },
+                    deltas: None,
+                    removed_components: HashMap::new(),
+                },
+            )]),
+            sync_states: HashMap::new(),
+        }
+    }
+
+    /// A decoder for Robinhood that knows the fixture pool's two tokens.
+    async fn pons_stream_decoder() -> TychoStreamDecoder<BlockHeader> {
+        use crate::evm::protocol::uniswap_v4::{
+            hooks::hook_handler_creator::initialize_hook_handlers, pons_fixture,
+            state::UniswapV4State,
+        };
+
+        initialize_hook_handlers().expect("hook handler registration should succeed");
+        let mut decoder = TychoStreamDecoder::new(Chain::Robinhood);
+        decoder.register_decoder::<UniswapV4State>("uniswap_v4_hooks");
+        decoder
+            .set_tokens(pons_fixture::tokens())
+            .await;
+        decoder
+    }
+
+    /// The whole stream path on Robinhood: a Pons pool arrives in a snapshot, is emitted as a
+    /// `UniswapV4State` carrying the native handler, and quotes the hookless output less the fee
+    /// and the tax `registerPool` froze for it.
+    #[tokio::test]
+    async fn test_pons_pool_decodes_through_the_stream_decoder_on_robinhood() {
+        use crate::evm::protocol::uniswap_v4::{
+            hooks::pons_v2::hook_handler::PonsV2HookHandler, pons_fixture, state::UniswapV4State,
+        };
+
+        let decoder = pons_stream_decoder().await;
+
+        let result = decoder
+            .decode(&pons_feed_message(pons_fixture::snapshot()))
+            .await
+            .expect("decode failure");
+
+        let emitted = result
+            .states
+            .get(pons_fixture::POOL_ID)
+            .expect("the Pons pool must reach consumers");
+        let pool = emitted
+            .as_any()
+            .downcast_ref::<UniswapV4State>()
+            .expect("a uniswap_v4_hooks component decodes into a UniswapV4State");
+        let handler = pool
+            .hook
+            .as_ref()
+            .expect("a Pons pool must carry a hook handler");
+        let pons = handler
+            .as_any()
+            .downcast_ref::<PonsV2HookHandler>()
+            .expect("the registry must hand back the native Pons handler");
+        assert_eq!(u32::from(pons.hook_fee_bps()), pons_fixture::HOOK_FEE_BPS);
+        assert_eq!(u32::from(pons.creator_tax_bps()), pons_fixture::CREATOR_TAX_BPS);
+
+        let core = pons_fixture::decode_on(pons_fixture::hookless_snapshot(), Chain::Robinhood)
+            .await
+            .expect("the same pool with no hook must decode too");
+        let (xlg, nvda) = (pons_fixture::xlg(), pons_fixture::nvda());
+        let amount_in = BigUint::from(10u64).pow(18);
+        for (token_in, token_out) in [(&xlg, &nvda), (&nvda, &xlg)] {
+            let core_out = core
+                .get_amount_out(amount_in.clone(), token_in, token_out)
+                .expect("the reference pool quotes one whole token")
+                .amount;
+            let hooked_out = emitted
+                .get_amount_out(amount_in.clone(), token_in, token_out)
+                .expect("the emitted pool quotes one whole token")
+                .amount;
+
+            let expected = pons_fixture::net_of_hook_take(&core_out);
+            assert!(expected < core_out, "the hook must take something out of {core_out}");
+            assert_eq!(hooked_out, expected, "{} -> {}", token_in.symbol, token_out.symbol);
+        }
+    }
+
+    /// The same pool behind a hook with no native handler never reaches consumers, even when the
+    /// stream is configured to carry on past a decode failure.
+    #[tokio::test]
+    async fn test_unknown_hook_component_is_not_emitted_on_robinhood() {
+        use crate::evm::protocol::uniswap_v4::pons_fixture;
+
+        let mut decoder = pons_stream_decoder().await;
+        decoder.skip_state_decode_failures(true);
+
+        let result = decoder
+            .decode(&pons_feed_message(pons_fixture::unknown_hook_snapshot()))
+            .await
+            .expect("a skipped decode failure is not fatal");
+
+        assert!(
+            !result
+                .states
+                .contains_key(pons_fixture::POOL_ID),
+            "a pool whose hook cannot be modelled must not be quoted"
+        );
+        assert!(result.states.is_empty());
+    }
+
+    fn component_with_id(id: &str) -> ComponentWithState {
+        use tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState};
+
+        ComponentWithState {
+            state: ProtocolComponentState::new(id, HashMap::new(), HashMap::new()),
+            component: ProtocolComponent { id: id.to_string(), ..Default::default() },
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        }
+    }
+
+    fn rejects_a(component: &ComponentWithState) -> bool {
+        component.component.id != "a"
+    }
+
+    fn rejects_b(component: &ComponentWithState) -> bool {
+        component.component.id != "b"
+    }
+
+    #[test]
+    fn test_admits_requires_every_registered_filter() {
+        // Two filters on one exchange both apply: the second registration does not replace the
+        // first, and a component must pass both. An exchange without filters admits everything.
+        let mut decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Ethereum);
+        decoder.register_filter("x", rejects_a);
+        decoder.register_filter("x", rejects_b);
+
+        assert!(!decoder.admits("x", &component_with_id("a")));
+        assert!(!decoder.admits("x", &component_with_id("b")));
+        assert!(decoder.admits("x", &component_with_id("c")));
+        assert!(decoder.admits("y", &component_with_id("a")));
     }
 }

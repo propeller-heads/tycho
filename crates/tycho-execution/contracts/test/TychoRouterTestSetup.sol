@@ -6,7 +6,7 @@ import {BalancerV3Executor} from "../src/executors/BalancerV3Executor.sol";
 import {BebopExecutor} from "../src/executors/BebopExecutor.sol";
 import {CurveExecutor} from "../src/executors/CurveExecutor.sol";
 import {EkuboExecutor} from "../src/executors/EkuboExecutor.sol";
-import {EkuboV3Executor} from "../src/executors/EkuboV3Executor.sol";
+import {EkuboV3Executor} from "../src/executors/ekubo_v3/EkuboV3Executor.sol";
 import {EtherfiExecutor} from "../src/executors/EtherfiExecutor.sol";
 import {FermiSwapExecutor} from "../src/executors/FermiSwapExecutor.sol";
 import {BopAMMExecutor} from "../src/executors/BopAMMExecutor.sol";
@@ -15,6 +15,12 @@ import {
 } from "../src/executors/LiquidityPartyExecutor.sol";
 import {HashflowExecutor} from "../src/executors/HashflowExecutor.sol";
 import {MaverickV2Executor} from "../src/executors/MaverickV2Executor.sol";
+import {PropAMMExecutor} from "../src/executors/PropAMMExecutor.sol";
+import {
+    PropAMMFallbackExecutor
+} from "../src/executors/PropAMMFallbackExecutor.sol";
+import {PropAMMFallbackRouter} from "../src/fallback/PropAMMFallbackRouter.sol";
+import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 import {UniswapV2Executor} from "../src/executors/UniswapV2Executor.sol";
 import {
     UniswapV3Executor,
@@ -26,9 +32,18 @@ import {SlipstreamsExecutor} from "../src/executors/SlipstreamsExecutor.sol";
 import {RocketpoolExecutor} from "../src/executors/RocketpoolExecutor.sol";
 import {ERC4626Executor} from "../src/executors/ERC4626Executor.sol";
 import {NativeWrapExecutor} from "../src/executors/NativeWrapExecutor.sol";
+import {LidoV4Executor} from "../src/executors/LidoV4Executor.sol";
+import {
+    PancakeswapInfinityExecutor,
+    IPancakeswapInfinityVault
+} from "../src/executors/PancakeswapInfinityExecutor.sol";
 import {LiquoriceExecutor} from "../src/executors/LiquoriceExecutor.sol";
 import {AerodromeV1Executor} from "../src/executors/AerodromeV1Executor.sol";
+import {AeroBasicExecutor} from "../src/executors/AeroBasicExecutor.sol";
 import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
+import {RingSwapV2Executor} from "../src/executors/RingSwapV2Executor.sol";
+import {NativeExecutor} from "../src/executors/NativeExecutor.sol";
+import {SkyExecutor} from "../src/executors/SkyExecutor.sol";
 // Test utilities and mocks
 import "./Constants.sol";
 import "./TestUtils.sol";
@@ -37,10 +52,10 @@ import {ClientFeeTestHelper} from "./ClientFeeTestHelper.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
 // Core contracts
-import "@src/TychoRouter.sol";
+import "@src/TychoRouterV3.sol";
 import "@src/FeeCalculator.sol";
 
-contract TychoRouterExposed is TychoRouter {
+contract TychoRouterExposed is TychoRouterV3 {
     constructor(
         address permit2_,
         address feeCalculator,
@@ -49,7 +64,7 @@ contract TychoRouterExposed is TychoRouter {
         address executorSetter,
         address routerFeeSetter
     )
-        TychoRouter(
+        TychoRouterV3(
             permit2_,
             feeCalculator,
             pauser,
@@ -58,15 +73,6 @@ contract TychoRouterExposed is TychoRouter {
             routerFeeSetter
         )
     {}
-
-    function tstoreExposed(
-        address tokenIn,
-        uint256 amountIn,
-        bool isPermit2,
-        bool useVault
-    ) external {
-        _tstoreTransferFromInfo(tokenIn, amountIn, isPermit2, useVault);
-    }
 
     function exposedSplitSwap(
         uint256 amountIn,
@@ -83,6 +89,31 @@ contract TychoRouterExposed is TychoRouter {
         bytes calldata swaps,
         address receiver
     ) external returns (uint256) {
+        return _sequentialSwap(amountIn, swaps, receiver);
+    }
+
+    /// Authorises the swap to `transferFrom` `amountIn` of `tokenIn` from the
+    /// caller, then runs the split swap.
+    function exposedSplitSwapWithTransferFrom(
+        address tokenIn,
+        uint256 amountIn,
+        uint256 nTokens,
+        bytes calldata swaps,
+        address receiver,
+        bool isCyclical
+    ) external returns (uint256) {
+        _tstoreTransferFromInfo(tokenIn, amountIn, false, false);
+        return _splitSwap(amountIn, nTokens, swaps, receiver, isCyclical);
+    }
+
+    /// Sequential-swap counterpart of `exposedSplitSwapWithTransferFrom`.
+    function exposedSequentialSwapWithTransferFrom(
+        address tokenIn,
+        uint256 amountIn,
+        bytes calldata swaps,
+        address receiver
+    ) external returns (uint256) {
+        _tstoreTransferFromInfo(tokenIn, amountIn, false, false);
         return _sequentialSwap(amountIn, swaps, receiver);
     }
 
@@ -119,14 +150,23 @@ contract TychoRouterTestSetup is
     RocketpoolExecutor public rocketpoolExecutor;
     ERC4626Executor public erc4626Executor;
     NativeWrapExecutor public nativeWrapExecutor;
+    LidoV4Executor public lidoV4Executor;
+    PancakeswapInfinityExecutor public pancakeswapInfinityExecutor;
     EkuboV3Executor public ekuboV3Executor;
     EtherfiExecutor public etherfiExecutor;
     LiquidityPartyExecutor public liquidityPartyExecutor;
     LiquoriceExecutor public liquoriceExecutor;
     AerodromeV1Executor public aerodromeV1Executor;
+    AeroBasicExecutor public aeroBasicExecutor;
     FermiSwapExecutor public fermiSwapExecutor;
     MetricExecutor public metricExecutor;
     BopAMMExecutor public bopAMMExecutor;
+    RingSwapV2Executor public ringSwapV2Executor;
+    NativeExecutor public nativeExecutor;
+    PropAMMExecutor public propAMMExecutor;
+    SkyExecutor public skyExecutor;
+    PropAMMFallbackRouter public propAMMFallbackRouter;
+    PropAMMFallbackExecutor public propAMMFallbackExecutor;
 
     FeeCalculator feeCalculator;
     address routerFeeReceiver;
@@ -213,7 +253,7 @@ contract TychoRouterTestSetup is
         rocketpoolExecutor = new RocketpoolExecutor(ROCKET_DEPOSIT_POOL);
         erc4626Executor = new ERC4626Executor();
         nativeWrapExecutor = new NativeWrapExecutor(WETH_ADDR);
-        ekuboV3Executor = new EkuboV3Executor();
+        ekuboV3Executor = new EkuboV3Executor(EKUBO_V3_SIGNED_EXCLUSIVE_SWAP);
         // Etch placeholder bytecode if Etherfi contracts are not yet deployed
         // on this chain/block (e.g. non-mainnet forks or early mainnet blocks).
         if (EETH_ADDR.code.length == 0) vm.etch(EETH_ADDR, bytes("1"));
@@ -245,10 +285,62 @@ contract TychoRouterTestSetup is
         liquidityPartyExecutor = new LiquidityPartyExecutor();
         aerodromeV1Executor = new AerodromeV1Executor();
         fermiSwapExecutor = new FermiSwapExecutor(FERMI_SWAPPER);
-        metricExecutor = new MetricExecutor(METRIC_ORACLE);
+        metricExecutor = new MetricExecutor();
         bopAMMExecutor = new BopAMMExecutor(BOPAMM_SETTLEMENT);
+        ringSwapV2Executor =
+            new RingSwapV2Executor(RING_FEW_FACTORY, RING_SWAP_FACTORY);
+        propAMMExecutor = new PropAMMExecutor();
+        // Every executor's address here is deterministic from its deploy order, and the
+        // Rust-generated calldata.txt hardcodes those addresses, so inserting a deployment
+        // invalidates every entry after it. Add new deployments at the end of this block.
+        //
+        // The Sky venues exist only on mainnet, and the executor's constructor
+        // reads their token wiring, so it cannot deploy on forks where the
+        // venues have no code. It is deployed after the fixed executor set, so
+        // skipping it does not shift those executors' deterministic addresses.
+        bool skyDeployable = SKY_DAI_USDS_CONVERTER.code.length != 0;
+        if (skyDeployable) {
+            skyExecutor = new SkyExecutor(
+                SKY_LITE_PSM, SKY_USDS_PSM_WRAPPER, SKY_DAI_USDS_CONVERTER
+            );
+        }
 
-        address[] memory executors = new address[](24);
+        address nativeRouterV6 = getNativeRouterV6();
+        bool supportsNative = nativeRouterV6 != address(0);
+        if (supportsNative) {
+            // Some protocol tests use fork blocks from before Native V6 was
+            // deployed. The executor is not exercised in those tests, but its
+            // constructor still requires the configured Router to have code.
+            if (nativeRouterV6.code.length == 0) {
+                vm.etch(nativeRouterV6, bytes("1"));
+            }
+            nativeExecutor = new NativeExecutor(nativeRouterV6);
+        }
+
+        propAMMFallbackRouter = new PropAMMFallbackRouter(
+            poolManager,
+            FLUIDV1_LIQUIDITY,
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
+        );
+        propAMMFallbackExecutor =
+            new PropAMMFallbackExecutor(address(propAMMFallbackRouter));
+        // Last, per the note above: Lido V4 is only configured on mainnet, where both Sky and
+        // Native always deploy, so appending it shifts no address before it.
+        lidoV4Executor = new LidoV4Executor(STETH_ADDR, WSTETH_ADDR);
+        // PancakeSwap Infinity (Base and BNB share these addresses). The constructor only
+        // stores immutables, so it deploys on every fork.
+        pancakeswapInfinityExecutor = new PancakeswapInfinityExecutor(
+            IPancakeswapInfinityVault(
+                0x238a358808379702088667322f80aC48bAd5e6c4
+            ),
+            0xa0FfB9c1CE1Fe56963B0321B32E7A0302114058b,
+            0xC697d2898e0D09264376196696c51D7aBbbAA4a9
+        );
+        aeroBasicExecutor = new AeroBasicExecutor();
+
+        address[] memory executors = new address[](
+            30 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
+        );
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
         executors[2] = address(pancakev3Executor);
@@ -273,7 +365,31 @@ contract TychoRouterTestSetup is
         executors[21] = address(fermiSwapExecutor);
         executors[22] = address(metricExecutor);
         executors[23] = address(bopAMMExecutor);
+        executors[24] = address(ringSwapV2Executor);
+        executors[25] = address(propAMMExecutor);
+        executors[26] = address(propAMMFallbackExecutor);
+        executors[27] = address(lidoV4Executor);
+        executors[28] = address(pancakeswapInfinityExecutor);
+        executors[29] = address(aeroBasicExecutor);
+        uint256 nextExecutorIndex = 30;
+        if (skyDeployable) {
+            executors[nextExecutorIndex] = address(skyExecutor);
+            nextExecutorIndex++;
+        }
+        if (supportsNative) {
+            executors[nextExecutorIndex] = address(nativeExecutor);
+        }
+
         return executors;
+    }
+
+    function getNativeRouterV6() internal view returns (address) {
+        if (block.chainid == 1) return NATIVE_ROUTER_V6_ETHEREUM;
+        if (block.chainid == 8453) return NATIVE_ROUTER_V6_BASE;
+        if (block.chainid == 42161) return NATIVE_ROUTER_V6_ARBITRUM;
+        if (block.chainid == 56) return NATIVE_ROUTER_V6_BSC;
+        if (block.chainid == 4663) return NATIVE_ROUTER_V6_ROBINHOOD;
+        return address(0);
     }
 
     function deployFeeCalculator() public {
@@ -281,7 +397,13 @@ contract TychoRouterTestSetup is
         routerFeeReceiver = makeAddr("routerFeeReceiver");
         // clientFeeReceiver is the address corresponding to CLIENT_FEE_RECEIVER_PK
         clientFeeReceiver = vm.addr(CLIENT_FEE_RECEIVER_PK);
-        feeCalculator = new FeeCalculator(FEE_SETTER);
+        feeCalculator = new FeeCalculator(FEE_SETTER, routerFeeReceiver);
+        // The calculator enables positive slippage capture in its constructor.
+        // The swap tests quote a round `expectedAmountOut` below the real pool
+        // output and assert the receiver gets that whole output, so capture is
+        // switched off here and exercised by the tests that opt back in.
+        vm.prank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageEnabled(false);
     }
 
     function pleEncode(bytes[] memory data)
