@@ -121,9 +121,7 @@ mod tests {
             group_token_out: swap.token_out().address.clone(),
             origin: None,
         };
-        BaibaiSwapEncoder::new(Bytes::zero(20), Chain::Base, None)
-            .unwrap()
-            .encode_swap(swap, &context)
+        BaibaiSwapEncoder::new(Bytes::zero(20), Chain::Base, None)?.encode_swap(swap, &context)
     }
 
     #[rstest]

@@ -4331,56 +4331,63 @@ fn test_sequential_encoding_strategy_sky() {
     write_calldata_to_file("test_sequential_encoding_strategy_sky", hex_calldata.as_str());
 }
 
-#[test]
-fn test_single_encoding_strategy_baibai() {
+/// Writes the calldata of a single BaiBai swap on the WETH pair under `name`.
+fn write_baibai_single_swap(name: &str, sell_base: bool, amount: u64) {
     let base = Bytes::from("0x4200000000000000000000000000000000000006");
     let quote = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
-    let encoder = get_tycho_router_encoder(Chain::Base);
-    for (name, token_in, token_out, amount) in [
-        ("baibai_sell_base", base.clone(), quote.clone(), 10_000_000_000_000_000u64),
-        ("baibai_buy_base", quote.clone(), base.clone(), 10_000_000u64),
-    ] {
-        let swap = Swap::new(
-            ProtocolComponent {
-                protocol_system: "baibai".into(),
-                static_attributes: HashMap::from([
-                    ("base".into(), base.clone()),
-                    ("quote".into(), quote.clone()),
-                ]),
-                ..Default::default()
-            },
-            default_token(token_in.clone()),
-            default_token(token_out.clone()),
-            BigUint::ZERO,
-        );
-        let solution = Solution::new(
-            bob_address(),
-            bob_address(),
-            token_in,
-            token_out,
-            BigUint::from(amount),
-            BigUint::from(1u8),
-            BigUint::from(1u8),
-            vec![swap],
-        );
-        let encoded = encoder
-            .encode_solutions(vec![solution.clone()])
-            .unwrap()
-            .remove(0);
-        let calldata = encode_tycho_router_call(
-            Chain::Base.id(),
-            &encoded,
-            &solution,
-            &eth(),
-            None,
-            0,
-            &Bytes::zero(20),
-            &BigUint::ZERO,
-        )
+    let (token_in, token_out) =
+        if sell_base { (base.clone(), quote.clone()) } else { (quote.clone(), base.clone()) };
+    let swap = Swap::new(
+        ProtocolComponent {
+            protocol_system: "baibai".into(),
+            static_attributes: HashMap::from([("base".into(), base), ("quote".into(), quote)]),
+            ..Default::default()
+        },
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+    let solution = Solution::new(
+        bob_address(),
+        bob_address(),
+        token_in,
+        token_out,
+        BigUint::from(amount),
+        BigUint::from(1u8),
+        BigUint::from(1u8),
+        vec![swap],
+    );
+    let encoded = get_tycho_router_encoder(Chain::Base)
+        .encode_solutions(vec![solution.clone()])
         .unwrap()
-        .data;
-        write_calldata_to_file(name, &encode(calldata));
-    }
+        .remove(0);
+    let calldata = encode_tycho_router_call(
+        Chain::Base.id(),
+        &encoded,
+        &solution,
+        &eth(),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    write_calldata_to_file(name, &encode(calldata));
+}
+
+#[test]
+fn test_single_encoding_strategy_baibai_sell_base() {
+    write_baibai_single_swap(
+        "test_single_encoding_strategy_baibai_sell_base",
+        true,
+        10_000_000_000_000_000,
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_baibai_buy_base() {
+    write_baibai_single_swap("test_single_encoding_strategy_baibai_buy_base", false, 10_000_000);
 }
 
 #[test]
@@ -4437,5 +4444,5 @@ fn test_sequential_encoding_strategy_baibai() {
     )
     .unwrap()
     .data;
-    write_calldata_to_file("baibai_sequential_weth_to_cbbtc", &encode(calldata));
+    write_calldata_to_file("test_sequential_encoding_strategy_baibai", &encode(calldata));
 }
