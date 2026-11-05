@@ -1219,6 +1219,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         if (activationTs == 0) {
             revert TychoRouter__NoPendingFeeCalculator();
         }
+        // forge-lint: disable-next-line(block-timestamp) A one-day timelock is unaffected by seconds of block-time drift.
         if (block.timestamp < activationTs) {
             revert TychoRouter__TimelockNotExpired(
                 activationTs, block.timestamp
@@ -1390,6 +1391,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             }
             return;
         }
+        // forge-lint: disable-next-line(block-timestamp) A signed deadline expires to the second; seconds of block-time drift are harmless.
         if (block.timestamp > p.deadline) {
             revert TychoRouter__ExpiredClientSignature(
                 p.deadline, block.timestamp

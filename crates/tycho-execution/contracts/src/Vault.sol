@@ -76,6 +76,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         if (from != address(0)) {
             uint256 fromBalance = _vaultBalances[from][id];
             if (fromBalance < amount) {
+                // forge-lint: disable-next-item(require-revert-in-loop) A debit beyond the vault balance fails the call.
                 revert ERC6909.ERC6909InsufficientBalance(
                     from, fromBalance, amount, id
                 );
@@ -112,6 +113,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         internal
     {
         if (to == address(0)) {
+            // forge-lint: disable-next-line(require-revert-in-loop) A fee credited to address(0) would be lost, so the swap fails.
             revert ERC6909InvalidReceiver(address(0));
         }
         _updateWithoutEvent(address(0), to, id, amount);

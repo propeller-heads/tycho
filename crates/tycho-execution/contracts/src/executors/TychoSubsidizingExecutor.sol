@@ -158,6 +158,7 @@ contract TychoSubsidizingExecutor is IExecutor {
         if (activation == 0 || inner == _self) {
             revert TychoSubsidizingExecutor__UnapprovedInnerExecutor(inner);
         }
+        // forge-lint: disable-next-line(block-timestamp) A one-day timelock is unaffected by seconds of block-time drift.
         if (block.timestamp < activation) {
             revert TychoSubsidizingExecutor__UnapprovedInnerExecutor(inner);
         }

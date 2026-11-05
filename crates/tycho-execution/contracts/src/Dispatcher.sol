@@ -71,10 +71,12 @@ contract Dispatcher is TransferManager {
      */
     function _setExecutor(address target) internal {
         if (target.code.length == 0) {
+            // forge-lint: disable-next-line(require-revert-in-loop) setExecutors applies a batch completely or not at all.
             revert Dispatcher__NonContractExecutor();
         }
 
         if (executorsActivationTimestamp[target] != 0) {
+            // forge-lint: disable-next-line(require-revert-in-loop) setExecutors applies a batch completely or not at all.
             revert Dispatcher__ExecutorAlreadyExists(target);
         }
 
@@ -112,6 +114,7 @@ contract Dispatcher is TransferManager {
         _IS_SPLIT_SWAP_SLOT.tstore(isSplitSwap);
         _SWAP_INPUT_AMOUNT_SLOT.tstore(amount);
 
+        // forge-lint: disable-next-item(calls-loop) Each hop calls its own executor; a failing hop fails the route.
         (
             TransferManager.TransferType transferType,
             address transferReceiver,
@@ -123,6 +126,7 @@ contract Dispatcher is TransferManager {
         if (tokenIn == tokenOut) {
             // Single-hop cycles (such as those made possible via UniswapV4 flash
             // accounting) are not supported.
+            // forge-lint: disable-next-line(require-revert-in-loop) A route runs completely or not at all.
             revert Dispatcher__UnsupportedSingleHopCycle(tokenIn);
         }
 
@@ -145,7 +149,7 @@ contract Dispatcher is TransferManager {
             false
         );
 
-        // forge-lint: disable-next-item(delegatecall-loop, low-level-calls)
+        // forge-lint: disable-next-item(delegatecall-loop, low-level-calls, calls-loop) Each hop delegatecalls its own executor and bubbles its revert data.
         (bool success, bytes memory result) = executor.delegatecall(
             abi.encodeWithSelector(
                 IExecutor.swap.selector, amount, data, receiver
@@ -166,12 +170,14 @@ contract Dispatcher is TransferManager {
 
         if (!success) {
             if (result.length == 0) {
+                // forge-lint: disable-next-line(require-revert-in-loop) A route runs completely or not at all.
                 revert Dispatcher__SwapReverted(executor);
             }
             // Bubble the executor's revert payload byte-for-byte so callers
             // see the original Error(string)/Panic/custom-error.
             // forge-lint: disable-next-line(inline-assembly) LowLevelCall.bubbleRevert(result) exceeds the stack limit here, and a later call overwrites the return data.
             assembly {
+                // forge-lint: disable-next-line(require-revert-in-loop) A route runs completely or not at all.
                 revert(add(result, 0x20), mload(result))
             }
         }
@@ -258,6 +264,7 @@ contract Dispatcher is TransferManager {
     {
         _validateExecutor(executor);
 
+        // forge-lint: disable-next-line(calls-loop) Each hop calls its own executor; a failing hop fails the route.
         receiver = IExecutor(executor).fundsExpectedAddress(data);
     }
 
@@ -265,9 +272,12 @@ contract Dispatcher is TransferManager {
         uint256 activationTimestamp = executorsActivationTimestamp[executor];
 
         if (activationTimestamp == 0) {
+            // forge-lint: disable-next-line(require-revert-in-loop) A hop through an unapproved executor fails the route.
             revert Dispatcher__UnapprovedExecutor(executor);
         }
+        // forge-lint: disable-next-line(block-timestamp) A one-day timelock is unaffected by seconds of block-time drift.
         if (block.timestamp < activationTimestamp) {
+            // forge-lint: disable-next-line(require-revert-in-loop) A hop through an unapproved executor fails the route.
             revert Dispatcher__ExecutorIsTimelocked(executor);
         }
     }

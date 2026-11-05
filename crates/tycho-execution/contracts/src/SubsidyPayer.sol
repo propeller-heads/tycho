@@ -109,6 +109,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         _grantRole(PAUSER_ADMIN_ROLE, roles.pauserAdmin);
         for (uint256 i = 0; i < roles.pausers.length; i++) {
             if (roles.pausers[i] == address(0)) {
+                // forge-lint: disable-next-line(require-revert-in-loop) Deployment fails on a zero pauser, as on any other zero role.
                 revert SubsidyPayer__AddressZero();
             }
             _grantRole(PAUSER_ROLE, roles.pausers[i]);
@@ -238,6 +239,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         if (paused()) {
             return SkipReason.Paused;
         }
+        // forge-lint: disable-next-line(block-timestamp) A signed deadline expires to the second; seconds of block-time drift are harmless.
         if (block.timestamp > subsidy.deadline) {
             return SkipReason.Expired;
         }

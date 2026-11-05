@@ -179,6 +179,7 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
                     (int128, int128)
                 );
             } else {
+                // forge-lint: disable-next-item(calls-loop) Each hop of a multi-pool route swaps once in the same lock.
                 (delta0, delta1) = _core.swap_611415377(
                     pk, nextAmountIn, isToken1, sqrtRatioLimit, _SKIP_AHEAD
                 );
@@ -205,7 +206,7 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
             bytes4(0x101e8952), bytes32(uint256(uint160(to))), data
         );
 
-        // forge-lint: disable-next-line(low-level-calls)
+        // forge-lint: disable-next-line(low-level-calls, calls-loop) Each MEV-resist hop forwards once in the same lock.
         (bool success, bytes memory returnData) = address(_core).call(callData);
 
         if (!success) {

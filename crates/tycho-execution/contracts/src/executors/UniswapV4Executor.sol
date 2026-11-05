@@ -273,6 +273,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
             uint16 hookDataLength = uint16(bytes2(LibBytes.load(poolData, 46)));
 
             if (poolData.length < _POOL_HEADER_LENGTH + hookDataLength) {
+                // forge-lint: disable-next-line(require-revert-in-loop) Malformed swap data fails the swap.
                 revert UniswapV4Executor__InvalidDataLength();
             }
 
@@ -430,6 +431,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
         bytes calldata hookData
     ) private returns (int128 reciprocalAmount) {
         unchecked {
+            // forge-lint: disable-next-item(calls-loop) Each hop of a multi-pool route swaps once in the same unlock.
             BalanceDelta delta = poolManager.swap(
                 poolKey,
                 SwapParams({
@@ -521,6 +523,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
 
         // Calculate number of attestations from data length
         if (attestationData.length % totalLength != 0) {
+            // forge-lint: disable-next-line(require-revert-in-loop) Malformed attestation data fails the swap.
             revert UniswapV4Executor__InvalidAngstromAttestationDataLength(attestationData.length);
         }
 

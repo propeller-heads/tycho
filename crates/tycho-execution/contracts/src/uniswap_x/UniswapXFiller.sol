@@ -130,6 +130,7 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
         }
 
         for (uint256 i = 0; i < tokens.length; i++) {
+            // forge-lint: disable-next-line(calls-loop) The admin chooses the tokens and can leave out one whose balanceOf reverts.
             uint256 tokenBalance = tokens[i].balanceOf(address(this));
             if (tokenBalance > 0) {
                 emit Withdrawal(address(tokens[i]), tokenBalance, receiver);

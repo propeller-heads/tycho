@@ -42,9 +42,6 @@ These checks belong to forge lint, which has an equivalent lint:
   `function-init-state`, `uninitialized-local`, `unprotected-upgrade`, `pragma`: forge's lint
   covers the same check or more of it.
 
-forge lint turns `calls-loop` and `block-timestamp` off as well (see `foundry.toml`), so neither tool
-runs those two checks.
-
 Detectors that report different cases from their forge counterpart run in both tools:
 `divide-before-multiply`, `uninitialized-state`, `incorrect-exp`, `weak-prng`, `write-after-write`,
 `assert-state-change`, `costly-loop` and `immutable-states`.

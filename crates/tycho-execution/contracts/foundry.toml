@@ -78,13 +78,10 @@ exclude_lints = [
     "screaming-snake-case-immutable", # Immutable names; this rule conflicts with Slither's.
 
     # Off for this codebase:
-    "require-revert-in-loop",   # Rejecting a whole call when one element is invalid is intended.
-    "calls-loop",               # Calling out per element is intended; one failed call reverts the whole call.
-    "block-timestamp",          # Timestamps only gate deadlines and timelocks; seconds of drift are harmless.
     "unwrapped-modifier-logic", # Under via-IR, wrapping grows EkuboExecutor by 115 B and ~340 gas/swap (on c29ab76f7).
-    "modifier-used-only-once",  # Access checks are modifiers however many functions use them.
+    "modifier-used-only-once",  # A modifier puts an access check in the signature, where readers look for it.
     "asm-keccak256",            # abi.encode follows a struct's fields; a hand-listed library hash would not.
-    "unsafe-typecast",          # Off until each of its 54 casts in src/ is checked against its range.
+    "unsafe-typecast",          # Off until each cast it reports in src/ is checked against its range.
     "unsafe-cheatcode",         # Tests read fixture files on purpose; fs_permissions limits the paths.
 ]
 

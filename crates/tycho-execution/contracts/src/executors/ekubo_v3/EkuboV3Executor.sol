@@ -111,6 +111,7 @@ contract EkuboV3Executor is IExecutor, ICallback {
         uint256 lastHopOffset = offset;
         while (offset < data.length) {
             if (offset + _HOP_BYTE_LEN > data.length) {
+                // forge-lint: disable-next-line(require-revert-in-loop) Malformed swap data fails the swap.
                 revert EkuboV3Executor__InvalidDataLength();
             }
             lastHopOffset = offset;
@@ -290,12 +291,14 @@ contract EkuboV3Executor is IExecutor, ICallback {
 
         uint256 sigLenOff = offset + _SIGNED_FIXED_TAIL_LEN;
         if (sigLenOff + _SIG_LEN_BYTES > data.length) {
+            // forge-lint: disable-next-line(require-revert-in-loop) Malformed swap data fails the swap.
             revert EkuboV3Executor__InvalidDataLength();
         }
         uint256 sigLen =
             uint256(uint16(bytes2(data[sigLenOff:sigLenOff + _SIG_LEN_BYTES])));
         uint256 sigEnd = sigLenOff + _SIG_LEN_BYTES + sigLen;
         if (sigEnd > data.length) {
+            // forge-lint: disable-next-line(require-revert-in-loop) Malformed swap data fails the swap.
             revert EkuboV3Executor__InvalidDataLength();
         }
         return sigEnd;
@@ -320,6 +323,7 @@ contract EkuboV3Executor is IExecutor, ICallback {
 
         while (offset < swapData.length) {
             if (offset + _HOP_BYTE_LEN > swapData.length) {
+                // forge-lint: disable-next-line(require-revert-in-loop) Malformed swap data fails the swap.
                 revert EkuboV3Executor__InvalidDataLength();
             }
 

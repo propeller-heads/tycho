@@ -187,6 +187,7 @@ contract TransferManager is Vault {
             return amount;
         }
 
+        // forge-lint: disable-next-line(require-revert-in-loop) Unreachable for the four transfer types; rejects a type added without a branch above.
         revert TransferManager__UnknownTransferType();
     }
 
@@ -212,6 +213,7 @@ contract TransferManager is Vault {
     function _revokeUnconsumedApproval(address token, address spender)
         internal
     {
+        // forge-lint: disable-next-line(calls-loop) Each hop revokes its own spender's approval; a failing token fails the route.
         if (IERC20(token).allowance(address(this), spender) > 0) {
             IERC20(token).forceApprove(spender, 0);
         }
@@ -240,11 +242,13 @@ contract TransferManager is Vault {
         isPermit2 = _IS_PERMIT2_SLOT.tload();
 
         if (amount > amountAllowed) {
+            // forge-lint: disable-next-item(require-revert-in-loop) Pulling more than the swap's input amount fails the route.
             revert TransferManager__ExceededTransferFromAllowance(
                 amountAllowed, amount
             );
         }
         if (token != tokenInStorage) {
+            // forge-lint: disable-next-line(require-revert-in-loop) Pulling a token other than the swap's input fails the route.
             revert TransferManager__DifferentTokenIn(token, tokenInStorage);
         }
 
@@ -256,6 +260,7 @@ contract TransferManager is Vault {
         // Perform the actual transfer
         if (isPermit2) {
             // Permit2.permit is already called from the TychoRouterV3
+            // forge-lint: disable-next-line(calls-loop) Each split from the input token pulls its share from the user; a failing pull fails the route.
             permit2.transferFrom(sender, receiver, uint160(amount), token);
         } else {
             // forge-lint: disable-next-line(arbitrary-send-erc20)
@@ -273,9 +278,11 @@ contract TransferManager is Vault {
         view
         returns (uint256)
     {
-        return token == ETH_ADDRESS
-            ? owner.balance
-            : IERC20(token).balanceOf(owner);
+        // forge-lint: disable-next-item(calls-loop) Each hop reads its own token's balances; a failing token fails the route.
+        return
+            token == ETH_ADDRESS
+                ? owner.balance
+                : IERC20(token).balanceOf(owner);
     }
 
     /**
