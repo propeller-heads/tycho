@@ -6,15 +6,16 @@ import {
     IERC20,
     SafeERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-// slither-disable-next-line solc-version
 import {IAsset} from "@balancer-labs/v2-interfaces/contracts/vault/IAsset.sol";
-// slither-disable-next-line solc-version
 import {IVault} from "@balancer-labs/v2-interfaces/contracts/vault/IVault.sol";
 import {TransferManager} from "../TransferManager.sol";
 
 error BalancerV2Executor__InvalidDataLength();
 
 contract BalancerV2Executor is IExecutor {
+    // tokenIn (20) + tokenOut (20) + poolId (32)
+    uint256 private constant _DATA_LENGTH = 72;
+
     using SafeERC20 for IERC20;
 
     address private constant _VAULT =
@@ -32,7 +33,7 @@ contract BalancerV2Executor is IExecutor {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -61,7 +62,7 @@ contract BalancerV2Executor is IExecutor {
 
         uint256 limit = 0;
 
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         IVault(_VAULT).swap(singleSwap, funds, limit, block.timestamp);
     }
 
@@ -70,7 +71,7 @@ contract BalancerV2Executor is IExecutor {
         pure
         returns (address tokenIn, address tokenOut, bytes32 poolId)
     {
-        if (data.length != 72) {
+        if (data.length != _DATA_LENGTH) {
             revert BalancerV2Executor__InvalidDataLength();
         }
 
@@ -90,7 +91,7 @@ contract BalancerV2Executor is IExecutor {
             bool outputToRouter
         )
     {
-        if (data.length != 72) {
+        if (data.length != _DATA_LENGTH) {
             revert BalancerV2Executor__InvalidDataLength();
         }
 

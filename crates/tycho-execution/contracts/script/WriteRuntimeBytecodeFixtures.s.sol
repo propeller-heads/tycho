@@ -18,7 +18,6 @@ contract WriteRuntimeBytecodeFixtures is RuntimeBytecodeFixtures, Script {
             string memory json = vm.serializeBytes(
                 "fixture", "runtimeBytecode", _build(fixture)
             );
-            // forge-lint: disable-next-line(unsafe-cheatcode)
             vm.writeFile(_fixturePath(fixture.name), json);
         }
     }
