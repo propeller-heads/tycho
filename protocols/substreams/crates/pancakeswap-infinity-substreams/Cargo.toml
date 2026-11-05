@@ -1,0 +1,18 @@
+[package]
+name = "pancakeswap-infinity-substreams"
+version = "0.1.0"
+edition = "2021"
+description = "What the PancakeSwap Infinity substreams packages share regardless of pool type"
+license-file = "../../../../LICENSE.md"
+
+[dependencies]
+anyhow = "1.0.75"
+hex = "0.4.3"
+serde = { version = "1.0.204", features = ["derive"] }
+serde_qs = "0.13.0"
+tiny-keccak = { version = "2", features = ["keccak"] }
+
+[dev-dependencies]
+rstest = "0.24.0"
+substreams-ethereum = "0.9.9"
+tycho-substreams = "0.8.0"
