@@ -504,18 +504,11 @@ async fn run_spkg(global_args: &GlobalArgs, run_args: RunSpkgArgs) -> Result<(),
         ),
     )]));
 
-    let retention_horizon = match &run_args.retention_horizon {
-        Some(horizon) => horizon.parse().map_err(|e| {
-            ExtractionError::Setup(format!("Invalid retention horizon '{horizon}': {e}"))
-        })?,
-        None => Utc::now().naive_utc(),
-    };
-
     let (supervisor_tasks, mut other_tasks) = create_indexing_tasks(
         global_args,
         &run_args.substreams_args,
         &[chain],
-        retention_horizon,
+        Utc::now().naive_utc(),
         config,
         None,
         run_args.settlement_contract,

@@ -84,7 +84,8 @@ impl ComponentFilter {
     /// # Arguments
     ///
     /// * `ids` - A vector of component IDs to include in the filter. Only components with these IDs
-    ///   will be tracked.
+    ///   will be tracked. A listed component that does not exist yet is tracked from the block that
+    ///   creates it.
     #[expect(
         non_snake_case,
         reason = "named after the enum variant it stands for; renaming the public constructor is a breaking change"
@@ -423,21 +424,30 @@ where
 
     /// Given BlockAggregatedChanges, filter out components that are no longer relevant and return
     /// the components that need to be added or removed.
+    /// The components `deltas` creates that an `Ids` filter lists and that are not tracked yet.
+    /// Empty for any other filter.
+    pub fn created_listed_components(&self, deltas: &BlockAggregatedChanges) -> Vec<ComponentId> {
+        let ComponentFilterVariant::Ids(ids) = &self.filter.variant else {
+            return Vec::new();
+        };
+        let ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        deltas
+            .new_protocol_components
+            .keys()
+            .filter(|id| {
+                ids.contains(id.to_lowercase().as_str()) && !self.components.contains_key(*id)
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn filter_updated_components(
         &self,
         deltas: &BlockAggregatedChanges,
     ) -> (Vec<ComponentId>, Vec<ComponentId>) {
         match &self.filter.variant {
             // A listed component created after tracking started is added in its creation block.
-            ComponentFilterVariant::Ids(ids) => {
-                let to_add = deltas
-                    .new_protocol_components
-                    .keys()
-                    .filter(|id| ids.contains(&id.to_lowercase()))
-                    .cloned()
-                    .collect();
-                (to_add, Vec::new())
-            }
+            ComponentFilterVariant::Ids(_) => (self.created_listed_components(deltas), Vec::new()),
             ComponentFilterVariant::MinimumTVLRange { range: (remove_tvl, add_tvl), .. } => {
                 let (mut to_add, mut to_remove): (Vec<_>, Vec<_>) = deltas
                     .component_tvl
@@ -643,6 +653,30 @@ mod test {
         let (to_add, to_remove) = tracker.filter_updated_components(&deltas);
         assert_eq!(to_add, vec!["0xlisted".to_string()]);
         assert!(to_remove.is_empty());
+    }
+
+    #[test]
+    fn test_created_listed_components_skips_tracked_and_other_filters() {
+        let mut tracker = with_mocked_rpc();
+        tracker.filter =
+            ComponentFilter::Ids(vec!["0xListed".to_string(), "0xTracked".to_string()]);
+        tracker
+            .components
+            .insert("0xtracked".to_string(), ProtocolComponent::default());
+        let deltas = BlockAggregatedChanges {
+            new_protocol_components: HashMap::from([
+                ("0xlisted".to_string(), ProtocolComponent::default()),
+                ("0xtracked".to_string(), ProtocolComponent::default()),
+                ("0xother".to_string(), ProtocolComponent::default()),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(tracker.created_listed_components(&deltas), vec!["0xlisted".to_string()]);
+
+        tracker.filter = ComponentFilter::with_tvl_range(1.0, 2.0);
+        assert!(tracker
+            .created_listed_components(&deltas)
+            .is_empty());
     }
 
     #[test]

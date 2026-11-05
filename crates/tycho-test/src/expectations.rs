@@ -38,13 +38,14 @@ pub enum Harness {
 /// ```
 ///
 /// Legacy mode also accepts `true` and `false`. Strict mode rejects both: `true` gives no reason,
-/// and `false` is the default, so the key is left out.
+/// and `false` is the default, so the key is left out. In both modes, a string that reads as yes or
+/// no, such as `no` or `"false"`, is an error rather than a reason.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Skip {
     /// Not written: the check runs.
     #[default]
     No,
-    /// `true` or `false`, legacy mode's form.
+    /// `true` or `false`, legacy mode's form. `false` runs the check, like [`Skip::No`].
     Bool(bool),
     /// Skipped, for this reason.
     Reason(String),
@@ -52,10 +53,11 @@ pub enum Skip {
 
 impl Skip {
     pub fn is_skipped(&self) -> bool {
-        matches!(self, Skip::Bool(true) | Skip::Reason(_))
+        self.reason().is_some()
     }
 
-    /// Why the check is off, for logs and the report. `None` when it is not skipped.
+    /// Why the check is off, for logs and the report. `None` when it is not skipped. A legacy
+    /// `true` has no reason, and reads "no reason given".
     pub fn reason(&self) -> Option<&str> {
         match self {
             Skip::No | Skip::Bool(false) => None,
@@ -83,6 +85,18 @@ impl<'de> Deserialize<'de> for Skip {
             fn visit_str<E: de::Error>(self, v: &str) -> Result<Skip, E> {
                 if v.trim().is_empty() {
                     return Err(E::custom("the reason for a skip is empty"));
+                }
+                // serde_yaml reads only `true` and `false` as booleans, so `no` or a quoted
+                // `"false"` arrives as a string, and would otherwise turn the check off.
+                const YES_OR_NO: [&str; 8] = ["true", "false", "yes", "no", "on", "off", "y", "n"];
+                if YES_OR_NO
+                    .iter()
+                    .any(|word| v.trim().eq_ignore_ascii_case(word))
+                {
+                    return Err(E::custom(format!(
+                        "`{v}` reads as yes or no, not as a reason: write why the check is \
+                         skipped, or leave the key out to run it"
+                    )));
                 }
                 Ok(Skip::Reason(v.to_string()))
             }
@@ -139,27 +153,61 @@ pub struct Limits {
     pub lost_capacity: Option<String>,
 }
 
+impl fmt::Display for LimitKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            LimitKind::Hard => "hard",
+            LimitKind::Soft => "soft",
+            LimitKind::UnderCap => "under_cap",
+        })
+    }
+}
+
 impl Limits {
-    /// The fields this kind requires that are missing or empty.
-    fn missing_fields(&self) -> Vec<&'static str> {
-        let required: &[&'static str] = match self.kind {
-            LimitKind::Hard => &[],
-            LimitKind::Soft => &["reason"],
-            LimitKind::UnderCap => &["reason", "lost_capacity"],
+    /// What is wrong with the declaration's fields: each one its kind requires that is missing or
+    /// empty, and each one its kind does not read that is written.
+    fn field_problems(&self) -> Vec<String> {
+        let reason = ("reason", &self.reason);
+        let lost_capacity = ("lost_capacity", &self.lost_capacity);
+        let (required, unread) = match self.kind {
+            LimitKind::Hard => (vec![], vec![reason, lost_capacity]),
+            LimitKind::Soft => (vec![reason], vec![lost_capacity]),
+            LimitKind::UnderCap => (vec![reason, lost_capacity], vec![]),
         };
-        required
-            .iter()
-            .copied()
-            .filter(|field| {
-                let value = match *field {
-                    "reason" => &self.reason,
-                    _ => &self.lost_capacity,
-                };
-                value
+        let mut problems = Vec::new();
+        for (name, value) in required {
+            if value
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                problems.push(format!("missing {name}"));
+            }
+        }
+        for (name, value) in unread {
+            if value.is_some() {
+                problems.push(format!("{name} is not read for a {} limit", self.kind));
+            }
+        }
+        problems
+    }
+
+    /// Why `limits.past_limit` does not apply to this limit, if it does not: a soft or under-cap
+    /// limit is not the venue's bound. The reason names what the declaration gives.
+    pub fn past_limit_skip_reason(&self) -> Option<String> {
+        let reason = self
+            .reason
+            .as_deref()
+            .unwrap_or_default();
+        match self.kind {
+            LimitKind::Hard => None,
+            LimitKind::Soft => Some(format!("the limit is declared soft: {reason}")),
+            LimitKind::UnderCap => Some(format!(
+                "the limit is declared under_cap: {reason}; it gives up {}",
+                self.lost_capacity
                     .as_deref()
-                    .is_none_or(|value| value.trim().is_empty())
-            })
-            .collect()
+                    .unwrap_or_default()
+            )),
+        }
     }
 }
 
@@ -234,7 +282,7 @@ impl fmt::Display for Tolerance {
 /// delta, which puts TVL off by 100%; the tolerance sits well below that.
 ///
 /// The declaration is checked, not trusted: the runner decodes the snapshot again with the
-/// component's balances halved, and every limit, spot price and quote must stay the same
+/// component's balances scaled down, and every limit, spot price and quote must stay the same
 /// (`balances.tvl_only`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -266,16 +314,20 @@ pub fn tolerance_problems(
     measured: &str,
 ) -> Vec<String> {
     let mut problems = Vec::new();
-    match (bps, wei) {
-        (None, None) => problems.push(
-            "it declares neither `bps` nor `wei`; exact is the default: remove the declaration"
+    if bps.is_none() && wei.is_none() {
+        problems.push(
+            "it declares neither `bps` nor `wei`: declare one, or remove the declaration (in \
+             strict mode, exact is the default)"
                 .to_string(),
-        ),
-        (Some(0), _) | (_, Some(0)) => problems.push(
-            "a zero `bps` or `wei` allows nothing; exact is the default: leave it out".to_string(),
-        ),
-        (Some(bps), _) if bps >= 10_000 => problems.push(format!("`bps: {bps}` allows any amount")),
-        _ => {}
+        );
+    }
+    for (field, value) in [("bps", bps.map(u64::from)), ("wei", wei)] {
+        if value == Some(0) {
+            problems.push(format!("`{field}: 0` allows nothing: leave it out"));
+        }
+    }
+    if let Some(bps) = bps.filter(|bps| *bps >= 10_000) {
+        problems.push(format!("`bps: {bps}` is out of range: `bps` must be 1 to 9999"));
     }
     for (field, value) in [("cause", cause), ("measured", measured)] {
         if value.trim().is_empty() {
@@ -387,9 +439,14 @@ impl<'de> Deserialize<'de> for LimitsDeclaration {
                 declaration.default = Some(parse(key, limits.clone())?);
             } else {
                 let direction = Direction::from_str(key).map_err(de::Error::custom)?;
-                declaration
+                // Keys that differ only in case or spacing are one direction.
+                if declaration
                     .directions
-                    .insert(direction, parse(key, limits.clone())?);
+                    .insert(direction.clone(), parse(key, limits.clone())?)
+                    .is_some()
+                {
+                    return Err(de::Error::custom(format!("limits: {direction} is declared twice")));
+                }
             }
         }
         Ok(declaration)
@@ -408,16 +465,16 @@ impl Serialize for LimitsDeclaration {
     }
 }
 
-/// Records each entry of `declaration` that lacks a field its kind requires.
+/// Records each entry of `declaration` that lacks a field its kind requires, or has one its kind
+/// does not read.
 pub fn check_declaration(
     declaration: &LimitsDeclaration,
     location: &str,
     problems: &mut Vec<String>,
 ) {
     for (key, limits) in declaration.entries() {
-        let missing = limits.missing_fields();
-        if !missing.is_empty() {
-            problems.push(format!("{location}, {key}: missing {}", missing.join(", ")));
+        for problem in limits.field_problems() {
+            problems.push(format!("{location}, {key}: {problem}"));
         }
     }
 }

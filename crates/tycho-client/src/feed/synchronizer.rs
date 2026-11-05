@@ -677,6 +677,19 @@ where
                     break msg;
                 };
 
+                // A listed component created in the first block is not in the state the tracker
+                // initialised from, so it would be filtered out below and never tracked. Track it
+                // first, so the initial snapshot includes it.
+                let created = self
+                    .component_tracker
+                    .created_listed_components(&first_msg);
+                if !created.is_empty() {
+                    let created: Vec<&String> = created.iter().collect();
+                    self.component_tracker
+                        .start_tracking(&created)
+                        .await
+                        .map_err(SynchronizerError::RPCError)?;
+                }
                 self.filter_deltas(&mut first_msg);
 
                 // initial snapshot

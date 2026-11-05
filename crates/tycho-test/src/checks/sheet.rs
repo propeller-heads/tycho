@@ -1,5 +1,5 @@
-//! A decoded state's answers to the questions every check asks: each direction's limits, spot
-//! price and quotes along the ladder.
+//! A decoded state's answers to the questions the stream and `tvl_only` checks ask: each
+//! direction's limits, spot price and quotes along the ladder.
 //!
 //! A sheet holds the answers as printed values, so it outlives the state, which a later decode may
 //! invalidate. Two sheets of the same component compare question by question.
@@ -13,9 +13,11 @@ use tycho_simulation::tycho_common::{models::token::Token, simulation::protocol_
 
 /// What a check asks a decoded state.
 pub trait Quoter {
-    /// `(max input, max output)` of selling `token_in` for `token_out`.
+    /// `(max input, max output)` of selling `token_in` for `token_out`, or the error, printed.
     fn limits(&self, token_in: &Token, token_out: &Token) -> Result<(BigUint, BigUint), String>;
+    /// The price of `base` in `quote`, or the error, printed.
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, String>;
+    /// What selling `amount_in` of `token_in` pays in `token_out`, or the error, printed.
     fn amount_out(
         &self,
         amount_in: BigUint,
@@ -46,8 +48,9 @@ impl Quoter for dyn ProtocolSim {
     }
 }
 
-/// The fractions of a direction's max input the sheet quotes, in thousandths, as the ladder does.
-pub const LADDER: [u32; 3] = [1, 10, 100];
+/// The fractions of a direction's max input that [`quote_sheet`] and the `tvl_only` comparison
+/// quote, in thousandths (0.1%, 1% and 10%), as the ladder does.
+pub(crate) const LADDER_THOUSANDTHS: [u32; 3] = [1, 10, 100];
 
 /// Everything a state answers, by question: each direction's limits and spot price, and quotes at
 /// 0.1%, 1% and 10% of its max input after `sizing`, which caps it as the ladder does. Values are
@@ -84,7 +87,7 @@ pub fn quote_sheet<Q: Quoter + ?Sized>(
             continue;
         };
         let max_input = sizing(&max_input);
-        for thousandths in LADDER {
+        for thousandths in LADDER_THOUSANDTHS {
             let amount_in = &max_input * thousandths / 1000u32;
             if amount_in.is_zero() {
                 continue;

@@ -10,9 +10,23 @@ use num_traits::{Signed, ToPrimitive, Zero};
 use tracing::{error, info};
 
 use crate::{
-    execution::models::{TychoExecutionInput, TychoExecutionResult},
+    execution::{
+        models::{TychoExecutionInput, TychoExecutionResult},
+        TRANSPORT_ERROR_PREFIX,
+    },
     expectations::Tolerance,
 };
+
+/// `executed - simulated`, and that difference in basis points of `executed`. `None` for a zero
+/// executed amount, which no relative difference can be expressed against.
+pub fn drift(simulated: &BigUint, executed: &BigUint) -> Option<(BigInt, f64)> {
+    if executed.is_zero() {
+        return None;
+    }
+    let difference = BigInt::from(executed.clone()) - BigInt::from(simulated.clone());
+    let bps = BigRational::new(&difference * 10_000, BigInt::from(executed.clone())).to_f64()?;
+    Some((difference, bps))
+}
 
 /// Reports whether an executed amount out matches the simulated one within `tolerance`: in basis
 /// points of the executed amount, or in base units of the token out.
@@ -25,21 +39,16 @@ pub fn check_execution_slippage(
     amount_out: &BigUint,
     tolerance: Tolerance,
 ) -> Result<(), String> {
-    if amount_out.is_zero() {
+    let Some((difference, bps)) = drift(expected_amount_out, amount_out) else {
         return Err("execution returned no output".to_string());
-    }
-
-    let executed = BigInt::from(amount_out.clone());
-    let difference = executed.clone() - BigInt::from(expected_amount_out.clone());
+    };
     let within = difference.abs() <= BigInt::from(tolerance.wei) ||
-        difference.abs() * 10_000u32 <= executed.clone() * tolerance.bps;
+        difference.abs() * 10_000u32 <= BigInt::from(amount_out.clone()) * tolerance.bps;
     if within {
         return Ok(());
     }
 
-    let bps = BigRational::new(difference.abs() * 10_000u32, executed)
-        .to_f64()
-        .map_or_else(|| "?".to_string(), format_bps);
+    let bps = format_bps(bps.abs());
     let (paid, quotes) =
         if difference.is_negative() { ("less", "overquotes") } else { ("more", "underquotes") };
     Err(format!(
@@ -131,6 +140,15 @@ pub fn missing_revert(
     let component = &input.component_id;
     let amount_in = input.solution.amount_in();
     let failure = match results.get(simulation_id) {
+        // A node error on the call is reported as a revert, but proves nothing about the venue.
+        Some(TychoExecutionResult::Revert { reason, .. })
+            if reason.starts_with(TRANSPORT_ERROR_PREFIX) =>
+        {
+            Some(format!(
+                "[{component}] {simulation_id} could not be traced, so the revert past the limit \
+                 is unproven: {reason}"
+            ))
+        }
         Some(TychoExecutionResult::Revert { reason, .. }) => {
             info!(
                 "[{component}] {amount_in} {}, one unit past the hard limit, reverts: {reason}",
@@ -157,7 +175,76 @@ pub fn missing_revert(
 
 #[cfg(test)]
 mod tests {
+    use tycho_execution::encoding::models::Solution;
+    use tycho_simulation::tycho_common::Bytes;
+
     use super::*;
+    use crate::execution::models::Transaction;
+
+    fn past_limit_input() -> TychoExecutionInput {
+        TychoExecutionInput {
+            solution: Solution::new(
+                Bytes::default(),
+                Bytes::default(),
+                Bytes::from("0x01"),
+                Bytes::from("0x02"),
+                BigUint::from(101u32),
+                BigUint::from(50u32),
+                BigUint::from(50u32),
+                Vec::new(),
+            ),
+            transaction: Transaction::new(
+                Bytes::default(),
+                BigUint::zero(),
+                Vec::new(),
+                BigUint::zero(),
+            ),
+            expected_amount_out: BigUint::from(50u32),
+            protocol_system: "vault".to_string(),
+            component_id: "0xaa".to_string(),
+            token_in: "A".to_string(),
+            token_out: "B".to_string(),
+            estimated_gas: BigUint::zero(),
+            account_overwrites: None,
+        }
+    }
+
+    fn revert(reason: &str) -> TychoExecutionResult {
+        TychoExecutionResult::Revert {
+            reason: reason.to_string(),
+            state_overwrites: None,
+            overwrite_metadata: None,
+        }
+    }
+
+    #[test]
+    fn only_a_revert_from_the_chain_proves_a_hard_limit() {
+        let judge = |result: Option<TychoExecutionResult>| {
+            let results: HashMap<String, TychoExecutionResult> = result
+                .into_iter()
+                .map(|result| ("past".to_string(), result))
+                .collect();
+            missing_revert("past", &past_limit_input(), &results)
+        };
+        assert_eq!(judge(Some(revert("ERC4626: deposit more than max"))), None);
+        let settled = judge(Some(TychoExecutionResult::Success {
+            amount_out: BigUint::from(50u32),
+            gas_used: 0,
+            state_overwrites: None,
+            overwrite_metadata: None,
+        }))
+        .unwrap();
+        assert!(settled.contains("executes and pays 50 B"), "{settled}");
+        let untraced =
+            judge(Some(revert(&format!("{TRANSPORT_ERROR_PREFIX} request timed out")))).unwrap();
+        assert!(untraced.contains("could not be traced"), "{untraced}");
+        let failed =
+            judge(Some(TychoExecutionResult::Failed { error_msg: "decode".to_string() })).unwrap();
+        assert!(failed.contains("could not be simulated"), "{failed}");
+        assert!(judge(None)
+            .unwrap()
+            .contains("No result found"));
+    }
 
     #[test]
     fn legacy_tolerance_is_half_a_percent_either_way() {

@@ -353,13 +353,6 @@ pub struct RunSpkgArgs {
     /// so a client can follow a historical range block by block. For tests.
     #[clap(long)]
     pub wait_for_subscriber: bool,
-
-    /// Retention horizon date
-    ///
-    /// Optional. Versions older than this date are not kept in storage. Defaults to now, which
-    /// keeps only the latest state of a historical range.
-    #[clap(long)]
-    pub retention_horizon: Option<String>,
 }
 
 impl RunSpkgArgs {
@@ -497,7 +490,6 @@ mod cli_tests {
                     .parse()
                     .unwrap(),
                 wait_for_subscriber: false,
-                retention_horizon: None,
             }),
         };
 
