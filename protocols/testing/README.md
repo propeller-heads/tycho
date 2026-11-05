@@ -139,7 +139,10 @@ sits in the PSM's pocket, and the USDS it can pay out is the PSM's DAI:
 - `min_of` compares the indexed balance with the smallest of the holders' balances, for an amount
   bounded by each of them. It needs at least two holders.
 - The comparison is exact, and a token without an indexed balance counts as zero.
-- A `tokens` entry for a token the component does not have fails the component.
+- A `tokens` entry for a token the component does not have fails the component, and two entries
+  for one token (keys that differ only in case) are an error.
+- A test in strict mode must list its expected components: an empty list, which elsewhere means
+  every component of the protocol, would leave the balances unchecked.
 - A component whose id is not an address needs a holder.
 - The package-level `skip_balance_check` is an error in strict mode, whatever its value; leave
   it out, as the check runs by default. A
