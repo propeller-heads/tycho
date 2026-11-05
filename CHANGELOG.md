@@ -1,3 +1,5 @@
+## [0.502.3](https://github.com/propeller-heads/tycho/compare/0.502.2...0.502.3) (2026-11-05)
+
 ## [0.502.2](https://github.com/propeller-heads/tycho/compare/0.502.1...0.502.2) (2026-11-05)
 
 
