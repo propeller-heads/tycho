@@ -31,6 +31,9 @@ Shared domain types, storage/extraction traits, and simulation abstractions used
 - **`indicatively_priced`** — `IndicativelyPriced` extension trait for RFQ/off-chain-signed quotes
 - **`errors`** — `SimulationError` (Fatal / InvalidInput / Recoverable) and `TransitionError`
 
+### Test Helpers (`testing/`, `test-utils` feature)
+- **`delta_history`** — Delta catch-up oracle: `DeltaStateModel` (client state folded from WebSocket messages, `check_against` the canonical chain), `generate_history` (random extractor histories with reverts and restarts, reverts built like the indexer's), `catch_up_spec` (what the server's delta window must answer for a gap), `through_the_wire`
+
 ## Client Sync
 
 Changes to `dto.rs` or the `Chain` enum require updates to both `tycho-client/` (Rust) and
