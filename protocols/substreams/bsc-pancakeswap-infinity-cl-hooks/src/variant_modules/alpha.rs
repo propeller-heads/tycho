@@ -1,10 +1,10 @@
 //! What every module of this package shares about `CLAlphaHook`.
-use base_pancakeswap_infinity_cl::{
-    modules::map_pool_created::decode_address,
+use pancakeswap_infinity_substreams::{
     parameters::{
         hooks_registration_bitmap, HOOKS_AFTER_SWAP_OFFSET, HOOKS_AFTER_SWAP_RETURNS_DELTA_OFFSET,
         HOOKS_BEFORE_SWAP_OFFSET, HOOKS_BEFORE_SWAP_RETURNS_DELTA_OFFSET,
     },
+    params::decode_address,
 };
 use substreams_ethereum::pb::eth::v2::Log;
 use substreams_helper::hex::Hexable;
@@ -58,7 +58,7 @@ pub fn decode_start_update(log: &Log, hooks: &[Vec<u8>]) -> Option<(String, Vec<
 
 #[cfg(test)]
 mod tests {
-    use base_pancakeswap_infinity_cl::parameters::HOOKS_BEFORE_SWAP_OFFSET;
+    use pancakeswap_infinity_substreams::parameters::HOOKS_BEFORE_SWAP_OFFSET;
     use rstest::rstest;
 
     use super::*;

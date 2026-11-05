@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.2
+
+The hook bitmap, dynamic fee flag, pool slot hash, protocol fee split, deployment params and
+`Transaction` conversions come from the `pancakeswap-infinity-substreams` crate, shared with the
+Bin package. The output is unchanged; the wasm hash is not.
+
 ## v0.1.1
 
 The crate also builds as an rlib and exports `pool_component` and `decode_address`, so

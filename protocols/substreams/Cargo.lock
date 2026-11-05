@@ -437,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "base-pancakeswap-infinity-cl"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -445,10 +445,9 @@ dependencies = [
  "hex",
  "itertools 0.13.0",
  "num-bigint",
+ "pancakeswap-infinity-substreams",
  "prost 0.11.9",
  "rstest",
- "serde",
- "serde_qs 0.13.0",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
  "substreams-helper 0.0.2",
@@ -544,13 +543,14 @@ dependencies = [
 
 [[package]]
 name = "bsc-pancakeswap-infinity-cl-hooks"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base-pancakeswap-infinity-cl",
  "ethabi 18.0.0",
  "getrandom 0.2.17",
  "hex",
+ "pancakeswap-infinity-substreams",
  "rstest",
  "serde",
  "serde_qs 0.13.0",
