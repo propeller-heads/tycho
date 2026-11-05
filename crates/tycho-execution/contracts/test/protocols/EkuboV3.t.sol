@@ -419,14 +419,12 @@ contract LiquidityHelper {
         int128 liquidity
     ) external {
         // Start payment tracking before lock.
-        // slither-disable-next-line unused-return
         LibCall.callContract(
             CORE_ADDRESS,
             abi.encodeWithSelector(
                 IFlashAccountant.startPayments.selector, poolKey.token0
             )
         );
-        // slither-disable-next-line unused-return
         LibCall.callContract(
             CORE_ADDRESS,
             abi.encodeWithSelector(
@@ -434,7 +432,6 @@ contract LiquidityHelper {
             )
         );
 
-        // slither-disable-next-line unused-return
         LibCall.callContract(
             CORE_ADDRESS,
             abi.encodePacked(
@@ -471,14 +468,12 @@ contract LiquidityHelper {
             );
         }
 
-        // slither-disable-next-line unused-return
         LibCall.callContract(
             CORE_ADDRESS,
             abi.encodeWithSelector(
                 IFlashAccountant.completePayments.selector, poolKey.token0
             )
         );
-        // slither-disable-next-line unused-return
         LibCall.callContract(
             CORE_ADDRESS,
             abi.encodeWithSelector(

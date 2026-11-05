@@ -6,9 +6,7 @@ import {
     SafeERC20,
     IERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {TransferManager} from "../TransferManager.sol";
-import {TychoRouterV3} from "../TychoRouterV3.sol";
 import {
     ICurveCryptoPool,
     ICurveCryptoPoolETH,
@@ -19,6 +17,7 @@ import {
 error CurveExecutor__AddressZero();
 error CurveExecutor__InvalidDataLength();
 error CurveExecutor__TokenAddressZero();
+error CurveExecutor__NotAContract(address addr);
 
 contract CurveExecutor is IExecutor {
     using SafeERC20 for IERC20;
@@ -27,6 +26,7 @@ contract CurveExecutor is IExecutor {
     address public immutable stEthAddress;
     bool public immutable hasStETH;
 
+    // forge-lint: disable-next-line(missing-zero-check) address(0) means the chain has no stETH pool.
     constructor(address nativeToken_, address stEthAddress_) {
         if (nativeToken_ == address(0)) {
             revert CurveExecutor__AddressZero();
@@ -51,7 +51,6 @@ contract CurveExecutor is IExecutor {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -73,12 +72,12 @@ contract CurveExecutor is IExecutor {
         }
 
         if (isCurveStablePool(poolType)) {
-            // slither-disable-next-line arbitrary-send-eth
+            // forge-lint: disable-next-line(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
             ICurveStablePool(pool).exchange{value: ethAmount}(i, j, amountIn, 0);
         } else {
             // crypto or llamma
             if (tokenIn == nativeToken || tokenOut == nativeToken) {
-                // slither-disable-next-line arbitrary-send-eth
+                // forge-lint: disable-next-item(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
                 ICurveCryptoPoolETH(pool).exchange{value: ethAmount}(
                     uint256(int256(i)), uint256(int256(j)), amountIn, 0, true
                 );
@@ -120,7 +119,9 @@ contract CurveExecutor is IExecutor {
      * There are some curve pools that take ETH directly.
      */
     receive() external payable {
-        require(msg.sender.code.length != 0);
+        require(
+            msg.sender.code.length != 0, CurveExecutor__NotAContract(msg.sender)
+        );
     }
 
     function getTransferData(bytes calldata data)

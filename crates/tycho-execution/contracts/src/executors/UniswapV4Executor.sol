@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {Bytes} from "@openzeppelin/contracts/utils/Bytes.sol";
+import {LibBytes} from "@solady/utils/LibBytes.sol";
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
 import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
@@ -21,16 +23,12 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PathKey} from "@uniswap/v4-periphery/src/libraries/PathKey.sol";
 import {
-    IUnlockCallback
-} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
-import {
     SafeCast as V4SafeCast
 } from "@uniswap/v4-core/src/libraries/SafeCast.sol";
 import {
     TransientStateLibrary
 } from "@uniswap/v4-core/src/libraries/TransientStateLibrary.sol";
 import {TransferManager} from "../TransferManager.sol";
-import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {
     LibPrefixLengthEncodedByteArray
 } from "../../lib/bytes/LibPrefixLengthEncodedByteArray.sol";
@@ -39,14 +37,14 @@ error UniswapV4Executor__InvalidDataLength();
 error UniswapV4Executor__NotPoolManager();
 error UniswapV4Executor__UnknownCallback(bytes4 selector);
 error UniswapV4Executor__DeltaNotPositive(Currency currency);
-error UniswapV4Executor__DeltaNotNegative(Currency currency);
-error UniswapV4Executor__V4TooMuchRequested(
-    uint256 maxAmountInRequested, uint256 amountRequested
-);
 error UniswapV4Executor__InvalidAngstromAttestationDataLength(uint256 length);
 error UniswapV4Executor__ZeroAddressAngstromHook();
 
+// forge-lint: disable-next-item(missing-inheritance) Only the poolManager() getter matches Uniswap V4's IImmutableState.
 contract UniswapV4Executor is IExecutor, ICallback {
+    // token (20) + fee (3) + tickSpacing (3) + hook (20) + hookDataLength (2)
+    uint16 private constant _POOL_HEADER_LENGTH = 48;
+
     using SafeERC20 for IERC20;
     using CurrencyLibrary for Currency;
     using V4SafeCast for *;
@@ -160,9 +158,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
         if (skipUnlock) {
             // Caller must have called poolManager.sync(tokenIn)
             // and the Dispatcher transferred tokens to PM already.
-            // This delegatecall is safe because the swapData signature is constructed
-            // in this method.
-            // slither-disable-next-line low-level-calls
+            // forge-lint: disable-next-item(low-level-calls) swapData's selector is built in this function.
             (bool success, bytes memory returnData) =
                 _self.delegatecall(swapData);
             if (!success) {
@@ -182,7 +178,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
             poolManager.sync(Currency.wrap(tokenOut));
         } else {
             poolManager.sync(Currency.wrap(tokenIn));
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             poolManager.unlock(swapData);
         }
     }
@@ -192,7 +188,6 @@ contract UniswapV4Executor is IExecutor, ICallback {
         return token == ETH_ADDRESS ? address(0) : token;
     }
 
-    // slither-disable-next-line dead-code
     function _decodeData(bytes calldata data)
         internal
         view
@@ -217,8 +212,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
         bytes calldata remaining = data[42:];
 
         // Decode first pool with hook data
-        if (remaining.length < 48) {
-            // 20 + 3 + 3 + 20 + 2 = 48 minimum
+        if (remaining.length < _POOL_HEADER_LENGTH) {
             revert UniswapV4Executor__InvalidDataLength();
         }
 
@@ -228,7 +222,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
         address firstHook = address(bytes20(remaining[26:46]));
         uint16 firstHookDataLength = uint16(bytes2(remaining[46:48]));
 
-        uint256 firstPoolTotalLength = 48 + firstHookDataLength;
+        uint256 firstPoolTotalLength = _POOL_HEADER_LENGTH + firstHookDataLength;
         if (remaining.length < firstPoolTotalLength) {
             revert UniswapV4Executor__InvalidDataLength();
         }
@@ -238,10 +232,18 @@ contract UniswapV4Executor is IExecutor, ICallback {
             // Select attestation from first pool's hook data
             // Convert calldata to memory since _selectAttestation requires bytes memory
             firstHookData = _selectAttestation(
-                bytes(remaining[48:48 + firstHookDataLength])
+                bytes(
+                    remaining[_POOL_HEADER_LENGTH:_POOL_HEADER_LENGTH
+                                + firstHookDataLength
+                    ]
+                )
             );
         } else {
-            firstHookData = bytes(remaining[48:48 + firstHookDataLength]);
+            firstHookData = bytes(
+                remaining[_POOL_HEADER_LENGTH:_POOL_HEADER_LENGTH
+                            + firstHookDataLength
+                ]
+            );
         }
 
         // Remaining after first pool are ple encoded
@@ -250,33 +252,28 @@ contract UniswapV4Executor is IExecutor, ICallback {
         );
 
         pools = new UniswapV4Pool[](1 + encodedPools.length);
-        pools[0] = UniswapV4Pool(
-            firstToken, firstFee, firstTickSpacing, firstHook, firstHookData
-        );
+        pools[0] = UniswapV4Pool({
+            intermediaryToken: firstToken,
+            fee: firstFee,
+            tickSpacing: firstTickSpacing,
+            hook: firstHook,
+            hookData: firstHookData
+        });
 
         // Decode subsequent pools
         for (uint256 i = 0; i < encodedPools.length; i++) {
             bytes memory poolData = encodedPools[i];
 
-            address intermediaryToken;
-            uint24 fee;
-            int24 tickSpacing;
-            address hook;
-            uint16 hookDataLength;
+            address intermediaryToken =
+                _toV4Token(address(bytes20(LibBytes.load(poolData, 0))));
+            uint24 fee = uint24(bytes3(LibBytes.load(poolData, 20)));
+            int24 tickSpacing =
+                int24(uint24(bytes3(LibBytes.load(poolData, 23))));
+            address hook = address(bytes20(LibBytes.load(poolData, 26)));
+            uint16 hookDataLength = uint16(bytes2(LibBytes.load(poolData, 46)));
 
-            // slither-disable-next-line assembly
-            assembly {
-                let dataPtr := add(poolData, 0x20)
-                intermediaryToken := shr(96, mload(dataPtr))
-                fee := and(shr(232, mload(add(dataPtr, 20))), 0xffffff)
-                tickSpacing := and(shr(208, mload(add(dataPtr, 20))), 0xffffff)
-                hook := shr(96, mload(add(dataPtr, 26)))
-                hookDataLength := and(shr(240, mload(add(dataPtr, 46))), 0xffff)
-            }
-
-            intermediaryToken = _toV4Token(intermediaryToken);
-
-            if (poolData.length < 48 + hookDataLength) {
+            if (poolData.length < _POOL_HEADER_LENGTH + hookDataLength) {
+                // forge-lint: disable-next-line(require-revert-in-loop) Malformed swap data fails the swap.
                 revert UniswapV4Executor__InvalidDataLength();
             }
 
@@ -284,7 +281,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
             // We copy byte-by-byte because we cannot slice bytes memory in Solidity
             bytes memory rawHookData = new bytes(hookDataLength);
             for (uint256 j = 0; j < hookDataLength; j++) {
-                rawHookData[j] = poolData[48 + j];
+                rawHookData[j] = poolData[_POOL_HEADER_LENGTH + j];
             }
 
             bytes memory hookData;
@@ -295,9 +292,13 @@ contract UniswapV4Executor is IExecutor, ICallback {
                 hookData = rawHookData;
             }
 
-            pools[i + 1] = UniswapV4Pool(
-                intermediaryToken, fee, tickSpacing, hook, hookData
-            );
+            pools[i + 1] = UniswapV4Pool({
+                intermediaryToken: intermediaryToken,
+                fee: fee,
+                tickSpacing: tickSpacing,
+                hook: hook,
+                hookData: hookData
+            });
         }
     }
 
@@ -333,7 +334,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
         }
 
         // here we expect to call either `swapExactInputSingle` or `swapExactInput`. See `swap` to see how we encode the selector and the calldata
-        // slither-disable-next-line low-level-calls
+        // forge-lint: disable-next-line(low-level-calls) Solidity has no high-level delegatecall.
         (bool success, bytes memory returnData) = _self.delegatecall(data);
         if (!success) {
             revert(
@@ -430,16 +431,16 @@ contract UniswapV4Executor is IExecutor, ICallback {
         bytes calldata hookData
     ) private returns (int128 reciprocalAmount) {
         unchecked {
-            // slither-disable-next-line calls-loop
+            // forge-lint: disable-next-item(calls-loop) Each hop of a multi-pool route swaps once in the same unlock.
             BalanceDelta delta = poolManager.swap(
                 poolKey,
-                SwapParams(
-                    zeroForOne,
-                    amountSpecified,
-                    zeroForOne
+                SwapParams({
+                    zeroForOne: zeroForOne,
+                    amountSpecified: amountSpecified,
+                    sqrtPriceLimitX96: zeroForOne
                         ? TickMath.MIN_SQRT_PRICE + 1
                         : TickMath.MAX_SQRT_PRICE - 1
-                ),
+                }),
                 hookData
             );
 
@@ -475,10 +476,10 @@ contract UniswapV4Executor is IExecutor, ICallback {
     function _settle(Currency currency, uint256 amount) internal {
         if (amount == 0) return;
         if (currency.isAddressZero()) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return settle returns the amount paid, which is the amount just transferred.
             poolManager.settle{value: amount}();
         } else {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return settle returns the amount paid, which is the amount just transferred.
             poolManager.settle();
         }
     }
@@ -519,10 +520,10 @@ contract UniswapV4Executor is IExecutor, ICallback {
         returns (bytes memory)
     {
         uint256 totalLength = 93;
-        bytes memory attestation = new bytes(85);
 
         // Calculate number of attestations from data length
         if (attestationData.length % totalLength != 0) {
+            // forge-lint: disable-next-line(require-revert-in-loop) Malformed attestation data fails the swap.
             revert UniswapV4Executor__InvalidAngstromAttestationDataLength(attestationData.length);
         }
 
@@ -531,31 +532,16 @@ contract UniswapV4Executor is IExecutor, ICallback {
         for (uint256 i = 0; i < attestationCount; i++) {
             uint256 offset = i * totalLength;
 
-            // Assembly is used because attestationData is bytes memory
-            uint64 blockNumber;
-            // slither-disable-next-line assembly
-            assembly {
-                // Load block number (8 bytes) - shift right to get the first 8 bytes
-                blockNumber := shr(
-                    192,
-                    mload(add(add(attestationData, 0x20), offset))
-                )
-
-                // Copy attestation (85 bytes)
-                let src := add(add(attestationData, 0x20), add(offset, 8))
-                let dst := add(attestation, 0x20)
-
-                // Copy 85 bytes (2 full words + 21 bytes)
-                mstore(dst, mload(src)) // Copy first 32 bytes
-                mstore(add(dst, 0x20), mload(add(src, 0x20))) // Copy next 32 bytes
-                mstore(add(dst, 0x40), mload(add(src, 0x40))) // Copy remaining 21 bytes (loads 32, but we only need 21)
-            }
+            uint64 blockNumber =
+                uint64(bytes8(LibBytes.load(attestationData, offset)));
 
             // If we find the attestation for the current block, stop decoding early
             // and return the attestation.
-            // slither-disable-next-line incorrect-equality
             if (blockNumber == block.number) {
-                return attestation;
+                return
+                    Bytes.slice(
+                        attestationData, offset + 8, offset + totalLength
+                    );
             }
         }
 

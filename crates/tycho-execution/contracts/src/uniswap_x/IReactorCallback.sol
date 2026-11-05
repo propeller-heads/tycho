@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
-import "./IStructs.sol";
+import {ResolvedOrder} from "./IStructs.sol";
 
 /// @notice Callback for executing orders through a reactor.
 interface IReactorCallback {
