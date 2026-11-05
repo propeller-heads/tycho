@@ -130,12 +130,7 @@ fn register_exchanges(
         Chain::Arbitrum => {
             builder = builder.exchange::<RamsesV3State>("ramses_v3", tvl_filter, None)
         }
-        Chain::Starknet |
-        Chain::ZkSync |
-        Chain::Plasma |
-        Chain::Arc |
-        Chain::Custom(_) |
-        _ => {}
+        Chain::Starknet | Chain::ZkSync | Chain::Plasma | Chain::Arc | Chain::Custom(_) | _ => {}
     }
     builder
 }

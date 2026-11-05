@@ -348,11 +348,7 @@ pub fn get_default_endpoint(chain: &Chain) -> Option<String> {
         Chain::Arc => Some("https://arc.substreams.pinax.network:443".to_string()),
         Chain::Bsc => Some("https://bnb.streamingfast.io:443".to_string()),
         Chain::Arbitrum => Some("https://arb-one.streamingfast.io:443".to_string()),
-        Chain::Starknet |
-        Chain::ZkSync |
-        Chain::Plasma |
-        Chain::Custom(_) |
-        _ => None,
+        Chain::Starknet | Chain::ZkSync | Chain::Plasma | Chain::Custom(_) | _ => None,
     }
 }
 
