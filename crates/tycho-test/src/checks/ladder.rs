@@ -3,7 +3,7 @@
 //! past it. The ladder encodes each quote as a router swap; the runner executes them and judges
 //! the results.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, WrapErr};
@@ -26,7 +26,7 @@ use crate::{
         encoding::{encode_swap, EXECUTOR_ADDRESS},
         models::{TychoExecutionInput, TychoExecutionResult},
     },
-    expectations::{Direction, LimitKind, Tolerance},
+    expectations::{Direction, Limits, Tolerance},
 };
 
 /// What the ladder hands to execution.
@@ -40,14 +40,37 @@ pub struct LadderOutput {
     pub past_limit: HashMap<String, TychoExecutionInput>,
     /// Strict: every direction whose limit was checked.
     pub limit_directions: Vec<LimitDirection>,
+    /// Strict: every declared direction whose limit was not checked, and why.
+    pub unchecked_limits: Vec<UncheckedLimit>,
+}
+
+/// Strict: a declared direction of a simulated component whose limit was not checked.
+pub struct UncheckedLimit {
+    /// The component's id, as indexed.
+    pub component: String,
+    pub direction: Direction,
+    /// Why not. A zero limit is a skip; a direction the ladder never reached is a failure.
+    pub why: Unchecked,
+}
+
+/// Why a declared direction's limit was not checked.
+pub enum Unchecked {
+    /// `get_limits` reports zero: the venue does not trade this direction at this block.
+    ZeroLimit,
+    /// The ladder did not quote the direction, for example because the indexed tokens differ
+    /// from the declared ones.
+    NotQuoted,
 }
 
 /// Strict: the limit checks of one direction of one component, before execution.
 pub struct LimitDirection {
+    /// The component's id, as indexed.
     pub component: String,
     pub direction: Direction,
-    pub kind: LimitKind,
-    /// Whether the limit is at or above `int128::MAX`, the execution cap.
+    /// The declaration the direction is checked against.
+    pub limits: Limits,
+    /// Whether the limit is at or above `int128::MAX`, the cap the runner applies to every
+    /// protocol's executions.
     pub capped: bool,
     /// Whether `max_input` quoted. The past-limit swap and the max-output comparison need it.
     pub quoted_at_limit: bool,
@@ -56,9 +79,9 @@ pub struct LimitDirection {
     pub execution_skipped: Option<String>,
     /// The checks that failed in simulation, with the reason.
     pub failures: Vec<(CheckId, String)>,
-    /// The ids of the direction's executions in [`LadderOutput::at_limit`] and
-    /// [`LadderOutput::past_limit`].
+    /// The id of the direction's execution in [`LadderOutput::at_limit`], when it was queued.
     pub at_limit: Option<String>,
+    /// The id of the direction's execution in [`LadderOutput::past_limit`], when it was queued.
     pub past_limit: Option<String>,
 }
 
@@ -72,41 +95,48 @@ impl LimitDirection {
     }
 
     /// What `limits.at_limit` records when nothing failed: a pass once the quote at the limit
-    /// was executed, a skip when the component skips execution.
+    /// was executed, a skip when the component skips execution. Not run otherwise, which only a
+    /// failed quote leads to, and that is recorded as a failure first.
     pub fn at_limit_unfailed(&self) -> Outcome {
         match (&self.at_limit, &self.execution_skipped) {
+            (Some(_), _) => Outcome::Pass,
             (None, Some(reason)) => Outcome::Skipped {
                 reason: format!("the quote at the limit is not executed: {reason}"),
             },
-            (Some(_), _) | (None, None) => Outcome::Pass,
+            (None, None) => Outcome::NotRun { reason: "the limit did not quote".to_string() },
         }
     }
 
-    /// What `limits.past_limit` records when nothing failed: a skip when the check does not apply
-    /// to the limit or the component skips execution, not run when the limit did not quote, since
-    /// the past-limit swap takes its minimum output from that quote, and a pass once the swap
-    /// was executed.
-    pub fn past_limit_unfailed(&self) -> Outcome {
-        let skipped = |reason: &str| Outcome::Skipped { reason: reason.to_string() };
-        match self.kind {
-            LimitKind::Soft => return skipped("the limit is declared soft"),
-            LimitKind::UnderCap => return skipped("the limit is declared under_cap"),
-            LimitKind::Hard if self.capped => {
-                return skipped(
-                    "the limit is at the int128::MAX cap, which is not the venue's bound",
-                )
-            }
-            LimitKind::Hard => {}
+    /// What `limits.past_limit` records when nothing failed.
+    ///
+    /// - Skipped when the check does not apply: a soft or under-cap limit, with the declared
+    ///   reason, or a limit at the `int128` cap.
+    /// - Not run when the swap at the limit did not quote or did not execute: the past-limit swap
+    ///   takes its minimum output from that quote, and a revert past a limit that does not execute
+    ///   either proves nothing.
+    /// - Skipped when the component skips execution.
+    /// - A pass once the swap past the limit was executed, and reverted.
+    pub fn past_limit_unfailed(&self, at_limit_executed: bool) -> Outcome {
+        if let Some(reason) = self.limits.past_limit_skip_reason() {
+            return Outcome::Skipped { reason };
         }
+        if self.capped {
+            return Outcome::Skipped {
+                reason: "the limit is at the int128::MAX cap, which is not the venue's bound"
+                    .to_string(),
+            };
+        }
+        let not_run = || Outcome::NotRun { reason: format!("{} failed", CheckId::LimitsAtLimit) };
         match (&self.past_limit, self.quoted_at_limit, &self.execution_skipped) {
-            (Some(_), _, _) => Outcome::Pass,
-            (None, false, _) => {
-                Outcome::NotRun { reason: format!("{} failed", CheckId::LimitsAtLimit) }
-            }
+            (Some(_), _, _) if at_limit_executed => Outcome::Pass,
+            (Some(_), _, _) | (None, false, _) => not_run(),
             (None, true, Some(reason)) => Outcome::Skipped {
                 reason: format!("the swap past the limit is not executed: {reason}"),
             },
-            (None, true, None) => Outcome::Pass,
+            // Only a quote past the limit leads here, and that is recorded as a failure first.
+            (None, true, None) => {
+                Outcome::NotRun { reason: "the swap past the limit was not queued".to_string() }
+            }
         }
     }
 
@@ -139,7 +169,8 @@ pub fn executable_max_input(limit: &BigUint) -> BigUint {
     }
 }
 
-/// `int128::MAX`, the largest amount a swap can be executed with.
+/// `int128::MAX`, the cap the runner applies to every protocol's executions (see
+/// [`executable_max_input`]).
 fn int128_ceiling() -> BigUint {
     BigUint::from(i128::MAX as u128)
 }
@@ -169,12 +200,14 @@ pub fn at_execution_cap(limit: &BigUint) -> bool {
 /// * `skip_simulation`, `skip_execution` - The lowercase ids of the components that skip simulation
 ///   or execution, each with its reason
 /// * `protocol_system` - The protocol system identifier
-/// * `limit_kinds` - Strict mode: the kind of limit each component declares
+/// * `declared_limits` - Strict mode: the limit each direction of each component declares, keyed by
+///   `(lowercase component id, direction)`
 ///
 /// # Returns
-/// The ladder's quotes, keyed by simulation id, for execution. With `limit_kinds` (strict
-/// mode, one kind per component id) also each direction's limit checks, the quote at the limit,
-/// and for a hard limit the input one unit past it, all for execution as well.
+/// The ladder's quotes, keyed by simulation id, for execution. With `declared_limits` also each
+/// declared direction's limit checks, the quote at the limit, and for a hard limit the input one
+/// unit past it, all for execution as well, and the declared directions whose limit was not
+/// checked.
 ///
 /// # Errors
 /// Returns an error if:
@@ -188,17 +221,23 @@ pub fn run_ladder(
     skip_simulation: &HashMap<String, &str>,
     skip_execution: &HashMap<String, &str>,
     protocol_system: &str,
-    limit_kinds: Option<&HashMap<(String, Direction), LimitKind>>,
+    declared_limits: Option<&HashMap<(String, Direction), Limits>>,
 ) -> miette::Result<LadderOutput> {
     let mut output = LadderOutput::default();
 
-    for (id, state) in update.states.iter() {
-        // The skips and limit kinds are keyed by lowercase id; the update keeps the id as indexed.
+    // Sorted, so a report lists components in the same order on every run.
+    for (id, state) in update
+        .states
+        .iter()
+        .sorted_by(|a, b| a.0.cmp(b.0))
+    {
+        // The skips and limits are keyed by lowercase id; the update keeps the id as indexed.
         let key = id.to_lowercase();
-        if let Some(reason) = skip_simulation.get(&key) {
-            info!("Skipping simulation for component {id}: {reason}");
+        // The caller logs a skip's reason once per component.
+        if skip_simulation.contains_key(&key) {
             continue;
         }
+        let mut reached = HashSet::new();
         let component = protocol_components
             .get(id)
             .ok_or_else(|| miette!("Couldn't find protocol component {id}"))?;
@@ -238,7 +277,7 @@ pub fn run_ladder(
 
             let executable_input = executable_max_input(&max_input);
             let capped = at_execution_cap(&max_input);
-            if capped {
+            if executable_input != max_input {
                 warn!(
                     "[{}] Limit of {max_input} {} exceeds what a swap can be executed with; \
                      sizing trades from {executable_input} instead",
@@ -252,11 +291,27 @@ pub fn run_ladder(
             // rate limit with no capacity at this block. Skip the direction instead of
             // failing the component; the guard below still requires that at least one
             // direction was exercised.
+            let direction = Direction {
+                token_in: token_in.address.clone(),
+                token_out: token_out.address.clone(),
+            };
+            reached.insert(direction.clone());
             if max_input.is_zero() {
                 warn!(
                     "[{}] Zero limit for {} -> {}, skipping direction",
                     id, token_in.symbol, token_out.symbol
                 );
+                if declared_limits.is_some_and(|declared| {
+                    declared.contains_key(&(key.clone(), direction.clone()))
+                }) {
+                    output
+                        .unchecked_limits
+                        .push(UncheckedLimit {
+                            component: id.clone(),
+                            direction,
+                            why: Unchecked::ZeroLimit,
+                        });
+                }
                 continue;
             }
 
@@ -312,8 +367,7 @@ pub fn run_ladder(
 
                 quoted_any_direction = true;
 
-                if let Some(reason) = skip_execution.get(&key) {
-                    info!("Skipping execution for component {id}: {reason}");
+                if skip_execution.contains_key(&key) {
                     continue;
                 }
 
@@ -338,12 +392,9 @@ pub fn run_ladder(
                     .insert(simulation_id, input);
             }
 
-            let direction = Direction {
-                token_in: token_in.address.clone(),
-                token_out: token_out.address.clone(),
-            };
-            let kind = limit_kinds.and_then(|kinds| kinds.get(&(key.clone(), direction.clone())));
-            if let Some(kind) = kind {
+            let declared = declared_limits
+                .and_then(|declared| declared.get(&(key.clone(), direction.clone())));
+            if let Some(declared) = declared {
                 let checked = limits::check_direction(
                     |amount| {
                         state
@@ -355,12 +406,18 @@ pub fn run_ladder(
                     &max_input,
                     &max_output,
                     capped,
-                    *kind,
+                    declared.kind,
                 );
+                if let Some(rejection) = &checked.past_limit_rejection {
+                    info!(
+                        "[{id}] {} -> {}: the quote one unit past the limit errors: {rejection}",
+                        token_in.symbol, token_out.symbol
+                    );
+                }
                 let mut limits = LimitDirection {
                     component: id.clone(),
                     direction,
-                    kind: *kind,
+                    limits: declared.clone(),
                     capped,
                     quoted_at_limit: checked.at_limit.is_some(),
                     execution_skipped: skip_execution
@@ -406,6 +463,22 @@ pub fn run_ladder(
                     }
                 }
                 output.limit_directions.push(limits);
+            }
+        }
+
+        // A declared direction the loop above never reached has no limit result. Fail it rather
+        // than let it drop out of the report.
+        if let Some(declared) = declared_limits {
+            for (declared_id, direction) in declared.keys().sorted() {
+                if *declared_id == key && !reached.contains(direction) {
+                    output
+                        .unchecked_limits
+                        .push(UncheckedLimit {
+                            component: id.clone(),
+                            direction: direction.clone(),
+                            why: Unchecked::NotQuoted,
+                        });
+                }
             }
         }
 
@@ -481,11 +554,14 @@ pub struct LimitJudgement {
 }
 
 /// Judges the limit checks of every direction in `output`: `limits.at_limit`,
-/// `limits.past_limit` and `limits.max_output`, in that order for each direction.
+/// `limits.past_limit` and `limits.max_output`, in that order for each direction, then those of
+/// the declared directions that were not checked: skipped for a zero limit, failed for one the
+/// ladder never quoted.
 ///
 /// `executed` holds the results of executing `output`'s inputs, or why the batch could not run,
-/// which fails every execution a check needs. With `None`, nothing was executed, and the checks
-/// are judged from the simulation alone.
+/// which fails every execution a check needs. With `None`, nothing was executed, as at a block
+/// that only simulates: the checks are judged from the simulation alone, and those whose swap
+/// was queued are skipped rather than passed.
 pub fn judge_limits(
     output: &LadderOutput,
     executed: Option<Result<&HashMap<String, TychoExecutionResult>, &str>>,
@@ -515,27 +591,68 @@ pub fn judge_limits(
             failures,
         };
 
+        let not_executed_here =
+            || Outcome::Skipped { reason: "the swap is not executed at this block".to_string() };
+
         let mut at_limit = limits.failures_of(CheckId::LimitsAtLimit);
         at_limit.extend(execution_failure(&limits.at_limit, &|id, input, results| {
             execution_mismatch(id, input, results, tolerance)
         }));
-        judgements.push(judgement(CheckId::LimitsAtLimit, limits.at_limit_unfailed(), at_limit));
+        let at_limit_unfailed = match (executed, &limits.at_limit) {
+            (None, Some(_)) => not_executed_here(),
+            (Some(_), _) | (None, None) => limits.at_limit_unfailed(),
+        };
+        judgements.push(judgement(CheckId::LimitsAtLimit, at_limit_unfailed, at_limit));
 
+        // A revert past the limit proves the bound only if the swap at the limit executes.
+        let at_limit_executed = matches!(
+            (executed, &limits.at_limit),
+            (Some(Ok(results)), Some(id))
+                if matches!(results.get(id), Some(TychoExecutionResult::Success { .. }))
+        );
         let mut past_limit = limits.failures_of(CheckId::LimitsPastLimit);
-        past_limit.extend(execution_failure(&limits.past_limit, &|id, input, results| {
-            missing_revert(id, input, results)
-        }));
-        judgements.push(judgement(
-            CheckId::LimitsPastLimit,
-            limits.past_limit_unfailed(),
-            past_limit,
-        ));
+        let batch_failed = matches!(executed, Some(Err(_)));
+        if at_limit_executed || batch_failed {
+            past_limit.extend(execution_failure(&limits.past_limit, &|id, input, results| {
+                missing_revert(id, input, results)
+            }));
+        }
+        let past_limit_unfailed = match (executed, &limits.past_limit) {
+            (None, Some(_)) => not_executed_here(),
+            (Some(_), _) | (None, None) => limits.past_limit_unfailed(at_limit_executed),
+        };
+        judgements.push(judgement(CheckId::LimitsPastLimit, past_limit_unfailed, past_limit));
 
         judgements.push(judgement(
             CheckId::LimitsMaxOutput,
             limits.max_output_unfailed(),
             limits.failures_of(CheckId::LimitsMaxOutput),
         ));
+    }
+    for UncheckedLimit { component, direction, why } in &output.unchecked_limits {
+        let direction = direction.to_string();
+        for check in CheckId::LIMITS {
+            let (unfailed, failures) = match why {
+                Unchecked::ZeroLimit => (
+                    Outcome::Skipped { reason: "the limit is zero at this block".to_string() },
+                    Vec::new(),
+                ),
+                Unchecked::NotQuoted => (
+                    Outcome::Pass,
+                    vec![format!(
+                        "{direction} declares a limit, but the ladder did not quote it: the \
+                         indexed tokens differ from the expected ones"
+                    )],
+                ),
+            };
+            judgements.push(LimitJudgement {
+                check,
+                component: component.clone(),
+                direction: direction.clone(),
+                unfailed,
+                failures,
+            });
+        }
     }
     judgements
 }
@@ -551,7 +668,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::execution::models::Transaction;
+    use crate::{execution::models::Transaction, expectations::LimitKind};
 
     #[test]
     fn execution_trades_are_sized_within_uniswap_v4s_int128_range() {
@@ -607,7 +724,7 @@ mod tests {
             .push(LimitDirection {
                 component: "0xaa".to_string(),
                 direction: Direction::from_str("0x01->0x02").unwrap(),
-                kind: LimitKind::Hard,
+                limits: Limits { kind: LimitKind::Hard, reason: None, lost_capacity: None },
                 capped: false,
                 quoted_at_limit: true,
                 execution_skipped: None,
@@ -670,12 +787,26 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_batch_fails_every_execution_and_no_execution_judges_the_simulation() {
+    fn a_failed_batch_fails_every_execution_a_check_needs() {
         let judged = judge_limits(&output(), Some(Err("the node is down")), Tolerance::EXACT);
         assert_eq!(judged[0].failures, vec!["the node is down".to_string()]);
         assert_eq!(judged[1].failures, vec!["the node is down".to_string()]);
+        // The max output needs no execution, and keeps only its simulation failure.
+        assert_eq!(judged[2].failures, vec!["pays past max output".to_string()]);
+    }
 
+    #[test]
+    fn at_a_block_that_only_simulates_queued_swaps_are_skipped() {
         let simulated_only = judge_limits(&output(), None, Tolerance::EXACT);
+        let not_executed =
+            Outcome::Skipped { reason: "the swap is not executed at this block".to_string() };
+        assert_eq!(
+            unfailed(&simulated_only)[..2],
+            [
+                (CheckId::LimitsAtLimit, not_executed.clone()),
+                (CheckId::LimitsPastLimit, not_executed)
+            ]
+        );
         assert_eq!(
             failures(&simulated_only),
             vec![
@@ -687,17 +818,76 @@ mod tests {
     }
 
     #[test]
-    fn past_limit_does_not_apply_to_a_soft_or_capped_limit() {
-        let mut soft = output();
-        soft.limit_directions[0].kind = LimitKind::Soft;
+    fn a_revert_past_the_limit_proves_nothing_when_the_limit_reverts_too() {
+        let results = HashMap::from([("at".to_string(), revert()), ("past".to_string(), revert())]);
+        let judged = judge_limits(&output(), Some(Ok(&results)), Tolerance::EXACT);
+        assert_eq!(judged[0].failures.len(), 1);
+        assert!(judged[1].failures.is_empty(), "{:?}", judged[1].failures);
         assert_eq!(
-            judge_limits(&soft, None, Tolerance::EXACT)[1].unfailed,
-            Outcome::Skipped { reason: "the limit is declared soft".to_string() }
+            judged[1].unfailed,
+            Outcome::NotRun { reason: "limits.at_limit failed".to_string() }
+        );
+    }
+
+    #[test]
+    fn a_judgement_names_the_component_and_direction() {
+        let results =
+            HashMap::from([("at".to_string(), success(50)), ("past".to_string(), revert())]);
+        let judged = judge_limits(&output(), Some(Ok(&results)), Tolerance::EXACT);
+        assert!(judged
+            .iter()
+            .all(|j| j.component == "0xaa" && j.direction == "0x01->0x02"));
+        assert!(judged[0].failures.is_empty() && judged[1].failures.is_empty());
+    }
+
+    #[test]
+    fn declared_directions_without_a_check_are_skipped_or_failed() {
+        let mut output = output();
+        output.limit_directions.clear();
+        output.unchecked_limits = vec![
+            UncheckedLimit {
+                component: "0xaa".to_string(),
+                direction: Direction::from_str("0x01->0x02").unwrap(),
+                why: Unchecked::ZeroLimit,
+            },
+            UncheckedLimit {
+                component: "0xaa".to_string(),
+                direction: Direction::from_str("0x02->0x01").unwrap(),
+                why: Unchecked::NotQuoted,
+            },
+        ];
+        let judged = judge_limits(&output, None, Tolerance::EXACT);
+        assert_eq!(judged.len(), 6);
+        assert!(judged[..3]
+            .iter()
+            .all(|j| j.failures.is_empty() &&
+                j.unfailed ==
+                    Outcome::Skipped {
+                        reason: "the limit is zero at this block".to_string()
+                    }));
+        assert!(judged[3..]
+            .iter()
+            .all(|j| j.failures[0].contains("the ladder did not quote it")));
+    }
+
+    #[test]
+    fn past_limit_does_not_apply_to_a_soft_or_capped_limit() {
+        let results =
+            HashMap::from([("at".to_string(), success(50)), ("past".to_string(), revert())]);
+        let mut soft = output();
+        soft.limit_directions[0].limits = Limits {
+            kind: LimitKind::Soft,
+            reason: Some("constant product".to_string()),
+            lost_capacity: None,
+        };
+        assert_eq!(
+            judge_limits(&soft, Some(Ok(&results)), Tolerance::EXACT)[1].unfailed,
+            Outcome::Skipped { reason: "the limit is declared soft: constant product".to_string() }
         );
         let mut capped = output();
         capped.limit_directions[0].capped = true;
         assert!(matches!(
-            &judge_limits(&capped, None, Tolerance::EXACT)[1].unfailed,
+            &judge_limits(&capped, Some(Ok(&results)), Tolerance::EXACT)[1].unfailed,
             Outcome::Skipped { reason } if reason.contains("int128::MAX")
         ));
     }
@@ -750,12 +940,17 @@ mod tests {
 
         // Skipping execution, with limits declared: the limits are checked in simulation, and
         // nothing is queued for execution.
-        let kinds: HashMap<(String, Direction), LimitKind> = [
+        let soft = Limits {
+            kind: LimitKind::Soft,
+            reason: Some("constant product".to_string()),
+            lost_capacity: None,
+        };
+        let kinds: HashMap<(String, Direction), Limits> = [
             "0x00000000000000000000000000000000000000a1->0x00000000000000000000000000000000000000b1",
             "0x00000000000000000000000000000000000000b1->0x00000000000000000000000000000000000000a1",
         ]
         .into_iter()
-        .map(|direction| ((lowercase.clone(), Direction::from_str(direction).unwrap()), LimitKind::Soft))
+        .map(|direction| ((lowercase.clone(), Direction::from_str(direction).unwrap()), soft.clone()))
         .collect();
         let simulated_only = run_ladder(
             Chain::Ethereum,
@@ -787,8 +982,9 @@ mod tests {
     }
 
     /// The direction of [`output`], with no failure in simulation, quoted at the limit unless
-    /// `quoted_at_limit` is false, and executed unless `execution_skipped` gives a reason.
-    fn unexecuted(quoted_at_limit: bool, execution_skipped: Option<&str>) -> LadderOutput {
+    /// `quoted_at_limit` is false, and its swaps queued unless that or `execution_skipped`
+    /// stops them.
+    fn with_queued_swaps(quoted_at_limit: bool, execution_skipped: Option<&str>) -> LadderOutput {
         let mut output = output();
         let executed = quoted_at_limit && execution_skipped.is_none();
         let limits = &mut output.limit_directions[0];
@@ -813,7 +1009,8 @@ mod tests {
     fn limit_checks_pass_only_once_executed() {
         let results =
             HashMap::from([("at".to_string(), success(50)), ("past".to_string(), revert())]);
-        let judged = judge_limits(&unexecuted(true, None), Some(Ok(&results)), Tolerance::EXACT);
+        let judged =
+            judge_limits(&with_queued_swaps(true, None), Some(Ok(&results)), Tolerance::EXACT);
         assert_eq!(
             unfailed(&judged),
             vec![
@@ -826,7 +1023,7 @@ mod tests {
 
     #[test]
     fn limit_checks_of_a_component_that_skips_execution_are_skipped() {
-        let output = unexecuted(true, Some("no fork state"));
+        let output = with_queued_swaps(true, Some("no fork state"));
         let judged = judge_limits(&output, Some(Ok(&HashMap::new())), Tolerance::EXACT);
         let skipped = |reason: &str| Outcome::Skipped { reason: reason.to_string() };
         assert_eq!(
@@ -848,7 +1045,7 @@ mod tests {
 
     #[test]
     fn checks_that_need_the_quote_at_the_limit_are_not_run_without_it() {
-        let judged = judge_limits(&unexecuted(false, None), None, Tolerance::EXACT);
+        let judged = judge_limits(&with_queued_swaps(false, None), None, Tolerance::EXACT);
         let not_run = Outcome::NotRun { reason: "limits.at_limit failed".to_string() };
         assert_eq!(judged[1].unfailed, not_run);
         assert_eq!(judged[2].unfailed, not_run);

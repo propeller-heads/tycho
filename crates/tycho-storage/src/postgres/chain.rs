@@ -376,7 +376,22 @@ mod test {
         .await
         .unwrap();
 
-        assert_eq!(ts, chrono::NaiveDateTime::UNIX_EPOCH);
+        assert_eq!(ts, chrono::DateTime::UNIX_EPOCH.naive_utc());
+    }
+
+    #[tokio::test]
+    async fn test_latest_version_of_a_chain_not_in_the_database_is_an_error() {
+        let mut conn = setup_db().await;
+
+        let result = crate::postgres::maybe_lookup_block_ts(
+            &tycho_common::storage::BlockOrTimestamp::Block(BlockIdentifier::Latest(
+                Chain::Arbitrum,
+            )),
+            &mut conn,
+        )
+        .await;
+
+        assert!(result.is_err(), "{result:?}");
     }
 
     #[tokio::test]

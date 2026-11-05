@@ -339,7 +339,7 @@ impl ExecutionSimulator {
                     }
                 }
                 Err(err) => {
-                    let reason = format!("Transaction failed: {}", err);
+                    let reason = format!("{} {}", super::TRANSPORT_ERROR_PREFIX, err);
                     if crate::is_block_not_found(&reason) {
                         // All calls share the same block_id in a single batch request to one node,
                         // so if one fails with block-not-found the rest will too. Early-return so

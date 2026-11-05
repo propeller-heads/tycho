@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
-    process::Child,
     str::FromStr,
     sync::{Arc, LazyLock, RwLock},
     time::Duration,
@@ -49,7 +48,7 @@ use tycho_test::{
     checks::{
         execution::check_executions_match,
         ladder::{self, executable_max_input, LadderOutput},
-        sheet,
+        sheet, tvl_only,
     },
     execution::{
         models::{TychoExecutionInput, TychoExecutionResult},
@@ -62,8 +61,8 @@ use crate::{
     adapter_builder::AdapterContractBuilder,
     balances::{self, BalanceCheck},
     config::{
-        component_directions, Direction, Harness, IntegrationTest, IntegrationTestsConfig,
-        LimitKind, ProtocolComponentWithTestConfig, Skip, Tolerance,
+        component_directions, Direction, Harness, IntegrationTest, IntegrationTestsConfig, Limits,
+        ProtocolComponentWithTestConfig, Skip, Tolerance,
     },
     execution,
     report::{CheckId, Checks, Report},
@@ -71,7 +70,7 @@ use crate::{
     state_registry::{register_protocol, register_protocol_with_filter},
     stream,
     tycho_rpc::TychoClient,
-    tycho_runner::TychoRunner,
+    tycho_runner::{StreamingIndexer, TychoRunner},
     utils::{build_spkg, extract_initial_block},
 };
 
@@ -147,20 +146,20 @@ impl balances::Chain for RpcChain<'_> {
 
 /// Strict mode tests each direction's limit as declared, keyed by lowercase component id;
 /// `from_yaml` made sure every direction of every expected component has a declaration.
-fn limit_kinds(
+fn declared_limits(
     test: &IntegrationTest,
     config: &IntegrationTestsConfig,
-) -> HashMap<(String, Direction), LimitKind> {
+) -> HashMap<(String, Direction), Limits> {
     test.expected_components
         .iter()
         .flat_map(|component| {
             component_directions(component)
                 .into_iter()
                 .filter_map(move |direction| {
-                    let kind = config
+                    let limits = config
                         .limits_for(component, &direction)?
-                        .kind;
-                    Some(((component.base.id.to_lowercase(), direction), kind))
+                        .clone();
+                    Some(((component.base.id.to_lowercase(), direction), limits))
                 })
         })
         .collect()
@@ -206,7 +205,11 @@ fn observe_executions(
     inputs: &HashMap<String, TychoExecutionInput>,
     results: &HashMap<String, TychoExecutionResult>,
 ) {
-    for (simulation_id, input) in inputs {
+    // Sorted, so a tie between executions resolves the same way on every run.
+    for (simulation_id, input) in inputs
+        .iter()
+        .sorted_by(|a, b| a.0.cmp(b.0))
+    {
         if let Some(TychoExecutionResult::Success { amount_out, .. }) = results.get(simulation_id) {
             checks.observe_execution(
                 simulation_id,
@@ -719,7 +722,16 @@ impl TestRunner {
                 }
             }
             if let Some(Ok(streamed)) = &mut streamed {
-                self.execute_streamed(streamed, config, &mut checks);
+                let executes_nothing = (!test.expected_components.is_empty() &&
+                    test.expected_components
+                        .iter()
+                        .all(|component| {
+                            component
+                                .execution_skip_reason()
+                                .is_some()
+                        }))
+                .then_some("every expected component skips execution");
+                self.execute_streamed(streamed, config, executes_nothing, &mut checks);
             }
             let rpc_server = tycho_runner.start_rpc_server();
             let result = match self
@@ -765,6 +777,17 @@ impl TestRunner {
                     run.and(outcome)
                 }
                 Err(e) => {
+                    // A stream that failed is the likelier cause of a range indexed short.
+                    let e = match &streamed {
+                        Some(Err(stream_error)) => {
+                            checks.fail(
+                                CheckId::StreamMatchesSnapshot,
+                                &miette!("the stream failed: {stream_error}"),
+                            );
+                            e.wrap_err(format!("after the stream failed: {stream_error}"))
+                        }
+                        Some(Ok(_)) | None => e,
+                    };
                     checks.fail(CheckId::Index, &e);
                     report.results.extend(checks.finish().1);
                     Err(e)
@@ -815,7 +838,7 @@ impl TestRunner {
             .map(|c| c.base.id.to_lowercase())
             .collect::<Vec<String>>();
         // Strict: the components whose balances are declared to feed only TVL, which the runner
-        // verifies by quoting them again with their balances halved.
+        // verifies by quoting them again with their balances scaled down.
         let tvl_only_ids: Vec<String> = match config.harness {
             Harness::Strict => test
                 .expected_components
@@ -856,6 +879,11 @@ impl TestRunner {
             }
             if !tvl_only_ids.is_empty() {
                 checks.not_run(CheckId::BalancesTvlOnly, CheckId::Index);
+            }
+            if config.harness == Harness::Strict {
+                for id in CheckId::LIMITS {
+                    checks.not_run(id, CheckId::Index);
+                }
             }
             return Ok(());
         };
@@ -918,20 +946,14 @@ impl TestRunner {
             })?;
         }
 
-        for component in &test.expected_components {
-            let id = &component.base.id;
-            if let Some(reason) = component.skip_simulation.reason() {
-                checks.skip_component(CheckId::SimLadder, id, reason);
-                checks.skip_component(CheckId::ExecLadder, id, reason);
-                if config.harness == Harness::Strict {
-                    for limit_check in
-                        [CheckId::LimitsAtLimit, CheckId::LimitsPastLimit, CheckId::LimitsMaxOutput]
-                    {
-                        checks.skip_component(limit_check, id, reason);
+        let ladder_skips = record_ladder_skips(&test.expected_components, checks);
+        if config.harness == Harness::Strict {
+            for component in &test.expected_components {
+                if let Some(reason) = component.skip_simulation.reason() {
+                    for limit_check in CheckId::LIMITS {
+                        checks.skip_component(limit_check, &component.base.id, reason);
                     }
                 }
-            } else if let Some(reason) = component.skip_execution.reason() {
-                checks.skip_component(CheckId::ExecLadder, id, reason);
             }
         }
 
@@ -944,11 +966,28 @@ impl TestRunner {
                 config.adapter_build_args.as_deref(),
             )
         };
-        // Taken before the snapshot is decoded, which consumes it.
-        let halved = (!tvl_only_ids.is_empty()).then(|| {
-            let mut halved = snapshot.clone();
-            let changed = tycho_test::checks::tvl_only::halve_balances(&mut halved, &tvl_only_ids);
-            (halved, changed, all_tokens.clone())
+        // The copy with scaled-down balances holds only the `tvl_only` components, and is decoded
+        // first: VM states read a shared database each decode replaces, so the original decode
+        // below must come last for the ladders to run on it.
+        let scaled = (!tvl_only_ids.is_empty()).then(|| {
+            let mut scaled = snapshot.clone();
+            scaled.states.retain(|id, _| {
+                tvl_only_ids
+                    .iter()
+                    .any(|declared| declared.eq_ignore_ascii_case(id))
+            });
+            let changed = tvl_only::scale_balances(&mut scaled, &tvl_only_ids);
+            let decoded = adapter_contract_path().and_then(|path| {
+                self.decode_snapshot(
+                    &config.protocol_system,
+                    &header,
+                    scaled,
+                    all_tokens.clone(),
+                    path.as_deref(),
+                    self.vm_simulation_traces,
+                )
+            });
+            (decoded, changed)
         });
 
         let Some(update) = checks.run(CheckId::Decode, || {
@@ -972,11 +1011,16 @@ impl TestRunner {
         else {
             checks.not_run(CheckId::SimLadder, CheckId::Decode);
             checks.not_run(CheckId::ExecLadder, CheckId::Decode);
-            if halved.is_some() {
+            if scaled.is_some() {
                 checks.not_run(CheckId::BalancesTvlOnly, CheckId::Decode);
             }
             if streamed.is_some() {
                 checks.not_run(CheckId::StreamMatchesSnapshot, CheckId::Decode);
+            }
+            if config.harness == Harness::Strict {
+                for id in CheckId::LIMITS {
+                    checks.not_run(id, CheckId::Decode);
+                }
             }
             return Ok(());
         };
@@ -990,25 +1034,15 @@ impl TestRunner {
             })?;
         }
 
-        if let Some((snapshot, changed, all_tokens)) = halved {
-            // Decoding again replaces the VM database with the same storage, so the states
-            // decoded above still simulate as before.
-            let decoded = adapter_contract_path().and_then(|path| {
-                self.decode_snapshot(
-                    &config.protocol_system,
-                    &header,
-                    snapshot,
-                    all_tokens,
-                    path.as_deref(),
-                    self.vm_simulation_traces,
-                )
-            });
+        if let Some((decoded, changed)) = &scaled {
             for id in &tvl_only_ids {
-                let failures = match &decoded {
-                    Ok(halved) => Self::check_tvl_only(id, &update, halved, &changed),
-                    Err(e) => {
-                        vec![format!("decoding the snapshot with halved balances failed: {e:#}")]
+                let failures = match decoded {
+                    Ok(scaled) => {
+                        tvl_only::check(id, &update, scaled, changed, executable_max_input)
                     }
+                    Err(e) => vec![format!(
+                        "decoding the snapshot with scaled-down balances failed: {e:#}"
+                    )],
                 };
                 checks.record_component(CheckId::BalancesTvlOnly, id, &failures);
             }
@@ -1017,24 +1051,14 @@ impl TestRunner {
         let protocol_components_simulation: HashMap<String, ProtocolComponentModel> =
             update.new_pairs.clone();
 
-        let limit_kinds = (config.harness == Harness::Strict).then(|| limit_kinds(test, config));
+        let declared_limits =
+            (config.harness == Harness::Strict).then(|| declared_limits(test, config));
 
-        // A test-wide ladder result covers the components without a skip. When every component
-        // skips, nothing runs, and the ladder is reported skipped rather than passed.
-        let every_component = |skips: fn(&ProtocolComponentWithTestConfig) -> bool| {
-            !test.expected_components.is_empty() &&
-                test.expected_components
-                    .iter()
-                    .all(skips)
-        };
-        if every_component(|c| c.skip_simulation.is_skipped()) {
-            let reason = "every expected component skips simulation";
+        if let Some(reason) = ladder_skips.simulation {
             checks.skip(CheckId::SimLadder, reason);
             checks.skip(CheckId::ExecLadder, reason);
-            if limit_kinds.is_some() {
-                for id in
-                    [CheckId::LimitsAtLimit, CheckId::LimitsPastLimit, CheckId::LimitsMaxOutput]
-                {
+            if declared_limits.is_some() {
+                for id in CheckId::LIMITS {
                     checks.skip(id, reason);
                 }
             }
@@ -1047,25 +1071,21 @@ impl TestRunner {
                 &protocol_components_simulation,
                 &test.expected_components,
                 &config.protocol_system,
-                limit_kinds.as_ref(),
+                declared_limits.as_ref(),
             )
         })?
         else {
             checks.not_run(CheckId::ExecLadder, CheckId::SimLadder);
-            if limit_kinds.is_some() {
-                for id in
-                    [CheckId::LimitsAtLimit, CheckId::LimitsPastLimit, CheckId::LimitsMaxOutput]
-                {
+            if declared_limits.is_some() {
+                for id in CheckId::LIMITS {
                     checks.not_run(id, CheckId::SimLadder);
                 }
             }
             return Ok(());
         };
 
-        let executes_nothing =
-            every_component(|c| c.skip_simulation.is_skipped() || c.skip_execution.is_skipped())
-                .then_some("every expected component skips execution");
-        if limit_kinds.is_some() {
+        let executes_nothing = ladder_skips.execution;
+        if declared_limits.is_some() {
             return self.check_strict_executions(
                 &output,
                 Some(&header),
@@ -1080,26 +1100,22 @@ impl TestRunner {
             return Ok(());
         }
 
-        // The drift is noted whether or not the executions match, so a failing run still
-        // reports how far off it was.
-        let mut executed = None;
-        let ladder = checks.run(CheckId::ExecLadder, || {
-            let (inputs, results) = self
-                .runtime
-                .block_on(self.execute_unskipped(
-                    output.executions,
-                    &header,
-                    &config.protocol_system,
-                    &test.expected_components,
-                ))?;
-            let matched = check_executions_match(&inputs, &results, config.tolerance());
-            executed = Some((inputs, results));
-            matched
-        });
-        if let Some((inputs, results)) = &executed {
+        let executed = self
+            .runtime
+            .block_on(self.execute_unskipped(
+                output.executions,
+                &header,
+                &config.protocol_system,
+                &test.expected_components,
+            ));
+        // Noted before the check, so a failing run still reports how far off it was.
+        if let Ok((inputs, results)) = &executed {
             observe_executions(checks, inputs, results);
         }
-        ladder?;
+        checks.run(CheckId::ExecLadder, || {
+            let (inputs, results) = executed?;
+            check_executions_match(&inputs, &results, config.tolerance())
+        })?;
 
         Ok(())
     }
@@ -1556,7 +1572,7 @@ impl TestRunner {
         protocol_components: &HashMap<String, ProtocolComponentModel>,
         expected_components: &[ProtocolComponentWithTestConfig],
         protocol_system: &str,
-        limit_kinds: Option<&HashMap<(String, Direction), LimitKind>>,
+        declared_limits: Option<&HashMap<(String, Direction), Limits>>,
     ) -> miette::Result<LadderOutput> {
         ladder::run_ladder(
             self.chain,
@@ -1565,16 +1581,15 @@ impl TestRunner {
             &skip_reasons(expected_components, |c| &c.skip_simulation),
             &skip_reasons(expected_components, |c| &c.skip_execution),
             protocol_system,
-            limit_kinds,
+            declared_limits,
         )
     }
 
     /// Simulates executing trades through RPC requests using historical block data
     /// and validates the accuracy of the Tycho simulation predictions.
     ///
-    /// This method processes large execution sets using batching (batch size: 30) to avoid
-    /// RPC request size limits caused by large state overwrites. Each batch is processed
-    /// sequentially to maintain stability and provide detailed progress reporting.
+    /// tycho-test splits the executions into JSON-RPC batches of at most 30 calls, a few in flight
+    /// at once, to stay under the RPC's request size limit with large state overwrites.
     ///
     /// # Arguments
     /// * `execution_data` - HashMap of simulation IDs to TychoExecutionInput data
@@ -1582,16 +1597,10 @@ impl TestRunner {
     /// * `protocol_system` - The protocol system identifier
     /// * `expected_components` - Test configuration to determine which components to skip
     ///
-    /// # Returns
-    /// Returns `Ok(())` if all executions complete successfully within tolerance.
-    ///
     /// # Errors
-    /// Returns an error if:
-    /// - Execution simulation fails or reverts
-    /// - Difference between simulation and execution exceeds 0.5% tolerance
-    /// - Any critical execution failures occur
-    ///
-    /// Components can be skipped using `skip_execution` flag in the test configuration.
+    /// Returns an error if an execution cannot be simulated, reverts, or differs from its
+    /// simulation by more than 0.5%. Live mode has no package configuration to read, so it
+    /// ignores `harness` and `execution_tolerance` and always allows 0.5%.
     async fn run_execution(
         &self,
         execution_data: HashMap<String, TychoExecutionInput>,
@@ -1661,12 +1670,12 @@ impl TestRunner {
     }
 
     /// Strict mode's execution checks: the ladder, then per direction the quote at the limit,
-    /// the revert one unit past a hard limit, and the max output. Every execution runs in one
-    /// batch, and each limit check is recorded per component and direction. With
-    /// `executes_nothing`, the reason every component skips execution, the ladder is recorded as
-    /// skipped. With no `block` to execute at, nothing is executed or recorded for the ladder, and
-    /// the limit checks are recorded from the simulation alone: a streamed block that only
-    /// simulates.
+    /// the revert one unit past a hard limit, and the max output. Every execution is simulated in
+    /// one call to [`Self::simulate_executions`], which splits them into JSON-RPC batches, and each
+    /// limit check is recorded per component and direction. With `executes_nothing`, the reason
+    /// every component skips execution, the ladder is recorded as skipped. With no `block` to
+    /// execute at, nothing is executed or recorded for the ladder, and the limit checks are
+    /// recorded from the simulation alone: a streamed block that only simulates.
     fn check_strict_executions(
         &self,
         output: &LadderOutput,
@@ -1733,46 +1742,6 @@ impl TestRunner {
         Ok(())
     }
 
-    /// Strict: verifies that component `id`, declared `tvl_only`, quotes the same in `halved`, the
-    /// snapshot decoded with its balances halved, as in `update`. `changed` counts the balances
-    /// halving changed, per component. Returns every difference.
-    fn check_tvl_only(
-        id: &str,
-        update: &Update,
-        halved: &Update,
-        changed: &HashMap<String, usize>,
-    ) -> Vec<String> {
-        if changed
-            .get(id)
-            .is_none_or(|count| *count == 0)
-        {
-            return vec!["the component has no nonzero indexed balance, so halving its balances \
-                 verifies nothing; it needs no `tvl_only`"
-                .to_string()];
-        }
-        fn find<'a>(update: &'a Update, id: &str) -> Option<(&'a String, &'a dyn ProtocolSim)> {
-            update
-                .states
-                .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case(id))
-                .map(|(key, state)| (key, state.as_ref()))
-        }
-        let (Some((key, original)), Some((_, quoted_halved))) =
-            (find(update, id), find(halved, id))
-        else {
-            return vec!["the component did not decode with its balances halved".to_string()];
-        };
-        let Some(component) = update.new_pairs.get(key) else {
-            return vec![format!("the update has no component {key}")];
-        };
-        tycho_test::checks::tvl_only::compare(
-            original,
-            quoted_halved,
-            &component.tokens,
-            executable_max_input,
-        )
-    }
-
     /// Strict: indexes the test's range while streaming it. The indexer runs in the background,
     /// serving the blocks it indexes; the runner subscribes before extraction starts, so every
     /// block's deltas go through the decoder. Returns the indexer's outcome, and the stream's,
@@ -1785,7 +1754,7 @@ impl TestRunner {
         config: &IntegrationTestsConfig,
         checks: &mut Checks,
     ) -> miette::Result<Result<Streamed, String>> {
-        let limit_kinds = limit_kinds(test, config);
+        let declared_limits = declared_limits(test, config);
         let mut indexer = tycho_runner
             .start_tycho_streaming(
                 spkg_path,
@@ -1799,7 +1768,7 @@ impl TestRunner {
         let streamed = self.runtime.block_on(self.stream_range(
             test,
             config,
-            &limit_kinds,
+            &declared_limits,
             &mut indexer,
             checks,
         ));
@@ -1817,19 +1786,20 @@ impl TestRunner {
         &self,
         test: &IntegrationTest,
         config: &IntegrationTestsConfig,
-        limit_kinds: &HashMap<(String, Direction), LimitKind>,
-        indexer: &mut Child,
+        declared_limits: &HashMap<(String, Direction), Limits>,
+        indexer: &mut StreamingIndexer,
         checks: &mut Checks,
     ) -> miette::Result<Streamed> {
-        let mut exited = || {
-            indexer
-                .try_wait()
-                .map_or(true, |status| status.is_some())
-        };
+        let mut exited = || indexer.has_exited();
         let expected: HashSet<String> = test
             .expected_components
             .iter()
             .map(|component| component.base.id.to_lowercase())
+            .collect();
+        // The stream is judged on the components that simulate; one that skips simulation may
+        // not decode, and is dropped from the stream instead of failing it.
+        let simulated: HashSet<String> = simulated_ids(test)
+            .into_iter()
             .collect();
 
         // The indexer's server comes up before extraction starts; wait for it.
@@ -1890,7 +1860,7 @@ impl TestRunner {
             decoder_context,
             ComponentFilter::Ids(expected.iter().cloned().collect()),
         )
-        .skip_state_decode_failures(false)
+        .skip_state_decode_failures(true)
         .set_tokens(tokens)
         .await;
         let stream = builder
@@ -1913,6 +1883,7 @@ impl TestRunner {
         let mut latest: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
         let mut first = true;
         let mut reached_stop = false;
+        let mut last_block: Option<u64> = None;
         let mut idle = Duration::ZERO;
         loop {
             // The stream ends when the indexer has extracted the range and ended the
@@ -1942,6 +1913,15 @@ impl TestRunner {
             };
             idle = Duration::ZERO;
             let block = update.block_number;
+            // Every block of the range arrives, in order; a gap is a lost delta.
+            if let Some(last) = last_block.filter(|last| !first && block > last + 1) {
+                streamed.errors.push(format!(
+                    "blocks {}-{} never arrived in the stream",
+                    last + 1,
+                    block - 1
+                ));
+            }
+            last_block = Some(block);
             for (id, component) in &update.new_pairs {
                 if expected.contains(&id.to_lowercase()) {
                     components.insert(id.clone(), component.clone());
@@ -1950,7 +1930,7 @@ impl TestRunner {
             let changed: HashMap<String, Box<dyn ProtocolSim>> = update
                 .states
                 .iter()
-                .filter(|(id, _)| expected.contains(&id.to_lowercase()))
+                .filter(|(id, _)| simulated.contains(&id.to_lowercase()))
                 .map(|(id, state)| (id.clone(), state.clone_box()))
                 .collect();
             for (id, state) in &changed {
@@ -1988,7 +1968,7 @@ impl TestRunner {
                             &components,
                             &test.expected_components,
                             &config.protocol_system,
-                            Some(limit_kinds),
+                            Some(declared_limits),
                         )
                     });
                     checks.at_block(None);
@@ -2013,19 +1993,29 @@ impl TestRunner {
                     .iter()
                     .filter_map(|(id, state)| {
                         let component = components.get(id)?;
-                        let sheet = sheet::quote_sheet(
+                        let quotes = sheet::quote_sheet(
                             state.as_ref(),
                             &component.tokens,
                             executable_max_input,
                         );
-                        Some((id.to_lowercase(), sheet))
+                        Some((id.to_lowercase(), quotes))
                     })
                     .collect();
                 streamed.sheets.insert(block, sheets);
             }
         }
 
-        // The directions that trade at the end of the stream, which the floor asks to see quoted.
+        if !reached_stop {
+            let indexer = if exited() { "; the indexer exited" } else { "" };
+            return Err(miette!(
+                "the stream ended at block {} before reaching the stop block {}{indexer}",
+                last_block.map_or_else(|| "none".to_string(), |block| block.to_string()),
+                test.stop_block
+            ));
+        }
+
+        // The directions of the simulated components that trade at the end of the stream, which
+        // the floor asks to see quoted; `latest` holds only simulated components.
         for (id, state) in &latest {
             let Some(component) = components.get(id) else {
                 continue;
@@ -2064,10 +2054,14 @@ impl TestRunner {
 
     /// Strict, after a streamed range: executes at the fewest simulated blocks, spread evenly,
     /// that meet the floor, and records the limit checks of every simulated block.
+    ///
+    /// With `executes_nothing`, the reason every component skips execution, nothing is executed,
+    /// and the execution ladder is recorded as skipped once.
     fn execute_streamed(
         &self,
         streamed: &mut Streamed,
         config: &IntegrationTestsConfig,
+        executes_nothing: Option<&str>,
         checks: &mut Checks,
     ) {
         let counts = |output: &LadderOutput| {
@@ -2085,7 +2079,13 @@ impl TestRunner {
             .iter()
             .map(|(block, output)| stream::Candidate { block: *block, executions: counts(output) })
             .collect();
-        let to_execute = stream::blocks_to_execute(&candidates, stream::Floor::DEFAULT);
+        let to_execute = match executes_nothing {
+            Some(reason) => {
+                checks.skip(CheckId::ExecLadder, reason);
+                Vec::new()
+            }
+            None => stream::blocks_to_execute(&candidates, stream::Floor::DEFAULT),
+        };
         info!("Executing at {} of the {} simulated blocks", to_execute.len(), candidates.len());
 
         for (block, output) in std::mem::take(&mut streamed.simulated) {
@@ -2371,6 +2371,45 @@ fn executed_ids(test: &IntegrationTest) -> Vec<String> {
         .collect()
 }
 
+/// Which ladder the whole test skips, because every expected component skips it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LadderSkips {
+    /// Why `sim.ladder` and `exec.ladder` do not run, when every component skips simulation.
+    simulation: Option<&'static str>,
+    /// Why `exec.ladder` does not run, when every component skips simulation or execution.
+    execution: Option<&'static str>,
+}
+
+/// Records and logs each expected component's ladder skips, once per component: a
+/// `skip_simulation` skips both ladders, a `skip_execution` the execution one. Returns which
+/// ladder every component skips, if any; an empty list skips nothing, since it stands for every
+/// component of the protocol.
+fn record_ladder_skips(
+    expected_components: &[ProtocolComponentWithTestConfig],
+    checks: &mut Checks,
+) -> LadderSkips {
+    for component in expected_components {
+        let id = &component.base.id;
+        if let Some(reason) = component.skip_simulation.reason() {
+            info!("Skipping simulation and execution for component {id}: {reason}");
+            checks.skip_component(CheckId::SimLadder, id, reason);
+            checks.skip_component(CheckId::ExecLadder, id, reason);
+        } else if let Some(reason) = component.skip_execution.reason() {
+            info!("Skipping execution for component {id}: {reason}");
+            checks.skip_component(CheckId::ExecLadder, id, reason);
+        }
+    }
+    let every = |skips: fn(&ProtocolComponentWithTestConfig) -> bool| {
+        !expected_components.is_empty() && expected_components.iter().all(skips)
+    };
+    LadderSkips {
+        simulation: every(|c| c.skip_simulation.is_skipped())
+            .then_some("every expected component skips simulation"),
+        execution: every(|c| c.execution_skip_reason().is_some())
+            .then_some("every expected component skips execution"),
+    }
+}
+
 /// The lowercase ids of the expected components whose `flag` is skipped, each with its reason.
 fn skip_reasons<'a>(
     expected_components: &'a [ProtocolComponentWithTestConfig],
@@ -2390,10 +2429,131 @@ mod tests {
     use std::{collections::HashMap, env, str::FromStr};
 
     use dotenv::dotenv;
-    use glob::glob;
+    use tycho_execution::encoding::models::Solution;
     use tycho_simulation::tycho_common::{models::protocol::ProtocolComponentState, Bytes};
+    use tycho_test::execution::models::Transaction;
 
     use super::*;
+    use crate::{
+        config::{Harness, ProtocolComponentExpectation},
+        report::{CheckResult, Outcome},
+    };
+
+    fn component(
+        id: &str,
+        skip_simulation: Skip,
+        skip_execution: Skip,
+    ) -> ProtocolComponentWithTestConfig {
+        ProtocolComponentWithTestConfig {
+            base: ProtocolComponentExpectation {
+                id: id.to_string(),
+                tokens: Vec::new(),
+                static_attributes: HashMap::new(),
+                creation_tx: Bytes::default(),
+            },
+            skip_simulation,
+            skip_execution,
+            limits: None,
+            balance_check: None,
+            tvl_only: None,
+        }
+    }
+
+    fn reason(text: &str) -> Skip {
+        Skip::Reason(text.to_string())
+    }
+
+    /// The skips recorded for `components`, as `(check, component, reason)`, and what the whole
+    /// test skips.
+    fn ladder_skips(
+        components: &[ProtocolComponentWithTestConfig],
+    ) -> (Vec<(CheckId, Option<String>, String)>, LadderSkips) {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        let skips = record_ladder_skips(components, &mut checks);
+        let (_, results) = checks.finish();
+        let recorded = results
+            .into_iter()
+            .map(|CheckResult { check, component, outcome, .. }| {
+                let Outcome::Skipped { reason } = outcome else {
+                    panic!("{check} recorded {outcome:?}")
+                };
+                (check, component, reason)
+            })
+            .collect();
+        (recorded, skips)
+    }
+
+    #[test]
+    fn every_component_skipping_simulation_skips_both_ladders() {
+        let (recorded, skips) = ladder_skips(&[
+            component("0xAA", reason("no adapter"), Skip::No),
+            component("0xbb", reason("no state"), Skip::No),
+        ]);
+        assert_eq!(
+            recorded,
+            vec![
+                (CheckId::SimLadder, Some("0xaa".to_string()), "no adapter".to_string()),
+                (CheckId::ExecLadder, Some("0xaa".to_string()), "no adapter".to_string()),
+                (CheckId::SimLadder, Some("0xbb".to_string()), "no state".to_string()),
+                (CheckId::ExecLadder, Some("0xbb".to_string()), "no state".to_string()),
+            ]
+        );
+        assert_eq!(
+            skips,
+            LadderSkips {
+                simulation: Some("every expected component skips simulation"),
+                execution: Some("every expected component skips execution"),
+            }
+        );
+    }
+
+    #[test]
+    fn every_component_skipping_execution_skips_only_the_execution_ladder() {
+        let (recorded, skips) = ladder_skips(&[component("0xaa", Skip::No, reason("no fork"))]);
+        assert_eq!(
+            recorded,
+            vec![(CheckId::ExecLadder, Some("0xaa".to_string()), "no fork".to_string())]
+        );
+        assert_eq!(
+            skips,
+            LadderSkips {
+                simulation: None,
+                execution: Some("every expected component skips execution")
+            }
+        );
+    }
+
+    #[test]
+    fn a_simulation_skip_counts_as_an_execution_skip_for_the_whole_test() {
+        let (_, skips) = ladder_skips(&[
+            component("0xaa", reason("no adapter"), Skip::No),
+            component("0xbb", Skip::No, reason("no fork")),
+        ]);
+        assert_eq!(
+            skips,
+            LadderSkips {
+                simulation: None,
+                execution: Some("every expected component skips execution")
+            }
+        );
+    }
+
+    #[test]
+    fn a_mix_with_an_unskipped_component_skips_nothing_test_wide() {
+        let (recorded, skips) = ladder_skips(&[
+            component("0xaa", Skip::No, reason("no fork")),
+            component("0xbb", Skip::No, Skip::Bool(false)),
+        ]);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(skips, LadderSkips::default());
+    }
+
+    #[test]
+    fn no_expected_components_skips_nothing() {
+        let (recorded, skips) = ladder_skips(&[]);
+        assert!(recorded.is_empty());
+        assert_eq!(skips, LadderSkips::default());
+    }
 
     #[test]
     fn snapshot_block_reads_at_the_last_committed_block() {
@@ -2439,27 +2599,99 @@ mod tests {
 
     /// A limit no swap could be executed with is capped; anything at or below the ceiling is the
     /// size the venue reported, untouched.
-    /// Every integration test yaml under `protocols/substreams/`, clone and nested ones included,
-    /// as paths relative to `protocols/`.
+    fn execution_input(component: &str, amount_in: u32, simulated: u32) -> TychoExecutionInput {
+        TychoExecutionInput {
+            solution: Solution::new(
+                Bytes::default(),
+                Bytes::default(),
+                Bytes::from("0x01"),
+                Bytes::from("0x02"),
+                BigUint::from(amount_in),
+                BigUint::from(simulated),
+                BigUint::from(simulated),
+                Vec::new(),
+            ),
+            transaction: Transaction::new(
+                Bytes::default(),
+                BigUint::zero(),
+                Vec::new(),
+                BigUint::zero(),
+            ),
+            expected_amount_out: BigUint::from(simulated),
+            protocol_system: "vault".to_string(),
+            component_id: component.to_string(),
+            token_in: "A".to_string(),
+            token_out: "B".to_string(),
+            estimated_gas: BigUint::zero(),
+            account_overwrites: None,
+        }
+    }
+
+    fn success(amount_out: u32) -> TychoExecutionResult {
+        TychoExecutionResult::Success {
+            amount_out: BigUint::from(amount_out),
+            gas_used: 0,
+            state_overwrites: None,
+            overwrite_metadata: None,
+        }
+    }
+
+    #[test]
+    fn drift_is_noted_for_ladder_and_at_limit_executions_when_the_ladder_fails() {
+        let ladder = HashMap::from([("test_a".to_string(), execution_input("0x01", 10, 1000))]);
+        let at_limit =
+            HashMap::from([("at_limit_b".to_string(), execution_input("0x02", 99, 997))]);
+        let results = HashMap::from([
+            ("test_a".to_string(), success(999)),
+            ("at_limit_b".to_string(), success(1000)),
+        ]);
+        assert!(check_executions_match(&ladder, &results, Tolerance::EXACT).is_err());
+
+        let mut checks = Checks::new(Harness::Strict, "t");
+        observe_executions(&mut checks, &ladder, &results);
+        observe_executions(&mut checks, &at_limit, &results);
+        let drift = checks.take_drift().unwrap();
+        // The at-limit execution is 30 bps off, the ladder's 10.
+        assert_eq!(
+            (drift.test.as_str(), drift.simulation.as_str(), drift.component.as_str()),
+            ("t", "at_limit_b", "0x02")
+        );
+        assert_eq!(drift.largest_difference, "3");
+    }
+
+    #[test]
+    fn drift_ties_resolve_the_same_way_on_every_run() {
+        let inputs: HashMap<String, TychoExecutionInput> = (0..20)
+            .map(|i| (format!("test_{i:02}"), execution_input("0x01", 10, 1000)))
+            .collect();
+        let results: HashMap<String, TychoExecutionResult> = inputs
+            .keys()
+            .map(|id| (id.clone(), success(1000)))
+            .collect();
+        let mut checks = Checks::new(Harness::Strict, "t");
+        observe_executions(&mut checks, &inputs, &results);
+        assert_eq!(checks.take_drift().unwrap().simulation, "test_00");
+    }
+
+    /// Every integration test yaml under `protocols/substreams/`, clone, nested and template
+    /// ones included, as paths relative to `protocols/`: the files `load_packages` walks, and the
+    /// templates.
     fn all_test_yamls() -> Vec<String> {
         let protocols_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
             .to_path_buf();
-        let pattern = protocols_dir.join("substreams/**/integration_test*.tycho.yaml");
-        let mut yamls: Vec<String> = glob(pattern.to_str().unwrap())
-            .unwrap()
-            .map(|entry| {
-                entry
-                    .unwrap()
-                    .strip_prefix(&protocols_dir)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .filter(|path| !path.contains("/target/"))
-            .collect();
-        yamls.sort();
+        let yamls: Vec<String> =
+            tycho_test::expectations::test_yamls(&protocols_dir.join("substreams"), true)
+                .unwrap()
+                .into_iter()
+                .map(|path| {
+                    path.strip_prefix(&protocols_dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
         assert!(!yamls.is_empty(), "No integration test yamls found under substreams/");
         yamls
     }
@@ -2511,6 +2743,14 @@ mod tests {
                         component.base.id
                     );
                 }
+                assert_eq!(
+                    package
+                        .component(&component.base.id)
+                        .and_then(|declared| declared.tvl_only.as_ref()),
+                    component.tvl_only.as_ref(),
+                    "{path}: {} tvl_only",
+                    component.base.id
+                );
             }
         }
     }

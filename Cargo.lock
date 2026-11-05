@@ -7029,7 +7029,6 @@ dependencies = [
  "colored",
  "dotenv",
  "futures 0.3.31",
- "glob",
  "hex",
  "itertools 0.13.0",
  "miette",
