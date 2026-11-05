@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 import "../TychoRouterTestSetup.sol";
 import {
+    ITesseraSwap,
     TesseraExecutor,
     TesseraExecutor__AmountTooLarge,
     TesseraExecutor__InvalidDataLength,
@@ -11,13 +12,6 @@ import {TransferManager} from "../../src/TransferManager.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 uint256 constant TESSERA_FORK_BLOCK = 50_548_423;
-
-interface ITesseraQuote {
-    function tesseraSwapViewAmounts(address, address, int256)
-        external
-        view
-        returns (uint256, uint256);
-}
 
 contract TesseraExecutorExposed is TesseraExecutor {
     constructor(address tesseraSwap_) TesseraExecutor(tesseraSwap_) {}
@@ -96,7 +90,7 @@ contract TesseraExecutorTest is TestUtils, Constants {
         // TesseraSwap quotes for its caller and tx.origin; quote as the
         // executor with the test's default origin.
         vm.prank(address(executor));
-        (, uint256 quote) = ITesseraQuote(TESSERA_SWAP)
+        (, uint256 quote) = ITesseraSwap(TESSERA_SWAP)
             .tesseraSwapViewAmounts(BASE_WETH, BASE_USDC, int256(amountIn));
 
         uint256 usdcBefore = IERC20(BASE_USDC).balanceOf(BOB);
@@ -137,19 +131,14 @@ contract TesseraRouterTest is TychoRouterTestSetup {
         // TesseraSwap quotes for its caller and tx.origin; in a swap the caller
         // is the router.
         vm.prank(tychoRouterAddr);
-        (, uint256 quote) = ITesseraQuote(TESSERA_SWAP)
+        (, uint256 quote) = ITesseraSwap(TESSERA_SWAP)
             .tesseraSwapViewAmounts(tokenIn, tokenOut, int256(amountIn));
         assertGt(quote, 0);
         vm.expectCall(
             TESSERA_SWAP,
-            abi.encodeWithSignature(
-                "tesseraSwapWithAllowances(address,address,int256,uint256,address,bytes)",
-                tokenIn,
-                tokenOut,
-                int256(amountIn),
-                uint256(0),
-                ALICE,
-                bytes("")
+            abi.encodeCall(
+                ITesseraSwap.tesseraSwapWithAllowances,
+                (tokenIn, tokenOut, int256(amountIn), 0, ALICE, "")
             )
         );
         deal(tokenIn, ALICE, amountIn);
