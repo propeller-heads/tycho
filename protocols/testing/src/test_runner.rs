@@ -14,8 +14,7 @@ use futures::StreamExt;
 use itertools::Itertools;
 use miette::{ensure, miette, IntoDiagnostic, WrapErr};
 use num_bigint::{BigInt, BigUint};
-use num_rational::BigRational;
-use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
+use num_traits::{FromPrimitive, Signed, Zero};
 use postgres::NoTls;
 use serde_json::json;
 use tokio::runtime::Runtime;
@@ -59,7 +58,7 @@ use crate::{
         ProtocolComponentWithTestConfig, Skip, Tolerance,
     },
     execution, limits,
-    report::{CheckId, Checks, Outcome, Report},
+    report::{drift, CheckId, Checks, Outcome, Report},
     rpc::RPCProvider,
     state_registry::register_protocol,
     tycho_rpc::TychoClient,
@@ -106,21 +105,16 @@ fn check_execution_slippage(
     amount_out: &BigUint,
     tolerance: Tolerance,
 ) -> Result<(), String> {
-    if amount_out.is_zero() {
+    let Some((difference, bps)) = drift(expected_amount_out, amount_out) else {
         return Err("execution returned no output".to_string());
-    }
-
-    let executed = BigInt::from(amount_out.clone());
-    let difference = executed.clone() - BigInt::from(expected_amount_out.clone());
+    };
     let within = difference.abs() <= BigInt::from(tolerance.wei) ||
-        difference.abs() * 10_000u32 <= executed.clone() * tolerance.bps;
+        difference.abs() * 10_000u32 <= BigInt::from(amount_out.clone()) * tolerance.bps;
     if within {
         return Ok(());
     }
 
-    let bps = BigRational::new(difference.abs() * 10_000u32, executed)
-        .to_f64()
-        .map_or_else(|| "?".to_string(), format_bps);
+    let bps = format_bps(bps.abs());
     let (paid, quotes) =
         if difference.is_negative() { ("less", "overquotes") } else { ("more", "underquotes") };
     Err(format!(
@@ -329,7 +323,11 @@ fn observe_executions(
     inputs: &HashMap<String, TychoExecutionInput>,
     results: &HashMap<String, TychoExecutionResult>,
 ) {
-    for (simulation_id, input) in inputs {
+    // Sorted, so a tie between executions resolves the same way on every run.
+    for (simulation_id, input) in inputs
+        .iter()
+        .sorted_by(|a, b| a.0.cmp(b.0))
+    {
         if let Some(TychoExecutionResult::Success { amount_out, .. }) = results.get(simulation_id) {
             checks.observe_execution(
                 simulation_id,
@@ -1148,26 +1146,22 @@ impl TestRunner {
             return Ok(());
         }
 
-        // The drift is noted whether or not the executions match, so a failing run still
-        // reports how far off it was.
-        let mut executed = None;
-        let ladder = checks.run(CheckId::ExecLadder, || {
-            let (inputs, results) = self
-                .runtime
-                .block_on(self.execute_unskipped(
-                    output.executions,
-                    &header,
-                    &config.protocol_system,
-                    &test.expected_components,
-                ))?;
-            let matched = check_executions_match(&inputs, &results, config.tolerance());
-            executed = Some((inputs, results));
-            matched
-        });
-        if let Some((inputs, results)) = &executed {
+        let executed = self
+            .runtime
+            .block_on(self.execute_unskipped(
+                output.executions,
+                &header,
+                &config.protocol_system,
+                &test.expected_components,
+            ));
+        // Noted before the check, so a failing run still reports how far off it was.
+        if let Ok((inputs, results)) = &executed {
             observe_executions(checks, inputs, results);
         }
-        ladder?;
+        checks.run(CheckId::ExecLadder, || {
+            let (inputs, results) = executed?;
+            check_executions_match(&inputs, &results, config.tolerance())
+        })?;
 
         Ok(())
     }
@@ -1989,16 +1983,10 @@ impl TestRunner {
     /// * `protocol_system` - The protocol system identifier
     /// * `expected_components` - Test configuration to determine which components to skip
     ///
-    /// # Returns
-    /// Returns `Ok(())` if all executions complete successfully within tolerance.
-    ///
     /// # Errors
-    /// Returns an error if:
-    /// - Execution simulation fails or reverts
-    /// - Difference between simulation and execution exceeds 0.5% tolerance
-    /// - Any critical execution failures occur
-    ///
-    /// Components can be skipped using `skip_execution` flag in the test configuration.
+    /// Returns an error if an execution cannot be simulated, reverts, or differs from its
+    /// simulation by more than 0.5%. Live mode has no package configuration to read, so it
+    /// ignores `harness` and `execution_tolerance` and always allows 0.5%.
     async fn run_execution(
         &self,
         execution_data: HashMap<String, TychoExecutionInput>,
@@ -2689,15 +2677,19 @@ mod tests {
     }
 
     fn past_limit_input() -> TychoExecutionInput {
+        execution_input("0xaa", 101, 50)
+    }
+
+    fn execution_input(component: &str, amount_in: u32, simulated: u32) -> TychoExecutionInput {
         TychoExecutionInput {
             solution: Solution::new(
                 Bytes::default(),
                 Bytes::default(),
                 Bytes::from("0x01"),
                 Bytes::from("0x02"),
-                BigUint::from(101u32),
-                BigUint::from(50u32),
-                BigUint::from(50u32),
+                BigUint::from(amount_in),
+                BigUint::from(simulated),
+                BigUint::from(simulated),
                 Vec::new(),
             ),
             transaction: Transaction::new(
@@ -2706,9 +2698,9 @@ mod tests {
                 Vec::new(),
                 BigUint::zero(),
             ),
-            expected_amount_out: BigUint::from(50u32),
+            expected_amount_out: BigUint::from(simulated),
             protocol_system: "vault".to_string(),
-            component_id: "0xaa".to_string(),
+            component_id: component.to_string(),
             token_in: "A".to_string(),
             token_out: "B".to_string(),
             estimated_gas: BigUint::zero(),
@@ -2722,6 +2714,52 @@ mod tests {
             state_overwrites: None,
             overwrite_metadata: None,
         }
+    }
+
+    fn success(amount_out: u32) -> TychoExecutionResult {
+        TychoExecutionResult::Success {
+            amount_out: BigUint::from(amount_out),
+            gas_used: 0,
+            state_overwrites: None,
+            overwrite_metadata: None,
+        }
+    }
+
+    #[test]
+    fn drift_is_noted_for_ladder_and_at_limit_executions_when_the_ladder_fails() {
+        let ladder = HashMap::from([("test_a".to_string(), execution_input("0x01", 10, 1000))]);
+        let at_limit =
+            HashMap::from([("at_limit_b".to_string(), execution_input("0x02", 99, 997))]);
+        let results = HashMap::from([
+            ("test_a".to_string(), success(999)),
+            ("at_limit_b".to_string(), success(1000)),
+        ]);
+        assert!(check_executions_match(&ladder, &results, Tolerance::EXACT).is_err());
+
+        let mut checks = Checks::new(Harness::Strict, "t");
+        observe_executions(&mut checks, &ladder, &results);
+        observe_executions(&mut checks, &at_limit, &results);
+        let drift = checks.take_drift().unwrap();
+        // The at-limit execution is 30 bps off, the ladder's 10.
+        assert_eq!(
+            (drift.test.as_str(), drift.simulation.as_str(), drift.component.as_str()),
+            ("t", "at_limit_b", "0x02")
+        );
+        assert_eq!(drift.largest_difference, "3");
+    }
+
+    #[test]
+    fn drift_ties_resolve_the_same_way_on_every_run() {
+        let inputs: HashMap<String, TychoExecutionInput> = (0..20)
+            .map(|i| (format!("test_{i:02}"), execution_input("0x01", 10, 1000)))
+            .collect();
+        let results: HashMap<String, TychoExecutionResult> = inputs
+            .keys()
+            .map(|id| (id.clone(), success(1000)))
+            .collect();
+        let mut checks = Checks::new(Harness::Strict, "t");
+        observe_executions(&mut checks, &inputs, &results);
+        assert_eq!(checks.take_drift().unwrap().simulation, "test_00");
     }
 
     #[test]

@@ -109,7 +109,7 @@ pub struct CheckResult {
 }
 
 /// The largest difference between a simulated and an executed amount out in one test, whether or
-/// not it was within tolerance. A declared tolerance's `measured` is checked against it.
+/// not it was within tolerance. A declared tolerance's `measured` can be checked against it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Drift {
     pub test: String,
@@ -121,8 +121,28 @@ pub struct Drift {
     /// overquotes, positive when it underquotes.
     pub bps: f64,
     /// `executed - simulated` of the execution furthest off in absolute terms, in base units of
-    /// its token out, which may not be the one above. A `wei` tolerance is checked against it.
+    /// its token out, which may not be the one above. A `wei` tolerance can be checked against it.
     pub largest_difference: String,
+}
+
+/// `executed - simulated`, and that difference in basis points of `executed`. `None` for a zero
+/// executed amount, which no relative difference can be expressed against.
+pub fn drift(simulated: &BigUint, executed: &BigUint) -> Option<(BigInt, f64)> {
+    if executed.is_zero() {
+        return None;
+    }
+    let difference = BigInt::from(executed.clone()) - BigInt::from(simulated.clone());
+    let bps = BigRational::new(&difference * 10_000, BigInt::from(executed.clone())).to_f64()?;
+    Some((difference, bps))
+}
+
+/// The execution furthest off in relative terms so far, before it becomes a [`Drift`].
+struct Observed {
+    simulation: String,
+    component: String,
+    simulated: String,
+    executed: String,
+    bps: f64,
 }
 
 /// Runs the checks of one test and records how each ended.
@@ -130,7 +150,7 @@ pub struct Checks {
     harness: Harness,
     test: String,
     results: Vec<CheckResult>,
-    drift: Option<Drift>,
+    drift: Option<Observed>,
     largest_difference: Option<BigInt>,
 }
 
@@ -154,22 +174,16 @@ impl Checks {
         simulated: &BigUint,
         executed: &BigUint,
     ) {
-        if executed.is_zero() {
+        let Some((difference, bps)) = drift(simulated, executed) else {
             return;
-        }
-        let difference = BigInt::from(executed.clone()) - BigInt::from(simulated.clone());
+        };
         if self
             .largest_difference
             .as_ref()
             .is_none_or(|largest| difference.abs() > largest.abs())
         {
-            self.largest_difference = Some(difference.clone());
+            self.largest_difference = Some(difference);
         }
-        let Some(bps) =
-            (BigRational::new(difference * 10_000, BigInt::from(executed.clone()))).to_f64()
-        else {
-            return;
-        };
         if self
             .drift
             .as_ref()
@@ -177,23 +191,30 @@ impl Checks {
         {
             return;
         }
-        self.drift = Some(Drift {
-            test: self.test.clone(),
+        self.drift = Some(Observed {
             simulation: simulation.to_string(),
             component: component.to_string(),
             simulated: simulated.to_string(),
             executed: executed.to_string(),
             bps,
-            largest_difference: String::new(),
         });
     }
 
     /// The largest drift noted so far, if any execution was noted.
     pub fn take_drift(&mut self) -> Option<Drift> {
-        let largest_difference = self.largest_difference.take();
-        self.drift.take().map(|drift| Drift {
-            largest_difference: largest_difference.map_or_else(String::new, |d| d.to_string()),
-            ..drift
+        let (observed, largest_difference) = self
+            .drift
+            .take()
+            .zip(self.largest_difference.take())?;
+        let Observed { simulation, component, simulated, executed, bps } = observed;
+        Some(Drift {
+            test: self.test.clone(),
+            simulation,
+            component,
+            simulated,
+            executed,
+            bps,
+            largest_difference: largest_difference.to_string(),
         })
     }
 
@@ -494,8 +515,9 @@ mod tests {
         checks.observe_execution("a", "0x01", &amount(1000), &amount(1000));
         checks.observe_execution("b", "0x01", &amount(1003), &amount(1000)); // overquote, 30 bps
         checks.observe_execution("c", "0x02", &amount(999), &amount(1000)); // underquote, 10 bps
-        checks.observe_execution("d", "0x02", &amount(1000), &amount(0)); // no output: not noted
-                                                                          // Overquotes by 20 wei, more than "b" in wei but only 2 bps.
+                                                                            // No output: not noted.
+        checks.observe_execution("d", "0x02", &amount(1000), &amount(0));
+        // Overquotes by 20 wei, more than "b" in wei but only 2 bps.
         checks.observe_execution("e", "0x02", &amount(100_020), &amount(100_000));
 
         let drift = checks.take_drift().unwrap();
@@ -507,7 +529,7 @@ mod tests {
 
         checks.observe_execution("f", "0x01", &amount(1000), &amount(1001));
         let drift = checks.take_drift().unwrap();
-        assert!(drift.bps > 0.0);
+        assert!((drift.bps - 10_000.0 / 1001.0).abs() < 1e-9, "{}", drift.bps);
         assert_eq!(drift.largest_difference, "1");
     }
 }

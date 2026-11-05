@@ -87,6 +87,8 @@ In strict mode:
   stopping at the first. A check that needs the result of a failed one is reported as not run.
 - Every direction of every expected component declares what kind of limit `get_limits` reports,
   and the limit is tested as declared (below).
+- An execution must pay exactly the simulated amount, unless the package declares a tolerance
+  (below, "Execution tolerance").
 - New checks are added to strict mode only, so a legacy package never starts failing because the
   harness grew.
 
@@ -164,8 +166,9 @@ Legacy mode reads the declarations but runs none of these checks.
 ### Execution tolerance
 
 An execution matches its simulation when the executed amount out is within the tolerance, in basis
-points of the executed amount. Legacy mode allows 0.5% for every package. Strict mode requires an
-exact match: a simulation that ports the venue's math, or runs its bytecode, should not differ by
+points of the executed amount. Legacy mode allows 0.5% for every package. In `range`, strict mode
+requires an exact match (`full` reads neither `harness` nor `execution_tolerance`, and allows 0.5%
+for every package): a simulation that ports the venue's math, or runs its bytecode, should not differ by
 a wei, and 0.5% hides rounding and fee bugs. Where exact is out of reach, the package declares a
 tolerance, with why and what a run measured:
 
@@ -235,9 +238,10 @@ A skipped check is reported with its reason, per component (by lowercase id) for
 `sim.ladder` or `exec.ladder` result covers only the components without a `skipped` result for
 it. When every component skips, `range --report` records the test-wide result as `skipped`,
 unless an earlier check failed, in which case it is `not_run`. In legacy mode the report ends at
-the first failed check of a test. `drift` has one entry per test that executed anything: its
-largest `(executed - simulated) / executed`, in bps, negative when the simulation overquotes, and
-its largest `executed - simulated` in base units of the token out, which may come from another
+the first failed check of a test. `drift` has one entry per test with at least one execution that
+paid a nonzero amount: of those, the largest `(executed - simulated) / executed` in magnitude, in
+bps, kept with its sign (negative when the simulation overquotes), and the largest
+`executed - simulated` in magnitude, in base units of the token out, which may come from another
 execution.
 
 ## How to Run with Docker

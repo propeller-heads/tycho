@@ -33,5 +33,6 @@ rejects keys the runner does not read, requires every skip to be written as its 
 It is not required of any package yet, and new checks go into strict mode only.
 Strict mode also tests each direction's declared limit (README, "Limits").
 Strict mode also requires executions to match simulation exactly unless the package declares
-`execution_tolerance: {bps and/or wei, cause, measured}`; legacy mode allows 0.5%.
+`execution_tolerance: {bps and/or wei, cause, measured}`; legacy mode allows 0.5%. Only `range`
+reads these; `full` allows 0.5% for every package.
 `range --report <path>` writes each check's outcome as JSON. See `README.md`, "Strict mode".

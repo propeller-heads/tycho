@@ -665,19 +665,23 @@ impl IntegrationTestsConfig {
             return Ok(());
         };
         let mut problems = Vec::new();
-        match (tolerance.bps, tolerance.wei) {
-            (None, None) => problems.push(
-                "it declares neither `bps` nor `wei`; exact is the default: remove the declaration"
+        if tolerance.bps.is_none() && tolerance.wei.is_none() {
+            problems.push(
+                "it declares neither `bps` nor `wei`: declare one, or remove the declaration \
+                 (in strict mode, exact is the default)"
                     .to_string(),
-            ),
-            (Some(0), _) | (_, Some(0)) => problems.push(
-                "a zero `bps` or `wei` allows nothing; exact is the default: leave it out"
-                    .to_string(),
-            ),
-            (Some(bps), _) if bps >= 10_000 => {
-                problems.push(format!("`bps: {bps}` allows any output"))
+            );
+        }
+        for (field, value) in [("bps", tolerance.bps.map(u64::from)), ("wei", tolerance.wei)] {
+            if value == Some(0) {
+                problems.push(format!("`{field}: 0` allows nothing: leave it out"));
             }
-            _ => {}
+        }
+        if let Some(bps) = tolerance
+            .bps
+            .filter(|bps| *bps >= 10_000)
+        {
+            problems.push(format!("`bps: {bps}` is out of range: `bps` must be 1 to 9999"));
         }
         for (field, value) in [("cause", &tolerance.cause), ("measured", &tolerance.measured)] {
             if value.trim().is_empty() {
@@ -1301,11 +1305,12 @@ tests:
     #[test]
     fn a_tolerance_needs_a_cause_a_measurement_and_a_sensible_size() {
         for (declaration, problem) in [
-            ("{bps: 0, cause: \"c\", measured: \"m\"}", "allows nothing"),
-            ("{wei: 0, cause: \"c\", measured: \"m\"}", "allows nothing"),
-            ("{bps: 2, wei: 0, cause: \"c\", measured: \"m\"}", "allows nothing"),
+            ("{bps: 0, cause: \"c\", measured: \"m\"}", "`bps: 0` allows nothing"),
+            ("{wei: 0, cause: \"c\", measured: \"m\"}", "`wei: 0` allows nothing"),
+            ("{bps: 2, wei: 0, cause: \"c\", measured: \"m\"}", "`wei: 0` allows nothing"),
             ("{cause: \"c\", measured: \"m\"}", "neither `bps` nor `wei`"),
-            ("{bps: 10000, cause: \"c\", measured: \"m\"}", "allows any output"),
+            ("{bps: 10000, cause: \"c\", measured: \"m\"}", "`bps` must be 1 to 9999"),
+            ("{bps: 10000, wei: 0, cause: \"c\", measured: \"m\"}", "`bps` must be 1 to 9999"),
             ("{bps: 3, cause: \" \", measured: \"m\"}", "`cause` is empty"),
             ("{bps: 3, cause: \"c\", measured: \"\"}", "`measured` is empty"),
         ] {
@@ -1317,11 +1322,17 @@ tests:
                 assert!(err.contains(problem), "{declaration}: {err}");
             }
         }
-        for declaration in
-            ["{bps: 3, cause: \"c\"}", "{bps: 3, cause: \"c\", measured: \"m\", why: \"x\"}"]
-        {
-            let err = parse(&yaml(&format!("execution_tolerance: {declaration}"), "")).unwrap_err();
-            assert!(format!("{err:?}").contains("test.yaml"), "{declaration}: {err:?}");
+        for (declaration, expected) in [
+            ("{bps: 3, cause: \"c\"}", "missing field `measured`"),
+            ("{bps: 3, cause: \"c\", measured: \"m\", why: \"x\"}", "unknown field `why`"),
+        ] {
+            let err = parse(&yaml(&format!("execution_tolerance: {declaration}"), ""))
+                .unwrap_err()
+                .chain()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(": ");
+            assert!(err.contains(expected), "{declaration}: {err}");
         }
     }
 }
