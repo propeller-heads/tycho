@@ -1,3 +1,12 @@
+## [0.502.2](https://github.com/propeller-heads/tycho/compare/0.502.1...0.502.2) (2026-11-05)
+
+
+### Bug Fixes
+
+* **integration-test:** print the error chain when the test exits ([a51af00](https://github.com/propeller-heads/tycho/commit/a51af003955aa3d0bbea0cfa62cfc7cb9e8930f5))
+* **integration-test:** read the router fee at the latest block ([008fc37](https://github.com/propeller-heads/tycho/commit/008fc37f6c01cb08635c3acc218d1f9f037ef728)), closes [erigon#22533](https://github.com/propeller-heads/erigon/issues/22533)
+* **integration-test:** read the router fee at the latest block ([#1743](https://github.com/propeller-heads/tycho/issues/1743)) ([f8985dd](https://github.com/propeller-heads/tycho/commit/f8985dd7a66cfe81b91fd5f0b182396d43ca6b5c))
+
 ## [0.502.1](https://github.com/propeller-heads/tycho/compare/0.502.0...0.502.1) (2026-11-05)
 
 
