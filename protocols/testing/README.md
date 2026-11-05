@@ -165,8 +165,11 @@ every pool's funds, a view call returning a `uint` gives the amount, per token o
   `uint256` declares its outputs, `name(type,...) returns (type,...)`; the amount is the first, or
   the one `output` gives by index. That output must be a `uint`: an `int` or a dynamic type is
   rejected at load. Without declared outputs, a call that returns more than one word fails.
+- `to` is `self`, `attribute:NAME` or a `0x` address, as for a holder.
 - `args` has one entry per parameter: `self` (the component id), `token` (the token being
-  checked), `attribute:NAME`, or a literal of the parameter's type.
+  checked), `attribute:NAME`, or a literal of the parameter's type. An `attribute:` argument to an
+  `address` parameter takes 20 bytes or a 32-byte word; other types take its raw hex. A call for
+  the whole component serves every token, so it must take `token`.
 - `divide_by` (an integer or `1eN`, quoted or not) divides the result, rounding down.
 - `unindexed` passes only while the indexer reports no balance (or zero) for the token.
 
@@ -201,16 +204,17 @@ balances, being slightly off only moves TVL, and the component can declare a tol
 ```
 
 - The tolerance takes the same fields as `execution_tolerance`, checked the same way in both modes.
-  It applies to `holder`, `min_of` and `call` sources. An `unindexed` token must still have no
-  balance.
+  It applies to every source but `unindexed`, `default` and unlisted tokens included. An
+  `unindexed` token must still have no balance.
 - **The runner verifies the declaration** (`balances.tvl_only`). It decodes the snapshot again
-  with the component's balances halved, and every limit, spot price and quote at 0.1%, 1% and 10%
-  of the limit must come out the same, in every direction. If one changes, simulation reads the
+  with the component's balances scaled down, each token's by a different factor (1/2, 1/3, ...,
+  in token address order) so their ratios change too, and every limit, spot price and quote at
+  0.1%, 1% and 10% of the limit must come out the same, in every direction. If one changes, simulation reads the
   balances, and the check fails, naming each change:
   ```
-  WBTC -> WETH: limits is max input 8384236, max output 683094418215225792, but max input 3889669, max output 499999999548736461 with the balances halved
+  WBTC -> WETH: limits is max input 8384236, max output 683094418215225792, but max input 3889669, max output 499999999548736461 with the balances scaled down
   ```
-- A component with no nonzero indexed balance fails the check, as halving verifies nothing. So
+- A component with no nonzero indexed balance fails the check, as scaling verifies nothing. So
   does one whose every limit, spot price and quote errors: nothing was compared. An error counts
   as the same only when both states give the same message.
 - Strict mode rejects `tvl_only` on a component that sets `skip_simulation`, since the check
@@ -344,8 +348,8 @@ tolerance or not, so `measured` can be checked against a run.
 | `index` | the range indexes, and the snapshot can be read at the stop block |
 | `state.components` | every expected component is indexed, with its tokens and static attributes |
 | `state.excluded` | no excluded component is indexed |
-| `balances` | indexed balances match `balanceOf` on chain; strict: per component, against its declared holder |
-| `balances.tvl_only` | strict: a `tvl_only` component quotes the same with its balances halved |
+| `balances` | indexed balances match `balanceOf` on chain; strict: per component, against its declared source |
+| `balances.tvl_only` | strict: a `tvl_only` component quotes the same with its balances scaled down |
 | `decode` | the snapshot decodes, and so does every expected component |
 | `sim.ladder` | limits, spot prices and quotes at 0.1%, 1% and 10% of the limit, every direction |
 | `exec.ladder` | executing each quote on chain matches the simulation, within the tolerance |

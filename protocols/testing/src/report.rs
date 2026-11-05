@@ -27,7 +27,7 @@ pub enum CheckId {
     StateExcluded,
     /// Indexed component balances match the chain.
     Balances,
-    /// Strict: a component declared `tvl_only` quotes the same with its balances halved.
+    /// Strict: a component declared `tvl_only` quotes the same with its balances scaled down.
     BalancesTvlOnly,
     /// The snapshot decodes, and every expected component decodes from it.
     Decode,

@@ -449,7 +449,7 @@ impl fmt::Display for Tolerance {
 /// delta, which puts TVL off by 100%; the tolerance sits well below that.
 ///
 /// The declaration is checked, not trusted: the runner decodes the snapshot again with the
-/// component's balances halved, and every limit, spot price and quote must stay the same
+/// component's balances scaled down, and every limit, spot price and quote must stay the same
 /// (`balances.tvl_only`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

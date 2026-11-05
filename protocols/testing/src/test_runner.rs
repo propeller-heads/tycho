@@ -39,7 +39,6 @@ use tycho_simulation::{
             token::Token,
             Chain,
         },
-        simulation::protocol_sim::ProtocolSim,
         Bytes,
     },
 };
@@ -998,7 +997,7 @@ impl TestRunner {
             .map(|c| c.base.id.to_lowercase())
             .collect::<Vec<String>>();
         // Strict: the components whose balances are declared to feed only TVL, which the runner
-        // verifies by quoting them again with their balances halved.
+        // verifies by quoting them again with their balances scaled down.
         let tvl_only_ids: Vec<String> = match config.harness {
             Harness::Strict => test
                 .expected_components
@@ -1123,11 +1122,28 @@ impl TestRunner {
                 config.adapter_build_args.as_deref(),
             )
         };
-        // Taken before the snapshot is decoded, which consumes it.
-        let halved = (!tvl_only_ids.is_empty()).then(|| {
-            let mut halved = snapshot.clone();
-            let changed = tvl_only::halve_balances(&mut halved, &tvl_only_ids);
-            (halved, changed, all_tokens.clone())
+        // The copy with scaled-down balances holds only the `tvl_only` components, and is decoded
+        // first: VM states read a shared database each decode replaces, so the original decode
+        // below must come last for the ladders to run on it.
+        let scaled = (!tvl_only_ids.is_empty()).then(|| {
+            let mut scaled = snapshot.clone();
+            scaled.states.retain(|id, _| {
+                tvl_only_ids
+                    .iter()
+                    .any(|declared| declared.eq_ignore_ascii_case(id))
+            });
+            let changed = tvl_only::scale_balances(&mut scaled, &tvl_only_ids);
+            let decoded = adapter_contract_path().and_then(|path| {
+                self.decode_snapshot(
+                    &config.protocol_system,
+                    &header,
+                    scaled,
+                    all_tokens.clone(),
+                    path.as_deref(),
+                    self.vm_simulation_traces,
+                )
+            });
+            (decoded, changed)
         });
 
         let Some(update) = checks.run(CheckId::Decode, || {
@@ -1151,7 +1167,7 @@ impl TestRunner {
         else {
             checks.not_run(CheckId::SimLadder, CheckId::Decode);
             checks.not_run(CheckId::ExecLadder, CheckId::Decode);
-            if halved.is_some() {
+            if scaled.is_some() {
                 checks.not_run(CheckId::BalancesTvlOnly, CheckId::Decode);
             }
             if config.harness == Harness::Strict {
@@ -1162,25 +1178,15 @@ impl TestRunner {
             return Ok(());
         };
 
-        if let Some((snapshot, changed, all_tokens)) = halved {
-            // Decoding again replaces the VM database with the same storage, so the states
-            // decoded above still simulate as before.
-            let decoded = adapter_contract_path().and_then(|path| {
-                self.decode_snapshot(
-                    &config.protocol_system,
-                    &header,
-                    snapshot,
-                    all_tokens,
-                    path.as_deref(),
-                    self.vm_simulation_traces,
-                )
-            });
+        if let Some((decoded, changed)) = &scaled {
             for id in &tvl_only_ids {
-                let failures = match &decoded {
-                    Ok(halved) => Self::check_tvl_only(id, &update, halved, &changed),
-                    Err(e) => {
-                        vec![format!("decoding the snapshot with halved balances failed: {e:#}")]
+                let failures = match decoded {
+                    Ok(scaled) => {
+                        tvl_only::check(id, &update, scaled, changed, executable_max_input)
                     }
+                    Err(e) => vec![format!(
+                        "decoding the snapshot with scaled-down balances failed: {e:#}"
+                    )],
                 };
                 checks.record_component(CheckId::BalancesTvlOnly, id, &failures);
             }
@@ -2297,41 +2303,6 @@ impl TestRunner {
             }
         }
         Ok(())
-    }
-
-    /// Strict: verifies that component `id`, declared `tvl_only`, quotes the same in `halved`, the
-    /// snapshot decoded with its balances halved, as in `update`. `changed` counts the balances
-    /// halving changed, per component. Returns every difference.
-    fn check_tvl_only(
-        id: &str,
-        update: &Update,
-        halved: &Update,
-        changed: &HashMap<String, usize>,
-    ) -> Vec<String> {
-        if changed
-            .get(id)
-            .is_none_or(|count| *count == 0)
-        {
-            return vec!["the component has no nonzero indexed balance, so halving its balances \
-                 verifies nothing; it needs no `tvl_only`"
-                .to_string()];
-        }
-        fn find<'a>(update: &'a Update, id: &str) -> Option<(&'a String, &'a dyn ProtocolSim)> {
-            update
-                .states
-                .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case(id))
-                .map(|(key, state)| (key, state.as_ref()))
-        }
-        let (Some((key, original)), Some((_, quoted_halved))) =
-            (find(update, id), find(halved, id))
-        else {
-            return vec!["the component did not decode with its balances halved".to_string()];
-        };
-        let Some(component) = update.new_pairs.get(key) else {
-            return vec![format!("the update has no component {key}")];
-        };
-        tvl_only::compare(original, quoted_halved, &component.tokens, executable_max_input)
     }
 
     /// Strict: checks an expected component's indexed balances against the source it declares,
