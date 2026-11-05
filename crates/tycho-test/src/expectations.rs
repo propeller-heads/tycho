@@ -6,7 +6,13 @@
 //! reads them alone, for a runner that checks a protocol's live pools rather than a package's
 //! test cases.
 
-use std::{collections::HashMap, fmt, fs, io::Read, path::Path, str::FromStr};
+use std::{
+    collections::HashMap,
+    fmt, fs,
+    io::Read,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use miette::{miette, IntoDiagnostic, WrapErr};
 use serde::{
@@ -525,7 +531,7 @@ pub struct PackageExpectations {
 }
 
 /// The keys of a test yaml that [`PackageExpectations`] reads. Every other key is ignored: the
-/// test runner validates the whole file.
+/// test runner validates the whole file, and [`PackageExpectations::from_yaml`] validates these.
 #[derive(Deserialize)]
 struct PackageEntry {
     protocol_system: String,
@@ -555,42 +561,114 @@ struct ComponentEntry {
 }
 
 impl PackageExpectations {
-    /// Reads the declarations of a package's test yaml. A component listed by several tests must
-    /// declare the same limits and `tvl_only` in each.
+    /// Reads the declarations of a package's test yaml; `source` names it in messages.
+    ///
+    /// Errors when the yaml does not parse, when a declaration is invalid as the test runner
+    /// would reject it (a limit missing a field its kind requires, a tolerance without a cause,
+    /// ...), or when a component listed by several tests declares different limits or `tvl_only`
+    /// in them, naming which.
     pub fn from_yaml(reader: impl Read, source: &str) -> miette::Result<Self> {
         let entry: PackageEntry = serde_yaml::from_reader(reader)
             .into_diagnostic()
             .wrap_err_with(|| format!("Failed to read the declarations of {source}"))?;
-        let mut components: HashMap<String, ComponentExpectations> = HashMap::new();
+        let mut problems = Vec::new();
+        if let Some(declaration) = &entry.limits {
+            check_declaration(declaration, "package", &mut problems);
+        }
+        if let Some(tolerance) = &entry.execution_tolerance {
+            for problem in tolerance_problems(
+                tolerance.bps,
+                tolerance.wei,
+                &tolerance.cause,
+                &tolerance.measured,
+            ) {
+                problems.push(format!("execution_tolerance: {problem}"));
+            }
+        }
+        let mut package = Self {
+            protocol_system: entry.protocol_system,
+            harness: entry.harness,
+            limits: entry.limits,
+            execution_tolerance: entry.execution_tolerance,
+            components: HashMap::new(),
+        };
         for component in entry
             .tests
             .into_iter()
             .flat_map(|test| test.expected_components)
         {
-            let id = component.id.to_lowercase();
-            let expectations =
-                ComponentExpectations { limits: component.limits, tvl_only: component.tvl_only };
-            match components.get(&id) {
-                Some(seen) if *seen != expectations => {
-                    return Err(miette!(
-                        "{source} lists component {} in several tests with different limits or \
-                         `tvl_only`",
-                        component.id
-                    ))
-                }
-                Some(_) => {}
-                None => {
-                    components.insert(id, expectations);
+            let location = format!("component {}", component.id);
+            if let Some(declaration) = &component.limits {
+                check_declaration(declaration, &location, &mut problems);
+            }
+            if let Some(tvl_only) = &component.tvl_only {
+                for problem in tolerance_problems(
+                    tvl_only.bps,
+                    tvl_only.wei,
+                    &tvl_only.cause,
+                    &tvl_only.measured,
+                ) {
+                    problems.push(format!("{location}, tvl_only: {problem}"));
                 }
             }
+            let expectations =
+                ComponentExpectations { limits: component.limits, tvl_only: component.tvl_only };
+            if let Err(e) = package.add_component(&component.id, expectations) {
+                problems.push(format!("{e}, in several tests"));
+            }
         }
-        Ok(Self {
-            protocol_system: entry.protocol_system,
-            harness: entry.harness,
-            limits: entry.limits,
-            execution_tolerance: entry.execution_tolerance,
-            components,
-        })
+        if !problems.is_empty() {
+            return Err(miette!("{source} has invalid declarations: {}", problems.join("; ")));
+        }
+        Ok(package)
+    }
+
+    /// Adds what a test declares about component `id`. Errors, naming the field, when the
+    /// component is already there with a different declaration.
+    fn add_component(
+        &mut self,
+        id: &str,
+        expectations: ComponentExpectations,
+    ) -> Result<(), String> {
+        let Some(seen) = self.components.get(&id.to_lowercase()) else {
+            self.components
+                .insert(id.to_lowercase(), expectations);
+            return Ok(());
+        };
+        let mut differ = Vec::new();
+        if seen.limits != expectations.limits {
+            differ.push("limits");
+        }
+        if seen.tvl_only != expectations.tvl_only {
+            differ.push("tvl_only");
+        }
+        match differ.as_slice() {
+            [] => Ok(()),
+            fields => Err(format!("component {id} declares different {}", fields.join(" and "))),
+        }
+    }
+
+    /// Merges `other`, another yaml of the same protocol system: the package-level declarations
+    /// must be the same, and so must those of a component both list; components only one lists
+    /// are added. Errors name the declaration that differs.
+    fn merge(&mut self, other: PackageExpectations) -> Result<(), String> {
+        let mut differ = Vec::new();
+        if self.harness != other.harness {
+            differ.push("harness");
+        }
+        if self.limits != other.limits {
+            differ.push("limits");
+        }
+        if self.execution_tolerance != other.execution_tolerance {
+            differ.push("execution_tolerance");
+        }
+        if !differ.is_empty() {
+            return Err(format!("different package {}", differ.join(" and ")));
+        }
+        for (id, expectations) in other.components {
+            self.add_component(&id, expectations)?;
+        }
+        Ok(())
     }
 
     /// The tolerance executions of this package's pools are checked with.
@@ -604,8 +682,9 @@ impl PackageExpectations {
             .get(&component_id.to_lowercase())
     }
 
-    /// The limit declared for `direction` of `component_id`: the component's own declaration if
-    /// the tests list it, else the package's.
+    /// The limit declared for `direction` of `component_id`, from the most specific declaration:
+    /// the component's for that direction, the component's default, the package's for that
+    /// direction, then the package's default.
     pub fn limits_for(&self, component_id: &str, direction: &Direction) -> Option<&Limits> {
         limits_for(
             self.component(component_id)
@@ -621,15 +700,19 @@ impl PackageExpectations {
 ///
 /// A package's chain is the one its `substreams_yaml_path` names: the first word of that file's
 /// name (`base-aero-cl.yaml`, `test-base-lunarbase.yaml`), and Ethereum for a package's own
-/// `substreams.yaml`. Templates are skipped. A yaml whose chain cannot be told, or that does not
-/// parse, is an error, as are two packages declaring different things for the same chain and
-/// protocol system, since a pool could not tell which applies.
+/// `substreams.yaml`. Templates are skipped. Several yamls of one chain and protocol system are
+/// merged: their package-level declarations must match, and so must those of a component more
+/// than one lists, since a pool could not tell which applies.
+///
+/// Errors on the first yaml that cannot be read, whose chain cannot be told, or whose
+/// declarations are invalid, whatever chain it is for, so one bad yaml fails every chain: the
+/// test runner rejects the same yaml where it is tested.
 pub fn load_packages(
     root: &Path,
     chain: Chain,
 ) -> miette::Result<HashMap<String, PackageExpectations>> {
     let mut packages: HashMap<String, (PackageExpectations, String)> = HashMap::new();
-    for path in test_yamls(root)? {
+    for path in test_yamls(root, false)? {
         let source = path.display().to_string();
         let yaml = fs::read_to_string(&path)
             .into_diagnostic()
@@ -643,14 +726,12 @@ pub fn load_packages(
             continue;
         }
         let package = PackageExpectations::from_yaml(yaml.as_bytes(), &source)?;
-        match packages.get(&package.protocol_system) {
-            Some((seen, _)) if *seen == package => {}
-            Some((_, first)) => {
-                return Err(miette!(
-                    "{first} and {source} declare different things for protocol system `{}` on \
-                     {chain}",
-                    package.protocol_system
-                ))
+        match packages.get_mut(&package.protocol_system) {
+            Some((seen, first)) => {
+                let system = package.protocol_system.clone();
+                seen.merge(package).map_err(|e| {
+                    miette!("{first} and {source}, both for `{system}` on {chain}: {e}")
+                })?;
             }
             None => {
                 packages.insert(package.protocol_system.clone(), (package, source));
@@ -669,8 +750,9 @@ struct ManifestEntry {
     substreams_yaml_path: String,
 }
 
-/// Every `integration_test*.tycho.yaml` under `root`, outside build output and templates, sorted.
-fn test_yamls(root: &Path) -> miette::Result<Vec<std::path::PathBuf>> {
+/// Every `integration_test*.tycho.yaml` under `root`, outside build output, sorted; with
+/// `templates`, the package templates' yamls too.
+pub fn test_yamls(root: &Path, templates: bool) -> miette::Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
@@ -684,7 +766,7 @@ fn test_yamls(root: &Path) -> miette::Result<Vec<std::path::PathBuf>> {
                 .and_then(|name| name.to_str())
                 .unwrap_or_default();
             if path.is_dir() {
-                if name != "target" && !name.contains("-template-") {
+                if name != "target" && (templates || !name.contains("-template-")) {
                     dirs.push(path);
                 }
             } else if name.starts_with("integration_test") && name.ends_with(".tycho.yaml") {
@@ -699,7 +781,7 @@ fn test_yamls(root: &Path) -> miette::Result<Vec<std::path::PathBuf>> {
 /// The chain a package's substreams manifest is built for: the first word of the manifest's file
 /// name, after a `test-` prefix, and Ethereum for `substreams.yaml`, the name of a package's
 /// Ethereum manifest.
-fn package_chain(substreams_yaml_path: &str) -> Result<Chain, String> {
+pub fn package_chain(substreams_yaml_path: &str) -> Result<Chain, String> {
     let name = Path::new(substreams_yaml_path)
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -710,7 +792,9 @@ fn package_chain(substreams_yaml_path: &str) -> Result<Chain, String> {
     if name == "substreams" {
         return Ok(Chain::Ethereum);
     }
-    let word = name.split('-').next().unwrap_or(name);
+    let word = name
+        .split_once('-')
+        .map_or(name, |(word, _)| word);
     Chain::from_str(word)
         .map_err(|e| format!("cannot tell the chain of `{substreams_yaml_path}`: {e}"))
 }
@@ -769,13 +853,94 @@ tests:
     }
 
     #[test]
-    fn a_component_must_declare_the_same_limits_in_every_test_but_may_skip_differently() {
+    fn a_component_may_skip_differently_in_each_test() {
         let skips_once = PACKAGE.replacen("skip_execution: \"the router needs PUSH0\"", "", 1);
         assert!(PackageExpectations::from_yaml(skips_once.as_bytes(), "vault").is_ok());
+    }
 
+    #[test]
+    fn a_component_must_declare_the_same_limits_in_every_test() {
         let conflicting = PACKAGE.replacen("{kind: hard}", "{kind: soft, reason: \"r\"}", 1);
         let err = PackageExpectations::from_yaml(conflicting.as_bytes(), "vault").unwrap_err();
-        assert!(format!("{err:?}").contains("0xaa in several tests"), "{err:?}");
+        assert!(
+            err.to_string()
+                .contains("component 0xaa declares different limits, in several tests"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_component_must_declare_the_same_tvl_only_in_every_test() {
+        let tvl_only = "        tvl_only: {bps: 5, cause: \"fee bucket\", measured: \"4 bps\"}\n";
+        let once =
+            PACKAGE.replacen("        limits:\n", &format!("{tvl_only}        limits:\n"), 1);
+        let err = PackageExpectations::from_yaml(once.as_bytes(), "vault").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("declares different tvl_only"),
+            "{err}"
+        );
+
+        let both = PACKAGE.replace("        limits:\n", &format!("{tvl_only}        limits:\n"));
+        let package = PackageExpectations::from_yaml(both.as_bytes(), "vault").unwrap();
+        assert_eq!(
+            package
+                .component("0xAA")
+                .and_then(|component| component.tvl_only.as_ref())
+                .map(TvlOnly::tolerance),
+            Some(Tolerance { bps: 5, wei: 0 })
+        );
+    }
+
+    #[test]
+    fn declarations_the_runner_rejects_are_rejected() {
+        for (from, to, problem) in [
+            (
+                "{kind: soft, reason: \"any input trades\"}",
+                "{kind: soft}",
+                "package, default: missing reason",
+            ),
+            ("bps: 3, cause", "bps: 20000, cause", "`bps` must be 1 to 9999"),
+            ("{kind: hard}", "{kind: under_cap, reason: \"r\"}", "missing lost_capacity"),
+        ] {
+            let invalid = PACKAGE.replace(from, to);
+            let err = PackageExpectations::from_yaml(invalid.as_bytes(), "vault").unwrap_err();
+            assert!(err.to_string().contains(problem), "{to}: {err}");
+        }
+    }
+
+    /// A directory under the system's temporary one, empty, for yamls.
+    fn yaml_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tycho-test-{name}-{}", std::process::id()));
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn two_yamls_of_one_system_merge_their_components() {
+        let dir = yaml_dir("merge");
+        let other_pool = PACKAGE
+            .replace("0xAA", "0xBB")
+            .replace("0xaa", "0xbb");
+        fs::write(dir.join("integration_test.tycho.yaml"), PACKAGE).unwrap();
+        fs::write(dir.join("integration_test_second.tycho.yaml"), &other_pool).unwrap();
+        let packages = load_packages(&dir, Chain::Ethereum).unwrap();
+        let vault = &packages["vault"];
+        assert!(vault.component("0xaa").is_some() && vault.component("0xbb").is_some());
+
+        let other_limits = other_pool
+            .replace("limits: {kind: soft, reason: \"any input trades\"}", "limits: {kind: hard}");
+        fs::write(dir.join("integration_test_second.tycho.yaml"), other_limits).unwrap();
+        let err = load_packages(&dir, Chain::Ethereum).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("different package limits"),
+            "{err}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -802,6 +967,7 @@ tests:
             (Chain::Robinhood, "uniswap_v4_hooks"),
             (Chain::Unichain, "vm:curve"),
             (Chain::Arc, "uniswap_v2"),
+            (Chain::Polygon, "ramses_v3"),
         ] {
             let packages = load_packages(&root, chain).unwrap();
             assert!(packages.contains_key(system), "{system} on {chain}");
@@ -825,7 +991,7 @@ tests:
     #[test]
     fn every_package_in_the_repository_names_a_known_chain() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocols/substreams");
-        for path in test_yamls(&root).unwrap() {
+        for path in test_yamls(&root, false).unwrap() {
             let manifest: ManifestEntry =
                 serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
             if let Err(e) = package_chain(&manifest.substreams_yaml_path) {

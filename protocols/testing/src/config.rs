@@ -279,6 +279,10 @@ impl IntegrationTestsConfig {
                 }
             }
         }
+        // The shared reader of package declarations finds a package's chain this way, so a name it
+        // cannot read is caught where the package is tested.
+        tycho_test::expectations::package_chain(&config.substreams_yaml_path)
+            .map_err(|e| miette!("{source}: {e}"))?;
         config.check_limits(source)?;
         config.check_tolerance(source)?;
         config.check_tvl_only(source)?;
@@ -574,6 +578,53 @@ tests:
         assert!(config.tests[0]
             .excluded_components
             .is_empty());
+    }
+
+    /// `PackageExpectations`, the shared reader of declarations, agrees with the test
+    /// configuration on fixtures that declare limits on the package and a component, a tolerance
+    /// and `tvl_only`, which no repository yaml does yet.
+    #[test]
+    fn the_shared_reader_agrees_with_the_configuration_on_declared_fixtures() {
+        let fixtures = [
+            yaml(STRICT_WITH_LIMITS, ""),
+            yaml(
+                "harness: strict\nlimits: {kind: soft, reason: \"r\"}\nexecution_tolerance: {bps: \
+                 3, cause: \"c\", measured: \"m\"}",
+                "        limits: {\"0x01->0x02\": {kind: hard}}\n        tvl_only: {bps: 5, \
+                 cause: \"c\", measured: \"m\"}",
+            ),
+        ];
+        for fixture in fixtures {
+            let config = parse(&fixture).unwrap();
+            let package = tycho_test::expectations::PackageExpectations::from_yaml(
+                fixture.as_bytes(),
+                "test.yaml",
+            )
+            .unwrap();
+            assert_eq!(package.tolerance(), config.tolerance(), "{fixture}");
+            let component = &config.tests[0].expected_components[0];
+            for direction in component_directions(component) {
+                assert_eq!(
+                    package.limits_for(&component.base.id, &direction),
+                    config.limits_for(component, &direction),
+                    "{fixture}: {direction}"
+                );
+            }
+            assert_eq!(
+                package
+                    .component(&component.base.id)
+                    .and_then(|declared| declared.tvl_only.as_ref()),
+                component.tvl_only.as_ref(),
+                "{fixture}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_manifest_that_names_no_chain_is_an_error() {
+        let config = yaml("", "").replace("./substreams.yaml", "./mainnet-foo.yaml");
+        let err = parse(&config).unwrap_err().to_string();
+        assert!(err.contains("cannot tell the chain of `./mainnet-foo.yaml`"), "{err}");
     }
 
     #[test]

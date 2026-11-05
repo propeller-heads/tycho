@@ -3007,7 +3007,6 @@ mod tests {
     use std::{collections::HashMap, env, str::FromStr};
 
     use dotenv::dotenv;
-    use glob::glob;
     use tycho_execution::encoding::models::Solution;
     use tycho_simulation::tycho_common::{models::protocol::ProtocolComponentState, Bytes};
     use tycho_test::{execution::models::Transaction, expectations::LimitKind};
@@ -3379,27 +3378,25 @@ mod tests {
         assert_eq!(checks.take_drift().unwrap().simulation, "test_00");
     }
 
-    /// Every integration test yaml under `protocols/substreams/`, clone and nested ones included,
-    /// as paths relative to `protocols/`.
+    /// Every integration test yaml under `protocols/substreams/`, clone, nested and template
+    /// ones included, as paths relative to `protocols/`: the files `load_packages` walks, and the
+    /// templates.
     fn all_test_yamls() -> Vec<String> {
         let protocols_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
             .to_path_buf();
-        let pattern = protocols_dir.join("substreams/**/integration_test*.tycho.yaml");
-        let mut yamls: Vec<String> = glob(pattern.to_str().unwrap())
-            .unwrap()
-            .map(|entry| {
-                entry
-                    .unwrap()
-                    .strip_prefix(&protocols_dir)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .filter(|path| !path.contains("/target/"))
-            .collect();
-        yamls.sort();
+        let yamls: Vec<String> =
+            tycho_test::expectations::test_yamls(&protocols_dir.join("substreams"), true)
+                .unwrap()
+                .into_iter()
+                .map(|path| {
+                    path.strip_prefix(&protocols_dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
         assert!(!yamls.is_empty(), "No integration test yamls found under substreams/");
         yamls
     }
@@ -3451,6 +3448,14 @@ mod tests {
                         component.base.id
                     );
                 }
+                assert_eq!(
+                    package
+                        .component(&component.base.id)
+                        .and_then(|declared| declared.tvl_only.as_ref()),
+                    component.tvl_only.as_ref(),
+                    "{path}: {} tvl_only",
+                    component.base.id
+                );
             }
         }
     }
