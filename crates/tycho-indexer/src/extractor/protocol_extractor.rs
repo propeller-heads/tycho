@@ -3108,6 +3108,68 @@ mod test {
         assert_eq!(*cached.lock().unwrap(), vec!["USDC".to_string()]);
     }
 
+    /// A drained block whose only transaction changes the balance of each of `tokens`.
+    fn drained_block_with_balance_changes(number: u64, tokens: &[&Address]) -> DrainedBlock {
+        let mut block = trailing_block(number);
+        let tx = tycho_common::models::blockchain::Transaction::new(
+            Bytes::from(number).lpad(32, 0),
+            block.block.hash.clone(),
+            Bytes::zero(20),
+            None,
+            0,
+        );
+        let balances = tokens
+            .iter()
+            .map(|&token| {
+                let balance = ComponentBalance::new(
+                    token.clone(),
+                    Bytes::from(1u8),
+                    1.0,
+                    tx.hash.clone(),
+                    "pool",
+                );
+                (token.clone(), balance)
+            })
+            .collect();
+        block.txs_with_update = vec![TxWithChanges {
+            tx,
+            balance_changes: HashMap::from([("pool".to_string(), balances)]),
+            ..Default::default()
+        }];
+        Arc::new(BlockUpdateWithCursor::new(block, format!("cursor@{number}")))
+    }
+
+    #[test]
+    fn test_last_traded_in_takes_the_newest_block_of_each_token() {
+        let usdc = Bytes::from_str("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        let weth = Bytes::from_str("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let blocks = [
+            drained_block_with_balance_changes(1, &[&usdc, &weth]),
+            drained_block_with_balance_changes(3, &[&weth]),
+            drained_block_with_balance_changes(2, &[&usdc]),
+            drained_block_with_balance_changes(4, &[]),
+        ];
+
+        let last_traded: HashMap<Address, NaiveDateTime> = last_traded_in(&blocks)
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            last_traded,
+            HashMap::from([
+                (usdc, crate::testing::block(2).ts),
+                (weth, crate::testing::block(3).ts),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_last_traded_in_blocks_without_balance_changes_is_empty() {
+        let blocks = [Arc::new(BlockUpdateWithCursor::new(trailing_block(1), "cursor@1".into()))];
+
+        assert!(last_traded_in(&blocks).is_empty());
+    }
+
     #[tokio::test]
     async fn test_promoted_follower_commits_only_blocks_above_the_former_leaders_height() {
         let (gw, committed) = takeover_gateway(2);
