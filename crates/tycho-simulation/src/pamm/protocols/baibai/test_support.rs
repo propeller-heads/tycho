@@ -208,7 +208,7 @@ impl FakeNode {
             fixture,
             entrypoint_curve_book: BASE_DEPLOYMENT.curve_book,
             not_tokens: Vec::new(),
-            chain_id: BASE_DEPLOYMENT.chain_id,
+            chain_id: BASE_DEPLOYMENT.chain.id(),
             reverting: Vec::new(),
         }
     }

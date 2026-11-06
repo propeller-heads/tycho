@@ -206,7 +206,7 @@ impl BaibaiReader {
 
     /// The read's block and book-wide values, with no pairs yet.
     fn decode_settings(&self, answers: &[Call3Result]) -> Result<BookRead, FeedError> {
-        let Deployment { chain_id, entrypoint, curve_book, custodian, quote } = self.deployment;
+        let Deployment { chain, entrypoint, curve_book, custodian, quote } = self.deployment;
         for ((what, _), answer) in self
             .settings_calls()
             .iter()
@@ -220,6 +220,7 @@ impl BaibaiReader {
             }
         }
         let served = to_u64(decode::<getChainIdCall>(&answers[2], "chain id")?)?;
+        let chain_id = chain.id();
         if served != chain_id {
             return Err(FeedError::Fatal(format!(
                 "BaiBai: the RPC node serves chain {served}, not the deployment's chain {chain_id}"

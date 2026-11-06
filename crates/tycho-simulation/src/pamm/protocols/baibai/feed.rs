@@ -35,13 +35,9 @@ use crate::{
     },
 };
 
-/// Base's block time. A curve that expires before the next block can no longer be filled by a
-/// swap priced from it, so it is not published.
-const NEXT_BLOCK_SECONDS: u64 = 2;
-
-/// How far a read's block may trail the wall clock: two Base blocks. Past it the node is lagging,
-/// and curves it reports live may already have expired on chain.
-const MAX_BLOCK_LAG_SECONDS: u64 = 4;
+/// How many blocks a read's block may trail the wall clock. Past it the node is lagging, and
+/// curves it reports live may already have expired on chain.
+const MAX_BLOCK_LAG: u64 = 2;
 
 /// BaiBai's book feed. Built through [`BaibaiFeedBuilder`]. Neither its `Debug` output nor its
 /// errors carry the RPC URL, which commonly carries a key.
@@ -108,7 +104,8 @@ impl BaibaiFeedBuilder {
     /// that is not one, and for bases that are not addresses. The node's chain is checked on
     /// every poll, which fails fatally when the node serves another one.
     pub fn build(self) -> Result<BaibaiFeed, FeedError> {
-        if self.book_config.chain != Chain::Base {
+        let deployment = BASE_DEPLOYMENT;
+        if self.book_config.chain != deployment.chain {
             return Err(FeedError::InvalidInput(format!(
                 "BaiBai is deployed on Base only, not {}",
                 self.book_config.chain
@@ -124,7 +121,6 @@ impl BaibaiFeedBuilder {
             .iter()
             .map(|base| address(base, "base"))
             .collect::<Result<Vec<_>, _>>()?;
-        let deployment = BASE_DEPLOYMENT;
         Ok(BaibaiFeed {
             feed_config: self.feed_config,
             source: BaibaiBookSource {
@@ -171,14 +167,14 @@ impl HttpSource for BaibaiBookSource {
     type Snapshot = BookSnapshot<ReceivedAt>;
 
     /// A read that fails fails the poll, and so does one from a block older than a previous
-    /// poll's or more than [`MAX_BLOCK_LAG_SECONDS`] behind the wall clock: a load-balanced or
+    /// poll's or more than [`MAX_BLOCK_LAG`] blocks behind the wall clock: a load-balanced or
     /// lagging node would otherwise roll the books back or publish curves expired on chain.
     /// Pairs the read returns but no book can be made of are left out of it, so a poll whose
     /// every curve has expired withdraws every pair.
     async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
         let read = self.reader.read().await?;
         let now = (self.clock)();
-        if now > read.timestamp + MAX_BLOCK_LAG_SECONDS {
+        if now > read.timestamp + MAX_BLOCK_LAG * self.assembler.block_time() {
             return Err(FeedError::Connection(format!(
                 "BaiBai node is {} s behind: its latest block {} is from {}",
                 now - read.timestamp,
@@ -214,6 +210,12 @@ pub(super) struct BaibaiBookAssembler {
 }
 
 impl BaibaiBookAssembler {
+    /// The chain's block time in seconds. [`BaibaiFeedBuilder::build`] admits Base only, whose
+    /// block time is always registered.
+    fn block_time(&self) -> u64 {
+        self.book_config.chain.block_time_secs()
+    }
+
     /// The books of `read`, judging expiry at `now` (Unix seconds) or the read's block timestamp,
     /// whichever is later.
     pub(super) fn books(&self, read: &BookRead, now: u64) -> Books {
@@ -259,7 +261,7 @@ impl BaibaiBookAssembler {
             .book_config
             .pair_tokens(&base, &quote)?;
         let expires_at = expiry(pair.valid_until, pair.last_update_at, read.ttl);
-        if expires_at < now.saturating_add(NEXT_BLOCK_SECONDS) {
+        if expires_at < now.saturating_add(self.block_time()) {
             debug!(%base, expires_at, now, "skipping expiring curve");
             return None;
         }

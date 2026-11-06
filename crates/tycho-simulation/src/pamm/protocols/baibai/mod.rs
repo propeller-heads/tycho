@@ -26,6 +26,7 @@
 //! Reference: <https://docs.baibai.cx/takers/quoting-and-swapping>
 
 use alloy::primitives::{address, Address};
+use tycho_common::models::Chain;
 
 pub mod feed;
 mod math;
@@ -51,7 +52,7 @@ pub const QUOTE_ATTRIBUTE: &str = "quote";
 /// pair trades against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Deployment {
-    pub chain_id: u64,
+    pub chain: Chain,
     pub entrypoint: Address,
     pub curve_book: Address,
     pub custodian: Address,
@@ -60,7 +61,7 @@ pub(crate) struct Deployment {
 
 /// The Base deployment, quoted in USDC.
 pub(crate) const BASE_DEPLOYMENT: Deployment = Deployment {
-    chain_id: 8453,
+    chain: Chain::Base,
     entrypoint: address!("98c1D9E102Eb2806D902b13186BDc7892aC4fFBa"),
     curve_book: address!("604d9b9eB1e1571C78661a6C1088427EC9c8c6E5"),
     custodian: address!("AaC48FEB93c5C97E0fb3c7C57E1633922A4ACDa3"),
@@ -85,7 +86,6 @@ mod test_support;
 
 #[cfg(test)]
 mod tests {
-    use tycho_common::models::Chain;
     use tycho_execution::encoding::evm::{
         get_router_address, BAIBAI_BASE_ATTRIBUTE, BAIBAI_PROTOCOL_SYSTEM, BAIBAI_QUOTE_ATTRIBUTE,
     };
