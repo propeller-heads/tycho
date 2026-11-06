@@ -29,5 +29,7 @@ Docker Compose is available for isolated runs — see `README.md`.
 
 A test yaml can opt into `harness: strict`; without it the runner behaves as before. Strict mode
 rejects keys the runner does not read, requires every skip to be written as its reason (a string;
-`true` and `false` are errors), and reports every failed check of a test, not just the first. It is not required of any package yet, and new checks go into strict mode only.
+`true` and `false` are errors), and reports every failed check of a test, not just the first.
+It is not required of any package yet, and new checks go into strict mode only.
+Strict mode also tests each direction's declared limit (README, "Limits").
 `range --report <path>` writes each check's outcome as JSON. See `README.md`, "Strict mode".
