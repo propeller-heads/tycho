@@ -9,11 +9,13 @@ use std::path::Path;
 
 use miette::{miette, IntoDiagnostic, WrapErr};
 use num_bigint::{BigInt, BigUint};
-use num_rational::BigRational;
-use num_traits::{Signed, ToPrimitive, Zero};
+use num_traits::Signed;
 use serde::Serialize;
 use tracing::error;
-pub use tycho_test::checks::outcome::{CheckId, CheckResult, Outcome};
+pub use tycho_test::checks::{
+    execution::drift,
+    outcome::{CheckId, CheckResult, Outcome},
+};
 
 use crate::config::Harness;
 
@@ -32,17 +34,6 @@ pub struct Drift {
     /// `executed - simulated` of the execution furthest off in absolute terms, in base units of
     /// its token out, which may not be the one above. A `wei` tolerance can be checked against it.
     pub largest_difference: String,
-}
-
-/// `executed - simulated`, and that difference in basis points of `executed`. `None` for a zero
-/// executed amount, which no relative difference can be expressed against.
-pub fn drift(simulated: &BigUint, executed: &BigUint) -> Option<(BigInt, f64)> {
-    if executed.is_zero() {
-        return None;
-    }
-    let difference = BigInt::from(executed.clone()) - BigInt::from(simulated.clone());
-    let bps = BigRational::new(&difference * 10_000, BigInt::from(executed.clone())).to_f64()?;
-    Some((difference, bps))
 }
 
 /// The execution furthest off in relative terms so far, before it becomes a [`Drift`].
