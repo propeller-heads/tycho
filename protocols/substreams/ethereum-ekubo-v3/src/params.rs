@@ -5,6 +5,7 @@ use serde::Deserialize;
 struct Params {
     ve33_address: Option<Address>,
     signed_exclusive_swap_address: Option<Address>,
+    zero_seed_launch_address: Option<Address>,
 }
 
 fn parse(params: &str) -> Params {
@@ -23,4 +24,8 @@ pub fn ve33_address(params: &str) -> Option<Address> {
 /// pool gets the `is_exclusive` attribute.
 pub fn signed_exclusive_swap_address(params: &str) -> Option<Address> {
     parse(params).signed_exclusive_swap_address
+}
+
+pub fn zero_seed_launch_address(params: &str) -> Option<Address> {
+    parse(params).zero_seed_launch_address
 }

@@ -29,7 +29,7 @@ use super::{
     addresses::{
         BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
         SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS, TWAMM_ADDRESS_V1, TWAMM_ADDRESS_V2,
-        VE33_ROBINHOOD_ADDRESS,
+        VE33_ROBINHOOD_ADDRESS, ZERO_SEED_LAUNCH_ROBINHOOD_ADDRESS,
     },
     attributes::{rate_deltas_from_attributes, ticks_from_attributes},
     pool::{
@@ -41,6 +41,7 @@ use super::{
         stableswap::StableswapPool,
         twamm::TwammPool,
         ve33::{Ve33Pool, Ve33UnderlyingPool},
+        zero_seed_launch::ZeroSeedLaunchPool,
     },
     state::EkuboV3State,
 };
@@ -57,6 +58,7 @@ pub enum ExtensionType {
     BoostedFees,
     SignedExclusiveSwap,
     Ve33,
+    ZeroSeedLaunch,
 }
 
 fn has_no_swap_call_points(extension: Address) -> bool {
@@ -80,6 +82,8 @@ pub fn extension_type(extension: Address, chain: Chain) -> Option<ExtensionType>
         ExtensionType::SignedExclusiveSwap
     } else if chain == Chain::Robinhood && extension == VE33_ROBINHOOD_ADDRESS {
         ExtensionType::Ve33
+    } else if chain == Chain::Robinhood && extension == ZERO_SEED_LAUNCH_ROBINHOOD_ADDRESS {
+        ExtensionType::ZeroSeedLaunch
     } else {
         return None;
     })
@@ -97,7 +101,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
 
     async fn try_from_with_header(
         snapshot: ComponentWithState,
-        _block: BlockHeader,
+        block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
         _all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
@@ -180,6 +184,19 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
         let ext_type = extension_type_from_attributes_or_address(&static_attrs, extension, chain)?;
 
         Ok(match ext_type {
+            ExtensionType::ZeroSeedLaunch => {
+                let EvmPoolTypeConfig::Concentrated(pool_type_config) = pool_type_config else {
+                    return Err(InvalidSnapshotError::ValueError(
+                        "launch requires concentrated pool".into(),
+                    ));
+                };
+                let (key, state, tick, ticks) = concentrated_pool(&state_attrs, pool_type_config)?;
+                Self::ZeroSeedLaunch(ZeroSeedLaunchPool::new(
+                    ConcentratedPool::new(key, state, tick, ticks)?,
+                    attribute(&static_attrs, "launch_config")?,
+                    block.timestamp,
+                )?)
+            }
             ExtensionType::NoSwapCallPoints => match pool_type_config {
                 EvmPoolTypeConfig::FullRange(pool_type_config) => {
                     Self::FullRange(FullRangePool::new(
@@ -346,13 +363,17 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
     }
 }
 
-/// Determines the extension type, checking the legacy `extension_id` static
-/// attribute first if present, then falling back to address-based detection.
+/// Determines the extension type, retaining legacy IDs for historical pools.
 fn extension_type_from_attributes_or_address(
     static_attrs: &HashMap<String, Bytes>,
     extension: Address,
     chain: Chain,
 ) -> Result<ExtensionType, InvalidSnapshotError> {
+    // A legacy discriminant must never turn a launch into a fee-free Core pool.
+    if extension == ZERO_SEED_LAUNCH_ROBINHOOD_ADDRESS {
+        return extension_type(extension, chain)
+            .ok_or_else(|| InvalidSnapshotError::ValueError("unsupported launch chain".into()));
+    }
     // Backward compat: use extension_id attribute if present (legacy format).
     // A value of 0 means unset — fall through to address-based detection.
     if let Some(extension_id) = static_attrs.get("extension_id") {
@@ -434,6 +455,77 @@ mod tests {
         ekubo_v3::test_cases::*, test_utils::try_decode_snapshot_with_defaults,
     };
 
+    #[tokio::test]
+    async fn launch_snapshot_requires_final_chain_configuration_and_timestamp() {
+        use tycho_common::simulation::protocol_sim::ProtocolSim;
+
+        let case = concentrated();
+        let mut snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: String::new(),
+                attributes: case.state_attributes,
+                balances: HashMap::new(),
+            },
+            component: case.component,
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+        snapshot.component.chain = Chain::Robinhood;
+        let attrs = &mut snapshot.component.static_attributes;
+        attrs.insert(
+            "extension".into(),
+            ZERO_SEED_LAUNCH_ROBINHOOD_ADDRESS
+                .into_array()
+                .into(),
+        );
+        // A legacy Core discriminator must not strip launch fees or chain checks.
+        attrs.insert("extension_id".into(), 1i32.to_be_bytes().into());
+        let mut config = Vec::new();
+        for word in [1000u64, 68913100933, 922337203685477580, 55340232221128654] {
+            config.extend_from_slice(&word.to_be_bytes());
+        }
+        config.extend_from_slice(&(-10i32).to_be_bytes());
+        config.extend_from_slice(&10i32.to_be_bytes());
+        attrs.insert("launch_config".into(), config.into());
+        async fn decode(
+            snapshot: ComponentWithState,
+            timestamp: u64,
+        ) -> Result<EkuboV3State, InvalidSnapshotError> {
+            EkuboV3State::try_from_with_header(
+                snapshot,
+                BlockHeader { timestamp, ..Default::default() },
+                &HashMap::new(),
+                &HashMap::new(),
+                &Default::default(),
+            )
+            .await
+        }
+        let state = decode(snapshot.clone(), 1000)
+            .await
+            .unwrap();
+        assert!(matches!(state, EkuboV3State::ZeroSeedLaunch(_)));
+        let later = decode(snapshot.clone(), 186400)
+            .await
+            .unwrap();
+        assert!(later.fee() < state.fee());
+        assert!(decode(snapshot.clone(), 0)
+            .await
+            .is_err());
+        for chain in [Chain::Ethereum, Chain::Base] {
+            let mut wrong_chain = snapshot.clone();
+            wrong_chain.component.chain = chain;
+            assert!(decode(wrong_chain, 1000).await.is_err());
+        }
+        snapshot
+            .component
+            .static_attributes
+            .remove("launch_config");
+        assert!(matches!(
+            decode(snapshot, 1000).await,
+            Err(InvalidSnapshotError::MissingAttribute(_))
+        ));
+    }
+
     #[apply(all_cases)]
     #[tokio::test]
     async fn test_try_from_with_header(case: TestCase) {
@@ -472,7 +564,9 @@ mod tests {
             EkuboV3State::Twamm(_) => 3,
             EkuboV3State::MevCapture(_) => 4,
             // BoostedFees is new, no legacy format
-            EkuboV3State::BoostedFees(_) | EkuboV3State::Ve33(_) => return,
+            EkuboV3State::BoostedFees(_) |
+            EkuboV3State::Ve33(_) |
+            EkuboV3State::ZeroSeedLaunch(_) => return,
         };
 
         let mut component = case.component;

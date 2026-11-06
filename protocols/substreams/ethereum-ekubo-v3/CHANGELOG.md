@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.7
+
+- Join the final Robinhood zero-seed `LaunchCreated` event to Core initialization
+  by pool ID. Emit the immutable tick-rate schedule and installed position bounds
+  as `launch_config` for block-timestamp-pinned simulation. Other manifests do
+  not enable this deployment's ABI.
+
 ## v0.2.6
 
 - Point the Ethereum manifest's `signed_exclusive_swap_address` at the

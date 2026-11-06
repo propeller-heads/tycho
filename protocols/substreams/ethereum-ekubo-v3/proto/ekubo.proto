@@ -108,6 +108,7 @@ message BlockTransactionEvents {
         sint32 tick = 4;      // int32
         bytes sqrt_ratio = 5; // uint192
         bool has_time_rate_deltas = 6;
+        bytes launch_config = 7; // start, rate, initial/final fee (u64), installed bounds (i32), big-endian
       }
 
       message VirtualExecution {

@@ -19,3 +19,6 @@ pub const SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS: [(Chain, Address); 4] = [
 // The Ve33 extension is deployment-specific (see the v3.2.0 release notes of
 // EkuboProtocol/evm-contracts); this is the Robinhood deployment.
 pub const VE33_ROBINHOOD_ADDRESS: Address = address!("0xD18685a514E59b06d59824e16Db07e73345d9953");
+// Packed metadata and Q32.32 tick-rate revision, deployed at block 106030313.
+pub const ZERO_SEED_LAUNCH_ROBINHOOD_ADDRESS: Address =
+    address!("0x517621Ea1bf51F31826819b118fa4dfEb4D198D2");
