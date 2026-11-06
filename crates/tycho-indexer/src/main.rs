@@ -681,6 +681,9 @@ async fn create_indexing_tasks(
                 .clone(),
         )
         .writer_status(writer_status.clone())
+        .ready_head_tolerance(chrono::Duration::seconds(i64::from(
+            global_args.ready_head_tolerance_secs,
+        )))
         .run()?;
     info!(server_url, "Http and Ws server started");
 
