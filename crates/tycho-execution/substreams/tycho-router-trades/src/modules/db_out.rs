@@ -1,4 +1,5 @@
-//! Conversion of trades and fee events into `DatabaseChanges` rows for substreams-sink-sql.
+//! Conversion of trades, fee events, vault transfers and subsidy events into `DatabaseChanges`
+//! rows for substreams-sink-sql.
 use anyhow::{bail, Result};
 use substreams::scalar::{BigDecimal, BigInt};
 use substreams_database_change::{
@@ -6,13 +7,14 @@ use substreams_database_change::{
 };
 
 use super::hex_addr;
-use crate::pb::tycho::router::v1::{FeeConfigEvents, Trade, Trades, VaultTransfers};
+use crate::pb::tycho::router::v1::{FeeConfigEvents, SubsidyEvents, Trade, Trades, VaultTransfers};
 
 #[substreams::handlers::map]
 pub fn db_out(
     trades: Trades,
     fee_events: FeeConfigEvents,
     vault: VaultTransfers,
+    subsidies: SubsidyEvents,
 ) -> Result<DatabaseChanges> {
     let mut tables = Tables::new();
     for trade in &trades.trades {
@@ -75,6 +77,30 @@ pub fn db_out(
             .set("token", hex_addr(&t.token))
             .set("amount", &t.amount)
             .set("kind", &t.kind);
+    }
+    for s in &subsidies.events {
+        let tx_hash = hex_addr(&s.tx_hash);
+        let row = tables.create_row("subsidies", format!("{}:{tx_hash}:{}", s.chain, s.log_index));
+        row.set("chain", &s.chain)
+            .set("block_number", s.block_number)
+            .set("block_time", rfc3339(s.block_timestamp))
+            .set("tx_hash", &tx_hash)
+            .set("log_index", s.log_index)
+            .set("payer", hex_addr(&s.payer))
+            .set("event", &s.event)
+            .set("nonce", hex_addr(&s.nonce));
+        if let Some(call_index) = s.trade_call_index {
+            row.set("trade_id", format!("{}:{tx_hash}:{call_index}", s.chain));
+        }
+        if s.event == "paid" {
+            row.set("bound_to", hex_addr(&s.bound_to))
+                .set("receiver", hex_addr(&s.receiver))
+                .set("token", hex_addr(&s.token))
+                .set("amount", &s.amount);
+        }
+        if !s.reason.is_empty() {
+            row.set("reason", &s.reason);
+        }
     }
     Ok(tables.to_database_changes())
 }

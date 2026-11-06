@@ -298,4 +298,51 @@ pub struct VaultTransfer {
     #[prost(string, tag="12")]
     pub kind: ::prost::alloc::string::String,
 }
+/// Every SubsidyPaid and SubsidySkipped the SubsidyPayer emitted in one block.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubsidyEvents {
+    #[prost(message, repeated, tag="1")]
+    pub events: ::prost::alloc::vec::Vec<SubsidyEvent>,
+}
+/// One signed subsidy the payer settled: paid, or skipped with the contract's reason.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubsidyEvent {
+    #[prost(string, tag="1")]
+    pub chain: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub block_number: u64,
+    #[prost(uint64, tag="3")]
+    pub block_timestamp: u64,
+    #[prost(bytes="vec", tag="4")]
+    pub tx_hash: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag="5")]
+    pub log_index: u32,
+    #[prost(bytes="vec", tag="6")]
+    pub payer: ::prost::alloc::vec::Vec<u8>,
+    /// "paid" or "skipped".
+    #[prost(string, tag="7")]
+    pub event: ::prost::alloc::string::String,
+    /// The nonce of the signed terms, 32 bytes.
+    #[prost(bytes="vec", tag="8")]
+    pub nonce: ::prost::alloc::vec::Vec<u8>,
+    /// Paid only: the address the terms were bound to, where the payment went, in which token, and
+    /// how much. The payment goes to the router, which pays the user with the swap's output.
+    #[prost(bytes="vec", tag="9")]
+    pub bound_to: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes="vec", tag="10")]
+    pub receiver: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes="vec", tag="11")]
+    pub token: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag="12")]
+    pub amount: ::prost::alloc::string::String,
+    /// Skipped only: the payer's SkipReason, in snake case, or its number when unknown.
+    #[prost(string, tag="13")]
+    pub reason: ::prost::alloc::string::String,
+    /// The index of the router swap call the payer ran in: the call_index of the trade this
+    /// subsidy belongs to. Absent when no decoded router call encloses the event.
+    #[prost(uint32, optional, tag="14")]
+    pub trade_call_index: ::core::option::Option<u32>,
+}
 // @@protoc_insertion_point(module)

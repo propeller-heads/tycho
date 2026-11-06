@@ -198,3 +198,33 @@ message VaultTransfer {
   // "credit" (minted), "debit" (burned) or "transfer" (between two owners).
   string kind = 12;
 }
+
+// Every SubsidyPaid and SubsidySkipped the SubsidyPayer emitted in one block.
+message SubsidyEvents {
+  repeated SubsidyEvent events = 1;
+}
+
+// One signed subsidy the payer settled: paid, or skipped with the contract's reason.
+message SubsidyEvent {
+  string chain = 1;
+  uint64 block_number = 2;
+  uint64 block_timestamp = 3;
+  bytes tx_hash = 4;
+  uint32 log_index = 5;
+  bytes payer = 6;
+  // "paid" or "skipped".
+  string event = 7;
+  // The nonce of the signed terms, 32 bytes.
+  bytes nonce = 8;
+  // Paid only: the address the terms were bound to, where the payment went, in which token, and
+  // how much. The payment goes to the router, which pays the user with the swap's output.
+  bytes bound_to = 9;
+  bytes receiver = 10;
+  bytes token = 11;
+  string amount = 12;
+  // Skipped only: the payer's SkipReason, in snake case, or its number when unknown.
+  string reason = 13;
+  // The index of the router swap call the payer ran in: the call_index of the trade this
+  // subsidy belongs to. Absent when no decoded router call encloses the event.
+  optional uint32 trade_call_index = 14;
+}
