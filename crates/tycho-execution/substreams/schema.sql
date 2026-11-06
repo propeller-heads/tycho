@@ -194,3 +194,39 @@ CREATE TABLE IF NOT EXISTS vault_transfers (
 CREATE INDEX IF NOT EXISTS vault_transfers_owner_idx
     ON vault_transfers (chain, router, token);
 CREATE INDEX IF NOT EXISTS vault_transfers_block_idx ON vault_transfers (chain, block_number);
+
+-- What the SubsidyPayer did with each signed subsidy: paid it, or skipped it and why.
+--
+-- Hosted Fynd signs a subsidy into a quote's calldata. When the swap runs, the executor hands
+-- the terms to the payer, which pays them or skips them for a reason it names, and the swap
+-- fills either way. Only these events say which. A quoted subsidy that was never executed has
+-- no row: the chain never saw it.
+CREATE TABLE IF NOT EXISTS subsidies (
+    id           TEXT PRIMARY KEY, -- {chain}:{tx_hash}:{log_index}
+    chain        TEXT NOT NULL,
+    block_number BIGINT NOT NULL,
+    block_time   TIMESTAMPTZ NOT NULL,
+    tx_hash      TEXT NOT NULL,
+    log_index    INTEGER NOT NULL,
+    payer        TEXT NOT NULL,
+    event        TEXT NOT NULL CHECK (event IN ('paid', 'skipped')),
+    -- The nonce of the signed terms, 32 bytes. Hosted Fynd logs it on the `subsidy quoted`
+    -- line, which joins a settlement to the quote that promised it.
+    nonce        TEXT NOT NULL,
+    -- The trade the payer ran in: the row of the nearest router swap call enclosing the event
+    -- in the call trace. A transaction can hold several router calls, probes included, so the
+    -- hash alone would not say which. NULL when no decoded router call encloses the event.
+    trade_id     TEXT,
+    -- Paid only. The payment goes to the router (`receiver`), which pays the user with the
+    -- swap's output; `bound_to` is the address the terms were signed for.
+    bound_to     TEXT,
+    receiver     TEXT,
+    token        TEXT,
+    amount       NUMERIC(78, 0),
+    -- Skipped only: paused, expired, invalid_signature, caller_mismatch, below_min_amount_in,
+    -- nonce_used, insufficient_balance or transfer_failed, or the number of a reason newer
+    -- than the package.
+    reason       TEXT
+);
+CREATE INDEX IF NOT EXISTS subsidies_block_idx ON subsidies (chain, block_number);
+CREATE INDEX IF NOT EXISTS subsidies_trade_idx ON subsidies (trade_id);

@@ -108,4 +108,32 @@ BEGIN
     GROUP BY 1, 2, 3, 4;
 END $$;
 
+DO $$
+BEGIN
+    IF to_regclass('public.subsidies') IS NULL OR to_regclass('public.trades') IS NULL THEN
+        RAISE NOTICE 'subsidies or trades does not exist yet, skipping the subsidy view';
+        RETURN;
+    END IF;
+
+    -- Each subsidy the payer paid, next to the settled trade it was paid on: what the swap was
+    -- worth and what the subsidy cost.
+    --
+    -- `subsidy_usd` is known when the subsidy was paid in the trade's output token, which is
+    -- the price the pricer has. A subsidy on an earlier hop is paid in that hop's token and
+    -- stays unpriced here.
+    DROP VIEW IF EXISTS subsidized_trades;
+    CREATE VIEW subsidized_trades AS
+    SELECT s.chain, s.block_number, s.block_time, s.tx_hash, s.trade_id, s.payer, s.nonce,
+           s.bound_to, s.token AS subsidy_token, s.amount AS subsidy_amount,
+           CASE
+               WHEN s.token = t.token_out AND t.price_out_usd IS NOT NULL
+               THEN s.amount / power(10::numeric, t.decimals_out) * t.price_out_usd
+           END AS subsidy_usd,
+           t.eoa, t.msg_sender, t.receiver, t.token_in, t.token_out, t.amount_in, t.amount_out,
+           t.volume_usd, t.price_source
+    FROM subsidies s
+    JOIN trades_settled t ON t.id = s.trade_id
+    WHERE s.event = 'paid';
+END $$;
+
 COMMIT;
