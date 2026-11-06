@@ -18,15 +18,15 @@
 //! less basefee) exceeds 2e6 wei (0.002 gwei): one hundredth of a basis point per 1e4 wei above
 //! that, rounded down, capped at 50 bps (reached at 0.052 gwei), and the withheld amount rounded
 //! up. Measured at Base block 53,545,000, after the Entrypoint upgrade at 53,492,231; before it,
-//! the rule was a flat 10 bps above a gas price of 8e6 wei. The books do not price it, since the
-//! priority fee is the sending client's choice and a quote does not carry one: a route through
-//! BaiBai sent with a tip above 0.002 gwei receives up to 50 bps less than quoted, and reverts
-//! when its slippage tolerance is tighter than that.
+//! the rule was a flat 10 bps above a priority fee of 8e6 wei. The books do not price it, since
+//! the priority fee is the sending client's choice and a quote does not carry one: a route
+//! through BaiBai sent with a tip above 0.002 gwei receives up to 50 bps less than quoted, and
+//! reverts when its slippage tolerance is tighter than that.
 //!
 //! # What this integration depends on
 //!
 //! The arithmetic, the expiry rules, the fee and the gas model were measured against one
-//! implementation behind each proxy, pinned in [`BASE_DEPLOYMENT`]:
+//! implementation behind each proxy, pinned in `BASE_DEPLOYMENT`:
 //!
 //! | Proxy      | Implementation | Since Base block                         |
 //! |------------|----------------|------------------------------------------|

@@ -128,7 +128,8 @@ impl Curve {
 
     /// The input this side absorbs before it stops paying out: the whole remaining depth on the
     /// ask side, and on the bid side the depth up to the first segment whose marginal proceeds
-    /// are not positive, since past it more input buys less output.
+    /// are not positive. The contract reverts past a segment that loses money; it keeps filling
+    /// past one that exactly breaks even, where this stops too.
     pub(super) fn capacity(&self) -> Result<U256, SimulationError> {
         if self.filled >= self.max {
             return Ok(U256::ZERO);
@@ -202,7 +203,10 @@ impl Curve {
             return Ok((U256::ZERO, self.filled));
         }
         if !self.asks {
-            // Past the capacity the contract still fills, paying less the more it is sold.
+            // Past the capacity the contract reverts with an arithmetic underflow, except past a
+            // segment that exactly breaks even, which it keeps filling: refusing there turns away
+            // inputs the contract would fill, but never misprices one. Measured by overriding the
+            // mid at Base block 53,545,000.
             if input > self.capacity()? {
                 return Err(invalid("beyond the bid's paying depth"));
             }

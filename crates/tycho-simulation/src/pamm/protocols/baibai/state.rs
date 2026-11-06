@@ -52,8 +52,10 @@ const FEE_DENOMINATOR: u32 = 1_000_000;
 /// payout draws on, and the fee the entrypoint charges the taker the feed was built for.
 ///
 /// Prices exact-input swaps wei for wei as `Entrypoint.quoteFor(base, tokenIn, amountIn, taker)`
-/// does at that block. It does not price the entrypoint's priority surcharge, up to 50 bps
-/// withheld from a swap sent with a priority fee above 0.002 gwei: see the module docs.
+/// does at that block, except that it refuses inputs past a bid segment that exactly breaks even,
+/// which the contract fills (see `Curve::capacity`). It does not price the entrypoint's priority
+/// surcharge, up to 50 bps withheld from a swap sent with a priority fee above 0.002 gwei: see the
+/// module docs.
 #[derive(Clone, derive_more::Debug, PartialEq, Serialize, Deserialize)]
 pub struct BaibaiState {
     pub(super) base_token: Token,
@@ -508,8 +510,8 @@ mod tests {
         assert_eq!(gas, BigUint::from(115_400u64 + 1_550));
     }
 
-    /// When a bid segment pays nothing, more input past it would buy less output; the state
-    /// refuses it rather than quote a falling price, and `get_limits` stops before it.
+    /// Past a bid segment that loses money the contract reverts; the state refuses the same
+    /// inputs, and `get_limits` stops before them.
     #[test]
     fn a_bid_past_its_paying_depth_is_refused() {
         let mut state = weth_state();
