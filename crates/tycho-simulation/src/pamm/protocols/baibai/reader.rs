@@ -148,9 +148,7 @@ impl BaibaiReader {
     /// [`MAX_KNOTS`]), since no later read will either.
     pub(super) async fn read(&self) -> Result<BookRead, FeedError> {
         let mut calls = Vec::new();
-        for (_, settings_call) in self.settings_calls() {
-            calls.push(settings_call);
-        }
+        calls.extend(self.settings_calls());
         for base in &self.bases {
             calls.extend(self.pair_calls(*base));
         }
@@ -170,92 +168,78 @@ impl BaibaiReader {
     }
 
     /// The block and chain, the deployment's wiring, the book's settings and the quote token's
-    /// custody, each with the getter's name. Multicall3's own views cannot revert; the
-    /// deployment's may, after an upgrade, and are allowed to so that [`Self::decode_settings`]
-    /// can tell that apart from a node that failed.
-    fn settings_calls(&self) -> [(&'static str, Call3); SETTINGS_CALLS] {
+    /// custody, in the order [`Self::decode_settings`] destructures their answers. Multicall3's
+    /// own views cannot revert; the deployment's may, after an upgrade, and are allowed to so that
+    /// a revert is told apart from a node that failed.
+    fn settings_calls(&self) -> [Call3; SETTINGS_CALLS] {
         let Deployment { entrypoint, curve_book, custodian, quote, .. } = self.deployment;
         [
-            ("block number", call(MULTICALL3_ADDRESS, getBlockNumberCall {}.abi_encode(), false)),
-            (
-                "block timestamp",
-                call(MULTICALL3_ADDRESS, getCurrentBlockTimestampCall {}.abi_encode(), false),
-            ),
-            ("chain id", call(MULTICALL3_ADDRESS, getChainIdCall {}.abi_encode(), false)),
-            ("entrypoint's curveBook", call(entrypoint, curveBookCall {}.abi_encode(), true)),
-            ("entrypoint's custodian", call(entrypoint, custodianCall {}.abi_encode(), true)),
-            ("entrypoint's quoteToken", call(entrypoint, quoteTokenCall {}.abi_encode(), true)),
-            ("curve book's quoteToken", call(curve_book, quoteTokenCall {}.abi_encode(), true)),
-            ("curve book's ttl", call(curve_book, ttlCall {}.abi_encode(), true)),
-            ("curve book's cUnit", call(curve_book, cUnitCall {}.abi_encode(), true)),
-            (
-                "custodian's availableLiquidity",
-                call(custodian, availableLiquidityCall { token: quote }.abi_encode(), true),
-            ),
+            call(MULTICALL3_ADDRESS, getBlockNumberCall {}.abi_encode(), false),
+            call(MULTICALL3_ADDRESS, getCurrentBlockTimestampCall {}.abi_encode(), false),
+            call(MULTICALL3_ADDRESS, getChainIdCall {}.abi_encode(), false),
+            call(entrypoint, curveBookCall {}.abi_encode(), true),
+            call(entrypoint, custodianCall {}.abi_encode(), true),
+            call(entrypoint, quoteTokenCall {}.abi_encode(), true),
+            call(curve_book, quoteTokenCall {}.abi_encode(), true),
+            call(curve_book, ttlCall {}.abi_encode(), true),
+            call(curve_book, cUnitCall {}.abi_encode(), true),
+            call(custodian, availableLiquidityCall { token: quote }.abi_encode(), true),
         ]
     }
 
-    /// The read's block and book-wide values, with no pairs yet.
+    /// The read's block and book-wide values, with no pairs yet. The chain id is checked before
+    /// any of the deployment's getters is decoded: on another chain they answer from addresses
+    /// with no code, successfully and with no data.
     fn decode_settings(&self, answers: &[Call3Result]) -> Result<BookRead, FeedError> {
-        let Deployment { chain, entrypoint, curve_book, custodian, quote, .. } = self.deployment;
-        for ((what, _), answer) in self
-            .settings_calls()
-            .iter()
-            .zip(answers)
-        {
-            if !answer.success {
-                return Err(FeedError::Fatal(format!(
-                    "BaiBai entrypoint {entrypoint}: the {what} getter reverted; the deployment \
-                     changed and the integration needs updating"
-                )));
-            }
-        }
-        let served = to_u64(decode::<getChainIdCall>(&answers[2], "chain id")?)?;
-        let chain_id = chain.id();
-        if served != chain_id {
+        let Deployment { chain, curve_book, custodian, quote, .. } = self.deployment;
+        let [block_number, timestamp, chain_id, entrypoint_curve_book, entrypoint_custodian, entrypoint_quote, curve_book_quote, ttl, c_unit, quote_custody] =
+            answers
+        else {
+            return Err(FeedError::Parsing("BaiBai multicall answered too few calls".into()));
+        };
+        let served = to_u64(setting::<getChainIdCall>(chain_id, "chain id")?)?;
+        if served != chain.id() {
             return Err(FeedError::Fatal(format!(
-                "BaiBai: the RPC node serves chain {served}, not the deployment's chain {chain_id}"
+                "BaiBai: the RPC node serves chain {served}, not the deployment's chain {}",
+                chain.id()
             )));
         }
         let wiring = [
             (
-                "entrypoint's curve book",
-                decode::<curveBookCall>(&answers[3], "curveBook")?,
+                "entrypoint's curveBook",
+                setting::<curveBookCall>(entrypoint_curve_book, "entrypoint's curveBook")?,
                 curve_book,
             ),
             (
                 "entrypoint's custodian",
-                decode::<custodianCall>(&answers[4], "custodian")?,
+                setting::<custodianCall>(entrypoint_custodian, "entrypoint's custodian")?,
                 custodian,
             ),
             (
-                "entrypoint's quote token",
-                decode::<quoteTokenCall>(&answers[5], "quoteToken")?,
+                "entrypoint's quoteToken",
+                setting::<quoteTokenCall>(entrypoint_quote, "entrypoint's quoteToken")?,
                 quote,
             ),
             (
-                "curve book's quote token",
-                decode::<quoteTokenCall>(&answers[6], "quoteToken")?,
+                "curve book's quoteToken",
+                setting::<quoteTokenCall>(curve_book_quote, "curve book's quoteToken")?,
                 quote,
             ),
         ];
         for (what, found, expected) in wiring {
             if found != expected {
-                return Err(FeedError::Fatal(format!(
-                    "BaiBai entrypoint {entrypoint}: the {what} is {found}, not {expected}; the \
-                     deployment changed and the integration needs updating"
-                )));
+                return Err(deployment_changed(format!("the {what} is {found}, not {expected}")));
             }
         }
         Ok(BookRead {
-            block_number: to_u64(decode::<getBlockNumberCall>(&answers[0], "block number")?)?,
-            timestamp: to_u64(decode::<getCurrentBlockTimestampCall>(
-                &answers[1],
-                "block timestamp",
-            )?)?,
-            ttl: decode::<ttlCall>(&answers[7], "ttl")?,
-            c_unit: decode::<cUnitCall>(&answers[8], "cUnit")?,
-            available_quote: decode::<availableLiquidityCall>(&answers[9], "availableLiquidity")?,
+            block_number: to_u64(setting::<getBlockNumberCall>(block_number, "block number")?)?,
+            timestamp: to_u64(setting::<getCurrentBlockTimestampCall>(timestamp, "timestamp")?)?,
+            ttl: setting::<ttlCall>(ttl, "curve book's ttl")?,
+            c_unit: setting::<cUnitCall>(c_unit, "curve book's cUnit")?,
+            available_quote: setting::<availableLiquidityCall>(
+                quote_custody,
+                "custodian's availableLiquidity",
+            )?,
             pairs: Vec::new(),
         })
     }
@@ -470,6 +454,15 @@ fn read_knots(
         knots.push(Knot { q: knot.q.to(), extra: knot.extra.to() });
     }
     Ok(knots)
+}
+
+/// One setting's answer, decoded; fails fatally when its getter reverted, which only the
+/// deployment's can.
+fn setting<C: SolCall>(answer: &Call3Result, what: &str) -> Result<C::Return, FeedError> {
+    if !answer.success {
+        return Err(deployment_changed(format!("the {what} getter reverted")));
+    }
+    decode::<C>(answer, what)
 }
 
 /// The fatal error for a deployment that no longer answers the way this integration was built for.
