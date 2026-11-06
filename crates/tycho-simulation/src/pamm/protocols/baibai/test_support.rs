@@ -29,7 +29,7 @@ use crate::{
             quoteTokenCall, taker_fee_call, ttlCall, validUntilCall, PairView, SideView,
         },
         state::BaibaiState,
-        Deployment, BASE_DEPLOYMENT, BASE_LISTED_BASES, TAKER,
+        Deployment, BASE_DEPLOYMENT, BASE_LISTED_BASES, BASE_ROUTER,
     },
     snapshot_feed::http::test_support::{spawn_http_server, MockHttpServer, MockRequest},
 };
@@ -197,6 +197,8 @@ pub(super) struct FakeNode {
     pub reverting: Vec<[u8; 4]>,
     /// The block a read sees, to replay an older one.
     pub block: u64,
+    /// The only taker the entrypoint expects its fee asked for.
+    pub taker: Address,
 }
 
 impl FakeNode {
@@ -210,6 +212,7 @@ impl FakeNode {
             not_tokens: Vec::new(),
             chain_id: BASE_DEPLOYMENT.chain.id(),
             reverting: Vec::new(),
+            taker: BASE_ROUTER,
         }
     }
 
@@ -307,10 +310,17 @@ impl FakeNode {
                 let [q, extra] = side.knots[call.index.to::<usize>()];
                 (U48::from(q), U48::from(extra)).abi_encode_params()
             }
-            (t, _) if t == entrypoint && data[..4] == taker_fee_call(Address::ZERO)[..4] => {
+            (t, _)
+                if t == entrypoint &&
+                    data[..4] == taker_fee_call(Address::ZERO, Address::ZERO)[..4] =>
+            {
                 let (taker, base) = <(Address, Address)>::abi_decode_params(&data[4..]).unwrap();
-                assert_eq!(taker, TAKER, "the books are priced for Tycho's router");
-                self.pair(base)
+                assert_eq!(taker, self.taker, "the books are priced for the configured taker");
+                // Only Tycho's router is whitelisted; other callers pay the venue default.
+                let whitelisted = self
+                    .pair(base)
+                    .filter(|_| taker == BASE_ROUTER);
+                whitelisted
                     .map_or(50u32, |pair| pair.fee_pips)
                     .abi_encode()
             }

@@ -25,8 +25,8 @@ use crate::{
     pamm::protocols::baibai::{
         reader::{BaibaiReader, BookRead, PairRead},
         state::BaibaiState,
-        Deployment, BASE_ATTRIBUTE, BASE_DEPLOYMENT, BASE_LISTED_BASES, PROTOCOL_SYSTEM,
-        PROTOCOL_TYPE, QUOTE_ATTRIBUTE,
+        Deployment, BASE_ATTRIBUTE, BASE_DEPLOYMENT, BASE_LISTED_BASES, BASE_ROUTER,
+        PROTOCOL_SYSTEM, PROTOCOL_TYPE, QUOTE_ATTRIBUTE,
     },
     snapshot_feed::{
         errors::FeedError,
@@ -53,6 +53,7 @@ pub struct BaibaiFeedBuilder {
     book_config: BookFeedConfig,
     rpc_url: String,
     bases: Vec<Bytes>,
+    taker: Bytes,
     feed_config: HttpFeedConfig,
 }
 
@@ -65,6 +66,7 @@ impl BaibaiFeedBuilder {
                 .iter()
                 .map(|base| Bytes::from(base.to_vec()))
                 .collect(),
+            taker: Bytes::from(BASE_ROUTER.to_vec()),
             feed_config: Self::default_feed_config(),
         }
     }
@@ -74,6 +76,14 @@ impl BaibaiFeedBuilder {
     /// is served; one the book has not listed is skipped every poll.
     pub fn bases(mut self, bases: Vec<Bytes>) -> Self {
         self.bases = bases;
+        self
+    }
+
+    /// The address that calls BaiBai's entrypoint, replacing Tycho's router on Base. The
+    /// entrypoint charges each caller its own fee and the books are priced with this one's, so
+    /// set it when swaps go through another router.
+    pub fn taker(mut self, taker: Bytes) -> Self {
+        self.taker = taker;
         self
     }
 
@@ -101,8 +111,8 @@ impl BaibaiFeedBuilder {
     }
 
     /// Fails for a chain other than Base, the only one BaiBai is deployed on, for an RPC URL
-    /// that is not one, and for bases that are not addresses. The node's chain is checked on
-    /// every poll, which fails fatally when the node serves another one.
+    /// that is not one, and for bases or a taker that are not addresses. The node's chain is
+    /// checked on every poll, which fails fatally when the node serves another one.
     pub fn build(self) -> Result<BaibaiFeed, FeedError> {
         let deployment = BASE_DEPLOYMENT;
         if self.book_config.chain != deployment.chain {
@@ -121,10 +131,11 @@ impl BaibaiFeedBuilder {
             .iter()
             .map(|base| address(base, "base"))
             .collect::<Result<Vec<_>, _>>()?;
+        let taker = address(&self.taker, "taker")?;
         Ok(BaibaiFeed {
             feed_config: self.feed_config,
             source: BaibaiBookSource {
-                reader: BaibaiReader::new(rpc_url, deployment, bases),
+                reader: BaibaiReader::new(rpc_url, deployment, bases, taker),
                 assembler: BaibaiBookAssembler { book_config: self.book_config, deployment },
                 clock: Arc::new(unix_now),
                 last_block: Arc::new(AtomicU64::new(0)),
@@ -402,10 +413,34 @@ mod tests {
         );
     }
 
+    /// The books are priced with the fee the entrypoint charges the configured taker: a router
+    /// other than Tycho's pays the venue default.
+    #[tokio::test]
+    async fn the_books_carry_the_fee_of_the_configured_taker() {
+        let taker = Address::repeat_byte(0x11);
+        let mut node = FakeNode::new();
+        node.taker = taker;
+        let now = node.timestamp;
+        let server = node.spawn().await;
+        let mut source = BaibaiFeedBuilder::new(book_config(), server.url())
+            .taker(bytes(taker))
+            .build()
+            .unwrap()
+            .source;
+        source.clock = Arc::new(move || now);
+
+        let books = source.fetch().await.unwrap().books;
+
+        assert!(!books.is_empty());
+        for book in books.values() {
+            assert_eq!(book.state.fee(), 0.00005);
+        }
+    }
+
     /// After an upgrade that removes a getter the feed reads, no later poll can succeed.
     #[rstest]
     #[case::a_settings_getter(ttlCall::SELECTOR)]
-    #[case::the_taker_fee_getter(taker_fee_call(Address::ZERO)[..4].try_into().unwrap())]
+    #[case::the_taker_fee_getter(taker_fee_call(Address::ZERO, Address::ZERO)[..4].try_into().unwrap())]
     #[tokio::test]
     async fn a_reverting_getter_ends_the_feed(#[case] selector: [u8; 4]) {
         let mut node = FakeNode::new();
@@ -596,6 +631,16 @@ mod tests {
         }
 
         let error = builder.build().unwrap_err();
+
+        assert!(matches!(error, FeedError::InvalidInput(_)), "{error}");
+    }
+
+    #[test]
+    fn the_builder_refuses_a_taker_that_is_not_an_address() {
+        let error = BaibaiFeedBuilder::new(book_config(), "http://node".to_string())
+            .taker(Bytes::from(vec![1u8; 4]))
+            .build()
+            .unwrap_err();
 
         assert!(matches!(error, FeedError::InvalidInput(_)), "{error}");
     }

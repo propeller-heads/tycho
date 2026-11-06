@@ -25,7 +25,7 @@ use tracing::{debug, warn};
 use crate::{
     pamm::protocols::baibai::{
         math::{Knot, Side},
-        Deployment, TAKER,
+        Deployment,
     },
     snapshot_feed::errors::FeedError,
 };
@@ -82,8 +82,8 @@ pub(super) struct PairRead {
     pub mid: U256,
     pub q_unit: U256,
     pub available_base: U256,
-    /// The entrypoint's fee for [`TAKER`], in millionths of the gross output; `u32::MAX` when the
-    /// chain reports one that does not fit.
+    /// The entrypoint's fee for the reader's taker, in millionths of the gross output; `u32::MAX`
+    /// when the chain reports one that does not fit.
     pub fee_pips: u32,
     pub ask: Side,
     pub bid: Side,
@@ -111,15 +111,23 @@ pub(super) struct BaibaiReader {
     rpc_url: String,
     deployment: Deployment,
     bases: Vec<Address>,
+    /// The caller whose fee is read: the entrypoint charges each caller its own.
+    taker: Address,
 }
 
 impl BaibaiReader {
-    pub(super) fn new(rpc_url: Url, deployment: Deployment, bases: Vec<Address>) -> Self {
+    pub(super) fn new(
+        rpc_url: Url,
+        deployment: Deployment,
+        bases: Vec<Address>,
+        taker: Address,
+    ) -> Self {
         Self {
             rpc_url: rpc_url.to_string(),
             provider: RootProvider::new_http(rpc_url),
             deployment,
             bases,
+            taker,
         }
     }
 
@@ -275,7 +283,7 @@ impl BaibaiReader {
             call(curve_book, pairCall { base }.abi_encode(), true),
             call(curve_book, validUntilCall { base }.abi_encode(), true),
             call(custodian, availableLiquidityCall { token: base }.abi_encode(), true),
-            call(entrypoint, taker_fee_call(base), true),
+            call(entrypoint, taker_fee_call(self.taker, base), true),
         ]
     }
 
@@ -333,10 +341,10 @@ const SETTINGS_CALLS: usize = 10;
 /// Calls per configured base in the first multicall: see [`BaibaiReader::pair_calls`].
 const PAIR_CALLS: usize = 4;
 
-/// The entrypoint's fee for [`TAKER`] on `base`, as calldata.
-pub(super) fn taker_fee_call(base: Address) -> Vec<u8> {
+/// The entrypoint's fee for `taker` on `base`, as calldata.
+pub(super) fn taker_fee_call(taker: Address, base: Address) -> Vec<u8> {
     let mut data = TAKER_FEE_SELECTOR.to_vec();
-    data.extend((TAKER, base).abi_encode_params());
+    data.extend((taker, base).abi_encode_params());
     data
 }
 

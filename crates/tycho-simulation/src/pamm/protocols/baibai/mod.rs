@@ -76,10 +76,10 @@ pub(crate) const BASE_LISTED_BASES: [Address; 2] = [
     address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
 ];
 
-/// The taker the books are priced for: Tycho's router on Base, which calls the entrypoint. The
-/// entrypoint's fee for it is read every poll; BaiBai whitelisted it at zero for every base at
-/// block 53,359,421, where other callers pay the venue default of 50 millionths.
-pub(crate) const TAKER: Address = address!("AbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67");
+/// Tycho's default router on Base, the taker the books are priced for unless
+/// [`BaibaiFeedBuilder::taker`] sets another. BaiBai whitelisted it at a zero fee for every base
+/// at block 53,359,421, where other callers pay the venue default of 50 millionths.
+pub(crate) const BASE_ROUTER: Address = address!("AbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67");
 
 #[cfg(test)]
 mod test_support;
@@ -92,12 +92,13 @@ mod tests {
 
     use super::*;
 
-    /// The books are priced for the router tycho-execution encodes BaiBai swaps through.
+    /// By default the books are priced for the router tycho-execution encodes BaiBai swaps
+    /// through.
     #[test]
-    fn the_books_are_priced_for_the_base_router() {
+    fn the_books_are_priced_for_the_base_router_by_default() {
         let router = get_router_address(&Chain::Base).unwrap();
 
-        assert_eq!(router.as_ref(), TAKER.as_slice());
+        assert_eq!(router.as_ref(), BASE_ROUTER.as_slice());
     }
 
     /// tycho-execution keys BaiBai's encoder on the protocol system and reads the pair from the
