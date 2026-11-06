@@ -69,9 +69,7 @@ impl BaibaiState {
         if self.mid == U256::ZERO || self.q_unit == U256::ZERO || self.c_unit == U256::ZERO {
             return Err(invalid("curve has no mid price or unit"));
         }
-        if self.fee_pips >= FEE_DENOMINATOR {
-            return Err(invalid(format!("fee of {} pips takes the whole output", self.fee_pips)));
-        }
+        self.kept_pips()?;
         self.curve(SwapDirection::BaseToQuote)?;
         self.curve(SwapDirection::QuoteToBase)?;
         Ok(self)
@@ -95,13 +93,20 @@ impl BaibaiState {
         }
     }
 
-    /// The gross output less the entrypoint's fee, which the contract rounds up. Fails for a fee
-    /// of the whole output or more, which [`Self::validated`] refuses but a deserialized state
-    /// has not been through.
+    /// The millionths of the gross output the taker keeps. Fails for a fee of the whole output or
+    /// more, which the entrypoint never charges: [`Self::validated`] refuses it, and a
+    /// deserialized state, which has not been through it, fails every quote and price for it and
+    /// lists no direction.
+    fn kept_pips(&self) -> Result<u32, SimulationError> {
+        if self.fee_pips >= FEE_DENOMINATOR {
+            return Err(invalid(format!("fee of {} pips takes the whole output", self.fee_pips)));
+        }
+        Ok(FEE_DENOMINATOR - self.fee_pips)
+    }
+
+    /// The gross output less the entrypoint's fee, which the contract rounds up.
     fn after_fee(&self, gross: U256) -> Result<U256, SimulationError> {
-        let kept = FEE_DENOMINATOR
-            .checked_sub(self.fee_pips)
-            .ok_or_else(|| invalid(format!("fee of {} pips exceeds the output", self.fee_pips)))?;
+        let kept = self.kept_pips()?;
         mul_div(gross, U256::from(kept), U256::from(FEE_DENOMINATOR))
     }
 
@@ -119,7 +124,8 @@ impl BaibaiState {
 
     fn sells(&self, direction: SwapDirection) -> bool {
         let (_, out) = Self::custody(direction);
-        self.available[out] > U256::ZERO &&
+        self.kept_pips().is_ok() &&
+            self.available[out] > U256::ZERO &&
             self.curve(direction)
                 .and_then(|curve| curve.capacity())
                 .is_ok_and(|capacity| capacity > U256::ZERO)
@@ -167,7 +173,8 @@ impl ProtocolSim for BaibaiState {
             .curve(direction)?
             .marginal_price()?;
         let decimals = 10f64.powf(f64::from(base.decimals) - f64::from(quote.decimals));
-        Ok(atomic * decimals * (1.0 - self.fee()))
+        let kept = f64::from(self.kept_pips()?) / f64::from(FEE_DENOMINATOR);
+        Ok(atomic * decimals * kept)
     }
 
     fn get_amount_out(
@@ -486,22 +493,33 @@ mod tests {
         );
     }
 
-    /// A state deserialized from elsewhere has not been validated; its fee still cannot wrap.
-    #[test]
-    fn a_fee_over_the_whole_output_is_refused_when_quoting() {
+    /// A state deserialized from elsewhere has not been validated. A fee of the whole output or
+    /// more fails its quotes and prices alike, and it lists no direction to trade.
+    #[rstest]
+    #[case::the_whole_output(1_000_000)]
+    #[case::more_than_the_output(1_000_001)]
+    fn a_fee_of_the_whole_output_trades_nothing(#[case] fee_pips: u32) {
         let mut state = weth_state();
-        state.fee_pips = 1_000_001;
+        state.fee_pips = fee_pips;
+        let weth = state.base_token.clone();
 
-        let error = state
-            .get_amount_out(BigUint::from(10u64).pow(16), &state.base_token.clone(), &quote())
+        let quoted = state
+            .get_amount_out(BigUint::from(10u64).pow(16), &weth, &quote())
+            .unwrap_err();
+        let priced = state
+            .spot_price(&weth, &quote())
             .unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("exceeds the output"),
-            "{error}"
-        );
+        for error in [quoted, priced] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("takes the whole output"),
+                "{error}"
+            );
+        }
+        assert!(state.directions().is_empty());
+        assert!(state.validated().is_err());
     }
 
     #[test]
@@ -620,6 +638,8 @@ mod tests {
     #[case::falling_cost(|s: &mut BaibaiState| s.bid.knots = vec![Knot { q: 1, extra: 5 }, Knot { q: 2, extra: 4 }])]
     #[case::repeated_quantity(|s: &mut BaibaiState| s.bid.knots = vec![Knot { q: 1, extra: 0 }, Knot { q: 1, extra: 1 }])]
     #[case::depth_over_100_percent(|s: &mut BaibaiState| s.ask.depth_bps = 10_001)]
+    #[case::spread_of_minus_100_percent(|s: &mut BaibaiState| s.bid.spread_bps = -10_000)]
+    #[case::spread_below_minus_100_percent(|s: &mut BaibaiState| s.ask.spread_bps = i16::MIN)]
     fn malformed_states_are_rejected(#[case] corrupt: fn(&mut BaibaiState)) {
         let mut state = weth_state();
         corrupt(&mut state);
