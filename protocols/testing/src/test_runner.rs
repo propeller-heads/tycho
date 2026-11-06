@@ -54,7 +54,7 @@ use tycho_test::{
 
 use crate::{
     adapter_builder::AdapterContractBuilder,
-    config::{IntegrationTest, IntegrationTestsConfig, ProtocolComponentWithTestConfig},
+    config::{IntegrationTest, IntegrationTestsConfig, ProtocolComponentWithTestConfig, Skip},
     execution,
     report::{CheckId, Checks, Report},
     rpc::RPCProvider,
@@ -736,9 +736,9 @@ impl TestRunner {
             Self::validate_excluded_components(&test.excluded_components, &protocol_components)
         })?;
 
-        if config.skip_balance_check {
-            info!("Skipping balance check");
-            checks.skip(CheckId::Balances, "skip_balance_check: true");
+        if let Some(reason) = config.skip_balance_check.reason() {
+            info!("Skipping balance check: {reason}");
+            checks.skip(CheckId::Balances, reason);
         } else {
             checks.run(CheckId::Balances, || {
                 self.validate_token_balances(
@@ -750,6 +750,8 @@ impl TestRunner {
                 Ok(())
             })?;
         }
+
+        let ladder_skips = record_ladder_skips(&test.expected_components, checks);
 
         let Some(update) = checks.run(CheckId::Decode, || {
             let adapter_contract_path_str = self.get_adapter_contract_path(
@@ -784,6 +786,12 @@ impl TestRunner {
         let protocol_components_simulation: HashMap<String, ProtocolComponentModel> =
             update.new_pairs.clone();
 
+        if let Some(reason) = ladder_skips.simulation {
+            checks.skip(CheckId::SimLadder, reason);
+            checks.skip(CheckId::ExecLadder, reason);
+            return Ok(());
+        }
+
         let Some(execution_data) = checks.run(CheckId::SimLadder, || {
             self.run_simulation(
                 &update,
@@ -796,6 +804,11 @@ impl TestRunner {
             checks.not_run(CheckId::ExecLadder, CheckId::SimLadder);
             return Ok(());
         };
+
+        if let Some(reason) = ladder_skips.execution {
+            checks.skip(CheckId::ExecLadder, reason);
+            return Ok(());
+        }
 
         checks.run(CheckId::ExecLadder, || {
             self.runtime
@@ -1289,23 +1302,14 @@ impl TestRunner {
         expected_components: &[ProtocolComponentWithTestConfig],
         protocol_system: &String,
     ) -> miette::Result<HashMap<String, TychoExecutionInput>> {
-        let skip_simulation: HashSet<_> = expected_components
-            .iter()
-            .filter(|c| c.skip_simulation)
-            .map(|c| c.base.id.to_lowercase())
-            .collect();
-
-        let skip_execution: HashSet<_> = expected_components
-            .iter()
-            .filter(|c| c.skip_execution)
-            .map(|c| c.base.id.to_lowercase())
-            .collect();
+        let skip_simulation = skip_reasons(expected_components, |c| &c.skip_simulation);
+        let skip_execution = skip_reasons(expected_components, |c| &c.skip_execution);
 
         let mut execution_data = HashMap::new();
 
         for (id, state) in update.states.iter() {
-            if skip_simulation.contains(id) {
-                info!("Skipping simulation for component {id}");
+            // The reason is logged once per component, where the skips are recorded.
+            if skip_simulation.contains_key(id) {
                 continue;
             }
             let component = protocol_components
@@ -1423,8 +1427,7 @@ impl TestRunner {
 
                     quoted_any_direction = true;
 
-                    if skip_execution.contains(id) {
-                        info!("Skipping execution for component {id}");
+                    if skip_execution.contains_key(id) {
                         continue;
                     }
 
@@ -1519,16 +1522,12 @@ impl TestRunner {
             return Ok(());
         }
 
-        let skip_execution: HashSet<_> = expected_components
-            .iter()
-            .filter(|c| c.skip_execution)
-            .map(|c| c.base.id.to_lowercase())
-            .collect();
+        let skip_execution = skip_reasons(expected_components, |c| &c.skip_execution);
 
         // Filter out skipped components
         let filtered_execution_data: HashMap<_, _> = execution_data
             .into_iter()
-            .filter(|(_, input)| !skip_execution.contains(&input.component_id.to_lowercase()))
+            .filter(|(_, input)| !skip_execution.contains_key(&input.component_id.to_lowercase()))
             .collect();
 
         if filtered_execution_data.is_empty() {
@@ -1747,10 +1746,63 @@ fn undecoded_components<'a>(
         .collect();
     expected_components
         .iter()
-        .filter(|component| !component.skip_simulation)
+        .filter(|component| !component.skip_simulation.is_skipped())
         .map(|component| component.base.id.to_lowercase())
         .filter(|id| !decoded.contains(id))
         .collect()
+}
+
+/// Which ladder the whole test skips, because every expected component skips it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LadderSkips {
+    /// Why `sim.ladder` and `exec.ladder` do not run, when every component skips simulation.
+    simulation: Option<&'static str>,
+    /// Why `exec.ladder` does not run, when every component skips simulation or execution.
+    execution: Option<&'static str>,
+}
+
+/// Records and logs each expected component's ladder skips, once per component: a
+/// `skip_simulation` skips both ladders, a `skip_execution` the execution one. Returns which
+/// ladder every component skips, if any; an empty list skips nothing, since it stands for every
+/// component of the protocol.
+fn record_ladder_skips(
+    expected_components: &[ProtocolComponentWithTestConfig],
+    checks: &mut Checks,
+) -> LadderSkips {
+    for component in expected_components {
+        let id = &component.base.id;
+        if let Some(reason) = component.skip_simulation.reason() {
+            info!("Skipping simulation and execution for component {id}: {reason}");
+            checks.skip_component(CheckId::SimLadder, id, reason);
+            checks.skip_component(CheckId::ExecLadder, id, reason);
+        } else if let Some(reason) = component.skip_execution.reason() {
+            info!("Skipping execution for component {id}: {reason}");
+            checks.skip_component(CheckId::ExecLadder, id, reason);
+        }
+    }
+    let every = |skips: fn(&ProtocolComponentWithTestConfig) -> bool| {
+        !expected_components.is_empty() && expected_components.iter().all(skips)
+    };
+    LadderSkips {
+        simulation: every(|c| c.skip_simulation.is_skipped())
+            .then_some("every expected component skips simulation"),
+        execution: every(|c| c.execution_skip_reason().is_some())
+            .then_some("every expected component skips execution"),
+    }
+}
+
+/// The lowercase ids of the expected components whose `flag` is skipped, each with its reason.
+fn skip_reasons<'a>(
+    expected_components: &'a [ProtocolComponentWithTestConfig],
+    flag: impl Fn(&'a ProtocolComponentWithTestConfig) -> &'a Skip,
+) -> HashMap<String, &'a str> {
+    let mut reasons = HashMap::new();
+    for component in expected_components {
+        if let Some(reason) = flag(component).reason() {
+            reasons.insert(component.base.id.to_lowercase(), reason);
+        }
+    }
+    reasons
 }
 
 #[cfg(test)]
@@ -1762,6 +1814,123 @@ mod tests {
     use tycho_simulation::tycho_common::{models::protocol::ProtocolComponentState, Bytes};
 
     use super::*;
+    use crate::{
+        config::{Harness, ProtocolComponentExpectation},
+        report::{CheckResult, Outcome},
+    };
+
+    fn component(
+        id: &str,
+        skip_simulation: Skip,
+        skip_execution: Skip,
+    ) -> ProtocolComponentWithTestConfig {
+        ProtocolComponentWithTestConfig {
+            base: ProtocolComponentExpectation {
+                id: id.to_string(),
+                tokens: Vec::new(),
+                static_attributes: HashMap::new(),
+                creation_tx: Bytes::default(),
+            },
+            skip_simulation,
+            skip_execution,
+        }
+    }
+
+    fn reason(text: &str) -> Skip {
+        Skip::Reason(text.to_string())
+    }
+
+    /// The skips recorded for `components`, as `(check, component, reason)`, and what the whole
+    /// test skips.
+    fn ladder_skips(
+        components: &[ProtocolComponentWithTestConfig],
+    ) -> (Vec<(CheckId, Option<String>, String)>, LadderSkips) {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        let skips = record_ladder_skips(components, &mut checks);
+        let (_, results) = checks.finish();
+        let recorded = results
+            .into_iter()
+            .map(|CheckResult { check, component, outcome, .. }| {
+                let Outcome::Skipped { reason } = outcome else {
+                    panic!("{check} recorded {outcome:?}")
+                };
+                (check, component, reason)
+            })
+            .collect();
+        (recorded, skips)
+    }
+
+    #[test]
+    fn every_component_skipping_simulation_skips_both_ladders() {
+        let (recorded, skips) = ladder_skips(&[
+            component("0xAA", reason("no adapter"), Skip::No),
+            component("0xbb", reason("no state"), Skip::No),
+        ]);
+        assert_eq!(
+            recorded,
+            vec![
+                (CheckId::SimLadder, Some("0xaa".to_string()), "no adapter".to_string()),
+                (CheckId::ExecLadder, Some("0xaa".to_string()), "no adapter".to_string()),
+                (CheckId::SimLadder, Some("0xbb".to_string()), "no state".to_string()),
+                (CheckId::ExecLadder, Some("0xbb".to_string()), "no state".to_string()),
+            ]
+        );
+        assert_eq!(
+            skips,
+            LadderSkips {
+                simulation: Some("every expected component skips simulation"),
+                execution: Some("every expected component skips execution"),
+            }
+        );
+    }
+
+    #[test]
+    fn every_component_skipping_execution_skips_only_the_execution_ladder() {
+        let (recorded, skips) = ladder_skips(&[component("0xaa", Skip::No, reason("no fork"))]);
+        assert_eq!(
+            recorded,
+            vec![(CheckId::ExecLadder, Some("0xaa".to_string()), "no fork".to_string())]
+        );
+        assert_eq!(
+            skips,
+            LadderSkips {
+                simulation: None,
+                execution: Some("every expected component skips execution")
+            }
+        );
+    }
+
+    #[test]
+    fn a_simulation_skip_counts_as_an_execution_skip_for_the_whole_test() {
+        let (_, skips) = ladder_skips(&[
+            component("0xaa", reason("no adapter"), Skip::No),
+            component("0xbb", Skip::No, reason("no fork")),
+        ]);
+        assert_eq!(
+            skips,
+            LadderSkips {
+                simulation: None,
+                execution: Some("every expected component skips execution")
+            }
+        );
+    }
+
+    #[test]
+    fn a_mix_with_an_unskipped_component_skips_nothing_test_wide() {
+        let (recorded, skips) = ladder_skips(&[
+            component("0xaa", Skip::No, reason("no fork")),
+            component("0xbb", Skip::No, Skip::Bool(false)),
+        ]);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(skips, LadderSkips::default());
+    }
+
+    #[test]
+    fn no_expected_components_skips_nothing() {
+        let (recorded, skips) = ladder_skips(&[]);
+        assert!(recorded.is_empty());
+        assert_eq!(skips, LadderSkips::default());
+    }
 
     #[test]
     fn snapshot_block_reads_at_the_last_committed_block() {

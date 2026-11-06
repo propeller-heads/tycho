@@ -69,10 +69,29 @@ In strict mode:
 
 - A key the runner does not read is an error that names it, so a misspelt `skip_exectuion` cannot
   pass silently. Legacy mode logs such keys as a warning.
+- Every skip is written as its reason, a string. `true` gives no reason and `false` is the
+  default, so both are errors naming the flag and the component:
+
+  ```yaml
+  skip_execution: "range predates Shanghai; the router needs PUSH0"
+  ```
+
+  A reason works in legacy mode too, where `true` and `false` stay valid. A trace, a command and
+  its output, or a ticket go in the reason. The runner logs it once per component, and the report
+  records it.
+- A `skip_execution` next to a `skip_simulation` is an error: execution never runs without
+  simulation, so its reason would be read nowhere.
+- A skip that reads as yes or no, such as `no` or `"false"`, is an error in both modes, since
+  `no` would otherwise turn the check off.
 - Every check of a test runs, and the test fails at the end listing every failed check, instead of
   stopping at the first. A check that needs the result of a failed one is reported as not run.
 - New checks are added to strict mode only, so a legacy package never starts failing because the
   harness grew.
+
+A missing executor deployment is not a reason to skip execution, in either mode, when the
+protocol's executor has a runtime bytecode fixture in `src/execution.rs`: the harness overrides the
+executor address with that bytecode, so execution runs either way. A protocol without one needs a
+fixture added first.
 
 ### Test report
 
@@ -85,7 +104,8 @@ In strict mode:
   "harness": "strict",
   "results": [
     { "test": "first", "check": "state.components", "outcome": "pass" },
-    { "test": "first", "check": "balances", "outcome": "skipped", "reason": "skip_balance_check: true" },
+    { "test": "first", "check": "balances", "outcome": "pass" },
+    { "test": "first", "check": "exec.ladder", "component": "0xabc...", "outcome": "skipped", "reason": "range predates Shanghai; the router needs PUSH0" },
     { "test": "first", "check": "sim.ladder", "outcome": "fail", "detail": "Error calculating amount out ..." },
     { "test": "first", "check": "exec.ladder", "outcome": "not_run", "reason": "sim.ladder failed" }
   ]
@@ -102,7 +122,12 @@ In strict mode:
 | `sim.ladder` | limits, spot prices and quotes at 0.1%, 1% and 10% of the limit, every direction |
 | `exec.ladder` | executing each quote on chain matches the simulation |
 
-In legacy mode the report ends at the first failed check of a test.
+A skipped check is reported with its reason, per component (by lowercase id) for
+`skip_simulation` and `skip_execution`; a legacy `true` reads "no reason given". A test-wide
+`sim.ladder` or `exec.ladder` result covers only the components without a `skipped` result for
+it. When every component skips, `range --report` records the test-wide result as `skipped`,
+unless an earlier check failed, in which case it is `not_run`. In legacy mode the report ends at
+the first failed check of a test.
 
 ## How to Run with Docker
 
