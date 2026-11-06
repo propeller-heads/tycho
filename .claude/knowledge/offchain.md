@@ -26,13 +26,6 @@ Spot: Component ids built from tokens in API-response order; a map keyed by pair
 Applies: rust, rust-test · look first at lines matching `id|component|pair|maker|keccak|hash|format!|protocol_system`
 Checked by: ast-grep `rust-offchain-hashed-component-id`
 
-### offchain-settlement-tolerates-under-delivery
-Settlement of a signed off-chain quote handles an input that differs from the signed amount by direction: under-delivery is tolerated by writing the actual amount into the venue's unsigned override field rather than requiring an exact match; over-delivery either reverts or relies on a venue-documented rule that rescales the signed minimum output, proven against a recorded real quote rather than a mock; the executor names the override fields as the only ones the signature does not cover and never clamps a venue-supplied payable value to the input amount.
-Why: The input amount routinely differs by a few wei at execution time and venues revert on any mismatch with the signed amount, so strict equality makes swaps fail in production.
-Spot: Executor checks like `value == amountIn` or `signedAmount == amountIn`, or signed payloads forwarded verbatim without overriding the unsigned amount field. `if (amountIn != signedAmountIn)` branches that write the actual amount without touching the min-output field; `ethValue = amountIn > value ? value : amountIn`; over-delivery tests against a mock router that only records calldata.
-Applies: solidity, solidity-test, rust · look first at lines matching `amount|value|sign|override|payable|min|deliver`
-Checked by: ast-grep `sol-signed-quote-amount-mismatch`
-
 ### offchain-failure-classification
 Every venue failure is classified by whether another attempt could answer differently. At the HTTP layer the response's meaning decides, not its cosmetics: an error envelope returned with HTTP 200 is an error, a 5xx is retried whether or not its body parses, and a success=false flag is handled in one place with one verdict. At the error layer, a failure is fatal only when no retry can help (unsupported chain, unbuildable request); a declined size, a missing quote, a rejected credential or a rate limit is recoverable or reported as what it is; and conversions into simulation errors keep the classification and the venue's reason.
 Why: Blanket fatal classification ends healthy feeds and stops simulation of healthy books over one trade; misfiled 'connection' errors trigger pointless retries; flattened errors hide the venue's verdict.
@@ -69,7 +62,7 @@ Applies: rust, rust-test · look first at lines matching `override|slot|storage|
 ### offchain-binding-quote-pinned-to-simulated-book
 A binding quote is requested from the same book the state simulated: the request names the maker/book and disables fallback to others.
 Why: Otherwise the venue answers from a maker the route was never priced on, and execution diverges from simulation.
-Spot: Quote requests without a maker identifier where books are per maker; one component aggregating several makers.
+Spot: Quote requests without a maker identifier where books are per maker.
 Applies: rust, rust-test · look first at lines matching `maker|book|fallback|request|quote|rfq`
 
 ### offchain-quote-within-served-range
@@ -100,8 +93,8 @@ Applies: rust, rust-test · look first at lines matching `new|remov|snapshot|add
 
 ### offchain-shared-transport-lifecycle
 Transport and lifecycle behaviour (connect/reconnect, poll loop, failure counting, backoff, common config, TVL filter, component construction, HTTP send/status/parse) is written once and drives every venue; per-venue code is limited to its configuration, decoding its data into states, and its API client.
-Why: Copies drift: across five copied integrations no behavioural fix was ever applied to all of them, and only one counted failures and gave up.
-Spot: A new venue adding its own reconnect/poll/backoff loop, retry helper, or config struct with its own defaults.
+Why: Copies drift: a behavioural fix lands in one copy and not in the others.
+Spot: A new venue adding its own reconnect/poll/backoff loop, retry helper, or its own config struct.
 Applies: rust, rust-test
 
 ### offchain-timeouts-and-backoff
@@ -133,16 +126,10 @@ Applies: rust, rust-test · look first at lines matching `f64|f32|price|quantit|
 Checked by: clippy `clippy::cast_possible_truncation`; clippy `clippy::cast_sign_loss`
 
 ### offchain-per-venue-default-config
-Shared config structs have no anonymous Default; each venue exposes its own default config that callers spread from.
+Shared config structs have no anonymous Default; each venue exposes its own default value of the shared config that callers spread from.
 Why: A generic default quietly overrides a venue's tuned cadence or timeout.
 Spot: impl Default on a transport config used by several venues; ..Default::default() in builder code.
 Applies: rust, rust-test · look first at lines matching `default`
-
-### exclusive-live-credential
-Long-running live tests or benchmarks against a venue that allows one connection per credential use an exclusive credential, and two such runs never overlap.
-Why: A second connection supersedes the first, so the run measures the fight and degrades the production consumer sharing the key.
-Spot: Benchmarks or integration runs using the shared .env key for long sessions; scripts that start runs concurrently.
-Applies: rust, rust-test, script, ci, config · look first at lines matching `env|key|bench|ignore|live|credential|concurr|parallel|&|spawn|connect|criterion`
 
 ### quote-applies-depth-model
 A quote built from venue-published price data applies the venue's documented depth or price-impact model (cumulative depth bins, per-bin price curves); a flat price times amount is used only when the venue documents unlimited size at that price.

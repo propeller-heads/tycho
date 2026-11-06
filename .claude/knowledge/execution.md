@@ -298,3 +298,10 @@ A client-side type that maps onto an external interface uses that interface's pa
 Why: Readers move between the contract docs, its revert errors and the client type, and a mismatch between them causes confusion and wrong conversions.
 Spot: A struct documented as 'becomes the router's X' whose fields differ from the contract arguments they feed.
 Applies: rust
+
+### offchain-settlement-tolerates-under-delivery
+Settlement of a signed off-chain quote handles an input that differs from the signed amount by direction: under-delivery is tolerated by writing the actual amount into the venue's unsigned override field rather than requiring an exact match; over-delivery either reverts or relies on a venue-documented rule that rescales the signed minimum output; the executor names the override fields as the only ones the signature does not cover and never clamps a venue-supplied payable value to the input amount.
+Why: The input amount routinely differs by a few wei at execution time and venues revert on any mismatch with the signed amount, so strict equality makes swaps fail in production.
+Spot: Executor checks like `value == amountIn` or `signedAmount == amountIn`, or signed payloads forwarded verbatim without overriding the unsigned amount field. `if (amountIn != signedAmountIn)` branches that write the actual amount without touching the min-output field; `ethValue = amountIn > value ? value : amountIn`.
+Applies: solidity, solidity-test, rust · look first at lines matching `amount|value|sign|override|payable|min|deliver`
+Checked by: ast-grep `sol-signed-quote-amount-mismatch`
