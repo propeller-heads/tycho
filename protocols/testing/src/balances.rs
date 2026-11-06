@@ -11,18 +11,30 @@
 //! balance_check: {holder: "attribute:vault"}          # the address in an attribute
 //! balance_check: {holder: "0x…"}                      # a fixed address
 //! balance_check: {min_of: [self, "attribute:vault"]}  # the smallest of several
+//! balance_check: {call: {to: "0x<vault>", fn: "cash(bytes32,address)", args: [self, token]}}
 //! balance_check:                                      # per token; unlisted tokens: self
 //!   tokens:
 //!     "0x<USDC>": {holder: "0x<pocket>"}
 //!     "0x<USDS>": {holder: "0x<PSM>", token: "0x<DAI>"}   # another token's balance
+//!     "0x<ETH>": {call: {to: self, fn: "getTotalPooledEther()"}}   # protocol accounting
+//!     "0x<stETH>": {unindexed: "only the pooled ether is tracked"}
 //! ```
+//!
+//! The README's "Balances" section gives the full grammar.
 
 use std::{collections::HashMap, fmt, str::FromStr};
 
+use alloy::{
+    dyn_abi::{DynSolType, DynSolValue, FunctionExt, JsonAbiExt, Specifier},
+    json_abi::Function,
+};
 use itertools::Itertools;
 use num_bigint::BigUint;
+use num_traits::Zero;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use tycho_simulation::tycho_common::Bytes;
+
+use crate::config::Tolerance;
 
 /// Where a token balance is read on chain: `balanceOf(holder)`, or the native balance for the
 /// zero address.
@@ -96,7 +108,319 @@ pub enum BalanceCheck {
     /// The smallest `balanceOf` of the holders: the amount is bounded by each of them.
     MinOf(Vec<Holder>),
     /// A source per token; a token not listed is read from the component itself.
-    Tokens(HashMap<Bytes, Source>),
+    Tokens(HashMap<Bytes, TokenSource>),
+    /// One view call for every token, typically taking the token as an argument: a singleton
+    /// vault's per-pool, per-token view.
+    Call(Call),
+}
+
+/// Where one token of a [`BalanceCheck::Tokens`] declaration is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenSource {
+    /// A balance held by an address.
+    Held(Source),
+    /// A view call returning the amount, for a balance that is protocol accounting rather than a
+    /// token balance any address holds.
+    Call(Call),
+    /// The indexer reports no balance for this token, for the reason given; the check is that it
+    /// stays so. A component's balances need not cover every token it trades.
+    Unindexed(String),
+}
+
+/// A view call whose `uint` result is a token's balance:
+///
+/// ```yaml
+/// call: {to: "0x<vat>", fn: "dai(address)", args: ["0x<join>"], divide_by: "1e27"}
+/// call: {to: "0x<vault>", fn: "info(bytes32) returns (address,uint256)", output: 1}
+/// ```
+///
+/// The signature and arguments are parsed and checked once, when the yaml loads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Call {
+    to: Holder,
+    /// The function's signature as written: `name(type,...)`, with `returns (type,...)` when it
+    /// does not return a single `uint256`.
+    signature: String,
+    function: Function,
+    /// One per parameter.
+    args: Vec<Argument>,
+    /// The `output` index as written.
+    output: Option<usize>,
+    /// The declared output holding the amount, or `None` for a function that declares no
+    /// outputs and so must return a single `uint256`.
+    amount_output: Option<usize>,
+    /// Divides the result, rounding down, for accounting kept at a higher precision than the
+    /// token's.
+    divide_by: Option<BigUint>,
+}
+
+/// One argument of a [`Call`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Argument {
+    /// `self`: the component's id.
+    Component,
+    /// `token`: the token being checked.
+    Token,
+    /// `attribute:NAME`: a static or state attribute of the component.
+    Attribute(String),
+    /// A literal of the parameter's type, checked when the yaml loads.
+    Literal(String),
+}
+
+impl Argument {
+    fn parse(arg: String) -> Self {
+        match arg.as_str() {
+            "self" => Argument::Component,
+            "token" => Argument::Token,
+            other => match other.strip_prefix("attribute:") {
+                Some(name) => Argument::Attribute(name.to_string()),
+                None => Argument::Literal(arg),
+            },
+        }
+    }
+}
+
+impl fmt::Display for Argument {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Argument::Component => f.write_str("self"),
+            Argument::Token => f.write_str("token"),
+            Argument::Attribute(name) => write!(f, "attribute:{name}"),
+            Argument::Literal(literal) => f.write_str(literal),
+        }
+    }
+}
+
+/// What the balance check reads from the chain, at the snapshot block.
+pub trait Chain {
+    /// `token.balanceOf(holder)`, or the native balance for the zero address.
+    fn balance_of(&self, token: &Bytes, holder: &Bytes) -> Result<BigUint, String>;
+    /// The return data of an `eth_call` to `to` with `calldata`.
+    fn call(&self, to: &Bytes, calldata: &Bytes) -> Result<Bytes, String>;
+}
+
+impl Call {
+    fn parse(entry: CallEntry) -> Result<Self, String> {
+        let CallEntry { to, function: signature, args, output, divide_by } = entry;
+        let function = Function::parse(&signature)
+            .map_err(|e| format!("`{signature}` is not a function signature: {e}"))?;
+        let amount_output =
+            amount_output(&function, output).map_err(|e| format!("`{signature}`: {e}"))?;
+        let args: Vec<Argument> = args
+            .into_iter()
+            .map(|arg| match arg {
+                serde_yaml::Value::String(arg) => Ok(Argument::parse(arg)),
+                serde_yaml::Value::Number(arg) => Ok(Argument::Literal(arg.to_string())),
+                serde_yaml::Value::Null |
+                serde_yaml::Value::Bool(_) |
+                serde_yaml::Value::Sequence(_) |
+                serde_yaml::Value::Mapping(_) |
+                serde_yaml::Value::Tagged(_) => {
+                    Err(format!("`{signature}`: an argument must be a string or a number"))
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        if args.len() != function.inputs.len() {
+            return Err(format!(
+                "`{signature}` takes {} arguments, but `args` has {}",
+                function.inputs.len(),
+                args.len()
+            ));
+        }
+        // Literals are checked now; `self`, `token` and attributes only exist at the snapshot.
+        for (arg, input) in args.iter().zip(&function.inputs) {
+            let ty = input
+                .resolve()
+                .map_err(|e| format!("`{signature}`: type `{}`: {e}", input.ty))?;
+            if let Argument::Literal(literal) = arg {
+                coerce(&ty, literal).map_err(|e| format!("`{signature}`: {e}"))?;
+            }
+        }
+        let divide_by = divide_by
+            .map(|divisor| parse_divisor(&divisor))
+            .transpose()?;
+        Ok(Self { to, signature, function, args, output, amount_output, divide_by })
+    }
+
+    /// Whether the call reads the token it is checked for. A call for a whole component returns
+    /// one amount per token only if it does.
+    fn takes_token(&self) -> bool {
+        self.args.contains(&Argument::Token)
+    }
+
+    /// The calldata for this component and token.
+    fn calldata(&self, component: &Component<'_>, token: &Bytes) -> Result<Bytes, String> {
+        let mut values = Vec::with_capacity(self.args.len());
+        for (arg, input) in self
+            .args
+            .iter()
+            .zip(&self.function.inputs)
+        {
+            let ty = input
+                .resolve()
+                .map_err(|e| format!("`{}`: {e}", self.signature))?;
+            let value = match arg {
+                Argument::Component => coerce(&ty, component.id),
+                Argument::Token => coerce(&ty, &token.to_string()),
+                Argument::Attribute(name) => {
+                    let value = attribute(name, component)?;
+                    match (&ty, address_from_attribute(value)) {
+                        (DynSolType::Address, Some(address)) => coerce(&ty, &address.to_string()),
+                        _ => coerce(&ty, &value.to_string()),
+                    }
+                }
+                Argument::Literal(literal) => coerce(&ty, literal),
+            };
+            values.push(value.map_err(|e| format!("`{}`: {e}", self.signature))?);
+        }
+        let calldata = self
+            .function
+            .abi_encode_input(&values)
+            .map_err(|e| format!("`{}`: encoding the arguments failed: {e}", self.signature))?;
+        Ok(Bytes::from(calldata))
+    }
+
+    /// Reads the amount: the declared output, or the single `uint256` a function without
+    /// declared outputs must return, divided if declared.
+    fn read(
+        &self,
+        component: &Component<'_>,
+        token: &Bytes,
+        chain: &impl Chain,
+    ) -> Result<BigUint, String> {
+        let to = resolve(&self.to, component)?;
+        let returned = chain.call(&to, &self.calldata(component, token)?)?;
+        let amount = match self.amount_output {
+            None if returned.len() == 32 => BigUint::from_bytes_be(&returned),
+            None => {
+                return Err(format!(
+                    "{self} returned {} bytes, not a single uint256; declare its outputs as \
+                     `name(...) returns (...)`",
+                    returned.len()
+                ))
+            }
+            Some(index) => {
+                let values = self
+                    .function
+                    .abi_decode_output(&returned)
+                    .map_err(|e| format!("{self} returned data its outputs do not decode: {e}"))?;
+                // The load check made output `index` a uint, and decoding yields one value per
+                // output.
+                let Some(DynSolValue::Uint(amount, _)) = values.get(index) else {
+                    return Err(format!("{self} output {index} did not decode as a uint"));
+                };
+                BigUint::from_bytes_be(&amount.to_be_bytes::<32>())
+            }
+        };
+        Ok(match &self.divide_by {
+            Some(divisor) => amount / divisor,
+            None => amount,
+        })
+    }
+}
+
+impl fmt::Display for Call {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}({})", self.to, self.function.name, self.args.iter().join(", "))?;
+        if let Some(index) = self.output {
+            write!(f, "[{index}]")?;
+        }
+        if let Some(divisor) = &self.divide_by {
+            write!(f, " / {divisor}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Which of `function`'s declared outputs holds the amount: `output`, or the first. `None` when
+/// the function declares no outputs, and so must return a single `uint256`. The output must be a
+/// `uint`: an `int` can be negative, and a dynamic type's first word is an offset, not an amount.
+fn amount_output(function: &Function, output: Option<usize>) -> Result<Option<usize>, String> {
+    if function.outputs.is_empty() {
+        return match output {
+            Some(_) => {
+                Err("`output` needs the outputs declared, as `name(...) returns (...)`".to_string())
+            }
+            None => Ok(None),
+        };
+    }
+    let index = output.unwrap_or(0);
+    let param = function
+        .outputs
+        .get(index)
+        .ok_or_else(|| {
+            format!("there is no output {index}: it declares {}", function.outputs.len())
+        })?;
+    match param.resolve() {
+        Ok(DynSolType::Uint(_)) => Ok(Some(index)),
+        Ok(ty) => Err(format!("output {index} is `{ty}`, but the amount must be a uint")),
+        Err(e) => Err(format!("output {index}, type `{}`: {e}", param.ty)),
+    }
+}
+
+fn coerce(ty: &DynSolType, literal: &str) -> Result<DynSolValue, String> {
+    ty.coerce_str(literal)
+        .map_err(|e| format!("`{literal}` does not parse as `{ty}`: {e}"))
+}
+
+/// A divisor written as an integer or as `1eN`, quoted or not. Unquoted, yaml reads `1eN` as a
+/// float, which is taken only when it is a power of ten.
+fn parse_divisor(divisor: &serde_yaml::Value) -> Result<BigUint, String> {
+    match divisor {
+        serde_yaml::Value::String(divisor) => parse_divisor_str(divisor),
+        serde_yaml::Value::Number(number) => match (number.as_u64(), number.as_f64()) {
+            (Some(integer), _) => parse_divisor_str(&integer.to_string()),
+            (None, Some(float)) => {
+                let exponent = float.log10().round();
+                if exponent >= 0.0 && 10f64.powf(exponent) == float {
+                    parse_divisor_str(&format!("1e{exponent}"))
+                } else {
+                    Err(format!("`divide_by: {number}` is not an integer or `1eN`"))
+                }
+            }
+            (None, None) => Err(format!("`divide_by: {number}` is not an integer or `1eN`")),
+        },
+        serde_yaml::Value::Null |
+        serde_yaml::Value::Bool(_) |
+        serde_yaml::Value::Sequence(_) |
+        serde_yaml::Value::Mapping(_) |
+        serde_yaml::Value::Tagged(_) => Err("`divide_by` must be an integer or `1eN`".to_string()),
+    }
+}
+
+/// A divisor written as a string: more than 1, and at most 1e77, the largest power of ten a
+/// `uint256` holds, since a larger one would turn every amount into zero.
+fn parse_divisor_str(divisor: &str) -> Result<BigUint, String> {
+    let parsed = match divisor.strip_prefix("1e") {
+        Some(exponent) => exponent
+            .parse::<u32>()
+            .ok()
+            .map(|exponent| BigUint::from(10u32).pow(exponent)),
+        None => divisor.parse::<BigUint>().ok(),
+    };
+    match parsed {
+        Some(divisor) if divisor > BigUint::from(10u32).pow(77) => Err(format!(
+            "`divide_by: {divisor}` exceeds 1e77, the largest power of ten a uint256 holds"
+        )),
+        Some(divisor) if divisor > BigUint::from(1u32) => Ok(divisor),
+        Some(_) => Err(format!("`divide_by: {divisor}` must be more than 1; leave it out instead")),
+        None => Err(format!("`divide_by: {divisor}` is not an integer or `1eN`")),
+    }
+}
+
+/// A `call`, as the yaml writes it.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CallEntry {
+    to: Holder,
+    #[serde(rename = "fn")]
+    function: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    args: Vec<serde_yaml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    divide_by: Option<serde_yaml::Value>,
 }
 
 /// Where one token's indexed balance is read.
@@ -122,17 +446,33 @@ impl BalanceCheck {
             BalanceCheck::Default => Source::of(vec![Holder::Component]),
             BalanceCheck::Holder(holder) => Source::of(vec![holder.clone()]),
             BalanceCheck::MinOf(holders) => Source::of(holders.clone()),
-            BalanceCheck::Tokens(sources) => sources
-                .get(token)
-                .cloned()
-                .unwrap_or_else(|| Source::of(vec![Holder::Component])),
+            BalanceCheck::Tokens(sources) => match sources.get(token) {
+                Some(TokenSource::Held(source)) => source.clone(),
+                // `check_component` reads calls before asking for a held source.
+                Some(TokenSource::Call(_) | TokenSource::Unindexed(_)) | None => {
+                    Source::of(vec![Holder::Component])
+                }
+            },
+            // `check_component` reads calls before asking for a held source.
+            BalanceCheck::Call(_) => Source::of(vec![Holder::Component]),
+        }
+    }
+
+    fn call(&self, token: &Bytes) -> Option<&Call> {
+        match self {
+            BalanceCheck::Tokens(sources) => match sources.get(token) {
+                Some(TokenSource::Call(call)) => Some(call),
+                Some(TokenSource::Held(_) | TokenSource::Unindexed(_)) | None => None,
+            },
+            BalanceCheck::Call(call) => Some(call),
+            BalanceCheck::Default | BalanceCheck::Holder(_) | BalanceCheck::MinOf(_) => None,
         }
     }
 }
 
 /// The shapes a `balance_check` takes, for messages.
-pub const SHAPE: &str =
-    "`default`, `{holder: …}`, `{min_of: [...]}` or `{tokens: {0x<token>: {holder: …}, ...}}`";
+pub const SHAPE: &str = "`default`, `{holder: …}`, `{min_of: [...]}`, `{call: …}` or `{tokens: \
+                         {0x<token>: {holder: …} | {call: …} | {unindexed: \"<reason>\"}, ...}}`";
 
 /// The keys of a yaml mapping, in order.
 fn keys(map: &serde_yaml::Mapping) -> Vec<String> {
@@ -199,6 +539,25 @@ impl<'de> Deserialize<'de> for BalanceCheck {
                 return Err(de::Error::custom(format!("`balance_check` takes {SHAPE}")))
             }
         };
+        if map.contains_key("call") {
+            if keys(map) != ["call"] {
+                return Err(de::Error::custom(format!(
+                    "`balance_check` has keys {}; `call` stands alone",
+                    keys(map).join(", ")
+                )));
+            }
+            let entry: CallEntry = from_value(map, "call")
+                .map_err(|e: D::Error| de::Error::custom(format!("`balance_check`: {e}")))?;
+            let call = Call::parse(entry)
+                .map_err(|e| de::Error::custom(format!("`balance_check`: {e}")))?;
+            if !call.takes_token() {
+                return Err(de::Error::custom(format!(
+                    "`balance_check`: {call} serves every token, so it must take `token` as an \
+                     argument; a call that returns one amount goes under `tokens`, for its token"
+                )));
+            }
+            return Ok(BalanceCheck::Call(call));
+        }
         if keys(map) != ["tokens"] {
             let mut holders = holders(map, &[], "`balance_check`")?;
             return Ok(if holders.len() == 1 {
@@ -220,19 +579,49 @@ impl<'de> Deserialize<'de> for BalanceCheck {
                 de::Error::custom(format!("`balance_check: {{tokens: …}}`: a key {e}"))
             })?;
             let serde_yaml::Value::Mapping(source) = source else {
-                return Err(de::Error::custom(format!("{location} takes `{{holder: …}}`")));
+                return Err(de::Error::custom(format!(
+                    "{location} takes `{{holder: …}}` or `{{call: …}}`"
+                )));
             };
-            let token = match source.get("token") {
-                Some(read) => Some(
-                    parse_address(read)
-                        .map_err(|e| de::Error::custom(format!("{location}: `token` {e}")))?,
-                ),
-                None => None,
+            let token_source = if source.contains_key("unindexed") {
+                let reason = match (keys(source).as_slice(), source.get("unindexed")) {
+                    ([only], Some(serde_yaml::Value::String(reason))) if only == "unindexed" => {
+                        Some(reason).filter(|reason| !reason.trim().is_empty())
+                    }
+                    _ => None,
+                };
+                let Some(reason) = reason else {
+                    return Err(de::Error::custom(format!(
+                        "{location}: write `{{unindexed: \"<the reason>\"}}`, alone"
+                    )));
+                };
+                TokenSource::Unindexed(reason.to_string())
+            } else if source.contains_key("call") {
+                if keys(source) != ["call"] {
+                    return Err(de::Error::custom(format!(
+                        "{location} has keys {}; `call` stands alone",
+                        keys(source).join(", ")
+                    )));
+                }
+                let entry: CallEntry = from_value(source, "call")
+                    .map_err(|e: D::Error| de::Error::custom(format!("{location}: {e}")))?;
+                let call = Call::parse(entry)
+                    .map_err(|e| de::Error::custom(format!("{location}: {e}")))?;
+                TokenSource::Call(call)
+            } else {
+                let token = match source.get("token") {
+                    Some(read) => Some(
+                        parse_address(read)
+                            .map_err(|e| de::Error::custom(format!("{location}: `token` {e}")))?,
+                    ),
+                    None => None,
+                };
+                let holders = holders(source, &["token"], &location)?;
+                TokenSource::Held(Source { holders, token })
             };
-            let holders = holders(source, &["token"], &location)?;
             // Keys that differ only in case are one token.
             if sources
-                .insert(address, Source { holders, token })
+                .insert(address, token_source)
                 .is_some()
             {
                 return Err(de::Error::custom(format!("{location} is declared twice")));
@@ -284,18 +673,50 @@ fn source_value(source: &Source) -> serde_yaml::Value {
     map.into()
 }
 
+fn call_value(call: &Call) -> serde_yaml::Value {
+    let entry = CallEntry {
+        to: call.to.clone(),
+        function: call.signature.clone(),
+        args: call
+            .args
+            .iter()
+            .map(|arg| arg.to_string().into())
+            .collect(),
+        output: call.output,
+        divide_by: call
+            .divide_by
+            .as_ref()
+            .map(|divisor| divisor.to_string().into()),
+    };
+    let mut map = serde_yaml::Mapping::new();
+    map.insert("call".into(), serde_yaml::to_value(entry).expect("a call entry serializes"));
+    map.into()
+}
+
 impl Serialize for BalanceCheck {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let value: serde_yaml::Value = match self {
             BalanceCheck::Default => "default".into(),
             BalanceCheck::Holder(holder) => source_value(&Source::of(vec![holder.clone()])),
             BalanceCheck::MinOf(holders) => source_value(&Source::of(holders.clone())),
+            BalanceCheck::Call(call) => call_value(call),
             BalanceCheck::Tokens(sources) => {
-                let mut tokens: Vec<(&Bytes, &Source)> = sources.iter().collect();
+                let mut tokens: Vec<(&Bytes, &TokenSource)> = sources.iter().collect();
                 tokens.sort_by_key(|(token, _)| *token);
                 let tokens: serde_yaml::Mapping = tokens
                     .into_iter()
-                    .map(|(token, source)| (token.to_string().into(), source_value(source)))
+                    .map(|(token, source)| {
+                        let value = match source {
+                            TokenSource::Held(source) => source_value(source),
+                            TokenSource::Call(call) => call_value(call),
+                            TokenSource::Unindexed(reason) => {
+                                let mut map = serde_yaml::Mapping::new();
+                                map.insert("unindexed".into(), reason.as_str().into());
+                                map.into()
+                            }
+                        };
+                        (token.to_string().into(), value)
+                    })
                     .collect();
                 let mut map = serde_yaml::Mapping::new();
                 map.insert("tokens".into(), tokens.into());
@@ -317,15 +738,22 @@ pub struct Component<'a> {
     pub state_attributes: &'a HashMap<String, Bytes>,
 }
 
-/// Checks a component's indexed balance of every token against the declared source. Returns every
-/// mismatch, or the reason a balance could not be read.
+/// Checks a component's indexed balance of every token against the declared source, within
+/// `tolerance`: exact, unless the component is declared `tvl_only`. Returns every mismatch, or the
+/// reason a balance could not be read. A token declared unindexed must have no balance, whatever
+/// the tolerance.
 ///
-/// `balance_of(token, holder)` reads the chain at the snapshot block.
+/// `chain` reads the chain at the snapshot block.
 pub fn check_component(
     component: &Component<'_>,
     check: &BalanceCheck,
-    balance_of: impl Fn(&Bytes, &Bytes) -> Result<BigUint, String>,
+    tolerance: Tolerance,
+    chain: &impl Chain,
 ) -> Vec<String> {
+    let outside = match tolerance {
+        Tolerance::EXACT => String::new(),
+        tolerance => format!(", outside the `tvl_only` tolerance of {tolerance}"),
+    };
     let mut failures = Vec::new();
     if let BalanceCheck::Tokens(sources) = check {
         // Sorted, so the failure lists the tokens in the same order on every run.
@@ -347,6 +775,31 @@ pub fn check_component(
             .balances
             .get(token)
             .map_or_else(BigUint::default, |balance| BigUint::from_bytes_be(balance));
+        if let BalanceCheck::Tokens(sources) = check {
+            if let Some(TokenSource::Unindexed(_)) = sources.get(token) {
+                let indexed = component
+                    .balances
+                    .get(token)
+                    .map(|balance| BigUint::from_bytes_be(balance))
+                    .filter(|balance| !balance.is_zero());
+                if let Some(indexed) = indexed {
+                    failures.push(format!(
+                        "{symbol}: declared unindexed, but the indexer reports {indexed}"
+                    ));
+                }
+                continue;
+            }
+        }
+        if let Some(call) = check.call(token) {
+            match call.read(component, token, chain) {
+                Ok(on_chain) if within(&indexed, &on_chain, tolerance) => {}
+                Ok(on_chain) => failures.push(format!(
+                    "{symbol}: indexed {indexed}, but {call} is {on_chain} on chain{outside}"
+                )),
+                Err(e) => failures.push(format!("{symbol}: calling {call} failed: {e}")),
+            }
+            continue;
+        }
         let source = check.source(token);
         let read = source.token.as_ref().unwrap_or(token);
         let of_token = source
@@ -361,7 +814,8 @@ pub fn check_component(
         let mut failed = false;
         for holder in &source.holders {
             let balance = resolve(holder, component).and_then(|address| {
-                balance_of(read, &address)
+                chain
+                    .balance_of(read, &address)
                     .map_err(|e| format!("reading the balance{of_token} of {holder} failed: {e}"))
             });
             match balance {
@@ -381,15 +835,24 @@ pub fn check_component(
             }
         }
         if let (false, Some((on_chain, holder))) = (failed, smallest) {
-            if indexed != on_chain {
+            if !within(&indexed, &on_chain, tolerance) {
                 failures.push(format!(
-                    "{symbol}: indexed {indexed}, but {holder} holds {on_chain}{of_token} on chain{}",
+                    "{symbol}: indexed {indexed}, but {holder} holds {on_chain}{of_token} on \
+                     chain{}{outside}",
                     if source.holders.len() > 1 { " (the smallest of the holders)" } else { "" }
                 ));
             }
         }
     }
     failures
+}
+
+/// Whether `indexed` is within `tolerance` of `on_chain`: up to `bps` basis points of the
+/// on-chain amount, or up to `wei` base units.
+fn within(indexed: &BigUint, on_chain: &BigUint, tolerance: Tolerance) -> bool {
+    let difference = if indexed > on_chain { indexed - on_chain } else { on_chain - indexed };
+    difference <= BigUint::from(tolerance.wei) ||
+        &difference * 10_000u32 <= on_chain * tolerance.bps
 }
 
 /// The address a holder names, for this component.
@@ -408,18 +871,23 @@ fn resolve(holder: &Holder, component: &Component<'_>) -> Result<Bytes, String> 
             })
         }
         Holder::Attribute(name) => {
-            let value = component
-                .static_attributes
-                .get(name)
-                .or_else(|| component.state_attributes.get(name))
-                .ok_or_else(|| {
-                    format!("the holder attribute `{name}` is in neither the static nor the state attributes")
-                })?;
+            let value = attribute(name, component)?;
             address_from_attribute(value)
                 .ok_or_else(|| format!("the holder attribute `{name}` is {value}, not an address"))
         }
         Holder::Address(address) => Ok(address.clone()),
     }
+}
+
+/// The named attribute: the static one, else the state one at the snapshot block.
+fn attribute<'a>(name: &str, component: &'a Component<'_>) -> Result<&'a Bytes, String> {
+    component
+        .static_attributes
+        .get(name)
+        .or_else(|| component.state_attributes.get(name))
+        .ok_or_else(|| {
+            format!("the attribute `{name}` is in neither the static nor the state attributes")
+        })
 }
 
 /// An address stored in an attribute: 20 bytes, or 32 with the address in the low 20 and zeros
@@ -456,16 +924,56 @@ mod tests {
     }
 
     /// A chain where `holdings` gives each `(token, holder)` balance; any other read fails.
-    fn chain(holdings: &[(&str, &str, u64)]) -> impl Fn(&Bytes, &Bytes) -> Result<BigUint, String> {
-        let holdings: HashMap<(Bytes, Bytes), u64> = holdings
-            .iter()
-            .map(|(token, holder, n)| ((bytes(token), bytes(holder)), *n))
-            .collect();
-        move |token, holder| {
-            holdings
+    /// A scripted chain: balances by `(token, holder)`, and return data by `(to, calldata)`.
+    /// Any other read fails.
+    #[derive(Default)]
+    struct Scripted {
+        holdings: HashMap<(Bytes, Bytes), u64>,
+        calls: HashMap<(Bytes, Bytes), Bytes>,
+    }
+
+    impl Scripted {
+        fn returning(self, to: &str, calldata: Bytes, word: &BigUint) -> Self {
+            self.returning_words(to, calldata, std::slice::from_ref(word))
+        }
+
+        /// Returns `words`, each left-padded to 32 bytes.
+        fn returning_words(mut self, to: &str, calldata: Bytes, words: &[BigUint]) -> Self {
+            let mut returned = Vec::new();
+            for word in words {
+                let word = word.to_bytes_be();
+                returned.extend(vec![0u8; 32 - word.len()]);
+                returned.extend(word);
+            }
+            self.calls
+                .insert((bytes(to), calldata), Bytes::from(returned));
+            self
+        }
+    }
+
+    impl Chain for Scripted {
+        fn balance_of(&self, token: &Bytes, holder: &Bytes) -> Result<BigUint, String> {
+            self.holdings
                 .get(&(token.clone(), holder.clone()))
                 .map(|n| BigUint::from(*n))
                 .ok_or_else(|| format!("no balance of {token} for {holder}"))
+        }
+
+        fn call(&self, to: &Bytes, calldata: &Bytes) -> Result<Bytes, String> {
+            self.calls
+                .get(&(to.clone(), calldata.clone()))
+                .cloned()
+                .ok_or_else(|| format!("no call to {to} with {calldata}"))
+        }
+    }
+
+    fn chain(holdings: &[(&str, &str, u64)]) -> Scripted {
+        Scripted {
+            holdings: holdings
+                .iter()
+                .map(|(token, holder, n)| ((bytes(token), bytes(holder)), *n))
+                .collect(),
+            calls: HashMap::new(),
         }
     }
 
@@ -492,10 +1000,15 @@ mod tests {
             }
         }
 
-        fn check(
+        fn check(&self, check: &BalanceCheck, chain: &Scripted) -> Vec<String> {
+            self.check_within(check, Tolerance::EXACT, chain)
+        }
+
+        fn check_within(
             &self,
             check: &BalanceCheck,
-            balance_of: impl Fn(&Bytes, &Bytes) -> Result<BigUint, String>,
+            tolerance: Tolerance,
+            chain: &Scripted,
         ) -> Vec<String> {
             let component = Component {
                 id: &self.id,
@@ -504,7 +1017,7 @@ mod tests {
                 static_attributes: &self.static_attributes,
                 state_attributes: &self.state_attributes,
             };
-            check_component(&component, check, balance_of)
+            check_component(&component, check, tolerance, chain)
         }
     }
 
@@ -516,7 +1029,7 @@ mod tests {
     fn default_reads_the_component_itself() {
         let fixture = Fixture::new();
         let failures = fixture
-            .check(&BalanceCheck::Default, chain(&[(TOKEN_A, POOL, 100), (TOKEN_B, POOL, 200)]));
+            .check(&BalanceCheck::Default, &chain(&[(TOKEN_A, POOL, 100), (TOKEN_B, POOL, 200)]));
         assert!(failures.is_empty(), "{failures:?}");
     }
 
@@ -524,7 +1037,7 @@ mod tests {
     fn a_mismatch_names_the_token_and_both_amounts_and_the_other_tokens_are_still_checked() {
         let fixture = Fixture::new();
         let failures = fixture
-            .check(&BalanceCheck::Default, chain(&[(TOKEN_A, POOL, 99), (TOKEN_B, POOL, 201)]));
+            .check(&BalanceCheck::Default, &chain(&[(TOKEN_A, POOL, 99), (TOKEN_B, POOL, 201)]));
         assert_eq!(failures.len(), 2, "{failures:?}");
         assert!(failures[0].contains("A: indexed 100, but self holds 99"), "{}", failures[0]);
         assert!(failures[1].contains("B: indexed 200, but self holds 201"), "{}", failures[1]);
@@ -535,7 +1048,7 @@ mod tests {
         let mut fixture = Fixture::new();
         fixture.balances.remove(&bytes(TOKEN_B));
         let failures = fixture
-            .check(&BalanceCheck::Default, chain(&[(TOKEN_A, POOL, 100), (TOKEN_B, POOL, 0)]));
+            .check(&BalanceCheck::Default, &chain(&[(TOKEN_A, POOL, 100), (TOKEN_B, POOL, 0)]));
         assert!(failures.is_empty(), "{failures:?}");
     }
 
@@ -549,7 +1062,7 @@ mod tests {
             .static_attributes
             .insert("vault".to_string(), bytes(VAULT));
         assert!(from_static
-            .check(&check, chain(&on_chain))
+            .check(&check, &chain(&on_chain))
             .is_empty());
 
         // ABI-encoded, as state attributes often are.
@@ -560,14 +1073,14 @@ mod tests {
             .state_attributes
             .insert("vault".to_string(), Bytes::from(encoded));
         assert!(from_state
-            .check(&check, chain(&on_chain))
+            .check(&check, &chain(&on_chain))
             .is_empty());
 
         // The static attribute wins over the state one.
         from_state
             .static_attributes
             .insert("vault".to_string(), bytes(OTHER));
-        let failures = from_state.check(&check, chain(&on_chain));
+        let failures = from_state.check(&check, &chain(&on_chain));
         assert!(
             failures[0].contains("reading the balance of attribute:vault failed"),
             "{failures:?}"
@@ -577,14 +1090,14 @@ mod tests {
     #[test]
     fn a_missing_or_malformed_holder_attribute_fails_the_component() {
         let check = BalanceCheck::Holder(Holder::Attribute("vault".to_string()));
-        let missing = Fixture::new().check(&check, chain(&[]));
+        let missing = Fixture::new().check(&check, &chain(&[]));
         assert!(missing[0].contains("`vault` is in neither"), "{missing:?}");
 
         let mut malformed = Fixture::new();
         malformed
             .state_attributes
             .insert("vault".to_string(), amount(7));
-        let failures = malformed.check(&check, chain(&[]));
+        let failures = malformed.check(&check, &chain(&[]));
         assert!(failures[0].contains("not an address"), "{failures:?}");
 
         // A 32-byte word holds an address only when its high 12 bytes are zero.
@@ -595,14 +1108,14 @@ mod tests {
         dirty
             .state_attributes
             .insert("vault".to_string(), Bytes::from(word));
-        let failures = dirty.check(&check, chain(&[(TOKEN_A, VAULT, 100), (TOKEN_B, VAULT, 200)]));
+        let failures = dirty.check(&check, &chain(&[(TOKEN_A, VAULT, 100), (TOKEN_B, VAULT, 200)]));
         assert!(failures[0].contains("not an address"), "{failures:?}");
     }
 
     #[test]
     fn a_source_without_holders_fails_rather_than_passing_unchecked() {
         let check = BalanceCheck::MinOf(vec![]);
-        let failures = Fixture::new().check(&check, chain(&[]));
+        let failures = Fixture::new().check(&check, &chain(&[]));
         assert_eq!(failures.len(), 2, "{failures:?}");
         assert!(failures[0].contains("no holder is declared"), "{failures:?}");
     }
@@ -611,7 +1124,7 @@ mod tests {
     fn a_literal_holder_is_read_directly() {
         let check = BalanceCheck::Holder(Holder::Address(bytes(VAULT)));
         let failures =
-            Fixture::new().check(&check, chain(&[(TOKEN_A, VAULT, 100), (TOKEN_B, VAULT, 200)]));
+            Fixture::new().check(&check, &chain(&[(TOKEN_A, VAULT, 100), (TOKEN_B, VAULT, 200)]));
         assert!(failures.is_empty(), "{failures:?}");
     }
 
@@ -626,7 +1139,7 @@ mod tests {
             (TOKEN_B, VAULT, 900),
         ];
         assert!(Fixture::new()
-            .check(&check, chain(&on_chain))
+            .check(&check, &chain(&on_chain))
             .is_empty());
 
         let wrong = [
@@ -635,7 +1148,7 @@ mod tests {
             (TOKEN_B, POOL, 200),
             (TOKEN_B, VAULT, 900),
         ];
-        let failures = Fixture::new().check(&check, chain(&wrong));
+        let failures = Fixture::new().check(&check, &chain(&wrong));
         assert_eq!(failures.len(), 1, "{failures:?}");
         assert!(
             failures[0]
@@ -649,7 +1162,7 @@ mod tests {
     fn a_component_id_that_is_not_an_address_needs_a_holder() {
         let mut fixture = Fixture::new();
         fixture.id = format!("0x{}", "ab".repeat(32));
-        let failures = fixture.check(&BalanceCheck::Default, chain(&[]));
+        let failures = fixture.check(&BalanceCheck::Default, &chain(&[]));
         assert_eq!(failures.len(), 2, "one per token: {failures:?}");
         assert!(failures
             .iter()
@@ -669,11 +1182,11 @@ mod tests {
         .unwrap();
         let on_chain = [(TOKEN_A, POCKET, 100), (DAI, PSM, 200), (TOKEN_B, PSM, 0)];
         assert!(Fixture::new()
-            .check(&check, chain(&on_chain))
+            .check(&check, &chain(&on_chain))
             .is_empty());
 
         let wrong = [(TOKEN_A, POCKET, 100), (DAI, PSM, 199)];
-        let failures = Fixture::new().check(&check, chain(&wrong));
+        let failures = Fixture::new().check(&check, &chain(&wrong));
         assert_eq!(
             failures,
             vec![format!("B: indexed 200, but {PSM} holds 199 of {DAI} on chain")]
@@ -687,7 +1200,7 @@ mod tests {
             parse(&format!("{{tokens: {{\"{TOKEN_A}\": {{holder: \"{VAULT}\"}}}}}}")).unwrap();
         let on_chain = [(TOKEN_A, VAULT, 100), (TOKEN_B, POOL, 200)];
         assert!(Fixture::new()
-            .check(&check, chain(&on_chain))
+            .check(&check, &chain(&on_chain))
             .is_empty());
     }
 
@@ -696,9 +1209,342 @@ mod tests {
         let check =
             parse(&format!("{{tokens: {{\"{OTHER}\": {{holder: \"{VAULT}\"}}}}}}")).unwrap();
         let on_chain = [(TOKEN_A, POOL, 100), (TOKEN_B, POOL, 200)];
-        let failures = Fixture::new().check(&check, chain(&on_chain));
+        let failures = Fixture::new().check(&check, &chain(&on_chain));
         assert_eq!(failures.len(), 1, "{failures:?}");
         assert!(failures[0].contains("not one of the component's tokens"), "{}", failures[0]);
+    }
+
+    /// Lido's shape: the ETH balance is `getTotalPooledEther()` of the component itself.
+    #[test]
+    fn a_call_on_the_component_reads_its_accounting() {
+        let check = parse(&format!(
+            "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: self, fn: \"getTotalPooledEther()\"}}}}}}}}"
+        ))
+        .unwrap();
+        let mut fixture = Fixture::new();
+        fixture.balances.remove(&bytes(TOKEN_B));
+        let scripted = || {
+            chain(&[(TOKEN_B, POOL, 0)]).returning(
+                POOL,
+                bytes("0x37cfdaca"),
+                &BigUint::from(100u32),
+            )
+        };
+        assert!(fixture
+            .check(&check, &scripted())
+            .is_empty());
+
+        fixture
+            .balances
+            .insert(bytes(TOKEN_A), amount(101));
+        assert_eq!(
+            fixture.check(&check, &scripted()),
+            vec!["A: indexed 101, but self.getTotalPooledEther() is 100 on chain".to_string()]
+        );
+        assert_eq!(parse(&serde_yaml::to_string(&check).unwrap()), Ok(check));
+    }
+
+    /// Sky's converter: DAI is the DAI join's escrow in the vat, kept in rad (1e45) for a wad
+    /// (1e18) token.
+    #[test]
+    fn a_call_takes_typed_arguments_and_a_divisor() {
+        const JOIN: &str = "0x9759a6ac90977b93b58547b4a71c78317f391a28";
+        let check = parse(&format!(
+            "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: \"{VAULT}\", fn: \"dai(address)\", args: [\"{JOIN}\"], divide_by: \"1e27\"}}}}}}}}"
+        ))
+        .unwrap();
+        let calldata =
+            bytes("0x6c25b3460000000000000000000000009759a6ac90977b93b58547b4a71c78317f391a28");
+        let rad = BigUint::from(100u32) * BigUint::from(10u32).pow(27) + 999u32;
+        let failures = Fixture::new()
+            .check(&check, &chain(&[(TOKEN_B, POOL, 200)]).returning(VAULT, calldata, &rad));
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(parse(&serde_yaml::to_string(&check).unwrap()), Ok(check));
+    }
+
+    #[test]
+    fn call_arguments_can_be_the_component_id_an_attribute_or_a_number() {
+        let mut fixture = Fixture::new();
+        fixture.id = format!("0x{}aa", "00".repeat(31));
+        fixture
+            .state_attributes
+            .insert("shares".to_string(), amount(1000));
+        fixture.tokens.truncate(1);
+        let on_chain = |to: &str, calldata: &str| {
+            Scripted::default().returning(to, bytes(calldata), &BigUint::from(100u32))
+        };
+
+        // A bytes32 pool id, as a singleton vault takes it.
+        let by_id = parse(&format!(
+            "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: \"{VAULT}\", fn: \"getPoolBalance(bytes32)\", args: [self]}}}}}}}}"
+        ))
+        .unwrap();
+        let get_pool_balance =
+            "0x550e6ed100000000000000000000000000000000000000000000000000000000000000aa";
+        assert!(fixture
+            .check(&by_id, &on_chain(VAULT, get_pool_balance))
+            .is_empty());
+
+        let convert = "0x07a2d13a00000000000000000000000000000000000000000000000000000000000003e8";
+        for arg in ["attribute:shares", "1000"] {
+            let check = parse(&format!(
+                "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: \"{VAULT}\", fn: \"convertToAssets(uint256)\", args: [{arg}]}}}}}}}}"
+            ))
+            .unwrap();
+            let failures = fixture.check(&check, &on_chain(VAULT, convert));
+            assert!(failures.is_empty(), "{arg}: {failures:?}");
+        }
+    }
+
+    /// Balancer V2's shape: the vault's per-pool, per-token view, for every token at once.
+    #[test]
+    fn one_call_can_serve_every_token() {
+        let mut fixture = Fixture::new();
+        fixture.id = format!("0x{}aa", "00".repeat(31));
+        // It returns (cash, managed, lastChangeBlock, assetManager); the cash is the balance.
+        let check = parse(&format!(
+            "{{call: {{to: \"{VAULT}\", fn: \"getPoolTokenInfo(bytes32,address) returns (uint256,uint256,uint256,address)\", args: [self, token]}}}}"
+        ))
+        .unwrap();
+        let pool_id = format!("{}aa", "00".repeat(31));
+        let info = |token: &str| bytes(&format!("0xb05f8e48{pool_id}{:0>64}", &token[2..]));
+        let words = |cash: u32| [cash, 5, 21_000_000, 0xee].map(BigUint::from);
+        let scripted = Scripted::default()
+            .returning_words(VAULT, info(TOKEN_A), &words(100))
+            .returning_words(VAULT, info(TOKEN_B), &words(200));
+        let failures = fixture.check(&check, &scripted);
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(parse(&serde_yaml::to_string(&check).unwrap()), Ok(check));
+    }
+
+    /// Lido's stETH and wstETH: the component trades them, the indexer tracks only its ETH.
+    #[test]
+    fn an_unindexed_token_must_stay_unindexed() {
+        let check = parse(&format!(
+            "{{tokens: {{\"{TOKEN_B}\": {{unindexed: \"only the pooled ether is tracked\"}}}}}}"
+        ))
+        .unwrap();
+        let mut fixture = Fixture::new();
+        // B is held on chain, but not indexed.
+        let on_chain = chain(&[(TOKEN_A, POOL, 100), (TOKEN_B, POOL, 7)]);
+        fixture.balances.remove(&bytes(TOKEN_B));
+        assert!(fixture
+            .check(&check, &on_chain)
+            .is_empty());
+
+        fixture
+            .balances
+            .insert(bytes(TOKEN_B), amount(7));
+        assert_eq!(
+            fixture.check(&check, &on_chain),
+            vec!["B: declared unindexed, but the indexer reports 7".to_string()]
+        );
+        assert_eq!(parse(&serde_yaml::to_string(&check).unwrap()), Ok(check));
+    }
+
+    #[test]
+    fn a_failed_or_short_call_fails_the_token() {
+        let check = parse(&format!(
+            "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: self, fn: \"getTotalPooledEther()\"}}}}}}}}"
+        ))
+        .unwrap();
+        let mut fixture = Fixture::new();
+        fixture.tokens.truncate(1);
+        let failures = fixture.check(&check, &Scripted::default());
+        assert!(
+            failures[0].starts_with("A: calling self.getTotalPooledEther() failed"),
+            "{failures:?}"
+        );
+
+        let mut short = Scripted::default();
+        short
+            .calls
+            .insert((bytes(POOL), bytes("0x37cfdaca")), bytes("0x01"));
+        let failures = fixture.check(&check, &short);
+        assert!(failures[0].contains("returned 1 bytes, not a single uint256"), "{failures:?}");
+
+        // Two words from a function declared without outputs: the first could be anything.
+        let two_words = Scripted::default().returning_words(
+            POOL,
+            bytes("0x37cfdaca"),
+            &[BigUint::from(1u32), BigUint::from(2u32)],
+        );
+        let failures = fixture.check(&check, &two_words);
+        assert!(failures[0].contains("returned 64 bytes, not a single uint256"), "{failures:?}");
+    }
+
+    #[test]
+    fn the_amount_is_the_declared_output() {
+        let mut fixture = Fixture::new();
+        fixture.tokens.truncate(1);
+        let calldata = bytes("0x370158ea");
+        let check = |output: &str| {
+            parse(&format!(
+                "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: self, fn: \"info() returns (address,uint256)\"{output}}}}}}}}}"
+            ))
+        };
+        let scripted = Scripted::default().returning_words(
+            POOL,
+            calldata,
+            &[BigUint::from(0xeeu32), BigUint::from(100u32)],
+        );
+
+        let second = check(", output: 1").unwrap();
+        assert!(fixture
+            .check(&second, &scripted)
+            .is_empty());
+        assert_eq!(parse(&serde_yaml::to_string(&second).unwrap()), Ok(second));
+
+        // Without `output`, the first output is read, and it is an address.
+        assert!(check("")
+            .unwrap_err()
+            .contains("output 0 is `address`, but the amount must be a uint"));
+        assert!(check(", output: 2")
+            .unwrap_err()
+            .contains("there is no output 2: it declares 2"));
+    }
+
+    #[test]
+    fn an_output_that_is_not_a_uint_is_rejected_at_load() {
+        let call = |function: &str| {
+            parse(&format!(
+                "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: self, fn: \"{function}\"}}}}}}}}"
+            ))
+        };
+        assert!(call("f() returns (int256)")
+            .unwrap_err()
+            .contains("output 0 is `int256`"));
+        // A dynamic output's first word is an offset, not an amount.
+        assert!(call("f() returns (uint256[])")
+            .unwrap_err()
+            .contains("output 0 is `uint256[]`"));
+        assert!(call("f() returns (uint128)").is_ok());
+        assert!(parse(&format!(
+            "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: self, fn: \"f()\", output: 1}}}}}}}}"
+        ))
+        .unwrap_err()
+        .contains("`output` needs the outputs declared"));
+    }
+
+    #[test]
+    fn divide_by_may_be_written_unquoted() {
+        let call = |divisor: &str| {
+            parse(&format!(
+                "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: self, fn: \"f()\", divide_by: {divisor}}}}}}}}}"
+            ))
+        };
+        let divisor = |check: BalanceCheck| {
+            let BalanceCheck::Tokens(tokens) = check else { panic!("not per token: {check:?}") };
+            let TokenSource::Call(call) = &tokens[&bytes(TOKEN_A)] else {
+                panic!("not a call: {tokens:?}")
+            };
+            call.divide_by.clone()
+        };
+        assert_eq!(divisor(call("1000000").unwrap()), Some(BigUint::from(1_000_000u32)));
+        assert_eq!(divisor(call("1e27").unwrap()), Some(BigUint::from(10u32).pow(27)));
+        assert_eq!(divisor(call("\"1e27\"").unwrap()), Some(BigUint::from(10u32).pow(27)));
+        assert!(call("1.5")
+            .unwrap_err()
+            .contains("is not an integer or `1eN`"));
+        // Past 1e77 every amount would divide to zero, quoted or not.
+        assert_eq!(divisor(call("1e77").unwrap()), Some(BigUint::from(10u32).pow(77)));
+        for too_large in ["1e78", "\"1e78\"", "\"1e80\""] {
+            assert!(
+                call(too_large)
+                    .unwrap_err()
+                    .contains("exceeds 1e77"),
+                "{too_large}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_for_every_token_must_take_the_token() {
+        let err =
+            parse(&format!("{{call: {{to: \"{VAULT}\", fn: \"totalAssets()\"}}}}")).unwrap_err();
+        assert!(err.contains("must take `token` as an argument"), "{err}");
+    }
+
+    #[test]
+    fn an_address_attribute_argument_takes_the_address_from_a_32_byte_word() {
+        let mut fixture = Fixture::new();
+        fixture.tokens.truncate(1);
+        let mut word = vec![0u8; 32];
+        word[12..].copy_from_slice(&bytes(VAULT));
+        fixture
+            .static_attributes
+            .insert("vault".to_string(), Bytes::from(word));
+        let check = parse(&format!(
+            "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: self, fn: \"balanceIn(address)\", args: [\"attribute:vault\"]}}}}}}}}"
+        ))
+        .unwrap();
+        let selector = &alloy::primitives::keccak256("balanceIn(address)")[..4];
+        let calldata = Bytes::from([selector, &[0u8; 12], &bytes(VAULT)[..]].concat());
+        let on_chain = Scripted::default().returning(POOL, calldata, &BigUint::from(100u32));
+        let failures = fixture.check(&check, &on_chain);
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn return_data_the_declared_outputs_cannot_decode_fails_the_token() {
+        let mut fixture = Fixture::new();
+        fixture.tokens.truncate(1);
+        let check = parse(&format!(
+            "{{tokens: {{\"{TOKEN_A}\": {{call: {{to: self, fn: \"info() returns (uint256,uint256)\"}}}}}}}}"
+        ))
+        .unwrap();
+        let selector = Bytes::from(alloy::primitives::keccak256("info()")[..4].to_vec());
+        let on_chain = Scripted::default().returning(POOL, selector, &BigUint::from(100u32));
+        let failures = fixture.check(&check, &on_chain);
+        assert!(failures[0].contains("do not decode"), "{failures:?}");
+    }
+
+    #[test]
+    fn a_tvl_only_tolerance_allows_its_bps_or_wei_of_the_on_chain_amount() {
+        // Indexed 100 A and 200 B, against 101 A and 199 B on chain: 99 and 50 bps off.
+        let fixture = Fixture::new();
+        let on_chain = chain(&[(TOKEN_A, POOL, 101), (TOKEN_B, POOL, 199)]);
+        let check = |tolerance| fixture.check_within(&BalanceCheck::Default, tolerance, &on_chain);
+        assert!(check(Tolerance { bps: 100, wei: 0 }).is_empty());
+        assert!(check(Tolerance { bps: 0, wei: 1 }).is_empty());
+        let failures = check(Tolerance { bps: 60, wei: 0 });
+        assert_eq!(
+            failures,
+            vec!["A: indexed 100, but self holds 101 on chain, outside the `tvl_only` tolerance \
+                  of 60 bps"
+                .to_string()]
+        );
+        assert_eq!(check(Tolerance::EXACT).len(), 2);
+
+        // The bps are of the on-chain amount: 1 off 199 is 50.3 bps, 1 off 200 would be 50.
+        let at_the_base = chain(&[(TOKEN_A, POOL, 100), (TOKEN_B, POOL, 199)]);
+        let failures = fixture.check_within(
+            &BalanceCheck::Default,
+            Tolerance { bps: 50, wei: 0 },
+            &at_the_base,
+        );
+        assert_eq!(failures.len(), 1, "{failures:?}");
+    }
+
+    #[test]
+    fn a_tvl_only_tolerance_applies_to_calls_but_not_to_unindexed_tokens() {
+        let mut fixture = Fixture::new();
+        fixture.balances.remove(&bytes(TOKEN_B));
+        fixture
+            .balances
+            .insert(bytes(TOKEN_B), amount(3));
+        let check = parse(&format!(
+            "tokens: {{\"{TOKEN_A}\": {{call: {{to: self, fn: \"reserve()\"}}}}, \"{TOKEN_B}\": \
+             {{unindexed: \"not tracked\"}}}}"
+        ))
+        .unwrap();
+        let on_chain = chain(&[]).returning(
+            POOL,
+            Bytes::from(alloy::primitives::keccak256("reserve()")[..4].to_vec()),
+            &BigUint::from(101u32),
+        );
+        let failures = fixture.check_within(&check, Tolerance { bps: 100, wei: 0 }, &on_chain);
+        assert_eq!(failures, vec!["B: declared unindexed, but the indexer reports 3".to_string()]);
     }
 
     #[test]
@@ -724,10 +1570,32 @@ mod tests {
         assert_eq!(parse(&serde_yaml::to_string(&check).unwrap()), Ok(check));
     }
 
+    /// A `tokens` declaration with `source` for token A.
+    fn call(source: &str) -> String {
+        if source.contains("holder") {
+            let (call, rest) = source.split_once("}, ").unwrap();
+            return format!("{{tokens: {{\"{TOKEN_A}\": {{call: {call}}}, {rest}}}}}}}");
+        }
+        format!("{{tokens: {{\"{TOKEN_A}\": {{call: {source}}}}}}}")
+    }
+
     #[test]
     fn malformed_declarations_say_what_is_wrong() {
         for (yaml, problem) in [
             ("skip", "takes `default`"),
+            ("{tokens: {\"0x00000000000000000000000000000000000000a1\": {unindexed: true}}}", "write `{unindexed: \"<the reason>\"}`"),
+            ("{tokens: {\"0x00000000000000000000000000000000000000a1\": {unindexed: \" \"}}}", "write `{unindexed: \"<the reason>\"}`"),
+            ("{tokens: {\"0x00000000000000000000000000000000000000a1\": {unindexed: {reason: r}}}}", "write `{unindexed: \"<the reason>\"}`"),
+            ("{tokens: {\"0x00000000000000000000000000000000000000a1\": {unindexed: r, holder: self}}}", "write `{unindexed: \"<the reason>\"}`"),
+            ("{call: {to: self, fn: \"f()\"}, tokens: {}}", "`call` stands alone"),
+            (&call("{to: self, fn: \"f()\"}, holder: self"), "`call` stands alone"),
+            (&call("{to: self, fn: \"f(\"}"), "is not a function signature"),
+            (&call("{to: self, fn: \"f(address)\"}"), "takes 1 arguments, but `args` has 0"),
+            (&call("{to: self, fn: \"f(address)\", args: [\"0x12\"]}"), "`0x12` does not parse as `address`"),
+            (&call("{to: self, fn: \"f()\", divide_by: \"1\"}"), "must be more than 1"),
+            (&call("{to: self, fn: \"f()\", divide_by: \"ten\"}"), "is not an integer or `1eN`"),
+            (&call("{to: self, fn: \"f()\", returns: \"uint\"}"), "unknown field `returns`"),
+            (&call("{fn: \"f()\"}"), "missing field `to`"),
             ("{tokens: {self: {holder: self}}}", "not a token address"),
             ("{tokens: {\"0x00000000000000000000000000000000000000a1\": {token: \"0x00000000000000000000000000000000000000a1\"}}}", "has keys token"),
             ("{tokens: {\"0x00000000000000000000000000000000000000a1\": self}}", "takes `{holder: …}`"),

@@ -27,6 +27,8 @@ pub enum CheckId {
     StateExcluded,
     /// Indexed component balances match the chain.
     Balances,
+    /// Strict: a component declared `tvl_only` quotes the same with its balances scaled down.
+    BalancesTvlOnly,
     /// The snapshot decodes, and every expected component decodes from it.
     Decode,
     /// Limits, spot prices and quotes along the ladder, in every direction.
@@ -52,6 +54,7 @@ impl CheckId {
             CheckId::StateComponents => "state.components",
             CheckId::StateExcluded => "state.excluded",
             CheckId::Balances => "balances",
+            CheckId::BalancesTvlOnly => "balances.tvl_only",
             CheckId::Decode => "decode",
             CheckId::SimLadder => "sim.ladder",
             CheckId::ExecLadder => "exec.ladder",

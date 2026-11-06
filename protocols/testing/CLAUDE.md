@@ -32,7 +32,8 @@ rejects keys the runner does not read, requires every skip to be written as its 
 `true` and `false` are errors), and reports every failed check of a test, not just the first.
 It is not required of any package yet, and new checks go into strict mode only.
 Strict mode checks every expected component's balances against its declared `balance_check`
-(README, "Balances") and rejects `skip_balance_check`.
+(README, "Balances"), exactly unless the component declares `tvl_only`, which the runner verifies
+(`balances.tvl_only`), and rejects `skip_balance_check`.
 Strict mode also tests each direction's declared limit (README, "Limits").
 Strict mode also requires executions to match simulation exactly unless the package declares
 `execution_tolerance: {bps and/or wei, cause, measured}`; legacy mode allows 0.5%. Only `range`

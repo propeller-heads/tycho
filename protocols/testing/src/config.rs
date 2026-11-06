@@ -40,6 +40,9 @@ pub struct ProtocolComponentWithTestConfig {
     /// Where strict mode reads the component's balances on chain; `balanceOf(component id)`
     /// without it.
     pub balance_check: Option<BalanceCheck>,
+    /// Strict: the component's balances feed only TVL, so they are checked within a tolerance.
+    /// The runner verifies that simulation ignores them.
+    pub tvl_only: Option<TvlOnly>,
 }
 
 /// An `expected_components` entry as written in the yaml, with every key at one level.
@@ -61,6 +64,8 @@ struct ExpectedComponentEntry {
     limits: Option<LimitsDeclaration>,
     #[serde(default)]
     balance_check: Option<BalanceCheck>,
+    #[serde(default)]
+    tvl_only: Option<TvlOnly>,
 }
 
 impl ProtocolComponentWithTestConfig {
@@ -84,6 +89,7 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
             skip_execution,
             limits,
             balance_check,
+            tvl_only,
         } = entry;
         Self {
             base: ProtocolComponentExpectation { id, tokens, static_attributes, creation_tx },
@@ -91,6 +97,7 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
             skip_execution,
             limits,
             balance_check,
+            tvl_only,
         }
     }
 }
@@ -427,6 +434,76 @@ impl fmt::Display for Tolerance {
     }
 }
 
+/// A component whose indexed balances feed only TVL, not simulation, so they are checked within a
+/// tolerance instead of exactly:
+///
+/// ```yaml
+/// tvl_only:
+///   bps: 10
+///   cause: "the indexed reserves exclude the protocol fee bucket the contract also holds"
+///   measured: "6.2 bps at most over 40 components, blocks 21000000-21000100 (range --report)"
+/// ```
+///
+/// `bps` is relative to the on-chain amount; `wei` is absolute, in base units of the token. A
+/// difference within either passes. A plain skip would also hide a dropped or doubled balance
+/// delta, which puts TVL off by 100%; the tolerance sits well below that.
+///
+/// The declaration is checked, not trusted: the runner decodes the snapshot again with the
+/// component's balances scaled down, and every limit, spot price and quote must stay the same
+/// (`balances.tvl_only`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TvlOnly {
+    /// The largest difference allowed, in basis points of the on-chain amount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bps: Option<u32>,
+    /// The largest difference allowed, in base units of the token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wei: Option<u64>,
+    /// Why the indexed balances drift from the chain.
+    pub cause: String,
+    /// The largest drift a run measured, and which run.
+    pub measured: String,
+}
+
+impl TvlOnly {
+    pub fn tolerance(&self) -> Tolerance {
+        Tolerance { bps: self.bps.unwrap_or(0), wei: self.wei.unwrap_or(0) }
+    }
+}
+
+/// What is wrong with a declared tolerance, if anything: it needs a nonzero `bps` below 100%, a
+/// nonzero `wei`, or both, and a cause and a measurement.
+fn tolerance_problems(
+    bps: Option<u32>,
+    wei: Option<u64>,
+    cause: &str,
+    measured: &str,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    if bps.is_none() && wei.is_none() {
+        problems.push(
+            "it declares neither `bps` nor `wei`: declare one, or remove the declaration (in \
+             strict mode, exact is the default)"
+                .to_string(),
+        );
+    }
+    for (field, value) in [("bps", bps.map(u64::from)), ("wei", wei)] {
+        if value == Some(0) {
+            problems.push(format!("`{field}: 0` allows nothing: leave it out"));
+        }
+    }
+    if let Some(bps) = bps.filter(|bps| *bps >= 10_000) {
+        problems.push(format!("`bps: {bps}` is out of range: `bps` must be 1 to 9999"));
+    }
+    for (field, value) in [("cause", cause), ("measured", measured)] {
+        if value.trim().is_empty() {
+            problems.push(format!("`{field}` is empty"));
+        }
+    }
+    problems
+}
+
 /// A swap direction, as a `limits` declaration keys it: `"0x<token in>->0x<token out>"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Direction {
@@ -655,6 +732,7 @@ impl IntegrationTestsConfig {
         }
         config.check_limits(source)?;
         config.check_tolerance(source)?;
+        config.check_tvl_only(source)?;
         Ok(config)
     }
 
@@ -676,34 +754,52 @@ impl IntegrationTestsConfig {
         let Some(tolerance) = &self.execution_tolerance else {
             return Ok(());
         };
-        let mut problems = Vec::new();
-        if tolerance.bps.is_none() && tolerance.wei.is_none() {
-            problems.push(
-                "it declares neither `bps` nor `wei`: declare one, or remove the declaration \
-                 (in strict mode, exact is the default)"
-                    .to_string(),
-            );
-        }
-        for (field, value) in [("bps", tolerance.bps.map(u64::from)), ("wei", tolerance.wei)] {
-            if value == Some(0) {
-                problems.push(format!("`{field}: 0` allows nothing: leave it out"));
-            }
-        }
-        if let Some(bps) = tolerance
-            .bps
-            .filter(|bps| *bps >= 10_000)
-        {
-            problems.push(format!("`bps: {bps}` is out of range: `bps` must be 1 to 9999"));
-        }
-        for (field, value) in [("cause", &tolerance.cause), ("measured", &tolerance.measured)] {
-            if value.trim().is_empty() {
-                problems.push(format!("`{field}` is empty"));
-            }
-        }
+        let problems =
+            tolerance_problems(tolerance.bps, tolerance.wei, &tolerance.cause, &tolerance.measured);
         if problems.is_empty() {
             return Ok(());
         }
         Err(miette!("{source} has an invalid `execution_tolerance`: {}", problems.join("; ")))
+    }
+
+    /// A component's `tvl_only` has the fields a tolerance needs, in both modes. In strict mode
+    /// the component must also be simulated, since the runner verifies the declaration by
+    /// quoting.
+    fn check_tvl_only(&self, source: &str) -> miette::Result<()> {
+        let mut invalid = Vec::new();
+        for test in &self.tests {
+            for component in &test.expected_components {
+                let Some(tvl_only) = &component.tvl_only else {
+                    continue;
+                };
+                let mut problems = tolerance_problems(
+                    tvl_only.bps,
+                    tvl_only.wei,
+                    &tvl_only.cause,
+                    &tvl_only.measured,
+                );
+                if let (Harness::Strict, Some(reason)) =
+                    (self.harness, component.skip_simulation.reason())
+                {
+                    problems.push(format!(
+                        "the runner verifies `tvl_only` by quoting the component, but it sets \
+                         `skip_simulation` ({reason})"
+                    ));
+                }
+                if !problems.is_empty() {
+                    invalid.push(format!(
+                        "{} in test {}: {}",
+                        component.base.id,
+                        test.name,
+                        problems.join("; ")
+                    ));
+                }
+            }
+        }
+        if invalid.is_empty() {
+            return Ok(());
+        }
+        Err(miette!("{source} has an invalid `tvl_only`: {}", invalid.join(". ")))
     }
 
     /// The limit declared for `direction` of `component`, from the most specific declaration:
@@ -1446,5 +1542,58 @@ tests:
                 .join(": ");
             assert!(err.contains(expected), "{declaration}: {err}");
         }
+    }
+
+    const TVL_ONLY: &str =
+        "        tvl_only: {bps: 10, cause: \"fee bucket\", measured: \"6 bps over 40 components\"}";
+
+    #[test]
+    fn tvl_only_parses_in_both_modes_into_a_tolerance() {
+        for harness in ["", STRICT_WITH_LIMITS] {
+            let config = parse(&yaml(harness, TVL_ONLY)).unwrap();
+            let tvl_only = config.tests[0].expected_components[0]
+                .tvl_only
+                .as_ref()
+                .unwrap();
+            assert_eq!(tvl_only.tolerance(), Tolerance { bps: 10, wei: 0 });
+        }
+        let config = parse(&yaml("", "")).unwrap();
+        assert!(config.tests[0].expected_components[0]
+            .tvl_only
+            .is_none());
+    }
+
+    #[test]
+    fn tvl_only_needs_a_cause_a_measurement_and_a_sensible_size() {
+        for (declaration, problem) in [
+            ("{cause: \"c\", measured: \"m\"}", "neither `bps` nor `wei`"),
+            ("{bps: 0, cause: \"c\", measured: \"m\"}", "`bps: 0` allows nothing"),
+            ("{bps: 10000, cause: \"c\", measured: \"m\"}", "`bps` must be 1 to 9999"),
+            ("{wei: 5, cause: \"\", measured: \"m\"}", "`cause` is empty"),
+            ("{bps: 5, cause: \"c\"}", "missing field `measured`"),
+            ("{bps: 5, cause: \"c\", measured: \"m\", reason: \"r\"}", "unknown field `reason`"),
+        ] {
+            for harness in ["", STRICT_WITH_LIMITS] {
+                let err = parse(&yaml(harness, &format!("        tvl_only: {declaration}")))
+                    .unwrap_err()
+                    .chain()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(": ");
+                assert!(err.contains(problem), "{declaration}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn strict_tvl_only_needs_the_component_simulated() {
+        let skipped = format!("{TVL_ONLY}\n        skip_simulation: \"no adapter\"");
+        let err = parse(&yaml(STRICT_WITH_LIMITS, &skipped))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("0xAbC in test test_foo"), "{err}");
+        assert!(err.contains("sets `skip_simulation` (no adapter)"), "{err}");
+        let skipped = format!("{TVL_ONLY}\n        skip_simulation: true");
+        assert!(parse(&yaml("", &skipped)).is_ok());
     }
 }
