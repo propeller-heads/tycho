@@ -33,12 +33,21 @@ def encode_erc4626_params(params: list[dict[str, Any]]) -> str:
                 ]
             )
 
+            encoded_extra_entrypoints = "&".join(
+                [
+                    f"entrypoint_signatures[]={entrypoint['signature']}"
+                    f"&entrypoint_calldata[]={entrypoint['calldata']}"
+                    for entrypoint in param.get("extra_entrypoints", [])
+                ]
+            )
+
             encoded_param = (
                 f"{encoded_address}&"
                 f"{encoded_tx}&"
                 f"{encoded_asset}&"
                 f"{encoded_block}&"
-                f"{encoded_static_attributes}"
+                f"{encoded_static_attributes}&"
+                f"{encoded_extra_entrypoints}"
             ).rstrip("&")
 
             encoded_params.append(encoded_param)

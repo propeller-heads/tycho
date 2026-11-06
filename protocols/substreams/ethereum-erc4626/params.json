@@ -40,5 +40,18 @@
     "block": 16428133,
     "tx_hash": "a2f51048265f2fe9ffaf69b94cb5a2a4113be49bdecd2040d530dd6f68facc42",
     "asset": "6b175474e89094c44da98b954eedeac495271d0f"
+  },
+  {
+    "name": "stUSDS",
+    "address": "99cd4ec3f88a45940936f469e4bb72a2a701eeb9",
+    "block": 23219535,
+    "tx_hash": "719ef7cf10e4497963bd2c0a7d4123240331d94991c5ee5010ba1beee9effcfd",
+    "asset": "dc035d45d973e3ec169d2276ddab16f1e407384f",
+    "extra_entrypoints": [
+      {
+        "signature": "str()",
+        "calldata": "c15bae84"
+      }
+    ]
   }
 ]

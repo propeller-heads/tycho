@@ -32,9 +32,8 @@ subDAO) share one ecosystem, and their venues are split across Tycho protocols b
   - spUSDC/spUSDT/spETH — Spark's own vaults backed by its Liquidity Layer. Configured;
     intended to be filtered client-side.
   - stUSDS `0x99cd4ec3f88a45940936f469e4bb72a2a701eeb9` — Sky core (Lockstake engine).
-    NOT yet added: it has a deposit cap and utilization-gated withdrawals, so the
-    generic simulation's `max_redeem = totalSupply()` shortcut must first be replaced
-    with a real `maxRedeem` read.
+    Indexed by `ethereum-erc4626`. Its deposit cap and utilization-gated withdrawals reach the
+    simulation through `maxDeposit` and `maxRedeem`.
 - **Future Spark L2 integrations** (e.g. DXI-11, Arbitrum) — Spark runs PSM3 contracts
   (USDS/sUSDS/USDC no-slippage) on L2s via its Liquidity Layer; on Ethereum that role
   is played by Sky's LitePSM indexed here. A PSM3 package would be structurally close
