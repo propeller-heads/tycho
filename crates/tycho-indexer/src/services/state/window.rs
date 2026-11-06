@@ -432,8 +432,8 @@ impl DeltaWindow {
             .map(|m| m.block.clone())
     }
 
-    /// The newest block held in the window, if any.
-    #[cfg(test)]
+    /// The newest block the window received since it was created or last cleared, `None` before
+    /// the first block. A fold never evicts the newest block.
     pub(crate) fn tip(&self) -> Option<Block> {
         self.buffer
             .newest()
@@ -1139,6 +1139,23 @@ mod test {
 
         assert_eq!(sink.folded(), (1..=8).collect::<Vec<_>>());
         assert_eq!(buffered(&w), vec![9, 10]);
+    }
+
+    #[test]
+    fn tip_survives_a_fold_of_every_committed_block() {
+        let mut w = window(3, 1);
+        assert_eq!(tip_number(&w), None, "an empty window received no block");
+
+        fill(&mut w, 1..=4, 4, Some(4));
+        assert_eq!(tip_number(&w), Some(4));
+
+        let sink = RecordingSink::default();
+        w.fold_committed(&sink).unwrap();
+        assert_eq!(sink.folded(), vec![1, 2, 3, 4], "every block is committed and finalized");
+        assert_eq!(tip_number(&w), Some(4));
+
+        w.clear();
+        assert_eq!(tip_number(&w), None, "a cleared window forgets its blocks");
     }
 
     #[test]

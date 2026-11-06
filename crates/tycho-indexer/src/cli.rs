@@ -112,6 +112,11 @@ pub struct GlobalArgs {
     #[clap(long, env = "COMPONENT_INDEX", default_value_t = true, action = clap::ArgAction::Set)]
     pub component_index: bool,
 
+    /// How many seconds old the newest block of each streamed extractor may be for `/v1/ready`
+    /// to report a follower as ready.
+    #[clap(long, env = "READY_HEAD_TOLERANCE_SECS", default_value_t = 60)]
+    pub ready_head_tolerance_secs: u32,
+
     /// Name of the s3 bucket used to retrieve spkgs
     #[clap(env = "TYCHO_S3_BUCKET", long, default_value = "repo.propellerheads-propellerheads")]
     //Default is for backward compatibility but needs to be removed later
@@ -449,6 +454,7 @@ mod cli_tests {
                 entity_cache_shadow_sample_rate: 0.0,
                 disabled_rpc_caches: DisabledRpcCaches::default(),
                 component_index: true,
+                ready_head_tolerance_secs: 60,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,
@@ -669,6 +675,7 @@ mod cli_tests {
                 entity_cache_shadow_sample_rate: 0.0,
                 disabled_rpc_caches: DisabledRpcCaches::default(),
                 component_index: true,
+                ready_head_tolerance_secs: 60,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,

@@ -46,6 +46,7 @@ pub mod runner;
 pub mod supervisor;
 pub mod token_analysis_cron;
 mod u256_num;
+pub mod writer_status;
 
 #[cfg(test)]
 mod protobuf_conversion_tests;
@@ -81,6 +82,11 @@ pub enum ExtractionError {
     AccountExtractionError(String),
     #[error("DCI cache error: {0}")]
     DCICacheError(#[from] DCICacheError),
+    /// The process became the leader, and the extractor's DCI state comes from its own traces,
+    /// which can differ from the traces of the former leader. The extractor must be built again
+    /// from the database before it commits.
+    #[error("Extractor {0} must restart from the database cursor to take over commits")]
+    RestartToTakeOver(String),
 }
 
 impl ExtractionError {
@@ -101,6 +107,7 @@ impl ExtractionError {
             Self::TracingError(_) => "tracing",
             Self::AccountExtractionError(_) => "account_extraction",
             Self::DCICacheError(_) => "dci_cache",
+            Self::RestartToTakeOver(_) => "restart_to_take_over",
         }
     }
 }
@@ -182,6 +189,12 @@ pub trait Extractor: Send + Sync {
 
     /// Processes a progress report from the source stream.
     async fn handle_progress(&self, inp: ModulesProgress) -> Result<(), ExtractionError>;
+
+    /// Waits until the extractor can take another block from the source stream.
+    ///
+    /// Returns at once unless the extractor keeps blocks in memory for another process to
+    /// write and already holds as many as it may.
+    async fn wait_for_capacity(&self);
 }
 
 #[automock]

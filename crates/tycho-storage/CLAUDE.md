@@ -17,9 +17,11 @@ postgres/
 ├── token_cache.rs      — in-memory token store answering get_tokens without SQL (opt-in)
 ├── component_index.rs  — in-memory id/TVL index counting and paging get_protocol_components
 ├── entry_point.rs      — entry point + tracing param/result persistence
-├── extraction_state.rs — extractor checkpoint (cursor, block hash) persistence
+├── extraction_state.rs — extractor checkpoint (cursor, block hash) persistence; committed block per extractor
+├── leader_lock.rs      — LeaderLock: session advisory lock electing the single database writer
 ├── snapshot.rs         — one-transaction read of all live contracts and components for the entity cache (StateSnapshotGateway)
 ├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
+├── writer_epoch.rs     — single-writer fencing: increment / verify the `writer_epoch` row
 ├── orm.rs              — Diesel Queryable/Insertable structs for every table
 └── schema.rs           — auto-generated Diesel table! macros
 ```
@@ -35,10 +37,45 @@ All public DB operations go through one of two gateway structs:
   when enabled) and `get_delta` (small LRU). The executor runs a batch up to
   three times when Postgres reports a transaction conflict (deadlock or serialization
   failure); each attempt re-runs from scratch with a fresh snapshot.
+- **Write priority**: each transaction is `WritePriority::Head` (`start_transaction`) or
+  `Backfill` (`start_backfill_transaction`). The caller picks it; the indexer uses `Backfill` while
+  the extractor's newest received block is more than 10 minutes old. A `Head` start on an open
+  `Backfill` transaction raises it to `Head`. The executor moves everything already sent into a
+  `WriteQueue` and always runs the oldest head transaction before any backfill one, so a syncing
+  extractor's large batches delay only itself; a head write waits at most for the one
+  transaction already running. The `DBTransactionCommitted` debug event carries the `priority` it ran with.
+- **Writer fencing**: to *fence* a writer is to make the database refuse all its writes from
+  the moment a different process becomes the writer. A former leader can still run after it lost
+  the lock (a long pause, a network failure), and the lock alone cannot stop it from writing.
+  The writer calls `CachedGateway::increment_writer_epoch`, which increments the one-row
+  `writer_epoch` table, and every executor transaction first reads that row `FOR SHARE`. When
+  another process has incremented it since, the transaction fails with `StorageError::Fenced` and
+  writes nothing. An increment that commits while a write waits on the row makes the write fail
+  with a serialization error; the retry then sees the new epoch. Writes that bypass the executor
+  (migrations, `ensure_*` at startup, `add_protocol_types`, `update_tokens`) are not fenced.
+  An increment waits for every open write transaction (it logs a warning every 10s). So that a
+  vanished writer cannot block it for long, every pool session sets server-side TCP timeouts
+  (`SESSION_TCP_TIMEOUTS`): keepalives drop an idle session of a dead peer after about 25s, and
+  `tcp_user_timeout` drops a session that waits for the peer to acknowledge sent data after 30s.
+  Postgres then releases its lock. `tcp_user_timeout` needs Postgres 12 or later on a server that
+  supports `TCP_USER_TIMEOUT` (Linux).
+  The executor of `GatewayBuilder::build` rejects every write until the process increments the
+  epoch. The epoch lives on `PostgresGateway` (`ClaimedEpoch`), so the executor and every
+  `CachedGateway` clone share it.
+- **Leader election**: `LeaderLock` holds a session advisory lock on a dedicated, non-pooled
+  connection with the same server-side TCP timeouts, so Postgres frees the lock within about 30s after a
+  leader's host disappears. The lock elects the writer; the epoch fences it.
+- **Non-writer support**: `CachedGateway::get_committed_blocks` returns the number and timestamp
+  of the block each extractor's `extraction_state` points to (the newest block committed for it),
+  `cache_tokens` adds tokens to the token cache without writing them, and `cache_last_traded`
+  moves their `last_traded` timestamps forward without writing balances.
 - **`DirectGateway`** (testing / low-throughput): same trait surface, no buffering.
 
 `GatewayBuilder::build` requires **exactly one** chain (`ensure_chain`) — an instance is
 single-chain; it hard-fails otherwise.
+
+Every gateway build runs the embedded migrations first, under a Postgres advisory lock
+(`MIGRATION_LOCK_KEY`), so processes starting together against one database migrate one at a time.
 
 Both delegate every actual SQL call to `PostgresGateway` (unexported). Domain logic lives in
 `chain`, `contract`, `protocol`, `entry_point`, `extraction_state`, and `snapshot`—each adding

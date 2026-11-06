@@ -19,7 +19,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
-    extractor::{runner::ExtractorHandle, ExtractionError},
+    extractor::{runner::ExtractorHandle, writer_status::WriterStatus, ExtractionError},
     services::{
         api_docs::ApiDoc,
         deltas_buffer::PendingDeltas,
@@ -67,6 +67,8 @@ pub struct ServicesBuilder<G> {
     /// Pre-built receivers for PendingDeltas (one per extractor).
     pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
     window_config: WindowConfig,
+    /// Role of this process as database writer, read by the health endpoint.
+    writer_status: Option<WriterStatus>,
     /// `Off` makes the windows fold into a `DiscardSink` and every state request read the
     /// database.
     entity_cache: EntityCacheSetup<Arc<EntityCache>>,
@@ -74,6 +76,8 @@ pub struct ServicesBuilder<G> {
     shadow_sample_rate: f64,
     /// RPC response caches that stay off.
     disabled_rpc_caches: Vec<RpcCacheKind>,
+    /// How old the newest block of a streamed extractor may be on a ready follower.
+    ready_head_tolerance: chrono::Duration,
 }
 
 /// Resolves with the first error either service task produces, or with `Ok` once both end
@@ -112,6 +116,8 @@ where
             entity_cache: EntityCacheSetup::Off,
             shadow_sample_rate: 0.0,
             disabled_rpc_caches: Vec::new(),
+            writer_status: None,
+            ready_head_tolerance: rpc::DEFAULT_READY_HEAD_TOLERANCE,
         }
     }
 
@@ -142,6 +148,20 @@ where
     /// ignore it.
     pub fn shadow_sample_rate(mut self, rate: f64) -> Self {
         self.shadow_sample_rate = rate;
+        self
+    }
+
+    /// Makes the health endpoint fail while this process is the database writer and has stopped
+    /// confirming its leader lock.
+    pub fn writer_status(mut self, v: WriterStatus) -> Self {
+        self.writer_status = Some(v);
+        self
+    }
+
+    /// Sets how old the newest block of each streamed extractor may be for the readiness endpoint
+    /// to report a follower as ready.
+    pub fn ready_head_tolerance(mut self, tolerance: chrono::Duration) -> Self {
+        self.ready_head_tolerance = tolerance;
         self
     }
 
@@ -312,8 +332,10 @@ where
                 self.plans_config,
                 self.dci_protocols,
                 self.protocol_systems,
+                self.writer_status,
             )
             .with_disabled_caches(&self.disabled_rpc_caches)
+            .with_ready_head_tolerance(self.ready_head_tolerance)
             .with_state_service(state_service),
         );
 
@@ -369,7 +391,11 @@ where
                 )
                 .service(
                     web::resource(format!("/{}/health", self.prefix))
-                        .route(web::get().to(rpc::health)),
+                        .route(web::get().to(rpc::health::<G, EVMEntrypointService>)),
+                )
+                .service(
+                    web::resource(format!("/{}/ready", self.prefix))
+                        .route(web::get().to(rpc::ready::<G, EVMEntrypointService>)),
                 )
                 .service(
                     web::resource(format!("/{}/protocol_systems", self.prefix))
