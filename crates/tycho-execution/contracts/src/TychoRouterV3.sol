@@ -10,9 +10,6 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
     SafeERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {
-    ReentrancyGuard
-} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {
     IAllowanceTransfer
@@ -25,7 +22,6 @@ import {
 } from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 import {Dispatcher} from "./Dispatcher.sol";
 import {LibSwap} from "../lib/LibSwap.sol";
-import {TransferManager} from "./TransferManager.sol";
 import {ETH_ADDRESS} from "../lib/NativeETH.sol";
 import {FeeRecipient, FeeInput} from "../lib/FeeStructs.sol";
 import {IFeeCalculator} from "@interfaces/IFeeCalculator.sol";
@@ -77,7 +73,6 @@ error TychoRouter__MsgValueDoesNotMatchAmountIn(
     uint256 msgValue, uint256 amountIn
 );
 error TychoRouter__NegativeSlippage(uint256 amount, uint256 minAmount);
-error TychoRouter__InvalidDataLength();
 error TychoRouter__AmountOutZero();
 error TychoRouter__InvalidMinAmountOut(
     uint256 minAmountOut, uint256 expectedAmountOut
@@ -115,15 +110,12 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     using LibPrefixLengthEncodedByteArray for bytes;
     using LibSwap for bytes;
 
-    //keccak256("NAME_OF_ROLE") : save gas on deployment
     bytes32 public constant EXECUTOR_SETTER_ROLE =
-        0x6a1dd52dcad5bd732e45b6af4e7344fa284e2d7d4b23b5b09cb55d36b0685c87;
-    bytes32 public constant PAUSER_ROLE =
-        0x65d7a28e3265b37a6474929f336521b332c1681b933f6cb9f3376673440d862a;
-    bytes32 public constant UNPAUSER_ROLE =
-        0x427da25fe773164f88948d3e215c94b6554e2ed5e5f203a821c9f2f6131cf75a;
+        keccak256("EXECUTOR_SETTER_ROLE");
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+    bytes32 public constant UNPAUSER_ROLE = keccak256("UNPAUSER_ROLE");
     bytes32 public constant ROUTER_FEE_SETTER_ROLE =
-        0x9939157be7760e9462f1d5a0dcad88b616ddc64138e317108b40b1cf55601348;
+        keccak256("ROUTER_FEE_SETTER_ROLE");
 
     uint256 public constant DELAY_FEE_CALCULATOR_ACTIVATION = 1 days;
 
@@ -147,6 +139,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
 
     constructor(
         address permit2_,
+        // forge-lint: disable-next-line(missing-zero-check) The code-length check rejects address(0).
         address feeCalculator,
         address pauserAdmin,
         address unpauserAdmin,
@@ -216,7 +209,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
-    ) public payable whenNotPaused nonReentrant returns (uint256) {
+    ) public payable nonReentrant whenNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -274,7 +267,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
-    ) public whenNotPaused nonReentrant returns (uint256) {
+    ) public nonReentrant whenNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -335,7 +328,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         IAllowanceTransfer.PermitSingle calldata permitSingle,
         bytes calldata signature,
         bytes calldata swaps
-    ) external whenNotPaused nonReentrant returns (uint256) {
+    ) external nonReentrant whenNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -394,7 +387,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
-    ) public payable whenNotPaused nonReentrant returns (uint256) {
+    ) public payable nonReentrant whenNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -449,7 +442,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
-    ) public whenNotPaused nonReentrant returns (uint256) {
+    ) public nonReentrant whenNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -506,7 +499,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         IAllowanceTransfer.PermitSingle calldata permitSingle,
         bytes calldata signature,
         bytes calldata swaps
-    ) external whenNotPaused nonReentrant returns (uint256) {
+    ) external nonReentrant whenNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -564,7 +557,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swapData
-    ) public payable whenNotPaused nonReentrant returns (uint256) {
+    ) public payable nonReentrant whenNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -618,7 +611,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swapData
-    ) public whenNotPaused nonReentrant returns (uint256) {
+    ) public nonReentrant whenNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -675,7 +668,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         IAllowanceTransfer.PermitSingle calldata permitSingle,
         bytes calldata signature,
         bytes calldata swapData
-    ) external whenNotPaused nonReentrant returns (uint256) {
+    ) external nonReentrant whenNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -712,8 +705,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * splitSwap() and splitSwapPermit2() functions.
      *
      */
-    // State writes in _takeFees after external calls are safe because all public entry points use nonReentrant modifier
-    // slither-disable-next-line reentrancy-benign
+    // slither-disable-next-line reentrancy-benign State writes after external calls are safe: every entry point is nonReentrant.
     function _splitSwapChecked(
         uint256 amountIn,
         address tokenIn,
@@ -771,8 +763,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * singleSwap() and singleSwapPermit2() functions.
      *
      */
-    // State writes in _takeFees after external calls are safe because all public entry points use nonReentrant modifier
-    // slither-disable-next-line reentrancy-benign
+    // slither-disable-next-line reentrancy-benign State writes after external calls are safe: every entry point is nonReentrant.
     function _singleSwap(
         uint256 amountIn,
         address tokenIn,
@@ -829,8 +820,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * sequentialSwap() and sequentialSwapPermit2() functions.
      *
      */
-    // State writes in _takeFees after external calls are safe because all public entry points use nonReentrant modifier
-    // slither-disable-next-line reentrancy-benign
+    // slither-disable-next-line reentrancy-benign State writes after external calls are safe: every entry point is nonReentrant.
     function _sequentialSwapChecked(
         uint256 amountIn,
         address tokenIn,
@@ -1110,7 +1100,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                 receiver = finalReceiver;
             } else {
                 bytes calldata nextSwap;
-                // slither-disable-next-line unused-return
+                // slither-disable-next-line unused-return This only peeks at the next swap; the loop advances remainingSwaps itself.
                 (nextSwap,) = remainingSwaps.next();
                 (address nextExecutor, bytes calldata nextProtocolData) =
                     nextSwap.decodeSequentialSwap();
@@ -1183,6 +1173,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @notice Queues a new fee calculator with a timelock delay.
      * @param feeCalculator The address of the fee calculator contract
      */
+    // forge-lint: disable-next-line(missing-zero-check) The code-length check rejects address(0).
     function setFeeCalculator(address feeCalculator)
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
@@ -1222,11 +1213,10 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      */
     function activateFeeCalculator() external onlyRole(ROUTER_FEE_SETTER_ROLE) {
         uint48 activationTs = _feeCalculatorActivationTimestamp;
-        // slither-disable-next-line incorrect-equality
         if (activationTs == 0) {
             revert TychoRouter__NoPendingFeeCalculator();
         }
-        // slither-disable-next-line timestamp
+        // forge-lint: disable-next-line(block-timestamp) A one-day timelock is unaffected by seconds of block-time drift.
         if (block.timestamp < activationTs) {
             revert TychoRouter__TimelockNotExpired(
                 activationTs, block.timestamp
@@ -1288,7 +1278,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @dev Allows this contract to receive native token with empty msg.data from contracts
      */
     receive() external payable whenNotPaused {
-        require(msg.sender.code.length != 0);
+        require(
+            msg.sender.code.length != 0, TychoRouter__NotAContract(msg.sender)
+        );
     }
 
     /**
@@ -1337,11 +1329,11 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                 // output transfer has been performed yet, or the user has specified the
                 // receiver to be the router in order to rebalance their vault.
                 _updateDeltaAccounting(tokenOut, int256(requiredContribution));
-                // slither-disable-next-line incorrect-equality
             } else if (outputDelta == 0) {
                 if (receiver == address(this)) {
                     _creditVault(msg.sender, tokenOut, requiredContribution);
                 } else if (tokenOut == ETH_ADDRESS) {
+                    // forge-lint: disable-next-line(arbitrary-send-eth) Pays the client's contribution to the swap's receiver.
                     Address.sendValue(payable(receiver), requiredContribution);
                 } else {
                     // Measure user balance before and after required contribution to
@@ -1396,7 +1388,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             }
             return;
         }
-        // slither-disable-next-line timestamp
+        // forge-lint: disable-next-line(block-timestamp) A signed deadline expires to the second; seconds of block-time drift are harmless.
         if (block.timestamp > p.deadline) {
             revert TychoRouter__ExpiredClientSignature(
                 p.deadline, block.timestamp
@@ -1423,7 +1415,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         // ECDSA runs before ERC-1271 so that an EOA carrying delegated code
         // (EIP-7702) keeps signing with its own key. tryRecover's third return
         // value only describes the error, which err already reports.
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return tryRecover's third return value only describes the error, which err already reports.
         (address recovered, ECDSA.RecoverError err,) =
             ECDSA.tryRecoverCalldata(digest, p.clientSignature);
         if (
