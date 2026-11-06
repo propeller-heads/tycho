@@ -195,12 +195,7 @@ CREATE INDEX IF NOT EXISTS vault_transfers_owner_idx
     ON vault_transfers (chain, router, token);
 CREATE INDEX IF NOT EXISTS vault_transfers_block_idx ON vault_transfers (chain, block_number);
 
--- What the SubsidyPayer did with each signed subsidy: paid it, or skipped it and why.
---
--- Hosted Fynd signs a subsidy into a quote's calldata. When the swap runs, the executor hands
--- the terms to the payer, which pays them or skips them for a reason it names, and the swap
--- fills either way. Only these events say which. A quoted subsidy that was never executed has
--- no row: the chain never saw it.
+-- The SubsidyPayer's events: each signed subsidy it paid, or skipped and why.
 CREATE TABLE IF NOT EXISTS subsidies (
     id           TEXT PRIMARY KEY, -- {chain}:{tx_hash}:{log_index}
     chain        TEXT NOT NULL,
@@ -210,8 +205,7 @@ CREATE TABLE IF NOT EXISTS subsidies (
     log_index    INTEGER NOT NULL,
     payer        TEXT NOT NULL,
     event        TEXT NOT NULL CHECK (event IN ('paid', 'skipped')),
-    -- The nonce of the signed terms, 32 bytes. Hosted Fynd logs it on the `subsidy quoted`
-    -- line, which joins a settlement to the quote that promised it.
+    -- The nonce of the signed terms, 32 bytes.
     nonce        TEXT NOT NULL,
     -- The trade the payer ran in: the row of the nearest router swap call enclosing the event
     -- in the call trace. A transaction can hold several router calls, probes included, so the

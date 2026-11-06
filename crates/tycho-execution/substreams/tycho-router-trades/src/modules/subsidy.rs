@@ -1,9 +1,5 @@
-//! What the `SubsidyPayer` did with each signed subsidy: paid it, or skipped it and why.
-//!
-//! Hosted Fynd signs a subsidy into a quote's calldata. When the swap runs, the subsidizing
-//! executor hands the terms to the payer, which pays them (`SubsidyPaid`) or skips them for a
-//! reason it names (`SubsidySkipped`), and the swap fills either way. Only the chain knows which
-//! happened, and only the payer's events say so.
+//! What the `SubsidyPayer` did with each signed subsidy: paid it (`SubsidyPaid`), or skipped it
+//! for a reason it names (`SubsidySkipped`), the swap filling either way.
 //!
 //! Each event is joined to its trade through the call trace: the payer runs inside the router
 //! call that `map_trades` stores, so the nearest enclosing router call with a swap selector is

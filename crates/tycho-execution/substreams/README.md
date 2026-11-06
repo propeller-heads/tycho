@@ -96,39 +96,6 @@ Two things to know when reading real data:
   `balanceOf` answers on. On that router, the fee taker has withdrawn zero-address balances as
   ETH: the debit of 487837220983021421 in block 25144849 moved exactly that many wei.
 
-### Subsidies
-
-Hosted Fynd signs a subsidy into a quote's calldata. When the swap runs, the subsidizing executor
-hands the terms to the chain's `SubsidyPayer`, which pays them (`SubsidyPaid`) or skips them for
-a reason it names (`SubsidySkipped`: paused, expired, invalid signature, caller mismatch, input
-below the signed minimum, nonce used, insufficient balance, transfer failed), and the swap fills
-either way. Only the chain knows which happened, and only the payer's events say so.
-
-`map_subsidy_events` reads both events from the payer named by the `payer` param and stores one
-row per event in `subsidies`. A chain without a payer leaves the param out and the module emits
-nothing there. A quoted subsidy that was never executed has no row: the chain never saw it.
-
-Each row is joined to its trade through the call trace, not the transaction hash: the payer
-runs inside the router call that `map_trades` stores, so `trade_id` is the nearest enclosing
-router call with a swap selector. A transaction can hold several router calls, probes included,
-so the hash alone would not say which. The payment goes to the router (`receiver`), which pays
-the user with the swap's output; `bound_to` is the address the terms were signed for.
-
-`subsidized_trades` joins the paid rows to `trades_settled`, so a dashboard can put the volume
-subsidized next to what it cost:
-
-```sql
-SELECT chain, date_trunc('day', block_time) AS day,
-       count(*) AS swaps, sum(volume_usd) AS volume_usd, sum(subsidy_usd) AS subsidy_usd
-FROM subsidized_trades
-GROUP BY 1, 2;
-```
-
-`subsidy_usd` is known when the subsidy was paid in the trade's output token, which is the
-price the pricer has; a subsidy on an earlier hop is paid in that hop's token and stays
-unpriced. The nonce is on hosted Fynd's `subsidy quoted` log line, which joins a settlement to
-the quote that promised it.
-
 ### Executor names
 
 The package writes the executor address of a hop and nothing else. The protocol names of that
