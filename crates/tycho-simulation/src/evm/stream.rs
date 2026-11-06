@@ -605,17 +605,20 @@ impl ProtocolStreamBuilder {
 
     /// Registers a [`TxDeltaIndexer`] for ephemeral pending-block simulation.
     ///
-    /// The indexer is associated with `extractor` (the protocol synchronizer name, e.g.
-    /// `"uniswap_v3"`). Use [`build_with_pending`](Self::build_with_pending) to obtain both
-    /// the confirmed stream and the pending processor.
+    /// The indexer is associated with `extractor`, the protocol synchronizer name (e.g.
+    /// `"uniswap_v3"`). It must equal the `protocol_system` of the components the indexer
+    /// indexes: the indexer's account deltas reach only pools of that protocol system, so the
+    /// indexer must also emit every account those pools read. Use
+    /// [`build_with_pending`](Self::build_with_pending) to obtain both the confirmed stream and
+    /// the pending processor.
     ///
     /// The exchange must decode into a state whose `delta_transition` can rebuild it from the
-    /// `state_deltas` the indexer produces, because that is all
+    /// `state_deltas` the indexer produces, because
     /// [`apply_deltas_ephemeral`](crate::evm::decoder::TychoStreamDecoder::apply_deltas_ephemeral)
-    /// applies. Native and hybrid states qualify; the generic VM adapter does not, because it
-    /// re-reads pool state from the VM database — an indexer registered for one still gets its
-    /// balance and block-environment attributes applied, but every storage-derived value stays at
-    /// the confirmed block, with no error.
+    /// writes nothing to the VM database. Native and hybrid states qualify; the generic VM adapter
+    /// does not, because it re-reads pool state from the VM database — an indexer registered for
+    /// one still gets its balance and block-environment attributes applied, but every
+    /// storage-derived value stays at the confirmed block, with no error.
     #[expect(
         clippy::unnecessary_wraps,
         reason = "public API; changing the signature is a breaking change"
