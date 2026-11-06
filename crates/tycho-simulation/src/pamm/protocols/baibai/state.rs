@@ -577,6 +577,63 @@ mod tests {
             .is_err());
     }
 
+    /// The limits hold beyond a trivial state: on every recorded pair, including partly filled
+    /// sides, as recorded and with a fee, a spread or half the depth, the limit fills at its
+    /// stated output, and where the curve binds rather than custody, one atom more is refused.
+    #[rstest]
+    #[case::as_recorded(|_: &mut BaibaiState| {})]
+    #[case::with_a_fee(|s: &mut BaibaiState| s.fee_pips = 1_000)]
+    #[case::with_spreads(|s: &mut BaibaiState| {
+        s.ask.spread_bps = 25;
+        s.bid.spread_bps = -25;
+    })]
+    #[case::at_half_depth(|s: &mut BaibaiState| {
+        s.ask.depth_bps = 5_000;
+        s.bid.depth_bps = 5_000;
+    })]
+    fn the_limits_hold_on_every_recording(#[case] vary: fn(&mut BaibaiState)) {
+        let mut curve_bound = 0;
+        for fixture in fixtures() {
+            for pair in &fixture.pairs {
+                let mut state = state(&fixture, pair);
+                vary(&mut state);
+                let state = state.validated().unwrap();
+                for direction in [SwapDirection::BaseToQuote, SwapDirection::QuoteToBase] {
+                    let (token_in, token_out) = match direction {
+                        SwapDirection::BaseToQuote => (state.base_token.clone(), quote()),
+                        SwapDirection::QuoteToBase => (quote(), state.base_token.clone()),
+                    };
+                    let (max_in, max_out) = state
+                        .get_limits(token_in.address.clone(), token_out.address.clone())
+                        .unwrap();
+                    if max_in == BigUint::ZERO {
+                        continue;
+                    }
+                    let at_limit = state
+                        .get_amount_out(max_in.clone(), &token_in, &token_out)
+                        .unwrap();
+                    assert_eq!(
+                        at_limit.amount, max_out,
+                        "{direction:?} at block {}",
+                        fixture.block
+                    );
+                    let capacity = state
+                        .curve(direction)
+                        .unwrap()
+                        .capacity()
+                        .unwrap();
+                    if biguint_to_u256(&max_in) == capacity {
+                        curve_bound += 1;
+                        assert!(state
+                            .get_amount_out(max_in + 1u32, &token_in, &token_out)
+                            .is_err());
+                    }
+                }
+            }
+        }
+        assert!(curve_bound > 0, "no limit was bound by the curve");
+    }
+
     #[test]
     fn custody_binds_the_limits_when_it_runs_out_first() {
         let mut state = weth_state();
