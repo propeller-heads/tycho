@@ -72,13 +72,12 @@ contract TesseraFallbackRouter is TychoFallbackRouter {
     /// @dev Zero when Tessera cannot quote.
     function _viewQuote(Swap calldata swap_) private view returns (uint256) {
         // A negative amount would quote exact-out.
-        // forge-lint: disable-next-line(unsafe-typecast)
         if (swap_.amountIn > uint256(type(int256).max)) {
             return 0;
         }
         // Low-level so a pair that cannot quote, such as one past its price cutoff, quotes zero
         // instead of reverting `swap`.
-        // slither-disable-next-line low-level-calls
+        // forge-lint: disable-next-item(low-level-calls) A pair that cannot quote must quote zero, not revert swap.
         (bool quoted, bytes memory quote) = address(tesseraSwap)
             .staticcall(
                 abi.encodeCall(
@@ -87,7 +86,6 @@ contract TesseraFallbackRouter is TychoFallbackRouter {
                         swap_.tokenIn,
                         swap_.tokenOut,
                         // amountIn is checked above against int256.max.
-                        // forge-lint: disable-next-line(unsafe-typecast)
                         int256(swap_.amountIn)
                     )
                 )
@@ -118,7 +116,6 @@ contract TesseraFallbackRouter is TychoFallbackRouter {
         tesseraSwap.tesseraSwapWithAllowances(
             swap_.tokenIn,
             swap_.tokenOut,
-            // forge-lint: disable-next-line(unsafe-typecast)
             int256(swap_.amountIn),
             _TESSERA_QUOTE_SLOT.asUint256().tload(),
             swap_.receiver,

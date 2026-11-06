@@ -13,9 +13,12 @@ import {TesseraFallbackRouter} from "../fallback/TesseraFallbackRouter.sol";
 /// @dev Swap data is `[tokenIn: 20][tokenOut: 20][fallback]`: Tessera finds the pair by its
 /// tokens, so the fallback starts right after them.
 contract TesseraFallbackExecutor is FallbackExecutor {
+    // tokenIn (20) + tokenOut (20)
+    uint256 private constant _FALLBACK_SWAP_START = 40;
+
     constructor(address fallbackRouter_) FallbackExecutor(fallbackRouter_) {}
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -36,9 +39,9 @@ contract TesseraFallbackExecutor is FallbackExecutor {
         override
         returns (uint256)
     {
-        if (data.length <= 40) {
+        if (data.length <= _FALLBACK_SWAP_START) {
             revert FallbackExecutor__InvalidDataLength(data.length);
         }
-        return 40;
+        return _FALLBACK_SWAP_START;
     }
 }

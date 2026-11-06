@@ -57,19 +57,17 @@ contract TesseraExecutor is IExecutor {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
     {
         (address tokenIn, address tokenOut) = _decodeData(data);
         // A negative amountSpecified would make TesseraSwap swap exact-out.
-        // forge-lint: disable-next-line(unsafe-typecast)
         if (amountIn > uint256(type(int256).max)) {
             revert TesseraExecutor__AmountTooLarge();
         }
         // amountIn is checked above against int256.max.
-        // forge-lint: disable-next-line(unsafe-typecast)
         int256 amountSpecified = int256(amountIn);
         // The pair reads swapData's first byte as a fee tag and charges that
         // tag's fee; empty swapData selects tag 0.
