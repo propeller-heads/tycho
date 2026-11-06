@@ -200,9 +200,6 @@ message VaultTransfer {
 }
 
 // Every SubsidyPaid and SubsidySkipped the SubsidyPayer emitted in one block.
-//
-// Hosted Fynd signs a subsidy into a quote's calldata; when the swap runs, the payer pays it or
-// skips it for a reason it names, and the swap fills either way. Only these events say which.
 message SubsidyEvents {
   repeated SubsidyEvent events = 1;
 }
@@ -217,8 +214,7 @@ message SubsidyEvent {
   bytes payer = 6;
   // "paid" or "skipped".
   string event = 7;
-  // The nonce of the signed terms, 32 bytes. Hosted Fynd logs it with the quote, so it joins a
-  // settlement to the quote that promised it.
+  // The nonce of the signed terms, 32 bytes.
   bytes nonce = 8;
   // Paid only: the address the terms were bound to, where the payment went, in which token, and
   // how much. The payment goes to the router, which pays the user with the swap's output.

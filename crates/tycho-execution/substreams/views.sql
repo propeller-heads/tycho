@@ -115,12 +115,9 @@ BEGIN
         RETURN;
     END IF;
 
-    -- Each subsidy the payer paid, next to the settled trade it was paid on: what the swap was
-    -- worth and what the subsidy cost.
-    --
-    -- `subsidy_usd` is known when the subsidy was paid in the trade's output token, which is
-    -- the price the pricer has. A subsidy on an earlier hop is paid in that hop's token and
-    -- stays unpriced here.
+    -- Each subsidy the payer paid, next to the settled trade it was paid on. `subsidy_usd` is
+    -- known when the subsidy was paid in the trade's output token, which is the price the pricer
+    -- has; a subsidy on an earlier hop is paid in that hop's token and stays unpriced here.
     DROP VIEW IF EXISTS subsidized_trades;
     CREATE VIEW subsidized_trades AS
     SELECT s.chain, s.block_number, s.block_time, s.tx_hash, s.trade_id, s.payer, s.nonce,

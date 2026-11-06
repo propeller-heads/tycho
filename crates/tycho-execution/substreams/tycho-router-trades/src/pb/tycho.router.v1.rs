@@ -299,9 +299,6 @@ pub struct VaultTransfer {
     pub kind: ::prost::alloc::string::String,
 }
 /// Every SubsidyPaid and SubsidySkipped the SubsidyPayer emitted in one block.
-///
-/// Hosted Fynd signs a subsidy into a quote's calldata; when the swap runs, the payer pays it or
-/// skips it for a reason it names, and the swap fills either way. Only these events say which.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SubsidyEvents {
@@ -327,8 +324,7 @@ pub struct SubsidyEvent {
     /// "paid" or "skipped".
     #[prost(string, tag="7")]
     pub event: ::prost::alloc::string::String,
-    /// The nonce of the signed terms, 32 bytes. Hosted Fynd logs it with the quote, so it joins a
-    /// settlement to the quote that promised it.
+    /// The nonce of the signed terms, 32 bytes.
     #[prost(bytes="vec", tag="8")]
     pub nonce: ::prost::alloc::vec::Vec<u8>,
     /// Paid only: the address the terms were bound to, where the payment went, in which token, and
