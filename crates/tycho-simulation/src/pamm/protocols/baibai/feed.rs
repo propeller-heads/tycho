@@ -334,10 +334,10 @@ mod tests {
         book::{chain_without_id, Book},
         pamm::protocols::baibai::{
             math::MAX_KNOTS,
-            reader::{
-                knotCall, pairCall, taker_fee_call, ttlCall, validUntilCall, IMPLEMENTATION_SLOT,
+            reader::{knotCall, pairCall, ttlCall, validUntilCall, IMPLEMENTATION_SLOT},
+            test_support::{
+                book_config, bytes, cbbtc, state, token, weth, FakeNode, TAKER_FEE_SELECTOR,
             },
-            test_support::{book_config, bytes, cbbtc, state, token, weth, FakeNode},
         },
     };
 
@@ -446,7 +446,7 @@ mod tests {
     #[case::the_pair_getter(pairCall::SELECTOR)]
     #[case::the_valid_until_getter(validUntilCall::SELECTOR)]
     #[case::the_knot_getter(knotCall::SELECTOR)]
-    #[case::the_taker_fee_getter(taker_fee_call(Address::ZERO, Address::ZERO)[..4].try_into().unwrap())]
+    #[case::the_taker_fee_getter(TAKER_FEE_SELECTOR)]
     #[tokio::test]
     async fn a_reverting_getter_ends_the_feed(#[case] selector: [u8; 4]) {
         let mut node = FakeNode::new();

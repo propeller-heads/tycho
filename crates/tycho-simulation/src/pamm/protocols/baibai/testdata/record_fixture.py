@@ -29,7 +29,7 @@ QUOTE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 # tycho-execution's Base TychoRouter: the caller whose fee `quoteFor` charges.
 TAKER = "0xAbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67"
 # Unverified implementation; identified by its storage reads matching quoteFor's fee lookup.
-EFFECTIVE_FEE_SELECTOR = "0xa5cbd1b7"
+TAKER_FEE_SELECTOR = "0xa5cbd1b7"
 BASES = [
     ("0x4200000000000000000000000000000000000006", 18),
     ("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf", 8),
@@ -105,7 +105,7 @@ def main() -> None:
     }
     for base, decimals in BASES:
         fee_input = cast("abi-encode", "f(address,address)", TAKER, base)[2:]
-        fee_call = EFFECTIVE_FEE_SELECTOR + fee_input
+        fee_call = TAKER_FEE_SELECTOR + fee_input
         fee = int(cast("call", "--block", str(block), ENTRYPOINT, fee_call), 16)
         cases = []
         for sell_base in (True, False):

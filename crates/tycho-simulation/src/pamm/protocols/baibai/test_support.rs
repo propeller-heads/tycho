@@ -26,8 +26,7 @@ use crate::{
         math::{Knot, Side},
         reader::{
             availableLiquidityCall, cUnitCall, curveBookCall, custodianCall, knotCall, pairCall,
-            quoteTokenCall, taker_fee_call, ttlCall, validUntilCall, PairView, SideView,
-            IMPLEMENTATION_SLOT,
+            quoteTokenCall, ttlCall, validUntilCall, PairView, SideView, IMPLEMENTATION_SLOT,
         },
         state::BaibaiState,
         Deployment, BASE_DEPLOYMENT, BASE_LISTED_BASES, BASE_ROUTER,
@@ -178,6 +177,10 @@ pub(super) fn weth_state() -> BaibaiState {
     let fixture = fixture();
     state(&fixture, &fixture.pairs[0])
 }
+
+/// The entrypoint's taker fee view as it answers on chain: written out here rather than taken from
+/// the reader, so a reader asking with another selector finds no answer, as it would on chain.
+pub(super) const TAKER_FEE_SELECTOR: [u8; 4] = [0xa5, 0xcb, 0xd1, 0xb7];
 
 /// A JSON-RPC node serving a recording, with knobs for what a test wants it to get wrong. Like
 /// the chain, the custodian reverts for an address that is not a token, and a revert in a call
@@ -362,10 +365,7 @@ impl FakeNode {
                     .get(call.index.to::<usize>())?;
                 (U48::from(*q), U48::from(*extra)).abi_encode_params()
             }
-            (t, _)
-                if t == entrypoint &&
-                    data[..4] == taker_fee_call(Address::ZERO, Address::ZERO)[..4] =>
-            {
+            (t, _) if t == entrypoint && data[..4] == TAKER_FEE_SELECTOR => {
                 let (taker, base) = <(Address, Address)>::abi_decode_params(&data[4..]).unwrap();
                 assert_eq!(taker, self.taker, "the books are priced for the configured taker");
                 // Only Tycho's router is whitelisted; other callers pay the venue default.
