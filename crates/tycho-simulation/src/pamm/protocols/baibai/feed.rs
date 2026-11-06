@@ -334,7 +334,7 @@ mod tests {
         book::{chain_without_id, Book},
         pamm::protocols::baibai::{
             math::MAX_KNOTS,
-            reader::{taker_fee_call, ttlCall},
+            reader::{knotCall, pairCall, taker_fee_call, ttlCall, validUntilCall},
             test_support::{book_config, bytes, cbbtc, state, token, weth, FakeNode},
         },
     };
@@ -441,6 +441,9 @@ mod tests {
     /// After an upgrade that removes a getter the feed reads, no later poll can succeed.
     #[rstest]
     #[case::a_settings_getter(ttlCall::SELECTOR)]
+    #[case::the_pair_getter(pairCall::SELECTOR)]
+    #[case::the_valid_until_getter(validUntilCall::SELECTOR)]
+    #[case::the_knot_getter(knotCall::SELECTOR)]
     #[case::the_taker_fee_getter(taker_fee_call(Address::ZERO, Address::ZERO)[..4].try_into().unwrap())]
     #[tokio::test]
     async fn a_reverting_getter_ends_the_feed(#[case] selector: [u8; 4]) {
@@ -577,6 +580,26 @@ mod tests {
             .unwrap();
 
         assert_eq!(books.len(), 2);
+    }
+
+    /// The custodian reverts only for an address that is no token, which the book cannot have
+    /// listed: for a listed base it means the deployment changed.
+    #[tokio::test]
+    async fn a_listed_base_whose_custody_reverts_ends_the_feed() {
+        let mut node = FakeNode::new();
+        node.not_tokens.push(weth());
+
+        let error = fetch(node, book_config(), None)
+            .await
+            .unwrap_err();
+
+        assert!(error.is_fatal(), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("availableLiquidity"),
+            "{error}"
+        );
     }
 
     /// Contracts that no longer point at each other are a deployment this integration was not

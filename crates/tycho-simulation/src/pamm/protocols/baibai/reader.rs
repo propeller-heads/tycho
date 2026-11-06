@@ -20,7 +20,7 @@ use alloy::{
     sol_types::{SolCall, SolValue},
 };
 use reqwest::Url;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     pamm::protocols::baibai::{
@@ -131,12 +131,11 @@ impl BaibaiReader {
         }
     }
 
-    /// Reads every configured base at the latest block. A base the book has never listed, and one
-    /// whose calls revert (an address that is no token), is left out; the other pairs are read.
-    /// Fails fatally when the node serves another chain, or when the deployment no longer answers
-    /// the way this integration was built for (its contracts point elsewhere, or a getter it
-    /// reads reverts, or a side holds more knots than [`MAX_KNOTS`]), since no later read will
-    /// either.
+    /// Reads every configured base at the latest block. A base the book has never listed is left
+    /// out; the other pairs are read. Fails fatally when the node serves another chain, or when
+    /// the deployment no longer answers the way this integration was built for (its contracts
+    /// point elsewhere, a getter it reads reverts, or a side holds more knots than
+    /// [`MAX_KNOTS`]), since no later read will either.
     pub(super) async fn read(&self) -> Result<BookRead, FeedError> {
         let mut calls = Vec::new();
         for (_, settings_call) in self.settings_calls() {
@@ -322,47 +321,51 @@ fn call(target: Address, data: Vec<u8>, allow_failure: bool) -> Call3 {
     Call3 { target, allowFailure: allow_failure, callData: AlloyBytes::from(data) }
 }
 
-/// One configured base's pair with its knots; `None` when the book has not listed it or one of
-/// its calls reverted. Fails fatally when the taker fee getter reverts for a listed pair or a
-/// side holds more knots than [`MAX_KNOTS`]: the deployment changed.
+/// One configured base's pair with its knots; `None` when the book has not listed it.
+///
+/// The curve book answers `pair` and `validUntil` for any address, with zeros for one it has not
+/// listed, and the custodian reverts only for an address that is no token, which the book cannot
+/// have listed. So a revert of any call for a listed base, or of `pair` or `validUntil` for any
+/// base, means the deployment changed, and fails fatally; so does a side holding more knots than
+/// [`MAX_KNOTS`].
 fn decode_pair(base: Address, answers: &[Call3Result]) -> Result<Option<PairRead>, FeedError> {
     let (head, knots) = answers.split_at(PAIR_HEAD_CALLS);
     let [pair, valid_until, available, fee] = head else {
         return Err(FeedError::Parsing("BaiBai multicall answered too few calls".into()));
     };
     let (ask_knots, bid_knots) = knots.split_at(MAX_KNOTS);
-    if !(pair.success && valid_until.success && available.success) {
-        warn!(%base, "skipping BaiBai base whose pair or custody call reverted");
-        return Ok(None);
+    for (getter, answer) in [("curve book's pair", pair), ("curve book's validUntil", valid_until)]
+    {
+        if !answer.success {
+            return Err(deployment_changed(format!("the {getter} getter reverted for {base}")));
+        }
     }
     let view = decode::<pairCall>(pair, "pair")?;
     if view.qUnit == U256::ZERO {
         debug!(%base, "skipping base the BaiBai curve book has not listed");
         return Ok(None);
     }
-    if !fee.success {
-        return Err(FeedError::Fatal(format!(
-            "BaiBai: the entrypoint's taker fee getter reverted for {base}; the deployment \
-             changed and the integration needs updating"
-        )));
+    for (getter, answer) in
+        [("custodian's availableLiquidity", available), ("entrypoint's taker fee", fee)]
+    {
+        if !answer.success {
+            return Err(deployment_changed(format!(
+                "the {getter} getter reverted for listed base {base}"
+            )));
+        }
     }
     for (name, side) in [("ask", &view.ask), ("bid", &view.bid)] {
         if usize::from(side.knotCount) > MAX_KNOTS {
-            return Err(FeedError::Fatal(format!(
-                "BaiBai: {base}'s {name} side holds {} knots, more than the {MAX_KNOTS} read; the \
-                 deployment changed and the integration needs updating",
+            return Err(deployment_changed(format!(
+                "{base}'s {name} side holds {} knots, more than the {MAX_KNOTS} read",
                 side.knotCount
             )));
         }
     }
     let fee = U256::abi_decode(&fee.returnData)
         .map_err(|e| FeedError::Parsing(format!("BaiBai taker fee: {e}")))?;
-    let (Some(ask), Some(bid)) =
-        (read_knots(ask_knots, view.ask.knotCount)?, read_knots(bid_knots, view.bid.knotCount)?)
-    else {
-        warn!(%base, "skipping BaiBai pair whose knots could not be read");
-        return Ok(None);
-    };
+    let ask = read_knots(base, "ask", ask_knots, view.ask.knotCount)?;
+    let bid = read_knots(base, "bid", bid_knots, view.bid.knotCount)?;
     let side = |side: &SideView, knots: Vec<Knot>| Side {
         spread_bps: side.spreadBps,
         depth_bps: side.depthBps,
@@ -383,18 +386,35 @@ fn decode_pair(base: Address, answers: &[Call3Result]) -> Result<Option<PairRead
     Ok(Some(pair))
 }
 
-/// The first `count` of one side's knot answers; `None` when one of them reverted. The answers
-/// past `count` revert at the curve book and are ignored.
-fn read_knots(answers: &[Call3Result], count: u8) -> Result<Option<Vec<Knot>>, FeedError> {
+/// The first `count` of one side's knot answers. The answers past `count` revert at the curve
+/// book and are ignored; one within it reverting means the deployment changed.
+fn read_knots(
+    base: Address,
+    side: &str,
+    answers: &[Call3Result],
+    count: u8,
+) -> Result<Vec<Knot>, FeedError> {
     let mut knots = Vec::with_capacity(usize::from(count));
-    for answer in &answers[..usize::from(count)] {
+    for (index, answer) in answers[..usize::from(count)]
+        .iter()
+        .enumerate()
+    {
         if !answer.success {
-            return Ok(None);
+            return Err(deployment_changed(format!(
+                "the curve book's knot getter reverted for {base}'s {side} knot {index} of {count}"
+            )));
         }
         let knot = decode::<knotCall>(answer, "knot")?;
         knots.push(Knot { q: knot.q.to(), extra: knot.extra.to() });
     }
-    Ok(Some(knots))
+    Ok(knots)
+}
+
+/// The fatal error for a deployment that no longer answers the way this integration was built for.
+fn deployment_changed(what: String) -> FeedError {
+    FeedError::Fatal(format!(
+        "BaiBai: {what}; the deployment changed and the integration needs updating"
+    ))
 }
 
 fn to_u64(value: U256) -> Result<u64, FeedError> {
