@@ -1,0 +1,25 @@
+[
+  {
+    "type": "function",
+    "name": "getConfig",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct IMEVCaptureV21.Config",
+        "components": [
+          { "name": "halfLife", "type": "uint32", "internalType": "uint32" },
+          { "name": "slopeK", "type": "uint8", "internalType": "uint8" },
+          { "name": "segmentExp", "type": "uint8", "internalType": "uint8" },
+          { "name": "segmentWidthMultiplier", "type": "uint32", "internalType": "uint32" },
+          { "name": "jLin", "type": "uint8", "internalType": "uint8" },
+          { "name": "maxFee", "type": "uint64", "internalType": "uint64" },
+          { "name": "clampTicks", "type": "uint32", "internalType": "uint32" },
+          { "name": "mGate", "type": "uint8", "internalType": "uint8" }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  }
+]

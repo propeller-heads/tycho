@@ -35,7 +35,7 @@ use crate::{
             addresses::SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS,
             pool::{
                 boosted_fees::BoostedFeesPool, mev_capture::MevCapturePool,
-                stableswap::StableswapPool,
+                mev_capture_v21::MevCaptureV21Pool, stableswap::StableswapPool,
             },
         },
         u256_num::u256_to_f64,
@@ -60,6 +60,7 @@ pub enum EkuboV3State {
     Oracle(OraclePool),
     Twamm(TwammPool),
     MevCapture(MevCapturePool),
+    MevCaptureV21(MevCaptureV21Pool),
     BoostedFees(BoostedFeesPool),
     Ve33(Ve33Pool),
 }
@@ -75,7 +76,9 @@ fn sqrt_price_q128_to_f64(
 }
 
 impl EkuboV3State {
-    /// Zero unless the extension forces the swap through `Core.forward`.
+    /// Gas of a SignedExclusiveSwap `Core.forward` on top of the pool's own estimate, zero for
+    /// every other pool. MEVCapture v1 and v2.1 swaps are forwarded too, but their pool estimates
+    /// already include the forward.
     ///
     /// The pool key carries no chain, so a SignedExclusiveSwap address from any deployment counts.
     fn forward_overhead_gas(&self) -> u64 {
@@ -130,6 +133,7 @@ impl ProtocolSim for EkuboV3State {
             Self::Oracle(_) |
             Self::Twamm(_) |
             Self::MevCapture(_) |
+            Self::MevCaptureV21(_) |
             Self::BoostedFees(_) => self.key().config.fee,
         };
         fee as f64 / (2f64.powi(64))
@@ -309,7 +313,7 @@ mod tests {
     /// Only a pool that cannot be swapped without `Core.forward` is surcharged.
     #[rstest]
     fn test_other_pools_carry_no_forward_overhead() {
-        for case in [concentrated(), full_range(), mev_capture()] {
+        for case in [concentrated(), full_range(), mev_capture(), mev_capture_v21()] {
             assert_eq!(
                 case.state_after_transition
                     .forward_overhead_gas(),

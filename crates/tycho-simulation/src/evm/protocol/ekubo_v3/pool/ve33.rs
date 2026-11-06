@@ -37,6 +37,7 @@ impl Ve33UnderlyingPool {
             EkuboV3State::Oracle(_) |
             EkuboV3State::Twamm(_) |
             EkuboV3State::MevCapture(_) |
+            EkuboV3State::MevCaptureV21(_) |
             EkuboV3State::BoostedFees(_) |
             EkuboV3State::Ve33(_) => Err(SimulationError::FatalError(
                 "Ve33 underlying quote returned an unexpected pool type".to_string(),

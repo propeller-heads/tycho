@@ -58,7 +58,8 @@ abstract contract EkuboV3StandaloneLocker is EkuboV3Executor, ILocker {
         uint256 amount = uint128(bytes16(msg.data[36:52]));
 
         if (tokenIn != ETH_ADDRESS) {
-            IERC20(tokenIn).transfer(receiver, amount);
+            // Safe transfer for tokens without a return value (USDT).
+            SafeTransferLib.safeTransfer(tokenIn, receiver, amount);
         }
         bytes memory res = handleCallback(msg.data);
         assembly ("memory-safe") {
