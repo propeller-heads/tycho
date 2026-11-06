@@ -85,6 +85,8 @@ In strict mode:
   `no` would otherwise turn the check off.
 - Every check of a test runs, and the test fails at the end listing every failed check, instead of
   stopping at the first. A check that needs the result of a failed one is reported as not run.
+- Every expected component's balances are checked, against where the component declares they are
+  held, and `skip_balance_check` is an error (below).
 - Every direction of every expected component declares what kind of limit `get_limits` reports,
   and the limit is tested as declared (below).
 - An execution must pay exactly the simulated amount, unless the package declares a tolerance
@@ -96,6 +98,58 @@ A missing executor deployment is not a reason to skip execution, in either mode,
 protocol's executor has a runtime bytecode fixture in `src/execution.rs`: the harness overrides the
 executor address with that bytecode, so execution runs either way. A protocol without one needs a
 fixture added first.
+
+### Balances
+
+Legacy mode checks every component in the snapshot against `balanceOf(component id)`, or skips the
+check for the whole package. Strict mode checks each expected component, and reports each
+separately, against the source it declares:
+
+```yaml
+expected_components:
+  - id: "0x..."
+    balance_check: default                               # balanceOf(component id), the default
+  - id: "0x..."
+    balance_check: {holder: "attribute:vault"}           # the address in an attribute
+  - id: "0x..."
+    balance_check: {holder: "0xBA12222222228d8Ba445958a75a0704d566BF2C8"}   # a fixed address
+  - id: "0x..."
+    balance_check: {min_of: [self, "attribute:vault"]}   # the smallest of several holders
+```
+
+Where the tokens are held in different places, each token gets its own source, and a token not
+listed is read from the component itself. `token` reads another token's balance, for a component
+whose inventory mirrors an underlying. Sky's USDS/USDC wrapper holds nothing itself: its USDC
+sits in the PSM's pocket, and the USDS it can pay out is the PSM's DAI:
+
+```yaml
+  - id: "0xa188eec8f81263234da3622a406892f3d630f98c"   # Sky USDS/USDC wrapper
+    balance_check:
+      tokens:
+        # USDC: held by the PSM's pocket
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {holder: "0x37305b1cd40574e4c5ce33f8e8306be057fd7341"}
+        # USDS: the PSM's DAI balance
+        "0xdc035d45d973e3ec169d2276ddab16f1e407384f":
+          holder: "0xf6e72db5454dd049d0788e411b06cfaf16853042"
+          token: "0x6b175474e89094c44da98b954eedeac495271d0f"
+```
+
+- An `attribute:NAME` holder is read from the component's static attributes, then from its state
+  attributes at the snapshot block; a 32-byte ABI-encoded address is accepted.
+- `min_of` compares the indexed balance with the smallest of the holders' balances, for an amount
+  bounded by each of them. It needs at least two holders.
+- The comparison is exact, and a token without an indexed balance counts as zero.
+- A `tokens` entry for a token the component does not have fails the component, and two entries
+  for one token (keys that differ only in case) are an error.
+- A test in strict mode must list its expected components: an empty list, which elsewhere means
+  every component of the protocol, would leave the balances unchecked.
+- A component whose id is not an address needs a holder.
+- The package-level `skip_balance_check` is an error in strict mode, whatever its value; leave
+  it out, as the check runs by default. A
+  balance that is protocol accounting rather than a token balance (`totalPooledEther`, say) has
+  no source to declare yet; such a package stays in legacy mode for now.
+
+`balance_check` is read in legacy mode, where it is ignored.
 
 ### Limits
 
@@ -225,7 +279,7 @@ tolerance or not, so `measured` can be checked against a run.
 | `index` | the range indexes, and the snapshot can be read at the stop block |
 | `state.components` | every expected component is indexed, with its tokens and static attributes |
 | `state.excluded` | no excluded component is indexed |
-| `balances` | indexed balances match `balanceOf` on chain |
+| `balances` | indexed balances match `balanceOf` on chain; strict: per component, against its declared holder |
 | `decode` | the snapshot decodes, and so does every expected component |
 | `sim.ladder` | limits, spot prices and quotes at 0.1%, 1% and 10% of the limit, every direction |
 | `exec.ladder` | executing each quote on chain matches the simulation, within the tolerance |
