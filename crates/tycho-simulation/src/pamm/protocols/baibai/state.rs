@@ -1,6 +1,6 @@
 use std::{any::Any, collections::HashMap};
 
-use alloy::primitives::U256;
+use alloy::primitives::{address, Address, U256};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
@@ -29,13 +29,21 @@ use crate::{
 /// (behind its previous fill or passed by this swap), and, buying base, a further cost per knot
 /// the swap itself passes. Measured cold on Base forks against WETH's five-knot sides: a base of
 /// 110,963 buying and 111,330 selling at block 53,234,728, which the Entrypoint upgrade at
-/// 53,492,231 raised by 3,379 both ways; each knot passed adds 1,527 selling and 2,908 buying,
-/// unchanged by the upgrade. Curves with more knots were not available to measure. cbBTC's token
-/// transfers cost about 17,000 more than WETH's, which this leaves out. The router's own
-/// transfers and approval are added on top by tycho-execution's gas estimator.
+/// 53,492,231 raised by 3,379 both ways, to 114,342 and 114,709; the constant rounds the larger
+/// up, with a margin of about 700. Each knot passed adds 1,527 selling and 2,908 buying,
+/// unchanged by the upgrade. Curves with more knots were not available to measure. The router's
+/// own transfers and approval are added on top by tycho-execution's gas estimator.
 const BASE_SWAP_GAS: u64 = 115_400;
 const GAS_PER_KNOT_BELOW_CURSOR: u64 = 1_550;
 const GAS_PER_KNOT_BOUGHT_THROUGH: u64 = 1_360;
+
+/// Gas a base token's own transfers inside the swap add over WETH's, selling base then buying it:
+/// cbBTC's go through its proxy. Measured at Base block 53,545,000 as the difference between
+/// entrypoint swaps of each base within its first segment, +17,079 selling and +15,352 buying,
+/// rounded up. A base not listed here, such as one served through
+/// [`BaibaiFeedBuilder::bases`](super::BaibaiFeedBuilder::bases), is priced as WETH.
+const BASE_TRANSFER_GAS: [(Address, u64, u64); 1] =
+    [(address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"), 17_100, 15_400)];
 
 /// The entrypoint's fee denominator: fees are set in millionths of the gross output.
 const FEE_DENOMINATOR: u32 = 1_000_000;
@@ -111,13 +119,21 @@ impl BaibaiState {
     }
 
     /// The executor's gas for a swap in `direction` that moves the side's cursor to `cursor`.
-    fn gas(curve: &Curve, direction: SwapDirection, cursor: U256) -> u64 {
+    fn gas(&self, curve: &Curve, direction: SwapDirection, cursor: U256) -> u64 {
         let below = curve.knots_below(cursor);
         let bought_through = match direction {
             SwapDirection::BaseToQuote => 0,
             SwapDirection::QuoteToBase => below - curve.knots_below(curve.filled),
         };
+        let transfers = BASE_TRANSFER_GAS
+            .iter()
+            .find(|(base, _, _)| self.base_token.address.as_ref() == base.as_slice())
+            .map_or(0, |(_, selling, buying)| match direction {
+                SwapDirection::BaseToQuote => *selling,
+                SwapDirection::QuoteToBase => *buying,
+            });
         BASE_SWAP_GAS +
+            transfers +
             GAS_PER_KNOT_BELOW_CURSOR * below +
             GAS_PER_KNOT_BOUGHT_THROUGH * bought_through
     }
@@ -216,7 +232,7 @@ impl ProtocolSim for BaibaiState {
         next.available[paid_out] -= output;
         Ok(GetAmountOutResult::new(
             u256_to_biguint(output),
-            BigUint::from(Self::gas(&curve, direction, cursor)),
+            BigUint::from(self.gas(&curve, direction, cursor)),
             Box::new(next),
         ))
     }
@@ -302,7 +318,7 @@ mod tests {
     use super::*;
     use crate::pamm::protocols::baibai::{
         math::Knot,
-        test_support::{fee_charging_fixture, fixtures, state, token, weth_state},
+        test_support::{fee_charging_fixture, fixture, fixtures, state, token, weth_state},
         BASE_DEPLOYMENT,
     };
 
@@ -423,9 +439,9 @@ mod tests {
     }
 
     /// A swap costs a base amount plus a share per knot it walks past, and more per knot buying
-    /// base. The recording's WETH sides have knots at about 0.41, 1.03, 3.10 and 5.17 WETH; the
-    /// fork measured 1,527 more gas selling 2 WETH (two knots) than 0.2 WETH (none), and 2,908 more
-    /// buying with 1,000 USDC (one knot) than with 500.
+    /// base. The recording's WETH sides have five knots, the first three at about 0.41, 1.03 and
+    /// 3.10 WETH; the fork measured 1,527 more gas per knot selling 2 WETH (two knots) than 0.2
+    /// WETH (none), and 2,908 more buying with 1,000 USDC (one knot) than with 500.
     #[rstest]
     #[case::selling_within_the_first_segment(true, 2u64 * 10u64.pow(17), 115_400)]
     #[case::selling_past_two_knots(true, 2u64 * 10u64.pow(18), 118_500)]
@@ -437,6 +453,32 @@ mod tests {
         #[case] expected: u64,
     ) {
         let state = weth_state();
+        let (token_in, token_out) = if sell_base {
+            (state.base_token.clone(), quote())
+        } else {
+            (quote(), state.base_token.clone())
+        };
+
+        let gas = state
+            .get_amount_out(BigUint::from(amount), &token_in, &token_out)
+            .unwrap()
+            .gas;
+
+        assert_eq!(gas, BigUint::from(expected));
+    }
+
+    /// cbBTC's own transfers cost more than WETH's, each way, on top of the same curve walk.
+    #[rstest]
+    #[case::selling(true, 1_000_000, 115_400 + 17_100)]
+    #[case::buying(false, 500_000_000, 115_400 + 15_400)]
+    fn cbbtc_swaps_add_its_transfer_gas(
+        #[case] sell_base: bool,
+        #[case] amount: u64,
+        #[case] expected: u64,
+    ) {
+        let fixture = fixture();
+        let state = state(&fixture, &fixture.pairs[1]);
+        assert_eq!(state.base_token.symbol, "cbBTC");
         let (token_in, token_out) = if sell_base {
             (state.base_token.clone(), quote())
         } else {
