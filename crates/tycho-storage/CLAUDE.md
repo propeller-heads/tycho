@@ -66,8 +66,9 @@ All public DB operations go through one of two gateway structs:
   connection with the same server-side TCP timeouts, so Postgres frees the lock within about 30s after a
   leader's host disappears. The lock elects the writer; the epoch fences it.
 - **Non-writer support**: `CachedGateway::get_committed_blocks` returns the number and timestamp
-  of the block each extractor's `extraction_state` points to (the newest block committed for it), and
-  `cache_tokens` adds tokens to the token cache without writing them.
+  of the block each extractor's `extraction_state` points to (the newest block committed for it),
+  `cache_tokens` adds tokens to the token cache without writing them, and `cache_last_traded`
+  moves their `last_traded` timestamps forward without writing balances.
 - **`DirectGateway`** (testing / low-throughput): same trait surface, no buffering.
 
 `GatewayBuilder::build` requires **exactly one** chain (`ensure_chain`) — an instance is

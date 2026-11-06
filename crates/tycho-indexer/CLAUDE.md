@@ -214,8 +214,12 @@ the former leader left, instead of committing again from an old cursor:
 - **Committing** (leader): the path above.
 - **Following**: drained blocks go into the committing section but are never written. They are
   released once the leader's committed height for this extractor (`WriterStatus::committed_height`)
-  passes them, and the released blocks' `new_tokens` go into the token cache
-  (`ExtractorGateway::cache_tokens`), the same point at which the leader's write-through caches them.
+  passes them. The released blocks' `new_tokens` then go into the token cache
+  (`ExtractorGateway::cache_tokens`), and each token with a component balance change gets the
+  block timestamp as its `last_traded`, the same point and values at which the leader's
+  write-through updates its cache. Without this, the cache refresh, which reads only token rows,
+  would leave `last_traded` at its startup value, and a `traded_n_days_ago` token query would
+  return fewer tokens each day.
   Outgoing messages carry the leader's committed height as `db_committed_block_height`.
   A following extractor keeps committing blocks that span less than `FOLLOWER_RETENTION_SPAN`
   (1 hour of chain time, newest minus oldest committing block timestamp; chain time and not a

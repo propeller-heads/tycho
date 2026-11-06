@@ -66,6 +66,28 @@ type BatchCommitHandle = JoinHandle<Result<(), ExtractionError>>;
 /// A block drained from the reorg buffer, shared with the commit task.
 type DrainedBlock = Arc<BlockUpdateWithCursor<BlockChanges>>;
 
+/// Returns each token with a component balance change in `blocks`, with the timestamp of the
+/// newest such block. The leader's balance write sets a token's `last_traded` to the same value.
+fn last_traded_in(blocks: &[DrainedBlock]) -> Vec<(Address, NaiveDateTime)> {
+    let mut last_traded: HashMap<Address, NaiveDateTime> = HashMap::new();
+    for block in blocks {
+        let changes = block.block_update();
+        for tx in &changes.txs_with_update {
+            for token in tx
+                .balance_changes
+                .values()
+                .flat_map(HashMap::keys)
+            {
+                let ts = last_traded
+                    .entry(token.clone())
+                    .or_insert(changes.block.ts);
+                *ts = (*ts).max(changes.block.ts);
+            }
+        }
+    }
+    last_traded.into_iter().collect()
+}
+
 /// Most chain time the drained blocks of a following extractor may cover while they wait for the
 /// leader to commit them. At this span it stops taking blocks until the leader's commits release
 /// some, so its memory stays bounded when the leader stops committing for this extractor after
@@ -1065,9 +1087,10 @@ where
         })
     }
 
-    /// Caches the new tokens of blocks the database now covers. The leader's writes put a
-    /// block's tokens into its token cache when it commits the block; this gives every other
-    /// process the same tokens at the same point.
+    /// Caches the new tokens of blocks the database now covers, and when each token with a
+    /// component balance change in them last traded. The leader's writes update its token cache
+    /// in the same way when it commits the block; this gives every other process the same tokens
+    /// and "recently traded" filter at the same point.
     fn cache_committed_tokens(&self, blocks: &[DrainedBlock]) {
         let tokens: Vec<Token> = blocks
             .iter()
@@ -1079,9 +1102,13 @@ where
                     .cloned()
             })
             .collect();
-        if !tokens.is_empty() {
-            self.gateway.inner.cache_tokens(&tokens);
+        let last_traded = last_traded_in(blocks);
+        if tokens.is_empty() && last_traded.is_empty() {
+            return;
         }
+        self.gateway
+            .inner
+            .cache_tokens(&tokens, &last_traded);
     }
 
     /// Commits `blocks_to_commit` at `priority` in a background task, after the previous commit
@@ -2210,8 +2237,9 @@ pub trait ExtractorGateway: Send + Sync {
     /// `None` when nothing has been flushed since startup.
     async fn flushed_block_height(&self) -> Option<u64>;
 
-    /// Makes `tokens` available to token queries of this process without persisting them.
-    fn cache_tokens(&self, tokens: &[Token]);
+    /// Makes `tokens` available to token queries of this process without persisting them, then
+    /// records when each token of `last_traded` last traded, for the "recently traded" filter.
+    fn cache_tokens(&self, tokens: &[Token], last_traded: &[(Address, NaiveDateTime)]);
 
     /// Returns the current state of the protocol components identified by `component_ids`.
     ///
@@ -2579,8 +2607,10 @@ impl ExtractorGateway for ExtractorPgGateway {
             .flushed_block_height()
     }
 
-    fn cache_tokens(&self, tokens: &[Token]) {
+    fn cache_tokens(&self, tokens: &[Token], last_traded: &[(Address, NaiveDateTime)]) {
         self.state_gateway.cache_tokens(tokens);
+        self.state_gateway
+            .cache_last_traded(&self.chain, last_traded);
     }
 
     async fn get_protocol_states<'a>(
@@ -2914,7 +2944,7 @@ mod test {
         gw.expect_flushed_block_height()
             .returning(|| None);
         gw.expect_cache_tokens()
-            .returning(|_| ());
+            .returning(|_, _| ());
         let committed = Arc::new(std::sync::Mutex::new(Vec::new()));
         let committed_clone = committed.clone();
         gw.expect_advance()
@@ -3051,7 +3081,7 @@ mod test {
         let cached = Arc::new(std::sync::Mutex::new(Vec::new()));
         let cached_clone = cached.clone();
         gw.expect_cache_tokens()
-            .returning(move |tokens| {
+            .returning(move |tokens, _| {
                 cached_clone
                     .lock()
                     .unwrap()
@@ -3179,7 +3209,7 @@ mod test {
             .returning(|| Err(StorageError::NotFound("ExtractionState".into(), "x".into())));
         gw.expect_advance().never();
         gw.expect_cache_tokens()
-            .returning(|_| ());
+            .returning(|_, _| ());
         gw
     }
 

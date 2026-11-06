@@ -793,6 +793,23 @@ impl CachedGateway {
         }
     }
 
+    /// Records in the in-memory token cache when each `chain` token of `last_traded` last traded,
+    /// without writing to the database.
+    ///
+    /// A cached value only moves forward, and unknown tokens are ignored. Does nothing when the
+    /// token cache is disabled. Lets a process that does not write balances keep the "recently
+    /// traded" filter of token queries current: the cache refresh reads only token rows.
+    pub fn cache_last_traded(&self, chain: &Chain, last_traded: &[(Address, NaiveDateTime)]) {
+        if let Some(token_cache) = &self.state_gateway.token_cache {
+            token_cache.update_last_traded(
+                chain,
+                last_traded
+                    .iter()
+                    .map(|(address, ts)| (address, *ts)),
+            );
+        }
+    }
+
     /// Returns the height of the newest block whose staged writes reached the store, or
     /// `None` when this instance has not flushed anything yet.
     pub fn flushed_block_height(&self) -> Option<u64> {
