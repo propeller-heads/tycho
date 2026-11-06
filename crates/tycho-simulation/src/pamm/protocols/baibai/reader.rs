@@ -192,10 +192,12 @@ impl BaibaiReader {
     /// with no code, successfully and with no data.
     fn decode_settings(&self, answers: &[Call3Result]) -> Result<BookRead, FeedError> {
         let Deployment { chain, curve_book, custodian, quote, .. } = self.deployment;
-        let [block_number, timestamp, chain_id, entrypoint_curve_book, entrypoint_custodian, entrypoint_quote, curve_book_quote, ttl, c_unit, quote_custody] =
-            answers
-        else {
-            return Err(FeedError::Parsing("BaiBai multicall answered too few calls".into()));
+        let too_few = || FeedError::Parsing("BaiBai multicall answered too few calls".into());
+        let [block_number, timestamp, chain_id, wiring @ .., ttl, c_unit, custody] = answers else {
+            return Err(too_few());
+        };
+        let [entry_book, entry_custodian, entry_quote, book_quote] = wiring else {
+            return Err(too_few());
         };
         let served = to_u64(setting::<getChainIdCall>(chain_id, "chain id")?)?;
         if served != chain.id() {
@@ -207,22 +209,22 @@ impl BaibaiReader {
         let wiring = [
             (
                 "entrypoint's curveBook",
-                setting::<curveBookCall>(entrypoint_curve_book, "entrypoint's curveBook")?,
+                setting::<curveBookCall>(entry_book, "entrypoint's curveBook")?,
                 curve_book,
             ),
             (
                 "entrypoint's custodian",
-                setting::<custodianCall>(entrypoint_custodian, "entrypoint's custodian")?,
+                setting::<custodianCall>(entry_custodian, "entrypoint's custodian")?,
                 custodian,
             ),
             (
                 "entrypoint's quoteToken",
-                setting::<quoteTokenCall>(entrypoint_quote, "entrypoint's quoteToken")?,
+                setting::<quoteTokenCall>(entry_quote, "entrypoint's quoteToken")?,
                 quote,
             ),
             (
                 "curve book's quoteToken",
-                setting::<quoteTokenCall>(curve_book_quote, "curve book's quoteToken")?,
+                setting::<quoteTokenCall>(book_quote, "curve book's quoteToken")?,
                 quote,
             ),
         ];
@@ -237,7 +239,7 @@ impl BaibaiReader {
             ttl: setting::<ttlCall>(ttl, "curve book's ttl")?,
             c_unit: setting::<cUnitCall>(c_unit, "curve book's cUnit")?,
             available_quote: setting::<availableLiquidityCall>(
-                quote_custody,
+                custody,
                 "custodian's availableLiquidity",
             )?,
             pairs: Vec::new(),
