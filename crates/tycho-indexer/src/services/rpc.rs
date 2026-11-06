@@ -4682,9 +4682,17 @@ mod health_tests {
     use actix_web::{test, App};
     use tokio::{sync::watch, time::Instant};
     use tycho_common::traits::MockEntryPointTracer;
+    use tycho_storage::postgres::cache::CommittedBlock;
 
     use super::*;
-    use crate::{extractor::writer_status::Role, testing::MockGateway};
+    use crate::{
+        extractor::writer_status::Role,
+        services::{
+            deltas_buffer::PendingDeltas,
+            state::window::{new_windows, DiscardSink, WindowConfig},
+        },
+        testing::{self, MockGateway},
+    };
 
     fn writer_status(role: Role, last_confirmed_ago: std::time::Duration) -> WriterStatus {
         let confirmed_at = Instant::now()
@@ -4725,6 +4733,145 @@ mod health_tests {
         let stale = writer_status(Role::Leader, LEAD_CONFIRMATION_LIMIT * 2);
 
         assert_eq!(health_status(Some(stale)).await, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// A follower whose leader committed block 100 of `uniswap_v2` a minute ago, so the follower
+    /// streams `uniswap_v2`.
+    fn follower_streaming_uniswap_v2() -> WriterStatus {
+        let committed = HashMap::from([(
+            "uniswap_v2".to_string(),
+            CommittedBlock {
+                number: 100,
+                ts: chrono::Utc::now().naive_utc() - chrono::Duration::minutes(1),
+            },
+        )]);
+        let (_, role) = watch::channel(Role::Follower);
+        let (_, committed) = watch::channel(committed);
+        let (_, confirmed_at) = watch::channel(Instant::now());
+        WriterStatus::new(role, committed, confirmed_at)
+    }
+
+    /// Windows for `uniswap_v2` whose newest block, block 120, the chain produced `age` ago.
+    fn deltas_with_newest_block_of_age(
+        age: chrono::Duration,
+    ) -> Arc<dyn PendingDeltasBuffer + Send + Sync> {
+        let windows = new_windows(["uniswap_v2"], WindowConfig::default());
+        let mut block = testing::aggregated_changes("uniswap_v2", 120, 0, None);
+        block.block.ts = chrono::Utc::now().naive_utc() - age;
+        windows["uniswap_v2"]
+            .lock()
+            .expect("the window lock is not poisoned")
+            .insert(&Arc::new(block))
+            .expect("an empty window takes any block");
+        Arc::new(PendingDeltas::from_windows(windows, Arc::new(DiscardSink)))
+    }
+
+    fn fresh_deltas() -> Arc<dyn PendingDeltasBuffer + Send + Sync> {
+        deltas_with_newest_block_of_age(chrono::Duration::seconds(5))
+    }
+
+    fn stale_deltas() -> Arc<dyn PendingDeltasBuffer + Send + Sync> {
+        deltas_with_newest_block_of_age(chrono::Duration::minutes(5))
+    }
+
+    async fn ready_response(
+        writer_status: Option<WriterStatus>,
+        pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
+    ) -> (StatusCode, String) {
+        ready_response_with_tolerance(writer_status, pending_deltas, DEFAULT_READY_HEAD_TOLERANCE)
+            .await
+    }
+
+    async fn ready_response_with_tolerance(
+        writer_status: Option<WriterStatus>,
+        pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
+        tolerance: chrono::Duration,
+    ) -> (StatusCode, String) {
+        let handler = RpcHandler::new(
+            MockGateway::new(),
+            pending_deltas,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+            writer_status,
+        )
+        .with_ready_head_tolerance(tolerance);
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(handler))
+                .route("/ready", web::get().to(ready::<MockGateway, MockEntryPointTracer>)),
+        )
+        .await;
+        let req = test::TestRequest::get()
+            .uri("/ready")
+            .to_request();
+        let response = test::call_service(&app, req).await;
+        let status = response.status();
+        let body = test::read_body(response).await;
+        (status, String::from_utf8(body.to_vec()).expect("the body is UTF-8"))
+    }
+
+    #[actix_web::test]
+    async fn test_ready_fails_while_a_followers_newest_block_is_older_than_the_tolerance() {
+        let (status, body) =
+            ready_response(Some(follower_streaming_uniswap_v2()), Some(stale_deltas())).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("uniswap_v2 at block 120, 300s old"), "unexpected body: {body}");
+    }
+
+    #[actix_web::test]
+    async fn test_ready_passes_once_a_followers_newest_block_is_within_the_tolerance() {
+        let (status, _) =
+            ready_response(Some(follower_streaming_uniswap_v2()), Some(fresh_deltas())).await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn test_ready_uses_the_configured_tolerance() {
+        let (status, _) = ready_response_with_tolerance(
+            Some(follower_streaming_uniswap_v2()),
+            Some(stale_deltas()),
+            chrono::Duration::minutes(10),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn test_ready_fails_when_the_health_check_fails() {
+        let stale = writer_status(Role::Leader, LEAD_CONFIRMATION_LIMIT * 2);
+
+        let (status, _) = ready_response(Some(stale), Some(stale_deltas())).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[actix_web::test]
+    async fn test_ready_passes_for_a_leader_and_without_writer_status_or_windows() {
+        let leader = writer_status(Role::Leader, std::time::Duration::from_secs(1));
+
+        assert_eq!(
+            ready_response(Some(leader), Some(stale_deltas()))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            ready_response(None, Some(stale_deltas()))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            ready_response(Some(follower_streaming_uniswap_v2()), None)
+                .await
+                .0,
+            StatusCode::OK
+        );
     }
 
     #[actix_web::test]

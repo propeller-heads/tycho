@@ -215,6 +215,98 @@ mod tests {
         WriterStatus::new(role, committed, confirmed_at)
     }
 
+    fn follower_with_committed_blocks(committed: &[(&str, u64, chrono::Duration)]) -> WriterStatus {
+        let (_, role) = watch::channel(Role::Follower);
+        let committed = committed
+            .iter()
+            .map(|&(extractor, number, age)| {
+                (extractor.to_string(), CommittedBlock { number, ts: now() - age })
+            })
+            .collect();
+        let (_, committed) = watch::channel(committed);
+        let (_, confirmed_at) = watch::channel(Instant::now());
+        WriterStatus::new(role, committed, confirmed_at)
+    }
+
+    const TOLERANCE: chrono::Duration = chrono::Duration::seconds(60);
+
+    /// The newest block of each extractor: `(name, Some((number, age)))`, or `None` for none.
+    fn newest(
+        blocks: &[(&str, Option<(u64, chrono::Duration)>)],
+    ) -> HashMap<String, Option<Block>> {
+        blocks
+            .iter()
+            .map(|&(extractor, newest)| {
+                let block = newest.map(|(number, age)| {
+                    let mut block = crate::testing::block(number);
+                    block.ts = now() - age;
+                    block
+                });
+                (extractor.to_string(), block)
+            })
+            .collect()
+    }
+
+    fn behind(extractor: &str, newest: Option<(u64, chrono::Duration)>) -> ExtractorBehindHead {
+        ExtractorBehindHead {
+            extractor: extractor.to_string(),
+            newest: newest.map(|(number, age)| NewestBlock { number, age }),
+        }
+    }
+
+    #[test]
+    fn test_follower_is_behind_on_extractors_without_a_block_within_the_tolerance() {
+        let minute = chrono::Duration::minutes(1);
+        let second = chrono::Duration::seconds(1);
+        let follower = follower_with_committed_blocks(&[
+            ("uniswap_v3", 100, minute),
+            ("uniswap_v2", 100, minute),
+            ("sushiswap", 100, minute),
+            ("balancer", 100, minute),
+        ]);
+
+        let lagging = follower.extractors_behind_head(
+            &newest(&[
+                ("uniswap_v3", Some((120, TOLERANCE + second))),
+                ("uniswap_v2", None),
+                ("sushiswap", Some((121, TOLERANCE))),
+                ("balancer", Some((122, second))),
+            ]),
+            now(),
+            TOLERANCE,
+        );
+
+        assert_eq!(
+            lagging,
+            vec![behind("uniswap_v2", None), behind("uniswap_v3", Some((120, TOLERANCE + second)))]
+        );
+    }
+
+    #[test]
+    fn test_follower_is_not_behind_on_extractors_it_does_not_stream() {
+        let syncing_age = FOLLOWER_RETENTION_SPAN + chrono::Duration::minutes(1);
+        let follower = follower_with_committed_blocks(&[("syncing", 100, syncing_age)]);
+
+        let lagging = follower.extractors_behind_head(
+            &newest(&[("syncing", None), ("never_committed", None)]),
+            now(),
+            TOLERANCE,
+        );
+
+        assert_eq!(lagging, vec![]);
+    }
+
+    #[test]
+    fn test_leader_is_never_behind() {
+        let lagging = WriterStatus::leader().extractors_behind_head(
+            &newest(&[("uniswap_v2", None)]),
+            now(),
+            TOLERANCE,
+        );
+
+        assert_eq!(lagging, vec![]);
+    }
+
     #[test]
     fn test_leader_needs_the_stream_without_a_committed_block() {
         assert!(WriterStatus::leader().needs_stream("uniswap_v2", now()));

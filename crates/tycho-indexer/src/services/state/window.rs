@@ -1142,6 +1142,23 @@ mod test {
     }
 
     #[test]
+    fn tip_survives_a_fold_of_every_committed_block() {
+        let mut w = window(3, 1);
+        assert_eq!(tip_number(&w), None, "an empty window received no block");
+
+        fill(&mut w, 1..=4, 4, Some(4));
+        assert_eq!(tip_number(&w), Some(4));
+
+        let sink = RecordingSink::default();
+        w.fold_committed(&sink).unwrap();
+        assert_eq!(sink.folded(), vec![1, 2, 3, 4], "every block is committed and finalized");
+        assert_eq!(tip_number(&w), Some(4));
+
+        w.clear();
+        assert_eq!(tip_number(&w), None, "a cleared window forgets its blocks");
+    }
+
+    #[test]
     fn fold_committed_before_the_first_commit_folds_nothing() {
         let mut w = window(3, 1);
         fill(&mut w, 1..=5, 5, None);
