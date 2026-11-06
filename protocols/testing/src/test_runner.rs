@@ -14,8 +14,7 @@ use futures::StreamExt;
 use itertools::Itertools;
 use miette::{ensure, miette, IntoDiagnostic, WrapErr};
 use num_bigint::{BigInt, BigUint};
-use num_rational::BigRational;
-use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
+use num_traits::{FromPrimitive, Signed, Zero};
 use postgres::NoTls;
 use serde_json::json;
 use tokio::runtime::Runtime;
@@ -56,10 +55,10 @@ use crate::{
     adapter_builder::AdapterContractBuilder,
     config::{
         component_directions, Direction, Harness, IntegrationTest, IntegrationTestsConfig, Limits,
-        ProtocolComponentWithTestConfig, Skip,
+        ProtocolComponentWithTestConfig, Skip, Tolerance,
     },
     execution, limits,
-    report::{CheckId, Checks, Outcome, Report},
+    report::{drift, CheckId, Checks, Outcome, Report},
     rpc::RPCProvider,
     state_registry::register_protocol,
     tycho_rpc::TychoClient,
@@ -95,33 +94,43 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
     ])
 });
 
-/// Largest relative difference tolerated between the simulated and the executed amount out.
-const MAX_EXECUTION_SLIPPAGE: f64 = 0.005;
-
-/// Reports whether an executed amount out matches the simulated one, i.e. whether the difference
-/// between them stays within [`MAX_EXECUTION_SLIPPAGE`] of the executed amount.
+/// Reports whether an executed amount out matches the simulated one within `tolerance`: in basis
+/// points of the executed amount, or in base units of the token out.
 ///
-/// Returns the reason for the mismatch otherwise. A zero executed amount never matches, since no
-/// relative difference can be expressed against it.
+/// Returns the reason for the mismatch otherwise, saying whether the simulation over- or
+/// underquotes. A zero executed amount never matches, since no relative difference can be
+/// expressed against it.
 fn check_execution_slippage(
     expected_amount_out: &BigUint,
     amount_out: &BigUint,
+    tolerance: Tolerance,
 ) -> Result<(), String> {
-    if amount_out.is_zero() {
+    let Some((difference, bps)) = drift(expected_amount_out, amount_out) else {
         return Err("execution returned no output".to_string());
+    };
+    let within = difference.abs() <= BigInt::from(tolerance.wei) ||
+        difference.abs() * 10_000u32 <= BigInt::from(amount_out.clone()) * tolerance.bps;
+    if within {
+        return Ok(());
     }
 
-    let diff = BigInt::from(expected_amount_out.clone()) - BigInt::from(amount_out.clone());
-    let slippage = BigRational::new(diff.abs(), BigInt::from(amount_out.clone()));
+    let bps = format_bps(bps.abs());
+    let (paid, quotes) =
+        if difference.is_negative() { ("less", "overquotes") } else { ("more", "underquotes") };
+    Err(format!(
+        "execution paid {} {paid} than simulated: the simulation {quotes} by {bps} bps, beyond \
+         the tolerance ({tolerance})",
+        difference.abs()
+    ))
+}
 
-    // A slippage that cannot be evaluated counts as out of tolerance.
-    if slippage
-        .to_f64()
-        .is_none_or(|slippage| slippage > MAX_EXECUTION_SLIPPAGE)
-    {
-        Err(format!("amounts differ by more than {}%", MAX_EXECUTION_SLIPPAGE * 100.0))
+/// Formats a basis-point difference with two decimals, or with two significant digits below
+/// 0.01 bps, where a wei of a large trade would otherwise print as `0.00`.
+fn format_bps(bps: f64) -> String {
+    if bps == 0.0 || bps.abs() >= 0.01 {
+        format!("{bps:.2}")
     } else {
-        Ok(())
+        format!("{bps:.1e}")
     }
 }
 
@@ -251,6 +260,7 @@ fn execution_mismatch(
     simulation_id: &str,
     input: &TychoExecutionInput,
     results: &HashMap<String, TychoExecutionResult>,
+    tolerance: Tolerance,
 ) -> Option<String> {
     let component = &input.component_id;
     let mismatch = match results.get(simulation_id) {
@@ -261,7 +271,7 @@ fn execution_mismatch(
                 input.token_in,
                 input.token_out
             );
-            check_execution_slippage(&input.expected_amount_out, amount_out)
+            check_execution_slippage(&input.expected_amount_out, amount_out, tolerance)
                 .err()
                 .map(|reason| {
                     format!(
@@ -289,11 +299,14 @@ fn execution_mismatch(
 fn check_executions_match(
     inputs: &HashMap<String, TychoExecutionInput>,
     results: &HashMap<String, TychoExecutionResult>,
+    tolerance: Tolerance,
 ) -> miette::Result<()> {
     let failure_count = inputs
         .iter()
         .sorted_by(|a, b| a.0.cmp(b.0))
-        .filter_map(|(simulation_id, input)| execution_mismatch(simulation_id, input, results))
+        .filter_map(|(simulation_id, input)| {
+            execution_mismatch(simulation_id, input, results, tolerance)
+        })
         .count();
     let success_count = inputs.len() - failure_count;
     info!("Batch execution complete: {} successes, {} failures", success_count, failure_count);
@@ -302,6 +315,28 @@ fn check_executions_match(
         "Execution validation failed: {success_count} successes, {failure_count} failures"
     );
     Ok(())
+}
+
+/// Notes every execution in `inputs` that returned an output, for the report's drift.
+fn observe_executions(
+    checks: &mut Checks,
+    inputs: &HashMap<String, TychoExecutionInput>,
+    results: &HashMap<String, TychoExecutionResult>,
+) {
+    // Sorted, so a tie between executions resolves the same way on every run.
+    for (simulation_id, input) in inputs
+        .iter()
+        .sorted_by(|a, b| a.0.cmp(b.0))
+    {
+        if let Some(TychoExecutionResult::Success { amount_out, .. }) = results.get(simulation_id) {
+            checks.observe_execution(
+                simulation_id,
+                &input.component_id,
+                &input.expected_amount_out,
+                amount_out,
+            );
+        }
+    }
 }
 
 /// Why the execution of `simulation_id`, one unit past a hard limit, does not show the limit holds:
@@ -815,6 +850,7 @@ impl TestRunner {
             chain: self.chain.to_string(),
             harness: config.harness,
             results: Vec::new(),
+            drift: Vec::new(),
         };
 
         for (idx, test) in tests.iter().enumerate() {
@@ -870,6 +906,7 @@ impl TestRunner {
                         test.stop_block
                     );
                     let run = self.run_test(test, config, block, &mut checks);
+                    report.drift.extend(checks.take_drift());
                     let (outcome, results) = checks.finish();
                     report.results.extend(results);
                     run.and(outcome)
@@ -1099,6 +1136,7 @@ impl TestRunner {
                 output,
                 &header,
                 &config.protocol_system,
+                config.tolerance(),
                 executes_nothing,
                 checks,
             );
@@ -1108,14 +1146,21 @@ impl TestRunner {
             return Ok(());
         }
 
+        let executed = self
+            .runtime
+            .block_on(self.execute_unskipped(
+                output.executions,
+                &header,
+                &config.protocol_system,
+                &test.expected_components,
+            ));
+        // Noted before the check, so a failing run still reports how far off it was.
+        if let Ok((inputs, results)) = &executed {
+            observe_executions(checks, inputs, results);
+        }
         checks.run(CheckId::ExecLadder, || {
-            self.runtime
-                .block_on(self.run_execution(
-                    output.executions,
-                    &header,
-                    &config.protocol_system,
-                    &test.expected_components,
-                ))
+            let (inputs, results) = executed?;
+            check_executions_match(&inputs, &results, config.tolerance())
         })?;
 
         Ok(())
@@ -1938,16 +1983,10 @@ impl TestRunner {
     /// * `protocol_system` - The protocol system identifier
     /// * `expected_components` - Test configuration to determine which components to skip
     ///
-    /// # Returns
-    /// Returns `Ok(())` if all executions complete successfully within tolerance.
-    ///
     /// # Errors
-    /// Returns an error if:
-    /// - Execution simulation fails or reverts
-    /// - Difference between simulation and execution exceeds 0.5% tolerance
-    /// - Any critical execution failures occur
-    ///
-    /// Components can be skipped using `skip_execution` flag in the test configuration.
+    /// Returns an error if an execution cannot be simulated, reverts, or differs from its
+    /// simulation by more than 0.5%. Live mode has no package configuration to read, so it
+    /// ignores `harness` and `execution_tolerance` and always allows 0.5%.
     async fn run_execution(
         &self,
         execution_data: HashMap<String, TychoExecutionInput>,
@@ -1955,9 +1994,25 @@ impl TestRunner {
         protocol_system: &str,
         expected_components: &[ProtocolComponentWithTestConfig],
     ) -> miette::Result<()> {
+        let (inputs, results) = self
+            .execute_unskipped(execution_data, block, protocol_system, expected_components)
+            .await?;
+        check_executions_match(&inputs, &results, Tolerance::LEGACY)
+    }
+
+    /// Simulates executing every input whose component does not skip execution, returning the
+    /// inputs executed and their results.
+    async fn execute_unskipped(
+        &self,
+        execution_data: HashMap<String, TychoExecutionInput>,
+        block: &Block,
+        protocol_system: &str,
+        expected_components: &[ProtocolComponentWithTestConfig],
+    ) -> miette::Result<(HashMap<String, TychoExecutionInput>, HashMap<String, TychoExecutionResult>)>
+    {
         if execution_data.is_empty() {
             info!("No execution data to process");
-            return Ok(());
+            return Ok((HashMap::new(), HashMap::new()));
         }
 
         let skip_execution = skip_reasons(expected_components, |c| &c.skip_execution);
@@ -1970,13 +2025,13 @@ impl TestRunner {
 
         if filtered_execution_data.is_empty() {
             info!("All components skipped execution");
-            return Ok(());
+            return Ok((HashMap::new(), HashMap::new()));
         }
 
         let results = self
             .simulate_executions(&filtered_execution_data, block, protocol_system)
             .await?;
-        check_executions_match(&filtered_execution_data, &results)
+        Ok((filtered_execution_data, results))
     }
 
     /// Simulates executing every input at `block` in one batch, keyed like the inputs.
@@ -2010,6 +2065,7 @@ impl TestRunner {
         output: SimulationOutput,
         block: &Block,
         protocol_system: &str,
+        tolerance: Tolerance,
         executes_nothing: Option<&str>,
         checks: &mut Checks,
     ) -> miette::Result<()> {
@@ -2030,11 +2086,13 @@ impl TestRunner {
         let no_results = HashMap::new();
         let results = match &executed {
             Ok(results) => {
+                observe_executions(checks, &executions, results);
+                observe_executions(checks, &at_limit, results);
                 match executes_nothing {
                     Some(reason) => checks.skip(CheckId::ExecLadder, reason),
                     None => {
                         checks.run(CheckId::ExecLadder, || {
-                            check_executions_match(&executions, results)
+                            check_executions_match(&executions, results, tolerance)
                         })?;
                     }
                 }
@@ -2066,7 +2124,7 @@ impl TestRunner {
 
             let mut at_limit_failures = limits.failures_of(CheckId::LimitsAtLimit);
             at_limit_failures.extend(execution_failure(&limits.at_limit, &|id, input| {
-                execution_mismatch(id, input, results)
+                execution_mismatch(id, input, results, tolerance)
             }));
             checks.record_direction(
                 CheckId::LimitsAtLimit,
@@ -2619,15 +2677,19 @@ mod tests {
     }
 
     fn past_limit_input() -> TychoExecutionInput {
+        execution_input("0xaa", 101, 50)
+    }
+
+    fn execution_input(component: &str, amount_in: u32, simulated: u32) -> TychoExecutionInput {
         TychoExecutionInput {
             solution: Solution::new(
                 Bytes::default(),
                 Bytes::default(),
                 Bytes::from("0x01"),
                 Bytes::from("0x02"),
-                BigUint::from(101u32),
-                BigUint::from(50u32),
-                BigUint::from(50u32),
+                BigUint::from(amount_in),
+                BigUint::from(simulated),
+                BigUint::from(simulated),
                 Vec::new(),
             ),
             transaction: Transaction::new(
@@ -2636,9 +2698,9 @@ mod tests {
                 Vec::new(),
                 BigUint::zero(),
             ),
-            expected_amount_out: BigUint::from(50u32),
+            expected_amount_out: BigUint::from(simulated),
             protocol_system: "vault".to_string(),
-            component_id: "0xaa".to_string(),
+            component_id: component.to_string(),
             token_in: "A".to_string(),
             token_out: "B".to_string(),
             estimated_gas: BigUint::zero(),
@@ -2652,6 +2714,52 @@ mod tests {
             state_overwrites: None,
             overwrite_metadata: None,
         }
+    }
+
+    fn success(amount_out: u32) -> TychoExecutionResult {
+        TychoExecutionResult::Success {
+            amount_out: BigUint::from(amount_out),
+            gas_used: 0,
+            state_overwrites: None,
+            overwrite_metadata: None,
+        }
+    }
+
+    #[test]
+    fn drift_is_noted_for_ladder_and_at_limit_executions_when_the_ladder_fails() {
+        let ladder = HashMap::from([("test_a".to_string(), execution_input("0x01", 10, 1000))]);
+        let at_limit =
+            HashMap::from([("at_limit_b".to_string(), execution_input("0x02", 99, 997))]);
+        let results = HashMap::from([
+            ("test_a".to_string(), success(999)),
+            ("at_limit_b".to_string(), success(1000)),
+        ]);
+        assert!(check_executions_match(&ladder, &results, Tolerance::EXACT).is_err());
+
+        let mut checks = Checks::new(Harness::Strict, "t");
+        observe_executions(&mut checks, &ladder, &results);
+        observe_executions(&mut checks, &at_limit, &results);
+        let drift = checks.take_drift().unwrap();
+        // The at-limit execution is 30 bps off, the ladder's 10.
+        assert_eq!(
+            (drift.test.as_str(), drift.simulation.as_str(), drift.component.as_str()),
+            ("t", "at_limit_b", "0x02")
+        );
+        assert_eq!(drift.largest_difference, "3");
+    }
+
+    #[test]
+    fn drift_ties_resolve_the_same_way_on_every_run() {
+        let inputs: HashMap<String, TychoExecutionInput> = (0..20)
+            .map(|i| (format!("test_{i:02}"), execution_input("0x01", 10, 1000)))
+            .collect();
+        let results: HashMap<String, TychoExecutionResult> = inputs
+            .keys()
+            .map(|id| (id.clone(), success(1000)))
+            .collect();
+        let mut checks = Checks::new(Harness::Strict, "t");
+        observe_executions(&mut checks, &inputs, &results);
+        assert_eq!(checks.take_drift().unwrap().simulation, "test_00");
     }
 
     #[test]
@@ -2684,31 +2792,110 @@ mod tests {
     }
 
     #[test]
-    fn execution_within_slippage_tolerance_matches() {
+    fn legacy_tolerance_is_half_a_percent_either_way() {
         let executed = BigUint::from(1000u32);
+        let check = |simulated: u32| {
+            check_execution_slippage(&BigUint::from(simulated), &executed, Tolerance::LEGACY)
+        };
 
-        assert!(check_execution_slippage(&BigUint::from(1000u32), &executed).is_ok());
-        // 5/1000 is exactly MAX_EXECUTION_SLIPPAGE, in either direction.
-        assert!(check_execution_slippage(&BigUint::from(1005u32), &executed).is_ok());
-        assert!(check_execution_slippage(&BigUint::from(995u32), &executed).is_ok());
+        assert!(check(1000).is_ok());
+        // 5/1000 is exactly 0.5%, in either direction.
+        assert!(check(1005).is_ok());
+        assert!(check(995).is_ok());
+        assert!(check(1006).is_err());
+        assert!(check(994).is_err());
     }
 
     #[test]
-    fn execution_beyond_slippage_tolerance_does_not_match() {
-        let executed = BigUint::from(1000u32);
+    fn exact_tolerance_fails_on_one_wei() {
+        let executed = BigUint::from(1_000_000u32);
+        assert!(check_execution_slippage(&executed, &executed, Tolerance::EXACT).is_ok());
+        let reason =
+            check_execution_slippage(&BigUint::from(1_000_001u32), &executed, Tolerance::EXACT)
+                .expect_err("one wei off is not exact");
+        assert!(reason.contains("paid 1 less"), "{reason}");
+        assert!(reason.contains("tolerance (exact)"), "{reason}");
+    }
 
-        assert!(check_execution_slippage(&BigUint::from(1006u32), &executed).is_err());
-        assert!(check_execution_slippage(&BigUint::from(994u32), &executed).is_err());
+    #[test]
+    fn a_declared_tolerance_allows_up_to_its_bps() {
+        let executed = BigUint::from(10_000u32);
+        let check = |simulated: u32| {
+            check_execution_slippage(
+                &BigUint::from(simulated),
+                &executed,
+                Tolerance { bps: 3, wei: 0 },
+            )
+        };
+        assert!(check(10_003).is_ok());
+        assert!(check(9_997).is_ok());
+        assert!(check(10_004).is_err());
+        assert!(check(9_996).is_err());
+    }
+
+    #[test]
+    fn a_wei_tolerance_allows_a_fixed_difference_at_any_size() {
+        // stETH: a 150k ETH trade paying 1 wei less than simulated, which no bps can allow
+        // without allowing ether.
+        let executed = BigUint::from(150_000u32) * BigUint::from(10u32).pow(18);
+        let simulated = &executed + 1u32;
+        let one_wei = Tolerance { bps: 0, wei: 1 };
+        assert!(check_execution_slippage(&simulated, &executed, one_wei).is_ok());
+        assert!(check_execution_slippage(&(&executed - 1u32), &executed, one_wei).is_ok());
+        let reason = check_execution_slippage(&(&executed + 2u32), &executed, one_wei)
+            .expect_err("2 wei is past a 1 wei tolerance");
+        assert!(reason.contains("tolerance (1 wei)"), "{reason}");
+
+        // With both declared, a difference within either passes.
+        let both = Tolerance { bps: 1, wei: 5 };
+        let small = BigUint::from(10_000u32);
+        assert!(check_execution_slippage(&(&small + 5u32), &small, both).is_ok());
+        let large = BigUint::from(1_000_000u32);
+        assert!(check_execution_slippage(&(&large + 100u32), &large, both).is_ok());
+        assert!(check_execution_slippage(&(&large + 101u32), &large, both).is_err());
+    }
+
+    #[test]
+    fn a_tiny_mismatch_prints_its_bps_with_significant_digits() {
+        let executed = BigUint::from(150_000u32) * BigUint::from(10u32).pow(18);
+        let reason =
+            check_execution_slippage(&(&executed + 1u32), &executed, Tolerance::EXACT).unwrap_err();
+        assert!(reason.contains("overquotes by 6.7e-20 bps"), "{reason}");
+        assert_eq!(format_bps(0.0), "0.00");
+        assert_eq!(format_bps(0.01), "0.01");
+        assert_eq!(format_bps(0.0042), "4.2e-3");
+    }
+
+    #[test]
+    fn a_mismatch_says_whether_the_simulation_over_or_underquotes() {
+        let executed = BigUint::from(10_000u32);
+        let over = check_execution_slippage(&BigUint::from(10_010u32), &executed, Tolerance::EXACT)
+            .unwrap_err();
+        assert!(
+            over.contains("paid 10 less") && over.contains("overquotes by 10.00 bps"),
+            "{over}"
+        );
+        let under = check_execution_slippage(&BigUint::from(9_990u32), &executed, Tolerance::EXACT)
+            .unwrap_err();
+        assert!(
+            under.contains("paid 10 more") && under.contains("underquotes by 10.00 bps"),
+            "{under}"
+        );
     }
 
     #[test]
     fn zero_output_execution_does_not_match() {
-        let reason = check_execution_slippage(&BigUint::from(1000u32), &BigUint::zero())
-            .expect_err("a zero output must never match");
-        assert!(reason.contains("no output"), "unexpected reason: {reason}");
+        for tolerance in [Tolerance::EXACT, Tolerance { bps: 0, wei: 5 }, Tolerance::LEGACY] {
+            let reason =
+                check_execution_slippage(&BigUint::from(1000u32), &BigUint::zero(), tolerance)
+                    .expect_err("a zero output must never match");
+            assert!(reason.contains("no output"), "unexpected reason: {reason}");
 
-        // Simulating zero as well does not turn a swap that returned nothing into a match.
-        assert!(check_execution_slippage(&BigUint::zero(), &BigUint::zero()).is_err());
+            // Simulating zero as well does not turn a swap that returned nothing into a match.
+            assert!(
+                check_execution_slippage(&BigUint::zero(), &BigUint::zero(), tolerance).is_err()
+            );
+        }
     }
 
     /// Every integration test yaml under `protocols/substreams/`, clone and nested ones included,
