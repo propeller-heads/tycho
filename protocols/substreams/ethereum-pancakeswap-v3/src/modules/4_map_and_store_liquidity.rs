@@ -1,3 +1,5 @@
+use super::store_deltas::liquidity_store_key;
+
 use std::str::FromStr;
 
 use substreams::store::{
@@ -57,14 +59,14 @@ pub fn store_liquidity(ticks_deltas: LiquidityChanges, store: StoreSetSumBigInt)
             LiquidityChangeType::Delta => {
                 store.sum(
                     changes.ordinal,
-                    format!("pool:{0}", hex::encode(&changes.pool_address)),
+                    liquidity_store_key(&changes.pool_address),
                     BigInt::from_signed_bytes_be(&changes.value),
                 );
             }
             LiquidityChangeType::Absolute => {
                 store.set(
                     changes.ordinal,
-                    format!("pool:{0}", hex::encode(&changes.pool_address)),
+                    liquidity_store_key(&changes.pool_address),
                     BigInt::from_signed_bytes_be(&changes.value),
                 );
             }
