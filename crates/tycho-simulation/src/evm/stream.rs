@@ -243,6 +243,9 @@ impl BlockStepController {
 ///
 /// See the module documentation for details on protocols, configuration options, and
 /// stream behavior.
+/// Protocol system family of components routed through tycho-execution's fallback router.
+pub const FALLBACK_PROTOCOL_FAMILY: &str = "fallback";
+
 pub struct ProtocolStreamBuilder {
     decoder: TychoStreamDecoder<BlockHeader>,
     stream_builder: TychoStreamBuilder,
@@ -341,6 +344,19 @@ impl ProtocolStreamBuilder {
             );
         }
 
+        self
+    }
+
+    /// Publishes `name`'s components as `fallback:{name}`, so swaps on them are encoded for
+    /// tycho-execution's fallback router: it quotes the venue on-chain and, when the venue
+    /// quotes worse or reverts, runs the fallback pool the solver names in `user_data`.
+    ///
+    /// For natively indexed `IPropAMM` venues (e.g. `"biconomy"`). Call it after registering the
+    /// exchange. The components keep their id and state; a stream publishes each venue on one
+    /// path only.
+    pub fn via_fallback_router(mut self, name: &str) -> Self {
+        self.decoder
+            .label_components(name, format!("{FALLBACK_PROTOCOL_FAMILY}:{name}"));
         self
     }
 
