@@ -144,6 +144,8 @@ pub struct RpcHandler<G, T> {
     /// Role of this process as database writer, read by the health endpoint. `None` for a
     /// process that never writes extraction results.
     writer_status: Option<WriterStatus>,
+    /// How old the newest block of a streamed extractor may be on a ready follower.
+    ready_head_tolerance: chrono::Duration,
 }
 
 impl<G, T> RpcHandler<G, T>
@@ -201,11 +203,18 @@ where
             state_service: EntityCacheSetup::Off,
             off_worker: OffWorker::new(),
             writer_status,
+            ready_head_tolerance: DEFAULT_READY_HEAD_TOLERANCE,
         }
     }
 
     /// Turns the given response caches off. A request to an endpoint whose cache is off always
     /// runs the full path and stores nothing.
+    /// Sets how old the newest block of a streamed extractor may be on a ready follower.
+    pub(crate) fn with_ready_head_tolerance(mut self, tolerance: chrono::Duration) -> Self {
+        self.ready_head_tolerance = tolerance;
+        self
+    }
+
     pub(crate) fn with_disabled_caches(mut self, kinds: &[RpcCacheKind]) -> Self {
         for kind in kinds {
             match kind {
@@ -1690,10 +1699,14 @@ pub async fn add_entry_points<G: Gateway, T: EntryPointTracer>(
 /// blocks every other process from taking over, so it must be restarted.
 const LEAD_CONFIRMATION_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Default for how old the newest block of a streamed extractor may be on a ready follower.
+pub const DEFAULT_READY_HEAD_TOLERANCE: chrono::Duration = chrono::Duration::seconds(60);
+
 /// Health check endpoint
 ///
-/// This endpoint is used to check the health of the service. It fails with 503 while this
-/// process is the database writer but has not confirmed its leader lock for 30 seconds.
+/// Tells whether the process must be restarted: it fails with 503 while this process is the
+/// database writer but has not confirmed its leader lock for 30 seconds. A follower that is behind
+/// the leader is healthy; see `/v1/ready` for whether a process can serve clients.
 #[utoipa::path(
     get,
     path = "/v1/health",
@@ -1708,18 +1721,79 @@ const LEAD_CONFIRMATION_LIMIT: std::time::Duration = std::time::Duration::from_s
 pub async fn health<G: Gateway, T: EntryPointTracer>(
     handler: web::Data<RpcHandler<G, T>>,
 ) -> HttpResponse {
-    let since_confirmed = handler
-        .writer_status
-        .as_ref()
-        .and_then(WriterStatus::time_since_lead_confirmed);
-    match since_confirmed {
-        Some(elapsed) if elapsed > LEAD_CONFIRMATION_LIMIT => HttpResponse::ServiceUnavailable()
-            .json(dto::Health::NotReady(format!(
-                "Leader has not confirmed its leader lock for {}s",
-                elapsed.as_secs()
-            ))),
-        _ => HttpResponse::Ok().json(dto::Health::Ready),
+    match lead_unconfirmed(handler.writer_status.as_ref()) {
+        Some(reason) => HttpResponse::ServiceUnavailable().json(dto::Health::NotReady(reason)),
+        None => HttpResponse::Ok().json(dto::Health::Ready),
     }
+}
+
+/// Returns why this process is unhealthy: it is the database writer and has not confirmed its
+/// leader lock within [`LEAD_CONFIRMATION_LIMIT`].
+fn lead_unconfirmed(writer_status: Option<&WriterStatus>) -> Option<String> {
+    let elapsed = writer_status.and_then(WriterStatus::time_since_lead_confirmed)?;
+    (elapsed > LEAD_CONFIRMATION_LIMIT)
+        .then(|| format!("Leader has not confirmed its leader lock for {}s", elapsed.as_secs()))
+}
+
+/// Readiness check endpoint
+///
+/// Fails with 503 when the health check fails, and while this process follows a leader and is
+/// behind the chain head: an extractor it streams has no block yet, or its newest block is older
+/// than the configured tolerance (60 seconds by default). Extractors whose history the leader
+/// syncs do not count.
+#[utoipa::path(
+    get,
+    path = "/v1/ready",
+    responses(
+        (status = 200, description = "OK", body=Health),
+        (status = 503, description = "Unhealthy, or a follower behind the chain head", body=Health),
+    ),
+    security(
+         ("apiKey" = [])
+    )
+)]
+pub async fn ready<G: Gateway, T: EntryPointTracer>(
+    handler: web::Data<RpcHandler<G, T>>,
+) -> HttpResponse {
+    match not_ready_reason(&handler) {
+        Some(reason) => HttpResponse::ServiceUnavailable().json(dto::Health::NotReady(reason)),
+        None => HttpResponse::Ok().json(dto::Health::Ready),
+    }
+}
+
+/// Returns why this process is not ready, or `None` when it is.
+fn not_ready_reason<G: Gateway, T: EntryPointTracer>(handler: &RpcHandler<G, T>) -> Option<String> {
+    if let Some(reason) = lead_unconfirmed(handler.writer_status.as_ref()) {
+        return Some(reason);
+    }
+    let (Some(writer_status), Some(pending_deltas)) =
+        (handler.writer_status.as_ref(), handler.pending_deltas.as_ref())
+    else {
+        return None;
+    };
+    let newest_blocks = match pending_deltas.newest_blocks() {
+        Ok(newest_blocks) => newest_blocks,
+        Err(err) => return Some(format!("Failed to read the newest received blocks: {err}")),
+    };
+    let behind = writer_status.extractors_behind_head(
+        &newest_blocks,
+        chrono::Utc::now().naive_utc(),
+        handler.ready_head_tolerance,
+    );
+    if behind.is_empty() {
+        return None;
+    }
+    let behind = behind
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Behind the chain head by more than {}s: {behind}",
+        handler
+            .ready_head_tolerance
+            .num_seconds()
+    ))
 }
 
 #[cfg(test)]
@@ -1816,6 +1890,10 @@ mod tests {
                     f: &dyn Fn(&BlockAggregatedChanges) -> bool,
                     protocol_system: &'a str,
                 ) -> Result<Option<BlockAggregatedChanges>, PendingDeltasError>;
+
+                fn newest_blocks(
+                    &self,
+                ) -> Result<HashMap<String, Option<tycho_common::models::blockchain::Block>>, PendingDeltasError>;
             }
         }
     }

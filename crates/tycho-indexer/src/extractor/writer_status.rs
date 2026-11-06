@@ -3,6 +3,7 @@ use std::{collections::HashMap, time::Duration};
 
 use chrono::NaiveDateTime;
 use tokio::{sync::watch, time::Instant};
+use tycho_common::models::blockchain::Block;
 use tycho_storage::postgres::cache::CommittedBlock;
 
 use crate::extractor::protocol_extractor::FOLLOWER_RETENTION_SPAN;
@@ -87,6 +88,72 @@ impl WriterStatus {
             .borrow()
             .get(extractor)
             .is_some_and(|block| now.signed_duration_since(block.ts) < FOLLOWER_RETENTION_SPAN)
+    }
+
+    /// Returns the extractors on which this process is behind the chain head at `now`, sorted by
+    /// name. `newest_blocks` holds the newest block this process received for each extractor.
+    ///
+    /// An extractor is behind when it has no block, or when its newest block is older than
+    /// `tolerance`. Only extractors for which [`Self::needs_stream`] is true count: for the
+    /// others the leader syncs history or has committed nothing yet, so this process does not
+    /// stream them and a new leader resumes them from the database cursor. A leader is never
+    /// behind.
+    pub fn extractors_behind_head(
+        &self,
+        newest_blocks: &HashMap<String, Option<Block>>,
+        now: NaiveDateTime,
+        tolerance: chrono::Duration,
+    ) -> Vec<ExtractorBehindHead> {
+        if self.role() == Role::Leader {
+            return Vec::new();
+        }
+        let mut behind = Vec::new();
+        for (extractor, newest) in newest_blocks {
+            if !self.needs_stream(extractor, now) {
+                continue;
+            }
+            let newest = newest
+                .as_ref()
+                .map(|block| NewestBlock { number: block.number, age: now - block.ts });
+            if newest
+                .as_ref()
+                .is_none_or(|block| block.age > tolerance)
+            {
+                behind.push(ExtractorBehindHead { extractor: extractor.clone(), newest });
+            }
+        }
+        behind.sort_by(|a, b| a.extractor.cmp(&b.extractor));
+        behind
+    }
+}
+
+/// An extractor whose newest block on this process is missing or too old.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtractorBehindHead {
+    pub extractor: String,
+    /// The newest block this process received, `None` for none.
+    pub newest: Option<NewestBlock>,
+}
+
+/// The number of a block and how long ago the chain produced it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewestBlock {
+    pub number: u64,
+    pub age: chrono::Duration,
+}
+
+impl std::fmt::Display for ExtractorBehindHead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.newest {
+            Some(block) => write!(
+                f,
+                "{} at block {}, {}s old",
+                self.extractor,
+                block.number,
+                block.age.num_seconds()
+            ),
+            None => write!(f, "{} has no block", self.extractor),
+        }
     }
 }
 

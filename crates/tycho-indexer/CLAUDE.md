@@ -202,6 +202,14 @@ tries the `LeaderLock` once:
   (`time_since_lead_confirmed`). `GET /v1/health` returns 503 while this process leads and has not
   confirmed its lock for 30s, so a liveness probe restarts a leader that is stuck but still holds
   the lock. A frozen process does not answer the probe at all, which has the same effect.
+- **Readiness**: `GET /v1/ready` returns 503 when `/v1/health` does, and while a follower is
+  behind the chain head (`WriterStatus::extractors_behind_head`): an extractor that
+  `needs_stream` has no block in its `DeltaWindow`, or its newest block is older than
+  `--ready-head-tolerance-secs` (`READY_HEAD_TOLERANCE_SECS`, default 60). The age is wall clock
+  minus the block timestamp. Extractors whose history the leader syncs do not count, so a rolling
+  update waits only for the extractors near the head. A leader is always ready while healthy. Use
+  it as the readiness probe and `/v1/health` as the liveness probe: a follower that is behind must
+  not be restarted.
 
 ### Leader and follower extractors
 
@@ -258,8 +266,8 @@ the former leader left, instead of committing again from an old cursor:
   which can be busy for a long time, for example while it builds the extractor. The wait drops a
   `Subscribe` queued before it started, which closes that subscriber's channel. It logs
   `FollowerWaitsForLeaderSync`, `SubscriptionRejected` and `FollowerStreamStarts`. It ends when
-  the leader gets near the head or this process becomes leader. `/v1/health` stays 200 during the
-  wait, because the wait can last hours and a readiness gate would block a rollout. tycho-client
+  the leader gets near the head or this process becomes leader. `/v1/health` and `/v1/ready` stay
+  200 during the wait, because the wait can last hours and a readiness gate would block a rollout. tycho-client
   retries a rejected subscription on the same WS connection, so a client that the load balancer
   keeps on such a follower uses up its retries; a client-side reconnect is follow-up work. A
   process that is already leader builds the extractor with `CommitMode::Committing` from the
@@ -373,7 +381,8 @@ All POST under `/{version_prefix}/` (default `/v1/`), except where noted.
 | `/add_entry_points` | Register entry points for tracing |
 | `/protocol_systems` | List available protocol systems |
 | `/component_tvl` | Component TVL estimates |
-| `/health` | GET — health check; 503 when the leader stopped confirming its lock |
+| `/health` | GET — liveness check; 503 when the leader stopped confirming its lock |
+| `/ready` | GET — readiness check; 503 when unhealthy or while a follower is behind the chain head |
 | `/ws` | GET — WebSocket upgrade for delta subscriptions (exact match; `/ws/` 404s) |
 
 Registered outside the version prefix: `GET /docs/{...}` (Swagger UI, schema at
