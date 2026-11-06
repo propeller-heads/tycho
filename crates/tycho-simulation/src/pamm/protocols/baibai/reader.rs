@@ -1,9 +1,9 @@
 //! Reads every configured BaiBai pair over JSON-RPC, all at one block.
 //!
-//! A read is two `Multicall3.aggregate3` calls: one at the latest block for its number,
-//! timestamp and chain id, the deployment's wiring, the book's settings, custody and each pair's
-//! parameters and taker fee, then one pinned to that block for the knots those parameters say each
-//! side holds.
+//! A read is one `Multicall3.aggregate3` call at the latest block: its number, timestamp and chain
+//! id, the deployment's wiring, the book's settings, custody and, for each pair, its parameters,
+//! taker fee and every knot index a side can hold. The curve book reverts for an index past the
+//! side's knot count, so only the first `knotCount` answers of each side are kept.
 
 use alloy::{
     eips::BlockId,
@@ -24,7 +24,7 @@ use tracing::{debug, warn};
 
 use crate::{
     pamm::protocols::baibai::{
-        math::{Knot, Side},
+        math::{Knot, Side, MAX_KNOTS},
         Deployment,
     },
     snapshot_feed::errors::FeedError,
@@ -135,53 +135,27 @@ impl BaibaiReader {
     /// whose calls revert (an address that is no token), is left out; the other pairs are read.
     /// Fails fatally when the node serves another chain, or when the deployment no longer answers
     /// the way this integration was built for (its contracts point elsewhere, or a getter it
-    /// reads reverts), since no later read will either.
+    /// reads reverts, or a side holds more knots than [`MAX_KNOTS`]), since no later read will
+    /// either.
     pub(super) async fn read(&self) -> Result<BookRead, FeedError> {
-        let mut first = Vec::new();
+        let mut calls = Vec::new();
         for (_, settings_call) in self.settings_calls() {
-            first.push(settings_call);
+            calls.push(settings_call);
         }
         for base in &self.bases {
-            first.extend(self.pair_calls(*base));
+            calls.extend(self.pair_calls(*base));
         }
-        let answers = self
-            .aggregate(first, BlockId::latest())
-            .await?;
+        let answers = self.aggregate(calls).await?;
         let (settings_answers, pair_answers) = answers.split_at(SETTINGS_CALLS);
         let mut read = self.decode_settings(settings_answers)?;
-
-        let mut listed = Vec::new();
         for (base, answers) in self
             .bases
             .iter()
             .zip(pair_answers.chunks(PAIR_CALLS))
         {
             if let Some(pair) = decode_pair(*base, answers)? {
-                listed.push(pair);
+                read.pairs.push(pair);
             }
-        }
-
-        let mut second = Vec::new();
-        for (pair, view) in &listed {
-            second.extend(self.knot_calls(pair.base, view));
-        }
-        let answers = if second.is_empty() {
-            Vec::new()
-        } else {
-            self.aggregate(second, BlockId::number(read.block_number))
-                .await?
-        };
-        let mut answers = answers.iter();
-        for (mut pair, view) in listed {
-            let ask = read_knots(&mut answers, view.ask.knotCount)?;
-            let bid = read_knots(&mut answers, view.bid.knotCount)?;
-            let (Some(ask), Some(bid)) = (ask, bid) else {
-                warn!(base = %pair.base, "skipping BaiBai pair whose knots could not be read");
-                continue;
-            };
-            pair.ask.knots = ask;
-            pair.bid.knots = bid;
-            read.pairs.push(pair);
         }
         Ok(read)
     }
@@ -277,21 +251,18 @@ impl BaibaiReader {
         })
     }
 
-    fn pair_calls(&self, base: Address) -> [Call3; PAIR_CALLS] {
+    /// The pair's parameters, validity, custody and taker fee, then [`MAX_KNOTS`] knot calls for
+    /// the ask side and as many for the bid side: [`PAIR_CALLS`] in all.
+    fn pair_calls(&self, base: Address) -> Vec<Call3> {
         let Deployment { entrypoint, curve_book, custodian, .. } = self.deployment;
-        [
+        let mut calls = vec![
             call(curve_book, pairCall { base }.abi_encode(), true),
             call(curve_book, validUntilCall { base }.abi_encode(), true),
             call(custodian, availableLiquidityCall { token: base }.abi_encode(), true),
             call(entrypoint, taker_fee_call(self.taker, base), true),
-        ]
-    }
-
-    fn knot_calls(&self, base: Address, view: &PairView) -> Vec<Call3> {
-        let curve_book = self.deployment.curve_book;
-        let mut calls = Vec::new();
-        for (side, count) in [(ASK_SIDE, view.ask.knotCount), (BID_SIDE, view.bid.knotCount)] {
-            for index in 0..count {
+        ];
+        for side in [ASK_SIDE, BID_SIDE] {
+            for index in 0..MAX_KNOTS {
                 let knot = knotCall { base, side, index: U256::from(index) };
                 calls.push(call(curve_book, knot.abi_encode(), true));
             }
@@ -299,11 +270,7 @@ impl BaibaiReader {
         calls
     }
 
-    async fn aggregate(
-        &self,
-        calls: Vec<Call3>,
-        at: BlockId,
-    ) -> Result<Vec<Call3Result>, FeedError> {
+    async fn aggregate(&self, calls: Vec<Call3>) -> Result<Vec<Call3Result>, FeedError> {
         let expected = calls.len();
         let request = TransactionRequest::default()
             .to(MULTICALL3_ADDRESS)
@@ -315,7 +282,7 @@ impl BaibaiReader {
         let raw = self
             .provider
             .call(request)
-            .block(at)
+            .block(BlockId::latest())
             .await
             .map_err(|e| {
                 let error = e
@@ -338,8 +305,11 @@ impl BaibaiReader {
 /// Calls of the first multicall before the pairs': see [`BaibaiReader::settings_calls`].
 const SETTINGS_CALLS: usize = 10;
 
-/// Calls per configured base in the first multicall: see [`BaibaiReader::pair_calls`].
-const PAIR_CALLS: usize = 4;
+/// Calls per configured base before its knots: see [`BaibaiReader::pair_calls`].
+const PAIR_HEAD_CALLS: usize = 4;
+
+/// Calls per configured base: see [`BaibaiReader::pair_calls`].
+const PAIR_CALLS: usize = PAIR_HEAD_CALLS + 2 * MAX_KNOTS;
 
 /// The entrypoint's fee for `taker` on `base`, as calldata.
 pub(super) fn taker_fee_call(taker: Address, base: Address) -> Vec<u8> {
@@ -352,16 +322,15 @@ fn call(target: Address, data: Vec<u8>, allow_failure: bool) -> Call3 {
     Call3 { target, allowFailure: allow_failure, callData: AlloyBytes::from(data) }
 }
 
-/// One configured base's pair, its knots still to read, with the view that says how many there
-/// are; `None` when the book has not listed it or one of its calls reverted. Fails fatally when
-/// the taker fee getter reverts for a listed pair: the deployment changed.
-fn decode_pair(
-    base: Address,
-    answers: &[Call3Result],
-) -> Result<Option<(PairRead, PairView)>, FeedError> {
-    let [pair, valid_until, available, fee] = answers else {
+/// One configured base's pair with its knots; `None` when the book has not listed it or one of
+/// its calls reverted. Fails fatally when the taker fee getter reverts for a listed pair or a
+/// side holds more knots than [`MAX_KNOTS`]: the deployment changed.
+fn decode_pair(base: Address, answers: &[Call3Result]) -> Result<Option<PairRead>, FeedError> {
+    let (head, knots) = answers.split_at(PAIR_HEAD_CALLS);
+    let [pair, valid_until, available, fee] = head else {
         return Err(FeedError::Parsing("BaiBai multicall answered too few calls".into()));
     };
+    let (ask_knots, bid_knots) = knots.split_at(MAX_KNOTS);
     if !(pair.success && valid_until.success && available.success) {
         warn!(%base, "skipping BaiBai base whose pair or custody call reverted");
         return Ok(None);
@@ -377,13 +346,28 @@ fn decode_pair(
              changed and the integration needs updating"
         )));
     }
+    for (name, side) in [("ask", &view.ask), ("bid", &view.bid)] {
+        if usize::from(side.knotCount) > MAX_KNOTS {
+            return Err(FeedError::Fatal(format!(
+                "BaiBai: {base}'s {name} side holds {} knots, more than the {MAX_KNOTS} read; the \
+                 deployment changed and the integration needs updating",
+                side.knotCount
+            )));
+        }
+    }
     let fee = U256::abi_decode(&fee.returnData)
         .map_err(|e| FeedError::Parsing(format!("BaiBai taker fee: {e}")))?;
-    let side = |side: &SideView| Side {
+    let (Some(ask), Some(bid)) =
+        (read_knots(ask_knots, view.ask.knotCount)?, read_knots(bid_knots, view.bid.knotCount)?)
+    else {
+        warn!(%base, "skipping BaiBai pair whose knots could not be read");
+        return Ok(None);
+    };
+    let side = |side: &SideView, knots: Vec<Knot>| Side {
         spread_bps: side.spreadBps,
         depth_bps: side.depthBps,
         filled: side.filled,
-        knots: Vec::new(),
+        knots,
     };
     let pair = PairRead {
         base,
@@ -393,32 +377,24 @@ fn decode_pair(
         q_unit: view.qUnit,
         available_base: decode::<availableLiquidityCall>(available, "availableLiquidity")?,
         fee_pips: fee.try_into().unwrap_or(u32::MAX),
-        ask: side(&view.ask),
-        bid: side(&view.bid),
+        ask: side(&view.ask, ask),
+        bid: side(&view.bid, bid),
     };
-    Ok(Some((pair, view)))
+    Ok(Some(pair))
 }
 
-/// The next `count` knots of the second multicall; `None` when one of their calls reverted.
-fn read_knots<'a>(
-    answers: &mut impl Iterator<Item = &'a Call3Result>,
-    count: u8,
-) -> Result<Option<Vec<Knot>>, FeedError> {
-    let mut knots = Some(Vec::with_capacity(usize::from(count)));
-    for _ in 0..count {
-        let answer = answers
-            .next()
-            .ok_or_else(|| FeedError::Parsing("BaiBai multicall answered too few calls".into()))?;
+/// The first `count` of one side's knot answers; `None` when one of them reverted. The answers
+/// past `count` revert at the curve book and are ignored.
+fn read_knots(answers: &[Call3Result], count: u8) -> Result<Option<Vec<Knot>>, FeedError> {
+    let mut knots = Vec::with_capacity(usize::from(count));
+    for answer in &answers[..usize::from(count)] {
         if !answer.success {
-            knots = None;
-            continue;
+            return Ok(None);
         }
         let knot = decode::<knotCall>(answer, "knot")?;
-        if let Some(knots) = &mut knots {
-            knots.push(Knot { q: knot.q.to(), extra: knot.extra.to() });
-        }
+        knots.push(Knot { q: knot.q.to(), extra: knot.extra.to() });
     }
-    Ok(knots)
+    Ok(Some(knots))
 }
 
 fn to_u64(value: U256) -> Result<u64, FeedError> {

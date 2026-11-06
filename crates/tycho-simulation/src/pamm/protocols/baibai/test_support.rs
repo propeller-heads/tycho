@@ -224,10 +224,7 @@ impl FakeNode {
         let request: serde_json::Value = serde_json::from_str(&request.body).unwrap();
         assert_eq!(request["method"], "eth_call", "the fake node serves eth_call only");
         let block = &request["params"][1];
-        assert!(
-            *block == "latest" || *block == format!("{:#x}", self.block),
-            "a read asks for the latest block, then for the block it read: {block}"
-        );
+        assert_eq!(*block, "latest", "a read asks for the latest block");
         let input = request["params"][0]["input"]
             .as_str()
             .or_else(|| request["params"][0]["data"].as_str())
@@ -303,12 +300,14 @@ impl FakeNode {
             }
             (t, knotCall::SELECTOR) if t == curve_book => {
                 let call = knotCall::abi_decode(data).unwrap();
-                let Some(pair) = self.pair(call.base) else {
-                    panic!("the fake node has no knots for {}", call.base);
-                };
+                // Like the curve book, an index past the side's knots reverts
+                // (`InvalidLevelIndex`), and so does any index of an unlisted base.
+                let pair = self.pair(call.base)?;
                 let side = if call.side == 0 { &pair.pair.ask } else { &pair.pair.bid };
-                let [q, extra] = side.knots[call.index.to::<usize>()];
-                (U48::from(q), U48::from(extra)).abi_encode_params()
+                let [q, extra] = side
+                    .knots
+                    .get(call.index.to::<usize>())?;
+                (U48::from(*q), U48::from(*extra)).abi_encode_params()
             }
             (t, _)
                 if t == entrypoint &&

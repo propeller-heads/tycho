@@ -48,7 +48,7 @@ pub struct BaibaiFeed {
 }
 
 /// Builds a [`BaibaiFeed`] from the shared [`BookFeedConfig`] and a Base JSON-RPC URL. Every poll
-/// makes two `eth_call`s against recent state, so a full node is enough.
+/// makes one `eth_call` against the latest state, so a full node is enough.
 pub struct BaibaiFeedBuilder {
     book_config: BookFeedConfig,
     rpc_url: String,
@@ -333,6 +333,7 @@ mod tests {
     use crate::{
         book::{chain_without_id, Book},
         pamm::protocols::baibai::{
+            math::MAX_KNOTS,
             reader::{taker_fee_call, ttlCall},
             test_support::{book_config, bytes, cbbtc, state, token, weth, FakeNode},
         },
@@ -464,6 +465,39 @@ mod tests {
 
         assert!(error.is_fatal(), "{error}");
         assert!(error.to_string().contains("chain 1"), "{error}");
+    }
+
+    /// Settings, pairs and knots come from one `eth_call`, so they are all from one block.
+    #[tokio::test]
+    async fn a_poll_reads_the_chain_in_one_request() {
+        let node = FakeNode::new();
+        let now = node.timestamp;
+        let server = node.spawn().await;
+        let mut source = feed(&server.url(), book_config()).source;
+        source.clock = Arc::new(move || now);
+
+        let books = source.fetch().await.unwrap().books;
+
+        assert_eq!(books.len(), 2);
+        assert_eq!(server.request_count(), 1);
+    }
+
+    /// A read asks for the first [`MAX_KNOTS`] knots of each side; a side holding more is a
+    /// deployment this integration was not built for, which reading part of its curve would
+    /// misprice.
+    #[tokio::test]
+    async fn a_side_with_more_knots_than_read_ends_the_feed() {
+        let mut node = FakeNode::new();
+        let knots = &mut node.fixture.pairs[0].pair.ask.knots;
+        let last = *knots.last().unwrap();
+        knots.resize(MAX_KNOTS + 1, last);
+
+        let error = fetch(node, book_config(), None)
+            .await
+            .unwrap_err();
+
+        assert!(error.is_fatal(), "{error}");
+        assert!(error.to_string().contains("37 knots"), "{error}");
     }
 
     /// A load-balanced provider can answer from a block older than one already read; publishing
