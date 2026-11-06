@@ -252,10 +252,9 @@ fallback for protocols too complex to port, not a default.
 
 ## Pending-block state for hybrid/VM protocols
 
-`apply_deltas_ephemeral` applies only `state_deltas`; nothing on the pending path writes to the
-VM database, so `apply_deltas_ephemeral` can't read the pending state from there. A protocol
-whose `delta_transition` re-reads the VM would therefore quote a pending block against confirmed
-state. Fluid and Curve close that gap the same way:
+Nothing on the pending path writes to the VM database, so a VM read inside `delta_transition`
+sees confirmed state. A protocol whose `delta_transition` re-reads the VM would therefore quote a
+pending block against confirmed state. Fluid and Curve close that gap the same way:
 
 1. A `TxDeltaIndexer` implementation — which lives in the consuming repo, not here — builds
    `evm::simulation::PendingOverrides` (storage, native balances and block environment) from the
@@ -268,6 +267,12 @@ state. Fluid and Curve close that gap the same way:
 
 Reading under the pending block's own number and timestamp matters: anything with on-chain time
 math (Fluid's expanding limits, Curve's ramping `A()`) is wrong under the parent block's clock.
+
+An extractor's account deltas reach only pools of the protocol system that keys it in
+`pending_deltas`, so its indexer must emit every account those pools read. Without this rule, a
+token contract that Curve, the V4 hooks and Fluid all list would rebuild every Fluid pool from
+confirmed state, with one EVM call per pool. It would also replace each pool's own override set
+with another extractor's.
 
 ## Features
 
