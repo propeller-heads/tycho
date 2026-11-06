@@ -14,7 +14,7 @@ use alloy::primitives::Address;
 use chrono::DateTime;
 use reqwest::Url;
 use tracing::{debug, warn};
-use tycho_common::{models::Chain, Bytes};
+use tycho_common::Bytes;
 
 use crate::{
     book::{
@@ -327,7 +327,7 @@ mod tests {
 
     use alloy::{primitives::Address, sol_types::SolCall};
     use rstest::rstest;
-    use tycho_common::models::token::Token;
+    use tycho_common::models::{token::Token, Chain};
 
     use super::*;
     use crate::{
