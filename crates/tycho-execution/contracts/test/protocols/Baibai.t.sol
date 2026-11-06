@@ -86,8 +86,10 @@ contract BaibaiTest is TychoRouterTestSetup {
     }
 
     function getForkBlock() public pure override returns (uint256) {
-        // After the router's zero-fee whitelist (53359421) and the latest Entrypoint upgrade
-        // (53492231); the block the simulator's newest fixture was recorded at.
+        // After the Entrypoint upgrade at 53492231, and the block the simulator's fixture
+        // live_53545000.json was recorded at. The router under test is a fresh deployment, so
+        // the zero fee BaiBai set for Tycho's router (53359421) does not apply to it: it pays the
+        // default 50 millionths unless a test sets its fee.
         return 53545000;
     }
 
@@ -211,7 +213,9 @@ contract BaibaiTest is TychoRouterTestSetup {
         (uint256 beforeFee,) = IBaibaiFees(BAIBAI_ENTRYPOINT)
             .quoteFor(BASE, BASE, 1e16, tychoRouterAddr);
         _setFee(tychoRouterAddr, 1000);
-        _assertSellReverts(beforeFee, TychoRouter__NegativeSlippage.selector);
+        _assertSellReverts(
+            BASE, 1e16, beforeFee, TychoRouter__NegativeSlippage.selector
+        );
     }
 
     /// @dev BaiBai as the second hop: the router approves the entrypoint for the USDC the first
@@ -252,7 +256,7 @@ contract BaibaiTest is TychoRouterTestSetup {
     }
 
     /// @dev An unnamed entrypoint view (selector 0xc256865c): the priority fee above which the
-    ///      surcharge applies, 2e6 wei at the fork block.
+    ///      surcharge applies.
     function _surchargeThreshold() internal view returns (uint256) {
         (bool ok, bytes memory raw) =
             BAIBAI_ENTRYPOINT.staticcall(abi.encodeWithSelector(0xc256865c));
@@ -264,13 +268,14 @@ contract BaibaiTest is TychoRouterTestSetup {
     ///      its gross output withheld per 1e4 wei above it, up to `prioritySurchargeBps`, the
     ///      withheld amount rounded up; the basefee plays no part. At the threshold it fills at
     ///      the gas-free quote the simulator reproduces. The rule was measured on the unverified
-    ///      implementation, not read from source.
+    ///      implementation, not read from source. The threshold and cap are pinned to their
+    ///      values at the fork block, which the simulator's module docs state.
     function testPrioritySurchargeScalesWithThePriorityFee() public {
         uint256 threshold = _surchargeThreshold();
-        uint256 maxHundredths = uint256(
-            IBaibaiFees(BAIBAI_ENTRYPOINT).prioritySurchargeBps()
-        ) * 100;
-        assertGt(maxHundredths, 0);
+        assertEq(threshold, 2e6, "surcharge threshold");
+        uint256 capBps = IBaibaiFees(BAIBAI_ENTRYPOINT).prioritySurchargeBps();
+        assertEq(capBps, 50, "surcharge cap");
+        uint256 maxHundredths = capBps * 100;
         uint256[4] memory tips = [
             threshold,
             threshold + 1e6 + 9_999,
@@ -294,7 +299,9 @@ contract BaibaiTest is TychoRouterTestSetup {
             .quoteFor(BASE, BASE, 1e16, tychoRouterAddr);
         vm.fee(5_000_000);
         vm.txGasPrice(5_000_000 + threshold + 1e6);
-        _assertSellReverts(sellQuote, TychoRouter__NegativeSlippage.selector);
+        _assertSellReverts(
+            BASE, 1e16, sellQuote, TychoRouter__NegativeSlippage.selector
+        );
     }
 
     /// @dev A swap sent at `basefee` plus `tip` has `hundredths` of a basis point of its gross
@@ -320,38 +327,65 @@ contract BaibaiTest is TychoRouterTestSetup {
         vm.revertToState(snapshot);
     }
 
-    /// @dev A curve fills at its `validUntil` and is stale one second later, while the book's
-    ///      TTL, which also counts inclusively, still allows the swap.
+    /// @dev A curve fills at its `validUntil` and is stale one second later. On cbBTC's curve at
+    ///      the fork block, `validUntil` falls two seconds before the book's TTL ends
+    ///      (`lastUpdateAt` + `ttl`), so the revert one second past it comes from `validUntil`,
+    ///      not the TTL.
     function testCurveFillsUntilValidUntilInclusive() public {
         IBaibaiCurveBook book = IBaibaiCurveBook(CURVE_BOOK);
-        uint256 validUntil = book.validUntil(BASE);
-        uint256 ttlEnd = uint256(book.pair(BASE).lastUpdateAt) + book.ttl();
-        assertLe(validUntil + 1, ttlEnd, "the TTL must outlast validUntil here");
+        uint256 validUntil = book.validUntil(CBBTC);
+        uint256 ttlEnd = uint256(book.pair(CBBTC).lastUpdateAt) + book.ttl();
+        assertLt(validUntil + 1, ttlEnd, "the TTL must outlast validUntil + 1");
 
         uint256 snapshot = vm.snapshotState();
         vm.warp(validUntil);
-        _swap(true, 1e16);
+        (uint256 expected,) = IBaibaiFees(BAIBAI_ENTRYPOINT)
+            .quoteFor(CBBTC, CBBTC, 1e6, tychoRouterAddr);
+        assertGt(expected, 0);
+        uint256 beforeBalance = IERC20(QUOTE).balanceOf(BOB);
+        _sell(CBBTC, 1e6, expected);
+        assertEq(IERC20(QUOTE).balanceOf(BOB) - beforeBalance, expected);
         vm.revertToState(snapshot);
 
         vm.warp(validUntil + 1);
-        _assertSellReverts(1, CurveStale.selector);
+        _assertSellReverts(CBBTC, 1e6, 1, CurveStale.selector);
     }
 
-    function _assertSellReverts(uint256 minOutput, bytes4 reason) internal {
-        deal(BASE, BOB, 1e16);
+    /// @dev Sells `amount` of `base` for the quote token through the router, at no less than
+    ///      `minOutput`.
+    function _sell(address base, uint256 amount, uint256 minOutput) internal {
+        deal(base, BOB, amount);
         vm.startPrank(BOB);
-        IERC20(BASE).approve(tychoRouterAddr, 1e16);
+        IERC20(base).approve(tychoRouterAddr, amount);
         bytes memory swap = encodeSingleSwap(
-            address(baibaiExecutor), abi.encodePacked(BASE, uint8(1))
+            address(baibaiExecutor), abi.encodePacked(base, uint8(1))
         );
-        uint256 custodyBefore = IERC20(BASE).balanceOf(CUSTODIAN);
-        vm.expectPartialRevert(reason);
         tychoRouter.singleSwap(
-            1e16, BASE, QUOTE, minOutput, minOutput, BOB, noClientFee(), swap
+            amount, base, QUOTE, minOutput, minOutput, BOB, noClientFee(), swap
         );
         vm.stopPrank();
-        assertEq(IERC20(BASE).balanceOf(BOB), 1e16);
-        assertEq(IERC20(BASE).balanceOf(CUSTODIAN), custodyBefore);
-        assertEq(IERC20(BASE).allowance(tychoRouterAddr, BAIBAI_ENTRYPOINT), 0);
+    }
+
+    function _assertSellReverts(
+        address base,
+        uint256 amount,
+        uint256 minOutput,
+        bytes4 reason
+    ) internal {
+        deal(base, BOB, amount);
+        vm.startPrank(BOB);
+        IERC20(base).approve(tychoRouterAddr, amount);
+        bytes memory swap = encodeSingleSwap(
+            address(baibaiExecutor), abi.encodePacked(base, uint8(1))
+        );
+        uint256 custodyBefore = IERC20(base).balanceOf(CUSTODIAN);
+        vm.expectPartialRevert(reason);
+        tychoRouter.singleSwap(
+            amount, base, QUOTE, minOutput, minOutput, BOB, noClientFee(), swap
+        );
+        vm.stopPrank();
+        assertEq(IERC20(base).balanceOf(BOB), amount);
+        assertEq(IERC20(base).balanceOf(CUSTODIAN), custodyBefore);
+        assertEq(IERC20(base).allowance(tychoRouterAddr, BAIBAI_ENTRYPOINT), 0);
     }
 }
