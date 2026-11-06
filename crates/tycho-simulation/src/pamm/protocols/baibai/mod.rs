@@ -68,9 +68,13 @@ pub(crate) const BASE_DEPLOYMENT: Deployment = Deployment {
     quote: address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
 };
 
-/// The bases listed on the Base deployment: WETH and cbBTC. The CurveBook has no enumerable
-/// list of pairs, so a base listed later is served once it is passed to
-/// [`BaibaiFeedBuilder::bases`].
+/// The bases listed on the Base deployment: WETH and cbBTC. The CurveBook cannot enumerate its
+/// pairs, so a base listed later is served only once it is passed to
+/// [`BaibaiFeedBuilder::bases`]; the feed never discovers one. The book emits
+/// `PairListed(address indexed base, address indexed quote)` with a base's first curve, from
+/// block 51,696,183 on, where an upgrade emitted WETH's after the fact. Up to block 53,831,402
+/// the only other one is cbBTC's, at 52,869,661, so a later `PairListed` log names a base to add
+/// here.
 pub(crate) const BASE_LISTED_BASES: [Address; 2] = [
     address!("4200000000000000000000000000000000000006"),
     address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
