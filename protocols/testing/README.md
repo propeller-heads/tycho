@@ -320,6 +320,57 @@ over- or underquotes, since those are different defects. At least one of `bps` (
 0.5% whatever is declared. The report's `drift` gives the largest difference of each test, within
 tolerance or not, so `measured` can be checked against a run.
 
+### Streamed range
+
+In strict mode, `range` streams the range while it is indexed; `--no-stream` turns it off. The
+runner starts the indexer with `--wait-for-subscriber`, so extraction starts only once the runner
+has subscribed, and every block reaches it: the indexer waits for room in each subscription's
+channel, a resubscription's included. Every block's deltas then go through tycho-client and the
+production decoder. The client follows only the expected components, with a large buffer, and
+drops a component that does not decode, so a `skip_simulation` component that cannot decode does
+not fail the stream. The runner checks a sample of the blocks, not every one:
+
+| Every... | What runs | Cost |
+|---|---|---|
+| block | its deltas are applied to the decoded state | nothing extra |
+| block in which an expected component changed, up to 50 spread evenly over the range | `sim.ladder` and the limit checks | local, no RPC |
+| of those, the fewest spread evenly that meet the floor below | `exec.ladder` and the limit executions | one node call per execution |
+
+Executions run after the stream ends, at each chosen block, so the stream never waits on the node.
+Checks at a streamed block carry its `block` in the report. At a block that only simulates, the
+limit checks whose swap was queued are `skipped`, since nothing executed there. When every
+component skips execution, nothing is executed and `exec.ladder` is skipped.
+
+A stream that ends before the stop block, or skips a block, fails `stream.matches_snapshot`, naming
+the last block it reached or the missing blocks.
+
+The indexer keeps no version history (`run` takes the current time as its retention horizon), so
+the client's snapshot of a component created inside the range is read at the latest state, not at
+the creation block. A component that changes again before the client fetches its snapshot can
+therefore stream from a later state; `stream.matches_snapshot` then fails, so the race shows as a
+failure rather than a wrong pass.
+
+After the stream:
+
+- **`stream.matches_snapshot`**: the snapshot at the stop block, decoded as range mode always does,
+  must quote exactly as the streamed state: every direction's limits, spot price and ladder quotes.
+  A delta applied twice, a dropped field or a stale attribute fails here even when no single
+  block's quote looks wrong.
+- **`stream.coverage`**: how much the range exercised, against this floor. It is report-only for
+  now: a shortfall is a `warn` naming what is missing, and does not fail the test.
+
+  | Measure | Floor |
+  |---|---|
+  | blocks in which an expected component changed | 20 |
+  | changed blocks per simulated component | 2 |
+  | execution checks, in total | 100 |
+  | execution checks per component with execution on | 10 |
+  | tradable directions of the simulated components quoted after a delta | all |
+
+  The report's `coverage` section has the counts per test.
+
+The stream follows only the expected components, including one created inside the range.
+
 ### Test report
 
 `range --report <path>` writes every check's outcome, per test, as JSON, in either mode:
@@ -335,10 +386,26 @@ tolerance or not, so `measured` can be checked against a run.
     { "test": "first", "check": "exec.ladder", "component": "0xabc...", "outcome": "skipped", "reason": "range predates Shanghai; the router needs PUSH0" },
     { "test": "first", "check": "sim.ladder", "outcome": "fail", "detail": "Error calculating amount out ..." },
     { "test": "first", "check": "exec.ladder", "outcome": "not_run", "reason": "sim.ladder failed" },
-    { "test": "second", "check": "limits.past_limit", "component": "0x...", "direction": "0x...->0x...", "outcome": "pass" }
+    { "test": "second", "check": "limits.past_limit", "component": "0x...", "direction": "0x...->0x...", "outcome": "pass" },
+    { "test": "second", "check": "sim.ladder", "block": 19701407, "outcome": "pass" },
+    { "test": "second", "check": "stream.coverage", "outcome": "warn", "detail": "4 blocks changed an expected component, under the floor of 20; ..." }
   ],
   "drift": [
     { "test": "second", "simulation": "test_0x..._USDC_WETH_1000000", "component": "0x...", "simulated": "1003", "executed": "1000", "bps": -30.0, "largest_difference": "-3" }
+  ],
+  "coverage": [
+    {
+      "test": "test_wolf_weth_pool",
+      "blocks_streamed": 105,
+      "changed_blocks": 4,
+      "changed_blocks_by_component": { "0x6732...18c2": 4 },
+      "simulated_blocks": [19701398, 19701407, 19701458, 19701496],
+      "executed_blocks": [19701398, 19701407, 19701458, 19701496],
+      "executions": 32,
+      "executions_by_component": { "0x6732...18c2": 32 },
+      "quoted_directions": { "0x6732...18c2": ["0x6746...7e69->0xc02a...6cc2", "0xc02a...6cc2->0x6746...7e69"] },
+      "tradable_directions": { "0x6732...18c2": ["0x6746...7e69->0xc02a...6cc2", "0xc02a...6cc2->0x6746...7e69"] }
+    }
   ]
 }
 ```
@@ -356,6 +423,8 @@ tolerance or not, so `measured` can be checked against a run.
 | `limits.at_limit` | strict: every direction quotes and executes at its limit |
 | `limits.past_limit` | strict: past a hard limit, the quote errors and the execution reverts |
 | `limits.max_output` | strict: the quote at the limit pays no more than the limit's max output |
+| `stream.matches_snapshot` | strict, streamed: the streamed state quotes exactly as the snapshot at the stop block |
+| `stream.coverage` | strict, streamed: the range meets the floor; a shortfall is a `warn`, for now |
 
 A skipped check is reported with its reason, per component (by lowercase id) for
 `skip_simulation` and `skip_execution`; a legacy `true` reads "no reason given". A test-wide

@@ -7,6 +7,7 @@ use tokio::sync::{
 use tokio_retry::strategy::ExponentialBackoff;
 use tracing::{error, info, warn};
 use tycho_common::models::ExtractorIdentity;
+use uuid::Uuid;
 
 pub use crate::extractor::factory::{DCIType, ExtractorConfig, ProtocolTypeConfig};
 use crate::extractor::{
@@ -64,6 +65,7 @@ pub struct ExtractorSupervisor {
     id: ExtractorIdentity,
     max_restarts: Option<u32>,
     next_subscriber_id: u64,
+    wait_for_subscriber: bool,
 }
 
 impl ExtractorSupervisor {
@@ -79,7 +81,17 @@ impl ExtractorSupervisor {
             id,
             max_restarts,
             next_subscriber_id: 0,
+            wait_for_subscriber: false,
         }
+    }
+
+    /// Sets wait mode: the extractor is held back until the first external subscriber joins,
+    /// and every external subscriber is delivered to like an in-process one, so the extractor
+    /// waits for room in its channel instead of removing it. Without it, the extractor runs
+    /// through a historical range before a client subscribes, and drops a client that falls
+    /// behind, or one that resubscribes after a timeout.
+    pub fn wait_for_subscriber(&mut self) {
+        self.wait_for_subscriber = true;
     }
 
     /// Registers an in-process subscriber.
@@ -87,7 +99,8 @@ impl ExtractorSupervisor {
     /// The subscriber receives every [`DeltaCommand`] the extractor emits, across restarts: the
     /// extractor waits for room in its channel. External subscribers joining at runtime go through
     /// [`MessageSender::subscribe`](crate::extractor::runner::MessageSender::subscribe) on an
-    /// [`ExtractorHandle`] instead; they are removed when their channel is full.
+    /// [`ExtractorHandle`] instead; they are removed when their channel is full, except in wait
+    /// mode (see [`Self::wait_for_subscriber`]).
     pub async fn add_subscriber(&mut self, sender: Sender<DeltaCommand>) {
         self.insert_subscriber(sender, SubscriberKind::Internal)
             .await;
@@ -101,6 +114,12 @@ impl ExtractorSupervisor {
             .lock()
             .await
             .insert(subscriber_id, Subscriber { sender, kind });
+    }
+
+    /// How an external subscriber is delivered to: like a client, or, in wait mode, like an
+    /// in-process subscriber.
+    fn client_kind(&self, subscription_id: Uuid, user_identity: Option<String>) -> SubscriberKind {
+        subscriber_kind(self.wait_for_subscriber, subscription_id, user_identity)
     }
 
     /// Returns an [`ExtractorHandle`] that can be used to subscribe or stop this extractor.
@@ -124,6 +143,19 @@ impl ExtractorSupervisor {
     /// over RPC. A future improvement could instead retry transient build failures in place
     /// and reserve `Err` for deterministic configuration errors.
     pub async fn run(mut self) -> Result<(), ExtractionError> {
+        if self.wait_for_subscriber {
+            info!(extractor = %self.id, "Waiting for the first subscriber");
+            let Some((sender, subscription_id, user_identity)) =
+                first_subscriber(&mut self.control_rx).await
+            else {
+                info!(extractor = %self.id, "Stopped before a subscriber joined");
+                return Ok(());
+            };
+            let kind = self.client_kind(subscription_id, user_identity);
+            self.insert_subscriber(sender, kind)
+                .await;
+        }
+
         let mut restart_count: u32 = 0;
         let mut backoff_strategy = restart_backoff();
         let restarts = restart_counter(&self.id);
@@ -175,11 +207,8 @@ impl ExtractorSupervisor {
                                 };
                             }
                             ControlMessage::Subscribe { sender, subscription_id, user_identity } => {
-                                self
-                                    .insert_subscriber(
-                                        sender,
-                                        SubscriberKind::Client { subscription_id, user_identity },
-                                    )
+                                let kind = self.client_kind(subscription_id, user_identity);
+                                self.insert_subscriber(sender, kind)
                                     .await;
                             }
                         }
@@ -327,11 +356,8 @@ impl ExtractorSupervisor {
                                 return Ok(());
                             }
                             ControlMessage::Subscribe { sender, subscription_id, user_identity } => {
-                                self
-                                    .insert_subscriber(
-                                        sender,
-                                        SubscriberKind::Client { subscription_id, user_identity },
-                                    )
+                                let kind = self.client_kind(subscription_id, user_identity);
+                                self.insert_subscriber(sender, kind)
                                     .await;
                             }
                         }
@@ -346,6 +372,36 @@ impl ExtractorSupervisor {
             );
             restart_count += 1;
             restarts.increment(1);
+        }
+    }
+}
+
+/// How an external subscriber is delivered to. In wait mode it gets an in-process subscriber's
+/// delivery, which waits for room in its channel, so a slow or resubscribing client is not
+/// dropped; its subscription id is logged when it joins. Otherwise it is a client, removed when
+/// its channel is full.
+fn subscriber_kind(
+    wait_for_subscriber: bool,
+    subscription_id: Uuid,
+    user_identity: Option<String>,
+) -> SubscriberKind {
+    if wait_for_subscriber {
+        info!(%subscription_id, "Subscriber delivered to like an in-process one (wait mode)");
+        SubscriberKind::Internal
+    } else {
+        SubscriberKind::Client { subscription_id, user_identity }
+    }
+}
+
+/// Waits for the first `Subscribe` and returns its sender, subscription id and identity, or
+/// `None` on `Stop` or when every handle is gone.
+async fn first_subscriber(
+    control_rx: &mut Receiver<ControlMessage>,
+) -> Option<(Sender<DeltaCommand>, Uuid, Option<String>)> {
+    match control_rx.recv().await? {
+        ControlMessage::Stop => None,
+        ControlMessage::Subscribe { sender, subscription_id, user_identity } => {
+            Some((sender, subscription_id, user_identity))
         }
     }
 }
@@ -407,5 +463,55 @@ mod tests {
         });
 
         assert_eq!(restarts_series(&snapshotter), vec![(labels, 2)]);
+    }
+
+    #[tokio::test]
+    async fn first_subscriber_returns_the_sender_of_the_first_subscription() {
+        let (ctrl_tx, mut ctrl_rx) = mpsc::channel(CONTROL_CHANNEL_SIZE);
+        let (tx, mut rx) = mpsc::channel(1);
+        ctrl_tx
+            .send(ControlMessage::Subscribe {
+                sender: tx,
+                subscription_id: uuid::Uuid::new_v4(),
+                user_identity: None,
+            })
+            .await
+            .unwrap();
+
+        let (sender, _, _) = first_subscriber(&mut ctrl_rx)
+            .await
+            .expect("a subscriber joined");
+        sender
+            .send(DeltaCommand::ExtractorRestarted("uniswap_v2".to_string()))
+            .await
+            .unwrap();
+        assert!(matches!(rx.recv().await, Some(DeltaCommand::ExtractorRestarted(_))));
+    }
+
+    #[test]
+    fn wait_mode_delivers_to_every_external_subscriber_like_an_in_process_one() {
+        let id = uuid::Uuid::new_v4();
+        assert!(matches!(subscriber_kind(true, id, None), SubscriberKind::Internal));
+        assert!(matches!(
+            subscriber_kind(false, id, Some("user".to_string())),
+            SubscriberKind::Client { subscription_id, user_identity: Some(_) } if subscription_id == id
+        ));
+    }
+
+    #[tokio::test]
+    async fn first_subscriber_gives_up_on_stop_or_when_every_handle_is_gone() {
+        let (ctrl_tx, mut ctrl_rx) = mpsc::channel(CONTROL_CHANNEL_SIZE);
+        ctrl_tx
+            .send(ControlMessage::Stop)
+            .await
+            .unwrap();
+        assert!(first_subscriber(&mut ctrl_rx)
+            .await
+            .is_none());
+
+        drop(ctrl_tx);
+        assert!(first_subscriber(&mut ctrl_rx)
+            .await
+            .is_none());
     }
 }

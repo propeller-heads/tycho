@@ -19,8 +19,8 @@ use tycho_simulation::{
     tycho_common::{dto::TvlThresholdTier, models::Chain},
 };
 
-/// Register decoder based on protocol system. Defaults to EVMPoolState.
-/// To add a new protocol, just add a case to the match statement.
+/// Register decoder based on protocol system, tracking the components above the chain's medium TVL
+/// threshold. Defaults to EVMPoolState.
 pub fn register_protocol(
     stream_builder: ProtocolStreamBuilder,
     protocol_system: &str,
@@ -28,8 +28,22 @@ pub fn register_protocol(
     decoder_context: DecoderContext,
 ) -> ProtocolStreamBuilder {
     let tvl = chain.default_tvl_threshold(TvlThresholdTier::Medium);
-    let tvl_filter = ComponentFilter::with_tvl_range(tvl, tvl);
+    register_protocol_with_filter(
+        stream_builder,
+        protocol_system,
+        decoder_context,
+        ComponentFilter::with_tvl_range(tvl, tvl),
+    )
+}
 
+/// Register decoder based on protocol system, tracking the components `tvl_filter` selects.
+/// Defaults to EVMPoolState. To add a new protocol, just add a case to the match statement.
+pub fn register_protocol_with_filter(
+    stream_builder: ProtocolStreamBuilder,
+    protocol_system: &str,
+    decoder_context: DecoderContext,
+    tvl_filter: ComponentFilter,
+) -> ProtocolStreamBuilder {
     match protocol_system {
         "uniswap_v2" | "sushiswap_v2" => stream_builder
             .exchange_with_decoder_context::<UniswapV2State>(
