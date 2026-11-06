@@ -1,8 +1,8 @@
-//! Strict mode's verification of a `tvl_only` declaration: that simulation ignores the component's
+//! The verification of a `tvl_only` declaration: that simulation ignores the component's
 //! balances.
 //!
 //! A `tvl_only` component's balances are checked within a tolerance, which is only sound if they
-//! feed TVL and nothing else. The runner checks that, rather than taking it on trust: it decodes
+//! feed TVL and nothing else. A runner checks that, rather than taking it on trust: it decodes
 //! the snapshot a second time with the component's balances scaled down, each token's by a
 //! different factor so their ratios change too, and asks both decoded states the same questions.
 //! Every limit, spot price and ladder quote must come out the same. If one changes, simulation
@@ -19,40 +19,7 @@ use tycho_simulation::{
     tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes},
 };
 
-/// What the verification asks a decoded state.
-pub trait Quoter {
-    /// `(max input, max output)` of selling `token_in` for `token_out`.
-    fn limits(&self, token_in: &Token, token_out: &Token) -> Result<(BigUint, BigUint), String>;
-    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, String>;
-    fn amount_out(
-        &self,
-        amount_in: BigUint,
-        token_in: &Token,
-        token_out: &Token,
-    ) -> Result<BigUint, String>;
-}
-
-impl Quoter for dyn ProtocolSim {
-    fn limits(&self, token_in: &Token, token_out: &Token) -> Result<(BigUint, BigUint), String> {
-        self.get_limits(token_in.address.clone(), token_out.address.clone())
-            .map_err(|e| e.to_string())
-    }
-
-    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, String> {
-        ProtocolSim::spot_price(self, base, quote).map_err(|e| e.to_string())
-    }
-
-    fn amount_out(
-        &self,
-        amount_in: BigUint,
-        token_in: &Token,
-        token_out: &Token,
-    ) -> Result<BigUint, String> {
-        self.get_amount_out(amount_in, token_in, token_out)
-            .map(|quote| quote.amount)
-            .map_err(|e| e.to_string())
-    }
-}
+use crate::checks::sheet::{Quoter, LADDER_THOUSANDTHS};
 
 /// Scales down every indexed balance of the components `ids` in `snapshot`, keeping each value's
 /// byte length: in token address order, the first token's balance to 1/2, the second's to 1/3,
@@ -135,9 +102,6 @@ pub fn check(
     compare(original_state, scaled_state, &component.tokens, sizing)
 }
 
-/// The fractions of a direction's max input the ladder quotes, in thousandths.
-const LADDER: [u32; 3] = [1, 10, 100];
-
 /// Compares `original` with `scaled`, the same component decoded with its balances scaled, in
 /// every direction between `tokens`: limits, spot price, and a quote at 0.1%, 1% and 10% of the
 /// original max input after `sizing`, which caps it as the ladder does. Returns every difference.
@@ -176,7 +140,7 @@ pub fn compare<Q: Quoter + ?Sized>(
             continue;
         };
         let max_input = sizing(&max_input);
-        for thousandths in LADDER {
+        for thousandths in LADDER_THOUSANDTHS {
             let amount_in = &max_input * thousandths / 1000u32;
             if amount_in.is_zero() {
                 continue;

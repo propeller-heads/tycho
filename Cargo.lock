@@ -10379,6 +10379,7 @@ dependencies = [
  "colored",
  "futures 0.3.31",
  "hex",
+ "itertools 0.13.0",
  "miette",
  "mockito",
  "num-bigint",
