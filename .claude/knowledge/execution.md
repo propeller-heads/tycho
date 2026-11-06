@@ -305,3 +305,15 @@ Why: The input amount routinely differs by a few wei at execution time and venue
 Spot: Executor checks like `value == amountIn` or `signedAmount == amountIn`, or signed payloads forwarded verbatim without overriding the unsigned amount field. `if (amountIn != signedAmountIn)` branches that write the actual amount without touching the min-output field; `ethValue = amountIn > value ? value : amountIn`.
 Applies: solidity, solidity-test, rust · look first at lines matching `amount|value|sign|override|payable|min|deliver`
 Checked by: ast-grep `sol-signed-quote-amount-mismatch`
+
+### encoder-checks-binding-quote
+A swap encoder for a signed-quote venue reads and checks every quote field the executor depends on (expiry, recipient, payable value, calldata) before it encodes the swap.
+Why: An expired or wrong quote otherwise fails only on chain, and fields the client stores but the encoder never reads suggest validation that never happens.
+Spot: `quote_attributes` fields (signature, deadline, expiry) set by the client but never read in the encoder; calldata from `quote_attributes` encoded without a length or expiry check.
+Applies: rust, rust-test · look first at lines matching `quote_attributes|request_signed_quote|calldata|signature|deadline|expir|recipient|value`
+
+### encoder-no-network-for-unsigned-venue
+A swap encoder calls a venue's API or RPC only when the venue signs quotes at encode time.
+Why: A venue whose simulated state is what executes gains nothing from a fresh quote, and the encoder blocks on a network call for every swap.
+Spot: `request_signed_quote`, HTTP or RPC calls in the swap encoder of a venue that does not sign quotes (a pAMM, an on-chain book).
+Applies: rust, rust-test · look first at lines matching `request_signed_quote|indicativelypriced|reqwest|rpc|client|await`

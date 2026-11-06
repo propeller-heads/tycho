@@ -34,9 +34,9 @@ Applies: rust, rust-test · look first at lines matching `http|status|response|r
 Checked by: ast-grep `rust-blanket-from-fatal`
 
 ### offchain-quote-response-validated
-A binding quote's response is validated against the request and against what the executor needs (tokens, amount, expiry, recipient, payable value, calldata length) before it is encoded.
-Why: Malformed or expired venue calldata otherwise fails only on chain, a quote for a different trade goes through, and stored-but-unread fields suggest validation that never happens.
-Spot: Hex-decoded calldata inserted into quote data without a length check; responses used without comparing them to the request; signature/deadline fields stored but never read by the encoder.
+A binding quote's response is validated against the request (tokens, amount, recipient) and its calldata length is checked before it goes into the quote data. The encoder's checks are `encoder-checks-binding-quote` in `execution.md`.
+Why: Malformed venue calldata otherwise fails only on chain, and a quote for a different trade goes through.
+Spot: Hex-decoded calldata inserted into quote data without a length check; responses used without comparing them to the request.
 Applies: rust, rust-test · look first at lines matching `quote|calldata|signature|deadline|expir|recipient|encode|hex|response|payable|value`
 
 ### offchain-partial-response-parsing
@@ -145,7 +145,7 @@ Applies: rust, rust-test · look first at lines matching `direction|side|pair|bi
 Checked by: ast-grep `offchain-unconditional-directions`
 
 ### offchain-binding-quote-only-when-signed
-A venue implements the binding-quote interface only when execution needs a quote the venue signs at encode time; otherwise encoding never waits on the network for it.
+A venue implements the binding-quote interface only when execution needs a quote the venue signs at encode time. The encoder side is `encoder-no-network-for-unsigned-venue` in `execution.md`.
 Why: A venue whose simulated state is what executes gains nothing from a fresh quote, while the encoder blocks on network calls for every swap and the venue is counted as a signed-quote venue.
-Spot: `impl IndicativelyPriced` on a venue whose quotes are not signed (a pAMM, an on-chain book); an encoder calling out to a venue's API or RPC for a venue that does not sign quotes.
+Spot: `impl IndicativelyPriced` on a venue whose quotes are not signed (a pAMM, an on-chain book).
 Applies: rust, rust-test · look first at lines matching `indicativelypriced|request_signed_quote|binding|signed`
