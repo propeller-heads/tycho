@@ -27,6 +27,7 @@ use crate::{
         reader::{
             availableLiquidityCall, cUnitCall, curveBookCall, custodianCall, knotCall, pairCall,
             quoteTokenCall, taker_fee_call, ttlCall, validUntilCall, PairView, SideView,
+            IMPLEMENTATION_SLOT,
         },
         state::BaibaiState,
         Deployment, BASE_DEPLOYMENT, BASE_LISTED_BASES, BASE_ROUTER,
@@ -199,6 +200,10 @@ pub(super) struct FakeNode {
     pub block: u64,
     /// The only taker the entrypoint expects its fee asked for.
     pub taker: Address,
+    /// The implementation each proxy's EIP-1967 slot holds, keyed by proxy.
+    pub implementations: HashMap<Address, Address>,
+    /// Fails every `eth_getStorageAt`, as a node that cannot serve one.
+    pub storage_fails: bool,
 }
 
 impl FakeNode {
@@ -213,6 +218,12 @@ impl FakeNode {
             chain_id: BASE_DEPLOYMENT.chain.id(),
             reverting: Vec::new(),
             taker: BASE_ROUTER,
+            implementations: BASE_DEPLOYMENT
+                .proxies()
+                .into_iter()
+                .map(|(_, proxy, implementation)| (proxy, implementation))
+                .collect(),
+            storage_fails: false,
         }
     }
 
@@ -220,9 +231,52 @@ impl FakeNode {
         spawn_http_server(move |request| Some(("200 OK", self.answer(request)))).await
     }
 
+    /// Answers one request or a batch of them, each by its method.
     fn answer(&self, request: &MockRequest) -> String {
         let request: serde_json::Value = serde_json::from_str(&request.body).unwrap();
-        assert_eq!(request["method"], "eth_call", "the fake node serves eth_call only");
+        let answer = match request.as_array() {
+            Some(batch) => batch
+                .iter()
+                .map(|request| self.answer_one(request))
+                .collect(),
+            None => self.answer_one(&request),
+        };
+        answer.to_string()
+    }
+
+    fn answer_one(&self, request: &serde_json::Value) -> serde_json::Value {
+        match request["method"].as_str() {
+            Some("eth_call") => self.answer_call(request),
+            Some("eth_getStorageAt") => self.answer_storage(request),
+            method => panic!("the fake node does not serve {method:?}"),
+        }
+    }
+
+    /// The implementation slot of a proxy, the only storage a read asks for.
+    fn answer_storage(&self, request: &serde_json::Value) -> serde_json::Value {
+        let params = &request["params"];
+        assert_eq!(params[2], "latest", "a read asks for the latest block");
+        let slot: U256 = serde_json::from_value(params[1].clone()).unwrap();
+        assert_eq!(
+            slot,
+            U256::from_be_bytes(IMPLEMENTATION_SLOT.0),
+            "only the implementation slot"
+        );
+        if self.storage_fails {
+            let error = serde_json::json!({ "code": -32000, "message": "header not found" });
+            return serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "error": error });
+        }
+        let proxy: Address = serde_json::from_value(params[0].clone()).unwrap();
+        let implementation = self
+            .implementations
+            .get(&proxy)
+            .copied()
+            .unwrap_or_default();
+        let result = implementation.into_word();
+        serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": result })
+    }
+
+    fn answer_call(&self, request: &serde_json::Value) -> serde_json::Value {
         let block = &request["params"][1];
         assert_eq!(*block, "latest", "a read asks for the latest block");
         let input = request["params"][0]["input"]
@@ -238,8 +292,7 @@ impl FakeNode {
             let answer = self.call(call.target, &call.callData);
             if answer.is_none() && !call.allowFailure {
                 let error = serde_json::json!({ "code": 3, "message": "Multicall3: call failed" });
-                return serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "error": error })
-                    .to_string();
+                return serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "error": error });
             }
             answers.push(Call3Result {
                 success: answer.is_some(),
@@ -248,7 +301,7 @@ impl FakeNode {
         }
         let encoded = aggregate3Call::abi_encode_returns(&answers);
         let result = format!("0x{}", alloy::primitives::hex::encode(encoded));
-        serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": result }).to_string()
+        serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": result })
     }
 
     fn pair(&self, base: Address) -> Option<&FixturePair> {

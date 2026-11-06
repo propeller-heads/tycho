@@ -1,13 +1,16 @@
 //! Reads every configured BaiBai pair over JSON-RPC, all at one block.
 //!
-//! A read is one `Multicall3.aggregate3` call at the latest block: its number, timestamp and chain
-//! id, the deployment's wiring, the book's settings, custody and, for each pair, its parameters,
-//! taker fee and every knot index a side can hold. The curve book reverts for an index past the
-//! side's knot count, so only the first `knotCount` answers of each side are kept.
+//! A read is one JSON-RPC batch, sent as one HTTP request, at the latest block. It holds one
+//! `Multicall3.aggregate3` call: the block's number, timestamp and chain id, the deployment's
+//! wiring, the book's settings, custody and, for each pair, its parameters, taker fee and every
+//! knot index a side can hold. The curve book reverts for an index past the side's knot count, so
+//! only the first `knotCount` answers of each side are kept. Beside it, one `eth_getStorageAt` per
+//! proxy reads its EIP-1967 implementation slot, which no contract can read for Multicall3; an
+//! implementation other than the pinned one fails the read before any answer is decoded.
 
 use alloy::{
     eips::BlockId,
-    primitives::{Address, Bytes as AlloyBytes, U256},
+    primitives::{b256, Address, Bytes as AlloyBytes, B256, U256},
     providers::{
         bindings::IMulticall3::{
             aggregate3Call, getBlockNumberCall, getChainIdCall, getCurrentBlockTimestampCall,
@@ -15,12 +18,19 @@ use alloy::{
         },
         Provider, RootProvider, MULTICALL3_ADDRESS,
     },
-    rpc::types::{TransactionInput, TransactionRequest},
+    rpc::{
+        client::BatchRequest,
+        types::{TransactionInput, TransactionRequest},
+    },
     sol,
     sol_types::{SolCall, SolValue},
 };
 use reqwest::Url;
 use tracing::debug;
+
+/// EIP-1967's implementation slot, `keccak256("eip1967.proxy.implementation") - 1`.
+pub(super) const IMPLEMENTATION_SLOT: B256 =
+    b256!("360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc");
 
 use crate::{
     pamm::protocols::baibai::{
@@ -187,7 +197,7 @@ impl BaibaiReader {
 
     /// The read's block and book-wide values, with no pairs yet.
     fn decode_settings(&self, answers: &[Call3Result]) -> Result<BookRead, FeedError> {
-        let Deployment { chain, entrypoint, curve_book, custodian, quote } = self.deployment;
+        let Deployment { chain, entrypoint, curve_book, custodian, quote, .. } = self.deployment;
         for ((what, _), answer) in self
             .settings_calls()
             .iter()
@@ -269,6 +279,10 @@ impl BaibaiReader {
         calls
     }
 
+    /// Sends `calls` in one `aggregate3` at the latest block, batched with a read of each proxy's
+    /// implementation slot. Fails fatally when a proxy runs an implementation other than its pin,
+    /// before the multicall's answer is looked at: after an upgrade, that answer may well fail in
+    /// a way that hides the cause.
     async fn aggregate(&self, calls: Vec<Call3>) -> Result<Vec<Call3Result>, FeedError> {
         let expected = calls.len();
         let request = TransactionRequest::default()
@@ -278,17 +292,37 @@ impl BaibaiReader {
                     .abi_encode()
                     .into(),
             ));
-        let raw = self
-            .provider
-            .call(request)
-            .block(BlockId::latest())
+        let latest = BlockId::latest();
+        let client = self.provider.client();
+        let mut batch = BatchRequest::new(&client);
+        let multicall = batch
+            .add_call::<_, AlloyBytes>("eth_call", &(request, latest))
+            .map_err(|e| self.connection_error("multicall", e))?;
+        let mut slots = Vec::new();
+        for (_, proxy, _) in self.deployment.proxies() {
+            let slot = U256::from_be_bytes(IMPLEMENTATION_SLOT.0);
+            let read = batch
+                .add_call::<_, U256>("eth_getStorageAt", &(proxy, slot, latest))
+                .map_err(|e| self.connection_error("implementation slot", e))?;
+            slots.push(read);
+        }
+        batch
+            .send()
             .await
-            .map_err(|e| {
-                let error = e
-                    .to_string()
-                    .replace(&self.rpc_url, "<rpc url>");
-                FeedError::Connection(format!("BaiBai multicall: {error}"))
-            })?;
+            .map_err(|e| self.connection_error("batch", e))?;
+
+        let mut found = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let word = slot
+                .await
+                .map_err(|e| self.connection_error("implementation slot", e))?;
+            found.push(Address::from_word(B256::from(word)));
+        }
+        self.check_implementations(&found)?;
+
+        let raw = multicall
+            .await
+            .map_err(|e| self.connection_error("multicall", e))?;
         let answers = aggregate3Call::abi_decode_returns(&raw)
             .map_err(|e| FeedError::Parsing(format!("BaiBai multicall: {e}")))?;
         if answers.len() != expected {
@@ -298,6 +332,34 @@ impl BaibaiReader {
             )));
         }
         Ok(answers)
+    }
+
+    /// Fails fatally when a proxy runs an implementation other than the one it is pinned to.
+    fn check_implementations(&self, found: &[Address]) -> Result<(), FeedError> {
+        for ((name, proxy, pinned), found) in self
+            .deployment
+            .proxies()
+            .into_iter()
+            .zip(found)
+        {
+            if *found != pinned {
+                return Err(FeedError::Fatal(format!(
+                    "BaiBai: the {name} proxy {proxy} runs implementation {found}, not the pinned \
+                     {pinned}; the deployment was upgraded and the integration needs verifying \
+                     against the new implementation"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// A transport failure, with the RPC URL removed: it commonly carries a key, and the HTTP
+    /// client's errors quote the URL they failed on.
+    fn connection_error(&self, what: &str, error: impl std::fmt::Display) -> FeedError {
+        let error = error
+            .to_string()
+            .replace(&self.rpc_url, "<rpc url>");
+        FeedError::Connection(format!("BaiBai {what}: {error}"))
     }
 }
 

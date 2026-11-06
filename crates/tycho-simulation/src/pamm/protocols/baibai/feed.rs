@@ -334,7 +334,9 @@ mod tests {
         book::{chain_without_id, Book},
         pamm::protocols::baibai::{
             math::MAX_KNOTS,
-            reader::{knotCall, pairCall, taker_fee_call, ttlCall, validUntilCall},
+            reader::{
+                knotCall, pairCall, taker_fee_call, ttlCall, validUntilCall, IMPLEMENTATION_SLOT,
+            },
             test_support::{book_config, bytes, cbbtc, state, token, weth, FakeNode},
         },
     };
@@ -600,6 +602,78 @@ mod tests {
                 .contains("availableLiquidity"),
             "{error}"
         );
+    }
+
+    /// A proxy upgraded to an implementation this integration was not verified against may price
+    /// differently with every getter still answering, so it ends the feed.
+    #[rstest]
+    #[case::the_entrypoint("Entrypoint", BASE_DEPLOYMENT.entrypoint)]
+    #[case::the_curve_book("CurveBook", BASE_DEPLOYMENT.curve_book)]
+    #[case::the_custodian("Custodian", BASE_DEPLOYMENT.custodian)]
+    #[tokio::test]
+    async fn an_upgraded_proxy_ends_the_feed(#[case] name: &str, #[case] proxy: Address) {
+        let upgraded = Address::repeat_byte(0x99);
+        let mut node = FakeNode::new();
+        node.implementations
+            .insert(proxy, upgraded);
+
+        let error = fetch(node, book_config(), None)
+            .await
+            .unwrap_err();
+
+        assert!(error.is_fatal(), "{error}");
+        let message = error.to_string();
+        assert!(message.contains(&format!("{name} proxy {proxy}")), "{message}");
+        assert!(message.contains(&upgraded.to_string()), "{message}");
+    }
+
+    /// An upgrade often breaks a getter too; the error names the upgrade, not the getter.
+    #[tokio::test]
+    async fn an_upgrade_is_reported_before_the_getters_it_broke() {
+        let mut node = FakeNode::new();
+        node.implementations
+            .insert(BASE_DEPLOYMENT.entrypoint, Address::repeat_byte(0x99));
+        node.reverting.push(ttlCall::SELECTOR);
+
+        let error = fetch(node, book_config(), None)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Entrypoint proxy"),
+            "{error}"
+        );
+    }
+
+    /// A node that cannot read a proxy's storage this poll may next poll: the feed retries.
+    #[tokio::test]
+    async fn an_unreadable_implementation_slot_fails_only_the_poll() {
+        let mut node = FakeNode::new();
+        node.storage_fails = true;
+
+        let error = fetch(node, book_config(), None)
+            .await
+            .unwrap_err();
+
+        assert!(!error.is_fatal(), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("implementation slot"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_implementation_slot_is_eip_1967s() {
+        use alloy::primitives::{keccak256, B256, U256};
+
+        let hash = keccak256("eip1967.proxy.implementation");
+        let slot = U256::from_be_bytes(hash.0) - U256::from(1);
+
+        assert_eq!(IMPLEMENTATION_SLOT, B256::from(slot));
     }
 
     /// Contracts that no longer point at each other are a deployment this integration was not

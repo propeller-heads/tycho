@@ -23,6 +23,29 @@
 //! BaiBai sent with a tip above 0.002 gwei receives up to 50 bps less than quoted, and reverts
 //! when its slippage tolerance is tighter than that.
 //!
+//! # What this integration depends on
+//!
+//! The arithmetic, the expiry rules, the fee and the gas model were measured against one
+//! implementation behind each proxy, pinned in [`BASE_DEPLOYMENT`]:
+//!
+//! | Proxy      | Implementation | Since Base block                         |
+//! |------------|----------------|------------------------------------------|
+//! | Entrypoint | `0xCc61…F3B0`  | 53,492,231                               |
+//! | CurveBook  | `0x3E6A…9f1d`  | 52,963,996                               |
+//! | Custodian  | `0x997b…3076`  | unchanged at every block checked from 51,000,000 |
+//!
+//! A Safe (`0xB1F4E4d67E330CC505e526488bAe0388e616A907`) owns all three and can upgrade any of
+//! them. None is source-verified, so every upgrade is treated as one that may change the
+//! arithmetic: each poll reads the three EIP-1967 implementation slots, and one that differs from
+//! its pin ends the feed. Accepting a new implementation means re-recording a fixture with
+//! `testdata/record_fixture.py` and comparing its quotes wei for wei, re-measuring gas and the
+//! priority surcharge on a fork (tycho-execution's `Baibai.t.sol`), then updating the pin.
+//!
+//! The pins do not catch the owner changing parameters in storage. The TTL and the taker fee are
+//! read every poll, so a change to them reaches the books. The priority surcharge's threshold
+//! (view `0xc256865c`) and cap (`prioritySurchargeBps()`) are not read; a change to them would
+//! leave the section above stale, though the books do not price the surcharge either way.
+//!
 //! Reference: <https://docs.baibai.cx/takers/quoting-and-swapping>
 
 use alloy::primitives::{address, Address};
@@ -48,15 +71,29 @@ pub(crate) const PROTOCOL_TYPE: &str = "baibai_pair";
 pub const BASE_ATTRIBUTE: &str = "base";
 pub const QUOTE_ATTRIBUTE: &str = "quote";
 
-/// The three proxies of one BaiBai deployment, the chain they are on and the quote token every
-/// pair trades against.
+/// The three proxies of one BaiBai deployment, the implementation each was verified against, the
+/// chain they are on and the quote token every pair trades against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Deployment {
     pub chain: Chain,
     pub entrypoint: Address,
     pub curve_book: Address,
     pub custodian: Address,
+    pub entrypoint_implementation: Address,
+    pub curve_book_implementation: Address,
+    pub custodian_implementation: Address,
     pub quote: Address,
+}
+
+impl Deployment {
+    /// Each proxy's name, address and pinned implementation.
+    pub(crate) fn proxies(&self) -> [(&'static str, Address, Address); 3] {
+        [
+            ("Entrypoint", self.entrypoint, self.entrypoint_implementation),
+            ("CurveBook", self.curve_book, self.curve_book_implementation),
+            ("Custodian", self.custodian, self.custodian_implementation),
+        ]
+    }
 }
 
 /// The Base deployment, quoted in USDC.
@@ -65,6 +102,9 @@ pub(crate) const BASE_DEPLOYMENT: Deployment = Deployment {
     entrypoint: address!("98c1D9E102Eb2806D902b13186BDc7892aC4fFBa"),
     curve_book: address!("604d9b9eB1e1571C78661a6C1088427EC9c8c6E5"),
     custodian: address!("AaC48FEB93c5C97E0fb3c7C57E1633922A4ACDa3"),
+    entrypoint_implementation: address!("Cc61F0ACB73EeA94c160aF15dA4471b9B456F3B0"),
+    curve_book_implementation: address!("3E6AbC41E9f41D7F6F7f26a6bf8851434fa69f1d"),
+    custodian_implementation: address!("997b2D1b539DFccC9D42f2d10Fe804F0Ac9b3076"),
     quote: address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
 };
 
