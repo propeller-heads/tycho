@@ -154,6 +154,14 @@ fn maybe_create_component(
         },
     ];
 
+    if !pi.launch_config.is_empty() {
+        static_att.push(Attribute {
+            change: ChangeType::Creation.into(),
+            name: "launch_config".to_string(),
+            value: pi.launch_config,
+        });
+    }
+
     if Some(pool_config.extension) == signed_exclusive_swap_address {
         static_att.push(Attribute {
             change: ChangeType::Creation.into(),

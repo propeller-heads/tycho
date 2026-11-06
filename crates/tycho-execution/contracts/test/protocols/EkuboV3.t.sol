@@ -276,7 +276,8 @@ contract EkuboV3ExecutorTest is Constants, TestUtils {
         ext.initializePool(
             poolKey,
             0, // tick = 0 → ~1:1 price
-            ControllerAddress.wrap(controller)
+            ControllerAddress.wrap(controller),
+            0 // ownerFee, separate from the signed swap fee
         );
 
         // --- 3. Add liquidity ---
@@ -373,7 +374,8 @@ contract EkuboV3ExecutorTest is Constants, TestUtils {
         ext.initializePool(
             poolKey,
             0, // tick = 0 → ~1:1 price
-            ControllerAddress.wrap(controller)
+            ControllerAddress.wrap(controller),
+            0 // ownerFee, separate from the signed swap fee
         );
 
         // --- 3. Add liquidity ---

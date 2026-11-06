@@ -7,6 +7,7 @@ pub mod stableswap;
 mod timed;
 pub mod twamm;
 pub mod ve33;
+pub mod zero_seed_launch;
 
 use std::collections::{HashMap, HashSet};
 
