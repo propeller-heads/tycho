@@ -1,4 +1,5 @@
-//! Reads every configured BaiBai pair over JSON-RPC, all at one block.
+//! Reads every configured BaiBai pair over JSON-RPC: the pair data all at one block, from one
+//! multicall.
 //!
 //! A read is one JSON-RPC batch, sent as one HTTP request, at the latest block. It holds one
 //! `Multicall3.aggregate3` call: the block's number, timestamp and chain id, the deployment's
@@ -28,10 +29,6 @@ use alloy::{
 use reqwest::Url;
 use tracing::debug;
 
-/// EIP-1967's implementation slot, `keccak256("eip1967.proxy.implementation") - 1`.
-pub(super) const IMPLEMENTATION_SLOT: B256 =
-    b256!("360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc");
-
 use crate::{
     pamm::protocols::baibai::{
         math::{Knot, Side, MAX_KNOTS},
@@ -39,6 +36,10 @@ use crate::{
     },
     snapshot_feed::errors::FeedError,
 };
+
+/// EIP-1967's implementation slot, `keccak256("eip1967.proxy.implementation") - 1`.
+pub(super) const IMPLEMENTATION_SLOT: B256 =
+    b256!("360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc");
 
 // The CurveBook, Entrypoint and Custodian getters, as documented at
 // <https://docs.baibai.cx/takers/quoting-and-swapping>.
@@ -115,8 +116,7 @@ pub(super) struct BookRead {
 pub(super) struct BaibaiReader {
     #[debug(skip)]
     provider: RootProvider,
-    /// Removed from transport errors before they are reported: an RPC URL commonly carries a key,
-    /// and the HTTP client's errors quote the URL they failed on.
+    /// Removed from transport errors before they are reported: see [`Self::connection_error`].
     #[debug(skip)]
     rpc_url: String,
     deployment: Deployment,
@@ -142,10 +142,10 @@ impl BaibaiReader {
     }
 
     /// Reads every configured base at the latest block. A base the book has never listed is left
-    /// out; the other pairs are read. Fails fatally when the node serves another chain, or when
-    /// the deployment no longer answers the way this integration was built for (its contracts
-    /// point elsewhere, a getter it reads reverts, or a side holds more knots than
-    /// [`MAX_KNOTS`]), since no later read will either.
+    /// out; the other pairs are read. Fails fatally when a proxy runs an implementation other than
+    /// its pin, when the node serves another chain, or when the deployment no longer answers the
+    /// way this integration was built for (its contracts point elsewhere, a getter it depends on
+    /// reverts, or a side holds more knots than [`MAX_KNOTS`]), since no later read will either.
     pub(super) async fn read(&self) -> Result<BookRead, FeedError> {
         let mut calls = Vec::new();
         calls.extend(self.settings_calls());
@@ -349,7 +349,7 @@ impl BaibaiReader {
     }
 }
 
-/// Calls of the first multicall before the pairs': see [`BaibaiReader::settings_calls`].
+/// Calls before the pairs' in the multicall: see [`BaibaiReader::settings_calls`].
 const SETTINGS_CALLS: usize = 10;
 
 /// Calls per configured base before its knots: see [`BaibaiReader::pair_calls`].
@@ -373,9 +373,10 @@ fn call(target: Address, data: Vec<u8>, allow_failure: bool) -> Call3 {
 ///
 /// The curve book answers `pair` and `validUntil` for any address, with zeros for one it has not
 /// listed, and the custodian reverts only for an address that is no token, which the book cannot
-/// have listed. So a revert of any call for a listed base, or of `pair` or `validUntil` for any
-/// base, means the deployment changed, and fails fatally; so does a side holding more knots than
-/// [`MAX_KNOTS`].
+/// have listed. So a revert of `pair` or `validUntil` for any base, or of custody, the taker fee
+/// or a knot within the side's count for a listed base, means the deployment changed and fails
+/// fatally; so does a side holding more knots than [`MAX_KNOTS`]. A knot past the count reverts
+/// by design and is ignored.
 fn decode_pair(base: Address, answers: &[Call3Result]) -> Result<Option<PairRead>, FeedError> {
     let (head, knots) = answers.split_at(PAIR_HEAD_CALLS);
     let [pair, valid_until, available, fee] = head else {

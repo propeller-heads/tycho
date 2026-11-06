@@ -126,10 +126,10 @@ impl Curve {
             Self::extra(prev, end, from)?)
     }
 
-    /// The input this side absorbs before it stops paying out: the whole remaining depth on the
-    /// ask side, and on the bid side the depth up to the first segment whose marginal proceeds
-    /// are not positive. The contract reverts past a segment that loses money; it keeps filling
-    /// past one that exactly breaks even, where this stops too.
+    /// The input this side absorbs before it stops paying out: on the ask side the quote cost of
+    /// the whole remaining depth, and on the bid side the depth up to the first segment whose
+    /// marginal proceeds are not positive. The contract reverts past a segment that loses money; it
+    /// keeps filling past one that exactly breaks even, where this stops too.
     pub(super) fn capacity(&self) -> Result<U256, SimulationError> {
         if self.filled >= self.max {
             return Ok(U256::ZERO);

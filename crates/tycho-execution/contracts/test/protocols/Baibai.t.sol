@@ -7,12 +7,14 @@ import {TychoRouter__NegativeSlippage} from "@src/TychoRouterV3.sol";
 import {BaibaiExecutor} from "@src/executors/BaibaiExecutor.sol";
 import {TransferManager} from "@src/TransferManager.sol";
 
-/// @dev `quoteFor` is from BaiBai's taker documentation (docs.baibai.cx/takers/quoting-and-swapping).
-///      The others were identified on the live, not source-verified implementations behind the
-///      proxies: `setTakerFee` by its selector and its effect on `quoteFor`.
+/// @dev `quoteFor` is from BaiBai's taker documentation
+///      (docs.baibai.cx/takers/quoting-and-swapping). The others were identified on the live,
+///      not source-verified implementations behind the proxies: `owner` and
+///      `prioritySurchargeBps` by their selectors, `setTakerFee` by its selector and its effect
+///      on `quoteFor`. Fees are in millionths of the gross output.
 interface IBaibaiFees {
     function owner() external view returns (address);
-    function setTakerFee(address taker, address base, uint16 bps) external;
+    function setTakerFee(address taker, address base, uint16 pips) external;
     function quoteFor(
         address base,
         address tokenIn,
@@ -143,12 +145,12 @@ contract BaibaiTest is TychoRouterTestSetup {
         baibaiExecutor.getTransferData(abi.encodePacked(address(0), uint8(1)));
     }
 
-    function _setFee(address taker, uint16 bps) internal {
+    function _setFee(address taker, uint16 pips) internal {
         vm.prank(IBaibaiFees(BAIBAI_ENTRYPOINT).owner());
-        IBaibaiFees(BAIBAI_ENTRYPOINT).setTakerFee(taker, BASE, bps);
+        IBaibaiFees(BAIBAI_ENTRYPOINT).setTakerFee(taker, BASE, pips);
     }
 
-    /// @dev A router swap that fills at exactly the entrypoint's gas-free quote.
+    /// @dev A router swap that fills at exactly the entrypoint's surcharge-free quote.
     function _swap(bool sellBase, uint256 amount)
         internal
         returns (uint256 received)
@@ -219,7 +221,7 @@ contract BaibaiTest is TychoRouterTestSetup {
     }
 
     /// @dev BaiBai as the second hop: the router approves the entrypoint for the USDC the first
-    ///      BaiBai hop paid it, and each hop fills at its gas-free quote.
+    ///      BaiBai hop paid it, and each hop fills at its surcharge-free quote.
     function testSequentialRouteThroughTwoPairs() public {
         uint256 amount = 1e16;
         (uint256 usdc,) = IBaibaiFees(BAIBAI_ENTRYPOINT)
@@ -267,9 +269,9 @@ contract BaibaiTest is TychoRouterTestSetup {
     /// @dev A swap whose priority fee exceeds the threshold has a hundredth of a basis point of
     ///      its gross output withheld per 1e4 wei above it, up to `prioritySurchargeBps`, the
     ///      withheld amount rounded up; the basefee plays no part. At the threshold it fills at
-    ///      the gas-free quote the simulator reproduces. The rule was measured on the unverified
-    ///      implementation, not read from source. The threshold and cap are pinned to their
-    ///      values at the fork block, which the simulator's module docs state.
+    ///      the surcharge-free quote the simulator reproduces. The rule was measured on the
+    ///      unverified implementation, not read from source. The threshold and cap are pinned to
+    ///      their values at the fork block, which the simulator's module docs state.
     function testPrioritySurchargeScalesWithThePriorityFee() public {
         uint256 threshold = _surchargeThreshold();
         assertEq(threshold, 2e6, "surcharge threshold");
@@ -294,7 +296,7 @@ contract BaibaiTest is TychoRouterTestSetup {
                 }
             }
         }
-        // A route quoted at the gas-free price reverts instead of filling short.
+        // A route quoted at the surcharge-free price reverts instead of filling short.
         (uint256 sellQuote,) = IBaibaiFees(BAIBAI_ENTRYPOINT)
             .quoteFor(BASE, BASE, 1e16, tychoRouterAddr);
         vm.fee(5_000_000);

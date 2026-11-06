@@ -157,7 +157,8 @@ for any protocol indexed by Tycho.
   `BaibaiFeedBuilder::taker` sets another. BaiBai has no venue API, so instead of the
   per-provider `client.rs`/`source.rs`/`models.rs` split it has `reader.rs` (the batch read and
   its decoding), `math.rs` (the CurveBook's arithmetic) and `feed.rs` (the feed, its builder and
-  the book assembly), beside `state.rs`.
+  the book assembly), beside `state.rs`; its tests run on `test_support.rs` (the recordings and a
+  fake node) and `testdata/` (the recordings and `record_fixture.py`, which makes them).
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
   it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the

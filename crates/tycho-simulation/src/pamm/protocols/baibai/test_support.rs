@@ -101,12 +101,12 @@ pub(super) fn fixtures() -> Vec<Fixture> {
         .collect()
 }
 
-/// The newest recording, with every cursor at zero and the router's fee at zero.
+/// The 53,545,000 recording, with every cursor at zero and the router's fee at zero.
 pub(super) fn fixture() -> Fixture {
     serde_json::from_str(RECORDINGS[0]).unwrap()
 }
 
-/// The oldest recording with every cursor at zero, which charges the router 50 millionths.
+/// The 53,234,728 recording, with every cursor at zero, which charges the router 50 millionths.
 pub(super) fn fee_charging_fixture() -> Fixture {
     serde_json::from_str(RECORDINGS[1]).unwrap()
 }
@@ -172,7 +172,7 @@ pub(super) fn state(fixture: &Fixture, pair: &FixturePair) -> BaibaiState {
     .unwrap()
 }
 
-/// The newest recording's WETH pair.
+/// The 53,545,000 recording's WETH pair.
 pub(super) fn weth_state() -> BaibaiState {
     let fixture = fixture();
     state(&fixture, &fixture.pairs[0])

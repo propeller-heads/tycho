@@ -27,7 +27,7 @@ CURVE_BOOK = "0x604d9b9eB1e1571C78661a6C1088427EC9c8c6E5"
 CUSTODIAN = "0xAaC48FEB93c5C97E0fb3c7C57E1633922A4ACDa3"
 QUOTE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 # tycho-execution's Base TychoRouter: the caller whose fee `quoteFor` charges.
-TAKER = "0xAbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67"
+BASE_ROUTER = "0xAbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67"
 # Unverified implementation; identified by its storage reads matching quoteFor's fee lookup.
 TAKER_FEE_SELECTOR = "0xa5cbd1b7"
 BASES = [
@@ -94,7 +94,7 @@ def main() -> None:
     fixture = {
         "block": block,
         "timestamp": timestamp,
-        "taker": TAKER,
+        "taker": BASE_ROUTER,
         "quote": QUOTE,
         "ttl": call(block, CURVE_BOOK, "ttl()(uint64)")[0],
         "c_unit": str(call(block, CURVE_BOOK, "cUnit()(uint256)")[0]),
@@ -104,7 +104,7 @@ def main() -> None:
         "pairs": [],
     }
     for base, decimals in BASES:
-        fee_input = cast("abi-encode", "f(address,address)", TAKER, base)[2:]
+        fee_input = cast("abi-encode", "f(address,address)", BASE_ROUTER, base)[2:]
         fee_call = TAKER_FEE_SELECTOR + fee_input
         fee = int(cast("call", "--block", str(block), ENTRYPOINT, fee_call), 16)
         cases = []
@@ -113,7 +113,7 @@ def main() -> None:
             for amount in amounts(decimals, sell_base):
                 out, charged = call(
                     block, ENTRYPOINT, "quoteFor(address,address,uint256,address)(uint256,uint256)",
-                    base, token_in, str(amount), TAKER,
+                    base, token_in, str(amount), BASE_ROUTER,
                 )
                 curve = call(
                     block, CURVE_BOOK, "quote(address,address,uint256)(uint256)",

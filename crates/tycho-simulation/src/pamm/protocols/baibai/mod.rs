@@ -6,7 +6,7 @@
 //! the three proxies are not source-verified; the arithmetic was checked wei for wei against the
 //! deployed `CurveBook.quote` and `Entrypoint.quoteFor` (see `testdata/`), and an upgrade that
 //! changes it needs this module updated. The Entrypoint was last upgraded at Base block
-//! 53,492,231; the newest recording (53,545,000) postdates it.
+//! 53,492,231; the recording at 53,545,000 postdates it.
 //!
 //! Only spreads of zero and depths of 0 or 100% have been seen live, so the spread and partial
 //! depth paths of the arithmetic follow the contract's observed rounding but have not been
@@ -28,18 +28,19 @@
 //! The arithmetic, the expiry rules, the fee and the gas model were measured against one
 //! implementation behind each proxy, pinned in `BASE_DEPLOYMENT`:
 //!
-//! | Proxy      | Implementation | Since Base block                         |
-//! |------------|----------------|------------------------------------------|
-//! | Entrypoint | `0xCc61…F3B0`  | 53,492,231                               |
-//! | CurveBook  | `0x3E6A…9f1d`  | 52,963,996                               |
-//! | Custodian  | `0x997b…3076`  | unchanged at every block checked from 51,000,000 |
+//! | Proxy      | Implementation | Since Base block                       |
+//! |------------|----------------|----------------------------------------|
+//! | Entrypoint | `0xCc61…F3B0`  | 53,492,231                             |
+//! | CurveBook  | `0x3E6A…9f1d`  | 52,963,996                             |
+//! | Custodian  | `0x997b…3076`  | no change seen at blocks from 51,000,000 |
 //!
 //! A Safe (`0xB1F4E4d67E330CC505e526488bAe0388e616A907`) owns all three and can upgrade any of
 //! them. None is source-verified, so every upgrade is treated as one that may change the
 //! arithmetic: each poll reads the three EIP-1967 implementation slots, and one that differs from
 //! its pin ends the feed. Accepting a new implementation means re-recording a fixture with
-//! `testdata/record_fixture.py` and comparing its quotes wei for wei, re-measuring gas and the
-//! priority surcharge on a fork (tycho-execution's `Baibai.t.sol`), then updating the pin.
+//! `testdata/record_fixture.py` and comparing its quotes wei for wei, re-measuring the gas
+//! constants in `state.rs` on a fork, and re-running tycho-execution's `Baibai.t.sol`, which pins
+//! the priority surcharge and the expiry rules, then updating the pin.
 //!
 //! The pins do not catch the owner changing parameters in storage. The TTL and the taker fee are
 //! read every poll, so a change to them reaches the books. The priority surcharge's threshold

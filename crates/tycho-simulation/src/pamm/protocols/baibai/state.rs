@@ -31,8 +31,10 @@ use crate::{
 /// 110,963 buying and 111,330 selling at block 53,234,728, which the Entrypoint upgrade at
 /// 53,492,231 raised by 3,379 both ways, to 114,342 and 114,709; the constant rounds the larger
 /// up, with a margin of about 700. Each knot passed adds 1,527 selling and 2,908 buying,
-/// unchanged by the upgrade. Curves with more knots were not available to measure. The router's
-/// own transfers and approval are added on top by tycho-execution's gas estimator.
+/// unchanged by the upgrade: a knot below the cursor costs 1,550 (1,527 rounded up) and a knot
+/// bought through a further 1,360 (2,908 less 1,550, rounded up). Curves with more knots were not
+/// available to measure. The router's own transfers and approval are added on top by
+/// tycho-execution's gas estimator.
 const BASE_SWAP_GAS: u64 = 115_400;
 const GAS_PER_KNOT_BELOW_CURSOR: u64 = 1_550;
 const GAS_PER_KNOT_BOUGHT_THROUGH: u64 = 1_360;
@@ -386,7 +388,7 @@ mod tests {
         }
     }
 
-    /// The oldest recording's router fee, 50 millionths, before the whitelist.
+    /// The 53,234,728 recording's router fee, 50 millionths, before the whitelist.
     #[test]
     fn the_fee_is_in_millionths_of_the_output() {
         let fixture = fee_charging_fixture();
@@ -441,9 +443,10 @@ mod tests {
     }
 
     /// A swap costs a base amount plus a share per knot it walks past, and more per knot buying
-    /// base. The recording's WETH sides have five knots, the first three at about 0.41, 1.03 and
-    /// 3.10 WETH; the fork measured 1,527 more gas per knot selling 2 WETH (two knots) than 0.2
-    /// WETH (none), and 2,908 more buying with 1,000 USDC (one knot) than with 500.
+    /// base. The 53,545,000 recording's WETH sides have five knots, the first three at about 0.41,
+    /// 1.03 and 3.10 WETH; the fork at 53,234,728 measured 1,527 more gas per knot selling 2 WETH
+    /// (two knots) than 0.2 WETH (none), and 2,908 more buying with 1,000 USDC (one knot, just:
+    /// it buys 0.4137086 WETH against a knot at 0.4137) than with 500.
     #[rstest]
     #[case::selling_within_the_first_segment(true, 2u64 * 10u64.pow(17), 115_400)]
     #[case::selling_past_two_knots(true, 2u64 * 10u64.pow(18), 118_500)]

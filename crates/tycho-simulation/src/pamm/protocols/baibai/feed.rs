@@ -48,7 +48,8 @@ pub struct BaibaiFeed {
 }
 
 /// Builds a [`BaibaiFeed`] from the shared [`BookFeedConfig`] and a Base JSON-RPC URL. Every poll
-/// makes one `eth_call` against the latest state, so a full node is enough.
+/// sends one JSON-RPC batch at the latest block (one `eth_call` to Multicall3 and one
+/// `eth_getStorageAt` per proxy), so a full node is enough.
 pub struct BaibaiFeedBuilder {
     book_config: BookFeedConfig,
     rpc_url: String,
@@ -111,8 +112,9 @@ impl BaibaiFeedBuilder {
     }
 
     /// Fails for a chain other than Base, the only one BaiBai is deployed on, for an RPC URL
-    /// that is not one, and for bases or a taker that are not addresses. The node's chain is
-    /// checked on every poll, which fails fatally when the node serves another one.
+    /// that is not one, for an empty base list, and for bases or a taker that are not addresses.
+    /// The node's chain is checked on every poll, which fails fatally when the node serves another
+    /// one.
     pub fn build(self) -> Result<BaibaiFeed, FeedError> {
         let deployment = BASE_DEPLOYMENT;
         if self.book_config.chain != deployment.chain {
@@ -472,7 +474,8 @@ mod tests {
         assert!(error.to_string().contains("chain 1"), "{error}");
     }
 
-    /// Settings, pairs and knots come from one `eth_call`, so they are all from one block.
+    /// A poll is one HTTP request: a JSON-RPC batch of the multicall, whose settings, pairs and
+    /// knots share one block, and the three implementation-slot reads.
     #[tokio::test]
     async fn a_poll_reads_the_chain_in_one_request() {
         let node = FakeNode::new();
@@ -691,8 +694,8 @@ mod tests {
     }
 
     /// A curve that expires before the next block cannot fill a swap priced from it. The
-    /// recording's curves run until `validUntil`, six (cbBTC) and seven (WETH) seconds after
-    /// their update.
+    /// 53,545,000 recording's curves run until `validUntil`, six (cbBTC) and seven (WETH) seconds
+    /// after their update.
     #[rstest]
     #[case::fresh(0, 2)]
     #[case::one_expiring_before_the_next_block(5, 1)]
