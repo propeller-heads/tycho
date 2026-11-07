@@ -1,0 +1,429 @@
+//! Fixtures shared by the BaiBai state and feed tests: recordings of the Base deployment, the
+//! states they describe, and a JSON-RPC node that serves one.
+
+use std::{collections::HashMap, sync::Arc};
+
+use alloy::{
+    primitives::{aliases::U48, Address, U256},
+    providers::{
+        bindings::IMulticall3::{
+            aggregate3Call, getBlockNumberCall, getChainIdCall, getCurrentBlockTimestampCall,
+            Result as Call3Result,
+        },
+        MULTICALL3_ADDRESS,
+    },
+    sol_types::{SolCall, SolValue},
+};
+use serde::Deserialize;
+use tycho_common::{
+    models::{token::Token, Chain},
+    Bytes,
+};
+
+use crate::{
+    book::BookFeedConfig,
+    pamm::protocols::baibai::{
+        math::{Knot, Side},
+        reader::{
+            availableLiquidityCall, cUnitCall, curveBookCall, custodianCall, knotCall, pairCall,
+            quoteTokenCall, ttlCall, validUntilCall, PairView, SideView, IMPLEMENTATION_SLOT,
+        },
+        state::BaibaiState,
+        Deployment, BASE_DEPLOYMENT, BASE_LISTED_BASES, BASE_ROUTER,
+    },
+    snapshot_feed::http::test_support::{spawn_http_server, MockHttpServer, MockRequest},
+};
+
+/// Recorded by `testdata/record_fixture.py` at four Base blocks. The first, after the router's
+/// zero-fee whitelist and the Entrypoint upgrade, has every cursor at zero. The other three
+/// predate both and carry the default fee of 50 millionths: every cursor at zero, then WETH's ask
+/// partly filled, then its bid partly filled.
+const RECORDINGS: [&str; 4] = [
+    include_str!("testdata/live_53545000.json"),
+    include_str!("testdata/live_53234728.json"),
+    include_str!("testdata/live_53234783.json"),
+    include_str!("testdata/live_53236603.json"),
+];
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct Fixture {
+    pub block: u64,
+    pub timestamp: u64,
+    pub ttl: u64,
+    pub c_unit: U256,
+    pub available_quote: U256,
+    pub pairs: Vec<FixturePair>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct FixturePair {
+    pub base: Address,
+    pub valid_until: u64,
+    pub available_base: U256,
+    pub fee_pips: u32,
+    pub pair: FixtureView,
+    pub cases: Vec<FixtureCase>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct FixtureView {
+    pub seq: u64,
+    pub fill_seq: u64,
+    pub last_update_at: u64,
+    pub mid: U256,
+    pub q_unit: U256,
+    pub ask: FixtureSide,
+    pub bid: FixtureSide,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct FixtureSide {
+    pub spread_bps: i16,
+    pub depth_bps: u16,
+    pub filled: U256,
+    pub knots: Vec<[u64; 2]>,
+}
+
+/// One recorded quote: `quoteFor`'s net output for the router and the raw curve's output.
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct FixtureCase {
+    pub sell_base: bool,
+    pub amount_in: U256,
+    pub amount_out: U256,
+    pub curve_out: U256,
+}
+
+/// Every recording.
+pub(super) fn fixtures() -> Vec<Fixture> {
+    RECORDINGS
+        .iter()
+        .map(|recording| serde_json::from_str(recording).unwrap())
+        .collect()
+}
+
+/// The 53,545,000 recording, with every cursor at zero and the router's fee at zero.
+pub(super) fn fixture() -> Fixture {
+    serde_json::from_str(RECORDINGS[0]).unwrap()
+}
+
+/// The 53,234,728 recording, with every cursor at zero, which charges the router 50 millionths.
+pub(super) fn fee_charging_fixture() -> Fixture {
+    serde_json::from_str(RECORDINGS[1]).unwrap()
+}
+
+pub(super) fn bytes(address: Address) -> Bytes {
+    Bytes::from(address.to_vec())
+}
+
+pub(super) fn weth() -> Address {
+    BASE_LISTED_BASES[0]
+}
+
+pub(super) fn cbbtc() -> Address {
+    BASE_LISTED_BASES[1]
+}
+
+pub(super) fn token(address: Address) -> Token {
+    let (symbol, decimals) = match address {
+        a if a == weth() => ("WETH", 18),
+        a if a == cbbtc() => ("cbBTC", 8),
+        a if a == BASE_DEPLOYMENT.quote => ("USDC", 6),
+        _ => ("TKN", 18),
+    };
+    Token::new(&bytes(address), symbol, decimals, 0, &[Some(10_000)], Chain::Base, 100)
+}
+
+/// The recorded deployment's tokens on Base, with no TVL floor.
+pub(super) fn book_config() -> BookFeedConfig {
+    let tokens: HashMap<Bytes, Token> = [weth(), cbbtc(), BASE_DEPLOYMENT.quote]
+        .into_iter()
+        .map(|address| (bytes(address), token(address)))
+        .collect();
+    BookFeedConfig { chain: Chain::Base, tokens: Arc::new(tokens), min_tvl_usd: 0.0 }
+}
+
+fn side(side: &FixtureSide) -> Side {
+    Side {
+        spread_bps: side.spread_bps,
+        depth_bps: side.depth_bps,
+        filled: side.filled,
+        knots: side
+            .knots
+            .iter()
+            .map(|[q, extra]| Knot { q: *q, extra: *extra })
+            .collect(),
+    }
+}
+
+/// The state the recording describes for `pair`.
+pub(super) fn state(fixture: &Fixture, pair: &FixturePair) -> BaibaiState {
+    BaibaiState {
+        base_token: token(pair.base),
+        quote_token: token(BASE_DEPLOYMENT.quote),
+        mid: pair.pair.mid,
+        q_unit: pair.pair.q_unit,
+        c_unit: fixture.c_unit,
+        ask: side(&pair.pair.ask),
+        bid: side(&pair.pair.bid),
+        available: [pair.available_base, fixture.available_quote],
+        fee_pips: pair.fee_pips,
+    }
+    .validated()
+    .unwrap()
+}
+
+/// The 53,545,000 recording's WETH pair.
+pub(super) fn weth_state() -> BaibaiState {
+    let fixture = fixture();
+    state(&fixture, &fixture.pairs[0])
+}
+
+/// The entrypoint's taker fee view as it answers on chain: written out here rather than taken from
+/// the reader, so a reader asking with another selector finds no answer, as it would on chain.
+pub(super) const TAKER_FEE_SELECTOR: [u8; 4] = [0xa5, 0xcb, 0xd1, 0xb7];
+
+/// A JSON-RPC node serving a recording, with knobs for what a test wants it to get wrong. Like
+/// the chain, the custodian reverts for an address that is not a token, and a revert in a call
+/// that may not fail reverts the whole `aggregate3`.
+#[derive(Clone)]
+pub(super) struct FakeNode {
+    pub fixture: Fixture,
+    /// What the entrypoint answers `curveBook()` with.
+    pub entrypoint_curve_book: Address,
+    /// Overrides the block timestamp, to age every curve.
+    pub timestamp: u64,
+    /// Addresses with no token behind them, which the custodian reverts for. Any other token the
+    /// recording does not list reads as zero custody.
+    pub not_tokens: Vec<Address>,
+    /// The chain Multicall3 reports.
+    pub chain_id: u64,
+    /// Selectors of the deployment's getters that revert, as after an upgrade that removed them.
+    pub reverting: Vec<[u8; 4]>,
+    /// The block a read sees, to replay an older one.
+    pub block: u64,
+    /// The only taker the entrypoint expects its fee asked for.
+    pub taker: Address,
+    /// The implementation each proxy's EIP-1967 slot holds, keyed by proxy.
+    pub implementations: HashMap<Address, Address>,
+    /// Fails every `eth_getStorageAt`, as a node that cannot serve one.
+    pub storage_fails: bool,
+}
+
+impl FakeNode {
+    pub(super) fn new() -> Self {
+        let fixture = fixture();
+        Self {
+            timestamp: fixture.timestamp,
+            block: fixture.block,
+            fixture,
+            entrypoint_curve_book: BASE_DEPLOYMENT.curve_book,
+            not_tokens: Vec::new(),
+            chain_id: BASE_DEPLOYMENT.chain.id(),
+            reverting: Vec::new(),
+            taker: BASE_ROUTER,
+            implementations: BASE_DEPLOYMENT
+                .proxies()
+                .into_iter()
+                .map(|(_, proxy, implementation)| (proxy, implementation))
+                .collect(),
+            storage_fails: false,
+        }
+    }
+
+    pub(super) async fn spawn(self) -> MockHttpServer {
+        spawn_http_server(move |request| Some(("200 OK", self.answer(request)))).await
+    }
+
+    /// Answers one request or a batch of them, each by its method.
+    fn answer(&self, request: &MockRequest) -> String {
+        let request: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        let answer = match request.as_array() {
+            Some(batch) => batch
+                .iter()
+                .map(|request| self.answer_one(request))
+                .collect(),
+            None => self.answer_one(&request),
+        };
+        answer.to_string()
+    }
+
+    fn answer_one(&self, request: &serde_json::Value) -> serde_json::Value {
+        match request["method"].as_str() {
+            Some("eth_call") => self.answer_call(request),
+            Some("eth_getStorageAt") => self.answer_storage(request),
+            method => panic!("the fake node does not serve {method:?}"),
+        }
+    }
+
+    /// The implementation slot of a proxy, the only storage a read asks for.
+    fn answer_storage(&self, request: &serde_json::Value) -> serde_json::Value {
+        let params = &request["params"];
+        assert_eq!(params[2], "latest", "a read asks for the latest block");
+        let slot: U256 = serde_json::from_value(params[1].clone()).unwrap();
+        assert_eq!(
+            slot,
+            U256::from_be_bytes(IMPLEMENTATION_SLOT.0),
+            "only the implementation slot"
+        );
+        if self.storage_fails {
+            let error = serde_json::json!({ "code": -32000, "message": "header not found" });
+            return serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "error": error });
+        }
+        let proxy: Address = serde_json::from_value(params[0].clone()).unwrap();
+        let implementation = self
+            .implementations
+            .get(&proxy)
+            .copied()
+            .unwrap_or_default();
+        let result = implementation.into_word();
+        serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": result })
+    }
+
+    fn answer_call(&self, request: &serde_json::Value) -> serde_json::Value {
+        let block = &request["params"][1];
+        assert_eq!(*block, "latest", "a read asks for the latest block");
+        let input = request["params"][0]["input"]
+            .as_str()
+            .or_else(|| request["params"][0]["data"].as_str())
+            .unwrap();
+        let input = alloy::primitives::hex::decode(input).unwrap();
+        let calls = aggregate3Call::abi_decode(&input)
+            .unwrap()
+            .calls;
+        let mut answers = Vec::with_capacity(calls.len());
+        for call in &calls {
+            let answer = self.call(call.target, &call.callData);
+            if answer.is_none() && !call.allowFailure {
+                let error = serde_json::json!({ "code": 3, "message": "Multicall3: call failed" });
+                return serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "error": error });
+            }
+            answers.push(Call3Result {
+                success: answer.is_some(),
+                returnData: answer.unwrap_or_default().into(),
+            });
+        }
+        let encoded = aggregate3Call::abi_encode_returns(&answers);
+        let result = format!("0x{}", alloy::primitives::hex::encode(encoded));
+        serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": result })
+    }
+
+    fn pair(&self, base: Address) -> Option<&FixturePair> {
+        self.fixture
+            .pairs
+            .iter()
+            .find(|pair| pair.base == base)
+    }
+
+    /// The answer to one call, or `None` where the chain reverts.
+    fn call(&self, target: Address, data: &[u8]) -> Option<Vec<u8>> {
+        let Deployment { entrypoint, curve_book, custodian, quote, .. } = BASE_DEPLOYMENT;
+        let Ok(selector) = <[u8; 4]>::try_from(&data[..4]) else {
+            panic!("a call to {target} carries no selector");
+        };
+        if target != MULTICALL3_ADDRESS && self.reverting.contains(&selector) {
+            return None;
+        }
+        let answer = match (target, selector) {
+            (t, getBlockNumberCall::SELECTOR) if t == MULTICALL3_ADDRESS => {
+                U256::from(self.block).abi_encode()
+            }
+            (t, getChainIdCall::SELECTOR) if t == MULTICALL3_ADDRESS => {
+                U256::from(self.chain_id).abi_encode()
+            }
+            (t, getCurrentBlockTimestampCall::SELECTOR) if t == MULTICALL3_ADDRESS => {
+                U256::from(self.timestamp).abi_encode()
+            }
+            (t, curveBookCall::SELECTOR) if t == entrypoint => {
+                self.entrypoint_curve_book.abi_encode()
+            }
+            (t, custodianCall::SELECTOR) if t == entrypoint => custodian.abi_encode(),
+            (t, quoteTokenCall::SELECTOR) if t == entrypoint || t == curve_book => {
+                quote.abi_encode()
+            }
+            (t, ttlCall::SELECTOR) if t == curve_book => self.fixture.ttl.abi_encode(),
+            (t, cUnitCall::SELECTOR) if t == curve_book => self.fixture.c_unit.abi_encode(),
+            (t, pairCall::SELECTOR) if t == curve_book => {
+                let base = pairCall::abi_decode(data).unwrap().base;
+                pairCall::abi_encode_returns(&self.view(base))
+            }
+            (t, validUntilCall::SELECTOR) if t == curve_book => {
+                let base = validUntilCall::abi_decode(data)
+                    .unwrap()
+                    .base;
+                self.pair(base)
+                    .map_or(0, |pair| pair.valid_until)
+                    .abi_encode()
+            }
+            (t, knotCall::SELECTOR) if t == curve_book => {
+                let call = knotCall::abi_decode(data).unwrap();
+                // Like the curve book, an index past the side's knots reverts
+                // (`InvalidLevelIndex`), and so does any index of an unlisted base.
+                let pair = self.pair(call.base)?;
+                let side = if call.side == 0 { &pair.pair.ask } else { &pair.pair.bid };
+                let [q, extra] = side
+                    .knots
+                    .get(call.index.to::<usize>())?;
+                (U48::from(*q), U48::from(*extra)).abi_encode_params()
+            }
+            (t, _) if t == entrypoint && data[..4] == TAKER_FEE_SELECTOR => {
+                let (taker, base) = <(Address, Address)>::abi_decode_params(&data[4..]).unwrap();
+                assert_eq!(taker, self.taker, "the books are priced for the configured taker");
+                // Only Tycho's router is whitelisted; other callers pay the venue default.
+                let whitelisted = self
+                    .pair(base)
+                    .filter(|_| taker == BASE_ROUTER);
+                whitelisted
+                    .map_or(50u32, |pair| pair.fee_pips)
+                    .abi_encode()
+            }
+            (t, availableLiquidityCall::SELECTOR) if t == custodian => {
+                let token = availableLiquidityCall::abi_decode(data)
+                    .unwrap()
+                    .token;
+                if token == quote {
+                    self.fixture
+                        .available_quote
+                        .abi_encode()
+                } else if self.not_tokens.contains(&token) {
+                    return None;
+                } else {
+                    self.pair(token)
+                        .map_or(U256::ZERO, |pair| pair.available_base)
+                        .abi_encode()
+                }
+            }
+            _ => panic!("the fake node does not answer {selector:?} on {target}"),
+        };
+        Some(answer)
+    }
+
+    fn view(&self, base: Address) -> PairView {
+        let empty = SideView { spreadBps: 0, depthBps: 0, filled: U256::ZERO, knotCount: 0 };
+        let Some(pair) = self.pair(base) else {
+            return PairView {
+                seq: 0,
+                fillSeq: 0,
+                lastUpdateAt: 0,
+                mid: Default::default(),
+                qUnit: U256::ZERO,
+                ask: empty.clone(),
+                bid: empty,
+            };
+        };
+        let side = |side: &FixtureSide| SideView {
+            spreadBps: side.spread_bps,
+            depthBps: side.depth_bps,
+            filled: side.filled,
+            knotCount: u8::try_from(side.knots.len()).unwrap(),
+        };
+        PairView {
+            seq: pair.pair.seq,
+            fillSeq: pair.pair.fill_seq,
+            lastUpdateAt: pair.pair.last_update_at,
+            mid: pair.pair.mid.to(),
+            qUnit: pair.pair.q_unit,
+            ask: side(&pair.pair.ask),
+            bid: side(&pair.pair.bid),
+        }
+    }
+}

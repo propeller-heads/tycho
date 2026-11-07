@@ -11,7 +11,7 @@ Env vars (can be set in `.claude/settings.local.json`):
 | Variable | Purpose |
 |---|---|
 | `TYCHO_URL` | WebSocket endpoint of the Tycho server (required) |
-| `RPC_URL` | Ethereum-compatible JSON-RPC endpoint for on-chain validation (required) |
+| `RPC_URL` | Ethereum-compatible JSON-RPC endpoint for on-chain validation (required); with `--pamm baibai`, BaiBai's feed also polls it every second |
 | `TYCHO_API_KEY` | Auth key; defaults to `sampletoken`, which works against local dev instances |
 | `TYCHO_NO_TLS` | Set to `true` to talk plain HTTP/WS (same as `--no-tls`) |
 
@@ -27,7 +27,7 @@ cargo run -p tycho-integration-test -- \
 ```
 
 Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`, `--disable-pamm`,
-`--pamm metric`, `--rfq-all-pairs`, `--disable-price-level-stream`, `--disable-execution`,
+`--pamm metric,baibai`, `--rfq-all-pairs`, `--disable-price-level-stream`, `--disable-execution`,
 `--protocols uniswap_v2,curve`,
 `--protocol-tvl-thresholds lunarbase=10` (replaces `--tvl-threshold` for the named protocols;
 each one must be enabled),

@@ -80,8 +80,8 @@ for any protocol indexed by Tycho.
   complete book rather than as chain state. A feed publishes `BookSnapshot<A>` (a provider's whole
   set of `Book`s at one anchor — `ReceivedAt` for every feed here; a block-anchored feed would pick
   another `A`), and a `Book` is one book's simulate-ready component + state, plus the provider's
-  `updated_at` where it reports one: a pair for Bebop, Native and Metric, a pair and one market
-  maker for Hashflow and Liquorice, whose firm quote comes from the maker it is asked of. A
+  `updated_at` where it reports one: a pair for Bebop, Native, Metric and BaiBai, a pair and one
+  market maker for Hashflow and Liquorice, whose firm quote comes from the maker it is asked of. A
   provider's `*Feed` implements `SnapshotFeed` directly, with a `run` that calls one of the two
   loops and nothing else. `BookFeedConfig` (chain, tokens, minimum book TVL in USD) is what every
   book feed needs whatever transport it runs on, and is the first argument of every feed builder;
@@ -148,8 +148,17 @@ for any protocol indexed by Tycho.
   fallback router; off by default. The Native and Liquorice routers are not deployed yet. The
   fallback routers trade ERC20s only, so Native's fallback feed offers no native-token books
 - **`pamm/`**: book feeds for pAMMs — venues priced off-chain but executed directly against
-  the pool, no binding quote (Metric today; its state does not implement `IndicativelyPriced`,
-  and its client is held by the feed alone rather than by every state).
+  the pool, no binding quote (Metric and BaiBai; their states do not implement
+  `IndicativelyPriced`, and each client is held by the feed alone rather than by every state).
+  Metric polls the venue's API; BaiBai reads its on-chain curve over JSON-RPC (one batch per
+  poll: a Multicall3 call, and each proxy's implementation slot, checked against the
+  implementation it is pinned to) and prices it with the contract's arithmetic, at the fee the
+  entrypoint reports for the taker, read every poll: Tycho's Base router unless
+  `BaibaiFeedBuilder::taker` sets another. BaiBai has no venue API, so instead of the
+  per-provider `client.rs`/`source.rs`/`models.rs` split it has `reader.rs` (the batch read and
+  its decoding), `math.rs` (the CurveBook's arithmetic) and `feed.rs` (the feed, its builder and
+  the book assembly), beside `state.rs`; its tests run on `test_support.rs` (the recordings and a
+  fake node) and `testdata/` (the recordings and `record_fixture.py`, which makes them).
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
   it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
