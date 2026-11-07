@@ -3,7 +3,7 @@ use num_bigint::BigUint;
 use super::{
     constants::{
         FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
-        SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS,
+        SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, TESSERA_FALLBACK_PROTOCOL_SYSTEM,
     },
     group_swaps::group_swaps,
     subsidy::encoded_subsidy,
@@ -80,6 +80,7 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "erc4626",
     "ring_swap_v2",
     "sky",
+    "pamm:tessera",
 ];
 
 /// Whether the router must approve the protocol before swapping (see
@@ -91,14 +92,15 @@ pub fn needs_approval(protocol_system: &str) -> bool {
 /// Extra gas a fallback router adds around a primary fill: the `executePrimary` try/catch
 /// self-call, paying the primary, the `nonReentrant` guard and the no-output balance check. The
 /// router is push-funded, so the input transfer is charged separately and this sits on top of it.
-/// Metric and Bebop legs add their own extras on top.
+/// Metric, Tessera and the signed-quote legs add their own extras on top.
 ///
 /// A swap that actually falls back pays for the fallback protocol on top.
 pub const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 40_000;
 
-/// Gas for `MetricFallbackRouter`'s `quoteFallback` call, which prices the fallback protocol
-/// before the router picks a side. The cost depends on how much of the fallback pool's liquidity
-/// the quote walks; this covers most quotes on a concentrated-liquidity pool.
+/// Gas for the `quoteFallback` call of `MetricFallbackRouter` and `TesseraFallbackRouter`, which
+/// prices the fallback protocol before the router picks a side. The cost depends on how much of the
+/// fallback pool's liquidity the quote walks; this covers most quotes on a concentrated-liquidity
+/// pool.
 pub const METRIC_FALLBACK_QUOTE_GAS: u64 = 100_000;
 
 /// Extra gas of a subsidized swap.
@@ -132,7 +134,11 @@ pub const ROUTER_FEES_ACTIVE: bool = true;
 /// group (or ungrouped swap), sums:
 ///
 /// - **Pool gas** (`group.estimated_gas`): the simulation-reported cost with intermediate transfer
-///   savings already subtracted for multi-swap groups (see `compute_group_gas`).
+///   savings already subtracted for multi-swap groups (see `compute_group_gas`). A
+///   `fallback:pamm:tessera` swap reports one Tessera call priced for `TesseraFallbackRouter` as
+///   the caller, and is charged it twice. That figure is not the one a `pamm:tessera` swap reports:
+///   the pair reads its caller's code, so the cost follows the caller's size, and the TychoRouter
+///   is about twice the router's.
 /// - **Transfer overhead**: the input transfer, approval, and output transfer gas that is NOT
 ///   captured by `get_amount_out`, computed via `estimate_transfer_overhead` once per group.
 /// - **Router overhead**: the user input transfer and — when `ROUTER_FEES_ACTIVE` — the extra
@@ -159,8 +165,12 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
             &strategy,
         );
         total_gas += group_transfer_overhead + &group.estimated_gas;
-        // `MetricFallbackRouter` quotes the pool by running its swap, then quotes the fallback.
-        if group.protocol_system == METRIC_FALLBACK_PROTOCOL_SYSTEM {
+        // `MetricFallbackRouter` quotes the pool by running its swap. `TesseraFallbackRouter`
+        // quotes Tessera through a view in which the pair reads the caller's code, as the swap
+        // does, which makes most of the swap's gas. Both then quote the fallback.
+        if group.protocol_system == METRIC_FALLBACK_PROTOCOL_SYSTEM ||
+            group.protocol_system == TESSERA_FALLBACK_PROTOCOL_SYSTEM
+        {
             total_gas += &group.estimated_gas;
             total_gas += BigUint::from(METRIC_FALLBACK_QUOTE_GAS);
         }
@@ -286,6 +296,11 @@ fn estimate_transfer_overhead(
     if SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system) {
         overhead += BigUint::from(TOKEN_APPROVAL_GAS);
         overhead += transfer_token_gas(token_out);
+    }
+
+    // `TesseraFallbackRouter` approves `TesseraSwap` itself; the treasury pays the receiver.
+    if protocol_system == TESSERA_FALLBACK_PROTOCOL_SYSTEM {
+        overhead += BigUint::from(TOKEN_APPROVAL_GAS);
     }
 
     // Output transfer: router -> receiver/next pool (only when outputToRouter).
@@ -449,6 +464,21 @@ mod tests {
     }
 
     #[test]
+    fn test_single_tessera_fallback_router() {
+        let solution = make_solution(vec![make_swap(TESSERA_FALLBACK_PROTOCOL_SYSTEM)]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
+        // TesseraSwap approval                 25_000  ← TOKEN_APPROVAL_GAS
+        // fallback quote                      100_000  ← METRIC_FALLBACK_QUOTE_GAS
+        // pool gas                            100_000
+        // view quote                          100_000  ← the pool gas again
+        // fee output transfer                  60_000
+        assert_eq!(gas, BigUint::from(465_000u64));
+    }
+
+    #[test]
     fn test_single_bebop_fallback_router() {
         let solution = make_solution(vec![make_swap(BEBOP_FALLBACK_PROTOCOL_SYSTEM)]);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
@@ -494,9 +524,11 @@ mod tests {
         assert_eq!(gas, BigUint::from(460_000u64));
     }
 
-    #[test]
-    fn test_single_transfer_from_with_approval() {
-        let solution = make_solution(vec![make_swap("ring_swap_v2")]);
+    #[rstest]
+    #[case::ring_swap_v2("ring_swap_v2")]
+    #[case::tessera("pamm:tessera")]
+    fn test_single_transfer_from_with_approval(#[case] protocol_system: &str) {
+        let solution = make_solution(vec![make_swap(protocol_system)]);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
 
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS

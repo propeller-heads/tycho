@@ -178,6 +178,10 @@ pub const NATIVE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:native";
 /// Liquorice components executed through `LiquoriceFallbackRouter`.
 pub const LIQUORICE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:liquorice";
 
+/// Tessera components executed through `TesseraFallbackRouter`. `TesseraSwap` is not an
+/// `IPropAMM`, so the `fallback` family's encoder cannot encode them.
+pub const TESSERA_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:pamm:tessera";
+
 /// Components whose fallback router runs a signed RFQ quote first, approving the venue itself and
 /// forwarding the output.
 pub const SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS: [&str; 4] = [
@@ -185,6 +189,17 @@ pub const SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS: [&str; 4] = [
     HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
     NATIVE_FALLBACK_PROTOCOL_SYSTEM,
     LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
+];
+
+/// Components whose venue has a fallback router, and so an encoder, of its own. They never resolve
+/// to the `fallback` family's encoder, which encodes a swap through `PropAMMFallbackRouter`.
+pub const DEDICATED_FALLBACK_PROTOCOL_SYSTEMS: [&str; 6] = [
+    METRIC_FALLBACK_PROTOCOL_SYSTEM,
+    BEBOP_FALLBACK_PROTOCOL_SYSTEM,
+    HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
+    NATIVE_FALLBACK_PROTOCOL_SYSTEM,
+    LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
+    TESSERA_FALLBACK_PROTOCOL_SYSTEM,
 ];
 
 #[cfg(test)]
@@ -197,11 +212,19 @@ mod tests {
     fn test_family_keys_and_prefixes_agree() {
         assert_eq!(format!("{PRICE_LEVEL_STREAM_KEY}:"), PRICE_LEVEL_STREAM_PREFIX);
         assert_eq!(format!("{FALLBACK_KEY}:"), FALLBACK_PREFIX);
-        assert!(METRIC_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
-        assert!(BEBOP_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
-        assert!(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
-        assert!(NATIVE_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
-        assert!(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        for protocol_system in DEDICATED_FALLBACK_PROTOCOL_SYSTEMS {
+            assert!(protocol_system.starts_with(FALLBACK_PREFIX), "{protocol_system}");
+        }
+    }
+
+    #[test]
+    fn test_signed_quote_fallbacks_are_dedicated() {
+        for protocol_system in SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS {
+            assert!(
+                DEDICATED_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system),
+                "{protocol_system}"
+            );
+        }
     }
 
     /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus

@@ -34,6 +34,7 @@ mod rocketpool;
 mod sky;
 mod slipstreams;
 pub mod swap_encoder_registry;
+mod tessera_fallback;
 mod uniswap_v2;
 mod uniswap_v3;
 mod uniswap_v4;

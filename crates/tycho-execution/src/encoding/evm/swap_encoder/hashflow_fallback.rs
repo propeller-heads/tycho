@@ -57,17 +57,9 @@ impl SwapEncoder for HashflowFallbackSwapEncoder {
         encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
         let fallback = FallbackSwap::from_user_data(swap.user_data().as_ref())?;
-        if !fallback
+        fallback
             .protocol
-            .supported_on(self.chain)
-        {
-            return Err(EncodingError::InvalidInput(format!(
-                "Fallback protocol {} is not supported on {}: the chain's HashflowFallbackRouter \
-                 would revert the swap",
-                fallback.protocol.user_data_name(),
-                self.chain
-            )));
-        }
+            .require_supported_on(self.chain, "HashflowFallbackRouter")?;
         let native_token = self.chain.native_token().address;
         if swap.token_in().address == native_token || swap.token_out().address == native_token {
             return Err(EncodingError::InvalidInput(format!(
