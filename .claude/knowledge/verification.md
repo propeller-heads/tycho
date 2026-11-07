@@ -31,7 +31,7 @@ Back any claim about a dependency's behaviour by reading the source of the exact
 Why: Plausible but wrong mechanisms about library internals lead to fixes for the wrong problem, and an in-tree crate can share a version number with a published one that behaves differently.
 Steps:
 1. Read the version from Cargo.lock (not Cargo.toml).
-2. Open \~/.cargo/registry/src/*/\<crate>-\<version>/ (or `cargo download`/crates.io tarball) and cite path:line.
+2. Open ~/.cargo/registry/src/*/<crate>-<version>/ (or `cargo download`/crates.io tarball) and cite path:line.
 3. For proto/wire types, compare fields and tags with the in-repo type.
 4. For a crate pinned to a crates.io version that also exists in-tree, diff the tarball against the in-tree source for the fix the package relies on.
 5. If the claim is about runtime behaviour, confirm with a minimal harness (e.g. a local websockets server) before asserting it.
@@ -45,14 +45,14 @@ Steps:
 2. Send requests for an unsupported environment, a zero value and a below-minimum size; record status, code and message verbatim.
 3. Bisect the minimum: start at the documented level and step +1, 0, -1, -2, -10 units and 50%/10%/1%, on several inputs and >=2 environments.
 4. Time requests for latency.
-5. Commit as opt-in live tests gated on the credential (e.g. `#[ignore = "Requires <KEY>"]`); never overlap runs against an API that allows one connection per key.
+5. Commit as opt-in live tests gated on the credential (e.g. `#[ignore = "Requires <KEY>"]`).
 Builds or runs the change: no
 
 ### code-trace-with-permalinks
 Back a failure or severity claim with a step-by-step code trace through permalinked lines (pinned commit), following the value or error from where it arises to where it is handled, and name the test that would confirm a trace not yet executed.
 Why: Severity (whole pipeline vs one item, error vs silent loss) depends on the exact path, and a linked trace lets the author check each step instead of trusting the conclusion.
 Steps:
-1. Pin the PR head SHA and link every step as blob/\<sha>/path#Lx-Ly.
+1. Pin the PR head SHA and link every step as blob/<sha>/path#Lx-Ly.
 2. Follow the path end to end (e.g. parser -> state update -> storage layer -> error type -> the caller's error policy).
 3. Name the error type/branch reached at each hop.
 4. If not executed, write 'traced by hand' and name the test (e.g. an end-to-end integration test) that would confirm it.
@@ -65,7 +65,9 @@ Steps:
 1. Reuse the file's own test fixture or constructor (no new mocks).
 2. Call the function with the input the claim is about: beyond the reported limit, the same call twice, zero, or the same inputs passed to a sibling implementation known to be right.
 3. Print the outputs and tabulate them next to the expected bound or the reference.
-4. Offer the snippet as the failing test. Edge cases: query production data (or a local copy synced from it) for the degenerate condition, run the code under review on that instance with current data, and quote its identifier, state and result. Ports: a port whose only evidence is a few fixture tests, with no population-wide comparison against the original's reference implementation, gets the full-population run with the three-way classification.
+4. Offer the snippet as the failing test.
+5. Edge cases: query production data (or a local copy synced from it) for the degenerate condition, run the code under review on that instance with current data, and quote its identifier, state and result.
+6. Ports: a port whose only evidence is a few fixture tests, with no population-wide comparison against the original's reference implementation, gets the full-population run with the three-way classification.
 Builds or runs the change: yes
 
 ### vacuous-test-by-wrong-implementation
@@ -173,12 +175,6 @@ Steps:
 4. Report per-side distribution, not one number.
 Builds or runs the change: yes
 
-### record-how-each-claim-was-confirmed
-Every confirmed fact in a review or PR carries how it was confirmed: the command with its pinned inputs, the identifier of the observed event or record, or file:line.
-Why: A behaviour seen in one case is a hypothesis for the next; without the method it cannot be re-checked.
-Steps: Next to each claim, add the reproducer: the exact command with its pinned inputs (version, timestamp, id), the identifier of the observed event, or the permalink; flag anything not confirmed as inferred.
-Builds or runs the change: no
-
 ### cross-source-agreement
 Check decoding correctness across several independent sources by sending the same request to all of them within a short window; one diverging source flags a source-specific bug.
 Why: Agreement across independent wire formats is strong evidence; shared-pipeline bugs are hard to see per source.
@@ -191,19 +187,29 @@ Builds or runs the change: no
 ### base-vs-head-differential
 Back a claim about what a change does or does not affect by running the same probe or metric on the merge base and on the head, for every affected user of the changed path, and attribute to the change only what differs.
 Why: 'No impact' is ambiguous between measured and unchecked, and without a base run a review either blocks the change on inherited defects or misses the one regression it introduces.
-Steps: 'No impact on X' or 'this predates the PR' asserted for a shared path without a before/after run. Replies or PR descriptions saying 'did not observe an impact', 'didn't see any difference' or 'should not affect' that name no run, inputs or comparison.
+Steps:
+1. Find the merge base (`git merge-base origin/main HEAD`) and get both sides.
+2. Run the same probe or metric, with the same inputs, on the base and on the head, for every user of the changed path.
+3. Tabulate both results. Attribute to the change only what differs, and report what already fails on the base as existing behaviour.
 Builds or runs the change: yes
 
 ### check-labelled-literals-at-source
 Check every literal that docs, examples or fixtures label as a specific external entity (an address, an id) by resolving it at the authoritative source and comparing the name it reports there, plus a format and length check, before accepting the label.
 Why: A wrong-but-valid identifier runs fine and teaches readers or tests the wrong thing.
-Steps: New or edited identifier literals next to a name or label in README commands, docs pages, example defaults or test fixtures.
+Steps:
+1. List each new or edited literal that docs, examples or fixtures label as a named entity.
+2. Check its format and length (an address has 20 bytes).
+3. Resolve it at the authoritative source (a block explorer, `cast call <addr> 'name()(string)'`, the venue's registry) and compare the name it reports with the label.
 Builds or runs the change: no
 
 ### size-unsupported-variants-by-usage
 Before deciding which variants of an external system an integration must support, measure each unsupported variant's share of real usage and read each variant's actual capabilities from the authoritative source.
 Why: Scoping without usage data either over-builds for negligible variants or covers only a minority of the system's real usage.
-Steps: 
+Steps:
+1. List the variants of the external system and mark the ones the integration does not support.
+2. Measure each variant's share of real usage (volume, TVL or call count) over a stated window, from chain data or the provider's API.
+3. Read each unsupported variant's capabilities from its authoritative source (contract code, provider docs).
+4. Report the share of usage the integration covers.
 Builds or runs the change: no
 
 ## Tycho and chain methods
@@ -226,7 +232,9 @@ Steps:
 1. `cast storage <proxy> 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc --block <start>` and `--block latest`.
 2. `cast storage/call/balance <addr> ... --block <start-1>`, `<start>`, `latest`.
 3. For fork fixtures, `cast nonce <deployer> --block <pinned>` vs latest, and confirm the anvil fork reports the pinned value.
-4. Quote command and result per block. Edge inputs: call the venue's real entrypoints (e.g. submit(0), wrap(0), unwrap(0)) with `cast call ... --block <N>` and capture revert strings. Replayed quotes: eth_call with stateOverride = merged override frames of block N and blockOverrides {number: N, time: ts(N)} at block tag N-1 (the number override avoids the staleness revert). Quote block, call and override set.
+4. Quote command and result per block.
+5. Edge inputs: call the venue's real entrypoints (e.g. submit(0), wrap(0), unwrap(0)) with `cast call ... --block <N>` and capture revert strings.
+6. Replayed quotes: eth_call with stateOverride = merged override frames of block N and blockOverrides {number: N, time: ts(N)} at block tag N-1 (the number override avoids the staleness revert). Quote block, call and override set.
 Builds or runs the change: no
 
 ### live-integration-test-run
@@ -236,8 +244,7 @@ Steps:
 1. Sync a local indexer (sync-integration skill) with only the protocol's extractor.
 2. Release build.
 3. Run with `--skip-messages-duration 30`, `RUST_LOG=tycho_integration_test=debug,info` (successes log at debug), under `timeout -s KILL <secs>` (it ignores SIGTERM).
-4. Never two runs at once.
-5. Report blocks, simulations, failures by kind, slippage per protocol, counts; add price-printer spot checks across quote amounts.
+4. Report blocks, simulations, failures by kind, slippage per protocol, counts; add price-printer spot checks across quote amounts.
 Builds or runs the change: yes
 
 ### decompile-unverified-bytecode
@@ -264,7 +271,7 @@ Test hypotheses about caller-, holder- or environment-dependent behaviour with e
 Why: Inferences from disassembly or wallet-to-wallet probes can be wrong; overrides isolate each rule's effect.
 Steps:
 1. Control: same call from a plain caller of the same code size.
-2. Variant: stateOverride {\<caller>: {code: \<crafted bytes>}} (marker bytes, selectors at offsets, minimal-forwarder shape, address prefix) or at tx.origin; diff prices.
+2. Variant: stateOverride {<caller>: {code: <crafted bytes>}} (marker bytes, selectors at offsets, minimal-forwarder shape, address prefix) or at tx.origin; diff prices.
 3. To mirror the VM: override token addresses with the VM's TokenProxy code and no storage, call decimals()/balanceOf.
 4. For token taxes: eth_simulateV1 sequence pair -> wallet and wallet -> pair with the real v2 pair as holder; replay the analyzer's bytecode with different holders.
 Builds or runs the change: no
@@ -282,7 +289,7 @@ Builds or runs the change: no
 Establish ground truth for a limit by eth_call bisection over the input amount (largest input that settles, plus a one-raw-unit-more check), across pools x directions x blocks, and score both the current implementation and any proposed replacement against it, with a worked example from on-chain reads.
 Why: One example can't show whether a limit error is systematic or which way it fails, and an untested alternative can be as wrong as the code it replaces.
 Steps:
-1. Grid: >=2 pairs x both directions x \~10 blocks.
+1. Grid: >=2 pairs x both directions x ~10 blocks.
 2. Per case, bisect amount with `cast call <venue> 'swap/quote(...)' --block N` to the largest input that fills; check +1 raw unit fails.
 3. Run the PR's getLimits at the same block; tabulate error %.
 4. For a proposed formula, compute it step by step from on-chain reads at a fixed block (state getter, accumulators, balanceOf, exact-output quote) in a table, and score it on the same grid.
@@ -349,24 +356,21 @@ Steps:
 Builds or runs the change: no
 
 ### quote-and-balance-reconciliation
-Validate a protocol integration by checking, at pinned blocks, indexed state against the on-chain getters and simulated get_amount_out against the venue's own on-chain quote function to the raw unit, across both directions and different token decimals, on a component whose live state exercises the case under review; for indexed balances and reserves, reconcile every component at one block (the extractor head), selecting the row version valid at that block (valid_from \<= ts(B) \< valid_to) and the getter that exposes the stored quantity.
+Validate a protocol integration by checking, at pinned blocks, indexed state against the on-chain getters and simulated get_amount_out against the venue's own on-chain quote function to the raw unit, across both directions and different token decimals, on a component whose live state exercises the case under review; for indexed balances and reserves, reconcile every component at one block (the extractor head), selecting the row version valid at that block (valid_from <= ts(B) < valid_to) and the getter that exposes the stored quantity.
 Why: A run on an idle component passes without touching the condition at issue (e.g. retained protocol fees), and a pass rate alone does not show the numbers are right.
-Steps: A validation report that cites only success counts, or tests a freshly created/inactive pool when the concern is state that only accumulates with activity. Population reconciliation: pick block B = extractor head; for every component read the row with valid_from \<= ts(B) \< valid_to (not the latest row) and compare with the getter that exposes the stored quantity (e.g. getReservesOf, not balanceOf of the vault); report matched/total. Temporal-table reads that bypass extraction-state-gateway are acceptable for this one-off check, not for committed tooling.
+Steps:
+1. Pick a component whose live state exercises the case under review, not a freshly created or inactive pool.
+2. At pinned blocks, compare indexed state with the on-chain getters, and simulated get_amount_out with the venue's quote function, to the raw unit, in both directions.
+3. For balances and reserves, pick block B = the extractor head. For every component, read the row with valid_from <= ts(B) < valid_to (not the latest row) and compare it with the getter that exposes the stored quantity (e.g. getReservesOf, not balanceOf of the vault). Report matched/total.
+4. Temporal-table reads that bypass extraction-state-gateway are acceptable for this one-off check, not for committed tooling.
 Builds or runs the change: yes
 
 ### gas-measured-as-engine-calls-it
 Measure a venue or adapter call's gas the way the engine and router will incur it: standalone at a chosen block (the tip unless the claim is historical), from each caller that will make it (EOA, the TychoRouter address, the adapter) with matching outputs, never from the gasUsed of an inner frame of a historical tx; when calibrating a gas constant from such measurements, sample several tokens and balance transitions and subtract the 21k intrinsic transaction cost when the call runs as an inner call.
 Why: Caller-dependent gas (e.g. scanning msg.sender's code) is invisible from a single caller and makes simulated gas wrong by orders of magnitude. Gas from reasoning or one pinned fork block misses what the engine hits at the tip, and inner frames under-measure by the cold-access surcharge already paid by earlier legs. A constant calibrated on one token or including the intrinsic cost under- or over-prices the venue in routing.
 Steps:
-1. `cast estimate --from <EOA>` and `--from <TychoRouter addr>` (and the adapter) for the same calldata at latest; compare return values with `cast call --from`.
-2. If gas differs, `cast run`/debug_traceCall with callTracer from the router to find the frame (EXTCODECOPY/EXTCODESIZE loops).
-3. Compare to the VM's trade.gasUsed for the same swap;
-1. Code override: stateOverride {\<adapter>: {code: \<runtime bytecode from protocols/testing/fixtures/*.runtime.json>}}.
-2. Binary-search `gas` on eth_call (`cast call --gas-limit`) at latest per pool/direction until it stops reverting OOG; compare with the engine's cap.
-3. For venue calls: per real fill, debug_traceCall with callTracer at the fill's block, input amount pushed via balance override, read gasUsed.
-4. Report per-case numbers.
 1. Callers: `cast estimate --from <EOA>` and `--from <TychoRouter addr>` (and the adapter) for the same calldata at latest; confirm the outputs match with `cast call --from`. If gas differs, `cast run`/debug_traceCall with callTracer from the router to find the frame (EXTCODECOPY/EXTCODESIZE loops).
-2. Adapter view calls: stateOverride {\<adapter>: {code: \<runtime bytecode from protocols/testing/fixtures/*.runtime.json>}}, binary-search the eth_call gas limit (`cast call --gas-limit`) per pool/direction until it stops reverting OOG; compare with the engine's cap.
+2. Adapter view calls: stateOverride {<adapter>: {code: <runtime bytecode from protocols/testing/fixtures/*.runtime.json>}}, binary-search the eth_call gas limit (`cast call --gas-limit`) per pool/direction until it stops reverting OOG; compare with the engine's cap.
 3. Venue calls of real fills: per fill, debug_traceCall with callTracer at the fill's block, input amount pushed via balance override, read gasUsed.
 4. Calibrating a constant: several tokens, zero/nonzero sender and receiver balance slots; subtract 21,000 when the measured call runs as an inner call.
 5. Compare with the VM's trade.gasUsed for the same swap and report per-case numbers.
