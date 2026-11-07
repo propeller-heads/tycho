@@ -15,7 +15,8 @@ interface ITesseraSwap {
     ) external;
 
     /// @notice What a swap of `amountSpecified` would take and pay, priced for the
-    /// caller. Leaves out the treasury's balance, which the swap needs.
+    /// caller. Leaves out the treasury's balance and the pair's fee module, which
+    /// only the swap reads.
     function tesseraSwapViewAmounts(
         address tokenIn,
         address tokenOut,
