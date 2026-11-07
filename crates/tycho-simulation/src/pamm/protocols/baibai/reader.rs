@@ -280,7 +280,7 @@ impl BaibaiReader {
             ));
         let latest = BlockId::latest();
         let client = self.provider.client();
-        let mut batch = BatchRequest::new(&client);
+        let mut batch = BatchRequest::new(client);
         let multicall = batch
             .add_call::<_, AlloyBytes>("eth_call", &(request, latest))
             .map_err(|e| self.connection_error("multicall", e))?;
@@ -469,7 +469,7 @@ fn setting<C: SolCall>(answer: &Call3Result, what: &str) -> Result<C::Return, Fe
 }
 
 /// The fatal error for a deployment that no longer answers the way this integration was built for.
-fn deployment_changed(what: String) -> FeedError {
+fn deployment_changed(what: impl std::fmt::Display) -> FeedError {
     FeedError::Fatal(format!(
         "BaiBai: {what}; the deployment changed and the integration needs updating"
     ))
