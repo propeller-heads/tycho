@@ -15,13 +15,13 @@ or in full (`.claude/skills/tycho-review/SKILL.md` lists the file kinds).
 
 ### simulation-gas-measured-on-real-path
 Simulated gas reflects the protocol's real execution path: measured end-to-end for this protocol rather than copied from a similar one, quoted through the venue entry point with the same output and least overhead, with accounts a real route has already warmed (a shared vault or singleton) pre-warmed in the EVM journal rather than corrected by a tuned constant; any added constant (e.g. for caller-dependent costs) is named and documented with how it was measured and when to re-measure.
-Why: Copied or adapter-only figures misprice routes; the router can pay \~2M more gas per swap than simulation reports, and inline magic numbers hide that they are estimates.
+Why: Copied or adapter-only figures misprice routes; the router can pay ~2M more gas per swap than simulation reports, and inline magic numbers hide that they are estimates.
 Spot: A new `const *_GAS` equal to another integration's value or an inline literal like `BigUint::from(170_000u64)`; adapter quotes through a user-facing router function instead of the cheapest equivalent view; gas figures in comments taken from a test; reliance on manifest `protocol_gas`, which nothing reads. Named constants like COLD_WARM_SLOAD_DIFF or NON_METERED_SLOT_ESTIMATE subtracted from adapter gas for a specific protocol list.
 Applies: rust, rust-test, solidity, solidity-test · look first at lines matching `gas|warm|cold|sload|sstore|journal`
 Checked by: repo-script `sim-gas-constant-copied`; ast-grep `sim-gas-warmth-correction-constant`
 
 ### simulation-limits-are-settleable
-get_limits (natively or via the adapter's getLimits) reports the bound the venue can actually settle, derived from the on-chain constraint (field widths, reserves, only fillable levels net of fills, the inventory settlement draws from); never a placeholder 'uncapped' value, a coarse bisection over unfillable liquidity, or a silent fallback when the computation fails; exact wherever it can be derived, a conservative under-cap only with the evidence that quotes and limits agreeing requires (`simulation-quotes-and-limits-agree`), and never an overestimate, whatever the interface's doc comment suggests.
+get_limits (natively or via the adapter's getLimits) reports the bound the venue can actually settle, derived from the on-chain constraint (field widths, reserves, only fillable levels net of fills, the inventory settlement draws from); never a placeholder 'uncapped' value, a coarse bisection over unfillable liquidity, or a silent fallback when the computation fails. When exact is not possible, `simulation-quotes-and-limits-agree` says what a conservative cap needs.
 Why: The VM funds the swap with exactly the sell limit, so limits are hard: an overestimate produces fills that revert (and a failing probe can bench the pool for the session), an underestimate removes tradable size.
 Spot: get_limits returning U256::MAX/u128::MAX or an `uncapped_limit()` helper; `.unwrap_or(<reserve>)`/`.unwrap_or_default()` around the limit; getLimits summing all levels ignoring dead markers, ignoring treasury/vault inventory, or quoting the whole vault balance as exact output; no comparison with brute-force ground truth.
 Applies: rust, rust-test, solidity, solidity-test · look first at lines matching `limit|uncapped|inventory|vault|treasury|level|u256::max|u128::max`
@@ -37,7 +37,7 @@ Checked by: ast-grep `serde-default-for-older-snapshots`
 ### simulation-refuse-unservable-amounts
 An amount the venue rejects on chain (zero input, below a venue minimum, a zero-quantity level) is refused by the simulation with an error, never quoted as Ok(0) or as a complete fill.
 Why: A swap of nothing reads as one that worked, so a route can contain a leg that reverts on chain.
-Spot: get_amount_out returning Ok with a zero amount for amount_in == 0; ladder walks treating a zero amount as fully consumed; level validation accepting quantity \<= 0.
+Spot: get_amount_out returning Ok with a zero amount for amount_in == 0; ladder walks treating a zero amount as fully consumed; level validation accepting quantity <= 0.
 Applies: rust, rust-test, solidity, solidity-test · look first at lines matching `amount|quantit|zero|min|level|fill|==\s*0`
 
 ### simulation-caller-dependent-quotes
@@ -72,7 +72,7 @@ Spot: A new `vm:<protocol>` integration whose contracts are a recognisable fork 
 Applies: rust, solidity, config, integration-test, substreams, docs · look first at lines matching `vm[:_]|protocol_system|protocol_type|native|adapter`
 
 ### simulation-one-answer-per-refusal
-Each reason a swap cannot be served gets one answer used consistently by spot_price, get_amount_out and get_limits (e.g. zero amount = InvalidInput, side not quoted = no limit and no amount); refusal checks run most fundamental first (a side with no liquidity before any size-dependent minimum), so the answer names a cause the caller can act on; tests exercise each guard through every method.
+Each reason a swap cannot be served gets one answer used consistently by spot_price, get_amount_out and get_limits (e.g. side not quoted = no limit and no amount; the error variant follows `simulation-error-variant-by-meaning`); refusal checks run most fundamental first (a side with no liquidity before any size-dependent minimum), so the answer names a cause the caller can act on; tests exercise each guard through every method.
 Why: Overlapping refusal reasons let callers misread a broken component as an empty one, and a test that only exercises the method that already refused lets a regression in the others pass.
 Spot: Methods of one ProtocolSim returning different error variants (or Ok(zero) vs Err) for the same condition; a token-pair guard test that only calls get_limits. A minimum-amount or minimum-value guard computed from the fill result before checking whether the fill consumed anything.
 Applies: rust, rust-test · look first at lines matching `err|invalid|limit|spot_price|amount_out|fatal|recoverable|min|guard|zero`
@@ -105,10 +105,10 @@ Applies: solidity, solidity-test · look first at lines matching `price|limit|fr
 Checked by: ast-grep `sol-price-zero-fraction`; ast-grep `sol-price-no-zero-guard`; ast-grep `sol-price-calls-swap`
 
 ### simulation-finite-difference-step
-A finite-difference spot price uses a step large enough that the venue's output rounding is negligible (about 10^6 raw output units) and does not read token decimals() inside the VM.
-Why: With a \~1,000-unit output floor and round-down quotes the price is biased low by up to 1/1,000, above stable-pair spreads; self-contained token proxy accounts return decimals() = 0 in the VM.
-Spot: A price step derived from 10**decimals() or a small fixed floor of raw units; any decimals() call in adapter pricing code.
-Applies: solidity, solidity-test, rust · look first at lines matching `decimals|price|step|10\s*\*\*|1e\d`
+An adapter's finite-difference spot price takes its step from the output size (about 10^6 raw output units), not from token decimals.
+Why: Venues round output down, so a small step biases the price low by up to 1/output (0.1% at 1,000 units), more than a stable-pair spread. Tokens that Tycho does not index run in the VM as a `TokenProxy` with no implementation, and its `decimals()` returns 0 without reverting, so a step from `10 ** decimals()` becomes 1 wei or 0.
+Spot: A step from `10 ** decimals()` or a small fixed number of raw units; any `decimals()` call in adapter pricing code.
+Applies: solidity, solidity-test · look first at lines matching `decimals|price|step|10\s*\*\*|1e\d`
 Checked by: ast-grep `sol-adapter-decimals-astgrep`; ast-grep `sol-adapter-decimals`
 
 ### simulation-quotes-and-limits-agree
@@ -127,8 +127,8 @@ Checked by: ast-grep `get-amount-out-unchanged-new-state`
 ### simulation-mutable-conditions-in-state
 Conditions that can change after a component is admitted (incentives, pauses, venue flags) are enforced in the state or adapter on every update (e.g. get_limits returns [0,0]), not by a client-side inclusion filter.
 Why: Client-side filters run only on snapshots: a pool that gains the condition later stays in the stream with every quote reverting, and one filtered at startup is never readmitted.
-Spot: A new client-side filter entry keyed on a mutable attribute, plus indexer work to emit that attribute only for the filter.
-Applies: rust, substreams, config · look first at lines matching `filter|incentive|pause|exclu|inclu|attribute`
+Spot: A new client-side filter entry keyed on a mutable attribute.
+Applies: rust, config · look first at lines matching `filter|incentive|pause|exclu|inclu|attribute`
 
 ### simulation-shared-vm-path-scoped
 A change to a shared VM/adapter call path made for one protocol is scoped to that protocol, or documented at the call site with why it is safe for every other integration.
@@ -213,7 +213,7 @@ Applies: rust, rust-test · look first at lines matching `twamm|virtual|observ|f
 Checked by: ast-grep `sim-zero-swap-unadvanced-state`
 
 ### limit-search-probe-and-bisect
-A limit search distinguishes an input too small to produce output from one exceeding capacity, starts its probe from the side that binds the fill (output reserve at the price), and narrows by binary search rather than halving on any rejection.
+When no closed form exists (`simulation-closed-form-inverse`), a limit search distinguishes an input too small to produce output from one exceeding capacity, starts its probe from the side that binds the fill (output reserve at the price), and narrows by binary search rather than halving on any rejection.
 Why: Halving on every rejection reports zero limits for tradable directions when the start probe is undersized, and reports far less than fillable depth when the probe comes from the wrong reserve.
 Spot: A loop `amount >>= 1` on a quote error, or a probe derived from reserve_in for a venue whose capacity is set by reserve_out.
 Applies: rust, rust-test, solidity · look first at lines matching `limit|>>=|probe|search|binary|halv|/\s*2|reserve|capacity`
@@ -222,21 +222,14 @@ Checked by: ast-grep `sim-halving-limit-search`
 ### adapter-runtime-regenerated
 Every change to a VM adapter contract regenerates and commits the adapter runtime that tycho-simulation embeds (`crates/tycho-simulation/src/evm/protocol/vm/assets/<Name>SwapAdapter.evm.runtime`), and the diff shows a non-empty change to that asset.
 Why: Simulation keeps running the previous adapter bytecode, so fixes in the adapter source never reach quoting and tests pass or fail against code that is not in the PR.
-Spot: A diff touching protocols/adapter-integration/evm/src/\<protocol>/*.sol with no change to the matching .evm.runtime asset.
+Spot: A diff touching `protocols/adapter-integration/evm/src/<protocol>/*.sol` with no change to the matching .evm.runtime asset.
 Applies: solidity
 
 ### walk-matches-contract-search-set
-A ported liquidity walk visits exactly the set the contract's own swap visits: the entries in its search structure (bitmap/tree membership) plus any entry the contract reads before consulting that index (the current/active entry), not every entry that holds a non-zero balance; the indexer emits that membership and keeps the current entry visible.
+A ported liquidity walk visits exactly the set the contract's own swap visits: the entries in its search structure (bitmap/tree membership) plus any entry the contract reads before consulting that index (the current/active entry), not every entry that holds a non-zero balance. The package side is `search-set-membership-emitted` in `indexing.md`.
 Why: Entries the contract can never reach (dust left after the entry was removed from its search structure) get quoted and counted in get_limits, so trades sized at the limit revert on chain.
-Spot: next-entry search or limit loop iterating stored per-tick/bin reserves without consulting the protocol's initialised-tick bitmap or bin tree; attributes kept for entries the contract has removed from its index. A visibility predicate defined only as 'in the tree/bitmap with reserves', while the contract's swap starts by reading the active id's reserves before any tree lookup.
-Applies: rust, rust-test, substreams · look first at lines matching `tick|bin|bitmap|tree|walk|next|active|liquidity|reserve|initiali|loop|iter|level`
-
-### router-policy-not-indexed
-Component state carries no router address or router-specific caller policy; simulation assumes the router's caller treatment, so a router change needs no resync.
-Why: A router change would require updating the package and resyncing every component.
-Spot: A component attribute such as `quote_caller` or a whitelisted flag keyed on a specific router address.
-Applies: rust, substreams, config · look first at lines matching `router|caller|whitelist|sender`
-Checked by: ast-grep `substreams-router-policy-attribute`
+Spot: next-entry search or limit loop iterating stored per-tick/bin reserves without consulting the protocol's initialised-tick bitmap or bin tree; a visibility predicate defined only as 'in the tree/bitmap with reserves', while the contract's swap starts by reading the active id's reserves before any tree lookup.
+Applies: rust, rust-test · look first at lines matching `tick|bin|bitmap|tree|walk|next|active|liquidity|reserve|initiali|loop|iter|level`
 
 ### target-solver-monotonicity-and-bounds
 A target-price solver that decides reachability from one endpoint or brackets by monotonicity establishes that monotonicity for each protocol variant (dynamic fees, off-peg multipliers and fee-inclusive prices can break it), compares against the caller's full tolerance band, and searches beyond heuristic bounds (current balance) up to the caller's max or a real protocol limit.
@@ -248,8 +241,8 @@ Checked by: ast-grep `sim-target-search-bound-from-balance`
 ### components-simulated-independently
 Each component's state is simulated independently: when several components draw on shared inventory (a shared custodian, an RFQ maker across pairs), the integration documents that limitation in its README rather than synchronizing states across components, and relies on the router's minAmountOut for the resulting reverts.
 Why: Cross-state synchronization code cannot be driven by the consumer's routing (which clones and evolves states independently), adds complexity, and still cannot model the coupling correctly.
-Spot: A ProtocolSim method or helper that copies balances or words from another component's state (`sync_*` from a sibling), or a static attribute added only to group components that share inventory.
-Applies: rust, substreams, docs · look first at lines matching `sync|shared|sibling|inventory|custod|maker|balance|group|vault|static|attribute`
+Spot: A ProtocolSim method or helper that copies balances or words from another component's state (`sync_*` from a sibling).
+Applies: rust, docs · look first at lines matching `sync|shared|sibling|inventory|custod|maker|balance|group|vault|static|attribute`
 
 ### decode-protocol-sentinels
 Decoded protocol parameters are mapped through the protocol's sentinel encodings before being used as numbers (e.g. a magic fee value meaning 'explicitly zero').
@@ -280,14 +273,8 @@ Checked by: ast-grep `sim-unsupported-variant-default-config`
 ### fee-moves-against-trader
 A fee applied to a price or amount always moves it against the trader in both directions (raises what a buyer pays, lowers what a seller receives), and a test pins the direction for each side.
 Why: A sign-swapped fee quotes better-than-mid prices in one direction, so solvers route into trades that return less than simulated.
-Spot: Price adjusted by (1 + fee) on one branch and (1 - fee) on the other where the branch conditions might be inverted (is_buy/is_sell, zero_for_one); no test asserting quote \< fee-free quote per direction.
+Spot: Price adjusted by (1 + fee) on one branch and (1 - fee) on the other where the branch conditions might be inverted (is_buy/is_sell, zero_for_one); no test asserting quote < fee-free quote per direction.
 Applies: rust, rust-test, solidity · look first at lines matching `fee`
-
-### hook-by-permission-bits
-Hook-aware pool simulation classifies a hook by its permission bits: a hook that cannot affect swaps is simulated through the generic or hookless path, not rejected as unsupported.
-Why: Rejecting hooks without swap permissions drops pools whose swaps behave exactly like hookless ones.
-Spot: A hook-handler factory that errors for every hook without a registered native handler, regardless of its permissions.
-Applies: rust, rust-test · look first at lines matching `hook|permission|unsupported|handler`
 
 ### vm-deltas-applied-to-engine
 A path that applies deltas to cloned simulation states outside the main decoder also applies the account and storage changes the VM engine reads, or explicitly rejects VM-backed protocols; it never updates only the ProtocolSim attributes of a VM state.
@@ -299,11 +286,11 @@ Checked by: ast-grep `sim-delta-transition-without-engine-update`
 ### simulation-amounts-compared-in-one-unit
 Every amount that quoting or get_limits compares or converts is in the same unit and scale on both sides (shares vs underlying, raw atomic vs decimal-normalized), each direction's threshold is populated, and each get_limits arm is checked against its mirror direction.
 Why: A conversion applied to a value already in the target unit under-reports the cap by the exchange rate, and nothing fails. A scale mismatch makes the minimum check either always pass or always fail, so the simulation quotes amounts the venue rejects.
-Spot: Conversions like shares_for_amount(total_shares); asymmetric formulas between the two arms of a get_limits match; A value divided by `10^decimals` compared against a field taken unconverted from the venue API (`minimum_in_base`, `min_amount`), or a min-check that is skipped when one side's threshold defaults to 0. Conversions like shares_for_amount(total_shares) applied to a value already in the target unit; asymmetric formulas between the two arms of a get_limits match; a value divided by 10^decimals compared with a field taken unconverted from the venue API (minimum_in_base); a min-check skipped because one side's threshold defaults to 0.
+Spot: Conversions like shares_for_amount(total_shares); asymmetric formulas between the two arms of a get_limits match; a value divided by `10^decimals` compared against a field taken unconverted from the venue API (`minimum_in_base`, `min_amount`), or a min-check that is skipped when one side's threshold defaults to 0.
 Applies: rust, rust-test, solidity · look first at lines matching `share|decimal|10\^|pow|limit|min|amount|scale|unit|underlying|threshold|convert|\*\*`
 
 ### ported-math-matches-contract
 Ported on-chain math reproduces the contract, not an equivalent of it: the same formula and operation order (same numerator and denominator), the same signedness (an `int` in Solidity is a signed type in Rust, never a U256 that wraps), fees applied to gross or net amounts at the same point per branch, and values the contract stores compactly quantized to that representation with its direction-aware rounding before use.
 Why: Equivalent-on-paper formulas diverge under integer rounding or once a term that was zero in the fixtures becomes non-zero. A negative intermediate wraps to a huge unsigned value and silently picks the wrong branch (e.g. routing a debt-only trade through collateral), producing quotes that differ from the chain. The simulation lands on a price the contract can never store, so quotes and returned states diverge from on-chain execution at the boundary.
-Spot: Simulation formulas regrouping terms differently from the contract source; tests whose fixtures make a differentiating term zero; A Rust port returning U256 for a function whose Solidity original returns int256, or whose doc comment mentions a negative case ('if a \< 0') while the type cannot hold one; subtraction in U256 without checked ops in ported routing math; A price/limit converted to a full-precision integer (Q128.128, X96) and passed straight into a protocol whose storage packs it narrower, with only a min/max range check
+Spot: Simulation formulas regrouping terms differently from the contract source; tests whose fixtures make a differentiating term zero; a Rust port returning U256 for a function whose Solidity original returns int256, or whose doc comment mentions a negative case ('if a < 0') while the type cannot hold one; subtraction in U256 without checked ops in ported routing math; a price/limit converted to a full-precision integer (Q128.128, X96) and passed straight into a protocol whose storage packs it narrower, with only a min/max range check
 Applies: rust, rust-test

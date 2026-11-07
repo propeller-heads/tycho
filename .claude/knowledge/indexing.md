@@ -349,3 +349,22 @@ Why: Zeroed balances corrupt TVL and the VM's balance overwrites while the compo
 Spot: A substreams branch on a kill/shutdown/deprecate event that emits `BalanceChange { balance: vec![0] }` or `add_balance_change` with zero for every token, or a lifecycle flag written into static_att; A custom `active` attribute, or `paused` written with value 0, or a creation handler that ignores the pool's initial enabled flag; change_component_pause_state(.., true) with no path that emits `false`; pause logic driven by a value the module already watches (fee word, flag slot) but only on the transition to the bad value; A new package whose ABI contains Paused/Unpaused events or a whenNotPaused modifier with no handler and no README note
 Applies: substreams · look first at lines matching `pause|paused|kill|shutdown|deprecat|disable|enable|active|balance|static|creat|whenNotPaused`
 Checked by: repo-script `substreams-pause-without-unpause`; ast-grep `substreams-untradable-without-pause-attribute`; ast-grep `substreams-handwritten-paused-attribute`
+
+### router-policy-not-indexed
+Component state carries no router address or router-specific caller policy; simulation assumes the router's caller treatment, so a router change needs no resync.
+Why: A router change would require updating the package and resyncing every component.
+Spot: A component attribute such as `quote_caller` or a whitelisted flag keyed on a specific router address.
+Applies: substreams, config · look first at lines matching `router|caller|whitelist|sender`
+Checked by: ast-grep `substreams-router-policy-attribute`
+
+### search-set-membership-emitted
+For a venue whose swap walks a search structure (a tick bitmap, a bin tree), the package emits each entry's membership in that structure and keeps the current/active entry visible, so the simulation visits exactly what the contract visits (`walk-matches-contract-search-set` in `simulation.md`).
+Why: Without membership, the simulation quotes entries the contract can no longer reach (dust left after removal from the index), and trades sized at the limit revert on chain.
+Spot: Attributes kept for entries the contract has removed from its index; per-tick or per-bin reserves emitted with no membership attribute.
+Applies: substreams · look first at lines matching `tick|bin|bitmap|tree|active|initiali|liquidity|reserve`
+
+### no-attribute-only-for-client-filter-or-grouping
+A package does not emit an attribute only so a client-side filter can drop components, or only to group components that share inventory. A condition that can change is state the simulation enforces (`simulation-mutable-conditions-in-state`), and each component is simulated on its own (`components-simulated-independently`).
+Why: A client-side filter runs only on snapshots, so a pool that meets the condition later stays in the stream with every quote reverting. A grouping attribute exists only for cross-state synchronization, which the consumer's routing cannot drive.
+Spot: A new attribute whose only reader is a client inclusion filter; a static attribute added only to group components that share inventory.
+Applies: substreams · look first at lines matching `attribute|static|filter|incentive|group|shared|inventory|vault`
