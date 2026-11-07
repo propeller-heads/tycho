@@ -46,7 +46,8 @@ use tycho_test::{
     execution::{
         encoding::{encode_swap, pamm_account_overwrites},
         models::{RouterOverwritesData, TychoExecutionInput, TychoExecutionResult},
-        simulate_swap_transaction, simulate_swap_transaction_before_block, tenderly,
+        simulate_swap_transaction, simulate_swap_transaction_before_block,
+        simulate_swap_transaction_next_block, tenderly,
     },
     is_block_not_found,
     token_prices::{cap_amount_to_eth_value, load_token_prices},
@@ -409,7 +410,10 @@ async fn main() -> miette::Result<()> {
     match result {
         Ok(_) => std::process::exit(0),
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("Error: {e}");
+            for cause in e.chain().skip(1) {
+                eprintln!("  caused by: {cause}");
+            }
             std::process::exit(1);
         }
     }
@@ -1444,12 +1448,22 @@ async fn process_update(
     // A price level quote prices the block Titan was building, and its swaps carry the account
     // state the quote was priced on (`account_overwrites`) whenever the stream attached one. So
     // they are simulated the way a consumer tests the quote before that block exists: on the
-    // quoted block's parent, with the quoted block's number and timestamp. Every other swap, a
-    // pinned component's say, is simulated on the block's own state.
+    // quoted block's parent, with the quoted block's number and timestamp. A full block's update
+    // of a protocol in `NEXT_BLOCK_PROTOCOLS` is priced for the block after it, where a swap
+    // quoted on it executes at the earliest, so those swaps are simulated on the block's state in
+    // the next block's context. Every other swap, a pinned component's say, is simulated on the
+    // block's own state.
     let (before_block, after_block): (HashMap<_, _>, HashMap<_, _>) = block_execution_info
         .clone()
         .into_iter()
         .partition(|(_, info)| simulates_before_block(&info.protocol_system));
+    let full_block_update = match &update.payload {
+        StreamUpdatePayload::Protocol(protocol_update) => !protocol_update.is_partial,
+        StreamUpdatePayload::Book { .. } | StreamUpdatePayload::PriceLevelStream(_) => false,
+    };
+    let (next_block, after_block): (HashMap<_, _>, HashMap<_, _>) = after_block
+        .into_iter()
+        .partition(|(_, info)| full_block_update && executes_in_next_block(&info.protocol_system));
     record_swaps_without_simulation_overrides(&before_block);
     let mut results = HashMap::new();
     if !before_block.is_empty() {
@@ -1460,6 +1474,20 @@ async fn process_update(
                 &block,
                 router_overwrites_data.clone(),
                 None,
+            )
+            .await
+            .map_err(|(e, _, _)| e)?,
+        );
+    }
+    if !next_block.is_empty() {
+        results.extend(
+            simulate_swap_transaction_next_block(
+                &rpc_tools,
+                next_block,
+                &block,
+                router_overwrites_data.clone(),
+                None,
+                chain.block_time_secs(),
             )
             .await
             .map_err(|(e, _, _)| e)?,
@@ -2216,6 +2244,19 @@ fn simulates_before_block(protocol_system: &str) -> bool {
     pamm_venue(protocol_system).is_some()
 }
 
+/// Protocol systems whose quotes move with the block they execute in and that the decoder prices
+/// for the block after the update's, via `ProtocolSim::apply_block`. The v4 families stay out
+/// although the `pancakeswap_clalpha` hook implements it: their pools with VM hooks are priced on
+/// the update's block.
+const NEXT_BLOCK_PROTOCOLS: [&str; 5] =
+    ["aerodrome_slipstreams", "biconomy", "etherfi", "lido_v4", "lunarbase"];
+
+/// Whether a swap of `protocol_system` from a full block's update is simulated in the next block's
+/// context, the block its quote priced.
+fn executes_in_next_block(protocol_system: &str) -> bool {
+    NEXT_BLOCK_PROTOCOLS.contains(&protocol_system)
+}
+
 /// The block a Tenderly link replays a swap of `block` in. `None` keeps the link's default, the
 /// block after `block`, which matches a simulation on `block`'s own state. A swap simulated before
 /// `block` replays in `block` itself, on its parent's state.
@@ -2329,8 +2370,9 @@ mod tests {
     use tycho_simulation::tycho_common::models::Chain;
 
     use super::{
-        book_swap_directions, is_oracle_stale_revert, is_stale_quote, pamm_venue,
-        sample_swap_directions, should_fetch_block_by_number, Cli, PammVenue, TychoState,
+        book_swap_directions, executes_in_next_block, is_oracle_stale_revert, is_stale_quote,
+        pamm_venue, sample_swap_directions, should_fetch_block_by_number, Cli, PammVenue,
+        TychoState,
     };
 
     #[rstest]
@@ -2346,6 +2388,22 @@ mod tests {
         #[case] expected: Option<&str>,
     ) {
         assert_eq!(pamm_venue(protocol_system), expected);
+    }
+
+    #[rstest]
+    #[case::aerodrome_slipstreams("aerodrome_slipstreams", true)]
+    #[case::biconomy("biconomy", true)]
+    #[case::etherfi("etherfi", true)]
+    #[case::lido_v4("lido_v4", true)]
+    #[case::lunarbase("lunarbase", true)]
+    #[case::uniswap_v4("uniswap_v4", false)]
+    #[case::unlisted_native("uniswap_v3", false)]
+    #[case::vm("vm:curve", false)]
+    fn only_listed_protocols_execute_in_the_next_block(
+        #[case] protocol_system: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(executes_in_next_block(protocol_system), expected);
     }
 
     #[rstest]
