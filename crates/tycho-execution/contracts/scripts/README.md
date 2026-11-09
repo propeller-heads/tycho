@@ -27,8 +27,13 @@ from being stored in the shell history.
    export BLOCKCHAIN_EXPLORER_API_KEY=<blockchain-explorer-api-key>
    ```
 
-On Robinhood Chain (`robinhood`) and Arc (`arc`), leave `BLOCKCHAIN_EXPLORER_API_KEY` unset.
+On Robinhood Chain (`robinhood`), Arc (`arc`) and Elysium (`elysium`), leave
+`BLOCKCHAIN_EXPLORER_API_KEY` unset.
 Arc verifies through Sourcify, which is where [arc-scan.org](https://arc-scan.org) reads verification from.
+The deploy scripts do not verify on Elysium. Submit each contract's standard JSON input to the
+Etherscan-compatible API of [Elysium's Blockscout](https://elysium.kinetiq.xyz) at
+`https://elysium.kinetiq.xyz/api/verify` (no API key). hardhat-verify cannot reach it, because a
+single `apiKey` sends every chain to the Etherscan v2 API.
 
 If verification reports that Blockscout has not indexed the contract, re-run the deploy script
 later. Re-running skips a deployment that already exists.
