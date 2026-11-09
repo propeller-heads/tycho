@@ -69,6 +69,8 @@ pub(super) enum SimulationResult {
     Success { return_data: Vec<u8>, gas_used: u64 },
     /// Simulation reverted with reason
     Revert { reason: String },
+    /// The node returned an error for the call, so nothing executed
+    Failed { error_msg: String },
 }
 
 /// What to overwrite on the Tycho router and its executors for a swap simulation.

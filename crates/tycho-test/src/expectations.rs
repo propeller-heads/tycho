@@ -26,7 +26,9 @@ use tycho_simulation::tycho_common::{models::Chain, Bytes};
 /// `Legacy` runs the checks every package on main was written against. `Strict` is for new
 /// packages: it rejects keys the runner does not read, and runs every check of a test and reports
 /// all failures instead of stopping at the first. Later checks are added to `Strict` only, so a
-/// legacy package keeps passing or failing exactly as before.
+/// legacy package keeps passing or failing exactly as before. The one exception applies to both:
+/// the package's `substreams_yaml_path` must name its chain ([`package_chain`]), since
+/// [`load_packages`] cannot place a package without it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Harness {
@@ -722,10 +724,11 @@ pub fn load_packages(
             .wrap_err_with(|| format!("Failed to read the substreams_yaml_path of {source}"))?;
         let package_chain =
             package_chain(&manifest.substreams_yaml_path).map_err(|e| miette!("{source}: {e}"))?;
+        // Read before the chain is filtered, so an invalid yaml fails every chain, as documented.
+        let package = PackageExpectations::from_yaml(yaml.as_bytes(), &source)?;
         if package_chain != chain {
             continue;
         }
-        let package = PackageExpectations::from_yaml(yaml.as_bytes(), &source)?;
         match packages.get_mut(&package.protocol_system) {
             Some((seen, first)) => {
                 let system = package.protocol_system.clone();
@@ -938,6 +941,23 @@ tests:
         assert!(
             err.to_string()
                 .contains("different package limits"),
+            "{err}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_invalid_yaml_for_another_chain_fails_every_chain() {
+        let dir = yaml_dir("other-chain");
+        fs::write(dir.join("integration_test.tycho.yaml"), PACKAGE).unwrap();
+        let invalid_on_base = PACKAGE
+            .replace("./substreams.yaml", "./base-vault.yaml")
+            .replace("{kind: soft, reason: \"any input trades\"}", "{kind: soft}");
+        fs::write(dir.join("integration_test_base.tycho.yaml"), invalid_on_base).unwrap();
+        let err = load_packages(&dir, Chain::Ethereum).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("missing reason"),
             "{err}"
         );
         fs::remove_dir_all(&dir).unwrap();

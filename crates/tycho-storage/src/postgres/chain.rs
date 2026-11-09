@@ -391,7 +391,14 @@ mod test {
         )
         .await;
 
-        assert!(result.is_err(), "{result:?}");
+        assert!(
+            matches!(
+                &result,
+                Err(tycho_common::storage::StorageError::NotFound(entity, id))
+                    if entity == "Chain" && id == "arbitrum"
+            ),
+            "{result:?}"
+        );
     }
 
     #[tokio::test]
