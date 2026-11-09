@@ -1317,6 +1317,23 @@ mod tests {
     }
 
     #[test]
+    fn applies_a_cardinality_increase() {
+        // `increaseObservationCardinalityNext(4)` prefills slots 1-3 with timestamp 1, which the
+        // stream sends as the single byte 0x01.
+        let mut pool = create_basic_test_pool();
+        let delta = ProtocolStateDelta {
+            component_id: "test-pool".to_string(),
+            updated_attributes: (1..4)
+                .map(|index| (format!("observations/{index}"), Bytes::from([0x01_u8])))
+                .collect(),
+            ..Default::default()
+        };
+
+        pool.delta_transition(delta, &HashMap::new(), &Balances::default())
+            .expect("prefilled observation slots should be valid");
+    }
+
+    #[test]
     fn test_partial_step_updates_tick_when_price_moves_without_crossing_initialized_tick() {
         let pool = create_basic_test_pool();
         let amount =

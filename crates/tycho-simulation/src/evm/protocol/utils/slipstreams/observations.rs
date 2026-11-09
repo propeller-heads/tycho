@@ -696,6 +696,65 @@ mod tests {
     }
 
     #[test]
+    fn ring_rebuilt_from_stream_words_observes_like_the_chain() {
+        // Robinhood pool 0x8132252bd65e7c03f7b57739e1db1c58d6ee792f at block 61,011,933 (ts
+        // 1,789,206,560), as the stream sends it: slots 0-2 written, then the slots
+        // `increaseObservationCardinalityNext` prefilled up to cardinality 500, each the byte 0x01.
+        // The expected cumulatives are the pool's own `observe([600, 0])` at that block.
+        let mut observations = Observations::new(Vec::new());
+        let written = [
+            (1_789_205_466, -3_753_782_792, "4871078707023353428616415205"),
+            (1_789_206_050, -3_869_381_504, "4943578347386704671325331035"),
+            (1_789_206_560, -3_970_336_004, "5006891389484836749718391092"),
+        ];
+        for (index, (timestamp, tick_cumulative, seconds_per_liquidity)) in (0..).zip(written) {
+            let word = encode_observation_bytes(
+                timestamp,
+                tick_cumulative,
+                U256::from_str(seconds_per_liquidity).expect("decimal cumulative"),
+                true,
+            );
+            observations
+                .upsert_observation(index, &word)
+                .expect("written slot");
+        }
+        for index in 3..500 {
+            observations
+                .upsert_observation(index, &[0x01])
+                .expect("prefilled slot");
+        }
+
+        let (tick_cumulatives, seconds_per_liquidity_cumulatives) = observations
+            .observe(1_789_206_560, &[600, 0], -197_954, 2, 2_741_046_731_899_156, 500)
+            .expect("the chain answers this window");
+
+        assert_eq!(tick_cumulatives, vec![-3_851_566_634, -3_970_336_004]);
+        assert_eq!(
+            seconds_per_liquidity_cumulatives,
+            vec![
+                U256::from_str("4932405457604681363373614554").expect("decimal cumulative"),
+                U256::from_str("5006891389484836749718391092").expect("decimal cumulative"),
+            ]
+        );
+    }
+
+    #[test]
+    fn window_reaching_before_time_zero_wraps_and_reverts_old() {
+        // `seconds_ago > time` (#1744). Solidity 0.7 wraps the target instead of reverting, and
+        // `lte` then finds the only observation newer than it, so the oracle reverts with `OLD`.
+        let observations = Observations::new(vec![Observation {
+            block_timestamp: 50,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        }]);
+
+        let result = observations.observe(100, &[600, 0], 0, 0, 1, 1);
+
+        assert!(matches!(result, Err(ObserveError::TooOld)), "got {result:?}");
+    }
+
+    #[test]
     fn test_observe_single() {
         let bytes = encode_observation_bytes(
             1762309495,

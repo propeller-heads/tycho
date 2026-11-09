@@ -675,6 +675,56 @@ mod tests {
         assert_eq!(fee_over(&dfc.with_seconds_ago(DEFAULT_SECONDS_AGO)), 1375);
     }
 
+    #[rstest]
+    #[case::window_480_above_240(hex!("090b2A6bb475c00e2256e2095A60887cD710803b"), 250, 1000, true)]
+    #[case::window_30_above_15(hex!("87D8f999BBa9343E8099552426775B51C338E8CB"), 20, 1000, true)]
+    #[case::window_30_below_15(hex!("87D8f999BBa9343E8099552426775B51C338E8CB"), 14, 500, false)]
+    #[case::window_600_below_300(hex!("a8Bdc945bE050E451C97f935d7c0D6B0087cF94c"), 250, 500, false)]
+    fn minimum_cardinality_is_half_the_modules_seconds_ago(
+        #[case] module: [u8; 20],
+        #[case] cardinality: u16,
+        #[case] expected_fee: u32,
+        #[case] expected_observed_twap: bool,
+    ) {
+        // A full ring with one observation every 2 s at tick -500 against a current tick of 0:
+        // when the module reads the oracle, a scaling factor of 1e6 adds 500 to the 500 base fee.
+        // Below `secondsAgo / 2` it returns before reading it, so a fixed 600 s threshold would
+        // skip the first two cases.
+        let attributes = HashMap::from([
+            (DYNAMIC_FEE_MODULE_ATTRIBUTE.to_string(), Bytes::from(module)),
+            ("dfc_baseFee".to_string(), Bytes::from(500_u32.to_be_bytes())),
+            ("dfc_feeCap".to_string(), Bytes::from(10_000_u32.to_be_bytes())),
+            ("dfc_scalingFactor".to_string(), Bytes::from(1_000_000_u64.to_be_bytes())),
+        ]);
+        let dfc = DynamicFeeConfig::from_attributes(&attributes).expect("supported module");
+        let mut written = Vec::new();
+        for slot in 0..cardinality {
+            written.push((
+                usize::from(slot),
+                1_000 + 2 * u32::from(slot),
+                -1_000 * i64::from(slot),
+                "0",
+            ));
+        }
+        let observations = ring(usize::from(cardinality), &written);
+        let newest = cardinality - 1;
+
+        let fee = get_dynamic_fee(
+            &dfc,
+            3000,
+            0,
+            1,
+            newest,
+            cardinality,
+            &observations,
+            1_000 + 2 * u32::from(newest),
+            true,
+        )
+        .expect("fee");
+
+        assert_eq!(fee, ResolvedFee { fee: expected_fee, observed_twap: expected_observed_twap });
+    }
+
     #[test]
     fn zero_scaling_still_pays_for_the_observe() {
         // A zero scaling factor only multiplies the deviation away; the oracle is still read, so
