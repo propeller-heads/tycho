@@ -8,6 +8,9 @@
 use std::{fmt, path::Path};
 
 use miette::{miette, IntoDiagnostic, WrapErr};
+use num_bigint::{BigInt, BigUint};
+use num_rational::BigRational;
+use num_traits::{Signed, ToPrimitive, Zero};
 use serde::Serialize;
 use tracing::error;
 
@@ -105,16 +108,114 @@ pub struct CheckResult {
     pub outcome: Outcome,
 }
 
+/// The largest difference between a simulated and an executed amount out in one test, whether or
+/// not it was within tolerance. A declared tolerance's `measured` can be checked against it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Drift {
+    pub test: String,
+    pub simulation: String,
+    pub component: String,
+    pub simulated: String,
+    pub executed: String,
+    /// `(executed - simulated) / executed`, in basis points: negative when the simulation
+    /// overquotes, positive when it underquotes.
+    pub bps: f64,
+    /// `executed - simulated` of the execution furthest off in absolute terms, in base units of
+    /// its token out, which may not be the one above. A `wei` tolerance can be checked against it.
+    pub largest_difference: String,
+}
+
+/// `executed - simulated`, and that difference in basis points of `executed`. `None` for a zero
+/// executed amount, which no relative difference can be expressed against.
+pub fn drift(simulated: &BigUint, executed: &BigUint) -> Option<(BigInt, f64)> {
+    if executed.is_zero() {
+        return None;
+    }
+    let difference = BigInt::from(executed.clone()) - BigInt::from(simulated.clone());
+    let bps = BigRational::new(&difference * 10_000, BigInt::from(executed.clone())).to_f64()?;
+    Some((difference, bps))
+}
+
+/// The execution furthest off in relative terms so far, before it becomes a [`Drift`].
+struct Observed {
+    simulation: String,
+    component: String,
+    simulated: String,
+    executed: String,
+    bps: f64,
+}
+
 /// Runs the checks of one test and records how each ended.
 pub struct Checks {
     harness: Harness,
     test: String,
     results: Vec<CheckResult>,
+    drift: Option<Observed>,
+    largest_difference: Option<BigInt>,
 }
 
 impl Checks {
     pub fn new(harness: Harness, test: &str) -> Self {
-        Self { harness, test: test.to_string(), results: Vec::new() }
+        Self {
+            harness,
+            test: test.to_string(),
+            results: Vec::new(),
+            drift: None,
+            largest_difference: None,
+        }
+    }
+
+    /// Notes an execution's output against its simulation, keeping the largest difference.
+    /// A zero output has no relative difference and is not noted; it fails its check anyway.
+    pub fn observe_execution(
+        &mut self,
+        simulation: &str,
+        component: &str,
+        simulated: &BigUint,
+        executed: &BigUint,
+    ) {
+        let Some((difference, bps)) = drift(simulated, executed) else {
+            return;
+        };
+        if self
+            .largest_difference
+            .as_ref()
+            .is_none_or(|largest| difference.abs() > largest.abs())
+        {
+            self.largest_difference = Some(difference);
+        }
+        if self
+            .drift
+            .as_ref()
+            .is_some_and(|largest| largest.bps.abs() >= bps.abs())
+        {
+            return;
+        }
+        self.drift = Some(Observed {
+            simulation: simulation.to_string(),
+            component: component.to_string(),
+            simulated: simulated.to_string(),
+            executed: executed.to_string(),
+            bps,
+        });
+    }
+
+    /// The largest drift noted so far, if any execution was noted.
+    pub fn take_drift(&mut self) -> Option<Drift> {
+        let (observed, largest_difference) = self
+            .drift
+            .take()
+            .zip(self.largest_difference.take())?;
+        let Observed { simulation, component, simulated, executed, bps } = observed;
+        Some(Drift {
+            test: self.test.clone(),
+            simulation,
+            component,
+            simulated,
+            executed,
+            bps,
+            largest_difference: largest_difference.to_string(),
+        })
     }
 
     /// Runs `check` and records its outcome.
@@ -230,6 +331,8 @@ pub struct Report {
     pub chain: String,
     pub harness: Harness,
     pub results: Vec<CheckResult>,
+    /// The largest drift of each test that executed anything.
+    pub drift: Vec<Drift>,
 }
 
 impl Report {
@@ -334,6 +437,7 @@ mod tests {
             package: "ethereum-foo".to_string(),
             chain: "ethereum".to_string(),
             harness: Harness::Strict,
+            drift: vec![],
             results: vec![
                 CheckResult {
                     test: "t".to_string(),
@@ -400,5 +504,32 @@ mod tests {
         // A failure outranks a skip.
         assert!(matches!(outcomes[3].2, Outcome::Fail { .. }));
         assert_eq!(outcomes[4], (Some("0x03"), Some("0xa->0xb"), &not_run()));
+    }
+
+    #[test]
+    fn the_largest_drift_of_a_test_is_kept_with_its_sign() {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        assert!(checks.take_drift().is_none());
+
+        let amount = |n: u32| BigUint::from(n);
+        checks.observe_execution("a", "0x01", &amount(1000), &amount(1000));
+        checks.observe_execution("b", "0x01", &amount(1003), &amount(1000)); // overquote, 30 bps
+        checks.observe_execution("c", "0x02", &amount(999), &amount(1000)); // underquote, 10 bps
+                                                                            // No output: not noted.
+        checks.observe_execution("d", "0x02", &amount(1000), &amount(0));
+        // Overquotes by 20 wei, more than "b" in wei but only 2 bps.
+        checks.observe_execution("e", "0x02", &amount(100_020), &amount(100_000));
+
+        let drift = checks.take_drift().unwrap();
+        assert_eq!(drift.simulation, "b");
+        assert_eq!(drift.component, "0x01");
+        assert_eq!((drift.simulated.as_str(), drift.executed.as_str()), ("1003", "1000"));
+        assert!((drift.bps + 30.0).abs() < 1e-9, "{}", drift.bps);
+        assert_eq!(drift.largest_difference, "-20");
+
+        checks.observe_execution("f", "0x01", &amount(1000), &amount(1001));
+        let drift = checks.take_drift().unwrap();
+        assert!((drift.bps - 10_000.0 / 1001.0).abs() < 1e-9, "{}", drift.bps);
+        assert_eq!(drift.largest_difference, "1");
     }
 }

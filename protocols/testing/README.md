@@ -87,6 +87,8 @@ In strict mode:
   stopping at the first. A check that needs the result of a failed one is reported as not run.
 - Every direction of every expected component declares what kind of limit `get_limits` reports,
   and the limit is tested as declared (below).
+- An execution must pay exactly the simulated amount, unless the package declares a tolerance
+  (below, "Execution tolerance").
 - New checks are added to strict mode only, so a legacy package never starts failing because the
   harness grew.
 
@@ -161,6 +163,40 @@ A declaration missing a required field, or with a field its kind does not read, 
 direction its component does not have, or naming one direction twice, is an error in both modes.
 Legacy mode reads the declarations but runs none of these checks.
 
+### Execution tolerance
+
+An execution matches its simulation when the executed amount out is within the tolerance, in basis
+points of the executed amount. Legacy mode allows 0.5% for every package. In `range`, strict mode
+requires an exact match (`full` reads neither `harness` nor `execution_tolerance`, and allows 0.5%
+for every package): a simulation that ports the venue's math, or runs its bytecode, should not differ by
+a wei, and 0.5% hides rounding and fee bugs. Where exact is out of reach, the package declares a
+tolerance, with why and what a run measured:
+
+```yaml
+harness: strict
+execution_tolerance:
+  bps: 3
+  cause: "the vault rounds shares down on deposit; the simulation rounds once at the end"
+  measured: "2.1 bps at most, blocks 21000000-21000100 (range --report)"
+```
+
+`bps` is relative to the executed amount. Where the loss is a fixed amount whatever the trade's
+size, such as stETH's 1-2 wei per transfer, declare `wei` instead, in base units of the token out;
+a bps loose enough for a small trade allows ether on a large one:
+
+```yaml
+execution_tolerance:
+  wei: 2
+  cause: "stETH transfers move shares, rounding the amount down by up to 2 wei"
+  measured: "1 wei at most, blocks 25603204-25603404 (range --report)"
+```
+
+With both declared, a difference within either passes. A mismatch says whether the simulation
+over- or underquotes, since those are different defects. At least one of `bps` (1 to 9999) and
+`wei` (1 or more) is required, as are `cause` and `measured`, in both modes; legacy mode keeps
+0.5% whatever is declared. The report's `drift` gives the largest difference of each test, within
+tolerance or not, so `measured` can be checked against a run.
+
 ### Test report
 
 `range --report <path>` writes every check's outcome, per test, as JSON, in either mode:
@@ -177,6 +213,9 @@ Legacy mode reads the declarations but runs none of these checks.
     { "test": "first", "check": "sim.ladder", "outcome": "fail", "detail": "Error calculating amount out ..." },
     { "test": "first", "check": "exec.ladder", "outcome": "not_run", "reason": "sim.ladder failed" },
     { "test": "second", "check": "limits.past_limit", "component": "0x...", "direction": "0x...->0x...", "outcome": "pass" }
+  ],
+  "drift": [
+    { "test": "second", "simulation": "test_0x..._USDC_WETH_1000000", "component": "0x...", "simulated": "1003", "executed": "1000", "bps": -30.0, "largest_difference": "-3" }
   ]
 }
 ```
@@ -189,7 +228,7 @@ Legacy mode reads the declarations but runs none of these checks.
 | `balances` | indexed balances match `balanceOf` on chain |
 | `decode` | the snapshot decodes, and so does every expected component |
 | `sim.ladder` | limits, spot prices and quotes at 0.1%, 1% and 10% of the limit, every direction |
-| `exec.ladder` | executing each quote on chain matches the simulation |
+| `exec.ladder` | executing each quote on chain matches the simulation, within the tolerance |
 | `limits.at_limit` | strict: every direction quotes and executes at its limit |
 | `limits.past_limit` | strict: past a hard limit, the quote errors and the execution reverts |
 | `limits.max_output` | strict: the quote at the limit pays no more than the limit's max output |
@@ -199,7 +238,11 @@ A skipped check is reported with its reason, per component (by lowercase id) for
 `sim.ladder` or `exec.ladder` result covers only the components without a `skipped` result for
 it. When every component skips, `range --report` records the test-wide result as `skipped`,
 unless an earlier check failed, in which case it is `not_run`. In legacy mode the report ends at
-the first failed check of a test.
+the first failed check of a test. `drift` has one entry per test with at least one execution that
+paid a nonzero amount: of those, the largest `(executed - simulated) / executed` in magnitude, in
+bps, kept with its sign (negative when the simulation overquotes), and the largest
+`executed - simulated` in magnitude, in base units of the token out, which may come from another
+execution.
 
 ## How to Run with Docker
 
