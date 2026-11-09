@@ -53,6 +53,7 @@ use tycho_test::{
 
 use crate::{
     adapter_builder::AdapterContractBuilder,
+    balances::{self, BalanceCheck},
     config::{
         component_directions, Direction, Harness, IntegrationTest, IntegrationTestsConfig, Limits,
         ProtocolComponentWithTestConfig, Skip, Tolerance,
@@ -1017,7 +1018,19 @@ impl TestRunner {
             Self::validate_excluded_components(&test.excluded_components, &protocol_components)
         })?;
 
-        if let Some(reason) = config.skip_balance_check.reason() {
+        if config.harness == Harness::Strict {
+            // `from_yaml` rejected a package-level skip.
+            for component in &test.expected_components {
+                let failures = self.check_component_balances(
+                    component,
+                    &protocol_components,
+                    &response_protocol_states_by_id,
+                    &all_tokens,
+                    block,
+                );
+                checks.record_component(CheckId::Balances, &component.base.id, &failures);
+            }
+        } else if let Some(reason) = config.skip_balance_check.reason() {
             info!("Skipping balance check: {reason}");
             checks.skip(CheckId::Balances, reason);
         } else {
@@ -2191,6 +2204,64 @@ impl TestRunner {
         Ok(())
     }
 
+    /// Strict: checks an expected component's indexed balances against the source it declares,
+    /// at `block`. Returns every failure, empty when all its balances match.
+    fn check_component_balances(
+        &self,
+        expected: &ProtocolComponentWithTestConfig,
+        indexed_components: &[ProtocolComponent],
+        states: &HashMap<String, ProtocolComponentState>,
+        all_tokens: &HashMap<Bytes, Token>,
+        block: u64,
+    ) -> Vec<String> {
+        let id = expected.base.id.to_lowercase();
+        let (Some(indexed), Some(state)) = (
+            indexed_components
+                .iter()
+                .find(|component| component.id.to_lowercase() == id),
+            states.get(&id),
+        ) else {
+            return vec!["the component is not in the snapshot".to_string()];
+        };
+        let tokens: Vec<(Bytes, String)> = indexed
+            .tokens
+            .iter()
+            .map(|address| {
+                let symbol = all_tokens
+                    .get(address)
+                    .map_or_else(|| address.to_string(), |token| token.symbol.clone());
+                (address.clone(), symbol)
+            })
+            .collect();
+        let component = balances::Component {
+            id: &id,
+            tokens: &tokens,
+            balances: &state.balances,
+            static_attributes: &indexed.static_attributes,
+            state_attributes: &state.attributes,
+        };
+        let balance_of = |token: &Bytes, holder: &Bytes| -> Result<BigUint, String> {
+            let token = bytes_to_address(token).map_err(|e| e.to_string())?;
+            let holder = bytes_to_address(holder).map_err(|e| e.to_string())?;
+            let balance = self
+                .runtime
+                .block_on(
+                    self.rpc_provider
+                        .get_token_balance(token, holder, block),
+                )
+                .map_err(|e| format!("{e:#}"))?;
+            Ok(BigUint::from_bytes_be(&balance.to_be_bytes::<32>()))
+        };
+        balances::check_component(
+            &component,
+            expected
+                .balance_check
+                .as_ref()
+                .unwrap_or(&BalanceCheck::Default),
+            balance_of,
+        )
+    }
+
     /// Validate that the token balances of the components match the values
     /// on-chain, extracted by querying the token balances using a node.
     fn validate_token_balances(
@@ -2406,6 +2477,7 @@ mod tests {
             skip_simulation,
             skip_execution,
             limits: None,
+            balance_check: None,
         }
     }
 
