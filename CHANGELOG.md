@@ -1,3 +1,17 @@
+## [0.503.0](https://github.com/propeller-heads/tycho/compare/0.502.3...0.503.0) (2026-11-09)
+
+
+### Features
+
+* **elysium:** add chain model and Uniswap V2/V3/V4 manifests ([814afb2](https://github.com/propeller-heads/tycho/commit/814afb2d9ea5f3c06d061f4ec6d9f6e1d9bf20f5))
+* **elysium:** add chain model and Uniswap V2/V3/V4 manifests ([#1751](https://github.com/propeller-heads/tycho/issues/1751)) ([7835cc6](https://github.com/propeller-heads/tycho/commit/7835cc60ff110f9b1f046069d785bbd75e73b18b))
+
+
+### Bug Fixes
+
+* **deps:** bump actix-http to 3.20.3 for RUSTSEC-2026-0446 ([cf91abf](https://github.com/propeller-heads/tycho/commit/cf91abfd1066bcd5cd9d06c7ab55f989fa0c85c6))
+* **deps:** bump actix-web to 4.18.2 for RUSTSEC-2026-0447 ([9c67f2c](https://github.com/propeller-heads/tycho/commit/9c67f2c63830deabd3bb0bba982b98f915f2efbc))
+
 ## [0.502.3](https://github.com/propeller-heads/tycho/compare/0.502.2...0.502.3) (2026-11-05)
 
 ## [0.502.2](https://github.com/propeller-heads/tycho/compare/0.502.1...0.502.2) (2026-11-05)
