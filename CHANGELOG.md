@@ -1,3 +1,17 @@
+## [0.504.0](https://github.com/propeller-heads/tycho/compare/0.503.0...0.504.0) (2026-11-09)
+
+
+### Features
+
+* add Ramses V3 Arbitrum support ([ebfb793](https://github.com/propeller-heads/tycho/commit/ebfb79375f09afd36d33759a0dfb9b6ff36265ca))
+* add Ramses V3 Arbitrum support ([#1235](https://github.com/propeller-heads/tycho/issues/1235)) ([38b87de](https://github.com/propeller-heads/tycho/commit/38b87de63a8b8e700891d079d14c471b260224a5))
+
+
+### Bug Fixes
+
+* address review findings on the Ramses V3 Arbitrum integration ([c947ea4](https://github.com/propeller-heads/tycho/commit/c947ea415afb456355fc83b2f6b99b108db75a43))
+* keep ramses_v3 out of the Arbitrum examples until it is synced in prod ([3239f8b](https://github.com/propeller-heads/tycho/commit/3239f8b93bcddbcc7c070929b4e061c808e6929e))
+
 ## [0.503.0](https://github.com/propeller-heads/tycho/compare/0.502.3...0.503.0) (2026-11-09)
 
 

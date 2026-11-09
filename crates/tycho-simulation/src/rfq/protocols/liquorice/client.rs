@@ -408,7 +408,7 @@ mod tests {
         Arc, Mutex,
     };
 
-    use dotenv::dotenv;
+    use dotenvy::dotenv;
     use rstest::rstest;
     use tycho_common::models::Chain;
 

@@ -36,7 +36,7 @@ RUN resolve_base() { \
             bsc-pancakeswap-infinity-bin) echo "base-pancakeswap-infinity-bin" ;; \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
+            robinhood-ramses-v3|arbitrum-ramses-v3) echo "polygon-ramses-v3" ;; \
             robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
             robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
@@ -88,7 +88,7 @@ RUN resolve_base() { \
             bsc-pancakeswap-infinity-bin) echo "base-pancakeswap-infinity-bin" ;; \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
+            robinhood-ramses-v3|arbitrum-ramses-v3) echo "polygon-ramses-v3" ;; \
             robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
             robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
