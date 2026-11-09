@@ -455,10 +455,6 @@ fn run_indexer(global_args: &GlobalArgs, index_args: &IndexArgs) -> Result<(), E
 }
 
 #[tokio::main]
-#[expect(
-    clippy::unwrap_in_result,
-    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
-)]
 async fn run_spkg(global_args: &GlobalArgs, run_args: RunSpkgArgs) -> Result<(), ExtractionError> {
     create_tracing_subscriber();
     info!("Starting Tycho");
@@ -523,10 +519,6 @@ async fn run_spkg(global_args: &GlobalArgs, run_args: RunSpkgArgs) -> Result<(),
 }
 
 #[tokio::main]
-#[expect(
-    clippy::unwrap_in_result,
-    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
-)]
 async fn run_rpc(
     global_args: &GlobalArgs,
     rpc_args: &RpcServerArgs,
@@ -932,10 +924,6 @@ async fn shutdown_handler(
 }
 
 #[tokio::main]
-#[expect(
-    clippy::unwrap_in_result,
-    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
-)]
 async fn run_analyze_tokens(
     global_args: &GlobalArgs,
     analyzer_args: AnalyzeTokenArgs,
