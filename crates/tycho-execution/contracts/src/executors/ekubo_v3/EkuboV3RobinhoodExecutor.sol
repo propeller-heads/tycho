@@ -12,9 +12,11 @@ import {SwapParameters} from "@ekubo-v3/types/swapParameters.sol";
 using FlashAccountantLib for ICore;
 
 address constant VE33_ADDRESS = 0xD18685a514E59b06d59824e16Db07e73345d9953;
+address constant ZERO_SEED_LAUNCH_ADDRESS =
+    0x517621Ea1bf51F31826819b118fa4dfEb4D198D2;
 
-/// Ekubo V3 executor for the Robinhood deployment. Adds the Ve33 extension,
-/// a forward-only swap call point with the normal fixed 52-byte hop
+/// Ekubo V3 executor for the Robinhood deployment. Adds Ve33 and the final
+/// zero-seed launch extension, forward-only call points with fixed 52-byte hop
 /// encoding, on top of the chain-agnostic executor's extensions.
 contract EkuboV3RobinhoodExecutor is EkuboV3Executor {
     constructor(address signedExclusiveSwap_)
@@ -32,12 +34,14 @@ contract EkuboV3RobinhoodExecutor is EkuboV3Executor {
         override
         returns (PoolBalanceUpdate balanceUpdate, uint256 nextOffset)
     {
-        if (poolKey.config.extension() != VE33_ADDRESS) {
+        address extension = poolKey.config.extension();
+        if (extension != VE33_ADDRESS && extension != ZERO_SEED_LAUNCH_ADDRESS)
+        {
             return super._swapHop(poolKey, swapParameters, swapData, offset);
         }
 
         (balanceUpdate,) = abi.decode(
-            CORE.forward(VE33_ADDRESS, abi.encode(poolKey, swapParameters)),
+            CORE.forward(extension, abi.encode(poolKey, swapParameters)),
             (PoolBalanceUpdate, PoolState)
         );
         nextOffset = offset;

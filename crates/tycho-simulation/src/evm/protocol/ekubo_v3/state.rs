@@ -17,7 +17,7 @@ use tycho_common::{
     simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::{
-            Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
+            Balances, BlockContext, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
             SwapConstraint,
         },
     },
@@ -26,7 +26,8 @@ use tycho_common::{
 
 use super::pool::{
     concentrated::ConcentratedPool, full_range::FullRangePool, oracle::OraclePool,
-    twamm::TwammPool, ve33::Ve33Pool, EkuboPool, EkuboPoolQuote,
+    twamm::TwammPool, ve33::Ve33Pool, zero_seed_launch::ZeroSeedLaunchPool, EkuboPool,
+    EkuboPoolQuote,
 };
 use crate::{
     evm::protocol::{
@@ -62,6 +63,7 @@ pub enum EkuboV3State {
     MevCapture(MevCapturePool),
     BoostedFees(BoostedFeesPool),
     Ve33(Ve33Pool),
+    ZeroSeedLaunch(ZeroSeedLaunchPool),
 }
 
 fn sqrt_price_q128_to_f64(
@@ -121,9 +123,19 @@ impl EkuboSwapToPrice for EkuboV3State {
 
 #[typetag::serde]
 impl ProtocolSim for EkuboV3State {
+    fn apply_block(&mut self, block: &BlockContext) -> bool {
+        if let Self::ZeroSeedLaunch(pool) = self {
+            pool.set_block_timestamp(block.timestamp());
+            true
+        } else {
+            false
+        }
+    }
+
     fn fee(&self) -> f64 {
         let fee = match self {
             Self::Ve33(pool) => pool.swap_fee(),
+            Self::ZeroSeedLaunch(pool) => pool.fee(),
             Self::Concentrated(_) |
             Self::FullRange(_) |
             Self::Stableswap(_) |

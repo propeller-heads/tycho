@@ -1071,7 +1071,9 @@ pub fn mev_capture() -> TestCase {
             ("tick".to_string(), TICK_INDEX_BETWEEN.to_be_bytes().into()),
         ]
         .into(),
-        swap_token0: (100_u8.into(), 86_u8.into()),
+        // SDK >=3.4 rounds each EVM next price to Core's compact format before
+        // calculating the amount, including the legacy MEVCapture path.
+        swap_token0: (100_u8.into(), 87_u8.into()),
         expected_limit_token0: 553_u16.into(),
     }
 }
