@@ -1,3 +1,11 @@
+## [0.504.1](https://github.com/propeller-heads/tycho/compare/0.504.0...0.504.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **deps:** enable the actix-web ws feature for tycho-indexer ([9571532](https://github.com/propeller-heads/tycho/commit/9571532b65a372a9c87f78f7ccb5303b3f2de87e))
+* **deps:** enable the actix-web ws feature for tycho-indexer ([#1758](https://github.com/propeller-heads/tycho/issues/1758)) ([337e112](https://github.com/propeller-heads/tycho/commit/337e112a78aa7d26965ff52627db1d8d0d940b3c))
+
 ## [0.504.0](https://github.com/propeller-heads/tycho/compare/0.503.0...0.504.0) (2026-11-09)
 
 
