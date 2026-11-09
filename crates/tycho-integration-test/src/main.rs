@@ -339,10 +339,6 @@ fn hashflow_min_amount_in(
 }
 
 #[tokio::main]
-#[expect(
-    clippy::unwrap_in_result,
-    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
-)]
 async fn main() -> miette::Result<()> {
     miette::set_hook(Box::new(|_| Box::new(NarratableReportHandler::new())))?;
     match dotenv() {
