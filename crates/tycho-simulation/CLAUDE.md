@@ -252,9 +252,9 @@ fallback for protocols too complex to port, not a default.
 
 ## Pending-block state for hybrid/VM protocols
 
-Nothing on the pending path writes to the VM database, so a VM read inside `delta_transition`
-sees confirmed state. A protocol whose `delta_transition` re-reads the VM would therefore quote a
-pending block against confirmed state. Fluid and Curve close that gap the same way:
+Nothing on the pending path writes to the VM database, so a protocol whose `delta_transition`
+re-reads the VM quotes a pending block against confirmed state. Fluid and Curve close that gap
+the same way:
 
 1. A `TxDeltaIndexer` implementation — which lives in the consuming repo, not here — builds
    `evm::simulation::PendingOverrides` (storage, native balances and block environment) from the
@@ -268,11 +268,13 @@ pending block against confirmed state. Fluid and Curve close that gap the same w
 Reading under the pending block's own number and timestamp matters: anything with on-chain time
 math (Fluid's expanding limits, Curve's ramping `A()`) is wrong under the parent block's clock.
 
-An extractor's account deltas reach only pools of the protocol system that keys it in
-`pending_deltas`, so its indexer must emit every account those pools read. Without this rule, a
-token contract that Curve, the V4 hooks and Fluid all list would rebuild every Fluid pool from
-confirmed state, with one EVM call per pool. It would also replace each pool's own override set
-with another extractor's.
+`apply_deltas_ephemeral` also sets each extractor's account deltas as `PendingOverrides` on the
+pools linked to a written account through `contracts_map`. Only Uniswap V4 states read them: a
+hooked pool prices from its hook's storage. It sets them only on pools whose protocol system is
+the extractor's key in `pending_deltas`, so the extractor's indexer must emit the writes to every
+account those pools read. Without this rule, a write to a token contract linked to Curve, V4 hooks
+and Fluid pools would make the decoder rebuild every Fluid pool from confirmed state, one EVM call
+per pool. Another extractor's override set would also replace a V4 pool's own.
 
 ## Features
 
