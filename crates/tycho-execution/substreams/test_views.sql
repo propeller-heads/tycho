@@ -168,7 +168,7 @@ DROP FUNCTION add_fee(TEXT, TEXT, TEXT, NUMERIC, TEXT);
 DROP FUNCTION add_vault(TEXT, TEXT, TEXT, TEXT, NUMERIC, TEXT);
 DROP FUNCTION add_trade(TEXT, TEXT, INTEGER, TEXT, TEXT, NUMERIC, BOOLEAN, BOOLEAN, BOOLEAN);
 -- A paid subsidy sits next to the settled trade it was paid on; one on a discarded call, one
--- skipped, and one without a trade stay out of the view.
+-- skipped, and one whose trade was not indexed stay out of the view.
 CREATE OR REPLACE FUNCTION add_subsidy(
     p_id TEXT, p_event TEXT, p_trade TEXT, p_token TEXT, p_amount NUMERIC
 ) RETURNS VOID AS $$
@@ -194,7 +194,7 @@ BEGIN
     PERFORM add_subsidy('s-other-token', 'paid', 'fill', '0xmid', 874);
     PERFORM add_subsidy('s-discarded', 'paid', 'discarded', '0xout', 874);
     PERFORM add_subsidy('s-skipped', 'skipped', 'committed', NULL, NULL);
-    PERFORM add_subsidy('s-no-trade', 'paid', NULL, '0xout', 874);
+    PERFORM add_subsidy('s-no-trade', 'paid', 'not-indexed', '0xout', 874);
 
     SELECT array_agg(tx_hash ORDER BY tx_hash) INTO kept FROM subsidized_trades;
     IF kept IS DISTINCT FROM ARRAY['0xs-committed', '0xs-other-token'] THEN

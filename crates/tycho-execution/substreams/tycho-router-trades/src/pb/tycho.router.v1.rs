@@ -305,7 +305,8 @@ pub struct SubsidyEvents {
     #[prost(message, repeated, tag="1")]
     pub events: ::prost::alloc::vec::Vec<SubsidyEvent>,
 }
-/// One signed subsidy the payer settled: paid, or skipped with the contract's reason.
+/// One signed subsidy a payer settled, inside a router swap: paid, or skipped with the contract's
+/// reason.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SubsidyEvent {
@@ -319,30 +320,49 @@ pub struct SubsidyEvent {
     pub tx_hash: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint32, tag="5")]
     pub log_index: u32,
+    /// The contract that emitted the event.
     #[prost(bytes="vec", tag="6")]
     pub payer: ::prost::alloc::vec::Vec<u8>,
-    /// "paid" or "skipped".
-    #[prost(string, tag="7")]
-    pub event: ::prost::alloc::string::String,
     /// The nonce of the signed terms, 32 bytes.
-    #[prost(bytes="vec", tag="8")]
+    #[prost(bytes="vec", tag="7")]
     pub nonce: ::prost::alloc::vec::Vec<u8>,
-    /// Paid only: the address the terms were bound to, where the payment went, in which token, and
-    /// how much. The payment goes to the router, which pays the user with the swap's output.
-    #[prost(bytes="vec", tag="9")]
-    pub bound_to: ::prost::alloc::vec::Vec<u8>,
-    #[prost(bytes="vec", tag="10")]
-    pub receiver: ::prost::alloc::vec::Vec<u8>,
-    #[prost(bytes="vec", tag="11")]
-    pub token: ::prost::alloc::vec::Vec<u8>,
-    #[prost(string, tag="12")]
-    pub amount: ::prost::alloc::string::String,
-    /// Skipped only: the payer's SkipReason, in snake case, or its number when unknown.
-    #[prost(string, tag="13")]
-    pub reason: ::prost::alloc::string::String,
     /// The index of the router swap call the payer ran in: the call_index of the trade this
-    /// subsidy belongs to. Absent when no decoded router call encloses the event.
-    #[prost(uint32, optional, tag="14")]
-    pub trade_call_index: ::core::option::Option<u32>,
+    /// subsidy belongs to.
+    #[prost(uint32, tag="8")]
+    pub trade_call_index: u32,
+    #[prost(oneof="subsidy_event::Outcome", tags="9, 10")]
+    pub outcome: ::core::option::Option<subsidy_event::Outcome>,
+}
+/// Nested message and enum types in `SubsidyEvent`.
+pub mod subsidy_event {
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Outcome {
+        #[prost(message, tag="9")]
+        Paid(super::SubsidyPayment),
+        #[prost(message, tag="10")]
+        Skipped(super::SubsidySkip),
+    }
+}
+/// A SubsidyPaid: `amount` of `token` to `receiver`, the router, which pays the user with the
+/// swap's output. `bound_to` is the address the terms were signed for.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubsidyPayment {
+    #[prost(bytes="vec", tag="1")]
+    pub bound_to: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes="vec", tag="2")]
+    pub receiver: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes="vec", tag="3")]
+    pub token: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag="4")]
+    pub amount: ::prost::alloc::string::String,
+}
+/// A SubsidySkipped: the payer's SkipReason, in snake case, or its number when unknown.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubsidySkip {
+    #[prost(string, tag="1")]
+    pub reason: ::prost::alloc::string::String,
 }
 // @@protoc_insertion_point(module)

@@ -204,27 +204,37 @@ message SubsidyEvents {
   repeated SubsidyEvent events = 1;
 }
 
-// One signed subsidy the payer settled: paid, or skipped with the contract's reason.
+// One signed subsidy a payer settled, inside a router swap: paid, or skipped with the contract's
+// reason.
 message SubsidyEvent {
   string chain = 1;
   uint64 block_number = 2;
   uint64 block_timestamp = 3;
   bytes tx_hash = 4;
   uint32 log_index = 5;
+  // The contract that emitted the event.
   bytes payer = 6;
-  // "paid" or "skipped".
-  string event = 7;
   // The nonce of the signed terms, 32 bytes.
-  bytes nonce = 8;
-  // Paid only: the address the terms were bound to, where the payment went, in which token, and
-  // how much. The payment goes to the router, which pays the user with the swap's output.
-  bytes bound_to = 9;
-  bytes receiver = 10;
-  bytes token = 11;
-  string amount = 12;
-  // Skipped only: the payer's SkipReason, in snake case, or its number when unknown.
-  string reason = 13;
+  bytes nonce = 7;
   // The index of the router swap call the payer ran in: the call_index of the trade this
-  // subsidy belongs to. Absent when no decoded router call encloses the event.
-  optional uint32 trade_call_index = 14;
+  // subsidy belongs to.
+  uint32 trade_call_index = 8;
+  oneof outcome {
+    SubsidyPayment paid = 9;
+    SubsidySkip skipped = 10;
+  }
+}
+
+// A SubsidyPaid: `amount` of `token` to `receiver`, the router, which pays the user with the
+// swap's output. `bound_to` is the address the terms were signed for.
+message SubsidyPayment {
+  bytes bound_to = 1;
+  bytes receiver = 2;
+  bytes token = 3;
+  string amount = 4;
+}
+
+// A SubsidySkipped: the payer's SkipReason, in snake case, or its number when unknown.
+message SubsidySkip {
+  string reason = 1;
 }

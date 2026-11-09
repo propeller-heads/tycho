@@ -3,13 +3,12 @@
 //! Format (query-string style, all addresses lowercase hex with `0x` prefix):
 //!
 //! ```text
-//! chain=ethereum&routers=<addr>:<version>,...&fee_calculators=<router>:<fee_calculator>,...&payer=<addr>
+//! chain=ethereum&routers=<addr>:<version>,...&fee_calculators=<router>:<fee_calculator>,...
 //! ```
 //!
 //! `version` is one of `v2`, `v3_0`, `v3_1`. `fee_calculators` lists the FeeCalculator each
 //! router was constructed with (the constructor emits no event); later rotations are picked up
-//! from router events. `payer` is the chain's SubsidyPayer, whose events `map_subsidy_events`
-//! reads; a chain without one leaves it out.
+//! from router events.
 use anyhow::{anyhow, bail, Context, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,8 +66,6 @@ pub struct RouterConfig {
 pub struct Params {
     pub chain: String,
     pub routers: Vec<RouterConfig>,
-    /// The SubsidyPayer of the chain, if it has one.
-    pub payer: Option<Vec<u8>>,
 }
 
 impl Params {
@@ -76,14 +73,12 @@ impl Params {
         let mut chain = None;
         let mut routers = Vec::new();
         let mut fee_calculators: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        let mut payer = None;
         for pair in raw.split('&').filter(|p| !p.is_empty()) {
             let (key, value) = pair
                 .split_once('=')
                 .ok_or_else(|| anyhow!("parameter '{pair}' is not key=value"))?;
             match key {
                 "chain" => chain = Some(value.to_string()),
-                "payer" => payer = Some(parse_address(value)?),
                 "routers" => {
                     for entry in value
                         .split(',')
@@ -126,7 +121,7 @@ impl Params {
                 })?;
             config.fee_calculator = Some(fc);
         }
-        Ok(Params { chain, routers, payer })
+        Ok(Params { chain, routers })
     }
 
     pub fn router(&self, address: &[u8]) -> Option<&RouterConfig> {
@@ -165,21 +160,6 @@ mod tests {
         assert_eq!(p.routers[1].fee_calculator.as_deref(), Some(&[0x33u8; 20][..]));
         assert!(p.router(&[0x22u8; 20]).is_some());
         assert!(p.router(&[0x44u8; 20]).is_none());
-        assert!(p.payer.is_none());
-    }
-
-    #[test]
-    fn parses_the_payer() {
-        let p = Params::parse(
-            "chain=base&routers=0x1111111111111111111111111111111111111111:v3_1\
-             &payer=0x4444444444444444444444444444444444444444",
-        )
-        .unwrap();
-        assert_eq!(p.payer.as_deref(), Some(&[0x44u8; 20][..]));
-        assert!(Params::parse(
-            "chain=base&routers=0x1111111111111111111111111111111111111111:v3_1&payer=0x44"
-        )
-        .is_err());
     }
 
     #[test]

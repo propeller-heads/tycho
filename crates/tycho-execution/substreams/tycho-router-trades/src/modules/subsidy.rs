@@ -1,16 +1,18 @@
-//! What the `SubsidyPayer` did with each signed subsidy: paid it (`SubsidyPaid`), or skipped it
+//! What a `SubsidyPayer` did with each signed subsidy: paid it (`SubsidyPaid`), or skipped it
 //! for a reason it names (`SubsidySkipped`), the swap filling either way.
 //!
-//! Each event is joined to its trade through the call trace: the payer runs inside the router
-//! call that `map_trades` stores, so the nearest enclosing router call with a swap selector is
-//! the trade the subsidy belongs to. A transaction can hold several router calls, probes
-//! included, so the transaction hash alone would not say which.
+//! An event counts only inside a router swap: the payer runs inside the router call that
+//! `map_trades` stores, so the nearest enclosing router call with a swap selector is the trade
+//! the subsidy belongs to. That call is also what keeps a contract emitting the same events
+//! elsewhere out, so no payer address is configured and a new payer needs no change here. A
+//! transaction can hold several router calls, probes included, so the transaction hash alone
+//! would not say which one carried the subsidy.
 use std::collections::HashMap;
 
 use anyhow::Result;
 use substreams::scalar::BigInt;
 use substreams_ethereum::{
-    pb::eth::v2::{Block, Call, Log, TransactionTrace},
+    pb::eth::v2::{Block, Call, Log},
     Event,
 };
 
@@ -19,11 +21,13 @@ use crate::{
     abi::subsidy_payer::events::{SubsidyPaid, SubsidySkipped},
     decode::decode_swap_call,
     params::Params,
-    pb::tycho::router::v1::{SubsidyEvent, SubsidyEvents},
+    pb::tycho::router::v1::{
+        subsidy_event::Outcome, SubsidyEvent, SubsidyEvents, SubsidyPayment, SubsidySkip,
+    },
 };
 
-/// Emits every `SubsidyPaid` and `SubsidySkipped` the configured payer logged in a call the
-/// chain kept. Without a `payer` in the params it emits nothing.
+/// Emits every `SubsidyPaid` and `SubsidySkipped` logged inside a configured router's swap call
+/// the chain kept.
 #[substreams::handlers::map]
 pub fn map_subsidy_events(params: String, block: Block) -> Result<SubsidyEvents> {
     let params = Params::parse(&params)?;
@@ -31,88 +35,73 @@ pub fn map_subsidy_events(params: String, block: Block) -> Result<SubsidyEvents>
 }
 
 /// Whether the log is a `SubsidyPaid` or `SubsidySkipped`, from any emitter. The block index
-/// uses it to keep the blocks `map_subsidy_events` needs; it knows no payer.
+/// uses it to keep the blocks `map_subsidy_events` needs.
 pub(crate) fn is_subsidy_log(log: &Log) -> bool {
     SubsidyPaid::match_log(log) || SubsidySkipped::match_log(log)
 }
 
 /// The subsidy events of one block, read from the calls of successful transactions, and only
-/// from calls whose state the chain kept: a payment in a reverted call moved nothing.
+/// from calls whose state the chain kept: a payment in a reverted call moved nothing. The call
+/// map the trade lookup needs is built only for a transaction that holds such an event.
 fn subsidy_events(params: &Params, block: &Block) -> Vec<SubsidyEvent> {
-    let Some(payer) = params.payer.as_deref() else {
-        return Vec::new();
-    };
     let timestamp = block_timestamp(block);
     let mut events = Vec::new();
     for tx in block.transactions() {
+        let decoded: Vec<(&Call, &Log, Vec<u8>, Outcome)> = tx
+            .calls
+            .iter()
+            .filter(|call| !call.state_reverted)
+            .flat_map(|call| {
+                call.logs
+                    .iter()
+                    .map(move |log| (call, log))
+            })
+            .filter_map(|(call, log)| {
+                decode_event(log).map(|(nonce, outcome)| (call, log, nonce, outcome))
+            })
+            .collect();
+        if decoded.is_empty() {
+            continue;
+        }
         let calls: HashMap<u32, &Call> = tx
             .calls
             .iter()
             .map(|call| (call.index, call))
             .collect();
-        for call in &tx.calls {
-            if call.address != payer || call.state_reverted {
+        for (call, log, nonce, outcome) in decoded {
+            let Some(trade_call_index) = enclosing_trade(params, &calls, call) else {
                 continue;
-            }
-            for log in &call.logs {
-                let Some(decoded) = decode_event(log) else {
-                    continue;
-                };
-                events.push(SubsidyEvent {
-                    chain: params.chain.clone(),
-                    block_number: block.number,
-                    block_timestamp: timestamp,
-                    tx_hash: tx.hash.clone(),
-                    log_index: log.index,
-                    payer: payer.to_vec(),
-                    event: decoded.event.to_string(),
-                    nonce: decoded.nonce,
-                    bound_to: decoded.bound_to,
-                    receiver: decoded.receiver,
-                    token: decoded.token,
-                    amount: decoded.amount,
-                    reason: decoded.reason,
-                    trade_call_index: enclosing_trade(params, &calls, call, tx),
-                });
-            }
+            };
+            events.push(SubsidyEvent {
+                chain: params.chain.clone(),
+                block_number: block.number,
+                block_timestamp: timestamp,
+                tx_hash: tx.hash.clone(),
+                log_index: log.index,
+                payer: call.address.clone(),
+                nonce,
+                trade_call_index,
+                outcome: Some(outcome),
+            });
         }
     }
     events
 }
 
-/// One decoded payer event; the fields of the other kind stay empty.
-struct Decoded {
-    event: &'static str,
-    nonce: Vec<u8>,
-    bound_to: Vec<u8>,
-    receiver: Vec<u8>,
-    token: Vec<u8>,
-    amount: String,
-    reason: String,
-}
-
-fn decode_event(log: &Log) -> Option<Decoded> {
+/// The nonce and outcome of a `SubsidyPaid` or `SubsidySkipped` log; `None` for any other log.
+fn decode_event(log: &Log) -> Option<(Vec<u8>, Outcome)> {
     if let Some(paid) = SubsidyPaid::match_and_decode(log) {
-        return Some(Decoded {
-            event: "paid",
-            nonce: word(&paid.nonce),
+        let payment = SubsidyPayment {
             bound_to: paid.bound_to,
             receiver: paid.to,
             token: paid.token,
             amount: paid.amount.to_string(),
-            reason: String::new(),
-        });
+        };
+        return Some((word(&paid.nonce), Outcome::Paid(payment)));
     }
     let skipped = SubsidySkipped::match_and_decode(log)?;
-    Some(Decoded {
-        event: "skipped",
-        nonce: word(&skipped.nonce),
-        bound_to: Vec::new(),
-        receiver: Vec::new(),
-        token: Vec::new(),
-        amount: String::new(),
-        reason: skip_reason(&skipped.reason),
-    })
+    let skip = SubsidySkip { reason: skip_reason(&skipped.reason) };
+    Some((word(&skipped.nonce), Outcome::Skipped(skip)))
 }
 
 /// A `uint256` as the 32 bytes it was signed as.
@@ -145,18 +134,15 @@ fn skip_reason(reason: &BigInt) -> String {
 /// into a configured router's swap entry point. `None` when none does.
 ///
 /// An executor runs by `delegatecall`, so its frame carries the router's address too; the swap
-/// selector is what tells the trade from it.
-fn enclosing_trade(
-    params: &Params,
-    calls: &HashMap<u32, &Call>,
-    call: &Call,
-    tx: &TransactionTrace,
-) -> Option<u32> {
+/// selector is what tells the trade from it. The walk takes at most one step per call of the
+/// transaction, so a malformed trace cannot loop it.
+fn enclosing_trade(params: &Params, calls: &HashMap<u32, &Call>, call: &Call) -> Option<u32> {
     let mut current = call;
-    let mut hops = 0;
-    while current.parent_index != 0 && hops < tx.calls.len() {
+    for _ in 0..calls.len() {
+        if current.parent_index == 0 {
+            return None;
+        }
         current = calls.get(&current.parent_index)?;
-        hops += 1;
         let Some(router) = params.router(&current.address) else {
             continue;
         };
@@ -169,10 +155,13 @@ fn enclosing_trade(
 
 #[cfg(test)]
 mod tests {
+    use substreams_ethereum::pb::eth::v2::TransactionTrace;
+
     use super::*;
 
     const PAYER: &str = "bfdf58dc941cb83a32afe0fc008288d7ea509e7c";
     const ROUTER: &str = "aba5b53b03eafad1c5fc8bd5fc765fc85bb3de67";
+    const OTHER: &str = "1111111111111111111111111111111111111111";
     // keccak256("SubsidyPaid(uint256,address,address,address,uint256)")
     const PAID: &str = "a3c020fea41365130e645110c836a51e4a3cc693bc032223d7d0a737df76ed8e";
     // keccak256("SubsidySkipped(uint256,uint8)")
@@ -192,9 +181,8 @@ mod tests {
         )
     }
 
-    fn params(payer: bool) -> Params {
-        let payer = if payer { format!("&payer=0x{PAYER}") } else { String::new() };
-        Params::parse(&format!("chain=base&routers=0x{ROUTER}:v3_1{payer}")).unwrap()
+    fn params() -> Params {
+        Params::parse(&format!("chain=base&routers=0x{ROUTER}:v3_1")).unwrap()
     }
 
     fn word_of(hex_tail: &str) -> Vec<u8> {
@@ -242,7 +230,7 @@ mod tests {
     /// (index 3, the router's address again), which calls the payer (index 4).
     fn calls_through_the_router(payer_logs: Vec<Log>) -> Vec<Call> {
         vec![
-            call(1, 0, "1111111111111111111111111111111111111111", "", vec![]),
+            call(1, 0, OTHER, "", vec![]),
             call(2, 1, ROUTER, &single_swap_v3_1(), vec![]),
             call(3, 2, ROUTER, "deadbeef", vec![]),
             call(4, 3, PAYER, "", payer_logs),
@@ -262,98 +250,74 @@ mod tests {
         }
     }
 
+    fn payment(event: &SubsidyEvent) -> &SubsidyPayment {
+        match &event.outcome {
+            Some(Outcome::Paid(payment)) => payment,
+            other => panic!("not a payment: {other:?}"),
+        }
+    }
+
+    fn skip_reason_of(event: &SubsidyEvent) -> &str {
+        match &event.outcome {
+            Some(Outcome::Skipped(skip)) => &skip.reason,
+            other => panic!("not a skip: {other:?}"),
+        }
+    }
+
     #[test]
     fn a_payment_is_decoded_and_joined_to_its_trade() {
-        let events =
-            subsidy_events(&params(true), &block(1, calls_through_the_router(vec![paid_log(29)])));
+        let block = block(1, calls_through_the_router(vec![paid_log(29)]));
+
+        let events = subsidy_events(&params(), &block);
 
         assert_eq!(events.len(), 1);
         let event = &events[0];
-        assert_eq!(event.event, "paid");
+        let paid = payment(event);
         assert_eq!(hex::encode(&event.nonce), NONCE);
-        assert_eq!(hex::encode(&event.bound_to), "b8df65dd1ff912bc3159c3d74ea134cc8da56aa5");
-        assert_eq!(
-            hex::encode(&event.receiver),
-            ROUTER,
-            "the payer pays the router, which pays the user"
-        );
-        assert_eq!(hex::encode(&event.token), USDC);
-        assert_eq!(event.amount, "874");
-        assert_eq!(event.reason, "");
+        assert_eq!(hex::encode(&paid.bound_to), "b8df65dd1ff912bc3159c3d74ea134cc8da56aa5");
+        assert_eq!(hex::encode(&paid.receiver), ROUTER, "paid to the router, which pays the user");
+        assert_eq!(hex::encode(&paid.token), USDC);
+        assert_eq!(paid.amount, "874");
         assert_eq!(event.log_index, 29);
         assert_eq!(event.block_number, 53844164);
-        assert_eq!(hex::encode(&event.payer), PAYER);
-        assert_eq!(event.trade_call_index, Some(2), "the swap call, not the executor's frame");
+        assert_eq!(hex::encode(&event.payer), PAYER, "the emitter");
+        assert_eq!(event.trade_call_index, 2, "the swap call, not the executor's frame");
     }
 
     #[test]
     fn a_skip_carries_its_reason() {
-        let reasons: Vec<(String, String)> = subsidy_events(
-            &params(true),
-            &block(1, calls_through_the_router(vec![skipped_log(7), skipped_log(9)])),
-        )
-        .into_iter()
-        .map(|event| (event.event, event.reason))
-        .collect();
+        let logs = vec![skipped_log(7), skipped_log(9)];
 
-        assert_eq!(
-            reasons,
-            [
-                ("skipped".to_string(), "insufficient_balance".to_string()),
-                ("skipped".to_string(), "9".to_string())
-            ]
-        );
-    }
+        let events = subsidy_events(&params(), &block(1, calls_through_the_router(logs)));
 
-    #[test]
-    fn a_skip_has_no_payment_fields() {
-        let events = subsidy_events(
-            &params(true),
-            &block(1, calls_through_the_router(vec![skipped_log(1)])),
-        );
-
-        assert_eq!(events.len(), 1);
-        assert!(
-            events[0].bound_to.is_empty() &&
-                events[0].token.is_empty() &&
-                events[0].amount.is_empty()
-        );
+        let reasons: Vec<&str> = events
+            .iter()
+            .map(skip_reason_of)
+            .collect();
+        assert_eq!(reasons, ["insufficient_balance", "9"]);
         assert_eq!(hex::encode(&events[0].nonce), NONCE);
     }
 
     #[test]
-    fn a_payer_call_outside_a_router_call_has_no_trade() {
-        let calls = vec![
-            call(1, 0, "1111111111111111111111111111111111111111", "", vec![]),
-            call(2, 1, PAYER, "", vec![paid_log(5)]),
-        ];
+    fn an_event_outside_a_router_swap_is_ignored() {
+        let calls = vec![call(1, 0, OTHER, "", vec![]), call(2, 1, PAYER, "", vec![paid_log(5)])];
 
-        let events = subsidy_events(&params(true), &block(1, calls));
-
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].trade_call_index, None);
+        assert!(subsidy_events(&params(), &block(1, calls)).is_empty());
     }
 
     #[test]
-    fn without_a_payer_nothing_is_emitted() {
-        let block = block(1, calls_through_the_router(vec![paid_log(29)]));
-        assert!(subsidy_events(&params(false), &block).is_empty());
-    }
+    fn an_event_under_a_router_call_that_is_not_a_swap_is_ignored() {
+        let calls =
+            vec![call(1, 0, ROUTER, "deadbeef", vec![]), call(2, 1, PAYER, "", vec![paid_log(5)])];
 
-    #[test]
-    fn another_emitter_is_ignored() {
-        let mut log = paid_log(29);
-        log.address = vec![0x55; 20];
-        let mut calls = calls_through_the_router(vec![]);
-        calls.push(call(5, 2, &"55".repeat(20), "", vec![log]));
-
-        assert!(subsidy_events(&params(true), &block(1, calls)).is_empty());
+        assert!(subsidy_events(&params(), &block(1, calls)).is_empty());
     }
 
     #[test]
     fn a_failed_transaction_paid_nothing() {
         let block = block(2, calls_through_the_router(vec![paid_log(29)]));
-        assert!(subsidy_events(&params(true), &block).is_empty());
+
+        assert!(subsidy_events(&params(), &block).is_empty());
     }
 
     #[test]
@@ -361,13 +325,21 @@ mod tests {
         let mut calls = calls_through_the_router(vec![paid_log(29)]);
         calls[3].state_reverted = true;
 
-        assert!(subsidy_events(&params(true), &block(1, calls)).is_empty());
+        assert!(subsidy_events(&params(), &block(1, calls)).is_empty());
+    }
+
+    #[test]
+    fn a_cyclic_trace_ends_the_walk() {
+        let calls = vec![call(1, 2, OTHER, "", vec![]), call(2, 1, PAYER, "", vec![paid_log(5)])];
+
+        assert!(subsidy_events(&params(), &block(1, calls)).is_empty());
     }
 
     #[test]
     fn the_index_keeps_a_block_with_a_payer_log_from_any_emitter() {
         let mut log = paid_log(0);
         log.address = vec![0x55; 20];
+
         assert!(is_subsidy_log(&log));
         assert!(is_subsidy_log(&skipped_log(1)));
         assert!(!is_subsidy_log(&Log { topics: vec![vec![0xcc; 32]], ..Default::default() }));

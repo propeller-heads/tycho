@@ -195,7 +195,7 @@ CREATE INDEX IF NOT EXISTS vault_transfers_owner_idx
     ON vault_transfers (chain, router, token);
 CREATE INDEX IF NOT EXISTS vault_transfers_block_idx ON vault_transfers (chain, block_number);
 
--- The SubsidyPayer's events: each signed subsidy it paid, or skipped and why.
+-- SubsidyPayer events inside a router swap: each signed subsidy paid, or skipped and why.
 CREATE TABLE IF NOT EXISTS subsidies (
     id           TEXT PRIMARY KEY, -- {chain}:{tx_hash}:{log_index}
     chain        TEXT NOT NULL,
@@ -203,14 +203,15 @@ CREATE TABLE IF NOT EXISTS subsidies (
     block_time   TIMESTAMPTZ NOT NULL,
     tx_hash      TEXT NOT NULL,
     log_index    INTEGER NOT NULL,
+    -- The contract that emitted the event.
     payer        TEXT NOT NULL,
     event        TEXT NOT NULL CHECK (event IN ('paid', 'skipped')),
     -- The nonce of the signed terms, 32 bytes.
     nonce        TEXT NOT NULL,
     -- The trade the payer ran in: the row of the nearest router swap call enclosing the event
     -- in the call trace. A transaction can hold several router calls, probes included, so the
-    -- hash alone would not say which. NULL when no decoded router call encloses the event.
-    trade_id     TEXT,
+    -- hash alone would not say which.
+    trade_id     TEXT NOT NULL,
     -- Paid only. The payment goes to the router (`receiver`), which pays the user with the
     -- swap's output; `bound_to` is the address the terms were signed for.
     bound_to     TEXT,

@@ -425,7 +425,7 @@ Six places, and the deployment fails quietly if any of the last three is missed.
 
    Put the same routers in the `blockFilter` of `map_trades`, `fee_cfg` in the one of
    `map_fee_config_events`, and `subsidy` in the one of `map_subsidy_events`. Give every
-   module the same params; add `&payer=<address>` when the chain has a SubsidyPayer. Run
+   module the same params. Run
    `make check-manifests` to confirm.
 
 4. **Pin the pricing tokens** in `pricing/preferred_tokens.sql`: the native sentinel row for the
@@ -480,9 +480,8 @@ emitter, and a list of addresses would not hold: nearly half of the fee-config e
 far come from an emitter no manifest configures. The index sets the key with the same two
 decoders the module uses, so the two cannot drift.
 
-`map_subsidy_events` filters on `subsidy` for the same reason in reverse: it reads one payer,
-but a chain without one would have no address to filter on, and a key its own decoders set
-costs that chain nothing. The params then keep an unconfigured emitter out.
+`map_subsidy_events` filters on `subsidy` too, set by its own decoders. It configures no payer:
+an event counts only inside a router swap call, which keeps other emitters out.
 
 The index takes no params and knows no router, so a new router changes the filter of the
 consumer and leaves the index alone. An index that is already built stays valid.
