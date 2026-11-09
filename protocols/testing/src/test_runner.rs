@@ -46,7 +46,7 @@ use tycho_test::{
     execution::{
         encoding::{encode_swap, EXECUTOR_ADDRESS},
         models::{TychoExecutionInput, TychoExecutionResult},
-        simulate_swap_transaction, TRANSPORT_ERROR_PREFIX,
+        simulate_swap_transaction,
     },
     RPCTools,
 };
@@ -349,15 +349,6 @@ fn missing_revert(
     let component = &input.component_id;
     let amount_in = input.solution.amount_in();
     let failure = match results.get(simulation_id) {
-        // A node error on the call is reported as a revert, but proves nothing about the venue.
-        Some(TychoExecutionResult::Revert { reason, .. })
-            if reason.starts_with(TRANSPORT_ERROR_PREFIX) =>
-        {
-            Some(format!(
-                "[{component}] {simulation_id} could not be traced, so the revert past the limit \
-                 is unproven: {reason}"
-            ))
-        }
         Some(TychoExecutionResult::Revert { reason, .. }) => {
             info!(
                 "[{component}] {amount_in} {}, one unit past the hard limit, reverts: {reason}",
@@ -789,12 +780,7 @@ impl TestRunner {
 
                     // Step 3: Execute the batch against the real block
                     match self
-                        .run_execution(
-                            execution_data,
-                            &block,
-                            &config.protocol_system,
-                            &[], // No skip filters for live testing
-                        )
+                        .run_execution(execution_data, &block, &config.protocol_system)
                         .await
                     {
                         Ok(_) => {
@@ -1148,12 +1134,7 @@ impl TestRunner {
 
         let executed = self
             .runtime
-            .block_on(self.execute_unskipped(
-                output.executions,
-                &header,
-                &config.protocol_system,
-                &test.expected_components,
-            ));
+            .block_on(self.execute_inputs(output.executions, &header, &config.protocol_system));
         // Noted before the check, so a failing run still reports how far off it was.
         if let Ok((inputs, results)) = &executed {
             observe_executions(checks, inputs, results);
@@ -1625,7 +1606,6 @@ impl TestRunner {
     /// # Arguments
     /// * `update` - The decoded protocol state containing all component data
     /// * `protocol_components` - Mapping of component IDs to their ProtocolComponent models
-    /// * `expected_components` - Test configuration to determine which components to skip
     /// * `protocol_system` - The protocol system identifier
     /// * `declared_limits` - Strict mode: the limit each direction of each component declares,
     ///   keyed by `(lowercase component id, direction)`
@@ -1981,7 +1961,6 @@ impl TestRunner {
     /// * `execution_data` - HashMap of simulation IDs to TychoExecutionInput data
     /// * `block` - The historical block to use for execution testing
     /// * `protocol_system` - The protocol system identifier
-    /// * `expected_components` - Test configuration to determine which components to skip
     ///
     /// # Errors
     /// Returns an error if an execution cannot be simulated, reverts, or differs from its
@@ -1992,22 +1971,19 @@ impl TestRunner {
         execution_data: HashMap<String, TychoExecutionInput>,
         block: &Block,
         protocol_system: &str,
-        expected_components: &[ProtocolComponentWithTestConfig],
     ) -> miette::Result<()> {
         let (inputs, results) = self
-            .execute_unskipped(execution_data, block, protocol_system, expected_components)
+            .execute_inputs(execution_data, block, protocol_system)
             .await?;
         check_executions_match(&inputs, &results, Tolerance::LEGACY)
     }
 
-    /// Simulates executing every input whose component does not skip execution, returning the
-    /// inputs executed and their results.
-    async fn execute_unskipped(
+    /// Simulates executing every input, returning the inputs and their results.
+    async fn execute_inputs(
         &self,
         execution_data: HashMap<String, TychoExecutionInput>,
         block: &Block,
         protocol_system: &str,
-        expected_components: &[ProtocolComponentWithTestConfig],
     ) -> miette::Result<(HashMap<String, TychoExecutionInput>, HashMap<String, TychoExecutionResult>)>
     {
         if execution_data.is_empty() {
@@ -2015,23 +1991,10 @@ impl TestRunner {
             return Ok((HashMap::new(), HashMap::new()));
         }
 
-        let skip_execution = skip_reasons(expected_components, |c| &c.skip_execution);
-
-        // Filter out skipped components
-        let filtered_execution_data: HashMap<_, _> = execution_data
-            .into_iter()
-            .filter(|(_, input)| !skip_execution.contains_key(&input.component_id.to_lowercase()))
-            .collect();
-
-        if filtered_execution_data.is_empty() {
-            info!("All components skipped execution");
-            return Ok((HashMap::new(), HashMap::new()));
-        }
-
         let results = self
-            .simulate_executions(&filtered_execution_data, block, protocol_system)
+            .simulate_executions(&execution_data, block, protocol_system)
             .await?;
-        Ok((filtered_execution_data, results))
+        Ok((execution_data, results))
     }
 
     /// Simulates executing every input at `block` in one batch, keyed like the inputs.
@@ -2780,9 +2743,6 @@ mod tests {
         }))
         .unwrap();
         assert!(settled.contains("executes and pays 50 B"), "{settled}");
-        let untraced =
-            judge(Some(revert(&format!("{TRANSPORT_ERROR_PREFIX} request timed out")))).unwrap();
-        assert!(untraced.contains("could not be traced"), "{untraced}");
         let failed =
             judge(Some(TychoExecutionResult::Failed { error_msg: "decode".to_string() })).unwrap();
         assert!(failed.contains("could not be simulated"), "{failed}");
