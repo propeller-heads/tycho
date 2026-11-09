@@ -422,8 +422,6 @@ where
             .collect()
     }
 
-    /// Given BlockAggregatedChanges, filter out components that are no longer relevant and return
-    /// the components that need to be added or removed.
     /// The components `deltas` creates that an `Ids` filter lists and that are not tracked yet.
     /// Empty for any other filter.
     pub fn created_listed_components(&self, deltas: &BlockAggregatedChanges) -> Vec<ComponentId> {
@@ -441,6 +439,8 @@ where
             .collect()
     }
 
+    /// Given BlockAggregatedChanges, filter out components that are no longer relevant and return
+    /// the components that need to be added or removed.
     pub fn filter_updated_components(
         &self,
         deltas: &BlockAggregatedChanges,
