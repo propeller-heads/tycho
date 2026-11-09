@@ -745,12 +745,7 @@ impl TestRunner {
 
                     // Step 3: Execute the batch against the real block
                     match self
-                        .run_execution(
-                            execution_data,
-                            &block,
-                            &config.protocol_system,
-                            &[], // No skip filters for live testing
-                        )
+                        .run_execution(execution_data, &block, &config.protocol_system)
                         .await
                     {
                         Ok(_) => {
@@ -1101,12 +1096,7 @@ impl TestRunner {
 
         checks.run(CheckId::ExecLadder, || {
             self.runtime
-                .block_on(self.run_execution(
-                    output.executions,
-                    &header,
-                    &config.protocol_system,
-                    &test.expected_components,
-                ))
+                .block_on(self.run_execution(output.executions, &header, &config.protocol_system))
         })?;
 
         Ok(())
@@ -1571,7 +1561,6 @@ impl TestRunner {
     /// # Arguments
     /// * `update` - The decoded protocol state containing all component data
     /// * `protocol_components` - Mapping of component IDs to their ProtocolComponent models
-    /// * `expected_components` - Test configuration to determine which components to skip
     /// * `protocol_system` - The protocol system identifier
     /// * `declared_limits` - Strict mode: the limit each direction of each component declares,
     ///   keyed by `(lowercase component id, direction)`
@@ -1927,7 +1916,6 @@ impl TestRunner {
     /// * `execution_data` - HashMap of simulation IDs to TychoExecutionInput data
     /// * `block` - The historical block to use for execution testing
     /// * `protocol_system` - The protocol system identifier
-    /// * `expected_components` - Test configuration to determine which components to skip
     ///
     /// # Returns
     /// Returns `Ok(())` if all executions complete successfully within tolerance.
@@ -1937,37 +1925,21 @@ impl TestRunner {
     /// - Execution simulation fails or reverts
     /// - Difference between simulation and execution exceeds 0.5% tolerance
     /// - Any critical execution failures occur
-    ///
-    /// Components can be skipped using `skip_execution` flag in the test configuration.
     async fn run_execution(
         &self,
         execution_data: HashMap<String, TychoExecutionInput>,
         block: &Block,
         protocol_system: &str,
-        expected_components: &[ProtocolComponentWithTestConfig],
     ) -> miette::Result<()> {
         if execution_data.is_empty() {
             info!("No execution data to process");
             return Ok(());
         }
 
-        let skip_execution = skip_reasons(expected_components, |c| &c.skip_execution);
-
-        // Filter out skipped components
-        let filtered_execution_data: HashMap<_, _> = execution_data
-            .into_iter()
-            .filter(|(_, input)| !skip_execution.contains_key(&input.component_id.to_lowercase()))
-            .collect();
-
-        if filtered_execution_data.is_empty() {
-            info!("All components skipped execution");
-            return Ok(());
-        }
-
         let results = self
-            .simulate_executions(&filtered_execution_data, block, protocol_system)
+            .simulate_executions(&execution_data, block, protocol_system)
             .await?;
-        check_executions_match(&filtered_execution_data, &results)
+        check_executions_match(&execution_data, &results)
     }
 
     /// Simulates executing every input at `block` in one batch, keyed like the inputs.
