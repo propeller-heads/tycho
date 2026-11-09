@@ -1,0 +1,31 @@
+substreams_yaml_path: ./robinhood-topaz-cl.yaml
+protocol_system: "topaz_cl"
+protocol_type_names:
+  - "topaz_cl_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # WETH / USDG on tick spacing 50. The range starts at the factory's deployment block because a
+  # pool is only emitted once its tick spacing has a stored fee, and the factory enables its tick
+  # spacings in its constructor.
+  - name: weth_usdg_dynamic_fee
+    start_block: 60744015
+    # Stop at the first swap after the pool got its dynamic fee config:
+    #   PoolCreated + Initialize + Mint:   block 60,814,279
+    #   fee module switched to 0x0Dca…:    block 60,854,672
+    #   FeeCapSet 500 + ScalingFactorSet:  block 61,009,994
+    #   SetCustomFee 50:                   block 61,010,039
+    #   Swap:                              block 61,011,933
+    stop_block: 61011933
+    expected_components:
+      - id: "0x8132252bd65e7c03f7b57739e1db1c58d6ee792f"
+        tokens:
+          - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" # WETH
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+        static_attributes:
+          default_fee: "0x01f4"
+          tick_spacing: "0x32"
+        creation_tx: "0x43d35f373bc3c44aa360513bd0eca938770485983471fe0b7583d478a73fce54"
+        skip_simulation: false
+        skip_execution: false

@@ -12,35 +12,55 @@ pub const ZERO_FEE_INDICATOR: u32 = 420;
 pub const DEFAULT_SECONDS_AGO: u32 = 600;
 pub const MIN_SECONDS_AGO: u32 = 2;
 pub const DEFAULT_SCALING_FACTOR: u64 = 0;
-// The upgraded DynamicSwapFeeModule deployments use 30_000 as their default fee cap.
+// The default fee cap of the Aerodrome DynamicSwapFeeModule deployments and UP, and of a config
+// serialized before the cap became per module. Other modules carry their own in
+// `SUPPORTED_DYNAMIC_FEE_MODULES`.
 pub const DEFAULT_FEE_CAP: u32 = 30_000;
 const SCALING_PRECISION: u128 = 1_000_000;
 const DYNAMIC_FEE_MODULE_ATTRIBUTE: &str = "dynamic_fee_module";
 
 /// A deployed fee module whose `getFee` `get_dynamic_fee` reproduces.
+///
+/// `default_fee_cap` is a snapshot of owner-settable module state: the swap fee manager can
+/// change it with `setDefaultFeeCap` (emitting `DefaultFeeCapSet`), and the factory can switch
+/// to another module with `setSwapFeeModule`. Nothing indexes those events, so a change needs a
+/// code change here. The same holds for `defaultScalingFactor`, which every supported module has
+/// at `DEFAULT_SCALING_FACTOR` today.
 struct SupportedModule {
     address: Address,
     /// The module's `secondsAgo`: the TWAP window, which also sets the minimum observation
-    /// cardinality (`secondsAgo / MIN_SECONDS_AGO`) below which the module adds no dynamic fee.
+    /// cardinality (`secondsAgo / MIN_SECONDS_AGO`) below which a module with
+    /// `min_cardinality_guard` adds no dynamic fee.
     /// A snapshot of state the swap fee manager can change with `setSecondsAgo`, which emits
     /// `SecondsAgoSet`; nothing indexes it, so a change needs a code change here.
     seconds_ago: u32,
+    /// The module's `defaultFeeCap`: the cap on a pool that has no scaling factor of its own.
+    default_fee_cap: u32,
+    /// Whether the module's `_getDynamicFee` returns no dynamic component while the pool's
+    /// observation cardinality is below `secondsAgo / MIN_SECONDS_AGO`.
+    min_cardinality_guard: bool,
 }
 
-const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 4] = [
+const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 6] = [
     // The three Base modules moved from 600 to 480 in tx 0x42122c80…7550 (block 52,307,488), and
     // 0x87D8 again to 30 in tx 0x1aeb7f17…2ae4 (block 53,228,614).
     SupportedModule {
         address: address!("090b2A6bb475c00e2256e2095A60887cD710803b"),
         seconds_ago: 480,
+        default_fee_cap: DEFAULT_FEE_CAP,
+        min_cardinality_guard: true,
     },
     SupportedModule {
         address: address!("F4Ecd78EBEB6d36CF7f80B5B6B41453515fe2785"),
         seconds_ago: 480,
+        default_fee_cap: DEFAULT_FEE_CAP,
+        min_cardinality_guard: true,
     },
     SupportedModule {
         address: address!("87D8f999BBa9343E8099552426775B51C338E8CB"),
         seconds_ago: 30,
+        default_fee_cap: DEFAULT_FEE_CAP,
+        min_cardinality_guard: true,
     },
     // UP on Robinhood Chain. Same module code as the Base deployments above, so the fee resolution
     // below applies unchanged; only its `factory` immutable and the name of its base-fee event
@@ -48,6 +68,27 @@ const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 4] = [
     SupportedModule {
         address: address!("a8Bdc945bE050E451C97f935d7c0D6B0087cF94c"),
         seconds_ago: DEFAULT_SECONDS_AGO,
+        default_fee_cap: DEFAULT_FEE_CAP,
+        min_cardinality_guard: true,
+    },
+    // Topaz CL on Robinhood Chain. Its `getFee` has no initial-fee branch, which the default
+    // `initial_fee_enabled == false` already skips, and it raises `MAX_BASE_FEE` and
+    // `defaultFeeCap` to 50_000. Its `_getDynamicFee` has no minimum-cardinality guard: it calls
+    // `observe` at any cardinality and adds the TWAP component whenever that succeeds, and pools
+    // below 300 exist (cardinality is raised permissionlessly, to any value).
+    SupportedModule {
+        address: address!("0Dca13b1039277d82B27ADd86d06195B8E9BBfDb"),
+        seconds_ago: DEFAULT_SECONDS_AGO,
+        default_fee_cap: 50_000,
+        min_cardinality_guard: false,
+    },
+    // Topaz CL on BSC. The Robinhood module's code with `MAX_BASE_FEE` 30_000 and `MAX_FEE_CAP`
+    // 50_000; its `defaultFeeCap` has been 10_000 since deployment.
+    SupportedModule {
+        address: address!("656cf5d2f1A70177E011e2c27DeafBeE4C7B0541"),
+        seconds_ago: DEFAULT_SECONDS_AGO,
+        default_fee_cap: 10_000,
+        min_cardinality_guard: false,
     },
 ];
 
@@ -67,10 +108,25 @@ pub struct DynamicFeeConfig {
     /// The pool's fee module's `secondsAgo`.
     #[serde(default = "default_seconds_ago")]
     seconds_ago: u32,
+    /// The cap applied while `scaling_factor == 0`, taken from the pool's fee module.
+    #[serde(default = "default_fee_cap")]
+    default_fee_cap: u32,
+    /// Whether the pool's fee module skips the TWAP below the minimum cardinality. A config
+    /// serialized before this was per module came from a module that does.
+    #[serde(default = "default_min_cardinality_guard")]
+    min_cardinality_guard: bool,
 }
 
 fn default_seconds_ago() -> u32 {
     DEFAULT_SECONDS_AGO
+}
+
+fn default_fee_cap() -> u32 {
+    DEFAULT_FEE_CAP
+}
+
+fn default_min_cardinality_guard() -> bool {
+    true
 }
 
 impl Default for DynamicFeeConfig {
@@ -94,6 +150,8 @@ impl DynamicFeeConfig {
             initial_fee_enabled,
             initial_fee,
             seconds_ago: DEFAULT_SECONDS_AGO,
+            default_fee_cap: DEFAULT_FEE_CAP,
+            min_cardinality_guard: true,
         }
     }
 
@@ -149,6 +207,8 @@ impl DynamicFeeConfig {
                 .map_err(|err| err.to_string())?
                 .unwrap_or_default(),
             seconds_ago: module.seconds_ago,
+            default_fee_cap: module.default_fee_cap,
+            min_cardinality_guard: module.min_cardinality_guard,
         })
     }
 
@@ -295,11 +355,11 @@ fn resolve_dynamic_fee(
     let (scaling_factor, fee_cap) = if dfc.scaling_factor != 0 {
         (dfc.scaling_factor, dfc.fee_cap)
     } else {
-        (DEFAULT_SCALING_FACTOR, DEFAULT_FEE_CAP)
+        (DEFAULT_SCALING_FACTOR, dfc.default_fee_cap)
     };
     // The module runs the TWAP computation for any scaling factor — a zero factor just
-    // multiplies the deviation away — so the observe gas is paid whenever the cardinality guard
-    // passes. Verified with debug_traceCall of fee() on a zero-scaling pool: the observe subcall
+    // multiplies the deviation away — so the observe gas is paid whenever the module reaches the
+    // oracle. Verified with debug_traceCall of fee() on a zero-scaling pool: the observe subcall
     // burns ~50k gas.
     let (dynamic_component, observed_twap) = calculate_dynamic_fee(
         current_tick,
@@ -309,6 +369,7 @@ fn resolve_dynamic_fee(
         observations,
         execution_timestamp,
         scaling_factor,
+        dfc.min_cardinality_guard,
         dfc.seconds_ago,
     )?;
     Ok(ResolvedFee { fee: (base_fee + dynamic_component).min(fee_cap), observed_twap })
@@ -326,9 +387,10 @@ fn calculate_dynamic_fee(
     observations: &Observations,
     blocktime: u32,
     scaling_factor: u64,
+    min_cardinality_guard: bool,
     seconds_ago: u32,
 ) -> Result<(u32, bool), SimulationError> {
-    if u32::from(observation_cardinality) < seconds_ago / MIN_SECONDS_AGO {
+    if min_cardinality_guard && u32::from(observation_cardinality) < seconds_ago / MIN_SECONDS_AGO {
         // The module returns before reaching the oracle: no observe gas.
         return Ok((0, false));
     }
@@ -501,6 +563,140 @@ mod tests {
         }
 
         assert_eq!(DynamicFeeConfig::from_attributes(&attributes), Ok(DynamicFeeConfig::default()));
+    }
+
+    #[rstest]
+    #[case::up(hex!("a8Bdc945bE050E451C97f935d7c0D6B0087cF94c"), 30_000)]
+    #[case::topaz_cl(hex!("0Dca13b1039277d82B27ADd86d06195B8E9BBfDb"), 40_000)]
+    #[case::topaz_cl_bsc(hex!("656cf5d2f1A70177E011e2c27DeafBeE4C7B0541"), 10_000)]
+    fn base_fee_without_scaling_factor_is_capped_by_the_module_default(
+        #[case] module: [u8; 20],
+        #[case] expected_fee: u32,
+    ) {
+        // A custom base fee with no scaling factor of its own: the module caps it at its
+        // `defaultFeeCap`, 30_000 for UP, 50_000 for Topaz on Robinhood and 10_000 on BSC.
+        let attributes = HashMap::from([
+            (DYNAMIC_FEE_MODULE_ATTRIBUTE.to_string(), Bytes::from(module)),
+            ("dfc_baseFee".to_string(), Bytes::from(40_000_u32.to_be_bytes())),
+            ("dfc_feeCap".to_string(), Bytes::from(0_u32.to_be_bytes())),
+            ("dfc_scalingFactor".to_string(), Bytes::from(0_u64.to_be_bytes())),
+        ]);
+        let dfc = DynamicFeeConfig::from_attributes(&attributes)
+            .expect("supported module with complete attributes");
+        let observations = Observations::new(vec![Observation {
+            block_timestamp: 100,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        }]);
+
+        let fee = get_dynamic_fee(&dfc, 3000, 0, 1, 0, 1, &observations, 100, true)
+            .expect("Failed to calculate dynamic fee");
+
+        assert_eq!(fee.fee, expected_fee);
+    }
+
+    #[rstest]
+    #[case::up_skips_the_twap(hex!("a8Bdc945bE050E451C97f935d7c0D6B0087cF94c"), 500, false)]
+    #[case::topaz_cl_adds_it(hex!("0Dca13b1039277d82B27ADd86d06195B8E9BBfDb"), 600, true)]
+    #[case::topaz_cl_bsc_adds_it(hex!("656cf5d2f1A70177E011e2c27DeafBeE4C7B0541"), 600, true)]
+    fn twap_component_below_the_minimum_cardinality_follows_the_module(
+        #[case] module: [u8; 20],
+        #[case] expected_fee: u32,
+        #[case] expected_observed_twap: bool,
+    ) {
+        // Cardinality 2, far below 300, with two observations 1000s apart that cover the 600s
+        // window: the TWAP tick is 100 and the current tick 200, so a scaling factor of 1e6 adds
+        // 100 to the 500 base fee. UP's module returns before observing; Topaz's adds it.
+        let attributes = HashMap::from([
+            (DYNAMIC_FEE_MODULE_ATTRIBUTE.to_string(), Bytes::from(module)),
+            ("dfc_baseFee".to_string(), Bytes::from(500_u32.to_be_bytes())),
+            ("dfc_feeCap".to_string(), Bytes::from(10_000_u32.to_be_bytes())),
+            ("dfc_scalingFactor".to_string(), Bytes::from(1_000_000_u64.to_be_bytes())),
+        ]);
+        let dfc = DynamicFeeConfig::from_attributes(&attributes)
+            .expect("supported module with complete attributes");
+        let observations = Observations::new(vec![
+            Observation {
+                block_timestamp: 1_000,
+                tick_cumulative: 0,
+                initialized: true,
+                index: 0,
+                ..Default::default()
+            },
+            Observation {
+                block_timestamp: 2_000,
+                tick_cumulative: 100_000,
+                initialized: true,
+                index: 1,
+                ..Default::default()
+            },
+        ]);
+
+        let fee = get_dynamic_fee(&dfc, 3000, 200, 1, 1, 2, &observations, 2_000, true)
+            .expect("Failed to calculate dynamic fee");
+
+        assert_eq!(fee, ResolvedFee { fee: expected_fee, observed_twap: expected_observed_twap });
+    }
+
+    #[test]
+    fn config_serialized_before_per_module_defaults_takes_the_shared_ones() {
+        let serialized = r#"{"base_fee":500,"fee_cap":700,"scaling_factor":6000000,"initial_fee_enabled":false,"initial_fee":0}"#;
+
+        let dfc: DynamicFeeConfig =
+            serde_json::from_str(serialized).expect("pre-existing serialized config");
+
+        assert_eq!(
+            dfc,
+            DynamicFeeConfig {
+                base_fee: 500,
+                fee_cap: 700,
+                scaling_factor: 6_000_000,
+                initial_fee_enabled: false,
+                initial_fee: 0,
+                seconds_ago: 600,
+                default_fee_cap: 30_000,
+                min_cardinality_guard: true,
+            }
+        );
+    }
+
+    #[test]
+    fn every_fee_module_a_slipstreams_manifest_indexes_is_supported() {
+        // A pool whose module is missing from the table silently prices at its static fee, so
+        // every module a manifest emits a `dynamic_fee_module` marker for must be listed here.
+        let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../protocols/substreams/base-aerodrome-slipstreams");
+        let entries = std::fs::read_dir(&package)
+            .unwrap_or_else(|err| panic!("reading manifests in {}: {err}", package.display()));
+        let mut checked = 0;
+        for entry in entries {
+            let path = entry
+                .expect("manifest directory entry")
+                .path();
+            if path
+                .extension()
+                .is_none_or(|extension| extension != "yaml")
+            {
+                continue;
+            }
+            let manifest = std::fs::read_to_string(&path).expect("readable manifest");
+            const KEY: &str = "dynamic_fee_modules[]=";
+            for (start, _) in manifest.match_indices(KEY) {
+                let module: String = manifest[start + KEY.len()..]
+                    .chars()
+                    .take_while(char::is_ascii_hexdigit)
+                    .collect();
+                let address = hex::decode(&module).expect("hex module address");
+                assert!(
+                    supported_dynamic_fee_module(&address).is_some(),
+                    "{} indexes fee module 0x{module}, which SUPPORTED_DYNAMIC_FEE_MODULES lacks",
+                    path.display()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no dynamic_fee_modules[] found under {}", package.display());
     }
 
     #[test]

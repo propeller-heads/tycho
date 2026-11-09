@@ -318,6 +318,7 @@ impl ProtocolStreamProcessor {
                 "pancakeswap_infinity_cl".to_string(),
                 "pancakeswap_infinity_cl_hooks".to_string(),
                 "lunarbase".to_string(),
+                "topaz_cl".to_string(),
             ],
             Chain::Unichain => {
                 vec![
@@ -353,6 +354,7 @@ impl ProtocolStreamProcessor {
                     "pancakeswap_infinity_cl".to_string(),
                     "aero_cl".to_string(),
                     "aero_basic".to_string(),
+                    "topaz_cl".to_string(),
                 ]
             }
             Chain::Arbitrum => {
@@ -458,9 +460,11 @@ impl ProtocolStreamProcessor {
                     Some(fluid_v1_paused_pools_filter),
                 );
             }
-            "aerodrome_slipstreams" => {
+            // UP and Topaz CL deploy the Aerodrome Slipstream contracts, so they decode with the
+            // same state.
+            "aerodrome_slipstreams" | "up_v3" | "topaz_cl" => {
                 stream = stream.exchange::<AerodromeSlipstreamsState>(
-                    "aerodrome_slipstreams",
+                    protocol,
                     tvl_filter.clone(),
                     None,
                 );
@@ -478,12 +482,6 @@ impl ProtocolStreamProcessor {
                     tvl_filter.clone(),
                     None,
                 );
-            }
-            // UP on Robinhood Chain deploys the Slipstream contracts verbatim, so it decodes
-            // with the same state as Aerodrome.
-            "up_v3" => {
-                stream =
-                    stream.exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None);
             }
             "ramses_v3" => {
                 stream = stream.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None);

@@ -36,6 +36,7 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "velodrome_slipstreams",
     "up_v3",
     "aero_cl",
+    "topaz_cl",
     "vm:balancer_v3",
 ];
 
