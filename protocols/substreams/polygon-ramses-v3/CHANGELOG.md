@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.1.2
+
+- Add Arbitrum support via a third manifest, `arbitrum-ramses-v3.yaml`. The wasm is
+  reused unchanged: the Arbitrum deployment (factory
+  `0xd0019e86edB35E1fedaaB03aED5c3c60f115d28b`, first pool at block `421077300`) emits
+  events byte-identical to the Polygon deployment this package was built for, including
+  the Ramses-specific `Mint` with its extra `uint256 index` parameter.
+
+  The version bump is required to release the manifest at all: `polygon-ramses-v3-0.1.1`
+  already exists, pointing at a commit that predates this manifest.
+- Set `package.version` to `v0.1.2` in all three manifests, so each spkg carries the version
+  it is released under.
+
 ## v0.1.1
 
 - Add Robinhood Chain support via a second manifest, `robinhood-ramses-v3.yaml` (factory

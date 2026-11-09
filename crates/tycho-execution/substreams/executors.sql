@@ -33,7 +33,7 @@ INSERT INTO executors (chain, address, protocol_systems) VALUES
     ('arbitrum', '0x73ab9f8741a4ef6cb44fc095bfc767b5e458e125', ARRAY['rfq:native']),
     ('arbitrum', '0x918335af35dddfad0c6e0d3bef95a6f9a0f02c3c', ARRAY['rfq:metric']),
     ('arbitrum', '0x9bac15444f4ec473f045d47c03701469b59d7f9e', ARRAY['rfq:native']),
-    ('arbitrum', '0xcaaac0c6193e3e2e3e8e94baf6367f75bae591c9', ARRAY['pancakeswap_v3', 'uniswap_v3']),
+    ('arbitrum', '0xcaaac0c6193e3e2e3e8e94baf6367f75bae591c9', ARRAY['pancakeswap_v3', 'ramses_v3', 'uniswap_v3']),
     ('arbitrum', '0xce5af637bffe0c34a37f34471ab6a3e90adf8ffb', ARRAY['rfq:metric']),
     ('arbitrum', '0xd0a1f74d4d77834feca0efa01ca6e0161dbf1f57', ARRAY['uniswap_v2']),
     ('arbitrum', '0xdb696336f7a5f9048252664a3475c194dae0e62f', ARRAY['uniswap_v4']),
