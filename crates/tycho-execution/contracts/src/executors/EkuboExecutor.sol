@@ -13,6 +13,7 @@ import {ILocker, IPayer} from "@ekubo/interfaces/IFlashAccountant.sol";
 import {NATIVE_TOKEN_ADDRESS} from "@ekubo/math/constants.sol";
 import {SafeTransferLib} from "@solady/utils/SafeTransferLib.sol";
 import {LibBytes} from "@solady/utils/LibBytes.sol";
+import {SafeCastLib} from "@solady/utils/SafeCastLib.sol";
 import {Config, PoolKey} from "@ekubo/types/poolKey.sol";
 import {
     MAX_SQRT_RATIO,
@@ -69,10 +70,10 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
             revert EkuboExecutor__InvalidDataLength();
         }
 
-        // amountIn must be at most type(int128).MAX
+        // amountIn must be at most type(int128).max
         _lock(
             abi.encodePacked(
-                bytes16(uint128(amountIn)), bytes20(receiver), data
+                SafeCastLib.toInt128(amountIn), bytes20(receiver), data
             )
         );
     }
