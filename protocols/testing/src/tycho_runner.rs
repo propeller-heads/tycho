@@ -347,12 +347,8 @@ pub fn get_default_endpoint(chain: &Chain) -> Option<String> {
         Chain::Robinhood => Some("https://mainnet.robinhood.streamingfast.io:443".to_string()),
         Chain::Arc => Some("https://arc.substreams.pinax.network:443".to_string()),
         Chain::Bsc => Some("https://bnb.streamingfast.io:443".to_string()),
-        Chain::Starknet |
-        Chain::ZkSync |
-        Chain::Arbitrum |
-        Chain::Plasma |
-        Chain::Custom(_) |
-        _ => None,
+        Chain::Arbitrum => Some("https://arb-one.streamingfast.io:443".to_string()),
+        Chain::Starknet | Chain::ZkSync | Chain::Plasma | Chain::Custom(_) | _ => None,
     }
 }
 
@@ -373,6 +369,14 @@ mod tests {
         assert_eq!(
             get_default_endpoint(&Chain::Bsc).as_deref(),
             Some("https://bnb.streamingfast.io:443")
+        );
+    }
+
+    #[test]
+    fn arbitrum_uses_streamingfast_substreams_endpoint() {
+        assert_eq!(
+            get_default_endpoint(&Chain::Arbitrum).as_deref(),
+            Some("https://arb-one.streamingfast.io:443")
         );
     }
 }

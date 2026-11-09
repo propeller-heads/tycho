@@ -30,14 +30,14 @@ contract PropAMMExecutor is IExecutor {
     // the output via balance diff, so the protocol-level minAmountOut is 0.
     // The deadline check is the router's responsibility too; block.timestamp
     // is always within any still-valid deadline.
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
     {
         (address pamm, address tokenIn, address tokenOut) = _decodeData(data);
 
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         IPropAMM(pamm)
             .swap(tokenIn, tokenOut, amountIn, 0, receiver, block.timestamp);
     }

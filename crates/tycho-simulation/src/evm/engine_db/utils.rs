@@ -1,7 +1,7 @@
 use std::{env, sync::Arc};
 
 use alloy::providers::ProviderBuilder;
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use tokio::runtime::Runtime;
 use tycho_common::simulation::errors::SimulationError;
 

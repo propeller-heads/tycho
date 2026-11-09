@@ -1,3 +1,49 @@
+## [0.504.2](https://github.com/propeller-heads/tycho/compare/0.504.1...0.504.2) (2026-11-09)
+
+
+### Bug Fixes
+
+* unblock Fluid pools that have swaps unpaused again ([0b69dbd](https://github.com/propeller-heads/tycho/commit/0b69dbd3a7449b2db3720dda2030ad618383046d)), closes [#1709](https://github.com/propeller-heads/tycho/issues/1709) [#1709](https://github.com/propeller-heads/tycho/issues/1709)
+* unblock Fluid pools that have swaps unpaused again ([#1757](https://github.com/propeller-heads/tycho/issues/1757)) ([53cb909](https://github.com/propeller-heads/tycho/commit/53cb909f1c04f3cd31d2258c413c20dde0459462))
+
+## [0.504.1](https://github.com/propeller-heads/tycho/compare/0.504.0...0.504.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **deps:** enable the actix-web ws feature for tycho-indexer ([9571532](https://github.com/propeller-heads/tycho/commit/9571532b65a372a9c87f78f7ccb5303b3f2de87e))
+* **deps:** enable the actix-web ws feature for tycho-indexer ([#1758](https://github.com/propeller-heads/tycho/issues/1758)) ([337e112](https://github.com/propeller-heads/tycho/commit/337e112a78aa7d26965ff52627db1d8d0d940b3c))
+
+## [0.504.0](https://github.com/propeller-heads/tycho/compare/0.503.0...0.504.0) (2026-11-09)
+
+
+### Features
+
+* add Ramses V3 Arbitrum support ([ebfb793](https://github.com/propeller-heads/tycho/commit/ebfb79375f09afd36d33759a0dfb9b6ff36265ca))
+* add Ramses V3 Arbitrum support ([#1235](https://github.com/propeller-heads/tycho/issues/1235)) ([38b87de](https://github.com/propeller-heads/tycho/commit/38b87de63a8b8e700891d079d14c471b260224a5))
+
+
+### Bug Fixes
+
+* address review findings on the Ramses V3 Arbitrum integration ([c947ea4](https://github.com/propeller-heads/tycho/commit/c947ea415afb456355fc83b2f6b99b108db75a43))
+* keep ramses_v3 out of the Arbitrum examples until it is synced in prod ([3239f8b](https://github.com/propeller-heads/tycho/commit/3239f8b93bcddbcc7c070929b4e061c808e6929e))
+
+## [0.503.0](https://github.com/propeller-heads/tycho/compare/0.502.3...0.503.0) (2026-11-09)
+
+
+### Features
+
+* **elysium:** add chain model and Uniswap V2/V3/V4 manifests ([814afb2](https://github.com/propeller-heads/tycho/commit/814afb2d9ea5f3c06d061f4ec6d9f6e1d9bf20f5))
+* **elysium:** add chain model and Uniswap V2/V3/V4 manifests ([#1751](https://github.com/propeller-heads/tycho/issues/1751)) ([7835cc6](https://github.com/propeller-heads/tycho/commit/7835cc60ff110f9b1f046069d785bbd75e73b18b))
+
+
+### Bug Fixes
+
+* **deps:** bump actix-http to 3.20.3 for RUSTSEC-2026-0446 ([cf91abf](https://github.com/propeller-heads/tycho/commit/cf91abfd1066bcd5cd9d06c7ab55f989fa0c85c6))
+* **deps:** bump actix-web to 4.18.2 for RUSTSEC-2026-0447 ([9c67f2c](https://github.com/propeller-heads/tycho/commit/9c67f2c63830deabd3bb0bba982b98f915f2efbc))
+
+## [0.502.3](https://github.com/propeller-heads/tycho/compare/0.502.2...0.502.3) (2026-11-05)
+
 ## [0.502.2](https://github.com/propeller-heads/tycho/compare/0.502.1...0.502.2) (2026-11-05)
 
 
