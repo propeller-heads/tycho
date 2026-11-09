@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
@@ -35,7 +35,7 @@ contract BalancerV3Executor is IExecutor, ICallback {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -43,7 +43,7 @@ contract BalancerV3Executor is IExecutor, ICallback {
         if (data.length != 60) {
             revert BalancerV3Executor__InvalidDataLength();
         }
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         _VAULT.unlock(abi.encodePacked(amountIn, data, receiver));
     }
 
@@ -86,7 +86,7 @@ contract BalancerV3Executor is IExecutor, ICallback {
             })
         );
 
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The vault credits what it received; amountIn is already known.
         _VAULT.settle(tokenIn, amountIn);
         _VAULT.sendTo(tokenOut, receiver, amountOut);
         return abi.encode(amountCalculated, tokenOut);

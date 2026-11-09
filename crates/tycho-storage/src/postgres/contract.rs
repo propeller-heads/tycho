@@ -23,7 +23,8 @@ use tycho_common::{
 };
 
 use super::{
-    maybe_lookup_block_ts, maybe_lookup_version_ts, orm, schema, storage_error_from_diesel,
+    count_to_i64, maybe_lookup_block_ts, maybe_lookup_version_ts, orm, schema,
+    storage_error_from_diesel,
     versioning::{apply_partitioned_versioning, apply_versioning, VersioningEntry},
     PostgresError, PostgresGateway, WithOrdinal, WithTxHash, MAX_TS, MAX_VERSION_TS,
 };
@@ -512,7 +513,6 @@ impl PostgresGateway {
             .map_err(PostgresError::from)?
             .into_iter()
             .collect();
-        #[allow(clippy::mutable_key_type)]
         let accounts: HashSet<_> = slots
             .values()
             .flat_map(|contract_slots| contract_slots.keys())
@@ -657,7 +657,6 @@ impl PostgresGateway {
                 .distinct_on((account::id, slot))
                 .into_boxed();
             if let Some(addresses) = contracts {
-                #[allow(clippy::mutable_key_type)]
                 let filter_val: HashSet<_> = addresses.iter().collect();
                 q = q.filter(account::address.eq_any(filter_val));
             }
@@ -670,13 +669,13 @@ impl PostgresGateway {
             .map_err(PostgresError::from)?
             .into_iter()
             .collect::<HashMap<i64, Bytes>>();
-        Self::construct_account_to_contract_store(slots.into_iter(), accounts)
+        Self::construct_account_to_contract_store(slots.into_iter(), &accounts)
     }
 
     /// Constructs a mapping from address to contract slots
     fn construct_account_to_contract_store(
         slot_values: impl Iterator<Item = (i64, Bytes, Option<Bytes>)>,
-        addresses: HashMap<i64, Bytes>,
+        addresses: &HashMap<i64, Bytes>,
     ) -> Result<AccountToContractStoreDeltas, StorageError> {
         let mut result: AccountToContractStoreDeltas = HashMap::with_capacity(addresses.len());
         for (cid, raw_key, raw_val) in slot_values.into_iter() {
@@ -790,6 +789,17 @@ impl PostgresGateway {
         Ok(account)
     }
 
+    /// Retrieve contracts, optionally filtered by address and paginated.
+    ///
+    /// Pagination is applied to the accounts matching `ids` (or, if `ids` is None, to all accounts
+    /// that have code at `version`), ordered by their database id. Balances, code and slots are
+    /// only read for the accounts on the returned page. Callers must therefore pass the full
+    /// address list in `ids` and let this method cut the page - pre-slicing `ids` while also
+    /// passing `pagination_params` would apply the offset twice.
+    ///
+    /// The returned `total` is the number of accounts matching the filters at `version`, so the
+    /// caller can tell how many pages exist. Note that on the `ids` path an account that has no
+    /// code at `version` is counted but not returned.
     #[instrument(level = Level::DEBUG, skip(self, ids, conn))]
     pub async fn get_contracts(
         &self,
@@ -859,15 +869,21 @@ impl PostgresGateway {
                 .collect::<Vec<_>>()
         };
 
-        let mut all_balances = self
-            .get_account_balances(chain, ids, version, true, conn)
-            .await?;
-
-        // take all ids and query both code and storage
+        // Everything below must be restricted to the accounts on this page. Passing the request's
+        // `ids` here instead would read the whole chain's balances and slots on every page, since
+        // a full snapshot request has `ids = None`.
         let account_ids = accounts
             .iter()
             .map(|a| a.id)
             .collect::<HashSet<_>>();
+        let page_addresses = accounts
+            .iter()
+            .map(|a| a.address.clone())
+            .collect::<Vec<_>>();
+
+        let mut all_balances = self
+            .get_account_balances(chain, Some(&page_addresses), version, true, conn)
+            .await?;
 
         let codes = {
             use schema::contract_code::dsl::*;
@@ -921,7 +937,7 @@ impl PostgresGateway {
 
         let slots = if include_slots {
             Some(
-                self.get_contract_slots(chain, ids, version, conn)
+                self.get_contract_slots(chain, Some(&page_addresses), version, conn)
                     .await?,
             )
         } else {
@@ -1035,7 +1051,7 @@ impl PostgresGateway {
                 .map_err(PostgresError::from)?
         } else {
             // If no pagination, use the length of the result
-            res.len() as i64
+            count_to_i64(res.len())
         };
 
         Ok(WithTotal { entity: res, total: Some(total_count) })
@@ -1078,7 +1094,6 @@ impl PostgresGateway {
             chain_id,
             creation_tx: creation_tx_id,
             created_at: Some(created_ts),
-            deleted_at: None,
         };
         let hex_addr = hex::encode(&new.address);
 
@@ -1903,7 +1918,7 @@ mod test {
                 "account0".to_owned(),
                 contract_slots([(1, 5), (2, 1), (0, 1)])
                     .into_iter()
-                    .map(|(k, v)| (k, v.unwrap_or(Bytes::from("0x00"))))
+                    .map(|(k, v)| (k, v.unwrap_or_else(|| Bytes::from("0x00"))))
                     .collect(),
                 Bytes::from(100u64).lpad(32, 0),
                 vec![
@@ -1958,7 +1973,7 @@ mod test {
                 "account0".to_owned(),
                 contract_slots([(6, 30), (5, 25), (1, 3), (2, 1), (0, 2)])
                     .into_iter()
-                    .map(|(k, v)| (k, v.unwrap_or(Bytes::from("0x00"))))
+                    .map(|(k, v)| (k, v.unwrap_or_else(|| Bytes::from("0x00"))))
                     .collect(),
                 Bytes::from(101u64).lpad(32, 0),
                 vec![
@@ -2032,7 +2047,7 @@ mod test {
                 "c1".to_owned(),
                 contract_slots([(1, 255), (0, 128)])
                     .into_iter()
-                    .map(|(k, v)| (k, v.unwrap_or(Bytes::from("0x00"))))
+                    .map(|(k, v)| (k, v.unwrap_or_else(|| Bytes::from("0x00"))))
                     .collect(),
                 Bytes::from(50u64).lpad(32, 0),
                 HashMap::new(),
@@ -2060,7 +2075,7 @@ mod test {
                 "c2".to_owned(),
                 contract_slots([(1, 2), (2, 4)])
                     .into_iter()
-                    .map(|(k, v)| (k, v.unwrap_or(Bytes::from("0x00"))))
+                    .map(|(k, v)| (k, v.unwrap_or_else(|| Bytes::from("0x00"))))
                     .collect(),
                 Bytes::from(25u64).lpad(32, 0),
                 HashMap::new(),
@@ -2223,6 +2238,38 @@ mod test {
         assert!(result.entity.len() <= 1);
         assert_eq!(result.total, Some(exp_total));
         assert_eq!(result.entity, exp);
+    }
+
+    /// Walks all pages of a full snapshot request. Each page must carry the balances and slots of
+    /// its own accounts only, and the total must stay the number of matching accounts.
+    #[tokio::test]
+    async fn test_get_contracts_pages_cover_all_accounts() {
+        let mut conn = setup_db().await;
+        setup_data(&mut conn).await;
+        let gw = EVMGateway::from_connection(&mut conn).await;
+
+        let mut pages = Vec::new();
+        for page in 0..3 {
+            let result = gw
+                .get_contracts(
+                    &Chain::Ethereum,
+                    None,
+                    None,
+                    true,
+                    Some(&PaginationParams { page, page_size: 1 }),
+                    &mut conn,
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(result.total, Some(2));
+            pages.push(result.entity);
+        }
+
+        // c2 is deleted at the latest version, so only c0 and c1 are returned.
+        assert_eq!(pages[0], vec![account_c0(2)]);
+        assert_eq!(pages[1], vec![account_c1(2)]);
+        assert_eq!(pages[2], Vec::<Account>::new());
     }
 
     #[tokio::test]

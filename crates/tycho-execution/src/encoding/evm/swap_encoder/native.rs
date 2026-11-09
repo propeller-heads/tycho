@@ -14,7 +14,10 @@ use tycho_common::{
 
 use crate::encoding::{
     errors::EncodingError,
-    evm::utils::{bytes_to_address, create_encoding_runtime, on_blocking_thread, SafeRuntime},
+    evm::utils::{
+        bytes_to_address, check_signed_quote, create_encoding_runtime, on_blocking_thread,
+        SafeRuntime,
+    },
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
 };
@@ -24,7 +27,10 @@ pub struct NativeSwapEncoder {
     executor_address: Bytes,
     router_v6: Address,
     runtime_handle: Handle,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "owns the runtime behind `runtime_handle`; dropping it would shut the runtime down"
+    )]
     runtime: SafeRuntime,
 }
 
@@ -84,17 +90,21 @@ impl SwapEncoder for NativeSwapEncoder {
         let amount_in = swap
             .estimated_amount_in()
             .as_ref()
-            .ok_or(EncodingError::FatalError(
-                "Estimated amount in is mandatory for a Native swap".to_string(),
-            ))?
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "Estimated amount in is mandatory for a Native swap".to_string(),
+                )
+            })?
             .clone();
 
         let sender = encoding_context
             .router_address
             .clone()
-            .ok_or(EncodingError::FatalError(
-                "The router address is needed to perform a Native swap".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "The router address is needed to perform a Native swap".to_string(),
+                )
+            })?;
 
         let signed_quote = on_blocking_thread(|| {
             self.runtime_handle.block_on(async {
@@ -106,10 +116,12 @@ impl SwapEncoder for NativeSwapEncoder {
                         token_out: swap.token_out().address.clone(),
                         sender: sender.clone(),
                         receiver: sender,
+                        origin: None,
                     })
                     .await
             })
         })??;
+        check_signed_quote(swap, protocol_state.as_ref(), &signed_quote)?;
         // NativeClient already bound response.amountIn and order.sellerTokenAmount to the requested
         // amount. Store that validated quote baseline in the executor header so it can detect
         // under- or over-delivery at execution time.
@@ -117,9 +129,9 @@ impl SwapEncoder for NativeSwapEncoder {
         let target_bytes = signed_quote
             .quote_attributes
             .get("target")
-            .ok_or(EncodingError::FatalError(
-                "Native quote must have a target attribute".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError("Native quote must have a target attribute".to_string())
+            })?;
 
         let target = bytes_to_address(target_bytes)?;
         if target != self.router_v6 {
@@ -131,21 +143,23 @@ impl SwapEncoder for NativeSwapEncoder {
         let calldata = signed_quote
             .quote_attributes
             .get("calldata")
-            .ok_or(EncodingError::FatalError(
-                "Native quote must have a calldata attribute".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError("Native quote must have a calldata attribute".to_string())
+            })?;
 
         let deadline_timestamp = signed_quote
             .quote_attributes
             .get("deadline_timestamp")
-            .ok_or(EncodingError::FatalError(
-                "Native quote must have a deadline_timestamp attribute".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "Native quote must have a deadline_timestamp attribute".to_string(),
+                )
+            })?;
         let deadline = u64::from_be_bytes(
             deadline_timestamp
                 .as_ref()
                 .try_into()
-                .map_err(|_| {
+                .map_err(|_wrong_length| {
                     EncodingError::InvalidInput(format!(
                         "Native deadline_timestamp must be 8 bytes, got {}",
                         deadline_timestamp.len()
@@ -154,7 +168,9 @@ impl SwapEncoder for NativeSwapEncoder {
         );
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|_| EncodingError::FatalError("SystemTime before UNIX EPOCH".to_string()))?
+            .map_err(|_before_epoch| {
+                EncodingError::FatalError("SystemTime before UNIX EPOCH".to_string())
+            })?
             .as_secs();
         if deadline <= now {
             return Err(EncodingError::RecoverableError(format!(
@@ -220,11 +236,11 @@ mod test {
         models::{default_token, Swap},
     };
 
-    fn native_config() -> Option<HashMap<String, String>> {
-        Some(HashMap::from([(
+    fn native_config() -> HashMap<String, String> {
+        HashMap::from([(
             "router_v6".to_string(),
             "0x4777A6B3A9A889ABfd4C7666Bdd2a7AB633293be".to_string(),
-        )]))
+        )])
     }
 
     #[test]
@@ -248,14 +264,15 @@ mod test {
 
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
         };
 
         let encoder = NativeSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            native_config(),
+            Some(native_config()),
         )
         .unwrap();
         let error = encoder
@@ -287,8 +304,8 @@ mod test {
         let calldata_hex = format!("7083527c{:064x}{:064x}{:064x}", 0x60u8, 0u8, 0u8);
         let calldata_bytes = Bytes::from(hex::decode(&calldata_hex).unwrap());
         let native_quote_data = vec![
-            ("target".to_string(), target_bytes.clone()),
-            ("calldata".to_string(), calldata_bytes.clone()),
+            ("target".to_string(), target_bytes),
+            ("calldata".to_string(), calldata_bytes),
             ("deadline_timestamp".to_string(), Bytes::from(u64::MAX.to_be_bytes().to_vec())),
         ];
 
@@ -313,14 +330,15 @@ mod test {
 
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
         };
 
         let encoder = NativeSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            native_config(),
+            Some(native_config()),
         )
         .unwrap();
 
@@ -382,11 +400,12 @@ mod test {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in,
             group_token_out: token_out,
+            origin: None,
         };
         let encoder = NativeSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            native_config(),
+            Some(native_config()),
         )
         .unwrap();
 
@@ -427,11 +446,12 @@ mod test {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in,
             group_token_out: token_out,
+            origin: None,
         };
         let encoder = NativeSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            native_config(),
+            Some(native_config()),
         )
         .unwrap();
 
@@ -453,14 +473,14 @@ mod test {
             Err(EncodingError::FatalError(message)) if message.contains("config is empty")
         ));
 
-        let mut config = native_config().unwrap();
+        let mut config = native_config();
         config.remove("router_v6");
         assert!(matches!(
             NativeSwapEncoder::new(executor.clone(), Chain::Ethereum, Some(config)),
             Err(EncodingError::FatalError(message)) if message.contains("Missing router_v6")
         ));
 
-        let mut config = native_config().unwrap();
+        let mut config = native_config();
         config.insert(
             "router_v6".to_string(),
             "0x0000000000000000000000000000000000000000".to_string(),

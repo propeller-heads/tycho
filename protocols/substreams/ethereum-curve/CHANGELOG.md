@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.10
+
+- Update `tycho-substreams` from `0.8.1` to `0.8.2`. Native balance changes recorded on the
+  callee's call frame are now emitted, so the ETH a pool pays out of a swap no longer leaves its
+  VM balance stale (#1544).
+
 ## v0.3.9
 
 - Update `tycho-substreams` from `0.8.0` to `0.8.1`. Contract changes carrying only

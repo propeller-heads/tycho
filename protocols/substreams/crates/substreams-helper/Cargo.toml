@@ -3,7 +3,7 @@ name = "substreams-helper"
 description = "Substreams Helper Crate - by Messari"
 version = "0.0.2"
 edition = "2021"
-license = "MIT"
+license-file = "../../../../LICENSE.md"
 homepage = "https://messari.io/"
 repository = "https://github.com/messari/substreams/substreams-helper"
 

@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.2.6
+
+- Point the Ethereum manifest's `signed_exclusive_swap_address` at the
+  SignedExclusiveSwap v3.3.0 deployment (`0x550CFe…1D09`), the address the
+  other chains use. Pools on the old extension (`0x55b703…05A3`) no longer get
+  the `is_exclusive` attribute.
+- Remove the `signed_exclusive_swap` integration test, because its pool uses
+  the old extension. No pool on the new extension exists on Ethereum yet.
+
+## v0.2.5
+
+- Add `bsc-ekubo-v3.yaml` and `base-ekubo-v3.yaml` manifests that pass the
+  chains' SignedExclusiveSwap address (`0x550CFe…1D09`) to `map_components`, so
+  their exclusive pools get the `is_exclusive` attribute. Neither chain has a
+  Ve33 deployment.
+
+## v0.2.4
+
+- Read the SignedExclusiveSwap extension address from the `map_components`
+  params (`signed_exclusive_swap_address=0x...`) instead of a hardcoded
+  constant, so each chain tags `is_exclusive` on its own deployment. The
+  Ethereum and Robinhood manifests each carry their deployment's address;
+  omitting the param disables the `is_exclusive` attribute.
+
 ## v0.2.3
 
 - Track Ve33 pool swap-fee changes for accurate off-chain quotes. The Ve33

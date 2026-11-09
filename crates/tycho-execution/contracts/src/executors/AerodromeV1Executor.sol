@@ -1,21 +1,9 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
+import {IAerodromeV1Pool} from "@interfaces/IAerodromeV1Pool.sol";
 import {TransferManager} from "../TransferManager.sol";
-
-interface IAerodromeV1Pool {
-    function getAmountOut(uint256 amountIn, address tokenIn)
-        external
-        view
-        returns (uint256);
-    function swap(
-        uint256 amount0Out,
-        uint256 amount1Out,
-        address to,
-        bytes calldata data
-    ) external;
-}
 
 error AerodromeV1Executor__InvalidDataLength();
 
@@ -28,7 +16,7 @@ contract AerodromeV1Executor is IExecutor {
         return address(bytes20(data[0:20]));
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -50,12 +38,21 @@ contract AerodromeV1Executor is IExecutor {
         bool zeroForOne,
         address receiver
     ) internal {
-        uint256 amountOut = pool.getAmountOut(amountIn, tokenIn);
+        uint256 amountOut = _getAmountOut(pool, amountIn, tokenIn);
         if (zeroForOne) {
             pool.swap(0, amountOut, receiver, "");
         } else {
             pool.swap(amountOut, 0, receiver, "");
         }
+    }
+
+    /// @dev The output to request from `pool` for `amountIn` already sent to it.
+    function _getAmountOut(
+        IAerodromeV1Pool pool,
+        uint256 amountIn,
+        address tokenIn
+    ) internal view virtual returns (uint256) {
+        return pool.getAmountOut(amountIn, tokenIn);
     }
 
     function _decodeData(bytes calldata data)

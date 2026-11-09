@@ -27,10 +27,6 @@ use crate::{
     state::State,
 };
 
-/// Titan's PropAMMRouter, hardcoded in `PropAMMFallbackExecutor`. The sender cannot choose it, so
-/// it is one fixed address rather than a requested parameter.
-const PROPAMM_ROUTER: Address = Address::Named("propamm-router");
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, PartialOrd, Ord)]
 pub enum Executor {
     // Only executors that give the caller control over the called pool contract were modeled.
@@ -44,11 +40,13 @@ pub enum Executor {
     UniswapV2,
     UniswapV3,
     NativeWrap,
+    /// Also models `AeroBasicExecutor`, which inherits `AerodromeV1Executor` and only changes how
+    /// the requested output amount is priced.
     AerodromeV1,
     LiquidityParty,
     LunarBase,
     PropAMM,
-    PropAMMFallback,
+    TychoSubsidizing,
 }
 
 /// Return value of [Executor::get_transfer_data]
@@ -82,7 +80,7 @@ impl Executor {
         Executor::LiquidityParty,
         Executor::LunarBase,
         Executor::PropAMM,
-        Executor::PropAMMFallback,
+        Executor::TychoSubsidizing,
     ];
 
     /// <https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/interfaces/IExecutor.sol#L41>
@@ -363,27 +361,15 @@ impl Executor {
                 )?,
                 output_to_router: false,
             }),
-            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMFallbackExecutor.sol
-            // The router pulls tokenIn with transferFrom, so the receiver is the router itself,
-            // not the venue in the swap data as on the push-payment PropAMM path.
-            Self::PropAMMFallback => Ok(TransferData {
-                transfer_type: TransferType::ProtocolWillDebit,
-                receiver: PROPAMM_ROUTER,
-                token_in: params.request(
-                    ParamKey::ProtocolData { swap_index, start: 20, end: 40 },
-                    Address::POSSIBLY_ERC20_AND_NATIVE,
-                )?,
-                token_out: params.request(
-                    ParamKey::ProtocolData { swap_index, start: 40, end: 60 },
-                    Address::POSSIBLY_ERC20_AND_NATIVE,
-                )?,
-                output_to_router: false,
-            }),
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/TychoSubsidizingExecutor.sol
+            Self::TychoSubsidizing => {
+                subsidizing_inner(params, swap_index)?.get_transfer_data(params, _state, swap_index)
+            }
         }
     }
 
     /// <https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/interfaces/IExecutor.sol#L23>
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "mirrors the parameters of IExecutor.swap")]
     pub fn swap(
         &self,
         params: &Params,
@@ -686,52 +672,13 @@ impl Executor {
                     })
                 }
             }
-            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMFallbackExecutor.sol
-            Self::PropAMMFallback => {
-                let venue = params.request(
-                    ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
-                    Address::VARIANTS,
-                )?;
-                // Unlike the sender-controlled counterparties above, the venue in the swap data
-                // reaches a governed whitelist, not a call. `swapViaVenueV1` reverts
-                // `UnknownVenue` for anything the PropAMMRouter's governance did not list, so the
-                // sender cannot make the router call code they control. Verified on-chain by
-                // `PropAMMFallbackExecutorTest.testUnknownVenueReverts`.
-                if venue.is_sender_controlled() {
-                    return Err(Error::revert("PropAMMRouter: UnknownVenue"));
-                }
-                let token_in = params.request(
-                    ParamKey::ProtocolData { swap_index, start: 20, end: 40 },
-                    Address::POSSIBLY_ERC20_AND_NATIVE,
-                )?;
-                let token_out = params.request(
-                    ParamKey::ProtocolData { swap_index, start: 40, end: 60 },
-                    Address::POSSIBLY_ERC20_AND_NATIVE,
-                )?;
-                // The executor passes token addresses through unchanged and declares
-                // ProtocolWillDebit, so a native leg would have the router approve the ETH marker.
-                // The PropAMMRouter's own ETH_SENTINEL path is not used.
-                if token_in == Address::NativeETH || token_out == Address::NativeETH {
-                    return Err(Error::revert(
-                        "PropAMMFallbackExecutor: native token is not supported",
-                    ));
-                }
-                // The PropAMMRouter consumes the approval the Dispatcher just gave it: it pulls
-                // exactly `amount` of `token_in` out of the router before it reaches the venue.
-                // The Dispatcher then revokes whatever is left.
-                //
-                // What the venue or the Uniswap V3 retry does with the input, and the `token_out`
-                // it delivers, is outside the model: the model has no way to make a counterparty
-                // the sender does not control pay out. Every leg on this executor therefore
-                // measures zero output, the same as the other non-sender-controlled protocols
-                // here.
-                state.erc20_safe_transfer_from(
-                    token_in,
-                    PROPAMM_ROUTER,
-                    Address::Router,
-                    PROPAMM_ROUTER,
-                    amount,
-                )?;
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/TychoSubsidizingExecutor.sol
+            // The subsidy payer is not modeled: it pays from its own balance.
+            Self::TychoSubsidizing => {
+                let inner = subsidizing_inner(params, swap_index)?;
+                state.tstore("currently_swapping_executor", inner);
+                inner.swap(params, state, vault, log, amount, _receiver, swap_index)?;
+                state.tdelete("currently_swapping_executor");
                 Ok(())
             }
         }
@@ -744,40 +691,62 @@ impl Executor {
         _swap_index: u8,
     ) -> Result<CallbackTransferData, Error> {
         match self {
-            Self::Curve => unimplemented!(),
-            Self::ERC4626 => unimplemented!(),
+            Self::Curve => Err(Error::warning("Curve.get_callback_transfer_data is not modeled")),
+            Self::ERC4626 => {
+                Err(Error::warning("ERC4626.get_callback_transfer_data is not modeled"))
+            }
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/FluidV1Executor.sol#L159
             Self::FluidV1 => Ok(CallbackTransferData {
                 transfer_type: TransferType::Transfer,
                 receiver: Address::Named("fluid-v1-liquidity"),
             }),
-            Self::MaverickV2 => unimplemented!(),
+            Self::MaverickV2 => {
+                Err(Error::warning("MaverickV2.get_callback_transfer_data is not modeled"))
+            }
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/SlipstreamsExecutor.sol#L107
             Self::Slipstreams => Ok(CallbackTransferData {
                 transfer_type: TransferType::Transfer,
                 // called via delegatecall. therefore not the router
                 receiver: state.msg_sender(),
             }),
-            Self::UniswapV2 => unimplemented!(),
+            Self::UniswapV2 => {
+                Err(Error::warning("UniswapV2.get_callback_transfer_data is not modeled"))
+            }
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol#L105
             Self::UniswapV3 => Ok(CallbackTransferData {
                 transfer_type: TransferType::Transfer,
                 // called via delegatecall. therefore not the router
                 receiver: state.msg_sender(),
             }),
-            Self::NativeWrap => unimplemented!(),
-            Self::AerodromeV1 => unimplemented!(),
-            Self::LiquidityParty => unimplemented!(),
-            Self::LunarBase => unimplemented!(),
-            Self::PropAMM => unimplemented!(),
-            Self::PropAMMFallback => unimplemented!(),
+            Self::NativeWrap => {
+                Err(Error::warning("NativeWrap.get_callback_transfer_data is not modeled"))
+            }
+            Self::AerodromeV1 => {
+                Err(Error::warning("AerodromeV1.get_callback_transfer_data is not modeled"))
+            }
+            Self::LiquidityParty => {
+                Err(Error::warning("LiquidityParty.get_callback_transfer_data is not modeled"))
+            }
+            Self::LunarBase => {
+                Err(Error::warning("LunarBase.get_callback_transfer_data is not modeled"))
+            }
+            Self::PropAMM => {
+                Err(Error::warning("PropAMM.get_callback_transfer_data is not modeled"))
+            }
+            Self::TychoSubsidizing => Err(Error::warning(
+                "TychoSubsidizing points the callback slot at its inner executor",
+            )),
         }
     }
 
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn handle_callback(&self, _params: &Params, state: &mut State) -> Result<(), Error> {
         match self {
-            Self::Curve => unimplemented!("Curve doesn't use callbacks"),
-            Self::ERC4626 => unimplemented!("ERC4626 doesn't use callbacks"),
+            Self::Curve => Err(Error::warning("Curve doesn't use callbacks")),
+            Self::ERC4626 => Err(Error::warning("ERC4626 doesn't use callbacks")),
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/FluidV1Executor.sol#L117
             Self::FluidV1 => {
                 let dex: Address = state.tload("fluid_v1_current_dex")?;
@@ -786,24 +755,22 @@ impl Executor {
                 }
                 Ok(())
             }
-            Self::MaverickV2 => unimplemented!("MaverickV2 doesn't use callbacks"),
+            Self::MaverickV2 => Err(Error::warning("MaverickV2 doesn't use callbacks")),
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/SlipstreamsExecutor.sol#L60
             // not worth modeling as it has no reverts or side effects
             Self::Slipstreams => Ok(()),
-            Self::UniswapV2 => unimplemented!("UniswapV2 doesn't use callbacks"),
+            Self::UniswapV2 => Err(Error::warning("UniswapV2 doesn't use callbacks")),
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol#L58
             // not worth modeling as it has no reverts or side effects
             Self::UniswapV3 => Ok(()),
-            Self::NativeWrap => unimplemented!("Wrap doesn't use callbacks"),
-            Self::AerodromeV1 => unimplemented!("AerodromeV1 doesn't use callbacks"),
-            Self::LiquidityParty => unimplemented!("LiquidityParty doesn't use callbacks"),
-            Self::LunarBase => unimplemented!("LunarBase doesn't use callbacks"),
-            Self::PropAMM => {
-                unimplemented!("PropAMM doesn't use callbacks")
-            }
-            Self::PropAMMFallback => {
-                unimplemented!("PropAMMRouter doesn't use callbacks")
-            }
+            Self::NativeWrap => Err(Error::warning("Wrap doesn't use callbacks")),
+            Self::AerodromeV1 => Err(Error::warning("AerodromeV1 doesn't use callbacks")),
+            Self::LiquidityParty => Err(Error::warning("LiquidityParty doesn't use callbacks")),
+            Self::LunarBase => Err(Error::warning("LunarBase doesn't use callbacks")),
+            Self::PropAMM => Err(Error::warning("PropAMM doesn't use callbacks")),
+            Self::TychoSubsidizing => Err(Error::warning(
+                "TychoSubsidizing points the callback slot at its inner executor",
+            )),
         }
     }
 
@@ -872,141 +839,23 @@ impl Executor {
                 // and currently is ignored anyway
                 Address::SENDER_CONTROLLED,
             )?,
-            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMFallbackExecutor.sol
-            // Funds stay in the router, which approves the PropAMMRouter.
-            Self::PropAMMFallback => Address::Router,
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/TychoSubsidizingExecutor.sol
+            Self::TychoSubsidizing => subsidizing_inner(params, swap_index)?
+                .funds_expected_address(params, _state, swap_index)?,
         })
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        log::NopLog,
-        params::{ParamValue, ParamsInner},
-    };
-
-    /// [Params] whose swap 0 protocol data holds `venue`, `token_in` and `token_out`, which is the
-    /// 60-byte layout `PropAMMFallbackExecutor._decodeData` requires.
-    fn propamm_fallback_params(venue: Address, token_in: Address, token_out: Address) -> Params {
-        let mut inner = ParamsInner::default();
-        inner.insert(
-            ParamKey::ProtocolData { swap_index: 0, start: 0, end: 20 },
-            ParamValue::Address(venue),
-        );
-        inner.insert(
-            ParamKey::ProtocolData { swap_index: 0, start: 20, end: 40 },
-            ParamValue::Address(token_in),
-        );
-        inner.insert(
-            ParamKey::ProtocolData { swap_index: 0, start: 40, end: 60 },
-            ParamValue::Address(token_out),
-        );
-        Params::from(inner)
-    }
-
-    fn propamm_fallback_swap(
-        state: &mut State,
-        venue: Address,
-        token_in: Address,
-        token_out: Address,
-        amount: i64,
-    ) -> Result<(), Error> {
-        Executor::PropAMMFallback.swap(
-            &propamm_fallback_params(venue, token_in, token_out),
-            state,
-            &mut Vault::default(),
-            &mut NopLog,
-            amount,
-            Address::Sender,
-            0,
-        )
-    }
-
-    /// A venue the sender controls is not on the PropAMMRouter's whitelist, so the whole route
-    /// reverts instead of reaching code the sender wrote.
-    #[test]
-    fn sender_controlled_venue_reverts() {
-        for venue in Address::SENDER_CONTROLLED {
-            let mut state = State::default();
-            let error =
-                propamm_fallback_swap(&mut state, venue, Address::WETH, Address::Sender, 1000)
-                    .expect_err("a sender-controlled venue is never whitelisted");
-
-            assert!(matches!(error, Error::Revert { .. }), "{error}");
-            assert!(
-                state
-                    .owner_and_token_to_balance
-                    .is_empty(),
-                "a reverted swap moves nothing"
-            );
-        }
-    }
-
-    /// The executor passes token addresses through unchanged, so a native leg would have the
-    /// router approve the ETH marker instead of an ERC20.
-    #[test]
-    fn native_token_reverts() {
-        let whitelisted = Address::WETH;
-        for (token_in, token_out) in
-            [(Address::NativeETH, Address::WETH), (Address::WETH, Address::NativeETH)]
-        {
-            let mut state = State::default();
-            let error = propamm_fallback_swap(&mut state, whitelisted, token_in, token_out, 1000)
-                .expect_err("native token is not supported");
-
-            assert!(matches!(error, Error::Revert { .. }), "{error}");
-        }
-    }
-
-    /// The PropAMMRouter pulls `token_in` with the approval the Dispatcher gave it.
-    #[test]
-    fn whitelisted_venue_consumes_the_approval() {
-        let mut state = State::default();
-        state
-            .erc20_force_approve(Address::WETH, Address::Router, PROPAMM_ROUTER, 1000)
-            .unwrap();
-
-        propamm_fallback_swap(&mut state, Address::WETH, Address::WETH, Address::Sender, 1000)
-            .expect("a whitelisted venue swaps");
-
-        assert_eq!(
-            state
-                .erc20_allowance(Address::WETH, Address::Router, PROPAMM_ROUTER)
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            state
-                .erc20_balance_of(Address::WETH, Address::Router)
-                .unwrap(),
-            -1000
-        );
-        assert_eq!(
-            state
-                .erc20_balance_of(Address::WETH, PROPAMM_ROUTER)
-                .unwrap(),
-            1000
-        );
-    }
-
-    /// The leg is `ProtocolWillDebit` on the hardcoded PropAMMRouter, which is what makes the
-    /// Dispatcher approve it and then revoke whatever the router did not pull.
-    #[test]
-    fn transfer_data_approves_the_propamm_router() {
-        let transfer_data = Executor::PropAMMFallback
-            .get_transfer_data(
-                &propamm_fallback_params(Address::WETH, Address::WETH, Address::Sender),
-                &mut State::default(),
-                0,
-            )
-            .unwrap();
-
-        assert_eq!(transfer_data.transfer_type, TransferType::ProtocolWillDebit);
-        assert_eq!(transfer_data.receiver, PROPAMM_ROUTER);
-        assert_eq!(transfer_data.token_in, Address::WETH);
-        assert_eq!(transfer_data.token_out, Address::Sender);
-        assert!(!transfer_data.output_to_router);
-    }
+/// The inner executor the caller names in a [Executor::TychoSubsidizing] swap's data. The
+/// executor rejects itself as its inner executor, and the model only has approved executors.
+///
+/// The contract maps its own address back to the router. The model needs no mapping: its inner
+/// executors already report the router.
+fn subsidizing_inner(params: &Params, swap_index: u8) -> Result<Executor, Error> {
+    Ok(params.request(
+        ParamKey::SwapIndexed { prefix: "subsidizing_inner_executor", swap_index },
+        Executor::VARIANTS
+            .into_iter()
+            .filter(|executor| *executor != Executor::TychoSubsidizing),
+    )?)
 }

@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, fmt};
+use std::{any::Any, collections::HashMap, fmt, sync::Arc};
 
 use num_bigint::BigUint;
 
@@ -194,6 +194,10 @@ impl PoolSwap {
         self.new_state.as_ref()
     }
 
+    #[expect(
+        clippy::ref_option,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn price_points(&self) -> &Option<Vec<PricePoint>> {
         &self.price_points
     }
@@ -398,8 +402,7 @@ pub trait ProtocolSim: fmt::Debug + Send + Sync + 'static {
     /// * `Err(SimulationError)` - If:
     ///   - The calculation encounters numerical issues
     ///   - The method is not implemented for this protocol
-    #[allow(unused)]
-    fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+    fn query_pool_swap(&self, _params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
         Err(SimulationError::FatalError("query_pool_swap not implemented".into()))
     }
 
@@ -433,6 +436,22 @@ pub trait ProtocolSim: fmt::Debug + Send + Sync + 'static {
     /// from: it describes the future, not the observed past.
     fn apply_block(&mut self, _block: &BlockContext) -> bool {
         false
+    }
+
+    /// Runs every later quote from this state under a pending block's state, held in
+    /// `overrides`.
+    ///
+    /// The payload type belongs to the simulation crate that builds it. The default ignores it,
+    /// for protocols that do not simulate pending state.
+    ///
+    /// # Errors
+    /// Returns an error when the protocol simulates pending state but `overrides` is not the
+    /// type it expects.
+    fn set_pending_overrides(
+        &mut self,
+        _overrides: Arc<dyn Any + Send + Sync>,
+    ) -> Result<(), SimulationError> {
+        Ok(())
     }
 }
 
@@ -474,7 +493,7 @@ where
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        #[allow(deprecated)]
+        #[expect(deprecated, reason = "implements the deprecated get_amount_out on top of quote")]
         self.quote(
             QuoteParams::fixed_in(&token_in.address, &token_out.address, amount_in)?
                 .with_new_state(),
@@ -528,7 +547,10 @@ where
                 }
             }
         };
-        #[allow(deprecated)]
+        #[expect(
+            deprecated,
+            reason = "implements the deprecated query_pool_swap on top of query_swap"
+        )]
         self.query_swap(swap::QuerySwapParams::new(
             &params.token_in.address,
             &params.token_out.address,
@@ -556,7 +578,10 @@ where
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
-        #[allow(deprecated)]
+        #[expect(
+            deprecated,
+            reason = "to_protocol_sim is deprecated for consumers but is the clone implementation here"
+        )]
         self.to_protocol_sim()
     }
 
@@ -601,6 +626,7 @@ mod tests {
         }
 
         #[typetag::serde]
+        #[expect(clippy::todo, reason = "test double: the test only serializes it")]
         impl ProtocolSim for DummyProtocol {
             fn clone_box(&self) -> Box<dyn ProtocolSim> {
                 todo!()

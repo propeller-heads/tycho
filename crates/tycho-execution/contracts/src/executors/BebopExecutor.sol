@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
@@ -26,6 +26,10 @@ contract BebopExecutor is IExecutor {
     error BebopExecutor__InvalidTarget();
     error BebopExecutor__InvalidSelector();
 
+    // tokenIn (20) + tokenOut (20) + target (20) + partialFillOffset (1) +
+    // originalFilledTakerAmount (32)
+    uint256 private constant _MIN_DATA_LENGTH = 93;
+    uint256 private constant _WORD_LEN = 32;
     /// @notice BebopSettlement.swapSingle
     bytes4 private constant _SWAP_SINGLE_SELECTOR = 0x4dcebcba;
     /// @notice BebopSettlement.swapAggregate
@@ -68,7 +72,7 @@ contract BebopExecutor is IExecutor {
         address target;
         uint8 partialFillOffset;
         uint256 originalFilledTakerAmount;
-        bytes memory bebopCalldata;
+        bytes calldata bebopCalldata;
         (target, partialFillOffset, originalFilledTakerAmount, bebopCalldata) =
             _decodeData(data);
 
@@ -87,7 +91,7 @@ contract BebopExecutor is IExecutor {
 
         // Use OpenZeppelin's Address library for safe call
         // This will revert if the call fails
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         target.functionCall(finalCalldata);
     }
 
@@ -118,13 +122,12 @@ contract BebopExecutor is IExecutor {
             address target,
             uint8 partialFillOffset,
             uint256 originalFilledTakerAmount,
-            bytes memory bebopCalldata
+            bytes calldata bebopCalldata
         )
     {
-        // Need at least 93 bytes for the minimum fixed fields
-        // 20 (tokenIn) + 20 (tokenOut) + 20 (target) + 1 (offset) +
-        // 32 (amount) = 93
-        if (data.length < 93) revert BebopExecutor__InvalidDataLength();
+        if (data.length < _MIN_DATA_LENGTH) {
+            revert BebopExecutor__InvalidDataLength();
+        }
 
         target = address(bytes20(data[40:60]));
         partialFillOffset = uint8(data[60]);
@@ -139,14 +142,15 @@ contract BebopExecutor is IExecutor {
     /// @param partialFillOffset The offset from Bebop API indicating where filledTakerAmount is located
     /// @return The modified calldata with updated filledTakerAmount
     function _modifyFilledTakerAmount(
-        bytes memory bebopCalldata,
+        bytes calldata bebopCalldata,
         uint256 amountIn,
         uint256 originalFilledTakerAmount,
         uint8 partialFillOffset
     ) internal pure returns (bytes memory) {
         // Use the offset from Bebop API to locate filledTakerAmount
         // Position = 4 bytes (selector) + offset * 32 bytes
-        uint256 filledTakerAmountPos = 4 + uint256(partialFillOffset) * 32;
+        uint256 filledTakerAmountPos =
+            4 + uint256(partialFillOffset) * _WORD_LEN;
 
         // Cap the fill amount at what we actually have available
         uint256 newFilledTakerAmount = originalFilledTakerAmount > amountIn
@@ -158,18 +162,14 @@ contract BebopExecutor is IExecutor {
             return bebopCalldata;
         }
 
-        // Use assembly to modify the filledTakerAmount at the correct position
-        // slither-disable-next-line assembly
-        assembly {
-            // Get pointer to the data portion of the bytes array
-            let dataPtr := add(bebopCalldata, 0x20)
-
-            // Calculate the actual position and store the new value
-            let actualPos := add(dataPtr, filledTakerAmountPos)
-            mstore(actualPos, newFilledTakerAmount)
+        if (filledTakerAmountPos + _WORD_LEN > bebopCalldata.length) {
+            revert BebopExecutor__InvalidDataLength();
         }
-
-        return bebopCalldata;
+        return bytes.concat(
+            bebopCalldata[:filledTakerAmountPos],
+            bytes32(newFilledTakerAmount),
+            bebopCalldata[filledTakerAmountPos + _WORD_LEN:]
+        );
     }
 
     /**
@@ -193,7 +193,7 @@ contract BebopExecutor is IExecutor {
             bool outputToRouter
         )
     {
-        if (data.length < 93) {
+        if (data.length < _MIN_DATA_LENGTH) {
             revert BebopExecutor__InvalidDataLength();
         }
 

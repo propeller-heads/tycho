@@ -8,7 +8,7 @@ description: Overview of Tycho, its components and how to get started.
 
 ## What is Tycho?
 
-Tycho is an open-source interface to on-chain liquidity. Tycho
+Tycho is a source-available interface to on-chain liquidity. Tycho
 
 * **Indexes** DEX protocol state for you with low latency,
 * **Simulates** swaps extremely fast with one interface for all DEXs, and

@@ -4,9 +4,9 @@ import "../TychoRouterTestSetup.sol";
 import {TestUtils} from "../TestUtils.sol";
 import {
     AerodromeV1Executor,
-    AerodromeV1Executor__InvalidDataLength,
-    IAerodromeV1Pool
+    AerodromeV1Executor__InvalidDataLength
 } from "@src/executors/AerodromeV1Executor.sol";
+import {IAerodromeV1Pool} from "@interfaces/IAerodromeV1Pool.sol";
 import {Constants} from "../Constants.sol";
 import {TransferManager} from "@src/TransferManager.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -246,7 +246,8 @@ contract TychoRouterForAerodromeV1Test is
         uint256 amountIn = 10 ether;
         uint256 intermediateAmountOut = IAerodromeV1Pool(
                 AERODROME_V1_STABLE_POOL
-            ).getAmountOut(amountIn, AERODROME_V1_DOLA);
+            )
+            .getAmountOut(amountIn, AERODROME_V1_DOLA);
         uint256 expectedAmountOut = IAerodromeV1Pool(AERODROME_V1_VOLATILE_POOL)
             .getAmountOut(intermediateAmountOut, AERODROME_V1_USDBC);
         deal(AERODROME_V1_DOLA, ALICE, amountIn);

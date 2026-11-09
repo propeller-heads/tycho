@@ -107,7 +107,7 @@ use std::{
     time,
 };
 
-use futures::{future::Either, stream, Stream, StreamExt};
+use futures::{future::Either, Stream, StreamExt};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, warn};
 use tycho_client::{
@@ -507,6 +507,16 @@ impl ProtocolStreamBuilder {
         self
     }
 
+    /// Sets the number of deltas buffered for each underlying Tycho WebSocket subscription.
+    ///
+    /// See [`TychoStreamBuilder::subscription_buffer_size`].
+    pub fn subscription_buffer_size(mut self, subscription_buffer_size: usize) -> Self {
+        self.stream_builder = self
+            .stream_builder
+            .subscription_buffer_size(subscription_buffer_size);
+        self
+    }
+
     /// Exclude additional component IDs from all registered exchanges.
     ///
     /// These IDs are added to the shipped blocklist that is already applied by default (see
@@ -579,6 +589,16 @@ impl ProtocolStreamBuilder {
         self
     }
 
+    /// Sets the maximum random delay before a restarted synchronizer requests a snapshot.
+    ///
+    /// Defaults to 60 seconds. A `jitter` below 5 seconds is raised to 5 seconds.
+    pub fn snapshot_jitter(mut self, jitter: time::Duration) -> Self {
+        self.stream_builder = self
+            .stream_builder
+            .snapshot_jitter(jitter);
+        self
+    }
+
     pub fn get_decoder(&self) -> &TychoStreamDecoder<BlockHeader> {
         &self.decoder
     }
@@ -596,6 +616,10 @@ impl ProtocolStreamBuilder {
     /// re-reads pool state from the VM database — an indexer registered for one still gets its
     /// balance and block-environment attributes applied, but every storage-derived value stays at
     /// the confirmed block, with no error.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn with_pending_indexer(
         mut self,
         extractor: &str,
@@ -664,12 +688,20 @@ impl ProtocolStreamBuilder {
                 }
 
                 // Publish the buffered message so the caller can peek before triggering.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the peek slot is optional; a send error only means the controller dropped its receiver"
+                )]
                 let _ = peek_tx.send(Some(msg.clone()));
 
                 // Block until the controller fires trigger_next_block(), or until it is dropped.
                 if trigger_rx.recv().await.is_none() {
                     // Controller dropped — forward the buffered message and drain the rest
                     // without gating, so the stream continues to its natural end.
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the peek slot is optional; a send error only means the controller dropped its receiver"
+                    )]
                     let _ = peek_tx.send(None);
                     if output_tx.send(msg).await.is_err() {
                         break;
@@ -687,6 +719,10 @@ impl ProtocolStreamBuilder {
                 }
 
                 // Clear the peek slot before decoding so callers see None between blocks.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the peek slot is optional; a send error only means the controller dropped its receiver"
+                )]
                 let _ = peek_tx.send(None);
 
                 if output_tx.send(msg).await.is_err() {
@@ -799,12 +835,14 @@ impl ProtocolStreamBuilder {
             };
 
         let stream = Box::pin(decode_stream.then({
-            let decoder = decoder.clone();
+            let decoder = decoder;
             move |msg| {
                 let decoder = decoder.clone();
                 let advance_tx = advance_tx.clone();
                 async move {
-                    let _ = advance_tx.send(msg.clone());
+                    if let Err(e) = advance_tx.send(msg.clone()) {
+                        warn!(error = %e, "Pending block processor is gone; block not forwarded");
+                    }
                     decoder.decode(&msg).await.map_err(|e| {
                         debug!(msg=?msg, "Decode error: {}", e);
                         e
@@ -863,7 +901,7 @@ impl ProtocolStreamBuilder {
             };
 
         let stream = Box::pin(decode_stream.then({
-            let decoder = decoder.clone();
+            let decoder = decoder;
             move |msg| {
                 let decoder = decoder.clone();
                 async move {
@@ -882,39 +920,32 @@ impl ProtocolStreamBuilder {
 /// Wraps a decoded protocol stream to inject a `NativeWrapperState` component
 /// on the first successful update.
 ///
-/// Skips injection for chains where the native and wrapped-native tokens share
-/// the same address (e.g. Starknet).
+/// Skips injection when the chain's native asset has no real wrapper contract.
 fn inject_native_wrapper(
     inner: impl Stream<Item = Result<Update, StreamDecodeError>> + Unpin + Send + 'static,
     chain: Chain,
 ) -> impl Stream<Item = Result<Update, StreamDecodeError>> + Send {
-    let has_distinct_wrapper = chain.native_token().address != chain.wrapped_native_token().address;
-    if !has_distinct_wrapper {
+    let Some(native_wrapper) = NativeWrapperState::new(chain) else {
         return Either::Left(inner);
-    }
+    };
 
-    Either::Right(
-        stream::once(async move {
-            let mut inner = inner;
-            let first = inner.next().await;
-            let modified = first.into_iter().map(move |result| {
-                result.map(|mut update| {
-                    let component = NativeWrapperState::component(chain);
-                    let id = component.id.to_string();
-                    update
-                        .new_pairs
-                        .insert(id.clone(), component);
-                    update
-                        .states
-                        .insert(id, Box::new(NativeWrapperState::new(chain)));
-                    debug!("Injected native_wrapper component for {chain}");
-                    update
-                })
-            });
-            stream::iter(modified).chain(inner)
+    let mut pending_wrapper = Some(native_wrapper);
+    Either::Right(inner.map(move |result| {
+        result.map(|mut update| {
+            if let Some(native_wrapper) = pending_wrapper.take() {
+                let component = native_wrapper.component();
+                let id = component.id.to_string();
+                update
+                    .new_pairs
+                    .insert(id.clone(), component);
+                update
+                    .states
+                    .insert(id, Box::new(native_wrapper));
+                debug!("Injected native_wrapper component for {chain}");
+            }
+            update
         })
-        .flatten(),
-    )
+    }))
 }
 
 #[cfg(test)]
@@ -925,7 +956,9 @@ mod tests {
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::protocol::models::Update;
+    use crate::{
+        evm::protocol::native_wrapper::state::NATIVE_WRAPPER_ID, protocol::models::Update,
+    };
 
     fn empty_update(block: u64) -> Update {
         Update::new(block, HashMap::new(), HashMap::new())
@@ -942,7 +975,9 @@ mod tests {
 
         assert_eq!(results.len(), 3);
 
-        let expected_id = NativeWrapperState::component(Chain::Ethereum)
+        let expected_id = NativeWrapperState::new(Chain::Ethereum)
+            .expect("Ethereum should have a wrapper")
+            .component()
             .id
             .to_string();
 
@@ -975,6 +1010,62 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_inject_native_wrapper_after_initial_decode_error() {
+        let updates = vec![
+            Err(StreamDecodeError::Fatal("decode failed".to_string())),
+            Ok(empty_update(1)),
+            Ok(empty_update(2)),
+        ];
+        let results: Vec<_> = inject_native_wrapper(stream::iter(updates), Chain::Ethereum)
+            .collect()
+            .await;
+
+        assert!(results[0].is_err(), "the decode error must pass through unchanged");
+        let expected_id = NativeWrapperState::new(Chain::Ethereum)
+            .expect("Ethereum should have a wrapper")
+            .component()
+            .id
+            .to_string();
+        let first_success = results[1]
+            .as_ref()
+            .expect("second stream item should decode");
+        assert!(first_success
+            .new_pairs
+            .contains_key(&expected_id));
+        assert!(first_success
+            .states
+            .contains_key(&expected_id));
+
+        let second_success = results[2]
+            .as_ref()
+            .expect("third stream item should decode");
+        assert!(!second_success
+            .new_pairs
+            .contains_key(&expected_id));
+        assert!(!second_success
+            .states
+            .contains_key(&expected_id));
+    }
+
+    #[tokio::test]
+    async fn test_does_not_inject_native_wrapper_for_arc_shared_balance() {
+        let results: Vec<_> =
+            inject_native_wrapper(stream::iter([Ok(empty_update(1))]), Chain::Arc)
+                .collect()
+                .await;
+
+        let update = results[0]
+            .as_ref()
+            .expect("update should decode");
+        assert!(!update
+            .new_pairs
+            .contains_key(NATIVE_WRAPPER_ID));
+        assert!(!update
+            .states
+            .contains_key(NATIVE_WRAPPER_ID));
+    }
+
     /// Verifies that `with_step_controller` returns both a modified builder and a controller.
     ///
     /// This test only checks that the builder method is callable and that the returned controller
@@ -985,6 +1076,44 @@ mod tests {
         let (_builder, controller) = builder.with_step_controller();
         // The controller was successfully returned — verifying the public API is callable.
         drop(controller);
+    }
+
+    #[tokio::test]
+    async fn test_subscription_buffer_size_forwards_zero_rejection() {
+        let error = ProtocolStreamBuilder::new("not a valid endpoint", Chain::Ethereum)
+            .subscription_buffer_size(0)
+            .build()
+            .await;
+
+        let Err(error) = error else {
+            panic!("a zero subscription buffer size must be rejected during setup");
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("subscription buffer size must be greater than zero"),
+            "the underlying Tycho stream builder should return the configuration error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subscription_buffer_size_forwards_upper_bound_rejection() {
+        let error = ProtocolStreamBuilder::new("not a valid endpoint", Chain::Ethereum)
+            .subscription_buffer_size(usize::MAX)
+            .build()
+            .await;
+
+        let Err(error) = error else {
+            panic!("an oversized subscription buffer size must be rejected during setup");
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("subscription buffer size must not exceed"),
+            "the underlying Tycho stream builder should return the configuration error: {error}"
+        );
     }
 
     /// Connects to a live Tycho instance, verifies that the stream blocks until

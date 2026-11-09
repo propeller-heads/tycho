@@ -1,10 +1,10 @@
 use std::{
     env,
     fs::OpenOptions,
-    io::{BufRead, BufReader, Write},
+    io::{Read, Seek, SeekFrom, Write},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
 };
 
@@ -16,10 +16,14 @@ use alloy::{
     },
     sol_types::SolValue,
 };
-use num_bigint::BigUint;
-use once_cell::sync::Lazy;
+use metrics::{counter, histogram};
+use num_bigint::{BigInt, BigUint};
 use tokio::runtime::{Handle, Runtime};
-use tycho_common::Bytes;
+use tracing::{debug, warn};
+use tycho_common::{
+    simulation::{indicatively_priced::SignedQuote, protocol_sim::ProtocolSim},
+    Bytes,
+};
 
 use crate::encoding::{errors::EncodingError, evm::constants::ROUTER_ETH_ADDRESS, models::Swap};
 
@@ -77,9 +81,7 @@ pub(crate) fn get_token_position(tokens: &Vec<&Bytes>, token: &Bytes) -> Result<
 /// Pads or truncates a byte slice to a fixed size array of N bytes.
 /// If input is shorter than N, it pads with zeros at the start.
 /// If input is longer than N, it truncates from the start (keeps last N bytes).
-pub(crate) fn pad_or_truncate_to_size<const N: usize>(
-    input: &[u8],
-) -> Result<[u8; N], EncodingError> {
+pub(crate) fn pad_or_truncate_to_size<const N: usize>(input: &[u8]) -> [u8; N] {
     let mut result = [0u8; N];
 
     if input.len() <= N {
@@ -92,7 +94,7 @@ pub(crate) fn pad_or_truncate_to_size<const N: usize>(
         result.copy_from_slice(&input[start..]);
     }
 
-    Ok(result)
+    result
 }
 
 /// Extracts a static attribute from a swap.
@@ -140,8 +142,8 @@ pub(crate) fn create_encoding_runtime() -> Result<(Handle, SafeRuntime), Encodin
             .worker_threads(1)
             .enable_all()
             .build()
-            .map_err(|_| {
-                EncodingError::FatalError("Failed to create encoding runtime".to_string())
+            .map_err(|e| {
+                EncodingError::FatalError(format!("Failed to create encoding runtime: {e}"))
             })?,
     );
     let handle = rt.handle().clone();
@@ -266,53 +268,183 @@ pub(crate) type EVMProvider = Arc<
 
 /// Gets the client used for interacting with the EVM-compatible network.
 pub(crate) async fn get_client() -> Result<EVMProvider, EncodingError> {
-    dotenvy::dotenv().ok();
+    match dotenvy::dotenv() {
+        Ok(_) => {}
+        Err(e) if e.not_found() => {}
+        Err(e) => {
+            return Err(EncodingError::FatalError(format!("Failed to load .env file: {e}")));
+        }
+    }
     let eth_rpc_url = env::var("RPC_URL")
-        .map_err(|_| EncodingError::FatalError("Missing RPC_URL in environment".to_string()))?;
+        .map_err(|e| EncodingError::FatalError(format!("Missing RPC_URL in environment: {e}")))?;
     let client = ProviderBuilder::new()
         .connect(&eth_rpc_url)
         .await
-        .map_err(|_| EncodingError::FatalError("Failed to build provider".to_string()))?;
+        .map_err(|e| EncodingError::FatalError(format!("Failed to build provider: {e}")))?;
     Ok(Arc::new(client))
+}
+
+/// Records how far a maker's signed RFQ quote lands from the price levels of `protocol_state`,
+/// and enforces the swap's `max_signed_quote_shortfall_bps`.
+///
+/// Prices `signed_quote.amount_in` on `protocol_state` and emits a debug event with that level
+/// amount, `signed_quote.amount_out` and the gap between them in basis points. A negative gap
+/// means the maker signed for less than its levels advertised. If the levels cannot price the
+/// signed input, it logs a warning instead.
+///
+/// Returns `EncodingError::RecoverableError` when the signed amount out is further below the
+/// level amount than the swap allows, with the message `"{protocol} signed {n} bps below its
+/// price levels; the swap allows {max} bps"`. A swap without a limit, or a quote the levels cannot
+/// price, passes.
+pub(crate) fn check_signed_quote(
+    swap: &Swap,
+    protocol_state: &dyn ProtocolSim,
+    signed_quote: &SignedQuote,
+) -> Result<(), EncodingError> {
+    let component = swap.component();
+    let labels = [("protocol", component.protocol_system.clone())];
+    let price_level_amount_out = match protocol_state.get_amount_out(
+        signed_quote.amount_in.clone(),
+        swap.token_in(),
+        swap.token_out(),
+    ) {
+        Ok(result) => result.amount,
+        Err(err) => {
+            counter!("rfq_signed_quote_unpriced_total", &labels).increment(1);
+            warn!(
+                protocol = %component.protocol_system,
+                component_id = %component.id,
+                token_in = %swap.token_in().address,
+                token_out = %swap.token_out().address,
+                amount_in = %signed_quote.amount_in,
+                error = %err,
+                "could not price a signed RFQ quote on its price levels"
+            );
+            return Ok(());
+        }
+    };
+    let deviation_bps = deviation_bps(&price_level_amount_out, &signed_quote.amount_out);
+    debug!(
+        target: "rfq_signed_quote",
+        protocol = %component.protocol_system,
+        component_id = %component.id,
+        token_in = %swap.token_in().address,
+        token_out = %swap.token_out().address,
+        amount_in = %signed_quote.amount_in,
+        price_level_amount_out = %price_level_amount_out,
+        signed_amount_out = %signed_quote.amount_out,
+        deviation_bps,
+        "signed RFQ quote against its price levels"
+    );
+    match deviation_bps {
+        Some(bps) => histogram!("rfq_signed_quote_deviation_bps", &labels).record(bps as f64),
+        None => counter!("rfq_signed_quote_unpriced_total", &labels).increment(1),
+    }
+    let Some(max_shortfall_bps) = swap.max_signed_quote_shortfall_bps() else { return Ok(()) };
+    match exceeds_shortfall_tolerance_by(
+        &price_level_amount_out,
+        &signed_quote.amount_out,
+        max_shortfall_bps,
+    ) {
+        Some(shortfall_bps) => Err(EncodingError::RecoverableError(format!(
+            "{} signed {shortfall_bps} bps below its price levels; the swap allows \
+             {max_shortfall_bps} bps",
+            component.protocol_system
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Returns how far `signed_amount_out` is below `price_level_amount_out`, in basis points rounded
+/// up, when that is more than `max_shortfall_bps`.
+///
+/// The comparison is exact. Returns `None` when the shortfall is within the limit, when the maker
+/// signed for at least the level amount, or when `price_level_amount_out` is zero.
+fn exceeds_shortfall_tolerance_by(
+    price_level_amount_out: &BigUint,
+    signed_amount_out: &BigUint,
+    max_shortfall_bps: u32,
+) -> Option<u64> {
+    if *price_level_amount_out == BigUint::ZERO || signed_amount_out >= price_level_amount_out {
+        return None;
+    }
+    let scaled_shortfall = (price_level_amount_out - signed_amount_out) * 10_000u32;
+    if scaled_shortfall <= price_level_amount_out * max_shortfall_bps {
+        return None;
+    }
+    let shortfall_bps = (scaled_shortfall + price_level_amount_out - 1u32) / price_level_amount_out;
+    Some(u64::try_from(&shortfall_bps).unwrap_or(u64::MAX))
+}
+
+/// Returns `(signed - level) / level` in whole basis points, truncated toward zero.
+///
+/// Returns `None` when `price_level_amount_out` is zero or the result does not fit in an `i64`.
+fn deviation_bps(price_level_amount_out: &BigUint, signed_amount_out: &BigUint) -> Option<i64> {
+    if *price_level_amount_out == BigUint::ZERO {
+        return None;
+    }
+    let price_level = BigInt::from(price_level_amount_out.clone());
+    let gap = BigInt::from(signed_amount_out.clone()) - &price_level;
+    i64::try_from(gap * 10_000 / price_level).ok()
 }
 
 /// Uses prefix-length encoding to efficient encode action data.
 ///
 /// Prefix-length encoding is a data encoding method where the beginning of a data segment
 /// (the "prefix") contains information about the length of the following data.
-pub(crate) fn ple_encode(action_data_array: Vec<Vec<u8>>) -> Vec<u8> {
+///
+/// Fails if a segment is longer than `u16::MAX` bytes, the largest length the prefix can hold.
+pub(crate) fn ple_encode(action_data_array: Vec<Vec<u8>>) -> Result<Vec<u8>, EncodingError> {
     let mut encoded_action_data: Vec<u8> = Vec::new();
 
     for action_data in action_data_array {
-        let args = (encoded_action_data, action_data.len() as u16, action_data);
+        let length = u16::try_from(action_data.len()).map_err(|_out_of_range| {
+            EncodingError::InvalidInput(format!(
+                "Action data of {} bytes exceeds the u16 length prefix",
+                action_data.len()
+            ))
+        })?;
+        let args = (encoded_action_data, length, action_data);
         encoded_action_data = args.abi_encode_packed();
     }
 
-    encoded_action_data
+    Ok(encoded_action_data)
 }
 
-static CALLDATA_WRITE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+/// End of `items[index]` in `ple_encode(items)`.
+pub(crate) fn find_ple_item_end(items: &[Vec<u8>], index: usize) -> usize {
+    let mut end = 0;
+    for item in &items[..=index] {
+        end += size_of::<u16>() + item.len();
+    }
+    end
+}
+
 // Function used in tests to write calldata to a file that then is used by the corresponding
 // solidity tests.
 pub fn write_calldata_to_file(test_identifier: &str, hex_calldata: &str) {
-    let _lock = CALLDATA_WRITE_MUTEX
-        .lock()
-        .expect("Couldn't acquire lock");
-
     let file_path = "contracts/test/assets/calldata.txt";
-    let file = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .read(true)
+        .write(true)
         .open(file_path)
-        .expect("Failed to open calldata file for reading");
-    let reader = BufReader::new(file);
+        .expect("Failed to open calldata file");
+    // nextest runs each test in its own process, so only a file lock keeps two tests from
+    // rewriting the file at once. Dropping `file` releases it.
+    file.lock()
+        .expect("Failed to lock calldata file");
 
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .expect("Failed to read calldata file");
+
+    let entry = format!("{test_identifier}:{hex_calldata}");
     let mut lines = Vec::new();
     let mut found = false;
-    for line in reader.lines().map_while(Result::ok) {
-        let mut parts = line.splitn(2, ':'); // split at the :
-        let key = parts.next().unwrap_or("");
+    for line in contents.lines() {
+        let key = line.split(':').next().unwrap_or("");
         if key == test_identifier {
-            lines.push(format!("{test_identifier}:{hex_calldata}"));
+            lines.push(entry.as_str());
             found = true;
         } else {
             lines.push(line);
@@ -321,24 +453,68 @@ pub fn write_calldata_to_file(test_identifier: &str, hex_calldata: &str) {
 
     // If the test identifier wasn't found, append a new line
     if !found {
-        lines.push(format!("{test_identifier}:{hex_calldata}"));
+        lines.push(entry.as_str());
     }
 
-    // Write the updated contents back to the file
-    let mut file = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(file_path)
-        .expect("Failed to open calldata file for writing");
-
-    for line in lines {
-        writeln!(file, "{line}").expect("Failed to write calldata");
-    }
+    let mut updated = lines.join("\n");
+    updated.push('\n');
+    file.set_len(0)
+        .expect("Failed to truncate calldata file");
+    file.seek(SeekFrom::Start(0))
+        .expect("Failed to rewind calldata file");
+    file.write_all(updated.as_bytes())
+        .expect("Failed to write calldata");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_deviation_bps() {
+        let price_level = BigUint::from(1_000_000u64);
+        assert_eq!(deviation_bps(&price_level, &BigUint::from(1_000_000u64)), Some(0));
+        assert_eq!(deviation_bps(&price_level, &BigUint::from(990_000u64)), Some(-100));
+        assert_eq!(deviation_bps(&price_level, &BigUint::from(1_005_000u64)), Some(50));
+        assert_eq!(deviation_bps(&price_level, &BigUint::from(999_950u64)), Some(0));
+        assert_eq!(deviation_bps(&price_level, &BigUint::ZERO), Some(-10_000));
+    }
+
+    #[test]
+    fn test_exceeds_shortfall_tolerance_by() {
+        let price_level = BigUint::from(1_000_000u64);
+        assert_eq!(
+            exceeds_shortfall_tolerance_by(&price_level, &BigUint::from(995_000u64), 50),
+            None
+        );
+        assert_eq!(
+            exceeds_shortfall_tolerance_by(&price_level, &BigUint::from(994_999u64), 50),
+            Some(51)
+        );
+        assert_eq!(
+            exceeds_shortfall_tolerance_by(&price_level, &BigUint::from(990_000u64), 50),
+            Some(100)
+        );
+        assert_eq!(
+            exceeds_shortfall_tolerance_by(&price_level, &BigUint::from(1_000_001u64), 0),
+            None
+        );
+        assert_eq!(
+            exceeds_shortfall_tolerance_by(&price_level, &BigUint::from(999_999u64), 0),
+            Some(1)
+        );
+        assert_eq!(exceeds_shortfall_tolerance_by(&price_level, &BigUint::ZERO, 50), Some(10_000));
+    }
+
+    #[test]
+    fn test_exceeds_shortfall_tolerance_by_zero_price_level() {
+        assert_eq!(exceeds_shortfall_tolerance_by(&BigUint::ZERO, &BigUint::from(1u64), 0), None);
+    }
+
+    #[test]
+    fn test_deviation_bps_zero_level() {
+        assert_eq!(deviation_bps(&BigUint::ZERO, &BigUint::from(1u64)), None);
+    }
 
     #[test]
     fn test_map_on_threads_keeps_input_order_above_the_thread_cap() {
@@ -390,12 +566,12 @@ mod tests {
     fn test_pad_or_truncate_to_size() {
         // Test padding
         let input = hex::decode("0110").unwrap();
-        let result = pad_or_truncate_to_size::<3>(&input).unwrap();
+        let result = pad_or_truncate_to_size::<3>(&input);
         assert_eq!(hex::encode(result), "000110");
 
         // Test truncation
         let input_long = hex::decode("00800000").unwrap();
-        let result_truncated = pad_or_truncate_to_size::<3>(&input_long).unwrap();
+        let result_truncated = pad_or_truncate_to_size::<3>(&input_long);
         assert_eq!(hex::encode(result_truncated), "800000");
     }
 }

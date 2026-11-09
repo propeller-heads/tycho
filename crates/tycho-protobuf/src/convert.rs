@@ -36,7 +36,7 @@ impl TryFromMessage for AccountDelta {
         // bytes. None means "code unchanged" for Updates, but is incorrect for Creations.
         let code = match change {
             ChangeType::Creation => Some(msg.code.into()),
-            _ => {
+            ChangeType::Update | ChangeType::Deletion => {
                 if !msg.code.is_empty() {
                     Some(msg.code.into())
                 } else {
@@ -84,7 +84,9 @@ impl TryFromMessage for Block {
             number: msg.number,
             hash: msg.hash.into(),
             parent_hash: msg.parent_hash.into(),
-            ts: DateTime::from_timestamp(msg.ts as i64, 0)
+            ts: i64::try_from(msg.ts)
+                .ok()
+                .and_then(|secs| DateTime::from_timestamp(secs, 0))
                 .ok_or_else(|| {
                     DecodeError::Decode(format!(
                         "Failed to convert timestamp {} to datetime!",
@@ -167,7 +169,7 @@ impl TryFromMessage for ProtocolComponent {
         let protocol_type = msg
             .protocol_type
             .clone()
-            .ok_or(DecodeError::Decode("Missing protocol type".to_owned()))?;
+            .ok_or_else(|| DecodeError::Decode("Missing protocol type".to_owned()))?;
 
         if !protocol_types.contains_key(&protocol_type.name) {
             return Err(DecodeError::Decode(format!(
@@ -368,9 +370,9 @@ impl TryFromMessage for TxWithChanges {
             let component_id = msg_entrypoint_params
                 .component_id
                 .clone()
-                .ok_or(DecodeError::Decode(
-                    "Entrypoint params should have a component id".to_owned(),
-                ))?;
+                .ok_or_else(|| {
+                    DecodeError::Decode("Entrypoint params should have a component id".to_owned())
+                })?;
             let tracing_data = TracingParams::try_from_message(msg_entrypoint_params)?;
             entrypoint_params
                 .entry(entrypoint_id)

@@ -1,0 +1,25 @@
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "lido_v4"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "lido_v4_pool"
+# The component reports getTotalPooledEther() as its ETH balance, which is protocol accounting
+# rather than the stETH contract's own ETH balance (that only holds buffered ether).
+skip_balance_check: true
+
+tests:
+  - name: test_lido_v4_component_creation
+    start_block: 25603297
+    stop_block: 25603404
+    expected_components:
+      # One component for the whole venue: stETH mints, and wstETH wraps, unwraps and mints
+      # through receive(). The two orderings that would unstake (stETH -> ETH, wstETH -> ETH) run
+      # through the asynchronous withdrawal queue, report a zero limit, and the harness skips them.
+      - id: "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+          - "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
+        creation_tx: "0x297042b4e5fd41399634f124beec7afc37712bc3374c3419b72932caf52714aa"
+        skip_simulation: false
+        skip_execution: false

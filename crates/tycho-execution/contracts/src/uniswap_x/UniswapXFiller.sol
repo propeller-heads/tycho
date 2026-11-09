@@ -1,19 +1,20 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
-import "./IReactor.sol";
-import "./IReactorCallback.sol";
+import {IReactor} from "./IReactor.sol";
+import {IReactorCallback} from "./IReactorCallback.sol";
+import {ResolvedOrder, SignedOrder, OutputToken} from "./IStructs.sol";
 import {
     SafeERC20,
     IERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/utils/Address.sol";
-import {TychoRouterV3} from "../TychoRouterV3.sol";
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 
 error UniswapXFiller__AddressZero();
 error UniswapXFiller__BatchExecutionNotSupported();
+error UniswapXFiller__NotAContract(address addr);
 
 contract UniswapXFiller is AccessControl, IReactorCallback {
     using SafeERC20 for IERC20;
@@ -23,11 +24,8 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
     address public immutable tychoRouter;
     address public immutable nativeAddress;
 
-    // keccak256("NAME_OF_ROLE") : save gas on deployment
-    bytes32 public constant REACTOR_ROLE =
-        0x39dd1d7269516fc1f719706a5e9b05cdcb1644978808b171257d9a8eab55dd57;
-    bytes32 public constant EXECUTOR_ROLE =
-        0xd8aa0f3194971a2a116679f7c2090f6939c8d4e01a2a8d7e41d55e5351469e63;
+    bytes32 public constant REACTOR_ROLE = keccak256("REACTOR_ROLE");
+    bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
 
     event Withdrawal(
         address indexed token, uint256 amount, address indexed receiver
@@ -36,6 +34,7 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
     constructor(
         address _tychoRouter,
         address _reactor,
+        // forge-lint: disable-next-line(missing-zero-check) UniswapX marks native ETH with address(0).
         address _native_address
     ) {
         if (_tychoRouter == address(0)) {
@@ -48,7 +47,6 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
         tychoRouter = _tychoRouter;
         reactor = IReactor(_reactor);
 
-        // slither-disable-next-line missing-zero-check
         nativeAddress = _native_address;
     }
 
@@ -80,7 +78,7 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
                 .forceApprove(tychoRouter, type(uint256).max);
         }
 
-        // slither-disable-next-line low-level-calls
+        // forge-lint: disable-next-line(low-level-calls) tychoCalldata arrives encoded, so no high-level call fits.
         (bool success, bytes memory result) = tychoRouter.call(tychoCalldata);
 
         if (!success) {
@@ -132,7 +130,7 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
         }
 
         for (uint256 i = 0; i < tokens.length; i++) {
-            // slither-disable-next-line calls-loop
+            // forge-lint: disable-next-line(calls-loop) The admin chooses the tokens and can leave out one whose balanceOf reverts.
             uint256 tokenBalance = tokens[i].balanceOf(address(this));
             if (tokenBalance > 0) {
                 emit Withdrawal(address(tokens[i]), tokenBalance, receiver);
@@ -155,6 +153,7 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
         uint256 amount = address(this).balance;
         if (amount > 0) {
             emit Withdrawal(ETH_ADDRESS, amount, receiver);
+            // forge-lint: disable-next-line(arbitrary-send-eth) Only DEFAULT_ADMIN_ROLE withdraws, to the receiver it names.
             Address.sendValue(payable(receiver), amount);
         }
     }
@@ -162,8 +161,10 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
     /**
      * @dev Allows this contract to receive native token with empty msg.data from contracts
      */
-    // slither-disable-next-line locked-ether
     receive() external payable {
-        require(msg.sender.code.length != 0);
+        require(
+            msg.sender.code.length != 0,
+            UniswapXFiller__NotAContract(msg.sender)
+        );
     }
 }

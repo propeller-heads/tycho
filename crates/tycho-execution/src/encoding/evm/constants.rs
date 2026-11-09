@@ -8,10 +8,9 @@ use tycho_common::{models::Chain, Bytes};
 
 use crate::encoding::errors::EncodingError;
 
-pub(crate) const DEFAULT_EXECUTORS_JSON: &str =
-    include_str!("../../../config/executor_addresses.json");
-pub(crate) const DEFAULT_ROUTERS_JSON: &str = include_str!("../../../config/router_addresses.json");
-pub(crate) const PROTOCOL_SPECIFIC_CONFIG: &str =
+pub const DEFAULT_EXECUTORS_JSON: &str = include_str!("../../../config/executor_addresses.json");
+pub const DEFAULT_ROUTERS_JSON: &str = include_str!("../../../config/router_addresses.json");
+pub const PROTOCOL_SPECIFIC_CONFIG: &str =
     include_str!("../../../config/protocol_specific_addresses.json");
 
 /// Default router addresses keyed by chain, parsed from `config/router_addresses.json`.
@@ -49,14 +48,13 @@ pub static ROUTER_ETH_ADDRESS: LazyLock<Bytes> = LazyLock::new(|| {
 pub const ANGSTROM_DEFAULT_BLOCKS_IN_FUTURE: u64 = 10;
 
 /// The endpoint serving Angstrom pool unlock attestations.
-pub(crate) const ANGSTROM_DEFAULT_API_URL: &str =
-    "https://attestations.angstrom.xyz/getAttestations";
+pub const ANGSTROM_DEFAULT_API_URL: &str = "https://attestations.angstrom.xyz/getAttestations";
 
 /// The size of a single Angstrom attestation, without its block number prefix.
 ///
 /// The Uniswap V4 executor rejects attestation data that is not a whole number of
 /// `8 + ANGSTROM_ATTESTATION_SIZE` byte entries.
-pub(crate) const ANGSTROM_ATTESTATION_SIZE: usize = 85;
+pub const ANGSTROM_ATTESTATION_SIZE: usize = 85;
 
 /// The shortest time Ethereum can take to produce a block, which both the refresh interval and
 /// the maximum window age derive from.
@@ -75,7 +73,7 @@ const ETHEREUM_MIN_BLOCK_TIME_SECS: u64 = 12;
 const ANGSTROM_ATTESTATION_REFRESHES_PER_BLOCK: u64 = 2;
 
 /// How long the background prefetcher waits between Angstrom attestation refreshes.
-pub(crate) const ANGSTROM_ATTESTATION_REFRESH_INTERVAL: Duration =
+pub const ANGSTROM_ATTESTATION_REFRESH_INTERVAL: Duration =
     Duration::from_secs(ETHEREUM_MIN_BLOCK_TIME_SECS / ANGSTROM_ATTESTATION_REFRESHES_PER_BLOCK);
 
 /// How many of the fetched window's blocks may elapse before the cache refetches while encoding.
@@ -91,7 +89,7 @@ const ANGSTROM_ATTESTATION_MAX_AGE_BLOCKS: u64 = 1;
 ///
 /// Only reached when the background refresh has stopped keeping up: a healthy refresher replaces
 /// the window every `ANGSTROM_ATTESTATION_REFRESH_INTERVAL`.
-pub(crate) const ANGSTROM_ATTESTATION_MAX_AGE: Duration =
+pub const ANGSTROM_ATTESTATION_MAX_AGE: Duration =
     Duration::from_secs(ETHEREUM_MIN_BLOCK_TIME_SECS * ANGSTROM_ATTESTATION_MAX_AGE_BLOCKS);
 
 /// How long a single request to the Angstrom API may take before it is aborted.
@@ -100,7 +98,7 @@ pub(crate) const ANGSTROM_ATTESTATION_MAX_AGE: Duration =
 /// refresh still replaces the window within `ANGSTROM_ATTESTATION_MAX_AGE` of the previous one
 /// (3s aborted + 6s sleep + at most 3s for the retry). The slowest read measured against the
 /// live API was 902ms, including DNS and TLS on a cold connection.
-pub(crate) const ANGSTROM_API_TIMEOUT: Duration =
+pub const ANGSTROM_API_TIMEOUT: Duration =
     Duration::from_secs(ANGSTROM_ATTESTATION_REFRESH_INTERVAL.as_secs() / 2);
 
 /// These protocols support the optimization of grouping swaps.
@@ -126,6 +124,19 @@ pub static NON_PLE_ENCODED_PROTOCOLS: LazyLock<HashSet<&'static str>> = LazyLock
     set
 });
 
+/// Uniswap V2 and its forks encode identically, so they share `UniswapV2SwapEncoder`.
+pub const UNISWAP_V2_FORKS: &[&str] =
+    &["uniswap_v2", "sushiswap_v2", "pancakeswap_v2", "quickswap_v2"];
+
+/// Uniswap V3 and its forks share `UniswapV3SwapEncoder`; see [`UNISWAP_V2_FORKS`].
+pub const UNISWAP_V3_FORKS: &[&str] =
+    &["uniswap_v3", "pancakeswap_v3", "sushiswap_v3", "robinswap_v3", "gigadex_v3"];
+
+/// Slipstream deployments and forks. They share `SlipstreamsSwapEncoder`, which packs
+/// `tick_spacing` where `UniswapV3SwapEncoder` packs the fee. The pool ABI is Uniswap V3's.
+pub const SLIPSTREAMS_FORKS: &[&str] =
+    &["aerodrome_slipstreams", "velodrome_slipstreams", "up_v3", "ramses_v3", "aero_cl"];
+
 /// Protocol system prefix carried by components sourced from the pAMM price level stream. The
 /// venue suffix is either a configured name (e.g. `pricelevelstream:fermiswap`) or, for
 /// auto-detected pAMMs, the venue address (e.g. `pricelevelstream:0x5979…`); every such protocol
@@ -137,15 +148,44 @@ pub const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
 /// so a single configured executor address covers every pAMM, including auto-detected ones.
 pub const PRICE_LEVEL_STREAM_KEY: &str = "pricelevelstream";
 
-/// Protocol system prefix for pAMM components executed through the PropAMMRouter, so a stale maker
-/// quote retries on Uniswap V3 instead of reverting the route. Venue suffixes follow
-/// `PRICE_LEVEL_STREAM_PREFIX`; only whitelisted venues may use it. Calldata matches the direct
-/// path, so both prefixes share `PropAMMSwapEncoder` and differ only in the executor.
-pub const PROPAMM_FALLBACK_PREFIX: &str = "propammfallback:";
+/// Protocol system prefix for components executed through a fallback router, which retries a
+/// failing primary on the fallback protocol named in the swap's `user_data`. pAMM suffixes follow
+/// `PRICE_LEVEL_STREAM_PREFIX`.
+pub const FALLBACK_PREFIX: &str = "fallback:";
 
-/// The executor-config key serving the whole PropAMMRouter protocol family, mirroring
+/// The executor-config key serving the whole fallback protocol family, mirroring
 /// `PRICE_LEVEL_STREAM_KEY`.
-pub const PROPAMM_FALLBACK_KEY: &str = "propammfallback";
+pub const FALLBACK_KEY: &str = "fallback";
+
+/// Config key of `TychoSubsidizingExecutor` and of its `payer_address`.
+pub const SUBSIDY_KEY: &str = "subsidy";
+
+/// Protocol system of the native token wrap/unwrap.
+pub const NATIVE_WRAPPER_PROTOCOL_SYSTEM: &str = "native_wrapper";
+
+/// Metric components executed through `MetricFallbackRouter`.
+pub const METRIC_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
+
+/// Bebop components executed through `BebopFallbackRouter`.
+pub const BEBOP_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:bebop";
+
+/// Hashflow components executed through `HashflowFallbackRouter`.
+pub const HASHFLOW_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:hashflow";
+
+/// Native components executed through `NativeFallbackRouter`.
+pub const NATIVE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:native";
+
+/// Liquorice components executed through `LiquoriceFallbackRouter`.
+pub const LIQUORICE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:liquorice";
+
+/// Components whose fallback router runs a signed RFQ quote first, approving the venue itself and
+/// forwarding the output.
+pub const SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS: [&str; 4] = [
+    BEBOP_FALLBACK_PROTOCOL_SYSTEM,
+    HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
+    NATIVE_FALLBACK_PROTOCOL_SYSTEM,
+    LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
+];
 
 #[cfg(test)]
 mod tests {
@@ -156,7 +196,12 @@ mod tests {
     #[test]
     fn test_family_keys_and_prefixes_agree() {
         assert_eq!(format!("{PRICE_LEVEL_STREAM_KEY}:"), PRICE_LEVEL_STREAM_PREFIX);
-        assert_eq!(format!("{PROPAMM_FALLBACK_KEY}:"), PROPAMM_FALLBACK_PREFIX);
+        assert_eq!(format!("{FALLBACK_KEY}:"), FALLBACK_PREFIX);
+        assert!(METRIC_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(BEBOP_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(NATIVE_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
     }
 
     /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus

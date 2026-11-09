@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
@@ -9,7 +9,8 @@ error PropAMMExecutor__InvalidDataLength();
 
 /// @title PropAMMExecutor
 /// @notice Generic executor for any pAMM implementing the standard `IPropAMM`
-/// interface, priced off-chain via the Titan price level stream.
+/// interface pushed by Titan, whether it is priced off-chain via the price
+/// level stream or indexed natively (e.g. the Biconomy venue on Base).
 /// @dev The pAMM address is part of the swap data instead of an immutable, so
 /// a single deployment serves all venues following the standard interface and
 /// new pAMMs need no new executor. `IPropAMM` uses a push-payment model: the
@@ -29,14 +30,14 @@ contract PropAMMExecutor is IExecutor {
     // the output via balance diff, so the protocol-level minAmountOut is 0.
     // The deadline check is the router's responsibility too; block.timestamp
     // is always within any still-valid deadline.
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
     {
         (address pamm, address tokenIn, address tokenOut) = _decodeData(data);
 
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         IPropAMM(pamm)
             .swap(tokenIn, tokenOut, amountIn, 0, receiver, block.timestamp);
     }

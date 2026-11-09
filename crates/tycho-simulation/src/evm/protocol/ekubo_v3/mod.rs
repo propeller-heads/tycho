@@ -46,12 +46,17 @@ mod tests {
 
     use revm::primitives::address;
     use tycho_common::{
-        models::protocol::{ProtocolComponent, ProtocolComponentState},
+        models::{
+            protocol::{ProtocolComponent, ProtocolComponentState},
+            Chain,
+        },
         Bytes,
     };
 
     use super::{
-        addresses::{ORACLE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_ADDRESS},
+        addresses::{
+            ORACLE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_ADDRESS, SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS,
+        },
         *,
     };
 
@@ -74,10 +79,33 @@ mod tests {
 
     #[test]
     fn signed_exclusive_swap_excluded_by_default() {
-        let signed = with_extension(SIGNED_EXCLUSIVE_SWAP_ADDRESS);
+        for (chain, extension) in SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS {
+            let mut signed = with_extension(extension);
+            signed.component.chain = chain;
 
-        assert!(!filter_fn(&signed));
-        assert!(filter_fn_with_signed_exclusive_swap(&signed));
+            assert!(!filter_fn(&signed));
+            assert!(filter_fn_with_signed_exclusive_swap(&signed));
+        }
+    }
+
+    #[test]
+    fn signed_exclusive_swap_chains() {
+        for chain in [Chain::Ethereum, Chain::Robinhood, Chain::Bsc, Chain::Base] {
+            let mut signed = with_extension(SIGNED_EXCLUSIVE_SWAP_ADDRESS);
+            signed.component.chain = chain;
+
+            assert!(!filter_fn(&signed), "{chain} pool passed the default filter");
+            assert!(filter_fn_with_signed_exclusive_swap(&signed), "{chain} pool not recognised");
+        }
+    }
+
+    #[test]
+    fn signed_exclusive_swap_on_undeployed_chain() {
+        let mut on_unichain = with_extension(SIGNED_EXCLUSIVE_SWAP_ADDRESS);
+        on_unichain.component.chain = Chain::Unichain;
+
+        assert!(!filter_fn(&on_unichain));
+        assert!(!filter_fn_with_signed_exclusive_swap(&on_unichain));
     }
 
     #[test]

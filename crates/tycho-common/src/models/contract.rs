@@ -29,7 +29,10 @@ pub struct Account {
 }
 
 impl Account {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         chain: Chain,
         address: Address,
@@ -92,6 +95,10 @@ impl Account {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default, DeepSizeOf)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; `code` and `change` are kept consistent by `new`, and making the other fields private is a breaking change"
+)]
 pub struct AccountDelta {
     pub chain: Chain,
     pub address: Address,
@@ -217,6 +224,8 @@ impl AccountDelta {
     /// This function is utilized for aggregating multiple updates into a single
     /// update. The attribute values of `other` are set on `self`.
     /// Meanwhile, contract storage maps are merged, with keys from `other` taking precedence.
+    /// A creation in `other` makes the result a creation: the DCI can start to track an account
+    /// after earlier transactions of the block updated it.
     ///
     /// Be noted that, this function will mutate the state of the calling
     /// struct. An error will occur if merging updates from different accounts.
@@ -247,7 +256,10 @@ impl AccountDelta {
         if let Some(balance) = other.balance {
             self.balance = Some(balance)
         }
-        self.code = other.code.or(self.code.take());
+        self.code = other.code.or_else(|| self.code.take());
+        if other.change == ChangeType::Creation {
+            self.change = ChangeType::Creation;
+        }
 
         if self.code.is_none() && matches!(self.change, ChangeType::Creation) {
             warn!(address=?self.address, "AccountDelta without code marked as creation after merge!")
@@ -268,6 +280,10 @@ impl AccountDelta {
         self.change
     }
 
+    #[expect(
+        clippy::ref_option,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn code(&self) -> &Option<Code> {
         &self.code
     }
@@ -374,7 +390,7 @@ impl From<dto::AccountUpdate> for AccountDelta {
     }
 }
 
-#[allow(deprecated)] // creation_tx field on ResponseAccount is deprecated
+#[expect(deprecated, reason = "reads the deprecated creation_tx field of ResponseAccount")]
 impl From<dto::ResponseAccount> for Account {
     fn from(value: dto::ResponseAccount) -> Self {
         // Snapshot responses don't carry per-balance modify_tx; use zero as placeholder.
@@ -456,6 +472,52 @@ mod test {
         update_left.merge(update_right).unwrap();
 
         assert_eq!(update_left, exp);
+    }
+
+    fn creation_delta() -> AccountDelta {
+        AccountDelta::new(
+            Chain::Ethereum,
+            Bytes::from_str("e688b84b23f322a994A53dbF8E15FA82CDB71127").unwrap(),
+            slots([(1, 3), (2, 4)]),
+            Some(Bytes::from(7u64).lpad(32, 0)),
+            Some(Bytes::from("0x6000")),
+            ChangeType::Creation,
+        )
+    }
+
+    #[test]
+    fn test_merge_creation_into_update_is_creation() {
+        let mut delta = update_slots_delta();
+
+        delta.merge(creation_delta()).unwrap();
+
+        assert_eq!(delta.change_type(), ChangeType::Creation);
+        assert_eq!(delta.slots, slots([(0, 1), (1, 3), (2, 4)]));
+        assert_eq!(delta.code(), &Some(Bytes::from("0x6000")));
+    }
+
+    #[test]
+    fn test_merge_update_into_creation_stays_creation() {
+        let mut delta = creation_delta();
+
+        delta
+            .merge(update_slots_delta())
+            .unwrap();
+
+        assert_eq!(delta.change_type(), ChangeType::Creation);
+        assert_eq!(delta.slots, slots([(0, 1), (1, 2), (2, 4)]));
+    }
+
+    #[test]
+    fn test_merge_deletion_into_update_stays_update() {
+        let mut delta = update_slots_delta();
+        let address = delta.address.clone();
+
+        delta
+            .merge(AccountDelta::deleted(&Chain::Ethereum, &address))
+            .unwrap();
+
+        assert_eq!(delta.change_type(), ChangeType::Update);
     }
 
     #[test]

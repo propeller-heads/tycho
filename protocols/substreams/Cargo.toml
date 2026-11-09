@@ -21,11 +21,15 @@ members = [
     "ethereum-ekubo-v3",
     "ethereum-maverick-v2",
     "ethereum-lido",
+    "ethereum-lido-v4",
     "ethereum-balancer-v3",
     "ethereum-fluid",
     "base-aerodrome-v1",
+    "evm-aero-basic",
     "base-aerodrome-slipstreams",
+    "evm-aero-cl",
     "base-lunarbase",
+    "base-biconomy",
     "ethereum-erc4626",
     "ethereum-rocketpool",
     "unichain-velodrome",
@@ -35,6 +39,9 @@ members = [
     "ethereum-ring-swap-v2",
     "ethereum-sky",
     "polygon-ramses-v3",
+    "ethereum-etherfi",
+    "base-pancakeswap-infinity-cl",
+    "bsc-pancakeswap-infinity-cl-hooks",
 ]
 resolver = "2"
 

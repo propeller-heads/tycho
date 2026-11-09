@@ -24,7 +24,7 @@ use std::{
 use clap::Parser;
 use futures::StreamExt;
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
+use num_traits::{FromPrimitive, ToPrimitive};
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 use tycho_common::{models::Chain, simulation::protocol_sim::ProtocolSim};
@@ -187,7 +187,7 @@ async fn main() {
                 };
                 print_block_recap(current_block, &pools, &block_stats);
                 block_stats.clear();
-                current_block = Some(update.block_number_or_timestamp);
+                current_block = Some(update.block_number);
 
                 for (id, component) in update.new_pairs {
                     // The stream also carries synthetic components (e.g. the native ETH/WETH
@@ -209,7 +209,7 @@ async fn main() {
 
                 println!(
                     "\n═══ tycho block {} ({} pool(s)) ═══",
-                    update.block_number_or_timestamp,
+                    update.block_number,
                     pools.len()
                 );
                 quote_all(&pools, &providers, cli.sell_units, &mut last_printed, &mut block_stats, true);
@@ -244,7 +244,8 @@ fn quote_all(
 ) {
     for (id, pool) in pools {
         let [token_in, token_out, ..] = pool.component.tokens.as_slice() else { continue };
-        let amount_in = BigUint::from((10f64.powi(token_in.decimals as i32) * sell_units) as u128);
+        let amount_in = BigUint::from_f64(10f64.powf(f64::from(token_in.decimals)) * sell_units)
+            .expect("finite non-negative amount");
         let result = pool
             .state
             .get_amount_out(amount_in, token_in, token_out);
@@ -252,8 +253,8 @@ fn quote_all(
         // the display precision is still counted as a reprice.
         let (display, value, raw) = match &result {
             Ok(res) => {
-                let human =
-                    res.amount.to_f64().unwrap_or(f64::NAN) / 10f64.powi(token_out.decimals as i32);
+                let human = res.amount.to_f64().unwrap_or(f64::NAN) /
+                    10f64.powf(f64::from(token_out.decimals));
                 (
                     format!(
                         "{sell_units} {} = {} {}",

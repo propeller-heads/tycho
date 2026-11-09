@@ -25,7 +25,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -66,6 +66,8 @@ use uuid::Uuid;
 use zstd;
 
 use crate::{client_metadata::CLIENT_METADATA_HEADER, TYCHO_SERVER_VERSION};
+
+pub(crate) const DEFAULT_RECONNECTING_SUBSCRIPTION_BUFFER_SIZE: usize = 128;
 
 #[derive(Error, Debug)]
 pub enum DeltasError {
@@ -271,22 +273,23 @@ impl Inner {
     /// Transitions a pending subscription to active.
     ///
     /// Will ignore any request to do so for subscriptions that are not pending.
-    fn mark_active(&mut self, extractor_id: ExtractorIdentity, subscription_id: Uuid) {
-        if let Some(info) = self.pending.remove(&extractor_id) {
+    fn mark_active(&mut self, extractor_id: &ExtractorIdentity, subscription_id: Uuid) {
+        if let Some(info) = self.pending.remove(extractor_id) {
             if let SubscriptionInfo::RequestedSubscription(ready_tx) = info {
                 let (tx, rx) = mpsc::channel(self.buffer_size);
                 self.sender.insert(subscription_id, tx);
                 self.subscriptions
                     .insert(subscription_id, SubscriptionInfo::Active);
-                let _ = ready_tx
+                if ready_tx
                     .send(Ok((subscription_id, rx)))
-                    .map_err(|_| {
-                        warn!(
-                            ?extractor_id,
-                            ?subscription_id,
-                            "Subscriber for has gone away. Ignoring."
-                        )
-                    });
+                    .is_err()
+                {
+                    warn!(
+                        ?extractor_id,
+                        ?subscription_id,
+                        "Subscriber for has gone away. Ignoring."
+                    );
+                }
             } else {
                 error!(
                     ?extractor_id,
@@ -350,9 +353,9 @@ impl Inner {
         {
             let info = e.remove();
             if let SubscriptionInfo::RequestedUnsubscription(tx) = info {
-                let _ = tx.send(()).map_err(|_| {
-                    debug!(?subscription_id, "failed to notify about removed subscription")
-                });
+                if tx.send(()).is_err() {
+                    debug!(?subscription_id, "failed to notify about removed subscription");
+                }
                 self.sender
                     .remove(&subscription_id)
                     .ok_or_else(|| DeltasError::Fatal("Inconsistent internal client state: `sender` state drifted from `info` while removing a subscription.".to_string()))?;
@@ -376,17 +379,20 @@ impl Inner {
         Ok(())
     }
 
-    fn cancel_pending(&mut self, extractor_id: ExtractorIdentity, error: &WebsocketError) {
-        if let Some(sub_info) = self.pending.remove(&extractor_id) {
+    fn cancel_pending(&mut self, extractor_id: &ExtractorIdentity, error: &WebsocketError) {
+        if let Some(sub_info) = self.pending.remove(extractor_id) {
             match sub_info {
                 SubscriptionInfo::RequestedSubscription(tx) => {
-                    let _ = tx
+                    if tx
                         .send(Err(DeltasError::ServerError(format!(
                             "Subscription failed: {error}"
                         ))))
-                        .map_err(|_| debug!("Cancel pending failed: receiver deallocated!"));
+                        .is_err()
+                    {
+                        debug!("Cancel pending failed: receiver deallocated!");
+                    }
                 }
-                _ => {
+                SubscriptionInfo::Active | SubscriptionInfo::RequestedUnsubscription(_) => {
                     error!(?extractor_id, "Pending subscription in wrong state")
                 }
             }
@@ -478,7 +484,7 @@ impl WsDeltasClient {
             auth_key: auth_key.map(|s| s.to_string()),
             inner: Arc::new(Mutex::new(None)),
             ws_buffer_size: 128,
-            subscription_buffer_size: 128,
+            subscription_buffer_size: DEFAULT_RECONNECTING_SUBSCRIPTION_BUFFER_SIZE,
             conn_notify: Arc::new(Notify::new()),
             max_reconnects,
             retry_cooldown,
@@ -493,29 +499,9 @@ impl WsDeltasClient {
         self
     }
 
-    // Construct a new client with custom buffer sizes (for testing)
-    #[cfg(test)]
-    pub fn new_with_custom_buffers(
-        ws_uri: &str,
-        auth_key: Option<&str>,
-        ws_buffer_size: usize,
-        subscription_buffer_size: usize,
-    ) -> Result<Self, DeltasError> {
-        let uri = ws_uri
-            .parse::<Uri>()
-            .map_err(|e| DeltasError::UriParsing(ws_uri.to_string(), e.to_string()))?;
-        Ok(Self {
-            uri,
-            auth_key: auth_key.map(|s| s.to_string()),
-            inner: Arc::new(Mutex::new(None)),
-            ws_buffer_size,
-            subscription_buffer_size,
-            conn_notify: Arc::new(Notify::new()),
-            max_reconnects: 5,
-            retry_cooldown: Duration::from_millis(0),
-            dead: Arc::new(AtomicBool::new(false)),
-            client_metadata_header: None,
-        })
+    pub(crate) fn with_subscription_buffer_size(mut self, subscription_buffer_size: usize) -> Self {
+        self.subscription_buffer_size = subscription_buffer_size;
+        self
     }
 
     /// Ensures that the client is connected.
@@ -590,7 +576,7 @@ impl WsDeltasClient {
                             let inner = guard
                                 .as_mut()
                                 .ok_or_else(|| DeltasError::NotConnected)?;
-                            inner.mark_active(extractor_id.into(), subscription_id);
+                            inner.mark_active(&extractor_id.into(), subscription_id);
                         }
                         WebSocketMessage::Response(Response::SubscriptionEnded {
                             subscription_id,
@@ -606,7 +592,7 @@ impl WsDeltasClient {
                                 let inner = guard
                                     .as_mut()
                                     .ok_or_else(|| DeltasError::NotConnected)?;
-                                inner.cancel_pending(extractor_id.clone().into(), &error);
+                                inner.cancel_pending(&extractor_id.clone().into(), &error);
                             }
                             WebsocketError::SubscriptionNotFound(subscription_id) => {
                                 debug!("Received subscription not found, removing subscription");
@@ -630,7 +616,7 @@ impl WsDeltasClient {
                                 let inner = guard
                                     .as_mut()
                                     .ok_or_else(|| DeltasError::NotConnected)?;
-                                inner.cancel_pending(extractor_id.clone().into(), &error);
+                                inner.cancel_pending(&extractor_id.clone().into(), &error);
                             }
                         },
                     },
@@ -668,7 +654,7 @@ impl WsDeltasClient {
                                             )
                                             .await?;
                                         }
-                                        _ => {
+                                        WebSocketMessage::Response(_) => {
                                             error!(
                                                 "Received unsupported compressed WebSocketMessage variant. \nMessage: {ws_message:?}",
                                             );
@@ -731,7 +717,14 @@ impl WsDeltasClient {
                     tungstenite::Error::Io(_) | tungstenite::Error::Protocol(_) => {
                         DeltasError::ConnectionError(Box::new(error))
                     }
-                    _ => DeltasError::Fatal(error.to_string()),
+                    tungstenite::Error::Tls(_) |
+                    tungstenite::Error::Capacity(_) |
+                    tungstenite::Error::WriteBufferFull(_) |
+                    tungstenite::Error::Utf8 |
+                    tungstenite::Error::AttackAttempt |
+                    tungstenite::Error::Url(_) |
+                    tungstenite::Error::Http(_) |
+                    tungstenite::Error::HttpFormat(_) => DeltasError::Fatal(error.to_string()),
                 });
             }
         };
@@ -853,12 +846,12 @@ impl DeltasClient for WsDeltasClient {
         trace!("Waiting for subscription response");
         let res = tokio::time::timeout(Duration::from_secs(30), ready_rx)
             .await
-            .map_err(|_| {
+            .map_err(|_elapsed| {
                 DeltasError::TransportError(
                     "Subscribe confirmation timed out after 30s".to_string(),
                 )
             })?
-            .map_err(|_| {
+            .map_err(|_closed| {
                 DeltasError::TransportError("Subscription channel closed unexpectedly".to_string())
             })??;
         trace!("Subscription successful");
@@ -879,13 +872,13 @@ impl DeltasClient for WsDeltasClient {
         }
         tokio::time::timeout(Duration::from_secs(5), ready_rx)
             .await
-            .map_err(|_| {
+            .map_err(|_elapsed| {
                 warn!(?subscription_id, "Unsubscribe confirmation timed out after 5s");
                 DeltasError::TransportError(
                     "Unsubscribe confirmation timed out after 5s".to_string(),
                 )
             })?
-            .map_err(|_| {
+            .map_err(|_closed| {
                 DeltasError::TransportError("Unsubscribe channel closed unexpectedly".to_string())
             })?;
 
@@ -909,12 +902,20 @@ impl DeltasClient for WsDeltasClient {
         let jh = tokio::spawn(async move {
             let mut retry_count = 0;
             let mut result = Err(DeltasError::NotConnected);
+            let mut last_attempt = Instant::now();
 
             'retry: while retry_count < this.max_reconnects {
                 info!(?ws_uri, retry_count, "Connecting to WebSocket server");
+                // The cooldown limits attempts to one per `retry_cooldown`. After a connection
+                // that outlived it, reconnect at once.
                 if retry_count > 0 {
-                    sleep(this.retry_cooldown).await;
+                    sleep(
+                        this.retry_cooldown
+                            .saturating_sub(last_attempt.elapsed()),
+                    )
+                    .await;
                 }
+                last_attempt = Instant::now();
 
                 let request = build_ws_handshake_request(
                     &ws_uri,
@@ -1010,12 +1011,11 @@ impl DeltasClient for WsDeltasClient {
                                 "Connection dropped unexpectedly; Reconnecting..."
                             );
                             break;
-                        } else {
-                            // Other errors are considered fatal
-                            error!(?error, "Fatal error; Exiting");
-                            result = Err(error);
-                            break 'retry;
                         }
+                        // Other errors are considered fatal
+                        error!(?error, "Fatal error; Exiting");
+                        result = Err(error);
+                        break 'retry;
                     }
                 }
             }
@@ -1077,6 +1077,7 @@ mod tests {
     use tycho_common::models::Chain;
 
     use super::*;
+    use crate::stream::TychoStreamBuilder;
 
     #[derive(Clone)]
     enum ExpectedComm {
@@ -1132,6 +1133,10 @@ mod tests {
                     info!("Mock communication completed");
                     sleep(Duration::from_millis(100)).await;
                     // Close the WebSocket connection
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the mock server may close a connection the client has already closed"
+                    )]
                     let _ = websocket.close(None).await;
                     info!("Mock server closed connection");
                 }
@@ -1314,6 +1319,19 @@ mod tests {
                 .unwrap(),
             format!("tycho-client-{}", env!("CARGO_PKG_VERSION")).as_str()
         );
+    }
+
+    #[test]
+    fn test_new_with_reconnects_preserves_default_subscription_buffer_size() {
+        let client = WsDeltasClient::new_with_reconnects(
+            "ws://localhost:4242",
+            None,
+            3,
+            Duration::from_secs(1),
+        )
+        .expect("a valid websocket URI should construct a client");
+
+        assert_eq!(client.subscription_buffer_size, DEFAULT_RECONNECTING_SUBSCRIPTION_BUFFER_SIZE);
     }
 
     #[tokio::test]
@@ -1651,6 +1669,44 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
+    async fn test_reconnect_skips_cooldown_after_long_connection() {
+        let hold = Duration::from_secs(1);
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = server.local_addr().unwrap();
+        let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = server.accept().await {
+                let stream = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .unwrap();
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the test may have stopped listening for accepted connections"
+                )]
+                let _ = accepted_tx.send(std::time::Instant::now());
+                sleep(hold).await;
+                drop(stream);
+            }
+        });
+        let client =
+            WsDeltasClient::new_with_reconnects(&format!("ws://{addr}"), None, 3, hold * 4 / 5)
+                .unwrap();
+
+        let _jh = client.connect().await.unwrap();
+
+        let first = accepted_rx.recv().await.unwrap();
+        let second = timeout(Duration::from_secs(5), accepted_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        // The connection outlived the cooldown, so the reconnect does not wait for it.
+        let gap = second - first;
+        assert!(gap < hold + hold / 2, "reconnect waited {:?}", gap - hold);
+    }
+
+    #[test_log::test(tokio::test)]
     async fn test_subscribe_dead_client_after_max_attempts() {
         let (addr, _) = mock_bad_connection_tycho_ws(true).await;
         let client = WsDeltasClient::new_with_reconnects(
@@ -1711,7 +1767,7 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn test_buffer_full_triggers_unsubscribe() {
+    async fn test_stream_builder_buffer_size_limits_subscription_channel() {
         // Expected communication sequence for buffer full scenario
         let exp_comm = {
             [
@@ -1810,14 +1866,12 @@ mod tests {
 
         let (addr, server_thread) = mock_tycho_ws(&exp_comm, 0).await;
 
-        // Create client with very small buffer size (1) to easily trigger BufferFull
-        let client = WsDeltasClient::new_with_custom_buffers(
-            &format!("ws://{addr}"),
-            None,
-            128, // ws_buffer_size
-            1,   // subscription_buffer_size - this will trigger BufferFull easily
-        )
-        .unwrap();
+        // Build the client through the public stream builder so the test observes its configured
+        // capacity on the real subscription channel.
+        let client = TychoStreamBuilder::new("unused", Chain::Ethereum)
+            .subscription_buffer_size(1)
+            .build_ws_deltas_client(&format!("ws://{addr}"), None, None)
+            .expect("stream builder should construct a websocket client");
 
         let jh = client
             .connect()
@@ -1881,8 +1935,12 @@ mod tests {
         jh.abort();
         server_thread.abort();
 
-        let _ = jh.await;
-        let _ = server_thread.await;
+        if let Err(e) = jh.await {
+            assert!(e.is_cancelled(), "task panicked instead of being aborted: {e}");
+        }
+        if let Err(e) = server_thread.await {
+            assert!(e.is_cancelled(), "task panicked instead of being aborted: {e}");
+        }
     }
 
     #[tokio::test]
@@ -2025,6 +2083,10 @@ mod tests {
             .expect("connect failed");
 
         // Subscribe successfully
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the server answers the subscription with the error under test, so it may fail"
+        )]
         let _ = timeout(
             Duration::from_millis(100),
             client.subscribe(extractor_id, SubscriptionOptions::new().with_compression(false)),
@@ -2075,6 +2137,10 @@ mod tests {
             .expect("connect failed");
 
         // Subscribe successfully with compression disabled
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the server answers the subscription with the error under test, so it may fail"
+        )]
         let _ = timeout(
             Duration::from_millis(100),
             client.subscribe(extractor_id, SubscriptionOptions::new()),
@@ -2270,10 +2336,20 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Close may fail if client disconnected after unsubscribe, which is fine
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "closing may fail when the client already disconnected after unsubscribing"
+        )]
         let _ = timeout(Duration::from_millis(100), client.close()).await;
 
         // Wait for tasks to complete
-        let _ = jh.await;
-        let _ = server_thread.await;
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the forced unsubscribe closes the connection, so the client task ends with an error"
+        )]
+        let _ = jh.await.expect("client task panicked");
+        server_thread
+            .await
+            .expect("mock server panicked");
     }
 }

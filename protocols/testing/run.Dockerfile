@@ -1,44 +1,49 @@
 # =========== Third Party ===========
-# Get substreams CLI
+# substreams CLI. Integration tests run v1.16.4; mise.toml pins the version the release
+# workflows use.
 FROM ghcr.io/streamingfast/substreams:v1.16.4 AS substreams-cli
 
-# Install Foundry (Forge)
-FROM debian:bookworm AS foundry-builder
-WORKDIR /build
-RUN apt-get update && apt-get install -y curl git
-RUN curl -L https://foundry.paradigm.xyz | bash
-RUN /root/.foundry/bin/foundryup
+# Tools pinned in mise.toml, installed from mise.lock: mise refuses any version not locked there.
+FROM jdxcode/mise:2026.10.25-debian@sha256:00a8a9d05a300e5a15a89d6d3a87ea88ec4e78c4702b78d49aa1d3250af61427 AS tools
+WORKDIR /tools
+COPY mise.toml mise.lock ./
+ENV MISE_TRUSTED_CONFIG_PATHS=/tools
+RUN mise install foundry \
+    && mkdir /out \
+    && cp "$(mise which forge)" "$(mise which cast)" /out/
 
 # =========== Protocol SDK (includes tycho-indexer) ===========
-FROM rust:1.89-bookworm AS protocol-sdk-builder
+FROM rust:1.99.1-bookworm AS protocol-sdk-builder
 ARG PROTOCOLS=""
 WORKDIR /build/tycho-protocol-sdk
 COPY . .
 
 # Build EVM contracts first (protocol-testing depends on the runtime JSON files)
 WORKDIR /build/tycho-protocol-sdk/protocols/adapter-integration/evm
-COPY --from=foundry-builder /root/.foundry/bin/forge /usr/local/bin/forge
-RUN chmod +x /usr/local/bin/forge
-# Fetch forge lib submodules (not present in Docker context due to .dockerignore
-# excluding .git/ and CI checkout not always fetching submodules).
-RUN apt-get update && apt-get install -y --no-install-recommends git && \
-    git init && \
-    forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git && \
-    apt-get purge -y git && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+COPY --from=tools /out/forge /usr/local/bin/forge
+# The forge libraries come from the lib/ submodules in the build context.
 RUN forge build
 
 # Build substreams (wasm targets only - source not needed in final image)
 WORKDIR /build/tycho-protocol-sdk/protocols/substreams
-# resolve_base maps clone protocol names to their base substreams directory.
-# Keep this in sync with CLONE_TO_BASE_PROTOCOL in protocols/testing/src/test_runner.rs.
+# resolve_base maps clone protocol names to buildable substreams directories.
+# This follows CLONE_TO_BASE_PROTOCOL in test_runner.rs except that V4 clone aliases resolve to
+# the parent workspace. The runtime uses ethereum-uniswap-v4/no-hooks, while build/filter must
+# copy ethereum-uniswap-v4 so no-hooks and its parent-local target directory are both present.
 RUN resolve_base() { \
         case "$1" in \
+            bsc-lunarbase) echo "base-lunarbase" ;; \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
-            robinhood-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
+            robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
+            robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
             base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
+            arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
+            arc-uniswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
+            arc-uniswap-v4-no-hooks) echo "ethereum-uniswap-v4" ;; \
+            bsc-ring-swap-v2) echo "ethereum-ring-swap-v2" ;; \
             ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
             unichain-curve) echo "ethereum-curve" ;; \
@@ -72,16 +77,24 @@ RUN cargo build --release
 FROM debian:bookworm-slim AS substreams-filter
 ARG PROTOCOLS=""
 COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/substreams /source
-# resolve_base maps clone protocol names to their base substreams directory.
-# Keep this in sync with CLONE_TO_BASE_PROTOCOL in protocols/testing/src/test_runner.rs.
+# resolve_base maps clone protocol names to buildable substreams directories.
+# This follows CLONE_TO_BASE_PROTOCOL in test_runner.rs except that V4 clone aliases resolve to
+# the parent workspace. The runtime uses ethereum-uniswap-v4/no-hooks, while build/filter must
+# copy ethereum-uniswap-v4 so no-hooks and its parent-local target directory are both present.
 RUN resolve_base() { \
         case "$1" in \
+            bsc-lunarbase) echo "base-lunarbase" ;; \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
-            robinhood-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
+            robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
+            robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
             base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
+            arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
+            arc-uniswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
+            arc-uniswap-v4-no-hooks) echo "ethereum-uniswap-v4" ;; \
+            bsc-ring-swap-v2) echo "ethereum-ring-swap-v2" ;; \
             ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
             unichain-curve) echo "ethereum-curve" ;; \
@@ -97,6 +110,11 @@ RUN resolve_base() { \
             if [ -d "/source/$base_dir" ]; then \
                 echo "Including $base_dir (for protocol $protocol_clean)..."; \
                 cp -r "/source/$base_dir" "/filtered/"; \
+                for dep in $(sed -n 's#^ *- \.\./\([A-Za-z0-9_-]*\)/proto *$#\1#p' \
+                        "/source/$base_dir"/*.yaml | sort -u); do \
+                    echo "Including $dep (its protos are imported by $base_dir)..."; \
+                    cp -r "/source/$dep" "/filtered/"; \
+                done; \
                 base_wasm=$(echo "$base_dir" | tr '-' '_'); \
                 if [ -f "/source/target/wasm32-unknown-unknown/release/${base_wasm}.wasm" ]; then \
                     cp "/source/target/wasm32-unknown-unknown/release/${base_wasm}.wasm" \
@@ -160,8 +178,7 @@ RUN find /app -name "*.rs" -delete && \
 # Copy external tools
 COPY --from=substreams-cli /app/substreams /usr/local/bin/substreams
 RUN chmod +x /usr/local/bin/substreams
-COPY --from=foundry-builder /root/.foundry/bin/forge /usr/local/bin/forge
-COPY --from=foundry-builder /root/.foundry/bin/cast /usr/local/bin/cast
+COPY --from=tools /out/forge /out/cast /usr/local/bin/
 
 # Strip binaries to reduce size
 RUN strip /usr/local/bin/* 2>/dev/null || true

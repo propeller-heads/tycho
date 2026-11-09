@@ -1,6 +1,7 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
 import {TransferManager} from "../TransferManager.sol";
@@ -26,15 +27,18 @@ error MetricExecutor__AmountInTooLarge();
 error MetricExecutor__InvalidCallback();
 
 contract MetricExecutor is IExecutor, ICallback {
+    // One directive per slot type: Slither 0.11.6 can fail to analyse a
+    // contract that uses `using TransientSlot for *`.
+    using TransientSlot for TransientSlot.AddressSlot;
     uint256 private constant _DATA_LENGTH = 61;
     uint256 private constant _INT128_MAX = uint256(uint128(type(int128).max));
 
     // metricOmmSwapCallback(int256,int256,bytes) — the only callback the pool emits.
     bytes4 private constant _METRIC_CALLBACK_SELECTOR = 0xc3251075;
 
-    // keccak256("MetricExecutor#CURRENT_METRIC_POOL")
-    bytes32 private constant _CURRENT_METRIC_POOL_SLOT =
-        0x4d22bc52e1e7b4ceea27d9d7b99b3dc629ed6f14191a4839f79502a7ee831121;
+    TransientSlot.AddressSlot private constant _CURRENT_METRIC_POOL_SLOT =
+        TransientSlot.AddressSlot
+            .wrap(keccak256("MetricExecutor#CURRENT_METRIC_POOL"));
 
     function fundsExpectedAddress(
         bytes calldata /* data */
@@ -46,7 +50,7 @@ contract MetricExecutor is IExecutor, ICallback {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -57,17 +61,11 @@ contract MetricExecutor is IExecutor, ICallback {
             revert MetricExecutor__AmountInTooLarge();
         }
 
-        // We already checked that this fits in int128.
-        // forge-lint: disable-next-line(unsafe-typecast)
         uint128 amountIn128 = uint128(amountIn);
-        // We already checked that this fits in int128.
-        // forge-lint: disable-next-line(unsafe-typecast)
         int128 amountSpecified = int128(amountIn128);
 
         _setCurrentPool(pool);
-        // The returned deltas are intentionally unused: the Dispatcher derives
-        // the output from balance diffs and never trusts protocol return values.
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         IMetricPool(pool)
             .swap(
                 receiver,
@@ -157,18 +155,10 @@ contract MetricExecutor is IExecutor, ICallback {
     }
 
     function _setCurrentPool(address pool) internal {
-        bytes32 slot = _CURRENT_METRIC_POOL_SLOT;
-        // slither-disable-next-line assembly
-        assembly {
-            tstore(slot, pool)
-        }
+        _CURRENT_METRIC_POOL_SLOT.tstore(pool);
     }
 
     function _getCurrentPool() internal view returns (address pool) {
-        bytes32 slot = _CURRENT_METRIC_POOL_SLOT;
-        // slither-disable-next-line assembly
-        assembly {
-            pool := tload(slot)
-        }
+        pool = _CURRENT_METRIC_POOL_SLOT.tload();
     }
 }

@@ -1,6 +1,7 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {
     SafeERC20,
     IERC20
@@ -12,7 +13,6 @@ import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {Vault} from "./Vault.sol";
 import {ETH_ADDRESS} from "../lib/NativeETH.sol";
 
-error TransferManager__AddressZero();
 error TransferManager__NotAContract(address addr);
 error TransferManager__ExceededTransferFromAllowance(
     uint256 allowedAmount, uint256 amountAttempted
@@ -46,21 +46,26 @@ error TransferManager__UnknownTransferType();
  * swap entry (`_tstoreTransferFromInfo`) and consumed throughout the swap.
  */
 contract TransferManager is Vault {
+    // One directive per slot type: Slither 0.11.6 can fail to analyse a
+    // contract that uses `using TransientSlot for *`.
+    using TransientSlot for TransientSlot.AddressSlot;
+    using TransientSlot for TransientSlot.BooleanSlot;
+    using TransientSlot for TransientSlot.Uint256Slot;
     using SafeERC20 for IERC20;
 
     IAllowanceTransfer public immutable permit2;
-    // keccak256("TransferManager#TOKEN_IN_SLOT")
-    uint256 private constant _TOKEN_IN_SLOT =
-        0xaf58e9f1b0923d55d0ec6a57763d43cd9bb1d6bd8bad5ce9522fbe772c6ec42b;
-    // keccak256("TransferManager#AMOUNT_ALLOWED_SLOT")
-    uint256 private constant _AMOUNT_ALLOWED_SLOT =
-        0x28d0e2684c9341fec58f816e0c375a4e51f9f34ec034a29c97467df00497c8d9;
-    // keccak256("TransferManager#IS_PERMIT2_SLOT")
-    uint256 private constant _IS_PERMIT2_SLOT =
-        0xd847dc13274ab371f6244234290f56fa8650ec9dceff86e20efe1ddc141bdb03;
-    // keccak256("TransferManager#SENDER_SLOT")
-    uint256 private constant _SENDER_SLOT =
-        0x99298391997747e556e81b2d36d99151315b6c1b92e826ca8d37acad5fddaf70;
+    TransientSlot.AddressSlot private constant _TOKEN_IN_SLOT =
+        TransientSlot.AddressSlot
+            .wrap(keccak256("TransferManager#TOKEN_IN_SLOT"));
+    TransientSlot.Uint256Slot private constant _AMOUNT_ALLOWED_SLOT =
+        TransientSlot.Uint256Slot
+            .wrap(keccak256("TransferManager#AMOUNT_ALLOWED_SLOT"));
+    TransientSlot.BooleanSlot private constant _IS_PERMIT2_SLOT =
+        TransientSlot.BooleanSlot
+            .wrap(keccak256("TransferManager#IS_PERMIT2_SLOT"));
+    TransientSlot.AddressSlot private constant _SENDER_SLOT =
+        TransientSlot.AddressSlot
+        .wrap(keccak256("TransferManager#SENDER_SLOT"));
 
     constructor(address permit2_) {
         if (permit2_.code.length == 0) {
@@ -80,7 +85,6 @@ contract TransferManager is Vault {
      * @dev This function is used to store the transfer information in the
      * contract's storage. This is done as the first step in the swap process in TychoRouterV3.
      */
-    // slither-disable-next-line assembly
     function _tstoreTransferFromInfo(
         address tokenIn,
         uint256 amountIn,
@@ -88,13 +92,11 @@ contract TransferManager is Vault {
         bool useVault
     ) internal {
         uint256 amountAllowed = useVault ? 0 : amountIn;
-        assembly {
-            tstore(_TOKEN_IN_SLOT, tokenIn)
-            tstore(_AMOUNT_ALLOWED_SLOT, amountAllowed)
-            tstore(_IS_PERMIT2_SLOT, isPermit2)
-            tstore(_SENDER_SLOT, caller())
-            tstore(_USE_VAULT_SLOT, useVault)
-        }
+        _TOKEN_IN_SLOT.tstore(tokenIn);
+        _AMOUNT_ALLOWED_SLOT.tstore(amountAllowed);
+        _IS_PERMIT2_SLOT.tstore(isPermit2);
+        _SENDER_SLOT.tstore(msg.sender);
+        _USE_VAULT_SLOT.tstore(useVault);
     }
 
     /**
@@ -142,10 +144,7 @@ contract TransferManager is Vault {
 
         // Determine if we need to transfer from user wallet (first swap + not using vault)
         bool useVault;
-        // slither-disable-next-line assembly
-        assembly {
-            useVault := tload(_USE_VAULT_SLOT)
-        }
+        useVault = _USE_VAULT_SLOT.tload();
         bool needsTransferFromUser = isFirstSwap && !useVault;
 
         // Scenario 3 & 4: Protocol will debit tokens from router
@@ -188,6 +187,7 @@ contract TransferManager is Vault {
             return amount;
         }
 
+        // forge-lint: disable-next-line(require-revert-in-loop) Unreachable for the four transfer types; rejects a type added without a branch above.
         revert TransferManager__UnknownTransferType();
     }
 
@@ -210,10 +210,10 @@ contract TransferManager is Vault {
      * In the normal case the protocol consumed the approval, so we skip the expensive
      * forceApprove.
      */
-    // slither-disable-next-line calls-loop
     function _revokeUnconsumedApproval(address token, address spender)
         internal
     {
+        // forge-lint: disable-next-line(calls-loop) Each hop revokes its own spender's approval; a failing token fails the route.
         if (IERC20(token).allowance(address(this), spender) > 0) {
             IERC20(token).forceApprove(spender, 0);
         }
@@ -236,38 +236,34 @@ contract TransferManager is Vault {
         uint256 amountAllowed;
         address sender;
         bool isPermit2;
-
-        // slither-disable-next-line assembly
-        assembly {
-            tokenInStorage := tload(_TOKEN_IN_SLOT)
-            amountAllowed := tload(_AMOUNT_ALLOWED_SLOT)
-            sender := tload(_SENDER_SLOT)
-            isPermit2 := tload(_IS_PERMIT2_SLOT)
-        }
+        tokenInStorage = _TOKEN_IN_SLOT.tload();
+        amountAllowed = _AMOUNT_ALLOWED_SLOT.tload();
+        sender = _SENDER_SLOT.tload();
+        isPermit2 = _IS_PERMIT2_SLOT.tload();
 
         if (amount > amountAllowed) {
+            // forge-lint: disable-next-item(require-revert-in-loop) Pulling more than the swap's input amount fails the route.
             revert TransferManager__ExceededTransferFromAllowance(
                 amountAllowed, amount
             );
         }
         if (token != tokenInStorage) {
+            // forge-lint: disable-next-line(require-revert-in-loop) Pulling a token other than the swap's input fails the route.
             revert TransferManager__DifferentTokenIn(token, tokenInStorage);
         }
 
         // Update remaining allowance
         amountAllowed -= amount;
-        assembly {
-            tstore(_AMOUNT_ALLOWED_SLOT, amountAllowed)
-        }
+        _AMOUNT_ALLOWED_SLOT.tstore(amountAllowed);
 
         uint256 balanceBefore = _balanceOf(token, receiver);
         // Perform the actual transfer
         if (isPermit2) {
             // Permit2.permit is already called from the TychoRouterV3
-            // slither-disable-next-line calls-loop
+            // forge-lint: disable-next-line(calls-loop) Each split from the input token pulls its share from the user; a failing pull fails the route.
             permit2.transferFrom(sender, receiver, uint160(amount), token);
         } else {
-            // slither-disable-next-line arbitrary-send-erc20
+            // forge-lint: disable-next-line(arbitrary-send-erc20) sender is the router's msg.sender, stored by the entry point.
             IERC20(token).safeTransferFrom(sender, receiver, amount);
         }
         uint256 balanceAfter = _balanceOf(token, receiver);
@@ -282,7 +278,7 @@ contract TransferManager is Vault {
         view
         returns (uint256)
     {
-        // slither-disable-next-line calls-loop
+        // forge-lint: disable-next-item(calls-loop) Each hop reads its own token's balances; a failing token fails the route.
         return
             token == ETH_ADDRESS
                 ? owner.balance
@@ -302,6 +298,7 @@ contract TransferManager is Vault {
     {
         uint256 balanceBefore = _balanceOf(token, to);
         if (token == ETH_ADDRESS) {
+            // forge-lint: disable-next-line(arbitrary-send-eth) Sends a swap's output to the receiver its caller chose.
             Address.sendValue(payable(to), amount);
         } else {
             IERC20(token).safeTransfer(to, amount);

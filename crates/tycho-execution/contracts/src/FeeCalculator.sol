@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
@@ -48,9 +48,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     // while positive slippage capture is enabled
     mapping(address => bool) private _positiveSlippageExempt;
 
-    //keccak256("ROUTER_FEE_SETTER_ROLE")
     bytes32 public constant ROUTER_FEE_SETTER_ROLE =
-        0x9939157be7760e9462f1d5a0dcad88b616ddc64138e317108b40b1cf55601348;
+        keccak256("ROUTER_FEE_SETTER_ROLE");
 
     event RouterFeeOnOutputUpdated(uint32 oldFeeBps, uint32 newFeeBps);
     event RouterFeeOnClientFeeUpdated(uint32 oldFeeBps, uint32 newFeeBps);
@@ -222,7 +221,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      *      so unsigned swaps can still benefit from custom router fee rates negotiated with the
      *      client that originated the transaction.
      */
-    // slither-disable-next-line tx-origin
     function _resolveClient(address client) internal view returns (address) {
         return client == address(0) ? tx.origin : client;
     }
@@ -309,7 +307,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         customFees.feeBpsOnOutput = feeBps;
         customFees.hasCustomFeeOnOutput = true;
         _customRouterFees[client] = customFees;
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return add returns false for a client already in the set, which is fine here.
         _customFeeClients.add(client);
 
         emit CustomRouterFeeOnOutputUpdated(client, oldFeeBps, feeBps);
@@ -330,7 +328,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         _customRouterFees[client] = customFees;
 
         if (!customFees.hasCustomFeeOnClientFee) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The client is in the set while it has a custom fee, so remove cannot fail.
             _customFeeClients.remove(client);
         }
 
@@ -376,7 +374,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         customFees.feeBpsOnClientFee = feeBps;
         customFees.hasCustomFeeOnClientFee = true;
         _customRouterFees[client] = customFees;
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return add returns false for a client already in the set, which is fine here.
         _customFeeClients.add(client);
 
         emit CustomRouterFeeOnClientFeeUpdated(client, oldFeeBps, feeBps);
@@ -396,7 +394,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         _customRouterFees[client] = customFees;
 
         if (!customFees.hasCustomFeeOnOutput) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The client is in the set while it has a custom fee, so remove cannot fail.
             _customFeeClients.remove(client);
         }
 

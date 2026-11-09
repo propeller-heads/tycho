@@ -1,0 +1,44 @@
+name: CLA
+
+# Contributors sign the PropellerHeads CLA (CLA.md) once by commenting on their PR.
+# Signatures are stored in signatures/cla.json on the unprotected `cla-signatures` branch.
+on:
+  issue_comment:
+    types: [created]
+  # pull_request_target is required so the bot can comment on and set statuses for fork PRs.
+  # This workflow never checks out or runs code from the pull request.
+  pull_request_target:  # zizmor: ignore[dangerous-triggers]
+    types: [opened, closed, synchronize]
+
+permissions: {}
+
+jobs:
+  cla:
+    name: CLA signature
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request &&
+        (github.event.comment.body == 'recheck' ||
+         github.event.comment.body == 'I have read the PropellerHeads CLA and I hereby sign the CLA'))
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08  # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: signatures/cla.json
+          path-to-document: https://github.com/propeller-heads/tycho/blob/main/CLA.md
+          branch: cla-signatures
+          allowlist: dependabot[bot],github-actions[bot]
+          custom-pr-sign-comment: I have read the PropellerHeads CLA and I hereby sign the CLA
+          custom-notsigned-prcomment: >-
+            Thank you for your contribution. Before we can merge it, please read the
+            [PropellerHeads Contributor License Agreement](https://github.com/propeller-heads/tycho/blob/main/CLA.md)
+            and sign it by posting the comment below. You only need to do this once.
+          create-file-commit-message: "chore(cla): create signature store"
+          signed-commit-message: "chore(cla): $contributorName signed the CLA in #$pullRequestNo"

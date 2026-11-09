@@ -60,7 +60,7 @@ pub struct Inner {
     first_message_processed: bool,
 }
 
-type BatchCommitHandle = tracing::instrument::Instrumented<JoinHandle<Result<(), ExtractionError>>>;
+type BatchCommitHandle = JoinHandle<Result<(), ExtractionError>>;
 
 #[derive(Default)]
 struct GatewayInner<G> {
@@ -100,7 +100,10 @@ where
     T: TokenPreProcessor,
     E: ExtractorExtension,
 {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "takes each dependency of the extractor as a separate argument"
+    )]
     pub async fn new(
         gateway: G,
         database_insert_batch_size: usize,
@@ -292,12 +295,13 @@ where
         gauge!(
             "extractor_sync_block_rate",
             "chain" => extractor_id.chain.to_string(),
-            "extractor" => extractor_id.name.to_string(),
+            "extractor" => extractor_id.name,
         )
         .set(blocks_per_minute);
 
+        let minutes_remaining = distance_to_current as f64 / blocks_per_minute;
         if let Some(time_remaining) =
-            Duration::try_minutes((distance_to_current as f64 / blocks_per_minute) as i64)
+            whole_minutes(minutes_remaining).and_then(Duration::try_minutes)
         {
             let hours = time_remaining.num_hours();
             let minutes = (time_remaining.num_minutes()) % 60;
@@ -311,10 +315,7 @@ where
                 name = "SyncProgress"
             );
         } else {
-            warn!(
-                "Failed to convert {} to a duration",
-                (distance_to_current as f64 / blocks_per_minute) as i64,
-            );
+            warn!("Failed to convert {} minutes to a duration", minutes_remaining,);
             info!(
                 extractor_id = self.name,
                 blocks_per_minute = format!("{blocks_per_minute:.2}"),
@@ -655,7 +656,7 @@ where
         let new_token_addresses = msg
             .protocol_components()
             .into_iter()
-            .flat_map(|pc| pc.tokens.clone().into_iter())
+            .flat_map(|pc| pc.tokens.into_iter())
             .collect::<Vec<_>>();
 
         // Separate between known and unkown tokens
@@ -806,9 +807,7 @@ where
             let (extractor_name, chain) = (self.name.clone(), self.chain);
 
             if let Some(db_commit_handle_to_join) = commit_handle_guard.take() {
-                let needs_await = !db_commit_handle_to_join
-                    .inner()
-                    .is_finished();
+                let needs_await = !db_commit_handle_to_join.is_finished();
                 let now = chrono::Utc::now().naive_utc();
 
                 let result = db_commit_handle_to_join
@@ -835,31 +834,10 @@ where
                 }
             }
 
-            let new_handle = tokio::spawn(async move {
-                let now = std::time::Instant::now();
-
-                let mut it = blocks_to_commit.iter().peekable();
-                while let Some(block) = it.next() {
-                    let force_db_commit = if is_syncing { false } else { it.peek().is_none() };
-
-                    gateway
-                        .advance(block.block_update(), block.cursor(), force_db_commit)
-                        .await
-                        .map_err(ExtractionError::Storage)?;
-                }
-
-                let mut committed_hieght_guard = committed_block_height.lock().await;
-                *committed_hieght_guard = Some(last_block_height);
-
-                trace!(batch_size, block_height = last_block_height, extractor_id = extractor_name, chain = %chain, "CommitTaskCompleted");
-
-                histogram!(
-                    "database_commit_duration_ms", "chain" => chain.to_string(), "extractor" => extractor_name
-                )
-                .record(now.elapsed().as_millis() as f64);
-
-                Ok(())
-            });
+            // Detached from the caller because the commit outlives the block that queued it;
+            // the caller is recorded as a follows-from link instead. The span wraps the task
+            // body, not its `JoinHandle` -- instrumenting the handle would only cover the
+            // await and leave every gateway call inside the task without a parent.
             let commit_span = info_span!(
                 parent: None,
                 "commit_blocks_task",
@@ -869,7 +847,38 @@ where
                 chain = %self.chain,
             );
             commit_span.follows_from(tracing::Span::current().id());
-            let new_handle = new_handle.instrument(commit_span);
+
+            let new_handle = tokio::spawn(
+                async move {
+                    let now = std::time::Instant::now();
+
+                    let mut it = blocks_to_commit.iter().peekable();
+                    while let Some(block) = it.next() {
+                        let force_db_commit =
+                            if is_syncing { false } else { it.peek().is_none() };
+
+                        gateway
+                            .advance(block.block_update(), block.cursor(), force_db_commit)
+                            .await
+                            .map_err(ExtractionError::Storage)?;
+                    }
+
+                    if let Some(flushed) = gateway.flushed_block_height().await {
+                        let mut guard = committed_block_height.lock().await;
+                        *guard = Some(guard.map_or(flushed, |current| current.max(flushed)));
+                    }
+
+                    trace!(batch_size, block_height = last_block_height, extractor_id = extractor_name, chain = %chain, "CommitTaskCompleted");
+
+                    histogram!(
+                        "database_commit_duration_ms", "chain" => chain.to_string(), "extractor" => extractor_name
+                    )
+                    .record(now.elapsed().as_millis() as f64);
+
+                    Ok(())
+                }
+                .instrument(commit_span),
+            );
 
             *commit_handle_guard = Some(new_handle);
 
@@ -919,7 +928,22 @@ enum AttrRevert {
     CreatedInRange { alive: bool },
 }
 
+/// The whole minutes of `minutes`, or `None` when it is not finite or does not fit `i64`.
+fn whole_minutes(minutes: f64) -> Option<i64> {
+    // `i64::MAX as f64` rounds up to 2^63, which is itself out of range, hence the strict bound.
+    if !minutes.is_finite() || minutes.abs() >= i64::MAX as f64 {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "minutes is finite and within the i64 range, checked above; the fraction is dropped"
+    )]
+    let whole = minutes as i64;
+    Some(whole)
+}
+
 /// One event on a (component, attribute) pair, in chronological order.
+#[derive(Clone, Copy)]
 enum AttrEvent {
     Created,
     Updated,
@@ -1151,7 +1175,7 @@ where
         skip_all,
         fields(current_block, current_partial_block_index, target_hash, target_number)
     )]
-    #[allow(clippy::mutable_key_type)] // Clippy thinks that tuple with Bytes are a mutable type.
+    // Clippy thinks that tuple with Bytes are a mutable type.
     async fn handle_revert(
         &self,
         inp: BlockUndoSignal,
@@ -1170,14 +1194,14 @@ where
         let last_processed_block_number = self
             .get_last_processed_block()
             .await
-            .map_or("None".to_string(), |b| b.number.to_string());
+            .map_or_else(|| "None".to_string(), |b| b.number.to_string());
         let current_partial_block_index = self
             .partial_block_buffer
             .lock()
             .await
             .as_ref()
             .and_then(|b| b.partial_block_index)
-            .map_or("None".to_string(), |i| i.to_string());
+            .map_or_else(|| "None".to_string(), |i| i.to_string());
 
         tracing::Span::current().record("current_block", &last_processed_block_number);
         tracing::Span::current()
@@ -1628,7 +1652,7 @@ where
                         created_attributes: HashSet::new(),
                     })
                     .updated_attributes
-                    .insert(key.clone(), value);
+                    .insert(key, value);
                 acc
             });
 
@@ -1765,7 +1789,9 @@ where
 
     #[instrument(skip_all)]
     async fn handle_progress(&self, _inp: ModulesProgress) -> Result<(), ExtractionError> {
-        todo!()
+        Err(ExtractionError::Unknown(
+            "handle_progress is not supported by ProtocolExtractor".to_string(),
+        ))
     }
 }
 pub struct ExtractorPgGateway {
@@ -1988,7 +2014,6 @@ impl ExtractorGateway for ExtractorPgGateway {
         let mut account_changes: Vec<(Bytes, AccountDelta)> = vec![];
         let mut component_balance_changes: Vec<ComponentBalance> = vec![];
         let mut account_balance_changes: Vec<AccountBalance> = vec![];
-        let mut protocol_tokens: HashSet<Bytes> = HashSet::new();
         let mut new_entrypoints: HashMap<ComponentId, HashSet<EntryPoint>> = HashMap::new();
         let mut new_entrypoint_params: HashMap<
             EntryPointId,
@@ -2008,7 +2033,6 @@ impl ExtractorGateway for ExtractorPgGateway {
             // Map new protocol components
             for new_protocol_component in tx_update.protocol_components.values() {
                 new_protocol_components.push(new_protocol_component.clone());
-                protocol_tokens.extend(new_protocol_component.tokens.clone());
             }
 
             // Map new accounts/contracts
@@ -2266,14 +2290,15 @@ mod test {
 
     const EXTRACTOR_NAME: &str = "TestExtractor";
     const TEST_PROTOCOL: &str = "TestProtocol";
-    async fn create_extractor_with_batch_size(
+    async fn create_extractor_with_chain_and_batch_size(
         gw: MockExtractorGateway,
         batch_size: usize,
+        chain: Chain,
     ) -> ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>
     {
         let protocol_types = HashMap::from([("pt_1".to_string(), ProtocolType::default())]);
         let protocol_cache = ProtocolMemoryCache::new(
-            Chain::Ethereum,
+            chain,
             chrono::Duration::seconds(900),
             Arc::new(MockGateway::new()),
         );
@@ -2285,7 +2310,7 @@ mod test {
             gw,
             batch_size,
             EXTRACTOR_NAME,
-            Chain::Ethereum,
+            chain,
             ChainState::default(),
             TEST_PROTOCOL.to_string(),
             protocol_cache,
@@ -2296,6 +2321,14 @@ mod test {
         )
         .await
         .expect("Failed to create extractor")
+    }
+
+    async fn create_extractor_with_batch_size(
+        gw: MockExtractorGateway,
+        batch_size: usize,
+    ) -> ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>
+    {
+        create_extractor_with_chain_and_batch_size(gw, batch_size, Chain::Ethereum).await
     }
 
     async fn create_extractor(
@@ -2348,7 +2381,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -2362,7 +2395,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(2)),
                     ..Default::default()
                 },
@@ -2410,7 +2443,7 @@ mod test {
 
         let scoped = |n: u64, fin: u64| {
             pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(n)),
                     ..Default::default()
                 },
@@ -2422,7 +2455,7 @@ mod test {
             let guard = ex.gateway.commit_handle.lock().await;
             guard
                 .as_ref()
-                .is_some_and(|h| !h.inner().is_finished())
+                .is_some_and(|h| !h.is_finished())
         };
         let commit_task_is_none = async |ex: &ProtocolExtractor<_, _, _>| -> bool {
             ex.gateway
@@ -2527,6 +2560,86 @@ mod test {
         assert_eq!(call_count.load(Ordering::SeqCst), 4, "second commit should be counted");
     }
 
+    /// Syncs blocks 1-3 with batch size 2, so block 3 drains blocks 1 and 2 into a commit task.
+    /// The gateway flushes the writes of blocks up to `flush_through` only. Returns the
+    /// `db_committed_block_height` that block 4 reports after the commit task finished.
+    async fn db_committed_after_drain(flush_through: u64) -> Option<u64> {
+        let flushed = Arc::new(AtomicU64::new(0));
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        let flushed_writer = flushed.clone();
+        gw.expect_advance()
+            .times(2)
+            .returning(move |changes, _, _| {
+                if changes.block.number <= flush_through {
+                    flushed_writer.fetch_max(changes.block.number, Ordering::SeqCst);
+                }
+                Ok(())
+            });
+        let flushed_reader = flushed.clone();
+        gw.expect_flushed_block_height()
+            .returning(move || {
+                let height = flushed_reader.load(Ordering::SeqCst);
+                (height > 0).then_some(height)
+            });
+        let extractor = create_extractor_with_batch_size(gw, 2).await;
+        let scoped = |n: u64| {
+            pb_fixtures::pb_block_scoped_data(
+                &tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(n)),
+                    ..Default::default()
+                },
+                Some(&format!("cursor@{n}")),
+                Some(n),
+            )
+        };
+
+        for n in 1..=3 {
+            extractor
+                .handle_tick_scoped_data(scoped(n))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let commit_task = extractor
+            .gateway
+            .commit_handle
+            .lock()
+            .await
+            .take()
+            .expect("block 3 must start a commit task");
+        commit_task.await.unwrap().unwrap();
+
+        extractor
+            .handle_tick_scoped_data(scoped(4))
+            .await
+            .unwrap()
+            .unwrap()
+            .db_committed_block_height
+    }
+
+    #[tokio::test]
+    async fn test_unflushed_drained_blocks_are_not_reported_as_committed() {
+        assert_eq!(
+            db_committed_after_drain(0).await,
+            Some(0),
+            "before the first flush, the stored cursor block is the committed height"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flushed_height_is_reported_as_committed() {
+        assert_eq!(db_committed_after_drain(1).await, Some(1));
+    }
+
     #[tokio::test]
     async fn test_handle_tick_scoped_data_unknown_message_type() {
         let mut gw = MockExtractorGateway::new();
@@ -2597,7 +2710,7 @@ mod test {
 
         let extractor = create_extractor(gw).await;
 
-        let inp = pb_fixtures::pb_block_scoped_data((), None, None);
+        let inp = pb_fixtures::pb_block_scoped_data(&(), None, None);
         let res = extractor
             .handle_tick_scoped_data(inp)
             .await;
@@ -2605,7 +2718,7 @@ mod test {
         match res {
             Ok(Some(_)) => panic!("Expected Ok(None) but got Ok(Some(..))"),
             Ok(None) => (), // This is the expected case
-            Err(_) => panic!("Expected Ok(None) but got Err(..)"),
+            Err(e) => panic!("Expected Ok(None) but got Err({e:?})"),
         }
         assert_eq!(extractor.get_cursor().await, "cursor@420");
     }
@@ -2642,7 +2755,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges { block: Some(block_1), ..Default::default() },
+                &tycho_pb::BlockChanges { block: Some(block_1), ..Default::default() },
                 Some(format!("cursor@{}", 1).as_str()),
                 Some(1),
             ))
@@ -2653,7 +2766,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges { block: Some(block_2), ..Default::default() },
+                &tycho_pb::BlockChanges { block: Some(block_2), ..Default::default() },
                 Some(format!("cursor@{}", 2).as_str()),
                 Some(2),
             ))
@@ -2676,7 +2789,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges { block: Some(block_3), ..Default::default() },
+                &tycho_pb::BlockChanges { block: Some(block_3), ..Default::default() },
                 Some(format!("cursor@{}", 3).as_str()),
                 Some(2),
             ))
@@ -2696,6 +2809,67 @@ mod test {
                 .timestamp_subsec_micros(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn arc_same_timestamp_blocks_are_broadcast_and_persisted_in_number_order() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        let persisted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let persisted_by_mock = Arc::clone(&persisted);
+        gw.expect_advance()
+            .times(2)
+            .returning(move |changes, _, _| {
+                persisted_by_mock
+                    .lock()
+                    .unwrap()
+                    .push(changes.block.number);
+                Ok(())
+            });
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+
+        let extractor = create_extractor_with_chain_and_batch_size(gw, 1, Chain::Arc).await;
+        let timestamp = pb_fixtures::pb_blocks(1).ts;
+        let mut broadcast = Vec::new();
+
+        for number in 1..=3 {
+            let mut block = pb_fixtures::pb_blocks(number);
+            block.ts = timestamp;
+            let message = extractor
+                .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                    &tycho_pb::BlockChanges { block: Some(block), ..Default::default() },
+                    Some(format!("cursor@{number}").as_str()),
+                    Some(number),
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(message.chain, Chain::Arc);
+            broadcast.push(message.block.number);
+        }
+
+        let commit_handle = extractor
+            .gateway
+            .commit_handle
+            .lock()
+            .await
+            .take();
+        if let Some(handle) = commit_handle {
+            handle.await.unwrap().unwrap();
+        }
+
+        assert_eq!(broadcast, vec![1, 2, 3]);
+        assert_eq!(*persisted.lock().unwrap(), vec![1, 2]);
+        assert_eq!(extractor.get_cursor().await, "cursor@3");
     }
 
     fn token_prices() -> HashMap<Bytes, f64> {
@@ -2807,6 +2981,10 @@ mod test {
             100,
         );
         let ret = vec![t3.clone()];
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test runs on a multi-thread runtime (`flavor = \"multi_thread\"`)"
+        )]
         preprocessor
             .expect_get_tokens()
             .return_once(|_, balance_owner_store, _| {
@@ -3038,7 +3216,9 @@ mod test {
     /// `pb_vm_block_changes(block_num)`. This method strips balance changes and token balances
     /// to avoid triggering TVL code paths, which would require the CachedGateway to be setup.
     fn make_partial_block_with_data(block_num: u64, partial_index: u32) -> BlockScopedData {
-        let mut msg = pb_fixtures::pb_vm_block_changes(block_num as u8 + partial_index as u8);
+        let mut msg = pb_fixtures::pb_vm_block_changes(
+            u8::try_from(block_num).unwrap() + u8::try_from(partial_index).unwrap(),
+        );
         msg.block = Some(pb_fixtures::pb_blocks(block_num));
         for tx in &mut msg.changes {
             // Rename a protocol type to be consistent with extractor fixtures.
@@ -3055,7 +3235,7 @@ mod test {
             }
         }
         let mut bsd = pb_fixtures::pb_block_scoped_data(
-            msg,
+            &msg,
             Some(&format!("cursor@{block_num}_p{partial_index}")),
             Some(block_num),
         );
@@ -3068,7 +3248,7 @@ mod test {
     /// `pb_vm_block_changes(block_num)`. This method strips balance changes and token balances to
     /// avoid triggering TVL code paths, which would require the CachedGateway to be setup.
     fn make_full_block_with_data(block_num: u64, final_block_height: u64) -> BlockScopedData {
-        let mut msg = pb_fixtures::pb_vm_block_changes(block_num as u8);
+        let mut msg = pb_fixtures::pb_vm_block_changes(u8::try_from(block_num).unwrap());
         msg.block = Some(pb_fixtures::pb_blocks(block_num));
         for tx in &mut msg.changes {
             // Rename a protocol type to be consistent with extractor fixtures.
@@ -3085,7 +3265,7 @@ mod test {
             }
         }
         pb_fixtures::pb_block_scoped_data(
-            msg,
+            &msg,
             Some(&format!("cursor@{block_num}")),
             Some(final_block_height),
         )
@@ -3265,7 +3445,7 @@ mod test {
         // Block 1
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3323,7 +3503,7 @@ mod test {
         // ── Block 1: empty anchor ──
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3437,7 +3617,7 @@ mod test {
         // ── Block 1: empty anchor ──
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3537,7 +3717,7 @@ mod test {
         let cursor = format!("cursor@{block}");
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges {
+                &PbBlockChanges {
                     block: Some(pb_fixtures::pb_blocks(block)),
                     changes: txs,
                     ..Default::default()
@@ -3559,7 +3739,7 @@ mod test {
     ) {
         let cursor = format!("cursor@{block}_p{partial_index}");
         let mut partial = pb_fixtures::pb_block_scoped_data(
-            PbBlockChanges {
+            &PbBlockChanges {
                 block: Some(pb_fixtures::pb_blocks(block)),
                 changes: txs,
                 ..Default::default()
@@ -3692,7 +3872,7 @@ mod test {
         let extractor = create_extractor_with_batch_size(revert_test_gateway(), 1).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3751,7 +3931,7 @@ mod test {
         let extractor = create_extractor(no_lookup_gateway()).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3808,7 +3988,7 @@ mod test {
         let extractor = create_extractor_with_batch_size(revert_test_gateway(), 1).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3885,7 +4065,7 @@ mod test {
         let extractor = create_extractor(no_lookup_gateway()).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3917,7 +4097,7 @@ mod test {
         let extractor = create_extractor(no_lookup_gateway()).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3961,7 +4141,7 @@ mod test {
         let extractor = create_extractor(no_lookup_gateway()).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -4006,7 +4186,7 @@ mod test {
         let extractor = create_extractor_with_batch_size(revert_test_gateway(), 1).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -4061,7 +4241,7 @@ mod test {
         let extractor = create_extractor(no_lookup_gateway()).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -5556,7 +5736,7 @@ mod test_serial_db {
                                 balance: Bytes::from(&[0u8]),
                                 balance_float: 10.0,
                                 modify_tx: VM_TX_HASH_1.parse().unwrap(),
-                                component_id: component_id.clone(),
+                                component_id,
                             },
                         )]),
                     )]),
@@ -5580,7 +5760,7 @@ mod test_serial_db {
     }
 
     // Tests a forward call with a native contract creation and an account update
-    #[ignore]
+    #[ignore = "requires a running Postgres"]
     #[tokio::test]
     async fn test_forward_native_protocol() {
         run_against_db(|pool| async move {
@@ -5666,7 +5846,7 @@ mod test_serial_db {
                     None,
                     &BlockOrTimestamp::Block(BlockIdentifier::Number((
                         Chain::Ethereum,
-                        msg.block.number as i64,
+                        i64::try_from(msg.block.number).unwrap(),
                     ))),
                 )
                 .await
@@ -5761,7 +5941,13 @@ mod test_serial_db {
             }
 
             // Wait for the extractor to finish processing
-            if let Some(handle) = extractor.gateway.commit_handle.lock().await.take() {
+            let commit_handle = extractor
+                .gateway
+                .commit_handle
+                .lock()
+                .await
+                .take();
+            if let Some(handle) = commit_handle {
                 handle.await.unwrap().unwrap();
             }
 
@@ -5947,7 +6133,13 @@ mod test_serial_db {
             }
 
             // Wait for the extractor to finish processing
-            if let Some(handle) = extractor.gateway.commit_handle.lock().await.take() {
+            let commit_handle = extractor
+                .gateway
+                .commit_handle
+                .lock()
+                .await
+                .take();
+            if let Some(handle) = commit_handle {
                 handle.await.unwrap().unwrap();
             }
 
@@ -6052,7 +6244,7 @@ mod test_serial_db {
                         token: Bytes::from_str(USDC_ADDRESS).unwrap(),
                         balance: Bytes::from("0x00000064"),
                         modify_tx:Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000007532").unwrap(),
-                        account: account1.clone(),
+                        account: account1,
                         }),
                     ])),
                     (account2.clone(), HashMap::from([
@@ -6060,7 +6252,7 @@ mod test_serial_db {
                         token: Bytes::from_str(USDC_ADDRESS).unwrap(),
                         balance: Bytes::from("0x00000001"),
                         modify_tx:Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000007531").unwrap(),
-                        account: account2.clone(),
+                        account: account2,
                         }),
                     ]))
                 ]),
@@ -6143,16 +6335,19 @@ mod test_serial_db {
             .expect("Failed to create extractor");
 
             // Send a sequence of block scoped data with the same timestamp.
-            let base_ts = db_fixtures::yesterday_midnight()
-                .and_utc()
-                .timestamp() as u64;
+            let base_ts = u64::try_from(
+                db_fixtures::yesterday_midnight()
+                    .and_utc()
+                    .timestamp(),
+            )
+            .unwrap();
             let versions = [1, 2, 3, 4];
 
             let inp_sequence = versions
                 .into_iter()
                 .map(|version| {
                     pb_fixtures::pb_block_scoped_data(
-                        tycho_pb::BlockChanges {
+                        &tycho_pb::BlockChanges {
                             block: Some(tycho_pb::Block {
                                 number: version,
                                 hash: Bytes::from(version)
@@ -6186,13 +6381,13 @@ mod test_serial_db {
             }
 
             // Wait for the extractor to finish processing
-            if let Some(handle) = extractor
+            let commit_handle = extractor
                 .gateway
                 .commit_handle
                 .lock()
                 .await
-                .take()
-            {
+                .take();
+            if let Some(handle) = commit_handle {
                 handle.await.unwrap().unwrap();
             }
 
@@ -6213,7 +6408,7 @@ mod test_serial_db {
             // New block #4 should have the same timestamp as block #3.
             extractor
                 .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                    tycho_pb::BlockChanges {
+                    &tycho_pb::BlockChanges {
                         block: Some(tycho_pb::Block {
                             number: 4,
                             hash: Bytes::from(4_u64).lpad(32, 0).to_vec(),
@@ -6249,27 +6444,27 @@ mod test_serial_db {
     ) -> impl Iterator<Item = crate::pb::sf::substreams::rpc::v2::BlockScopedData> {
         vec![
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_native_block_changes(1),
+                &pb_fixtures::pb_native_block_changes(1),
                 Some(format!("cursor@{}", 1).as_str()),
                 Some(1), // Syncing (buffered)
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_native_block_changes(2),
+                &pb_fixtures::pb_native_block_changes(2),
                 Some(format!("cursor@{}", 2).as_str()),
                 Some(1), // Buffered
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_native_block_changes(3),
+                &pb_fixtures::pb_native_block_changes(3),
                 Some(format!("cursor@{}", 3).as_str()),
                 Some(1), // Buffered
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_native_block_changes(4),
+                &pb_fixtures::pb_native_block_changes(4),
                 Some(format!("cursor@{}", 4).as_str()),
                 Some(1), // Buffered
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_native_block_changes(5),
+                &pb_fixtures::pb_native_block_changes(5),
                 Some(format!("cursor@{}", 5).as_str()),
                 Some(3), // Buffered + flush 1 + 2
             ),
@@ -6281,27 +6476,27 @@ mod test_serial_db {
     ) -> impl Iterator<Item = crate::pb::sf::substreams::rpc::v2::BlockScopedData> {
         vec![
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_vm_block_changes(1),
+                &pb_fixtures::pb_vm_block_changes(1),
                 Some(format!("cursor@{}", 1).as_str()),
                 Some(1), // Syncing (buffered)
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_vm_block_changes(2),
+                &pb_fixtures::pb_vm_block_changes(2),
                 Some(format!("cursor@{}", 2).as_str()),
                 Some(1), // Buffered
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_vm_block_changes(3),
+                &pb_fixtures::pb_vm_block_changes(3),
                 Some(format!("cursor@{}", 3).as_str()),
                 Some(1), // Buffered
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_vm_block_changes(4),
+                &pb_fixtures::pb_vm_block_changes(4),
                 Some(format!("cursor@{}", 4).as_str()),
                 Some(1), // Buffered
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_vm_block_changes(5),
+                &pb_fixtures::pb_vm_block_changes(5),
                 Some(format!("cursor@{}", 5).as_str()),
                 Some(3), // Buffered + flush 1 + 2
             ),

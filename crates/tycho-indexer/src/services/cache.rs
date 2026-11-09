@@ -15,6 +15,12 @@ use mini_moka::sync::Cache;
 use tokio::sync::MutexGuard;
 use tracing::{debug, instrument, trace, Level};
 
+/// Converts a byte size to the `u32` cache weight, saturating at `u32::MAX` for entries larger
+/// than 4 GiB.
+fn saturating_u32(size: usize) -> u32 {
+    u32::try_from(size).unwrap_or(u32::MAX)
+}
+
 /// A wrapper around the cached value that also tracks its size.
 /// The value is wrapped in a Mutex to allow for in-flight requests to be handled correctly.
 /// The size is stored in an AtomicU32 to allow for concurrent read/write access.
@@ -42,14 +48,31 @@ impl<V: DeepSizeOf + Send + Sync> ValueWithSize<V> {
     /// the value at the same time.
     fn update(&self, new_value: Arc<V>, mut value_update_guard: MutexGuard<Option<Arc<V>>>) {
         self.size
-            .store(new_value.deep_size_of() as u32, Ordering::Relaxed);
+            .store(saturating_u32(new_value.deep_size_of()), Ordering::Relaxed);
         *value_update_guard = Some(new_value);
     }
+}
+
+/// The response caches of the RPC handler, one per endpoint. Set the ones to turn off per
+/// deployment with `DISABLED_RPC_CACHES`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "snake_case")]
+pub enum RpcCacheKind {
+    /// `/contract_state` responses.
+    ContractStorage,
+    /// `/protocol_state` responses.
+    ProtocolState,
+    /// `/protocol_components` responses.
+    ProtocolComponents,
+    /// `/traced_entry_points` responses.
+    TracedEntryPoints,
 }
 
 pub struct RpcCache<R, V> {
     name: String,
     cache: Cache<R, Arc<ValueWithSize<V>>>,
+    /// When `false`, every `get` runs the fallback and stores nothing.
+    enabled: bool,
 }
 
 impl<R, V> RpcCache<R, V>
@@ -57,9 +80,14 @@ where
     R: Clone + Hash + Eq + Send + Sync + Debug + DeepSizeOf + 'static,
     V: Send + Sync + DeepSizeOf + 'static,
 {
+    #[cfg(test)]
+    pub(crate) fn contains(&self, request: &R) -> bool {
+        self.cache.contains_key(request)
+    }
+
     pub fn new(name: &str, capacity: u64, ttl: u64) -> Self {
         let weigher = Box::new(|key: &R, value_with_size: &Arc<ValueWithSize<V>>| {
-            let key_weight = key.deep_size_of() as u32;
+            let key_weight = saturating_u32(key.deep_size_of());
             value_with_size
                 .size()
                 .saturating_add(key_weight)
@@ -71,7 +99,12 @@ where
             .weigher(weigher)
             .build();
 
-        Self { name: name.to_string(), cache }
+        Self { name: name.to_string(), cache, enabled: true }
+    }
+
+    /// Turns the cache off: every `get` runs the fallback and stores nothing.
+    pub fn disable(&mut self) {
+        self.enabled = false;
     }
 
     #[instrument(
@@ -90,13 +123,19 @@ where
         request: R,
         fallback: F,
     ) -> Result<Arc<V>, E> {
+        if !self.enabled {
+            trace!("CacheDisabled");
+            let (response, _) = (fallback)(request).await?;
+            return Ok(Arc::new(response));
+        }
         tracing::Span::current().record("size", self.cache.entry_count());
         // Check the cache for a cached response
         if let Some(inflight_val) = self.cache.get(&request) {
             // the value is present or is being written to
             // If the values is None, we likely hit a should_cache = false entry while in-flight,
             //  so we simply behave as if it was a cache miss.
-            if let Some(res) = inflight_val.value.lock().await.clone() {
+            let inflight_res = inflight_val.value.lock().await.clone();
+            if let Some(res) = inflight_res {
                 tracing::Span::current().record("miss", false);
                 trace!("CacheHit");
                 counter!("rpc_cache_hits", "cache" => self.name.clone()).increment(1);
@@ -189,6 +228,25 @@ mod test {
         let mut guard = access_counter.lock().await;
         *guard += 1;
         Ok((1, true))
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_disabled_cache_runs_fallback_every_time() {
+        let access_counter = Arc::new(Mutex::new(0));
+        let mut cache = RpcCache::<String, i32>::new("test", 100, 3600);
+        cache.disable();
+
+        for _ in 0..2 {
+            cache
+                .get("k0".to_string(), |_| async {
+                    increment_counter(access_counter.clone()).await
+                })
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(*access_counter.lock().await, 2);
+        assert_eq!(cache.cache.entry_count(), 0);
     }
 
     #[test_log::test(tokio::test)]

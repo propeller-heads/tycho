@@ -56,6 +56,10 @@ pub enum BlockPositionAssumption {
 ///
 /// This struct can be extended to include additional attributes for other decoders in the future
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; making every field public or private is a breaking change"
+)]
 pub struct DecoderContext {
     pub adapter_path: Option<String>,
     pub vm_traces: Option<bool>,
@@ -70,6 +74,13 @@ pub struct DecoderContext {
     /// Set internally by the decoder from its registered override providers; not part of the
     /// public API. External consumers never set this — overrides are fully handled by the library.
     pub(crate) live_override: Option<watch::Receiver<OverrideSnapshot>>,
+    /// Chain the decoded components live on.
+    ///
+    /// Stamped by [`TychoStreamDecoder`](crate::evm::decoder::TychoStreamDecoder) at registration,
+    /// so it is `None` only for a context that never went through a decoder. Decoders whose
+    /// behaviour depends on the chain (currently the Uniswap V4 hook handler registry) reject the
+    /// snapshot when it is `None` rather than assume one.
+    pub chain: Option<Chain>,
 }
 
 impl DecoderContext {
@@ -79,7 +90,18 @@ impl DecoderContext {
             vm_traces: None,
             block_position: BlockPositionAssumption::default(),
             live_override: None,
+            chain: None,
         }
+    }
+
+    /// Declares the chain the decoded components live on.
+    ///
+    /// Registering the context with a
+    /// [`TychoStreamDecoder`](crate::evm::decoder::TychoStreamDecoder) overrides whatever is
+    /// set here with the decoder's own chain.
+    pub fn chain(mut self, chain: Chain) -> Self {
+        self.chain = Some(chain);
+        self
     }
 
     pub fn block_position_assumption(mut self, assumption: BlockPositionAssumption) -> Self {
@@ -126,8 +148,14 @@ pub struct ProtocolComponent {
 }
 
 impl ProtocolComponent {
-    #[allow(deprecated)]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        deprecated,
+        reason = "fills the deprecated address field so consumers still reading it get a value"
+    )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         id: Bytes,
         protocol_system: String,
@@ -159,7 +187,7 @@ impl ProtocolComponent {
     ) -> Self {
         let id = Bytes::from(core_model.id.as_str());
         ProtocolComponent::new(
-            id.clone(),
+            id,
             core_model.protocol_system,
             core_model.protocol_type_name,
             core_model.chain,
@@ -200,7 +228,7 @@ where
     type Error;
 
     fn try_from_with_header(
-        value: T,
+        snapshot: T,
         block: H,
         account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
         all_tokens: &HashMap<Bytes, Token>,
@@ -212,7 +240,7 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Update {
-    pub block_number_or_timestamp: u64,
+    pub block_number: u64,
     /// True when this update is for a partial (pre-confirmation) block, false for full blocks.
     #[serde(default)]
     pub is_partial: bool,
@@ -236,7 +264,7 @@ impl Update {
         new_pairs: HashMap<String, ProtocolComponent>,
     ) -> Self {
         Update {
-            block_number_or_timestamp: block_number,
+            block_number,
             is_partial: false,
             sync_states: HashMap::new(),
             states,

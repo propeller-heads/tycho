@@ -1,8 +1,12 @@
 use num_bigint::BigUint;
 
 use super::{
-    constants::{PRICE_LEVEL_STREAM_PREFIX, PROPAMM_FALLBACK_PREFIX},
+    constants::{
+        FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
+        SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS,
+    },
     group_swaps::group_swaps,
+    subsidy::encoded_subsidy,
 };
 use crate::encoding::models::{Solution, Strategy, UserTransferType};
 
@@ -23,11 +27,15 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "pancakeswap_v3",
     "uniswap_v4",
     "uniswap_v4_hooks",
+    "pancakeswap_infinity_cl",
+    "pancakeswap_infinity_cl_hooks",
+    "pancakeswap_infinity_bin",
     "ekubo_v2",
     "ekubo_v3",
     "aerodrome_slipstreams",
     "velodrome_slipstreams",
     "up_v3",
+    "aero_cl",
     "vm:balancer_v3",
 ];
 
@@ -37,15 +45,24 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
 ///
 /// This list is incomplete on its own: whole protocol families can qualify too. Use
 /// [`optimizable_transfer_in`] for the full classification.
-pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] =
-    &["erc4626", "maverick_v2", "uniswap_v2", "sushiswap_v2", "pancakeswap_v2", "quickswap_v2"];
+pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] = &[
+    "biconomy",
+    "erc4626",
+    "maverick_v2",
+    "uniswap_v2",
+    "sushiswap_v2",
+    "pancakeswap_v2",
+    "quickswap_v2",
+];
 
 /// Whether the router-to-pool input transfer is skipped for `protocol_system` (see
 /// [`PROTOCOLS_OPTIMIZABLE_TRANSFER_IN`]). Price-level-stream pAMMs are push-payment venues whose
 /// `fundsExpectedAddress` is the venue itself, so the whole `pricelevelstream:` family qualifies.
+/// The `fallback:` family is push-payment too, with the TychoFallbackRouter as the funded address.
 pub fn optimizable_transfer_in(protocol_system: &str) -> bool {
     PROTOCOLS_OPTIMIZABLE_TRANSFER_IN.contains(&protocol_system) ||
-        protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX)
+        protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX) ||
+        protocol_system.starts_with(FALLBACK_PREFIX)
 }
 
 /// Exact-name protocols where the router must `approve(protocol)` before swapping
@@ -66,32 +83,45 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
 ];
 
 /// Whether the router must approve the protocol before swapping (see
-/// `PROTOCOLS_NEEDING_APPROVAL`). The PropAMMRouter pulls `tokenIn` with `transferFrom`, so the
-/// whole `propammfallback:` family needs the approval.
+/// `PROTOCOLS_NEEDING_APPROVAL`).
 pub fn needs_approval(protocol_system: &str) -> bool {
-    PROTOCOLS_NEEDING_APPROVAL.contains(&protocol_system) ||
-        protocol_system.starts_with(PROPAMM_FALLBACK_PREFIX)
+    PROTOCOLS_NEEDING_APPROVAL.contains(&protocol_system)
 }
 
-/// Extra gas the PropAMMRouter adds around the venue swap: the `transferFrom` that pulls `tokenIn`
-/// out of the TychoRouter, the venue whitelist read, and its own accounting. Measured on mainnet
-/// forks by the router authors at +48,972 (FermiSwap) and +69,952 (Kipseli) over a direct venue
-/// call; the higher figure is used so the estimate is not optimistic.
+/// Extra gas a fallback router adds around a primary fill: the `executePrimary` try/catch
+/// self-call, paying the primary, the `nonReentrant` guard and the no-output balance check. The
+/// router is push-funded, so the input transfer is charged separately and this sits on top of it.
+/// Metric and Bebop legs add their own extras on top.
 ///
-/// The pull is inside this figure, which is why `estimate_transfer_overhead` charges no separate
-/// input transfer for the family.
-///
-/// The Uniswap V3 retry is not included, and it costs far more than this: the whole router call on
-/// the retry path measures 249,895 gas against 106,784 for the same Uniswap V3 swap called
-/// directly (`PropAMMFallbackExecutorTest.testFallbackPathGas` and `testDirectUniswapV3Gas`, block
-/// 25682938). A leg that actually falls back therefore costs about 180k more than estimated here.
-/// The estimate prices the venue path because that is the path a fresh quote takes.
-pub const PROPAMM_FALLBACK_OVERHEAD_GAS: u64 = 70_000;
+/// A swap that actually falls back pays for the fallback protocol on top.
+pub const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 40_000;
+
+/// Gas for `MetricFallbackRouter`'s `quoteFallback` call, which prices the fallback protocol
+/// before the router picks a side. The cost depends on how much of the fallback pool's liquidity
+/// the quote walks; this covers most quotes on a concentrated-liquidity pool.
+pub const METRIC_FALLBACK_QUOTE_GAS: u64 = 100_000;
+
+/// Extra gas of a subsidized swap.
+pub const SUBSIDY_GAS: u64 = 65_000;
 
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
 pub const PROTOCOLS_OUTPUT_TO_ROUTER: &[&str] =
-    &["vm:curve", "rocketpool", "fluid_v1", "native_wrapper"];
+    &["vm:curve", "rocketpool", "fluid_v1", "native_wrapper", "lido_v4"];
+
+/// Mainnet stETH, the only Lido input token whose leg the router has to approve. Lido is
+/// configured on mainnet only, so a plain constant is enough.
+const LIDO_STETH_ADDRESS: [u8; 20] =
+    alloy::primitives::hex!("ae7ab96520DE3A18E5e111B5EaAb095312D7fE84");
+
+/// Only the stETH -> wstETH leg approves the wrapper to debit stETH.
+/// Submit legs send native ETH; unwrap burns wstETH held by the router.
+fn lido_leg_needs_approval(
+    protocol_system: &str,
+    token_in: &tycho_common::models::token::Token,
+) -> bool {
+    protocol_system == "lido_v4" && token_in.address.as_ref() == LIDO_STETH_ADDRESS
+}
 
 pub const ROUTER_FEES_ACTIVE: bool = true;
 
@@ -112,6 +142,10 @@ pub const ROUTER_FEES_ACTIVE: bool = true;
 ///   pay nothing extra. Non-callback protocols add the full user transfer cost. For split swaps,
 ///   funds always go through the router first, so the full user input transfer is always added
 ///   regardless of protocol type.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "public API; taking `&Strategy` is a breaking change"
+)]
 pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
     let mut total_gas = BigUint::ZERO;
     let swap_groups = group_swaps(solution.swaps());
@@ -125,6 +159,14 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
             &strategy,
         );
         total_gas += group_transfer_overhead + &group.estimated_gas;
+        // `MetricFallbackRouter` quotes the pool by running its swap, then quotes the fallback.
+        if group.protocol_system == METRIC_FALLBACK_PROTOCOL_SYSTEM {
+            total_gas += &group.estimated_gas;
+            total_gas += BigUint::from(METRIC_FALLBACK_QUOTE_GAS);
+        }
+    }
+    if encoded_subsidy(solution).is_some() {
+        total_gas += BigUint::from(SUBSIDY_GAS);
     }
 
     // Add user transfer overhead
@@ -143,8 +185,10 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
             } else {
                 total_gas += BigUint::from(match *solution.user_transfer_type() {
                     UserTransferType::TransferFromPermit2 => USER_PERMIT2_TRANSFER,
-                    _ => DEFAULT_TOKEN_TRANSFER_GAS, /* TransferFrom and UseVaultsFunds have
-                                                      * similar overheads */
+                    UserTransferType::TransferFrom | UserTransferType::UseVaultsFunds => {
+                        DEFAULT_TOKEN_TRANSFER_GAS
+                    } /* TransferFrom and UseVaultsFunds have
+                       * similar overheads */
                 });
             }
         }
@@ -152,8 +196,10 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
         // for split swaps the funds always go through the router first
         total_gas += BigUint::from(match *solution.user_transfer_type() {
             UserTransferType::TransferFromPermit2 => USER_PERMIT2_TRANSFER,
-            _ => DEFAULT_TOKEN_TRANSFER_GAS, /* TransferFrom and UseVaultsFunds have
-                                              * similar overheads */
+            UserTransferType::TransferFrom | UserTransferType::UseVaultsFunds => {
+                DEFAULT_TOKEN_TRANSFER_GAS
+            } /* TransferFrom and UseVaultsFunds have
+               * similar overheads */
         });
     }
 
@@ -219,23 +265,27 @@ fn estimate_transfer_overhead(
     // - Callback protocols handle it inside the callback (part of swap gas).
     // - Protocols that can have an optimizable transfer in should not be included here either
     //   because the extra transfer is skipped but only if the strategy is not Split
-    // - The PropAMMRouter pulls tokenIn itself and PROPAMM_FALLBACK_OVERHEAD_GAS already prices
-    //   that pull, so charging a transfer here would count it twice.
     if !PROTOCOLS_CALLBACK.contains(&protocol_system) &&
-        !protocol_system.starts_with(PROPAMM_FALLBACK_PREFIX) &&
         (!optimizable_transfer_in(protocol_system) || *strategy == Strategy::Split)
     {
         overhead += transfer_token_gas(token_in);
     }
 
-    if needs_approval(protocol_system) {
+    if needs_approval(protocol_system) || lido_leg_needs_approval(protocol_system, token_in) {
         overhead += BigUint::from(TOKEN_APPROVAL_GAS);
     }
 
-    // The venue swap gas from `get_amount_out` prices a direct call to an already-funded venue,
-    // not one wrapped by the PropAMMRouter.
-    if protocol_system.starts_with(PROPAMM_FALLBACK_PREFIX) {
-        overhead += BigUint::from(PROPAMM_FALLBACK_OVERHEAD_GAS);
+    // The pAMM gas from `get_amount_out` prices a direct call to an already-funded pAMM; the
+    // TychoFallbackRouter's own work — including the transfer that funds the pAMM from the
+    // fallback router — comes on top.
+    if protocol_system.starts_with(FALLBACK_PREFIX) {
+        overhead += BigUint::from(FALLBACK_ROUTER_OVERHEAD_GAS);
+    }
+
+    // The signed-quote routers approve the venue themselves and forward the output.
+    if SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system) {
+        overhead += BigUint::from(TOKEN_APPROVAL_GAS);
+        overhead += transfer_token_gas(token_out);
     }
 
     // Output transfer: router -> receiver/next pool (only when outputToRouter).
@@ -249,10 +299,54 @@ fn estimate_transfer_overhead(
 #[cfg(test)]
 mod tests {
     use num_bigint::BigUint;
+    use rstest::rstest;
     use tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
     use super::*;
-    use crate::encoding::models::{default_token, Solution, Strategy, Swap, UserTransferType};
+    use crate::encoding::{
+        evm::constants::{
+            BEBOP_FALLBACK_PROTOCOL_SYSTEM, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
+            LIQUORICE_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
+        },
+        models::{default_token, Solution, Strategy, Swap, UserTransferType},
+    };
+
+    fn lido_swap(token_in: Bytes, token_out: Bytes) -> Swap {
+        Swap::new(
+            ProtocolComponent { protocol_system: "lido_v4".to_string(), ..Default::default() },
+            default_token(token_in),
+            default_token(token_out),
+            BigUint::from(100_000u64),
+        )
+    }
+
+    /// Every Lido direction has `outputToRouter = true`, so each one pays an output transfer;
+    /// only the wrap leg debits stETH from the router and needs the approval on top.
+    #[test]
+    fn lido_overhead_charges_the_output_transfer_and_only_the_wrap_approval() {
+        let eth = Bytes::from(vec![0u8; 20]);
+        let steth = Bytes::from(LIDO_STETH_ADDRESS.to_vec());
+        let wsteth = Bytes::from(vec![0x77u8; 20]);
+
+        let overhead = |token_in: Bytes, token_out: Bytes| {
+            let swap = lido_swap(token_in, token_out);
+            estimate_transfer_overhead(
+                "lido_v4",
+                swap.token_in(),
+                swap.token_out(),
+                &Strategy::Single,
+            )
+        };
+
+        // One transfer in, one transfer out, each priced from the token's own measured gas.
+        let one_transfer = transfer_token_gas(&default_token(Bytes::from(vec![0u8; 20])));
+        let input_and_output = &one_transfer + &one_transfer;
+
+        assert_eq!(overhead(eth.clone(), steth.clone()), input_and_output);
+        assert_eq!(overhead(eth, wsteth.clone()), input_and_output);
+        assert_eq!(overhead(wsteth.clone(), steth.clone()), input_and_output);
+        assert_eq!(overhead(steth, wsteth), input_and_output + BigUint::from(TOKEN_APPROVAL_GAS));
+    }
 
     fn make_swap(protocol: &str) -> Swap {
         Swap::new(
@@ -326,39 +420,78 @@ mod tests {
     }
 
     #[test]
-    fn test_single_propamm_fallback() {
-        // Routing the same venue through the PropAMMRouter switches the leg to ProtocolWillDebit:
-        // the router approves, then the PropAMMRouter pulls tokenIn itself.
-        let solution = make_solution(vec![make_swap("propammfallback:fermiswap")]);
+    fn test_single_fallback_router() {
+        // Routing a pAMM through the TychoFallbackRouter keeps the leg push-payment (the funded
+        // address is the fallback router), so no input transfer; the wrapper overhead is extra.
+        let solution = make_solution(vec![make_swap("fallback:fermiswap")]);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
 
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
-        // input transfer                            0  ← the PropAMMRouter pulls, see below
-        // approval                             25_000  ← TOKEN_APPROVAL_GAS
-        // PropAMMRouter overhead               70_000  ← PROPAMM_FALLBACK_OVERHEAD_GAS, which
-        //                                                prices the pull
+        // input transfer                            0  ← push-payment, funds sent directly
+        // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
         // pool gas                            100_000
         // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER
-        assert_eq!(gas, BigUint::from(295_000u64));
+        assert_eq!(gas, BigUint::from(240_000u64));
     }
 
     #[test]
-    fn test_split_propamm_fallback() {
-        // Split does not reintroduce the input transfer: the leg is still ProtocolWillDebit, so
-        // the PropAMMRouter pulls from the router either way.
+    fn test_single_metric_fallback_router() {
+        let solution = make_solution(vec![make_swap(METRIC_FALLBACK_PROTOCOL_SYSTEM)]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
+        // fallback quote                      100_000  ← METRIC_FALLBACK_QUOTE_GAS
+        // pool gas                            100_000
+        // simulated quote                     100_000  ← the pool gas again
+        // fee output transfer                  60_000
+        assert_eq!(gas, BigUint::from(440_000u64));
+    }
+
+    #[test]
+    fn test_single_bebop_fallback_router() {
+        let solution = make_solution(vec![make_swap(BEBOP_FALLBACK_PROTOCOL_SYSTEM)]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
+        // settlement approval                  25_000  ← TOKEN_APPROVAL_GAS
+        // output forward                       60_000  ← TOKEN_GAS
+        // pool gas                            100_000
+        // fee output transfer                  60_000
+        assert_eq!(gas, BigUint::from(325_000u64));
+    }
+
+    #[rstest]
+    #[case::hashflow(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM)]
+    #[case::native(NATIVE_FALLBACK_PROTOCOL_SYSTEM)]
+    #[case::liquorice(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM)]
+    fn test_single_signed_quote_fallback_router(#[case] protocol_system: &str) {
+        let solution = make_solution(vec![make_swap(protocol_system)]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // The same charges as the Bebop fallback router.
+        assert_eq!(gas, BigUint::from(325_000u64));
+    }
+
+    #[test]
+    fn test_split_fallback_router() {
+        // Split funds always route through the router first, so the router→fallback-router
+        // transfer is back on top of the wrapper overhead.
         let solution = make_solution(vec![
-            make_swap("propammfallback:fermiswap").with_split(0.5),
-            make_swap("propammfallback:kipseli").with_split(0.5),
+            make_swap("fallback:fermiswap").with_split(0.5),
+            make_swap("uniswap_v2").with_split(0.5),
         ]);
         let gas = estimate_gas_usage(&solution, Strategy::Split);
 
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
-        // leg1 approval + router overhead      95_000
+        // leg1 input transfer                  60_000  ← Split reintroduces the router hop
+        // leg1 fallback router overhead        40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
         // leg1 pool gas                       100_000
-        // leg2 approval + router overhead      95_000
+        // leg2 input transfer                  60_000  ← Split reintroduces the router hop
         // leg2 pool gas                       100_000
         // extra output transfer (→ router)     60_000  ← TOKEN_GAS
-        assert_eq!(gas, BigUint::from(490_000u64));
+        assert_eq!(gas, BigUint::from(460_000u64));
     }
 
     #[test]
@@ -466,7 +599,7 @@ mod tests {
         let solution = make_solution(vec![
             make_swap_with_tokens("uniswap_v4", token_a(), token_b(), 100_000),
             make_swap_with_tokens("uniswap_v4", token_b(), token_c(), 100_000),
-            make_swap_with_tokens("uniswap_v2", token_c(), token_d.clone(), 100_000),
+            make_swap_with_tokens("uniswap_v2", token_c(), token_d, 100_000),
         ]);
         let gas = estimate_gas_usage(&solution, Strategy::Sequential);
 

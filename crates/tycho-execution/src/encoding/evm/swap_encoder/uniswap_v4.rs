@@ -59,8 +59,8 @@ impl SwapEncoder for UniswapV4SwapEncoder {
         let angstrom = match hook_address {
             None => None,
             Some(address) => {
-                let hook_address = Bytes::from_str(address).map_err(|_| {
-                    EncodingError::FatalError("Invalid Angstrom hook address".to_string())
+                let hook_address = Bytes::from_str(address).map_err(|e| {
+                    EncodingError::FatalError(format!("Invalid Angstrom hook address: {e}"))
                 })?;
                 // Starting the cache here warms it up while the encoder is built, so that the
                 // first encoded Angstrom swap does not wait on the Angstrom API.
@@ -77,18 +77,15 @@ impl SwapEncoder for UniswapV4SwapEncoder {
         swap: &Swap,
         encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let v4_user_data = UniswapV4UserData::from_swap_user_data(swap.user_data())?;
+        let v4_user_data = UniswapV4UserData::from_swap_user_data(swap.user_data().as_ref())?;
 
         let fee = get_static_attribute(swap, "key_lp_fee")?;
 
-        let pool_fee_u24 = pad_or_truncate_to_size::<3>(&fee)
-            .map_err(|_| EncodingError::FatalError("Failed to pad fee bytes".to_string()))?;
+        let pool_fee_u24 = pad_or_truncate_to_size::<3>(&fee);
 
         let tick_spacing = get_static_attribute(swap, "tick_spacing")?;
 
-        let pool_tick_spacing_u24 = pad_or_truncate_to_size::<3>(&tick_spacing).map_err(|_| {
-            EncodingError::FatalError("Failed to pad tick spacing bytes".to_string())
-        })?;
+        let pool_tick_spacing_u24 = pad_or_truncate_to_size::<3>(&tick_spacing);
 
         let hook_address = match get_static_attribute(swap, "hooks") {
             Ok(hook) => Address::from_slice(&hook),
@@ -107,7 +104,14 @@ impl SwapEncoder for UniswapV4SwapEncoder {
             None => v4_user_data.hook_data.to_vec(),
         };
 
-        let hook_data_length = (hook_data.len() as u16).to_be_bytes();
+        let hook_data_length = u16::try_from(hook_data.len())
+            .map_err(|_out_of_range| {
+                EncodingError::InvalidInput(format!(
+                    "Hook data of {} bytes exceeds the u16 length prefix",
+                    hook_data.len()
+                ))
+            })?
+            .to_be_bytes();
 
         // Early check if this is not the first swap
         if encoding_context.group_token_in != *swap.token_in().address {
@@ -188,8 +192,8 @@ pub(super) struct UniswapV4UserData {
 }
 
 impl UniswapV4UserData {
-    fn from_swap_user_data(user_data: &Option<Bytes>) -> Result<Self, EncodingError> {
-        match user_data.as_ref() {
+    fn from_swap_user_data(user_data: Option<&Bytes>) -> Result<Self, EncodingError> {
+        match user_data {
             Some(bytes) if !bytes.is_empty() => serde_json::from_slice(bytes).map_err(|e| {
                 EncodingError::FatalError(format!("Invalid UniswapV4 user_data JSON: {}", e))
             }),
@@ -217,11 +221,11 @@ mod tests {
 
     #[test]
     fn test_user_data_defaults_when_absent_or_empty() {
-        let from_none = UniswapV4UserData::from_swap_user_data(&None).unwrap();
+        let from_none = UniswapV4UserData::from_swap_user_data(None).unwrap();
         assert!(!from_none.skip_unlock);
         assert!(from_none.hook_data.is_empty());
 
-        let from_empty = UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(""))).unwrap();
+        let from_empty = UniswapV4UserData::from_swap_user_data(Some(&Bytes::from(""))).unwrap();
         assert!(!from_empty.skip_unlock);
         assert!(from_empty.hook_data.is_empty());
     }
@@ -230,21 +234,21 @@ mod tests {
     fn test_user_data_parses_both_fields() {
         let raw = br#"{"skip_unlock":true,"hook_data":"0xdeadbeef"}"#;
         let parsed =
-            UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(raw.as_slice()))).unwrap();
+            UniswapV4UserData::from_swap_user_data(Some(&Bytes::from(raw.as_slice()))).unwrap();
         assert!(parsed.skip_unlock);
         assert_eq!(parsed.hook_data, Bytes::from("0xdeadbeef"));
     }
 
     #[test]
     fn test_user_data_partial_fields_use_defaults() {
-        let only_skip = UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(
+        let only_skip = UniswapV4UserData::from_swap_user_data(Some(&Bytes::from(
             br#"{"skip_unlock":true}"#.as_slice(),
         )))
         .unwrap();
         assert!(only_skip.skip_unlock);
         assert!(only_skip.hook_data.is_empty());
 
-        let only_hook = UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(
+        let only_hook = UniswapV4UserData::from_swap_user_data(Some(&Bytes::from(
             br#"{"hook_data":"0x1234"}"#.as_slice(),
         )))
         .unwrap();
@@ -255,7 +259,7 @@ mod tests {
     #[test]
     fn test_user_data_invalid_json_errors() {
         let err =
-            UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(b"not json".as_slice())))
+            UniswapV4UserData::from_swap_user_data(Some(&Bytes::from(b"not json".as_slice())))
                 .unwrap_err();
         assert!(format!("{:?}", err).contains("Invalid UniswapV4 user_data JSON"));
     }
@@ -287,8 +291,9 @@ mod tests {
         let encoding_context = EncodingContext {
             // Same as the executor address
             router_address: Some(Bytes::from("0x5615deb798bb3e4dfa0139dfa1b3d433cc23b72f")),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
         };
         let encoder = UniswapV4SwapEncoder::new(
             Bytes::from("0xF62849F9A0B5Bf2913b396098F7c7019b51A820a"),
@@ -349,16 +354,17 @@ mod tests {
 
         let swap = Swap::new(
             usv4_pool,
-            default_token(token_in.clone()),
+            default_token(token_in),
             default_token(token_out.clone()),
             BigUint::ZERO,
         );
 
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: group_token_in.clone(),
+            group_token_in,
             // Token out is the same as the group token out
-            group_token_out: token_out.clone(),
+            group_token_out: token_out,
+            origin: None,
         };
 
         let encoder = UniswapV4SwapEncoder::new(
@@ -399,9 +405,10 @@ mod tests {
 
         // The context is the same for both swaps, since the group token in and out are the same
         let context = EncodingContext {
-            router_address: Some(router_address.clone()),
+            router_address: Some(router_address),
             group_token_in: usde_address.clone(),
             group_token_out: wbtc_address.clone(),
+            origin: None,
         };
 
         // Setup - First sequence: USDE -> USDT
@@ -442,14 +449,14 @@ mod tests {
 
         let initial_swap = Swap::new(
             usde_usdt_component,
-            default_token(usde_address.clone()),
+            default_token(usde_address),
             default_token(usdt_address.clone()),
             BigUint::ZERO,
         );
         let second_swap = Swap::new(
             usdt_wbtc_component,
-            default_token(usdt_address.clone()),
-            default_token(wbtc_address.clone()),
+            default_token(usdt_address),
+            default_token(wbtc_address),
             BigUint::ZERO,
         );
 
@@ -469,7 +476,7 @@ mod tests {
         let combined_hex = format!(
             "{}{}",
             encode(&initial_encoded_swap),
-            encode(ple_encode(vec![second_encoded_swap]))
+            encode(ple_encode(vec![second_encoded_swap]).unwrap())
         );
 
         assert_eq!(
@@ -519,7 +526,7 @@ mod tests {
         };
 
         #[test]
-        #[ignore] // Performs real Angstrom API call
+        #[ignore = "requires ANGSTROM_API_KEY"]
         fn test_encode_grouped_swap_integration() {
             // This test performs a grouped swap: USDC -> WETH -> USDT on two consecutive Angstrom
             // pools
@@ -533,6 +540,7 @@ mod tests {
                 router_address: Some(Bytes::from("0x5615deb798bb3e4dfa0139dfa1b3d433cc23b72f")),
                 group_token_in: usdc_address.clone(),
                 group_token_out: usdt_address.clone(),
+                origin: None,
             };
 
             // Setup first pool: USDC -> WETH (use real tick spacing and fee from on-chain)
@@ -551,7 +559,7 @@ mod tests {
             let mut weth_usdt_attributes: HashMap<String, Bytes> = HashMap::new();
             weth_usdt_attributes.insert("key_lp_fee".into(), Bytes::from("0x800000")); // 8388608
             weth_usdt_attributes.insert("tick_spacing".into(), Bytes::from("0x0a")); // 10
-            weth_usdt_attributes.insert("hooks".into(), angstrom_hook.clone());
+            weth_usdt_attributes.insert("hooks".into(), angstrom_hook);
 
             let weth_usdt_pool = ProtocolComponent {
                 id: String::from("0x000000000004444c5dc75cB358380D2e3dE08A90"),
@@ -561,14 +569,14 @@ mod tests {
 
             let first_swap = Swap::new(
                 usdc_weth_pool,
-                default_token(usdc_address.clone()),
+                default_token(usdc_address),
                 default_token(weth_address.clone()),
                 BigUint::ZERO,
             );
             let second_swap = Swap::new(
                 weth_usdt_pool,
-                default_token(weth_address.clone()),
-                default_token(usdt_address.clone()),
+                default_token(weth_address),
+                default_token(usdt_address),
                 BigUint::ZERO,
             );
 
@@ -593,8 +601,11 @@ mod tests {
             let second_encoded = encoder
                 .encode_swap(&second_swap, &context)
                 .unwrap();
-            let combined_hex =
-                format!("{}{}", encode(&first_encoded), encode(ple_encode(vec![second_encoded])));
+            let combined_hex = format!(
+                "{}{}",
+                encode(&first_encoded),
+                encode(ple_encode(vec![second_encoded]).unwrap())
+            );
 
             write_calldata_to_file("test_encode_angstrom_grouped_swap", combined_hex.as_str());
 

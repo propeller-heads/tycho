@@ -1,5 +1,10 @@
 // This module is used in integration tests as well
-use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
@@ -25,11 +30,22 @@ pub struct MockRFQState {
     pub quote_amount_in: Option<BigUint>,
     pub quote_amount_out: BigUint,
     pub quote_data: HashMap<String, Bytes>,
+    /// What `get_amount_out` returns, standing in for the maker's price levels. `None` makes
+    /// `get_amount_out` fail.
+    #[serde(default)]
+    pub level_amount_out: Option<BigUint>,
     /// How long `request_signed_quote` waits before it answers, like a network round trip.
     #[serde(default)]
     pub delay: Duration,
+    /// The `origin` of every `request_signed_quote` call, in call order.
+    #[serde(skip)]
+    pub received_origins: Arc<Mutex<Vec<Option<Bytes>>>>,
 }
 #[typetag::serde]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "the mock panics on trait methods that tests must not reach"
+)]
 impl ProtocolSim for MockRFQState {
     fn fee(&self) -> f64 {
         panic!("MockRFQState does not implement fee")
@@ -45,7 +61,17 @@ impl ProtocolSim for MockRFQState {
         _token_in: &Token,
         _token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        panic!("MockRFQState does not implement fee")
+        let level_amount_out = self
+            .level_amount_out
+            .clone()
+            .ok_or_else(|| {
+                SimulationError::FatalError("MockRFQState has no level_amount_out".to_string())
+            })?;
+        Ok(GetAmountOutResult::new(
+            level_amount_out,
+            BigUint::ZERO,
+            Box::new(MockRFQState::default()),
+        ))
     }
 
     fn get_limits(
@@ -92,6 +118,10 @@ impl IndicativelyPriced for MockRFQState {
         &self,
         params: GetAmountOutParams,
     ) -> Result<SignedQuote, SimulationError> {
+        self.received_origins
+            .lock()
+            .unwrap()
+            .push(params.origin.clone());
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
         }
@@ -110,15 +140,27 @@ impl IndicativelyPriced for MockRFQState {
 
 /// Builds a Bebop swap whose signed quote arrives after `delay`.
 pub fn delayed_bebop_swap(token_in: Bytes, token_out: Bytes, delay: Duration) -> Swap {
+    recording_bebop_swap(token_in, token_out, delay, Arc::default())
+}
+
+/// Builds a Bebop swap that pushes the `origin` of each quote request onto `received_origins`.
+pub fn recording_bebop_swap(
+    token_in: Bytes,
+    token_out: Bytes,
+    delay: Duration,
+    received_origins: Arc<Mutex<Vec<Option<Bytes>>>>,
+) -> Swap {
     let state = MockRFQState {
         quote_amount_in: None,
         quote_amount_out: BigUint::from(1_000u64),
+        level_amount_out: None,
         quote_data: HashMap::from([
             ("calldata".to_string(), Bytes::from(vec![0x12, 0x34])),
             ("partial_fill_offset".to_string(), Bytes::from(12u64.to_be_bytes().to_vec())),
             ("tx_to".to_string(), Bytes::from("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F")),
         ]),
         delay,
+        received_origins,
     };
     Swap::new(
         ProtocolComponent {

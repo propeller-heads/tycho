@@ -8,7 +8,7 @@ use tokio::sync::{mpsc::UnboundedReceiver, watch};
 use tycho_client::feed::{synchronizer::Snapshot, BlockHeader, FeedMessage};
 use tycho_common::{
     models::{
-        blockchain::{Block, BlockAggregatedChanges, PendingBlock},
+        blockchain::{Block, BlockAggregatedChanges, DCIUpdate, PendingBlock},
         protocol::{ComponentBalance, ProtocolComponent, ProtocolComponentStateDelta},
         Chain,
     },
@@ -24,7 +24,7 @@ use crate::{
 /// An ephemeral [`Update`] tagged with a caller-supplied label.
 ///
 /// The label is an opaque string chosen by the caller to distinguish parallel bundle evaluations
-/// (e.g. bundle ID, strategy name). It is separate from `update.block_number_or_timestamp`,
+/// (e.g. bundle ID, strategy name). It is separate from `update.block_number`,
 /// which carries the target block the bundle was evaluated against.
 pub struct PendingUpdate {
     pub label: String,
@@ -193,7 +193,7 @@ impl PendingBlockProcessor {
                     &state_msg.snapshots,
                     &state_msg.header,
                     self.chain,
-                );
+                )?;
                 indexer
                     .apply_block(&block_changes)
                     .map_err(|e| PendingError::Indexer {
@@ -214,7 +214,10 @@ impl PendingBlockProcessor {
 
         if msg_block > self.current_confirmed_block {
             self.current_confirmed_block = msg_block;
-            // Receivers that have been dropped are silently ignored.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the confirmed-block receivers are optional; having none is normal"
+            )]
             let _ = self.confirmed_block_tx.send(msg_block);
         }
         Ok(())
@@ -223,14 +226,25 @@ impl PendingBlockProcessor {
 
 /// Converts a startup snapshot into a `BlockAggregatedChanges` suitable for
 /// [`TxDeltaIndexer::apply_block`].
+///
+/// Each component's traced entrypoints are folded into `dci_update`, so an indexer sees the
+/// contracts a component reads through DCI the same way it does on the delta path.
 fn snapshot_to_block_changes(
     extractor: &str,
     snapshot: &Snapshot,
     header: &BlockHeader,
     chain: Chain,
-) -> BlockAggregatedChanges {
-    let ts = chrono::DateTime::from_timestamp(header.timestamp as i64, 0)
-        .unwrap_or_default()
+) -> Result<BlockAggregatedChanges, PendingError> {
+    let ts = i64::try_from(header.timestamp)
+        .ok()
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+        .ok_or_else(|| PendingError::Indexer {
+            extractor: extractor.to_string(),
+            message: format!(
+                "block {} has an invalid timestamp {}",
+                header.number, header.timestamp
+            ),
+        })?
         .naive_utc();
     let block = Block {
         number: header.number,
@@ -243,9 +257,32 @@ fn snapshot_to_block_changes(
     let mut new_protocol_components: HashMap<String, ProtocolComponent> = HashMap::new();
     let mut state_deltas: HashMap<String, ProtocolComponentStateDelta> = HashMap::new();
     let mut component_balances: HashMap<String, HashMap<Bytes, ComponentBalance>> = HashMap::new();
+    let mut dci_update = DCIUpdate::default();
 
     for (id, comp_with_state) in &snapshot.states {
         new_protocol_components.insert(id.clone(), comp_with_state.component.clone());
+
+        for (entrypoint, trace) in &comp_with_state.entrypoints {
+            let ep_id = entrypoint
+                .entry_point
+                .external_id
+                .clone();
+            dci_update
+                .new_entrypoints
+                .entry(id.clone())
+                .or_default()
+                .insert(entrypoint.entry_point.clone());
+            dci_update
+                .new_entrypoint_params
+                .entry(ep_id.clone())
+                .or_default()
+                .insert((entrypoint.params.clone(), id.clone()));
+            dci_update
+                .trace_results
+                .entry(ep_id)
+                .or_default()
+                .merge(trace.clone());
+        }
 
         state_deltas.insert(
             id.clone(),
@@ -277,7 +314,7 @@ fn snapshot_to_block_changes(
         component_balances.insert(id.clone(), token_balances);
     }
 
-    BlockAggregatedChanges {
+    Ok(BlockAggregatedChanges {
         extractor: extractor.to_string(),
         chain,
         block,
@@ -285,8 +322,9 @@ fn snapshot_to_block_changes(
         new_protocol_components,
         state_deltas,
         component_balances,
+        dci_update,
         ..Default::default()
-    }
+    })
 }
 
 #[cfg(test)]
@@ -338,6 +376,65 @@ mod tests {
             Chain::Ethereum,
             rx,
         )
+    }
+
+    #[test]
+    fn test_snapshot_entrypoints_land_in_dci_update() {
+        use tycho_client::feed::synchronizer::ComponentWithState;
+        use tycho_common::models::{
+            blockchain::{
+                EntryPoint, EntryPointWithTracingParams, RPCTracerParams, TracingParams,
+                TracingResult,
+            },
+            protocol::ProtocolComponentState,
+        };
+
+        let component_id = "0xpool".to_string();
+        let entry_point = EntryPoint {
+            external_id: "0xpool:get_virtual_price()".to_string(),
+            target: Bytes::from([0xaa; 20]),
+            signature: "get_virtual_price()".to_string(),
+        };
+        let params =
+            TracingParams::RPCTracer(RPCTracerParams::new(None, Bytes::from([0x12, 0x34])));
+        let oracle = Bytes::from([0xbb; 20]);
+        let trace = TracingResult::new(
+            HashSet::new(),
+            HashMap::from([(oracle.clone(), HashSet::from([Bytes::from([0u8; 32])]))]),
+        );
+        let snapshot = Snapshot {
+            states: HashMap::from([(
+                component_id.clone(),
+                ComponentWithState {
+                    state: ProtocolComponentState::new(
+                        &component_id,
+                        HashMap::new(),
+                        HashMap::new(),
+                    ),
+                    component: ProtocolComponent::default(),
+                    component_tvl: None,
+                    entrypoints: vec![(
+                        EntryPointWithTracingParams::new(entry_point.clone(), params.clone()),
+                        trace,
+                    )],
+                },
+            )]),
+            vm_storage: HashMap::new(),
+        };
+        let header = BlockHeader { number: 7, ..Default::default() };
+
+        let changes =
+            snapshot_to_block_changes("vm:curve", &snapshot, &header, Chain::Ethereum).unwrap();
+
+        let dci = &changes.dci_update;
+        assert_eq!(dci.new_entrypoints[&component_id], HashSet::from([entry_point.clone()]));
+        assert_eq!(
+            dci.new_entrypoint_params[&entry_point.external_id],
+            HashSet::from([(params, component_id)])
+        );
+        assert!(dci.trace_results[&entry_point.external_id]
+            .accessed_slots
+            .contains_key(&oracle));
     }
 
     #[tokio::test]
@@ -396,7 +493,7 @@ mod tests {
             .expect("pending update failed");
 
         assert_eq!(
-            update.update.block_number_or_timestamp, 3,
+            update.update.block_number, 3,
             "The update must be stamped with the pending block, not the confirmed tip."
         );
     }

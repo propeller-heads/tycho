@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
@@ -42,7 +42,7 @@ contract BopAMMExecutor is IExecutor {
     // the output via balance diff, so the protocol-level minAmountOut is 0.
     // Settlement requires expiry >= block.timestamp; the swap is only valid in
     // the block whose timestamp matches the book's committed quote anyway.
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable

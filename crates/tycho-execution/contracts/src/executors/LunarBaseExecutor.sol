@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
@@ -44,7 +44,6 @@ contract LunarBaseExecutor is IExecutor {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -52,14 +51,15 @@ contract LunarBaseExecutor is IExecutor {
         (address pool, address tokenIn, address tokenOut,) = _decodeData(data);
 
         if (tokenIn == ETH_ADDRESS) {
-            // slither-disable-next-line arbitrary-send-eth,unused-return
+            // forge-lint: disable-next-item(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             ILunarBasePool(pool).swapExactInNative{value: amountIn}(
                 _toLunarBaseToken(tokenOut), receiver, 0, block.timestamp
             );
             return;
         }
 
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         ILunarBasePool(pool)
             .swapExactIn(
                 ILunarBasePool.ExactInputParams({

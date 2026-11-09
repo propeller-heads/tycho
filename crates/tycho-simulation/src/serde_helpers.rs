@@ -34,6 +34,7 @@ pub mod hex_bytes_option {
     use serde::{Deserialize, Deserializer, Serializer};
 
     /// Serialize a byte vec as a Some hex string with 0x prefix
+    #[expect(clippy::ref_option, reason = "serde's serialize_with passes the field by reference")]
     pub fn serialize<S, T>(x: &Option<T>, s: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -65,6 +66,19 @@ pub mod hex_bytes_option {
             }
             None => Ok(None),
         }
+    }
+}
+
+/// Deserializes a hex string that must be a 20-byte EVM address into its bytes; any letter case
+/// is accepted, any other length rejected.
+#[cfg(feature = "book-feeds")]
+pub(crate) mod evm_address {
+    use alloy::primitives::Address;
+    use serde::{Deserialize, Deserializer};
+    use tycho_common::Bytes;
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
+        Ok(Bytes::from(Address::deserialize(d)?.into_array()))
     }
 }
 
@@ -150,11 +164,11 @@ macro_rules! impl_non_serializable_protocol {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, str::FromStr};
 
     use serde::{Deserialize, Serialize};
     use serde_json;
-    use tycho_common::simulation::protocol_sim::ProtocolSim;
+    use tycho_common::{simulation::protocol_sim::ProtocolSim, Bytes};
 
     use super::*;
     use crate::protocol::models::Update;
@@ -183,6 +197,23 @@ mod tests {
         let deserialized: TestStruct = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized.bytes, vec![0u8; 10]);
         assert_eq!(deserialized.bytes_option, Some(vec![0u8; 10]));
+    }
+
+    #[test]
+    fn evm_address_accepts_any_case_and_rejects_other_lengths() {
+        #[derive(Deserialize)]
+        struct Holder(#[serde(deserialize_with = "evm_address::deserialize")] Bytes);
+
+        let lower = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+        let mixed = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+        let from_lower: Holder = serde_json::from_str(&format!("\"{lower}\"")).unwrap();
+        let from_mixed: Holder = serde_json::from_str(&format!("\"{mixed}\"")).unwrap();
+        assert_eq!(from_lower.0, from_mixed.0);
+        assert_eq!(from_lower.0, Bytes::from_str(lower).unwrap());
+
+        for not_an_address in ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb", "0x", "a0b8"] {
+            assert!(serde_json::from_str::<Holder>(&format!("\"{not_an_address}\"")).is_err());
+        }
     }
 
     #[test]
@@ -218,7 +249,7 @@ mod tests {
         assert!(json.contains("pool_a"));
 
         let roundtripped: Update = serde_json::from_str(&json).unwrap();
-        assert_eq!(roundtripped.block_number_or_timestamp, 12345);
+        assert_eq!(roundtripped.block_number, 12345);
         assert_eq!(roundtripped.states.len(), 1);
         assert!(roundtripped
             .states
@@ -230,23 +261,14 @@ mod tests {
     fn protocol_states_skips_non_serializable_entries() {
         use alloy::primitives::U256;
 
-        use crate::evm::protocol::{
-            uniswap_v2::state::UniswapV2State,
-            uniswap_v4::state::{UniswapV4Fees, UniswapV4State},
-        };
+        use crate::evm::{decoder::MockProtocolSim, protocol::uniswap_v2::state::UniswapV2State};
 
         let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
         states.insert(
             "serializable".to_string(),
             Box::new(UniswapV2State::new(U256::from(1000), U256::from(2000))),
         );
-        states.insert(
-            "non_serializable".to_string(),
-            Box::new(
-                UniswapV4State::new(0, U256::from(1), UniswapV4Fees::new(0, 0, 3000), 0, 1, vec![])
-                    .expect("valid state"),
-            ),
-        );
+        states.insert("non_serializable".to_string(), Box::new(MockProtocolSim::new()));
 
         let update = Update::new(42, states, HashMap::new());
         let json = serde_json::to_string(&update).expect("serialization should succeed");
@@ -296,7 +318,7 @@ mod tests {
         let update = Update::new(99999, HashMap::new(), HashMap::new());
         let json = serde_json::to_string(&update).unwrap();
         let roundtripped: Update = serde_json::from_str(&json).unwrap();
-        assert_eq!(roundtripped.block_number_or_timestamp, 99999);
+        assert_eq!(roundtripped.block_number, 99999);
         assert!(roundtripped.states.is_empty());
         assert!(roundtripped.new_pairs.is_empty());
     }

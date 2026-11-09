@@ -46,7 +46,7 @@ fn test_evm_sequential_swap_strategy_encoder() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        default_token(wbtc.clone()),
+        default_token(wbtc),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -71,13 +71,13 @@ fn test_evm_sequential_swap_strategy_encoder() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -112,7 +112,7 @@ fn test_sequential_swap_strategy_encoder_transfer_from_integration() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        default_token(wbtc.clone()),
+        default_token(wbtc),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -136,13 +136,13 @@ fn test_sequential_swap_strategy_encoder_transfer_from_integration() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -239,7 +239,7 @@ fn test_evm_sequential_strategy_cyclic_swap() {
             },
             ..Default::default()
         },
-        default_token(weth.clone()),
+        default_token(weth),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -250,7 +250,7 @@ fn test_evm_sequential_strategy_cyclic_swap() {
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         usdc.clone(),
-        usdc.clone(),
+        usdc,
         BigUint::from_str("100000000").unwrap(), // 100 USDC (6 decimals)
         BigUint::from_str("99389294").unwrap(),
         BigUint::from_str("97401508").unwrap(),
@@ -265,13 +265,13 @@ fn test_evm_sequential_strategy_cyclic_swap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -360,7 +360,7 @@ fn test_evm_sequential_strategy_cyclic_swap_and_vault() {
             },
             ..Default::default()
         },
-        default_token(weth.clone()),
+        default_token(weth),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -371,7 +371,7 @@ fn test_evm_sequential_strategy_cyclic_swap_and_vault() {
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         usdc.clone(),
-        usdc.clone(),
+        usdc,
         BigUint::from_str("100000000").unwrap(), // 100 USDC (6 decimals)
         BigUint::from_str("99389294").unwrap(),
         BigUint::from_str("97401508").unwrap(),
@@ -386,13 +386,13 @@ fn test_evm_sequential_strategy_cyclic_swap_and_vault() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -466,7 +466,7 @@ fn test_evm_sequential_swap_strategy_encoder_with_fees() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        default_token(wbtc.clone()),
+        default_token(wbtc),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -490,13 +490,13 @@ fn test_evm_sequential_swap_strategy_encoder_with_fees() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         1_000_000,
-        client_fee_receiver(),
-        BigUint::ZERO,
+        &client_fee_receiver(),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;

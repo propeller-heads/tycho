@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
@@ -37,6 +37,7 @@ error RingSwapV2Executor__ZeroRingSwapFactory();
 
 contract RingSwapV2Executor is IExecutor {
     uint256 private constant FEE_BPS = 30;
+    uint256 private constant _BPS_DENOMINATOR = 10000;
     address public immutable fewFactory;
     address public immutable ringSwapFactory;
 
@@ -61,7 +62,7 @@ contract RingSwapV2Executor is IExecutor {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -84,7 +85,7 @@ contract RingSwapV2Executor is IExecutor {
             IUniswapV2Pair(target), fwAmountIn, zeroForOne, address(this)
         );
 
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         IFewWrappedToken(fwTokenOut).unwrapTo(fwAmountOut, receiver);
     }
 
@@ -94,7 +95,7 @@ contract RingSwapV2Executor is IExecutor {
         bool zeroForOne,
         address receiver
     ) internal returns (uint256 amountOut) {
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return Pricing needs only the reserves, not their timestamp.
         (uint112 reserve0, uint112 reserve1,) = pool.getReserves();
         uint112 reserveIn = zeroForOne ? reserve0 : reserve1;
         uint112 reserveOut = zeroForOne ? reserve1 : reserve0;
@@ -171,9 +172,10 @@ contract RingSwapV2Executor is IExecutor {
         if (reserveIn == 0 || reserveOut == 0) {
             revert RingSwapV2Executor__InsufficientLiquidity();
         }
-        uint256 amountInWithFee = amountIn * (10000 - FEE_BPS);
+        uint256 amountInWithFee = amountIn * (_BPS_DENOMINATOR - FEE_BPS);
         uint256 numerator = amountInWithFee * uint256(reserveOut);
-        uint256 denominator = (uint256(reserveIn) * 10000) + amountInWithFee;
+        uint256 denominator =
+            (uint256(reserveIn) * _BPS_DENOMINATOR) + amountInWithFee;
         amount = numerator / denominator;
     }
 

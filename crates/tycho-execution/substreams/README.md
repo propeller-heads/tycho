@@ -122,6 +122,10 @@ and the name appears on every trade already stored.
     ('base', '0x...', ARRAY['uniswap_v4']),
 ```
 
+`make check-executors` fails when `config/executor_addresses.json` lists an address that has no
+row here for a chain this package indexes, and CI runs it when either file changes. Name a
+`fallback:<name>` config entry by `<name>` alone, so `fallback:rfq:bebop` is `rfq:bebop`.
+
 To name one in a running database without waiting for a deploy, insert it there as well; the file
 will not fight it.
 
@@ -474,11 +478,9 @@ consumer and leaves the index alone. An index that is already built stays valid.
 
 ## Running locally
 
+With mise activated, `substreams` and `substreams-sink-sql` come from the repository's `mise.toml`.
+
 ```bash
-rustup target add wasm32-unknown-unknown
-brew install streamingfast/tap/substreams            # or see substreams.dev
-# substreams-sink-sql: download the release binary for your platform from
-# https://github.com/streamingfast/substreams-sink-sql/releases (tested with v4.13.1)
 export SUBSTREAMS_API_TOKEN=$(curl -s https://auth.streamingfast.io/v1/auth/issue \
   -d "{\"api_key\":\"$STREAMINGFAST_KEY\"}" | jq -r .token)
 

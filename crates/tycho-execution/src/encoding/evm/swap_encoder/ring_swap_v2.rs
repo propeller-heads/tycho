@@ -31,8 +31,8 @@ impl SwapEncoder for RingSwapV2SwapEncoder {
     ) -> Result<Vec<u8>, EncodingError> {
         let token_in_address = bytes_to_address(&swap.token_in().address)?;
         let token_out_address = bytes_to_address(&swap.token_out().address)?;
-        let component_id = Address::from_str(&swap.component().id).map_err(|_| {
-            EncodingError::FatalError("Invalid ring_swap_v2 component id".to_string())
+        let component_id = Address::from_str(&swap.component().id).map_err(|e| {
+            EncodingError::FatalError(format!("Invalid ring_swap_v2 component id: {e}"))
         })?;
 
         let fw_token0 = static_attribute_address(swap, "fw_token0")?;
@@ -137,6 +137,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: dai,
             group_token_out: weth,
+            origin: None,
         };
 
         let hex_swap = encode(
@@ -172,6 +173,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: weth,
             group_token_out: dai,
+            origin: None,
         };
 
         let hex_swap = encode(
@@ -207,6 +209,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: fw_dai,
             group_token_out: fw_weth,
+            origin: None,
         };
 
         let err = encoder()

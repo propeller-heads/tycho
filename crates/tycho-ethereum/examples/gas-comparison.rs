@@ -76,6 +76,10 @@ const TOKENS: &[TokenConfig] = &[
     },
 ];
 
+#[expect(
+    clippy::unwrap_in_result,
+    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
+)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rpc_url = std::env::var("RPC_URL").expect("RPC_URL must be set");
@@ -176,12 +180,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
-            let gas_used = match receipt["gasUsed"]
+            let Some(gas_used) = receipt["gasUsed"]
                 .as_str()
                 .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-            {
-                Some(g) => g,
-                None => continue,
+            else {
+                continue
             };
 
             on_chain_gas.push(gas_used);
@@ -197,9 +200,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let delta_pct = p50_adj.map(|adj| {
             if adj == 0 {
-                return 0i64;
+                return 0i128;
             }
-            (est_avg as i64 - adj as i64) * 100 / adj as i64
+            (i128::from(est_avg) - i128::from(adj)) * 100 / i128::from(adj)
         });
 
         println!(
@@ -208,13 +211,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             est_avg,
             p50_raw
                 .map(|p| p.to_string())
-                .unwrap_or("n/a".to_string()),
+                .unwrap_or_else(|| "n/a".to_string()),
             p50_adj
                 .map(|p| p.to_string())
-                .unwrap_or("n/a".to_string()),
+                .unwrap_or_else(|| "n/a".to_string()),
             delta_pct
                 .map(|d| format!("{d:+}%"))
-                .unwrap_or("n/a".to_string()),
+                .unwrap_or_else(|| "n/a".to_string()),
             on_chain_gas.len(),
         );
     }

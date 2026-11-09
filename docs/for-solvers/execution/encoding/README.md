@@ -303,8 +303,13 @@ that surplus beyond your quote reaches the receiver. Amounts between `minAmountO
 
 ETH and WETH are separate tokens in a solution, and the encoder does not convert between them for you.
 Wherever your route goes from one to the other, add a swap on the `native_wrapper` protocol. The Tycho
-stream injects a `native_wrapper` component on every chain, so you route through it like through any
-other pool, and a dedicated WETH executor runs the swap.
+stream injects a `native_wrapper` component only when the chain has a wrapper contract, so you route
+through it like through any other pool and a dedicated WETH executor runs the swap.
+
+Arc has native USDC and a routable ERC-20 USDC interface at
+<code>0x3600000000000000000000000000000000000000</code>. They share one balance, Arc has no wrapper,
+and routes must use the ERC-20 address directly rather than a <code>native_wrapper</code> component.
+See <a href="https://docs.arc.network/arc/concepts/stablecoin-native-model" target="_blank" rel="noopener noreferrer">Arc's stablecoin-native model</a>.
 
 Your swaps must connect `token_in` to `token_out`, so a missing wrap swap is rejected at validation.
 

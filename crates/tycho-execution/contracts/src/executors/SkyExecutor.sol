@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
@@ -81,7 +81,7 @@ contract SkyExecutor is IExecutor {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -101,7 +101,7 @@ contract SkyExecutor is IExecutor {
             ? (_psm, _psmFactor)
             : (_wrapper, _wrapperFactor);
         if (gemToStable) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             psm.sellGem(receiver, amountIn);
         } else {
             // buyGem takes the gem OUTPUT amount and pulls the stable cost
@@ -110,7 +110,7 @@ contract SkyExecutor is IExecutor {
             // unspent at the router. A HALTED tout (uint256.max) reverts on
             // the checked addition, matching the venue's halt semantics.
             uint256 gemAmt = (amountIn * _WAD) / (factor * (_WAD + psm.tout()));
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The cost is at most amountIn by the rounding above; the Dispatcher measures the output.
             psm.buyGem(receiver, gemAmt);
         }
     }

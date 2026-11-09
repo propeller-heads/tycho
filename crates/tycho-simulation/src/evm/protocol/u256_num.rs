@@ -33,14 +33,18 @@ pub fn u256_to_f64(x: U256) -> Result<f64, SimulationError> {
         return Ok(0.0);
     }
 
-    let x_bits = x.bit_len();
-    let n_shifts = 53i32 - x_bits as i32;
-    let mut exponent = (1023 + 52 - n_shifts) as u64;
+    // A U256 has at most 256 bits, so the shift and the exponent are small and the exponent is
+    // positive.
+    let n_shifts = i32::try_from(x.bit_len())
+        .map(|x_bits| 53i32 - x_bits)
+        .map_err(|e| SimulationError::FatalError(format!("Bit length of {x} out of range: {e}")))?;
+    let mut exponent = u64::try_from(1023 + 52 - n_shifts)
+        .map_err(|e| SimulationError::FatalError(format!("Exponent for {x} out of range: {e}")))?;
 
     let mut significant = if n_shifts >= 0 {
-        let shift = n_shifts as u32;
+        let shift = n_shifts.unsigned_abs();
         let shifted = x << shift;
-        u64::try_from(shifted).map_err(|_| {
+        u64::try_from(shifted).map_err(|_out_of_range| {
             SimulationError::FatalError(format!(
                 "Unable to convert shifted U256 value `{shifted}` into u64 when converting {x}"
             ))
@@ -73,7 +77,7 @@ pub fn u256_to_f64(x: U256) -> Result<f64, SimulationError> {
         };
 
         let rounded_towards_zero_u256 = x >> shift;
-        let rounded_towards_zero: u64 = rounded_towards_zero_u256.try_into().map_err(|_| {
+        let rounded_towards_zero: u64 = rounded_towards_zero_u256.try_into().map_err(|_out_of_range| {
             SimulationError::FatalError(format!(
                 "Unable to convert rounded U256 value `{rounded_towards_zero_u256}` into u64 when converting {x}"
             ))
@@ -108,7 +112,10 @@ pub fn u256_to_f64(x: U256) -> Result<f64, SimulationError> {
 
 #[inline]
 pub fn u256_to_biguint(value: U256) -> BigUint {
-    BigUint::from_bytes_le(&value.to_le_bytes::<32>())
+    let digits = value
+        .as_limbs()
+        .map(|limb| [(limb & 0xFFFF_FFFF) as u32, (limb >> 32) as u32]);
+    BigUint::from_slice(digits.as_flattened())
 }
 
 pub fn biguint_to_u256(value: &BigUint) -> U256 {
@@ -120,6 +127,10 @@ pub fn biguint_to_u256(value: &BigUint) -> U256 {
     U256::from_limbs(limbs)
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "public API; taking the bytes by reference is a breaking change"
+)]
 pub fn bytes_to_u256(bytes: Bytes) -> U256 {
     // Ensure the input is exactly 32 bytes
     let mut padded_bytes = [0u8; 32];
@@ -162,5 +173,26 @@ mod test {
         let res = u256_to_f64(inp).expect("convert U256 to f64");
 
         assert_eq!(res, out);
+    }
+
+    #[test]
+    fn test_u256_biguint_round_trip() {
+        let values = [
+            U256::ZERO,
+            U256::from(1u64),
+            U256::from(u32::MAX),
+            U256::from(u64::MAX),
+            U256::from(u128::MAX),
+            U256::from_limbs([0, 0, 0, 1]),
+            U256::from_limbs([0x0123_4567_89ab_cdef, 0, 0xfedc_ba98_7654_3210, 0]),
+            U256::MAX,
+        ];
+
+        for value in values {
+            let converted = u256_to_biguint(value);
+
+            assert_eq!(converted, BigUint::from_bytes_le(&value.to_le_bytes::<32>()));
+            assert_eq!(biguint_to_u256(&converted), value);
+        }
     }
 }

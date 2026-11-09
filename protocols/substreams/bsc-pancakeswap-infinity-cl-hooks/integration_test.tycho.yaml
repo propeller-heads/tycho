@@ -1,0 +1,56 @@
+substreams_yaml_path: ./bsc-pancakeswap-infinity-cl-hooks.yaml
+protocol_system: "pancakeswap_infinity_cl_hooks"
+protocol_type_names:
+  - "pancakeswap_infinity_cl_pool"
+module_name: "map_protocol_changes"
+# Singleton design: every pool's funds sit in the Vault, and component ids are bytes32 pool ids
+# the balance check cannot resolve to an address.
+skip_balance_check: true
+# Native simulation reads no contract storage, so no account has to be snapshotted.
+initialized_accounts:
+tests:
+  # USDT/KGEN on CLAlphaHook v1 (0x72e0…), the pool the first hook version paused after launch.
+  # - 63651382: the owner sets the start to 2025-10-07 11:00 UTC, before the pool exists; the
+  #   window starts just ahead of it so the start time reaches the pool at creation.
+  # - 63654352: initialize, minted into in the same transaction.
+  # - 11:00: the pool opens and trades.
+  # - 63785046 (11:55): the owner moves the start to 14:00, pausing a live pool; no swap lands
+  #   until then.
+  # - 14:00 onwards: trading resumes; the stop block is past an hour of it.
+  - name: test_usdt_kgen_alpha_pool_paused_after_launch
+    start_block: 63651000
+    stop_block: 63800000
+    expected_components:
+      - id: "0xb9b436c3869da550f943d3493e262be84a20e53b22223810eb7aa12acb8b6d34"
+        tokens:
+          - "0x55d398326f99059ff775485246999027b3197955" # USDT
+          - "0xf3d5b4c34ed623478cc5141861776e6cf7ae3a1e" # KGEN
+        static_attributes:
+          key_lp_fee: "0x43"
+          tick_spacing: "0x0a"
+          hooks: "0x72e09ebd9b24f47730b651889a4ed984cba53d90"
+          hook_address: "0x72e09ebd9b24f47730b651889a4ed984cba53d90"
+        creation_tx: "0xdd24b39e9b2ee1f643952fd77b99f2e3097ebf018b88a8b8a25b5403e42a19d7"
+        skip_simulation: false
+        skip_execution: false
+  # NES/USDT on CLAlphaHook v3 (0xb0bb…), the version that sets the start time inside
+  # `initializePool`: its `PoolStartedAtUpdated` precedes `Initialize` in the same transaction.
+  # - 120893102: `initializePool`, start 2026-09-10 08:00 UTC; liquidity is added before it.
+  # - 121034428 (08:00:00): the first block at the start time, and the first swap.
+  # - The stop block is about 40 minutes of trading later.
+  - name: test_nes_usdt_alpha_pool_initialized_with_start_time
+    start_block: 120893000
+    stop_block: 121040000
+    expected_components:
+      - id: "0x24993d0e8ef738b3bac36a753c00b39793e416e05db87c2bafbb25c4351b34fd"
+        tokens:
+          - "0x097acf27503753e77bca940277806156c5925b81" # NES
+          - "0x55d398326f99059ff775485246999027b3197955" # USDT
+        static_attributes:
+          key_lp_fee: "0x43"
+          tick_spacing: "0x02"
+          hooks: "0xb0bb171d333569cfd28a37f5c5dddaaa90ad46af"
+          hook_address: "0xb0bb171d333569cfd28a37f5c5dddaaa90ad46af"
+        creation_tx: "0xf2ef0937e73cd33b15afcfa737c3bbf34fb2f48985dc562e4dfd69555804f39f"
+        skip_simulation: false
+        skip_execution: false

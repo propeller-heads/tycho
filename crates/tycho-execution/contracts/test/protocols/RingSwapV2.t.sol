@@ -419,6 +419,182 @@ contract RingSwapV2ExecutorTest is Constants, TestUtils {
     }
 }
 
+contract RingSwapV2ExecutorBscTest is TestUtils {
+    uint256 internal constant BSC_RING_FORK_BLOCK = 46793446;
+
+    address internal constant BSC_RING_SWAP_FACTORY =
+        0x4De602A30Ad7fEf8223dcf67A9fB704324C4dd9B;
+    address internal constant BSC_FEW_FACTORY =
+        0xEeE400Eabfba8F60f4e6B351D8577394BeB972CD;
+    address internal constant BSC_RING_WBNB_USDT_PAIR =
+        0x653Cd6B4F72585647aC9F7086550CA7E5C8E8a4c;
+    address internal constant BSC_WBNB =
+        0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
+    address internal constant BSC_USDT =
+        0x55d398326f99059fF775485246999027B3197955;
+    address internal constant BSC_FW_WBNB =
+        0x7f0172b75d3823D8aF04feE3A3f6a14aBD68EFE1;
+    address internal constant BSC_FW_USDT =
+        0x95b5aEfbcC9e6E462f21E0847e2d90b89b7Cd028;
+
+    address internal receiver = makeAddr("bsc-ring-receiver");
+    RingSwapV2ExecutorExposed ringSwapV2Exposed;
+
+    function setUp() public {
+        vm.createSelectFork(vm.rpcUrl("bsc"), BSC_RING_FORK_BLOCK);
+        ringSwapV2Exposed = new RingSwapV2ExecutorExposed(
+            BSC_FEW_FACTORY, BSC_RING_SWAP_FACTORY
+        );
+    }
+
+    function testBscConstructorConfig() public view {
+        assertEq(ringSwapV2Exposed.fewFactory(), BSC_FEW_FACTORY);
+        assertEq(ringSwapV2Exposed.ringSwapFactory(), BSC_RING_SWAP_FACTORY);
+    }
+
+    function testBscCanonicalSwapDataUsesProtocolWillDebit() public {
+        bytes memory params = abi.encodePacked(
+            BSC_RING_WBNB_USDT_PAIR,
+            BSC_WBNB,
+            BSC_USDT,
+            BSC_FW_WBNB,
+            BSC_FW_USDT
+        );
+
+        (
+            TransferManager.TransferType transferType,
+            address transferReceiver,
+            address tokenIn,
+            address tokenOut,
+            bool outputToRouter
+        ) = ringSwapV2Exposed.getTransferData(params);
+
+        assertEq(
+            uint8(transferType),
+            uint8(TransferManager.TransferType.ProtocolWillDebit)
+        );
+        assertEq(transferReceiver, BSC_FW_WBNB);
+        assertEq(tokenIn, BSC_WBNB);
+        assertEq(tokenOut, BSC_USDT);
+        assertFalse(outputToRouter);
+    }
+
+    function testBscFewTokenMappingsMatchUnderlyingTokens() public view {
+        assertEq(IFewWrappedTokenWithUnderlying(BSC_FW_WBNB).token(), BSC_WBNB);
+        assertEq(IFewWrappedTokenWithUnderlying(BSC_FW_USDT).token(), BSC_USDT);
+    }
+
+    function testSwapBscWbnbForUsdtWrapsSwapsAndUnwraps() public {
+        _assertBscSwapWrapsSwapsAndUnwraps(
+            BSC_WBNB, BSC_USDT, BSC_FW_WBNB, BSC_FW_USDT, 0.001 ether
+        );
+    }
+
+    function testSwapBscUsdtForWbnbWrapsSwapsAndUnwraps() public {
+        _assertBscSwapWrapsSwapsAndUnwraps(
+            BSC_USDT, BSC_WBNB, BSC_FW_USDT, BSC_FW_WBNB, 1 ether
+        );
+    }
+
+    function testBscRejectsFakeFewTokenBeforeFundsMove() public {
+        uint256 amountIn = 0.001 ether;
+        address fakeFewToken = makeAddr("fake-bsc-few-token");
+        bytes memory params = abi.encodePacked(
+            BSC_RING_WBNB_USDT_PAIR,
+            BSC_WBNB,
+            BSC_USDT,
+            fakeFewToken,
+            BSC_FW_USDT
+        );
+        uint256 pairBalanceBefore =
+            IERC20(BSC_FW_WBNB).balanceOf(BSC_RING_WBNB_USDT_PAIR);
+        deal(BSC_WBNB, address(ringSwapV2Exposed), amountIn);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RingSwapV2Executor__InvalidFewToken.selector,
+                BSC_WBNB,
+                fakeFewToken
+            )
+        );
+        ringSwapV2Exposed.swap(amountIn, params, receiver);
+
+        assertEq(
+            IERC20(BSC_WBNB).balanceOf(address(ringSwapV2Exposed)), amountIn
+        );
+        assertEq(
+            IERC20(BSC_FW_WBNB).balanceOf(BSC_RING_WBNB_USDT_PAIR),
+            pairBalanceBefore
+        );
+        assertEq(
+            IERC20(BSC_WBNB)
+                .allowance(address(ringSwapV2Exposed), fakeFewToken),
+            0
+        );
+    }
+
+    function testBscRejectsUnofficialPairBeforeFundsMove() public {
+        uint256 amountIn = 0.001 ether;
+        address unofficialPair = makeAddr("unofficial-bsc-ring-pair");
+        bytes memory params = abi.encodePacked(
+            unofficialPair, BSC_WBNB, BSC_USDT, BSC_FW_WBNB, BSC_FW_USDT
+        );
+        deal(BSC_WBNB, address(ringSwapV2Exposed), amountIn);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RingSwapV2Executor__InvalidPair.selector,
+                unofficialPair,
+                BSC_FW_WBNB,
+                BSC_FW_USDT
+            )
+        );
+        ringSwapV2Exposed.swap(amountIn, params, receiver);
+
+        assertEq(
+            IERC20(BSC_WBNB).balanceOf(address(ringSwapV2Exposed)), amountIn
+        );
+        assertEq(IERC20(BSC_FW_WBNB).balanceOf(unofficialPair), 0);
+        assertEq(
+            IERC20(BSC_WBNB).allowance(address(ringSwapV2Exposed), BSC_FW_WBNB),
+            0
+        );
+    }
+
+    function _assertBscSwapWrapsSwapsAndUnwraps(
+        address tokenIn,
+        address tokenOut,
+        address fwTokenIn,
+        address fwTokenOut,
+        uint256 amountIn
+    ) internal {
+        bool zeroForOne = fwTokenIn < fwTokenOut;
+        uint256 expectedAmountOut = ringSwapV2Exposed.getAmountOut(
+            BSC_RING_WBNB_USDT_PAIR, amountIn, zeroForOne
+        );
+        bytes memory params = abi.encodePacked(
+            BSC_RING_WBNB_USDT_PAIR, tokenIn, tokenOut, fwTokenIn, fwTokenOut
+        );
+
+        deal(tokenIn, address(ringSwapV2Exposed), amountIn);
+        vm.prank(address(ringSwapV2Exposed));
+        IERC20(tokenIn).approve(fwTokenIn, amountIn);
+
+        uint256 balanceBefore = IERC20(tokenOut).balanceOf(receiver);
+        ringSwapV2Exposed.swap(amountIn, params, receiver);
+        uint256 balanceAfter = IERC20(tokenOut).balanceOf(receiver);
+
+        assertGt(expectedAmountOut, 0);
+        assertEq(balanceAfter - balanceBefore, expectedAmountOut);
+        assertEq(IERC20(tokenIn).balanceOf(address(ringSwapV2Exposed)), 0);
+        assertEq(
+            IERC20(tokenIn).allowance(address(ringSwapV2Exposed), fwTokenIn), 0
+        );
+        assertEq(IERC20(fwTokenIn).balanceOf(address(ringSwapV2Exposed)), 0);
+        assertEq(IERC20(fwTokenOut).balanceOf(address(ringSwapV2Exposed)), 0);
+    }
+}
+
 contract TychoRouterForRingSwapV2Test is TychoRouterTestSetup {
     uint256 internal constant RING_FORK_BLOCK = 25283712;
 

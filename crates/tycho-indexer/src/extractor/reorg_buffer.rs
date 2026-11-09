@@ -24,10 +24,17 @@ pub enum BlockNumberOrTimestamp {
 }
 
 impl BlockNumberOrTimestamp {
-    fn greater_than(&self, other: &Block) -> bool {
+    pub(crate) fn greater_than(&self, other: &Block) -> bool {
         match self {
             BlockNumberOrTimestamp::Number(n) => n > &other.number,
             BlockNumberOrTimestamp::Timestamp(ts) => ts > &other.ts,
+        }
+    }
+
+    pub(crate) fn less_than(&self, other: &Block) -> bool {
+        match self {
+            BlockNumberOrTimestamp::Number(n) => n < &other.number,
+            BlockNumberOrTimestamp::Timestamp(ts) => ts < &other.ts,
         }
     }
 }
@@ -38,7 +45,11 @@ impl TryFrom<BlockOrTimestamp> for BlockNumberOrTimestamp {
     fn try_from(value: BlockOrTimestamp) -> Result<Self, Self::Error> {
         Ok(match value {
             BlockOrTimestamp::Block(bid) => match bid {
-                BlockIdentifier::Number((_, no)) => BlockNumberOrTimestamp::Number(no as u64),
+                BlockIdentifier::Number((_, no)) => {
+                    BlockNumberOrTimestamp::Number(u64::try_from(no).map_err(|_overflow| {
+                        StorageError::Unexpected(format!("Block number {no} is negative"))
+                    })?)
+                }
                 BlockIdentifier::Hash(_) => {
                     return Err(StorageError::Unexpected("BlockHash unsupported!".to_string()))
                 }
@@ -50,6 +61,9 @@ impl TryFrom<BlockOrTimestamp> for BlockNumberOrTimestamp {
         })
     }
 }
+
+// TODO: rename ReorgBuffer. `DeltaWindow` also keeps committed blocks here for serving, so this is
+// a contiguous chain segment with revert purge, not a buffer of blocks awaiting persistence.
 
 /// Buffer that holds blocks awaiting persistence to the database so extractors can batch commits
 /// and efficiently handle chain reorganisations (reorg) without requiring database rollbacks.
@@ -212,7 +226,7 @@ where
 
     /// Purges all blocks following the specified block hash from the buffer. Returns the purged
     /// blocks ordered by ascending number or an error if the target hash is not found.
-    pub fn purge(&mut self, target_hash: Bytes) -> Result<Vec<B>, StorageError> {
+    pub fn purge(&mut self, target_hash: &Bytes) -> Result<Vec<B>, StorageError> {
         debug!("Purging reorg buffer... Target hash {}", target_hash.to_string());
         let mut target_index = None;
 
@@ -222,7 +236,7 @@ where
             .rev()
             .enumerate()
         {
-            if block_message.block().hash == target_hash {
+            if block_message.block().hash == *target_hash {
                 target_index = Some(self.block_messages.len() - index);
                 break;
             }
@@ -299,6 +313,36 @@ where
             .into();
         trace!(?purged, "ReorgBuffer purged blocks from stale height");
         Ok(PurgeOutcome::HeightMatch(purged))
+    }
+
+    /// The oldest buffered message, or `None` if the buffer is empty.
+    pub fn oldest(&self) -> Option<&B> {
+        self.block_messages.front()
+    }
+
+    /// The newest buffered message, or `None` if the buffer is empty.
+    pub fn newest(&self) -> Option<&B> {
+        self.block_messages.back()
+    }
+
+    /// The buffered message for block `number`, or `None` if that block is not buffered.
+    /// Buffered blocks are contiguous, so this is an index lookup.
+    pub fn block_at(&self, number: u64) -> Option<&B> {
+        let first = self.oldest()?.block().number;
+        let index = usize::try_from(number.checked_sub(first)?).ok()?;
+        let msg = self.block_messages.get(index)?;
+        let found = msg.block().number;
+        if found != number {
+            error!(
+                number,
+                found,
+                first,
+                len = self.block_messages.len(),
+                "ReorgBuffer is not contiguous: index lookup landed on a different block"
+            );
+            return None;
+        }
+        Some(msg)
     }
 
     /// Returns an `Option` containing the most recent block in the buffer or `None` if the buffer
@@ -384,6 +428,9 @@ where
     }
 
     /// Retrieves [CommitStatus] for a block, returns None if the buffer is empty.
+    // The RPC side now answers from `DeltaWindow::commit_status`. Kept with its tests, which pin
+    // the buffer-bound behaviour the window deliberately diverges from.
+    #[cfg(test)]
     pub fn get_commit_status(&self, version: BlockNumberOrTimestamp) -> Option<CommitStatus> {
         let first_block = self.block_messages.front();
         let last_block = self.block_messages.back();
@@ -423,19 +470,16 @@ pub(crate) trait StateUpdateBufferEntry: std::fmt::Debug {
         keys: Vec<(&ProtocolStateIdType, &ProtocolStateKeyType)>,
     ) -> HashMap<(ProtocolStateIdType, ProtocolStateKeyType), ProtocolStateValueType>;
 
-    #[allow(clippy::mutable_key_type)]
     fn get_filtered_account_state_update(
         &self,
         keys: Vec<(&AccountStateIdType, &AccountStateKeyType)>,
     ) -> HashMap<(AccountStateIdType, AccountStateKeyType), AccountStateValueType>;
 
-    #[allow(clippy::mutable_key_type)]
     fn get_filtered_component_balance_update(
         &self,
         keys: Vec<(&String, &Bytes)>,
     ) -> HashMap<(String, Bytes), ComponentBalance>;
 
-    #[allow(clippy::mutable_key_type)]
     fn get_filtered_account_balance_update(
         &self,
         keys: Vec<(&Address, &Address)>,
@@ -451,8 +495,10 @@ where
 {
     /// Looks up buffered protocol state updates for the provided keys. Returns a map of updates and
     /// a list of keys for which updates were not found in the buffered blocks.
-    // Clippy thinks it is a complex type that is difficult to read
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "returns the found updates together with the keys that were not found"
+    )]
     pub fn lookup_protocol_state(
         &self,
         keys: &[(&ProtocolStateIdType, &ProtocolStateKeyType)],
@@ -506,7 +552,10 @@ where
 
     /// Looks up buffered account state updates for the provided keys. Returns a map of updates and
     /// a list of keys for which updates were not found in the buffered blocks.
-    #[allow(clippy::mutable_key_type, clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "returns the found updates together with the keys that were not found"
+    )]
     pub fn lookup_account_state(
         &self,
         keys: &[(&AccountStateIdType, &AccountStateKeyType)],
@@ -544,7 +593,10 @@ where
     /// Looks up buffered balance updates for the provided component and token keys. Returns a map
     /// where each key is a component ID associated with its token balances, and a list of
     /// component-token pairs for which no updates were found.
-    #[allow(clippy::type_complexity, clippy::mutable_key_type)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "returns the found updates together with the keys that were not found"
+    )]
     pub fn lookup_component_balances(
         &self,
         keys: &[(&ComponentId, &Bytes)],
@@ -582,7 +634,10 @@ where
     /// Looks up buffered account balance updates for the provided account and token keys. Returns a
     /// map where each key is an account address associated with its token balances, and a list
     /// of account-token pairs for which no updates were found.
-    #[allow(clippy::type_complexity, clippy::mutable_key_type)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "returns the found updates together with the keys that were not found"
+    )]
     pub fn lookup_account_balances(
         &self,
         keys: &[(&Address, &Address)],
@@ -624,7 +679,7 @@ mod test {
 
     use rstest::rstest;
     use tycho_common::models::{
-        blockchain::{Transaction, TxWithChanges},
+        blockchain::{BlockAggregatedChanges, Transaction, TxWithChanges},
         protocol::{ProtocolComponent, ProtocolComponentStateDelta},
         Chain, ChangeType,
     };
@@ -688,7 +743,7 @@ mod test {
                         [(
                             Bytes::from_str("0x6B175474E89094C44Da98b954EedeAC495271d0F").unwrap(),
                             ComponentBalance {
-                                token: token_addr.clone(),
+                                token: token_addr,
                                 balance: Bytes::from(30_i32.to_be_bytes()),
                                 modify_tx: tx.hash.clone(),
                                 component_id: "Balance2".to_string(),
@@ -752,7 +807,7 @@ mod test {
                                 token: token_addr.clone(),
                                 balance: Bytes::from(2_i32.to_be_bytes()),
                                 modify_tx: tx.hash.clone(),
-                                account: account1_addr.clone(),
+                                account: account1_addr,
                             },
                         )]
                         .into_iter()
@@ -763,7 +818,7 @@ mod test {
                         [(
                             token_addr.clone(),
                             AccountBalance {
-                                token: token_addr.clone(),
+                                token: token_addr,
                                 balance: Bytes::from(30_i32.to_be_bytes()),
                                 modify_tx: tx.hash.clone(),
                                 account: account2_addr,
@@ -839,6 +894,51 @@ mod test {
             _ => panic!("block entity version not implemented"),
         }
     }
+    fn numbered_buffer(
+        range: std::ops::RangeInclusive<u64>,
+    ) -> ReorgBuffer<BlockAggregatedChanges> {
+        let mut buffer = ReorgBuffer::new();
+        for n in range {
+            buffer
+                .insert_block(BlockAggregatedChanges {
+                    block: testing::block(n),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        buffer
+    }
+
+    #[test]
+    fn oldest_and_newest_are_the_buffer_ends() {
+        let empty: ReorgBuffer<BlockAggregatedChanges> = ReorgBuffer::new();
+        assert!(empty.oldest().is_none() && empty.newest().is_none());
+
+        let buffer = numbered_buffer(4..=6);
+
+        assert_eq!(buffer.oldest().map(|b| b.block.number), Some(4));
+        assert_eq!(buffer.newest().map(|b| b.block.number), Some(6));
+    }
+
+    #[rstest]
+    #[case::first(4, Some(4))]
+    #[case::middle(5, Some(5))]
+    #[case::below(3, None)]
+    #[case::above(7, None)]
+    fn block_at_finds_a_buffered_block_by_number(
+        #[case] number: u64,
+        #[case] expected: Option<u64>,
+    ) {
+        let buffer = numbered_buffer(4..=6);
+
+        assert_eq!(
+            buffer
+                .block_at(number)
+                .map(|b| b.block.number),
+            expected
+        );
+    }
+
     #[test]
     fn test_reorg_buffer_state_lookup() {
         let mut reorg_buffer = ReorgBuffer::new();
@@ -866,16 +966,13 @@ mod test {
 
         // Need to sort because collecting a HashSet is unstable.
         missing_keys.sort();
-        assert_eq!(
-            missing_keys,
-            vec![(c_ids[0].clone(), missing.clone()), (missing.clone(), new.clone())]
-        );
+        assert_eq!(missing_keys, vec![(c_ids[0].clone(), missing.clone()), (missing, new.clone())]);
         assert_eq!(
             res,
             HashMap::from([
-                ((c_ids[0].clone(), new.clone()), Bytes::from(2_u64.to_be_bytes().to_vec())),
+                ((c_ids[0].clone(), new), Bytes::from(2_u64.to_be_bytes().to_vec())),
                 ((c_ids[0].clone(), reserve.clone()), Bytes::from(10_u64.to_be_bytes().to_vec())),
-                ((c_ids[1].clone(), reserve.clone()), Bytes::from(30_u64.to_be_bytes().to_vec()))
+                ((c_ids[1].clone(), reserve), Bytes::from(30_u64.to_be_bytes().to_vec()))
             ])
         );
     }
@@ -911,10 +1008,7 @@ mod test {
         missing_keys.sort();
         assert_eq!(
             missing_keys,
-            vec![
-                (c_ids[1].clone(), missing_token.clone()),
-                (missing_component.clone(), token_key.clone())
-            ]
+            vec![(c_ids[1].clone(), missing_token), (missing_component, token_key.clone())]
         );
         assert_eq!(
             res,
@@ -937,7 +1031,7 @@ mod test {
                     HashMap::from([(
                         token_key.clone(),
                         tycho_common::models::protocol::ComponentBalance {
-                            token: token_key.clone(),
+                            token: token_key,
                             balance: Bytes::from(30_i32.to_be_bytes()),
                             modify_tx: transaction().hash,
                             component_id: c_ids[1].clone(),
@@ -982,10 +1076,7 @@ mod test {
         missing_keys.sort();
         assert_eq!(
             missing_keys,
-            vec![
-                (missing_account.clone(), token_key.clone()),
-                (accounts[1].clone(), missing_token.clone())
-            ]
+            vec![(missing_account, token_key.clone()), (accounts[1].clone(), missing_token)]
         );
         assert_eq!(
             res,
@@ -1132,7 +1223,7 @@ mod test {
         let c1 = "c1".to_string();
         let c3 = "c3".to_string();
         let ghost = "ghost".to_string();
-        let ids = HashSet::from([c1.clone(), c3.clone(), ghost.clone()]);
+        let ids = HashSet::from([c1.clone(), c3, ghost.clone()]);
 
         let missing = reorg_buffer.missing_components(ids.clone());
         assert_eq!(missing, HashSet::from([ghost.clone()]));
@@ -1189,6 +1280,47 @@ mod test {
     }
 
     #[test]
+    fn arc_same_timestamp_blocks_enter_persistence_in_number_order() {
+        let timestamp = "2020-01-01T00:00:00"
+            .parse::<NaiveDateTime>()
+            .unwrap();
+        let mut reorg_buffer = ReorgBuffer::new();
+        for number in 40..=42 {
+            reorg_buffer
+                .insert_block(BlockAggregatedChanges {
+                    chain: Chain::Arc,
+                    block: Block::new(
+                        number,
+                        Chain::Arc,
+                        Bytes::from(number).lpad(32, 0),
+                        Bytes::from(number - 1).lpad(32, 0),
+                        timestamp,
+                    ),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        let drained = reorg_buffer
+            .drain_into_committing(42)
+            .unwrap();
+
+        assert_eq!(
+            drained
+                .iter()
+                .map(|entry| entry.block.number)
+                .collect::<Vec<_>>(),
+            vec![40, 41]
+        );
+        assert_eq!(
+            reorg_buffer
+                .newest()
+                .map(|entry| entry.block.number),
+            Some(42)
+        );
+    }
+
+    #[test]
     fn test_purge() {
         let mut reorg_buffer = ReorgBuffer::new();
         reorg_buffer
@@ -1203,7 +1335,7 @@ mod test {
 
         let purged = reorg_buffer
             .purge(
-                Bytes::from_str(
+                &Bytes::from_str(
                     "0x0000000000000000000000000000000000000000000000000000000000000001",
                 )
                 .unwrap(),
@@ -1215,7 +1347,7 @@ mod test {
         assert_eq!(purged, vec![get_block_changes(2), get_block_changes(3)]);
 
         let unknown = reorg_buffer.purge(
-            Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000999")
+            &Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000999")
                 .unwrap(),
         );
 
@@ -1336,7 +1468,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Unexpected block sequence")]
     fn test_insert_wrong_block() {
         let mut reorg_buffer = ReorgBuffer::new();
         reorg_buffer
@@ -1419,8 +1551,13 @@ mod test {
         assert_eq!(res, exp);
     }
 
+    // The `committed_oldest_no` case pins current behavior: the oldest buffered block
+    // reports `Committed` although it is still only buffered (the oldest buffered block is
+    // `db_committed + 1`). `services::state::window::DeltaWindow::commit_status` documents this
+    // off-by-one and deliberately diverges from it.
     #[rstest]
     #[case::committed_no(BlockNumberOrTimestamp::Number(0), CommitStatus::Committed)]
+    #[case::committed_oldest_no(BlockNumberOrTimestamp::Number(1), CommitStatus::Committed)]
     #[case::committed_ts(
         BlockNumberOrTimestamp::Timestamp("2020-01-01T00:00:00".parse().unwrap()),
         CommitStatus::Committed

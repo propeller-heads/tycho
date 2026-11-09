@@ -216,16 +216,16 @@ contract Constants is
     // Fluid liquidity contract on mainnet
     address FLUIDV1_LIQUIDITY = 0x52Aa899454998Be5b000Ad077a46Bbe360F4e497;
 
+    // Ekubo V3 SignedExclusiveSwap extension on mainnet
+    address EKUBO_V3_SIGNED_EXCLUSIVE_SWAP =
+        0x55b703eED01b35641963da2FB2E14885993605A3;
+
+    // Eden Network's view quoter for Uniswap V3 pools, used by TychoFallbackRouter
+    address UNISWAP_V3_STATIC_QUOTER =
+        0xc80f61d1bdAbD8f5285117e1558fDDf8C64870FE;
+
     // FermiSwap
     address FERMI_SWAPPER = 0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e;
-
-    // PropAMMRouter (github.com/lambdaclass/propamm-router-contracts) and its Uniswap V3 fallback
-    address PROPAMM_ROUTER = 0x4DdF368080CD7946db5b459aD591c350158175e1;
-    address PROPAMM_FALLBACK_SWAP_ROUTER =
-        0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45;
-    // Whitelisted pAMM venues on the PropAMMRouter
-    address FERMI_PROPAMM_VENUE = 0x5979458912F80B96d30D4220af8E2e4925A33320;
-    address KIPSELI_PROPAMM_VENUE = 0x71e790dd841c8A9061487cb3E78C288E75cE0B3d;
 
     // BopAMM (Bebop on-chain PMM)
     address BOPAMM_SETTLEMENT = 0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca;
@@ -241,9 +241,9 @@ contract Constants is
     address ANGSTROM_HOOK = 0x0000000aa232009084Bd71A5797d089AA4Edfad4;
 
     // Liquorice
-    address LIQUORICE_SETTLEMENT = 0x0448633eb8B0A42EfED924C42069E0DcF08fb552;
+    address LIQUORICE_SETTLEMENT = 0x43Dcd6586e6209eE7235A21bDC4aa301E5Bc44e8;
     address LIQUORICE_BALANCE_MANAGER =
-        0xb87bAE43a665EB5943A5642F81B26666bC9E5C95;
+        0x56B4720e40dF52C560E520238E34e9C33d57E593;
 
     // Native Relay V6 routers
     address NATIVE_ROUTER_V6_ETHEREUM =
@@ -252,6 +252,8 @@ contract Constants is
     address NATIVE_ROUTER_V6_ARBITRUM =
         0x0183D055c77310aF03dCB397eFAA7E9cfB6dB59b;
     address NATIVE_ROUTER_V6_BSC = 0x1fDED89D98CBeADd96a109D28689c2638025dad3;
+    address NATIVE_ROUTER_V6_ROBINHOOD =
+        0x4Df7557734B382EB542BEa6c74786D398DF4CC19;
 
     // Etherfi
     address EETH_ADDR = 0x35fA164735182de50811E8e2E824cFb9B6118ac2;

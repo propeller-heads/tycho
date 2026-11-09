@@ -1,0 +1,112 @@
+{
+  "description": "Provenance for uniswap_v4_pons_snapshot_robinhood.json. Every field of that snapshot is derived from on-chain data for Pons V2 pool 0xc96847cc43f7595aafcbc1c99d335cb91be7ce1107524c87030f48a716a5f289 on Robinhood chain 4663, initialized in block 58759099 by transaction 0xf66ca58190cc186683267cb486bbc6e1f0469176b7ad4f92e43eb68a1a0936e5. The pool holds a single full-range position opened in that same transaction, so the snapshot is the pool's state at the end of its creation block.",
+  "chain_id": 4663,
+  "rpc": "https://rpc.mainnet.chain.robinhood.com",
+  "pool_manager": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+  "hook": "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044",
+  "fields": [
+    {
+      "field": "component.static_attributes.hooks / key_lp_fee / tick_spacing, state.attributes.sqrt_price_x96 / tick, component.tokens",
+      "source": "protocols/substreams/ethereum-uniswap-v4/with-hooks/src/variant_modules/fixtures/robinhood_58759099_initialize_logs.json",
+      "note": "PoolManager Initialize log. topic1 = pool id, topic2 = currency0 0xab5983fe30f186055095305c862b0e097dab3b52, topic3 = currency1 0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec. Data words: fee 0, tickSpacing 200 (0xc8), hooks 0xe5e702641ea86f4ae6cc3cdaed2b886f976be044, sqrtPriceX96 35770440558388723996908746 (0x1d96af77dc8202588b5cca), tick -154068 (0xfda62c as int24)."
+    },
+    {
+      "field": "state.attributes.liquidity and the two ticks/<tick>/net-liquidity attributes",
+      "source": "protocols/substreams/ethereum-uniswap-v4/with-hooks/src/variant_modules/fixtures/robinhood_58759099_receipt.json",
+      "note": "PoolManager ModifyLiquidity log in the creation transaction: tickLower -887200, tickUpper 887200, liquidityDelta 92140088551983424709539 (0x1382ec98f6ead85fa3a3). It is the pool's only position, so the active liquidity equals it, the lower tick's net liquidity is +liquidityDelta and the upper tick's is its two's complement negative 0xec7d1367091527a05c5d."
+    },
+    {
+      "field": "component.static_attributes.pons_hook_fee_bps and pons_creator_tax_bps",
+      "source": "protocols/substreams/ethereum-uniswap-v4/with-hooks/src/variant_modules/fixtures/robinhood_58759099_pons_launches_words.json",
+      "note": "eth_getStorageAt of launches[poolId] word 4 = 0x0000012c006413880bb80064263ed295dafae1d9aadd6e56c4b6f9f38ee019dd. creatorTaxBps sits at low-end byte offset 20 and hookFeeBps at low-end byte offset 26, both 100. Encoded the way the substreams module writes them, with BigInt::to_signed_bytes_be, which is one byte for 100."
+    },
+    {
+      "field": "component.static_attributes.hook_identifier",
+      "source": "protocols/substreams/ethereum-uniswap-v4/with-hooks/src/pons.rs",
+      "note": "The constant the Pons enrichment module writes, \"pons_v2\" as UTF-8."
+    },
+    {
+      "field": "state.attributes.balance_owner",
+      "source": "protocols/substreams/ethereum-uniswap-v4/with-hooks/src/variant_modules/fixtures/robinhood_58759099_initialize_logs.json",
+      "note": "The PoolManager that emitted the Initialize log holds every V4 pool's balances."
+    },
+    {
+      "field": "state.balances",
+      "source": "protocols/substreams/ethereum-uniswap-v4/with-hooks/src/variant_modules/fixtures/robinhood_58759099_receipt.json",
+      "note": "The two ERC-20 Transfer logs into the PoolManager in the creation transaction: 0xa8cff7796e7836404ff8a6 XLG and 0x024150e398003fecb9 NVDA. Nothing in the Pons decode path reads them; they are here so the fixture is a faithful component snapshot."
+    },
+    {
+      "field": "component.created_at",
+      "source": "protocols/substreams/ethereum-uniswap-v4/with-hooks/src/variant_modules/fixtures/robinhood_58759099_block_header.json",
+      "note": "Block 58759099 timestamp 1788978331 = 2026-09-09T18:25:31Z."
+    }
+  ],
+  "token_metadata_calls": [
+    {
+      "description": "XLG decimals and symbol, read at head. Used for the Token objects the tests build; the addresses come from the Initialize log.",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [
+          { "to": "0xab5983fe30f186055095305c862b0e097dab3b52", "data": "0x313ce567" },
+          "latest"
+        ]
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": "0x0000000000000000000000000000000000000000000000000000000000000012"
+      }
+    },
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "eth_call",
+        "params": [
+          { "to": "0xab5983fe30f186055095305c862b0e097dab3b52", "data": "0x95d89b41" },
+          "latest"
+        ]
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003584c470000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "description": "NVDA decimals and symbol.",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [
+          { "to": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec", "data": "0x313ce567" },
+          "latest"
+        ]
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": "0x0000000000000000000000000000000000000000000000000000000000000012"
+      }
+    },
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "eth_call",
+        "params": [
+          { "to": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec", "data": "0x95d89b41" },
+          "latest"
+        ]
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": "0x000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000044e56444100000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  ]
+}

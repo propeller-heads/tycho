@@ -35,9 +35,9 @@ impl SwapEncoder for MetricSwapEncoder {
         let pool_address = component
             .id
             .parse::<Bytes>()
-            .map_err(|_| {
+            .map_err(|e| {
                 EncodingError::FatalError(format!(
-                    "Metric component id is not a pool address: {}",
+                    "Metric component id is not a pool address: {}: {e}",
                     component.id
                 ))
             })?;
@@ -111,6 +111,7 @@ mod tests {
             ),
             group_token_in: Bytes::zero(20),
             group_token_out: Bytes::zero(20),
+            origin: None,
         }
     }
 
@@ -175,7 +176,7 @@ mod tests {
         let swap = Swap::new(
             component(&token0, &token1),
             default_token(token0.clone()),
-            default_token(other.clone()),
+            default_token(other),
             BigUint::ZERO,
         );
         let encoder = encoder();

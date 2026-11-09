@@ -121,7 +121,10 @@ jobs:
           # When a base directory changes, also add any clone protocols that use it.
           for clone in "${!CLONE_TO_BASE[@]}"; do
             base="${CLONE_TO_BASE[$clone]}"
-            if echo "$CHANGED_DIRS" | grep -qx "$base"; then
+            # CHANGED_DIRS contains only top-level directories; nested base paths map to their
+            # workspace directory while flat paths are unchanged.
+            base_top=${base%%/*}
+            if echo "$CHANGED_DIRS" | grep -qx "$base_top"; then
               CHANGED="$CHANGED $clone"
             fi
           done
@@ -198,6 +201,11 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      # run.Dockerfile builds the EVM adapter against its lib/ submodules, fetched the way the
+      # adapter's Foundry CI job fetches them.
+      - name: Checkout EVM adapter submodules (shallow)
+        run: git submodule update --init --depth 1 --recursive -- protocols/adapter-integration/evm/lib
+
       - name: Generate cache key
         id: cache-key
         run: |
@@ -255,6 +263,7 @@ jobs:
     environment: ${{ github.event.pull_request.head.repo.fork && 'integration-tests' || '' }}
     env:
       RPC_URL: ${{ secrets.RPC_URL_ARCHIVE }}
+      ARC_RPC_URL: ${{ secrets.ARC_RPC_URL_ARCHIVE }}
       BASE_RPC_URL: ${{ secrets.BASE_RPC_URL_ARCHIVE }}
       ARBITRUM_RPC_URL: ${{ secrets.ARBITRUM_RPC_URL_ARCHIVE }}
       UNICHAIN_RPC_URL: ${{ secrets.UNICHAIN_RPC_URL_ARCHIVE }}

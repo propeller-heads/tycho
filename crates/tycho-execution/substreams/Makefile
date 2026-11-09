@@ -1,15 +1,16 @@
 # Build, run and sink the router trades substreams.
 #
-# Requires: rustup target wasm32-unknown-unknown, `substreams` CLI, `substreams-sink-sql`
-# (go install github.com/streamingfast/substreams-sink-sql/cmd/substreams-sink-sql@latest),
+# Requires: `substreams` and `substreams-sink-sql` (pinned in the repository's mise.toml),
 # SUBSTREAMS_API_TOKEN and per-chain endpoints (see README).
 CHAIN ?= ethereum
 MANIFEST := tycho-router-trades/chains/$(CHAIN).yaml
 DSN ?= psql://tycho:tycho@localhost:5433/router_trades?sslmode=disable
 START ?=
 STOP ?= +10
+# The rustfmt and clippy toolchain, defined in the repository's mise.toml.
+NIGHTLY = $${RUST_NIGHTLY:?is set in mise.toml; activate mise or run make through mise exec --}
 
-.PHONY: build test test-pricing test-executors test-views check-manifests lint fmt protogen pack run setup executors views sink price-once price-loop
+.PHONY: build test test-pricing test-executors test-views check-manifests check-executors lint fmt protogen pack run setup executors views sink price-once price-loop
 
 # --target-dir keeps the wasm where the manifests expect it even with a global CARGO_TARGET_DIR.
 build:
@@ -30,12 +31,15 @@ test-views:
 check-manifests:
 	python3 scripts/check_manifests.py
 
-lint: check-manifests
-	cargo +nightly fmt -- --check
-	cargo +nightly clippy --all --all-features --all-targets -- -D warnings
+check-executors:
+	python3 scripts/check_executors.py
+
+lint: check-manifests check-executors
+	cargo +$(NIGHTLY) fmt -- --check
+	cargo +$(NIGHTLY) clippy --all --all-features --all-targets -- -D warnings
 
 fmt:
-	cargo +nightly fmt
+	cargo +$(NIGHTLY) fmt
 
 # Needs a substreams CLI that bundles the sink-sql descriptors (1.22 does, 1.16 does not:
 # it fails on the manifest's `sink:` block with "could not find protobuf message type").

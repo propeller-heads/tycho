@@ -33,8 +33,8 @@ impl SwapEncoder for BalancerV3SwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let pool = Address::from_str(&swap.component().id).map_err(|_| {
-            EncodingError::FatalError("Invalid pool address for Balancer v3".to_string())
+        let pool = Address::from_str(&swap.component().id).map_err(|e| {
+            EncodingError::FatalError(format!("Invalid pool address for Balancer v3: {e}"))
         })?;
 
         let args = (
@@ -83,8 +83,9 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
         };
         let encoder = BalancerV3SwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),

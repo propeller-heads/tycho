@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -77,7 +77,6 @@ contract EtherfiExecutor is IExecutor {
         redemptionManagerAddress = _redemptionManagerAddress;
     }
 
-    // slither-disable-next-line locked-ether
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -89,14 +88,14 @@ contract EtherfiExecutor is IExecutor {
             IEtherfiRedemptionManager(redemptionManagerAddress)
                 .redeemEEth(amountIn, receiver, ethAddress);
         } else if (direction == EtherfiDirection.EthToEeth) {
-            // slither-disable-next-line arbitrary-send-eth,unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             IEtherfiLiquidityPool(liquidityPoolAddress)
             .deposit{value: amountIn}();
         } else if (direction == EtherfiDirection.EethToWeeth) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             IWeETH(weethAddress).wrap(amountIn);
         } else if (direction == EtherfiDirection.WeethToEeth) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             IWeETH(weethAddress).unwrap(amountIn);
         } else {
             revert EtherfiExecutor__InvalidDirection();

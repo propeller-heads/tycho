@@ -25,6 +25,11 @@ use chrono::{NaiveDateTime, Utc};
 use clap::Parser;
 use futures03::future::select_all;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use pyroscope::{
+    backend::{pprof_backend, BackendConfig, PprofConfig},
+    pyroscope::{PyroscopeAgentBuilder, PyroscopeAgentRunning},
+    PyroscopeAgent,
+};
 use serde::Deserialize;
 use tokio::{
     runtime::Handle,
@@ -64,7 +69,9 @@ use tycho_indexer::{
         token_analysis_cron::analyze_tokens,
         ExtractionError,
     },
-    services::{PlansConfig, ServicesBuilder},
+    services::{
+        EntityCache, EntityCacheMode, EntityCacheSetup, PlansConfig, ServicesBuilder, WindowConfig,
+    },
 };
 use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
 
@@ -103,9 +110,11 @@ fn init_chains(path: &str) -> Result<(), ExtractionError> {
     } else {
         ChainConfigRegistry::empty()
     };
-    init_chain_registry(registry).map_err(|_| {
-        ExtractionError::Setup("chain config registry already initialised".to_string())
-    })
+    // The rejected registry is the `Err` payload; it carries no failure cause beyond "already set".
+    if init_chain_registry(registry).is_err() {
+        return Err(ExtractionError::Setup("chain config registry already initialised".to_string()));
+    }
+    Ok(())
 }
 
 type ExtractionTasks = Vec<JoinHandle<Result<(), ExtractionError>>>;
@@ -114,18 +123,18 @@ type ServerTasks = Vec<JoinHandle<Result<(), ExtractionError>>>; //TODO: introdu
 fn main() -> Result<(), anyhow::Error> {
     let cli: Cli = Cli::parse();
     let global_args = cli.args();
-    match cli.command() {
+    match cli.subcommand() {
         Command::Index(indexer_args) => {
-            run_indexer(global_args, indexer_args).map_err(|e| anyhow!(e))?;
+            run_indexer(&global_args, &indexer_args).map_err(|e| anyhow!(e))?;
         }
         Command::Run(run_args) => {
-            run_spkg(global_args, run_args).map_err(|e| anyhow!(e))?;
+            run_spkg(&global_args, run_args).map_err(|e| anyhow!(e))?;
         }
         Command::AnalyzeTokens(analyze_args) => {
-            run_analyze_tokens(global_args, analyze_args).map_err(|e| anyhow!(e))?;
+            run_analyze_tokens(&global_args, analyze_args).map_err(|e| anyhow!(e))?;
         }
         Command::Rpc(rpc_args) => {
-            run_rpc(global_args, rpc_args).map_err(|e| anyhow!(e))?;
+            run_rpc(&global_args, &rpc_args).map_err(|e| anyhow!(e))?;
         }
     };
     Ok(())
@@ -217,6 +226,83 @@ fn spawn_jemalloc_stats_reporter() {
     });
 }
 
+/// Starts continuous profiling if `PYROSCOPE_SERVER_URL` is set and not empty, and returns no
+/// agent otherwise. The CPU agent samples all threads `PYROSCOPE_SAMPLE_RATE` times per
+/// CPU-second (default 100). When jemalloc heap profiling is active (`_RJEM_MALLOC_CONF` with
+/// `prof:true,prof_active:true`), a second agent sends the jemalloc heap profile. Both push to the
+/// server every 10 s, with the pod name as tag. Profiling runs until the process exits. Dropping
+/// the agents does not stop it.
+///
+/// The application name is `PYROSCOPE_APPLICATION_NAME`, else `OTEL_SERVICE_NAME` (the service
+/// name of the traces), else `tycho-indexer-<chain>` with the first chain, the one the indexer
+/// uses.
+///
+/// # Errors
+///
+/// Returns an error if `PYROSCOPE_SAMPLE_RATE` is not a number from 1 to 1_000_000, or if an
+/// agent fails to start.
+fn start_profilers(
+    chains: &[String],
+) -> Result<Vec<PyroscopeAgent<PyroscopeAgentRunning>>, pyroscope::PyroscopeError> {
+    let Some(url) = env::var("PYROSCOPE_SERVER_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        return Ok(Vec::new());
+    };
+    let application = env::var("PYROSCOPE_APPLICATION_NAME")
+        .or_else(|_| env::var("OTEL_SERVICE_NAME"))
+        .unwrap_or_else(|_| match chains.first() {
+            Some(chain) => format!("tycho-indexer-{chain}"),
+            None => "tycho-indexer".to_string(),
+        });
+    // The pprof timer fires every 1_000_000 / rate µs: 0 divides by zero, and above 1_000_000 the
+    // interval is 0, which disarms the timer.
+    let sample_rate = match env::var("PYROSCOPE_SAMPLE_RATE") {
+        Ok(rate) => rate
+            .parse::<u32>()
+            .ok()
+            .filter(|rate| (1..=1_000_000).contains(rate))
+            .ok_or_else(|| {
+                pyroscope::PyroscopeError::new(&format!(
+                    "PYROSCOPE_SAMPLE_RATE must be a number from 1 to 1000000, got {rate:?}"
+                ))
+            })?,
+        Err(_) => 100,
+    };
+    let pod = env::var("HOSTNAME").unwrap_or_default();
+    let start = |backend| {
+        PyroscopeAgentBuilder::new(
+            &url,
+            &application,
+            sample_rate,
+            "pyroscope-rs",
+            env!("CARGO_PKG_VERSION"),
+            backend,
+        )
+        .tags(vec![("pod", pod.as_str())])
+        .build()?
+        .start()
+    };
+    let cpu = start(pprof_backend(PprofConfig { sample_rate }, BackendConfig::default()))?;
+    #[cfg(feature = "jemalloc")]
+    if heap_profiling_active() {
+        return Ok(vec![cpu, start(pyroscope::backend::jemalloc_backend())?]);
+    }
+    Ok(vec![cpu])
+}
+
+/// Whether jemalloc samples allocations, i.e. it was started with `prof:true,prof_active:true`.
+#[cfg(feature = "jemalloc")]
+fn heap_profiling_active() -> bool {
+    jemalloc_pprof::PROF_CTL
+        .as_ref()
+        .is_some_and(|ctl| {
+            ctl.try_lock()
+                .is_ok_and(|ctl| ctl.activated())
+        })
+}
+
 /// Executes all extractors configured in the extractor configuration file and starts the server.
 ///
 /// Note: This function utilizes two distinct runtimes: one for extraction tasks and another
@@ -225,80 +311,88 @@ fn spawn_jemalloc_stats_reporter() {
 /// By using separate runtimes, extraction processes in Tycho can run independently, ensuring
 /// that server-related tasks do not interfere with the extraction workflow, and overall
 /// system performance is maintained.
-fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), ExtractionError> {
+fn run_indexer(global_args: &GlobalArgs, index_args: &IndexArgs) -> Result<(), ExtractionError> {
     let extraction_threads = std::env::var("EXTRACTION_WORKER_THREADS")
         .unwrap_or_else(|_| "2".to_string())
         .parse()
-        .expect("EXTRACTION_WORKER_THREADS must be a number");
+        .map_err(|e| {
+            ExtractionError::Setup(format!("EXTRACTION_WORKER_THREADS must be a number: {e}"))
+        })?;
     let main_threads = std::env::var("MAIN_WORKER_THREADS")
         .unwrap_or_else(|_| "3".to_string())
         .parse()
-        .expect("MAIN_WORKER_THREADS must be a number");
+        .map_err(|e| {
+            ExtractionError::Setup(format!("MAIN_WORKER_THREADS must be a number: {e}"))
+        })?;
+    let profilers = start_profilers(&index_args.chains);
     // We spawn a dedicated runtime for extraction
     let extraction_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(extraction_threads)
         .enable_all()
         .build()
-        .unwrap();
+        .map_err(|e| {
+            ExtractionError::Setup(format!("Failed to build the extraction runtime: {e}"))
+        })?;
 
     let main_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(main_threads)
         .enable_all()
         .build()
-        .unwrap();
+        .map_err(|e| ExtractionError::Setup(format!("Failed to build the main runtime: {e}")))?;
 
     let (control_tx, control_rx) = mpsc::channel();
 
-    let (extraction_tasks, other_tasks) = main_runtime
-        .block_on(async {
-            create_tracing_subscriber();
-            let _metrics_task = create_metrics_exporter();
-            #[cfg(feature = "jemalloc")]
-            spawn_jemalloc_stats_reporter();
+    let (extraction_tasks, other_tasks) = main_runtime.block_on(async {
+        create_tracing_subscriber();
+        let _metrics_task = create_metrics_exporter();
+        #[cfg(feature = "jemalloc")]
+        spawn_jemalloc_stats_reporter();
+        match &profilers {
+            Ok(agents) if agents.is_empty() => {}
+            Ok(agents) => info!(agents = agents.len(), "Continuous profiling started"),
+            Err(err) => warn!(%err, "Continuous profiling failed to start"),
+        }
 
-            info!("Starting Tycho");
-            debug!("{} CPUs detected", num_cpus::get());
-            // Install the custom-chain registry before parsing extractors, so an extractor's
-            // `chain` field resolves against it at parse time.
-            init_chains(&index_args.chain_config)?;
+        info!("Starting Tycho");
+        debug!("{} CPUs detected", num_cpus::get());
+        // Install the custom-chain registry before parsing extractors, so an extractor's
+        // `chain` field resolves against it at parse time.
+        init_chains(&index_args.chain_config)?;
 
-            let extractors_config = ExtractorConfigs::from_yaml(&index_args.extractors_config)
-                .map_err(|e| {
-                    ExtractionError::Setup(format!("Failed to load extractors.yaml. {e}"))
-                })?;
+        let extractors_config = ExtractorConfigs::from_yaml(&index_args.extractors_config)
+            .map_err(|e| ExtractionError::Setup(format!("Failed to load extractors.yaml. {e}")))?;
 
-            let retention_horizon: NaiveDateTime = index_args
-                .retention_horizon
-                .parse()
-                .expect("Failed to parse retention horizon");
+        let retention_horizon: NaiveDateTime = index_args
+            .retention_horizon
+            .parse()
+            .expect("Failed to parse retention horizon");
 
-            let chains = index_args
-                .chains
-                .iter()
-                .map(|name| {
-                    Chain::from_str(name).map_err(|e| {
-                        ExtractionError::Setup(format!(
-                            "Unknown chain '{name}': {e}; add it to {}",
-                            index_args.chain_config
-                        ))
-                    })
+        let chains = index_args
+            .chains
+            .iter()
+            .map(|name| {
+                Chain::from_str(name).map_err(|e| {
+                    ExtractionError::Setup(format!(
+                        "Unknown chain '{name}': {e}; add it to {}",
+                        index_args.chain_config
+                    ))
                 })
-                .collect::<Result<Vec<_>, _>>()?;
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
-            let (extraction_tasks, other_tasks) = create_indexing_tasks(
-                &global_args,
-                &index_args.substreams_args,
-                &chains,
-                retention_horizon,
-                extractors_config,
-                Some(extraction_runtime.handle()),
-                index_args.settlement_contract,
-            )
-            .await?;
+        let (extraction_tasks, other_tasks) = create_indexing_tasks(
+            global_args,
+            &index_args.substreams_args,
+            &chains,
+            retention_horizon,
+            extractors_config,
+            Some(extraction_runtime.handle()),
+            index_args.settlement_contract,
+        )
+        .await?;
 
-            Ok::<_, ExtractionError>((extraction_tasks, other_tasks))
-        })
-        .expect("Should not fail during tasks creation");
+        Ok::<_, ExtractionError>((extraction_tasks, other_tasks))
+    })?;
 
     let extractor_ctrl_tx = control_tx.clone();
     extraction_runtime.spawn(async move {
@@ -337,7 +431,7 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
         }
     });
 
-    let services_ctrl_tx = control_tx.clone();
+    let services_ctrl_tx = control_tx;
     main_runtime.spawn(async move {
         let (res, _, _) = select_all(other_tasks).await;
 
@@ -347,9 +441,9 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
         }
     });
 
-    let res = control_rx
-        .recv()
-        .expect("Control channel unexpectedly closed");
+    let res = control_rx.recv().map_err(|_closed| {
+        ExtractionError::Unknown("Control channel unexpectedly closed".to_string())
+    })?;
 
     match res {
         Ok(()) => Ok(()),
@@ -361,7 +455,11 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
 }
 
 #[tokio::main]
-async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), ExtractionError> {
+#[expect(
+    clippy::unwrap_in_result,
+    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
+)]
+async fn run_spkg(global_args: &GlobalArgs, run_args: RunSpkgArgs) -> Result<(), ExtractionError> {
     create_tracing_subscriber();
     info!("Starting Tycho");
 
@@ -387,7 +485,7 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
             1, /* TODO: if we want to increase this, we need to commit the cache when we
                 * reached `end_block` */
             run_args.start_block,
-            run_args.stop_block(),
+            run_args.stop_block()?,
             run_args
                 .protocol_type_names
                 .into_iter()
@@ -406,7 +504,7 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
     )]));
 
     let (supervisor_tasks, mut other_tasks) = create_indexing_tasks(
-        &global_args,
+        global_args,
         &run_args.substreams_args,
         &[chain],
         Utc::now().naive_utc(),
@@ -420,12 +518,19 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
     all_tasks.append(&mut other_tasks);
 
     let (res, _, _) = select_all(all_tasks).await;
-    res.expect("Tasks should not panic")?;
+    res.map_err(|join_err| ExtractionError::Unknown(format!("Task panicked: {join_err}")))??;
     Ok(())
 }
 
 #[tokio::main]
-async fn run_rpc(global_args: GlobalArgs, rpc_args: RpcServerArgs) -> Result<(), ExtractionError> {
+#[expect(
+    clippy::unwrap_in_result,
+    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
+)]
+async fn run_rpc(
+    global_args: &GlobalArgs,
+    rpc_args: &RpcServerArgs,
+) -> Result<(), ExtractionError> {
     create_tracing_subscriber();
 
     init_chains(&rpc_args.chain_config)?;
@@ -438,13 +543,14 @@ async fn run_rpc(global_args: GlobalArgs, rpc_args: RpcServerArgs) -> Result<(),
     let direct_gw = GatewayBuilder::new(&global_args.database_url)
         .set_chains(&[chain])
         .enable_token_cache()
+        .set_component_index(global_args.component_index)
         .build_direct_gw()
         .await?;
 
     info!("Starting Tycho RPC");
     let server_url = format!("http://{}:{}", global_args.server_ip, global_args.server_port);
-    let api_key = env::var("AUTH_API_KEY").map_err(|_| {
-        ExtractionError::Setup("AUTH_API_KEY environment variable is not set".to_string())
+    let api_key = env::var("AUTH_API_KEY").map_err(|e| {
+        ExtractionError::Setup(format!("AUTH_API_KEY environment variable is not usable: {e}"))
     })?;
 
     let plans_config = PlansConfig::from_yaml("./plans.yaml").map_err(ExtractionError::Setup)?;
@@ -455,11 +561,17 @@ async fn run_rpc(global_args: GlobalArgs, rpc_args: RpcServerArgs) -> Result<(),
             .bind(&global_args.server_ip)
             .port(global_args.server_port)
             .plans_config(plans_config)
+            .disabled_rpc_caches(
+                global_args
+                    .disabled_rpc_caches
+                    .0
+                    .clone(),
+            )
             .run()?;
     info!(server_url, "Http and Ws server started");
     let shutdown_task = tokio::spawn(shutdown_handler(server_handle, vec![], None));
     let (res, _, _) = select_all([server_task, shutdown_task]).await;
-    res.expect("ServiceTasks shouldn't panic!")
+    res.map_err(|join_err| ExtractionError::Unknown(format!("Service task panicked: {join_err}")))?
 }
 
 /// Creates extraction and server tasks.
@@ -487,20 +599,18 @@ async fn create_indexing_tasks(
         .map(|(name, _)| name.clone())
         .collect();
 
-    let (cached_gw, gw_writer_handle) = GatewayBuilder::new(&global_args.database_url)
+    let (cached_gw, rpc_gw, gw_writer_handle) = GatewayBuilder::new(&global_args.database_url)
         .set_chains(chains)
         .set_protocol_systems(&protocol_systems)
         .set_retention_horizon(retention_horizon)
         .enable_token_cache()
-        .build()
+        .set_component_index(global_args.component_index)
+        .build_with_rpc_gateway()
         .await?;
-    let token_processor = EthereumTokenPreProcessor::new(
-        &rpc_client,
-        *chains
-            .first()
-            .expect("No chain provided"), //TODO: handle multichain?
-        settlement_contract,
-    );
+    let chain = *chains
+        .first()
+        .expect("No chain provided"); //TODO: handle multichain?
+    let token_processor = EthereumTokenPreProcessor::new(&rpc_client, chain, settlement_contract);
 
     let (supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
         &extractors_config,
@@ -519,27 +629,60 @@ async fn create_indexing_tasks(
     .map_err(|e| ExtractionError::Setup(format!("Failed to create extractors: {e}")))?;
 
     let server_url = format!("http://{}:{}", global_args.server_ip, global_args.server_port);
-    let api_key = env::var("AUTH_API_KEY").map_err(|_| {
-        ExtractionError::Setup("AUTH_API_KEY environment variable is not set".to_string())
+    let api_key = env::var("AUTH_API_KEY").map_err(|e| {
+        ExtractionError::Setup(format!("AUTH_API_KEY environment variable is not usable: {e}"))
     })?;
     let plans_config = PlansConfig::from_yaml("./plans.yaml").map_err(ExtractionError::Setup)?;
 
-    let (server_handle, server_task) =
-        ServicesBuilder::new(cached_gw.clone(), rpc_client.clone(), api_key)
-            .prefix(&global_args.server_version_prefix)
-            .bind(&global_args.server_ip)
-            .port(global_args.server_port)
-            .plans_config(plans_config)
-            .dci_protocols(dci_protocols)
-            .protocol_systems(protocol_systems)
-            .register_extractors(extractor_handles.clone())
-            .pending_deltas(pending_deltas_rxs)
-            .run()?;
+    // The load runs after the extractors are built and before the server and the pump start:
+    // the snapshot sees the initialized accounts, nothing writes during the build, and no
+    // request or fold can reach a half-built cache.
+    let entity_cache = match global_args.entity_cache_mode {
+        EntityCacheMode::Off => EntityCacheSetup::Off,
+        mode @ (EntityCacheMode::Shadow | EntityCacheMode::Serve) => {
+            info!(?mode, "Loading the entity cache");
+            let cache = EntityCache::load(&rpc_gw, &chain)
+                .await
+                .map_err(|e| ExtractionError::Setup(format!("Entity cache load failed: {e}")))?;
+            if mode == EntityCacheMode::Shadow {
+                EntityCacheSetup::Shadow(cache)
+            } else {
+                EntityCacheSetup::Serve(cache)
+            }
+        }
+    };
+
+    let (server_handle, server_task) = ServicesBuilder::new(rpc_gw, rpc_client.clone(), api_key)
+        .prefix(&global_args.server_version_prefix)
+        .bind(&global_args.server_ip)
+        .port(global_args.server_port)
+        .plans_config(plans_config)
+        .dci_protocols(dci_protocols)
+        .protocol_systems(protocol_systems)
+        .register_extractors(extractor_handles.clone())
+        .pending_deltas(pending_deltas_rxs)
+        .window_config(WindowConfig {
+            depth: global_args.delta_window_depth,
+            min_fold_batch: global_args.delta_window_fold_batch,
+        })
+        .entity_cache(entity_cache)
+        .shadow_sample_rate(global_args.entity_cache_shadow_sample_rate)
+        .disabled_rpc_caches(
+            global_args
+                .disabled_rpc_caches
+                .0
+                .clone(),
+        )
+        .run()?;
     info!(server_url, "Http and Ws server started");
 
     let shutdown_task =
         tokio::spawn(shutdown_handler(server_handle, extractor_handles, Some(gw_writer_handle)));
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "`run_spkg` passes no extraction runtime and runs inside `#[tokio::main]`'s multi-thread runtime"
+    )]
     let runtime = extraction_runtime
         .cloned()
         .unwrap_or_else(|| tokio::runtime::Handle::current());
@@ -552,7 +695,10 @@ async fn create_indexing_tasks(
     Ok((supervisor_tasks, vec![server_task, shutdown_task]))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "forwards the process-wide dependencies of every extractor"
+)]
 async fn build_all_extractors(
     config: &ExtractorConfigs,
     chains: &[Chain],
@@ -604,6 +750,10 @@ async fn build_all_extractors(
         )
         .await;
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "`run_spkg` passes no extraction runtime and runs inside `#[tokio::main]`'s multi-thread runtime"
+        )]
         let runtime_handle = runtime
             .cloned()
             .unwrap_or_else(|| tokio::runtime::Handle::current());
@@ -782,8 +932,12 @@ async fn shutdown_handler(
 }
 
 #[tokio::main]
+#[expect(
+    clippy::unwrap_in_result,
+    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
+)]
 async fn run_analyze_tokens(
-    global_args: GlobalArgs,
+    global_args: &GlobalArgs,
     analyzer_args: AnalyzeTokenArgs,
 ) -> Result<(), anyhow::Error> {
     let rpc_client = global_args.rpc.build_client()?;
@@ -823,6 +977,17 @@ mod tests {
             18
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_profilers_reject_invalid_sample_rate() {
+        std::env::set_var("PYROSCOPE_SERVER_URL", "http://localhost:4040");
+        for rate in ["0", "1000001", "-1", "abc"] {
+            std::env::set_var("PYROSCOPE_SAMPLE_RATE", rate);
+            assert!(super::start_profilers(&[]).is_err(), "rate {rate:?}");
+        }
+        std::env::remove_var("PYROSCOPE_SAMPLE_RATE");
+        std::env::remove_var("PYROSCOPE_SERVER_URL");
     }
 }
 

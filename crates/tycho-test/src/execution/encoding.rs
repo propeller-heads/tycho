@@ -1,17 +1,20 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use alloy::{
-    eips::BlockNumberOrTag,
-    primitives::{keccak256, map::AddressHashMap, Address, FixedBytes, Keccak256, B256, U256},
+    primitives::{
+        keccak256,
+        map::{AddressHashMap, B256HashMap},
+        Address, FixedBytes, Keccak256, B256, U256,
+    },
     providers::Provider,
     rpc::types::{state::AccountOverride, Block, BlockId, TransactionRequest},
     sol_types::SolValue,
 };
 use miette::{miette, IntoDiagnostic, WrapErr};
 use num_bigint::BigUint;
-use tracing::debug;
+use tracing::{debug, warn};
 use tycho_common::{
-    models::{token::Token, Chain},
+    models::{token::Token, Chain, NativeAsset},
     simulation::protocol_sim::ProtocolSim,
     traits::{AllowanceSlotDetector, BalanceSlotDetector},
     Bytes,
@@ -24,7 +27,11 @@ use tycho_execution::encoding::{
     models::{ClientFeeParams, EncodedSolution, Solution, Swap},
 };
 use tycho_simulation::{
-    evm::protocol::u256_num::biguint_to_u256, protocol::models::ProtocolComponent,
+    evm::protocol::u256_num::biguint_to_u256,
+    price_level_stream::overrides::{
+        AccountOverride as PammAccountOverride, PammSimulationOverrides,
+    },
+    protocol::models::ProtocolComponent,
 };
 
 use crate::{
@@ -35,10 +42,13 @@ use crate::{
     rpc_tools::RPCTools,
 };
 
-const USER_ADDR: &str = "0xf847a638E44186F3287ee9F8cAF73FF4d4B80784";
+/// Simulated end-user EOA used as sender/receiver of encoded test solutions.
+pub const USER_ADDR: &str = "0xf847a638E44186F3287ee9F8cAF73FF4d4B80784";
 const GAS_LIMIT: u64 = 100_000_000;
 // 1_000 native tokens (10^21 wei): covers 100M gas at up to ~10_000 gwei
 const GAS_RESERVE: U256 = alloy::uint!(1_000_000_000_000_000_000_000_U256);
+// RuntimeBytecodeFixtures.sol deploys executor fixtures here so immutable self-calls work.
+// Keep the generator and its execution regression tests aligned when changing this address.
 pub const EXECUTOR_ADDRESS: &str = "0xaE04CA7E9Ed79cBD988f6c536CE11C621166f41B";
 // Fixed address used to plant FeeCalculator bytecode in state overrides.
 pub const FEE_CALCULATOR_ADDRESS: &str = "0xfEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0";
@@ -52,16 +62,28 @@ const FERMISWAP_TARGET_ADDRESS: &str = "0x90f73fEA1Ee2Dc514d4dbAc0bfF7ff04b93376
 const BOPAMM_REGISTRY_ADDRESS: &str = "0xDA7AFeEd01fe625cF15D187A19F94B45F00b8C5f";
 const BOPAMM_MODULE_ADDRESS: &str = "0xbc60639345dfa607d73b74e88c2d54d8b8ad7cc3";
 
-/// Contains the detected storage slots for a token.
-#[derive(Debug, Clone, Default)]
-pub struct TokenSlots {
-    pub balance_storage_addr: Vec<u8>,
-    pub balance_slot: Vec<u8>,
-    pub allowance_storage_addr: Vec<u8>,
-    pub allowance_slot: Vec<u8>,
+/// Where the sender's sell-token balance lives.
+#[derive(Debug, Clone)]
+pub enum BalanceSlot {
+    /// The token stores balances in `slot` of the contract at `storage_addr`.
+    Storage { storage_addr: Address, slot: B256 },
+    /// The token reports the sender's native balance divided by `native_per_unit`, so the balance
+    /// is set on the account itself.
+    Native { native_per_unit: U256 },
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Contains the detected storage slots for a token.
+#[derive(Debug, Clone)]
+pub struct TokenSlots {
+    pub balance: BalanceSlot,
+    pub allowance_storage_addr: Address,
+    pub allowance_slot: B256,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is an independent input of one swap encoding"
+)]
 pub fn encode_swap(
     component: &ProtocolComponent,
     state: Option<Arc<dyn ProtocolSim>>,
@@ -78,8 +100,8 @@ pub fn encode_swap(
         state,
         sell_token.clone(),
         buy_token.clone(),
-        amount_in.clone(),
-        gas_usage.clone(),
+        amount_in,
+        gas_usage,
         expected_amount_out,
     )?;
     let swap_encoder_registry = SwapEncoderRegistry::new(chain)
@@ -102,7 +124,7 @@ pub fn encode_swap(
             .ok_or_else(|| miette!("Missing solution"))?
     };
     let transaction =
-        encoded_transaction(encoded_solution.clone(), &solution, chain.native_token().address)?;
+        encoded_transaction(&encoded_solution, &solution, &chain.native_token().address);
     Ok((solution, transaction))
 }
 
@@ -145,10 +167,10 @@ pub fn create_solution(
 }
 
 fn encoded_transaction(
-    encoded_solution: EncodedSolution,
+    encoded_solution: &EncodedSolution,
     solution: &Solution,
-    native_address: Bytes,
-) -> miette::Result<Transaction> {
+    native_address: &Bytes,
+) -> Transaction {
     let amount_in = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.expected_amount_out());
     let min_amount_out = biguint_to_u256(solution.min_amount_out());
@@ -179,19 +201,19 @@ fn encoded_transaction(
         .abi_encode();
 
     let contract_interaction = encode_input(encoded_solution.function_signature(), method_calldata);
-    let value = if *solution.token_in() == native_address {
+    let value = if solution.token_in() == native_address {
         solution.amount_in().clone()
     } else {
         BigUint::ZERO
     };
-    Ok(Transaction::new(
+    Transaction::new(
         encoded_solution
             .interacting_with()
             .clone(),
         value,
         contract_interaction,
         encoded_solution.estimated_gas().clone(),
-    ))
+    )
 }
 
 /// Encodes the input data for a function call to the given function selector.
@@ -216,39 +238,52 @@ fn encode_input(selector: &str, mut encoded_args: Vec<u8>) -> Vec<u8> {
     call_data
 }
 
+/// Returns the routable token and how many native base units make one of its base units, when the
+/// routable token reads the native balance instead of storing its own.
+fn shared_balance_routable(native_asset: &NativeAsset) -> Option<(Bytes, U256)> {
+    let NativeAsset::SharedBalance { native, routable } = native_asset else {
+        return None;
+    };
+    let decimals_gap = native
+        .decimals
+        .checked_sub(routable.decimals)?;
+    let native_per_unit = U256::from(10).pow(U256::from(decimals_gap));
+    Some((routable.address.clone(), native_per_unit))
+}
+
 /// Detects balance and allowance storage slots for all given tokens in a single batch operation.
 ///
-/// Returns a mapping from token address to their detected storage slots.
-/// This function should be called once per block with all tokens of interest to optimize RPC calls.
-/// Tokens that fail slot detection are silently skipped and not included in the result.
+/// Returns a mapping from token address to their detected storage slots. The native token needs
+/// no slots. A routable token that shares the native balance gets [`BalanceSlot::Native`] and only
+/// its allowance slot is detected. Tokens that fail slot detection are logged and left out.
 pub(crate) async fn detect_token_slots(
     rpc_tools: &RPCTools,
     token_addresses: &[Bytes],
     to_address: &Bytes,
 ) -> HashMap<Bytes, TokenSlots> {
-    let user_address = match Address::from_str(USER_ADDR).into_diagnostic() {
-        Ok(addr) => addr,
-        Err(_) => return HashMap::new(),
-    };
+    let user_address = Address::from_str(USER_ADDR).expect("Valid user address");
+    let shared_balance = shared_balance_routable(&rpc_tools.native_asset);
 
-    let mut token_slots = HashMap::new();
-    // Add one entry for the native token (represented as zero address)
-    token_slots.insert(Bytes::zero(20), TokenSlots::default());
-
-    // Filter out the native token (zero address) as it doesn't need slot detection
     let erc20_tokens: Vec<Bytes> = token_addresses
         .iter()
         .filter(|&addr| addr != &Bytes::zero(20))
         .cloned()
         .collect();
-
     if erc20_tokens.is_empty() {
-        return token_slots;
+        return HashMap::new();
     }
+    let shared_balance_token = shared_balance
+        .as_ref()
+        .map(|(routable, _)| routable);
+    let balance_tokens: Vec<Bytes> = erc20_tokens
+        .iter()
+        .filter(|&addr| shared_balance_token != Some(addr))
+        .cloned()
+        .collect();
 
     let balance_results = rpc_tools
         .evm_balance_slot_detector
-        .detect_balance_slots(&erc20_tokens, (**user_address).into())
+        .detect_balance_slots(&balance_tokens, (**user_address).into())
         .await;
 
     let allowance_results = rpc_tools
@@ -256,21 +291,30 @@ pub(crate) async fn detect_token_slots(
         .detect_allowance_slots(&erc20_tokens, (**user_address).into(), to_address.clone())
         .await;
 
+    let mut token_slots = HashMap::new();
     for token_address in &erc20_tokens {
-        let balance_slot_data = match balance_results.get(token_address) {
-            Some(Ok((storage_addr, slot))) => (storage_addr.clone(), slot.clone()),
-            Some(Err(e)) => {
+        let balance = match (&shared_balance, balance_results.get(token_address)) {
+            (Some((routable, native_per_unit)), _) if routable == token_address => {
+                BalanceSlot::Native { native_per_unit: *native_per_unit }
+            }
+            (_, Some(Ok((storage_addr, slot)))) => BalanceSlot::Storage {
+                storage_addr: Address::from_slice(&storage_addr[..20]),
+                slot: B256::from_slice(slot),
+            },
+            (_, Some(Err(e))) => {
                 tracing::warn!(token=%token_address, error=?e, "Balance slot detection failed");
                 continue;
             }
-            None => {
+            (_, None) => {
                 tracing::warn!(token=%token_address, "Balance slot detection returned no result");
                 continue;
             }
         };
 
-        let allowance_slot_data = match allowance_results.get(token_address) {
-            Some(Ok((storage_addr, slot))) => (storage_addr.clone(), slot.clone()),
+        let (allowance_storage_addr, allowance_slot) = match allowance_results.get(token_address) {
+            Some(Ok((storage_addr, slot))) => {
+                (Address::from_slice(&storage_addr[..20]), B256::from_slice(slot))
+            }
             Some(Err(e)) => {
                 tracing::warn!(token=%token_address, error=?e, "Allowance slot detection failed");
                 continue;
@@ -283,98 +327,76 @@ pub(crate) async fn detect_token_slots(
 
         token_slots.insert(
             token_address.clone(),
-            TokenSlots {
-                balance_storage_addr: balance_slot_data.0.to_vec(),
-                balance_slot: balance_slot_data.1.to_vec(),
-                allowance_storage_addr: allowance_slot_data.0.to_vec(),
-                allowance_slot: allowance_slot_data.1.to_vec(),
-            },
+            TokenSlots { balance, allowance_storage_addr, allowance_slot },
         );
     }
 
     token_slots
 }
 
+/// Overwrites the sender's native balance so it covers `amount` sent as tx value plus gas.
+pub(crate) fn setup_native_user_overwrites(amount: &BigUint) -> AddressHashMap<AccountOverride> {
+    let user_address = Address::from_str(USER_ADDR).expect("Valid user address");
+    let native_balance = biguint_to_u256(amount) + GAS_RESERVE;
+    AddressHashMap::from_iter([(
+        user_address,
+        AccountOverride::default().with_balance(native_balance),
+    )])
+}
+
 /// Set up all state overrides needed for simulation using pre-computed token slots.
 ///
-/// This includes balance overrides and allowance overrides of the sell token for the sender.
-/// Returns both the overwrites and metadata for human-readable logging.
+/// This includes balance overrides and allowance overrides of the sell token for the sender, and
+/// a native balance that pays for gas. Returns both the overwrites and metadata for human-readable
+/// logging.
 pub(crate) fn setup_user_overwrites(
     to_address: &Bytes,
     token_address: &Bytes,
     amount: &BigUint,
     token_slots: &TokenSlots,
 ) -> (AddressHashMap<AccountOverride>, OverwriteMetadata) {
-    let mut overwrites = AddressHashMap::default();
+    let mut overwrites: AddressHashMap<AccountOverride> = AddressHashMap::default();
     let mut metadata = OverwriteMetadata::new();
     let user_address = Address::from_str(USER_ADDR).expect("Valid user address");
     let spender_address = Address::from_slice(&to_address[..20]);
+    let token_amount = biguint_to_u256(amount);
+    let amount_slot_value = B256::from(token_amount.to_be_bytes::<32>());
 
-    // Native token (zero address)
-    if token_address == &Bytes::zero(20) {
-        // amount is sent as tx value, so the balance must cover both the swap value and gas
-        let native_balance = biguint_to_u256(amount) + GAS_RESERVE;
-        overwrites.insert(user_address, AccountOverride::default().with_balance(native_balance));
-    } else {
-        let token_balance = biguint_to_u256(amount);
-        let token_allowance = biguint_to_u256(amount);
+    debug!(
+        token = %token_address,
+        balance = ?token_slots.balance,
+        allowance_storage = %token_slots.allowance_storage_addr,
+        "Setting token override: amount={token_amount}"
+    );
 
-        let balance_storage_address = Address::from_slice(&token_slots.balance_storage_addr[..20]);
-        let allowance_storage_address =
-            Address::from_slice(&token_slots.allowance_storage_addr[..20]);
-
-        let balance_slot_b256 = alloy::primitives::B256::from_slice(&token_slots.balance_slot);
-        let allowance_slot_b256 = alloy::primitives::B256::from_slice(&token_slots.allowance_slot);
-
-        debug!(
-            "Setting token override for {token_address}: balance={}, allowance={}, balance_storage={}, allowance_storage={}",
-            token_balance, token_allowance, balance_storage_address, allowance_storage_address
-        );
-
-        // Add metadata for human-readable logging
-        metadata.add_balance(balance_storage_address, user_address, balance_slot_b256);
-        metadata.add_allowance(
-            allowance_storage_address,
-            user_address,
-            spender_address,
-            allowance_slot_b256,
-        );
-
-        // Apply balance and allowance overrides
-        // If both storage addresses are the same, combine them into one override
-        if balance_storage_address == allowance_storage_address {
-            overwrites.insert(
-                balance_storage_address,
-                AccountOverride::default().with_state_diff(vec![
-                    (
-                        balance_slot_b256,
-                        alloy::primitives::B256::from_slice(&token_balance.to_be_bytes::<32>()),
-                    ),
-                    (
-                        allowance_slot_b256,
-                        alloy::primitives::B256::from_slice(&token_allowance.to_be_bytes::<32>()),
-                    ),
-                ]),
-            );
-        } else {
-            // Different storage addresses, apply separately
-            overwrites.insert(
-                balance_storage_address,
-                AccountOverride::default().with_state_diff(vec![(
-                    balance_slot_b256,
-                    alloy::primitives::B256::from_slice(&token_balance.to_be_bytes::<32>()),
-                )]),
-            );
-            overwrites.insert(
-                allowance_storage_address,
-                AccountOverride::default().with_state_diff(vec![(
-                    allowance_slot_b256,
-                    alloy::primitives::B256::from_slice(&token_allowance.to_be_bytes::<32>()),
-                )]),
-            );
+    metadata.add_allowance(
+        token_slots.allowance_storage_addr,
+        user_address,
+        spender_address,
+        token_slots.allowance_slot,
+    );
+    let mut native_balance = GAS_RESERVE;
+    let mut storage_diffs =
+        vec![(token_slots.allowance_storage_addr, token_slots.allowance_slot, amount_slot_value)];
+    match &token_slots.balance {
+        BalanceSlot::Storage { storage_addr, slot } => {
+            metadata.add_balance(*storage_addr, user_address, *slot);
+            storage_diffs.push((*storage_addr, *slot, amount_slot_value));
         }
-        overwrites.insert(user_address, AccountOverride::default().with_balance(GAS_RESERVE));
+        BalanceSlot::Native { native_per_unit } => {
+            native_balance += token_amount * *native_per_unit;
+        }
     }
+
+    for (storage_addr, slot, value) in storage_diffs {
+        overwrites
+            .entry(storage_addr)
+            .or_default()
+            .state_diff
+            .get_or_insert_with(Default::default)
+            .insert(slot, value);
+    }
+    overwrites.insert(user_address, AccountOverride::default().with_balance(native_balance));
 
     (overwrites, metadata)
 }
@@ -384,7 +406,8 @@ pub(crate) fn swap_request(
     block: &Block,
 ) -> miette::Result<TransactionRequest> {
     let (max_fee_per_gas, max_priority_fee_per_gas) = calculate_gas_fees(block)?;
-    let user_address = Address::from_str(USER_ADDR).expect("Valid user address");
+    let user_address = Address::from_str(USER_ADDR)
+        .map_err(|e| miette!("Invalid user address {USER_ADDR}: {e}"))?;
     Ok(TransactionRequest::default()
         .to(Address::from_slice(&transaction.to()[..20]))
         .input(transaction.data().clone().into())
@@ -409,10 +432,12 @@ fn calculate_gas_fees(block: &Block) -> miette::Result<(U256, U256)> {
         .header
         .base_fee_per_gas
         .ok_or_else(|| miette::miette!("Block does not have base fee (pre-EIP-1559)"))?;
-    // Set max_priority_fee_per_gas to a reasonable value (2 Gwei)
-    let max_priority_fee_per_gas = U256::from(2_000_000_000u64);
-    // Set max_fee_per_gas to base_fee * 2 + max_priority_fee_per_gas to handle fee fluctuations
-    let max_fee_per_gas = U256::from(base_fee) * U256::from(2u64) + max_priority_fee_per_gas;
+    // A simulated swap competes for no block space, so it pays no priority fee. Contracts that
+    // read the priority fee then see the conditions the off-chain quote assumed: some Metric pools
+    // on OP Stack chains revert swaps whose priority fee exceeds a small cap.
+    let max_priority_fee_per_gas = U256::ZERO;
+    // Set max_fee_per_gas to base_fee * 2 to handle fee fluctuations
+    let max_fee_per_gas = U256::from(base_fee) * U256::from(2u64);
     debug!(
         "Gas pricing: base_fee={}, max_priority_fee_per_gas={}, max_fee_per_gas={}",
         base_fee, max_priority_fee_per_gas, max_fee_per_gas
@@ -496,22 +521,19 @@ pub fn setup_angstrom_overwrites(
 /// FermiSwap reads oracle state from PrioUpdateRegistry using a lane keyed by
 /// `keccak256(abi.encode(target, laneIndex))`. The first 4 bytes of that lane's
 /// slot store the update timestamp. To keep the lane payload intact, this reads
-/// each current slot value at the simulation block and only replaces the
-/// timestamp prefix with `block.timestamp`.
+/// each current slot value at `state_block`, the block whose state the simulation
+/// runs on, and only replaces the timestamp prefix with `block.timestamp`.
 pub async fn setup_fermiswap_overwrites(
     rpc_tools: &RPCTools,
     block: &Block,
+    state_block: BlockId,
     pairs: &[(Address, Address)],
 ) -> miette::Result<AddressHashMap<AccountOverride>> {
     let registry_address = Address::from_str(FERMISWAP_REGISTRY_ADDRESS).into_diagnostic()?;
     let target_address = Address::from_str(FERMISWAP_TARGET_ADDRESS).into_diagnostic()?;
-    let timestamp = u32::try_from(block.header.timestamp)
-        .map_err(|_| miette!("Block timestamp {} exceeds uint32", block.header.timestamp))?;
-    let block_id = if block.header.hash == B256::ZERO {
-        BlockId::from(BlockNumberOrTag::Pending)
-    } else {
-        BlockId::from(block.number())
-    };
+    let timestamp = u32::try_from(block.header.timestamp).map_err(|_out_of_range| {
+        miette!("Block timestamp {} exceeds uint32", block.header.timestamp)
+    })?;
 
     let mut state_diff = Vec::new();
     for &(base_asset, quote_asset) in pairs {
@@ -520,7 +542,7 @@ pub async fn setup_fermiswap_overwrites(
         let stored_value = rpc_tools
             .provider
             .get_storage_at(registry_address, U256::from_be_slice(storage_slot.as_slice()))
-            .block_id(block_id)
+            .block_id(state_block)
             .await
             .into_diagnostic()
             .wrap_err_with(|| {
@@ -572,22 +594,20 @@ fn overwrite_fermiswap_lane_timestamp(stored_value: B256, timestamp: u32) -> B25
 /// by `keccak256(abi.encode(module, assetId))` — the pricing module is the registry `target` and
 /// the book's `assetId` is the lane index. The first 4 bytes of that lane's slot store the update
 /// timestamp; the registry's exact-window `getState` gate reverts (`StaleUpdate`) unless
-/// `block.timestamp` matches it. This reads each lane's current value at the simulation block and
-/// only replaces the timestamp prefix with `block.timestamp`, leaving the quote payload intact.
+/// `block.timestamp` matches it. This reads each lane's current value at `state_block`, the block
+/// whose state the simulation runs on, and only replaces the timestamp prefix with
+/// `block.timestamp`, leaving the quote payload intact.
 pub async fn setup_bopamm_overwrites(
     rpc_tools: &RPCTools,
     block: &Block,
+    state_block: BlockId,
     asset_ids: &[U256],
 ) -> miette::Result<AddressHashMap<AccountOverride>> {
     let registry_address = Address::from_str(BOPAMM_REGISTRY_ADDRESS).into_diagnostic()?;
     let module_address = Address::from_str(BOPAMM_MODULE_ADDRESS).into_diagnostic()?;
-    let timestamp = u32::try_from(block.header.timestamp)
-        .map_err(|_| miette!("Block timestamp {} exceeds uint32", block.header.timestamp))?;
-    let block_id = if block.header.hash == B256::ZERO {
-        BlockId::from(BlockNumberOrTag::Pending)
-    } else {
-        BlockId::from(block.number())
-    };
+    let timestamp = u32::try_from(block.header.timestamp).map_err(|_out_of_range| {
+        miette!("Block timestamp {} exceeds uint32", block.header.timestamp)
+    })?;
 
     let mut state_diff = Vec::new();
     for asset_id in asset_ids {
@@ -595,7 +615,7 @@ pub async fn setup_bopamm_overwrites(
         let stored_value = rpc_tools
             .provider
             .get_storage_at(registry_address, U256::from_be_slice(storage_slot.as_slice()))
-            .block_id(block_id)
+            .block_id(state_block)
             .await
             .into_diagnostic()
             .wrap_err_with(|| {
@@ -693,9 +713,226 @@ pub fn setup_router_overwrites(
     Ok(state_overwrites)
 }
 
+/// A pAMM quote's simulation overrides as account overwrites for
+/// [`TychoExecutionInput::account_overwrites`](crate::execution::models::TychoExecutionInput):
+/// each overridden account with its balance, nonce and storage slots, in the shape `eth_call`
+/// takes. The price level stream validated every address, slot and value, so an account that does
+/// not convert is a bug: it is logged and left out.
+pub fn pamm_account_overwrites(
+    overrides: &PammSimulationOverrides,
+) -> AddressHashMap<AccountOverride> {
+    overrides
+        .accounts
+        .iter()
+        .filter_map(|(address, account)| {
+            let converted = pamm_account_overwrite(address, account);
+            if converted.is_none() {
+                warn!(%address, "A simulation override account does not convert; leaving it out");
+            }
+            converted
+        })
+        .collect()
+}
+
+fn pamm_account_overwrite(
+    address: &Bytes,
+    account: &PammAccountOverride,
+) -> Option<(Address, AccountOverride)> {
+    let address = Address::try_from(address.as_ref()).ok()?;
+    let balance = match &account.balance {
+        Some(balance) => Some(U256::try_from_be_slice(balance)?),
+        None => None,
+    };
+    let state_diff = account
+        .state_diff
+        .iter()
+        .map(|(slot, value)| {
+            Some((B256::try_from(slot.as_ref()).ok()?, B256::try_from(value.as_ref()).ok()?))
+        })
+        .collect::<Option<B256HashMap<B256>>>()?;
+    let overwrite = AccountOverride {
+        balance,
+        nonce: account.nonce,
+        state_diff: (!state_diff.is_empty()).then_some(state_diff),
+        ..Default::default()
+    };
+    Some((address, overwrite))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution::tenderly::SlotMetadata;
+
+    fn word(byte: u8) -> Bytes {
+        Bytes::from(vec![byte; 32])
+    }
+
+    fn pamm_overrides(accounts: Vec<(Bytes, PammAccountOverride)>) -> PammSimulationOverrides {
+        PammSimulationOverrides {
+            accounts: accounts.into_iter().collect(),
+            block_number: Some(1),
+            block_timestamp: Some(12),
+            built_at_ns: 0,
+        }
+    }
+
+    /// An account converts with its balance, its nonce and its storage slots.
+    #[test]
+    fn a_pamm_override_account_converts_with_its_balance_nonce_and_slots() {
+        let overrides = pamm_overrides(vec![(
+            Bytes::from(vec![0xaa; 20]),
+            PammAccountOverride {
+                balance: Some(Bytes::from(vec![0x01, 0x00])),
+                nonce: Some(5),
+                state_diff: [(word(0x01), word(0x02))]
+                    .into_iter()
+                    .collect(),
+            },
+        )]);
+
+        let overwrites = pamm_account_overwrites(&overrides);
+
+        let account = &overwrites[&Address::repeat_byte(0xaa)];
+        assert_eq!((account.balance, account.nonce), (Some(U256::from(256)), Some(5)));
+        assert_eq!(
+            account.state_diff,
+            Some(B256HashMap::from_iter([(B256::repeat_byte(0x01), B256::repeat_byte(0x02))]))
+        );
+    }
+
+    /// An account that overrides no storage carries no storage overwrite, so it never replaces the
+    /// slots another overwrite set for it.
+    #[test]
+    fn a_pamm_override_account_without_slots_carries_no_storage() {
+        let overrides = pamm_overrides(vec![(
+            Bytes::from(vec![0xaa; 20]),
+            PammAccountOverride {
+                balance: Some(Bytes::from(vec![0x01])),
+                nonce: None,
+                state_diff: Default::default(),
+            },
+        )]);
+
+        let overwrites = pamm_account_overwrites(&overrides);
+
+        assert_eq!(overwrites[&Address::repeat_byte(0xaa)].state_diff, None);
+    }
+
+    /// An account that does not convert is left out, and the others are kept.
+    #[test]
+    fn a_pamm_override_account_that_does_not_convert_is_left_out() {
+        let account =
+            PammAccountOverride { balance: None, nonce: Some(1), state_diff: Default::default() };
+        let overrides = pamm_overrides(vec![
+            (Bytes::from(vec![0xaa; 19]), account.clone()),
+            (Bytes::from(vec![0xbb; 20]), account),
+        ]);
+
+        let overwrites = pamm_account_overwrites(&overrides);
+
+        assert_eq!(overwrites.keys().collect::<Vec<_>>(), vec![&Address::repeat_byte(0xbb)]);
+    }
+
+    const ROUTER: &str = "0x72C452506a551C7fe069f1F66Beb671AC58909E9";
+    const TOKEN: &str = "0x3600000000000000000000000000000000000000";
+    const ALLOWANCE_SLOT: B256 = B256::with_last_byte(0x0a);
+    const BALANCE_SLOT: B256 = B256::with_last_byte(0x09);
+
+    fn user() -> Address {
+        Address::from_str(USER_ADDR).expect("valid user address")
+    }
+
+    fn token_slots(balance: BalanceSlot) -> TokenSlots {
+        TokenSlots {
+            balance,
+            allowance_storage_addr: Address::from_str(TOKEN).expect("valid token address"),
+            allowance_slot: ALLOWANCE_SLOT,
+        }
+    }
+
+    fn user_overwrites(slots: &TokenSlots) -> (AddressHashMap<AccountOverride>, OverwriteMetadata) {
+        setup_user_overwrites(
+            &Bytes::from_str(ROUTER).expect("valid router address"),
+            &Bytes::from_str(TOKEN).expect("valid token address"),
+            &BigUint::from(5_000_000u64),
+            slots,
+        )
+    }
+
+    #[test]
+    fn test_arc_usdc_shares_the_native_balance_at_6_decimals() {
+        let (routable, native_per_unit) =
+            shared_balance_routable(&Chain::Arc.native_asset()).expect("Arc shares its balance");
+
+        assert_eq!(routable, Bytes::from_str(TOKEN).expect("valid token address"));
+        assert_eq!(native_per_unit, U256::from(10).pow(U256::from(12)));
+        assert!(shared_balance_routable(&Chain::Ethereum.native_asset()).is_none());
+    }
+
+    #[test]
+    fn test_native_balance_token_funds_the_sender_account() {
+        let native_per_unit = U256::from(10).pow(U256::from(12));
+        let slots = token_slots(BalanceSlot::Native { native_per_unit });
+
+        let (overwrites, metadata) = user_overwrites(&slots);
+
+        let expected_balance = U256::from(5_000_000u64) * native_per_unit + GAS_RESERVE;
+        assert_eq!(overwrites[&user()].balance, Some(expected_balance));
+        let token_diff = overwrites[&slots.allowance_storage_addr]
+            .state_diff
+            .as_ref()
+            .expect("allowance is overwritten");
+        assert_eq!(token_diff.len(), 1);
+        assert_eq!(token_diff[&ALLOWANCE_SLOT], B256::from(U256::from(5_000_000u64)));
+        assert_eq!(
+            metadata.slots[&slots.allowance_storage_addr].len(),
+            1,
+            "only the allowance slot is overwritten"
+        );
+    }
+
+    #[test]
+    fn test_storage_balance_token_overwrites_both_slots_of_one_contract() {
+        let token = Address::from_str(TOKEN).expect("valid token address");
+        let slots = token_slots(BalanceSlot::Storage { storage_addr: token, slot: BALANCE_SLOT });
+
+        let (overwrites, metadata) = user_overwrites(&slots);
+
+        assert_eq!(overwrites[&user()].balance, Some(GAS_RESERVE));
+        let token_diff = overwrites[&token]
+            .state_diff
+            .as_ref()
+            .expect("token slots are overwritten");
+        assert_eq!(token_diff[&ALLOWANCE_SLOT], B256::from(U256::from(5_000_000u64)));
+        assert_eq!(token_diff[&BALANCE_SLOT], B256::from(U256::from(5_000_000u64)));
+        assert!(metadata.slots[&token]
+            .iter()
+            .any(|slot| match slot {
+                SlotMetadata::Balance { owner: _, slot } => *slot == BALANCE_SLOT,
+                SlotMetadata::Allowance { owner: _, spender: _, slot: _ } => false,
+            }));
+    }
+
+    fn block_with_base_fee(base_fee: Option<u64>) -> Block {
+        let mut block: Block = Block::empty(Default::default());
+        block.header.inner.base_fee_per_gas = base_fee;
+        block
+    }
+
+    #[test]
+    fn test_gas_fees_pay_no_priority_fee() {
+        let (max_fee_per_gas, max_priority_fee_per_gas) =
+            calculate_gas_fees(&block_with_base_fee(Some(5_000_000))).unwrap();
+
+        assert_eq!(max_priority_fee_per_gas, U256::ZERO);
+        assert_eq!(max_fee_per_gas, U256::from(10_000_000u64));
+    }
+
+    #[test]
+    fn test_gas_fees_require_a_base_fee() {
+        assert!(calculate_gas_fees(&block_with_base_fee(None)).is_err());
+    }
 
     #[test]
     fn test_fermiswap_lane_timestamp_preserves_payload() {

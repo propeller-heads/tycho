@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     sync::{
-        mpsc::{self, Receiver},
+        mpsc::{self, error::SendError, Receiver},
         oneshot,
     },
     task::JoinHandle,
@@ -55,9 +55,16 @@ pub struct BlockHeader {
     pub hash: Bytes,
     pub number: u64,
     pub parent_hash: Bytes,
+    /// True when the chain rolled back. The header then names the newest block that stays
+    /// valid. That block is always sealed and carries its sealed hash: the indexer reverts to
+    /// the newest block of its reorg buffer, which holds only sealed blocks. A revert never
+    /// targets a partial block, so do not look for a revert target among partials.
     pub revert: bool,
     pub timestamp: u64,
     /// Index of a partial block update within a block. None for full blocks.
+    ///
+    /// On a revert header this is not a position in the named block: it is the index of the
+    /// dropped partial of the next block, and is None when sealed blocks were reverted too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_block_index: Option<u32>,
 }
@@ -77,14 +84,22 @@ impl Display for BlockHeader {
             hex::encode(&self.hash)
         };
 
-        match self.partial_block_index {
-            Some(idx) => write!(f, "Block #{} [0x{}..] (partial {})", self.number, short_hash, idx),
-            None => write!(f, "Block #{} [0x{}..]", self.number, short_hash),
+        write!(f, "Block #{} [0x{short_hash}..]", self.number)?;
+        if let Some(idx) = self.partial_block_index {
+            write!(f, " (partial {idx})")?;
         }
+        if self.revert {
+            write!(f, " (revert)")?;
+        }
+        Ok(())
     }
 }
 
 impl From<&Block> for BlockHeader {
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "public infallible From; rejecting a pre-1970 server timestamp needs TryFrom, a breaking change"
+    )]
     fn from(block: &Block) -> Self {
         Self {
             hash: block.hash.clone(),
@@ -163,11 +178,14 @@ type BlockSyncResult<T> = Result<T, BlockSynchronizerError>;
 /// Once started, the synchronizers are queried concurrently for messages in lock step:
 /// the main loop queries all synchronizers in ready for the last emitted data, builds the
 /// `FeedMessage` and emits it, then it schedules the wait procedure for the next block.
+/// Stale synchronizers are left out of the lock step: active synchronizers advance first, then
+/// stale ones consume only what queued meanwhile. They wait only when no synchronizer is active.
 ///
 /// ## Synchronization Logic
 ///
-/// To classify a synchronizer as delayed, we need to first define the current block. The highest
-/// block number of all ready synchronizers is considered the current block.
+/// To classify a synchronizer as delayed, we need to first define the current block. The round
+/// advances by the headers of synchronizers that are Ready after this round: a revert first, the
+/// deepest one if there are several, and otherwise the highest block.
 ///
 /// Once we have the current block we can easily determine which block we expect next. And if a
 /// synchronizer delivers an older block we can classify it as delayed.
@@ -237,6 +255,23 @@ impl Display for SynchronizerState {
     }
 }
 
+/// When a synchronizer counts as stale.
+#[derive(Debug, Clone, Copy)]
+struct StaleLimits {
+    /// How long a synchronizer may make no progress before it is marked stale.
+    threshold: Duration,
+    /// How many blocks behind the round's tip a stale synchronizer's block may be and still
+    /// keep it stale. A replay further behind would hold every round if it went Delayed.
+    max_missed_blocks: u64,
+}
+
+/// Returns how many blocks `block` is behind the tip of `block_history`, or 0 at or past the tip.
+fn blocks_behind_tip(block_history: &BlockHistory, block: &BlockHeader) -> u64 {
+    block_history
+        .latest()
+        .map_or(0, |tip| tip.number.saturating_sub(block.number))
+}
+
 pub struct SynchronizerStream {
     extractor_id: ExtractorIdentity,
     state: SynchronizerState,
@@ -264,16 +299,15 @@ impl SynchronizerStream {
     /// - `block_history`: validated chain of recent blocks used to classify incoming headers.
     /// - `block_time`: expected time between blocks; sets the base timeout for Ready streams.
     /// - `latency_buffer`: added on top of `block_time` to absorb network/processing jitter.
-    /// - `stale_threshold`: how long a stream can make no progress before it is marked Stale and
-    ///   skipped.
-    /// - `skip_wait`: skip the blocking wait for all protocol state synchronizers - only advance
-    ///   those that have waiting messages.
+    /// - `stale`: when a stream counts as stale.
+    /// - `skip_wait`: Delayed and Stale streams only consume what is already queued. Ready streams
+    ///   still wait for their next block.
     async fn try_advance(
         &mut self,
         block_history: &BlockHistory,
         block_time: std::time::Duration,
         latency_buffer: std::time::Duration,
-        stale_threshold: std::time::Duration,
+        stale: StaleLimits,
         skip_wait: bool,
     ) -> BlockSyncResult<Option<StateSyncMessage<BlockHeader>>> {
         let extractor_id = self.extractor_id.clone();
@@ -287,7 +321,7 @@ impl SynchronizerStream {
             SynchronizerState::Advanced(b) => {
                 let future_block = b.clone();
                 // Transition to ready once we arrived at the expected height
-                self.transition(future_block, block_history, stale_threshold)?;
+                self.transition(future_block, block_history, stale)?;
                 Ok(None)
             }
             SynchronizerState::Ready(previous_block) => {
@@ -296,7 +330,7 @@ impl SynchronizerStream {
                     block_time + latency_buffer,
                     block_history,
                     previous_block.clone(),
-                    stale_threshold,
+                    stale,
                 )
                 .await
             }
@@ -310,7 +344,7 @@ impl SynchronizerStream {
                 );
                 let timeout =
                     if skip_wait { std::time::Duration::ZERO } else { block_time + latency_buffer };
-                self.try_catch_up(block_history, timeout, stale_threshold)
+                self.try_catch_up(block_history, timeout, stale)
                     .await
             }
             SynchronizerState::Stale(old_block) => {
@@ -322,7 +356,7 @@ impl SynchronizerStream {
                     "Trying to catch up stale synchronizer to latest block"
                 );
                 let timeout = if skip_wait { std::time::Duration::ZERO } else { block_time };
-                self.try_catch_up(block_history, timeout, stale_threshold)
+                self.try_catch_up(block_history, timeout, stale)
                     .await
             }
         }
@@ -340,12 +374,12 @@ impl SynchronizerStream {
         max_wait: std::time::Duration,
         block_history: &BlockHistory,
         previous_block: BlockHeader,
-        stale_threshold: std::time::Duration,
+        stale: StaleLimits,
     ) -> BlockSyncResult<Option<StateSyncMessage<BlockHeader>>> {
         let extractor_id = self.extractor_id.clone();
         match timeout(max_wait, self.rx.recv()).await {
             Ok(Some(Ok(msg))) => {
-                self.transition(msg.header.clone(), block_history, stale_threshold)?;
+                self.transition(msg.header.clone(), block_history, stale)?;
                 Ok(Some(msg))
             }
             Ok(Some(Err(e))) => {
@@ -379,12 +413,16 @@ impl SynchronizerStream {
     ///
     /// If a synchronizer is delayed, this method will try to catch up to the next expected block
     /// by consuming all waiting messages in its queue and waiting for any new block messages
-    /// within a timeout. Finally, all update messages are merged into one and returned.
+    /// within a timeout. It stops at the first block that is next expected, the next partial, or
+    /// advanced. Finally, all update messages are merged into one and returned.
+    ///
+    /// A zero `max_wait` still consumes the messages already queued; it only skips the wait for
+    /// new ones.
     async fn try_catch_up(
         &mut self,
         block_history: &BlockHistory,
         max_wait: std::time::Duration,
-        stale_threshold: std::time::Duration,
+        stale: StaleLimits,
     ) -> BlockSyncResult<Option<StateSyncMessage<BlockHeader>>> {
         let mut results = Vec::new();
         let extractor_id = self.extractor_id.clone();
@@ -392,7 +430,10 @@ impl SynchronizerStream {
         // Set a deadline for the overall catch-up operation
         let deadline = std::time::Instant::now() + max_wait;
 
-        while std::time::Instant::now() < deadline {
+        // No deadline check of its own: `timeout` polls the receiver before the deadline, so
+        // queued messages still drain once it has passed. Once tokio's coop budget is spent the
+        // drain stops early, and what is left drains next round.
+        loop {
             match timeout(
                 deadline.saturating_duration_since(std::time::Instant::now()),
                 self.rx.recv(),
@@ -403,8 +444,14 @@ impl SynchronizerStream {
                     debug!(%extractor_id, block=%msg.header, "Received new message during catch-up");
                     let block_pos = block_history.determine_block_position(&msg.header)?;
                     results.push(msg);
-                    if matches!(block_pos, BlockPosition::NextExpected | BlockPosition::NextPartial)
-                    {
+                    // Advanced means nothing later in the queue can connect to this history
+                    // either. Reading on only widens the gap the reinit has to stitch.
+                    if matches!(
+                        block_pos,
+                        BlockPosition::NextExpected |
+                            BlockPosition::NextPartial |
+                            BlockPosition::Advanced
+                    ) {
                         break;
                     }
                 }
@@ -437,11 +484,11 @@ impl SynchronizerStream {
         if let Some(msg) = merged {
             // we were able to get at least one block out
             debug!(%extractor_id, "Delayed extractor made progress!");
-            self.transition(msg.header.clone(), block_history, stale_threshold)?;
+            self.transition(msg.header.clone(), block_history, stale)?;
             Ok(Some(msg))
         } else {
             // No progress made during catch-up, check if we should go stale
-            self.check_and_transition_to_stale_if_needed(stale_threshold, None)?;
+            self.check_and_transition_to_stale_if_needed(stale.threshold, None)?;
             Ok(None)
         }
     }
@@ -483,39 +530,48 @@ impl SynchronizerStream {
     ///
     /// Updates the synchronizer's state according to the position of the received block:
     /// - Next expected block -> Ready state
-    /// - Latest/Delayed block -> Either Delayed or Stale (if >60s since last update)
+    /// - Latest/Delayed block -> Either Delayed or Stale (if no progress for `stale.threshold`)
+    /// - Latest/Delayed block on a Stale stream more than `stale.max_missed_blocks` behind the tip
+    ///   -> stays Stale
     /// - Advanced block -> Advanced state (block ahead of expected position)
     fn transition(
         &mut self,
-        latest_retrieved: BlockHeader,
+        block: BlockHeader,
         block_history: &BlockHistory,
-        stale_threshold: std::time::Duration,
+        stale: StaleLimits,
     ) -> Result<(), BlockSynchronizerError> {
         let extractor_id = self.extractor_id.clone();
         let last_message_at = self.modify_ts;
-        let block = &latest_retrieved;
 
-        match block_history.determine_block_position(&latest_retrieved)? {
+        match block_history.determine_block_position(&block)? {
             BlockPosition::NextExpected | BlockPosition::NextPartial => {
-                self.state = SynchronizerState::Ready(latest_retrieved.clone());
                 trace!(
-                    next = %latest_retrieved,
+                    next = %block,
                     extractor = %extractor_id,
                     "SynchronizerStream transition to next expected"
-                )
+                );
+                self.state = SynchronizerState::Ready(block);
+            }
+            BlockPosition::Latest | BlockPosition::Delayed
+                if self.is_stale() &&
+                    blocks_behind_tip(block_history, &block) > stale.max_missed_blocks =>
+            {
+                // A stream replaying blocks this old would hold every round while Delayed, so it
+                // catches up in the stale pass instead.
+                debug!(%extractor_id, %block, "Stale synchronizer still replaying old blocks");
+                self.state = SynchronizerState::Stale(block);
             }
             BlockPosition::Latest | BlockPosition::Delayed => {
-                if !self.check_and_transition_to_stale_if_needed(
-                    stale_threshold,
-                    Some(latest_retrieved.clone()),
-                )? {
+                if !self
+                    .check_and_transition_to_stale_if_needed(stale.threshold, Some(block.clone()))?
+                {
                     warn!(
                         %extractor_id,
                         ?last_message_at,
                         %block,
                         "SynchronizerStream transition transition to delayed."
                     );
-                    self.state = SynchronizerState::Delayed(latest_retrieved.clone());
+                    self.state = SynchronizerState::Delayed(block);
                 }
             }
             BlockPosition::Advanced => {
@@ -526,7 +582,7 @@ impl SynchronizerStream {
                     %block,
                     "SynchronizerStream transition to advanced."
                 );
-                self.state = SynchronizerState::Advanced(latest_retrieved.clone());
+                self.state = SynchronizerState::Advanced(block);
             }
         }
         self.modify_ts = Local::now().naive_utc();
@@ -587,7 +643,9 @@ impl SynchronizerStream {
             SynchronizerState::Ready(b) |
             SynchronizerState::Delayed(b) |
             SynchronizerState::Advanced(b) => Some(b),
-            _ => None,
+            SynchronizerState::Started |
+            SynchronizerState::Stale(_) |
+            SynchronizerState::Ended(_) => None,
         }
     }
 }
@@ -644,7 +702,7 @@ where
     /// Sets timeout for the first message of a protocol.
     ///
     /// Time to wait for the full first message, including snapshot retrieval.
-    pub fn startup_timeout(mut self, val: Duration) {
+    pub fn startup_timeout(&mut self, val: Duration) {
         self.startup_timeout = val;
     }
 
@@ -668,6 +726,10 @@ where
     ) {
         // Send close signals to all remaining synchronizers
         for close_sender in sync_close_senders {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a synchronizer that already ended has dropped its close receiver"
+            )]
             let _ = close_sender.send(());
         }
 
@@ -769,7 +831,7 @@ where
                         // initially default all synchronizers to Ready
                         synchronizer.mark_ready(&msg.header);
                         let header = msg.header.clone();
-                        ready_sync_msgs.insert(extractor_id.name.clone(), msg);
+                        ready_sync_msgs.insert(extractor_id.name, msg);
                         Some(header)
                     }
                     Ok(Some(Err(e))) => {
@@ -865,7 +927,9 @@ where
 
                 if let Err(e) = res {
                     // Communicate error to clients, then end the loop
-                    let _ = sync_tx.send(Err(e)).await;
+                    if let Err(SendError(Err(e))) = sync_tx.send(Err(e)).await {
+                        warn!(error = ?e, "consumer is gone; dropping the error that ends the task");
+                    }
                     return;
                 }
             }
@@ -877,11 +941,11 @@ where
         // channel to the user.
         let nanny_jh = tokio::spawn(async move {
             // report any panics
-            let _ = main_loop_jh.await.map_err(|e| {
+            if let Err(e) = main_loop_jh.await {
                 if e.is_panic() {
-                    error!("BlockSynchornizer main loop panicked: {e}")
+                    error!("BlockSynchornizer main loop panicked: {e}");
                 }
-            });
+            }
             debug!("Main loop exited. Closing synchronizers");
             Self::cleanup_synchronizers(state_sync_tasks, sync_close_senders).await;
             debug!("Shutdown complete");
@@ -905,46 +969,22 @@ where
         let any_advanced = sync_streams
             .iter()
             .any(SynchronizerStream::is_advanced);
-        let mut recv_futures = Vec::new();
-        for stream in sync_streams.iter_mut() {
-            // If stream is in ended state, do not check for any messages (it's receiver
-            // is closed), but do check stale streams.
-            if stream.has_ended() {
-                continue;
-            }
-            // Here we simply wait block_time + max_wait. This will not work for chains with
-            // unknown block times but is simple enough for now.
-            // If we would like to support unknown block times we could: Instruct all handles to
-            // await the max block time, if a header arrives within that time transition as
-            // usual, but via a select statement get notified (using e.g. Notify) if any other
-            // handle finishes before the timeout. Then await again but this time only for
-            // max_wait and then proceed as usual. So basically each try_advance task would have
-            // a select statement that allows it to exit the first timeout preemptively if any
-            // other try_advance task finished earlier.
-            recv_futures.push(async {
-                let res = stream
-                    .try_advance(
-                        block_history,
-                        self.block_time,
-                        self.latency_buffer,
-                        self.block_time
-                            .mul_f64(self.max_missed_blocks as f64),
-                        any_advanced,
-                    )
-                    .await?;
-                Ok::<_, BlockSynchronizerError>(
-                    res.map(|msg| (stream.extractor_id.name.clone(), msg)),
-                )
-            });
-        }
-        ready_sync_msgs.extend(
-            join_all(recv_futures)
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten(),
-        );
+        // A stale stream must not hold the round. Waiting `block_time` for it every round caps
+        // the feed at one block per `block_time`. On a chain faster than its configured block
+        // time, every other stream then falls further behind the chain head.
+        // Active streams advance first, then stale streams consume only what queued meanwhile.
+        // Stale streams wait only when no stream is active, so the main loop does not spin.
+        // Ended streams are skipped: their receiver is closed.
+        let (stale, active): (Vec<_>, Vec<_>) = sync_streams
+            .iter_mut()
+            .filter(|stream| !stream.has_ended())
+            .partition(|stream| stream.is_stale());
+        // An Advanced stream is always active, so `any_active` already covers `any_advanced`.
+        let any_active = !active.is_empty();
+        self.advance_streams(active, ready_sync_msgs, block_history, any_advanced)
+            .await?;
+        self.advance_streams(stale, ready_sync_msgs, block_history, any_active)
+            .await?;
 
         // Check if we have any active synchronizers (Ready, Delayed, or Advanced)
         // If all synchronizers have been purged (Stale/Ended), exit the main loop
@@ -957,15 +997,67 @@ where
             .any(SynchronizerStream::is_advanced)
         {
             *block_history = Self::reinit_block_history(sync_streams, block_history)?;
-        } else if let Some(header) = sync_streams
-            .iter()
-            .filter_map(SynchronizerStream::get_current_header)
-            .max_by_key(|b| b.number)
-        {
+        } else if let Some(header) = Self::round_header(sync_streams) {
+            if header.revert {
+                info!(%header, "RevertApplied");
+            }
             block_history.push(header.clone())?;
         }
         // If all synchronizers are stale (e.g. WS reconnect in progress), skip block
         // history update and continue waiting for recovery.
+        Ok(())
+    }
+
+    /// Advances `streams` concurrently by one step and inserts the messages they produced into
+    /// `ready_sync_msgs`, keyed by extractor name.
+    ///
+    /// With `skip_wait`, Delayed and Stale streams only consume what is already queued.
+    async fn advance_streams(
+        &self,
+        streams: Vec<&mut SynchronizerStream>,
+        ready_sync_msgs: &mut HashMap<String, StateSyncMessage<BlockHeader>>,
+        block_history: &BlockHistory,
+        skip_wait: bool,
+    ) -> BlockSyncResult<()> {
+        let stale = StaleLimits {
+            threshold: self
+                .block_time
+                .mul_f64(self.max_missed_blocks as f64),
+            max_missed_blocks: self.max_missed_blocks,
+        };
+        // Here we simply wait block_time + latency_buffer, or not at all with `skip_wait`. This
+        // will not work for chains with unknown block times but is simple enough for now.
+        // If we would like to support unknown block times we could: Instruct all handles to
+        // await the max block time, if a header arrives within that time transition as
+        // usual, but via a select statement get notified (using e.g. Notify) if any other
+        // handle finishes before the timeout. Then await again but this time only for
+        // max_wait and then proceed as usual. So basically each try_advance task would have
+        // a select statement that allows it to exit the first timeout preemptively if any
+        // other try_advance task finished earlier.
+        let recv_futures = streams
+            .into_iter()
+            .map(|stream| async move {
+                let res = stream
+                    .try_advance(
+                        block_history,
+                        self.block_time,
+                        self.latency_buffer,
+                        stale,
+                        skip_wait,
+                    )
+                    .await?;
+                Ok::<_, BlockSynchronizerError>(
+                    res.map(|msg| (stream.extractor_id.name.clone(), msg)),
+                )
+            });
+        ready_sync_msgs.extend(
+            join_all(recv_futures)
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten(),
+        );
         Ok(())
     }
 
@@ -979,7 +1071,7 @@ where
     /// Delayed state, it will return an error in case this is not the case.
     fn reinit_block_history(
         sync_streams: &mut [SynchronizerStream],
-        block_history: &mut BlockHistory,
+        block_history: &BlockHistory,
     ) -> Result<BlockHistory, BlockSynchronizerError> {
         let previous = block_history
             .latest()
@@ -1027,6 +1119,29 @@ where
                 }
             });
         Ok(new_block_history)
+    }
+
+    /// Picks the header the block history advances by this round.
+    ///
+    /// Only Ready streams count: each one's header is the next step from the current tip, read
+    /// this round. A stream that is Delayed holds a header the history has already passed, so it
+    /// must not move the tip. A revert wins over new blocks, the deepest if there are several.
+    fn round_header(sync_streams: &[SynchronizerStream]) -> Option<&BlockHeader> {
+        let ready = sync_streams
+            .iter()
+            .filter_map(|stream| match &stream.state {
+                SynchronizerState::Ready(header) => Some(header),
+                SynchronizerState::Started |
+                SynchronizerState::Delayed(_) |
+                SynchronizerState::Stale(_) |
+                SynchronizerState::Advanced(_) |
+                SynchronizerState::Ended(_) => None,
+            });
+        ready
+            .clone()
+            .filter(|header| header.revert)
+            .min_by_key(|header| header.number)
+            .or_else(|| ready.max_by_key(|header| (header.number, header.partial_block_index)))
     }
 
     /// Startup check: fails if no synchronizer is active (all Stale or Ended at init time).
@@ -1117,10 +1232,10 @@ mod tests {
     use async_trait::async_trait;
     use test_log::test;
     use tokio::sync::{oneshot, Mutex};
-    use tycho_common::models::Chain;
+    use tycho_common::models::{token::Token, Chain};
 
     use super::*;
-    use crate::feed::synchronizer::{SyncResult, SynchronizerTaskHandle};
+    use crate::feed::synchronizer::{SyncResult, SynchronizerTaskHandle, SYNC_CHANNEL_CAPACITY};
 
     #[test]
     fn block_header_from_block_maps_block_fields() {
@@ -1169,7 +1284,7 @@ mod tests {
         }
 
         fn with_behavior(behavior: MockBehavior) -> Self {
-            let (tx, rx) = mpsc::channel(1);
+            let (tx, rx) = mpsc::channel(SYNC_CHANNEL_CAPACITY);
             Self {
                 header_tx: tx,
                 header_rx: Arc::new(Mutex::new(Some(rx))),
@@ -1192,7 +1307,12 @@ mod tests {
 
         // For testing: trigger a close signal to make the synchronizer exit
         async fn trigger_close(&self) {
-            if let Some(close_tx) = self.close_tx.lock().await.take() {
+            let close_tx = self.close_tx.lock().await.take();
+            if let Some(close_tx) = close_tx {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the synchronizer may already have exited and dropped its receiver"
+                )]
                 let _ = close_tx.send(());
             }
         }
@@ -1249,6 +1369,10 @@ mod tests {
                     MockBehavior::Normal => {
                         // Wait for close signal from either handle or test, then respond based on
                         // behavior
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "a dropped close sender also ends the synchronizer"
+                        )]
                         let _ = tokio::select! {
                             result = close_rx => result,
                             result = close_rx_for_test => result,
@@ -1407,12 +1531,14 @@ mod tests {
 
         // Send initial messages to both synchronizers
         let block1_msg = header_message(1);
-        let _ = v2_sync
+        v2_sync
             .send_header(block1_msg.clone())
-            .await;
-        let _ = v3_sync
+            .await
+            .unwrap();
+        v3_sync
             .send_header(block1_msg.clone())
-            .await;
+            .await
+            .unwrap();
 
         // Start the block synchronizer
         let (nanny_handle, mut rx) = block_sync
@@ -1476,7 +1602,11 @@ mod tests {
                 assert_eq!(h.number, expected_block, "wrong block number");
                 assert_eq!(h.partial_block_index, expected_partial, "wrong partial index");
             }
-            other => panic!("expected Ready, got {:?}", other),
+            other @ (SynchronizerState::Started |
+            SynchronizerState::Delayed(_) |
+            SynchronizerState::Stale(_) |
+            SynchronizerState::Advanced(_) |
+            SynchronizerState::Ended(_)) => panic!("expected Ready, got {:?}", other),
         }
     }
 
@@ -1530,7 +1660,7 @@ mod tests {
             full_header(324, 324, 323),
             full_header(325, 325, 324),
         ];
-        let mut old_history = BlockHistory::new(old_blocks, 15).unwrap();
+        let old_history = BlockHistory::new(old_blocks, 15).unwrap();
 
         // One stream raced ahead to 326 (connected to 325) -> Advanced, triggering reinit.
         // Another stream is still at 325 (Delayed).
@@ -1539,11 +1669,9 @@ mod tests {
             stream_in_state("uniswap_v3", SynchronizerState::Delayed(full_header(325, 325, 324))),
         ];
 
-        let mut new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
-            &mut streams,
-            &mut old_history,
-        )
-        .expect("reinit failed");
+        let mut new_history =
+            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
+                .expect("reinit failed");
 
         // A revert to block 325 must still find its fork point (324) in the retained history.
         let revert = BlockHeader {
@@ -1570,7 +1698,7 @@ mod tests {
             full_header(324, 324, 323),
             full_header(325, 325, 324),
         ];
-        let mut old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
+        let old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
 
         // Advanced block is far ahead and its parent is unknown to the retained history.
         let mut streams = vec![stream_in_state(
@@ -1578,11 +1706,9 @@ mod tests {
             SynchronizerState::Advanced(full_header(400, 400, 399)),
         )];
 
-        let new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
-            &mut streams,
-            &mut old_history,
-        )
-        .expect("reinit failed");
+        let new_history =
+            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
+                .expect("reinit failed");
 
         let retained: Vec<u64> = new_history
             .blocks()
@@ -1590,9 +1716,11 @@ mod tests {
             .collect();
         assert_eq!(
             retained,
-            vec![400],
+            vec![399, 400],
             "detached advanced block must not be stitched to old history"
         );
+        let parent = new_history.oldest().unwrap();
+        assert!(parent.parent_hash.is_empty(), "block 399 must be the hash-only parent entry");
     }
 
     /// Companion regression test for the same crash with a *partial* advanced block — the
@@ -1611,7 +1739,7 @@ mod tests {
             full_header(324, 324, 323),
             partial_header(325, 2, 324),
         ];
-        let mut old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
+        let old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
 
         // A stream races ahead by one partial: first partial of 326, parented on the sealed
         // hash of 325, which the history never saw. This is what classifies it Advanced.
@@ -1628,17 +1756,15 @@ mod tests {
             stream_in_state("uniswap_v3", SynchronizerState::Delayed(partial_header(325, 2, 324))),
         ];
 
-        let new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
-            &mut streams,
-            &mut old_history,
-        )
-        .expect("reinit failed");
+        let new_history =
+            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
+                .expect("reinit failed");
 
         let retained: Vec<u64> = new_history
             .blocks()
             .map(|b| b.number)
             .collect();
-        assert_eq!(retained, vec![323, 324, 325, 326]);
+        assert_eq!(retained, vec![322, 323, 324, 325, 326]);
     }
 
     /// Full prod sequence behind the Base outages: partial-advanced reinit, the stream proceeds
@@ -1652,18 +1778,16 @@ mod tests {
             full_header(324, 324, 323),
             partial_header(325, 2, 324),
         ];
-        let mut old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
+        let old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
 
         let mut streams = vec![
             stream_in_state("aerodrome", SynchronizerState::Advanced(partial_header(326, 0, 325))),
             stream_in_state("uniswap_v3", SynchronizerState::Delayed(partial_header(325, 2, 324))),
         ];
 
-        let mut new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
-            &mut streams,
-            &mut old_history,
-        )
-        .expect("reinit failed");
+        let mut new_history =
+            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
+                .expect("reinit failed");
 
         // The stream proceeds normally: the last partial seals 326 with the correct hash, then
         // the first partial of 327 arrives on top of it.
@@ -1694,7 +1818,7 @@ mod tests {
             .blocks()
             .map(|b| b.number)
             .collect();
-        assert_eq!(retained, vec![323, 324, 325, 326]);
+        assert_eq!(retained, vec![322, 323, 324, 325, 326]);
         let latest = new_history.latest().unwrap();
         assert_eq!(latest.number, 326);
         assert!(latest.revert);
@@ -1800,9 +1924,10 @@ mod tests {
         let block1_msg = header_message(1);
         let block2_msg = header_message(2);
 
-        let _ = v2_sync
+        v2_sync
             .send_header(block1_msg.clone())
-            .await;
+            .await
+            .unwrap();
         v3_sync
             .send_header(block2_msg.clone())
             .await
@@ -1833,9 +1958,10 @@ mod tests {
 
         // Both advance to block 3
         let block3_msg = header_message(3);
-        let _ = v2_sync
+        v2_sync
             .send_header(block3_msg.clone())
-            .await;
+            .await
+            .unwrap();
         v3_sync
             .send_header(block3_msg.clone())
             .await
@@ -1926,9 +2052,10 @@ mod tests {
 
         // Send block 2 only to v3, v2 will timeout and become delayed
         let block2_msg = header_message(2);
-        let _ = v3_sync
+        v3_sync
             .send_header(block2_msg.clone())
-            .await;
+            .await
+            .unwrap();
         // Don't send to v2_sync - it will timeout
 
         // Consume second message - v2 should be delayed, v3 ready
@@ -1965,9 +2092,10 @@ mod tests {
 
         // Continue sending blocks only to v3 to keep it healthy while v2 goes stale
         let block3_msg = header_message(3);
-        let _ = v3_sync
+        v3_sync
             .send_header(block3_msg.clone())
-            .await;
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(40)).await;
 
@@ -1981,6 +2109,290 @@ mod tests {
         }
         assert!(stale_found, "v2 synchronizer should be stale");
 
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// Starts a block synchronizer over two mocks, uniswap-v2 and uniswap-v3, and consumes the
+    /// first feed at block 1. `max_missed_blocks` = 1, so the stale threshold is one `block_time`.
+    async fn setup_fast_stale_block_sync(
+        block_time: Duration,
+    ) -> (MockStateSync, MockStateSync, JoinHandle<()>, Receiver<BlockSyncResult<FeedMessage>>)
+    {
+        let v2_sync = MockStateSync::new();
+        let v3_sync = MockStateSync::new();
+        let block_sync = BlockSynchronizer::new(block_time, Duration::from_millis(10), 1)
+            .register_synchronizer(
+                ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v2".to_string() },
+                v2_sync.clone(),
+            )
+            .register_synchronizer(
+                ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v3".to_string() },
+                v3_sync.clone(),
+            );
+        for sync in [&v2_sync, &v3_sync] {
+            sync.send_header(header_message(1))
+                .await
+                .expect("send failed");
+        }
+        let (nanny_handle, mut rx) = block_sync
+            .run()
+            .await
+            .expect("BlockSynchronizer failed to start");
+        receive_message(&mut rx).await;
+        (v2_sync, v3_sync, nanny_handle, rx)
+    }
+
+    /// Sends blocks to v2 only until the feed reports v3 stale. Returns the last block sent.
+    async fn send_to_v2_until_v3_stale(
+        v2_sync: &MockStateSync,
+        rx: &mut Receiver<BlockSyncResult<FeedMessage>>,
+        block_time: Duration,
+    ) -> u8 {
+        let mut block: u8 = 1;
+        loop {
+            block += 1;
+            v2_sync
+                .send_header(header_message(block))
+                .await
+                .expect("send failed");
+            let feed = timeout(block_time * 3, rx.recv())
+                .await
+                .expect("round finishes")
+                .expect("feed open")
+                .expect("no error");
+            if matches!(feed.sync_states.get("uniswap-v3"), Some(SynchronizerState::Stale(_))) {
+                return block;
+            }
+            assert!(block < 10, "v3 never went stale");
+        }
+    }
+
+    /// A stale stream must not hold each round for `block_time`. On a chain faster than its
+    /// configured block time, that wait caps the feed at one block per `block_time`, and every
+    /// other stream falls further behind the chain head.
+    #[test(tokio::test)]
+    async fn test_round_with_stale_synchronizer() {
+        let block_time = Duration::from_millis(300);
+        let (v2_sync, _v3_sync, nanny_handle, mut rx) =
+            setup_fast_stale_block_sync(block_time).await;
+        let mut block = send_to_v2_until_v3_stale(&v2_sync, &mut rx, block_time).await;
+
+        for _ in 0..5 {
+            block += 1;
+            let feed = v2_round(&v2_sync, &mut rx, block, block_time / 2).await;
+            assert_ready_at(&feed, "uniswap-v2", u64::from(block), None);
+            assert!(matches!(
+                feed.sync_states.get("uniswap-v3"),
+                Some(SynchronizerState::Stale(_))
+            ));
+        }
+
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// The stale pass does not wait, so a recovering stream's header that lands just after the
+    /// active ones is read a round later. The stream must still get back to Ready.
+    #[test(tokio::test)]
+    async fn test_stale_synchronizer_recovers_with_late_header() {
+        let block_time = Duration::from_millis(300);
+        let (v2_sync, v3_sync, nanny_handle, mut rx) =
+            setup_fast_stale_block_sync(block_time).await;
+        let mut block = send_to_v2_until_v3_stale(&v2_sync, &mut rx, block_time).await;
+
+        let mut recovered = false;
+        for _ in 0..3 {
+            // Blocks come 20 ms apart and v3's header lags 5 ms, so it lands within the block.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            block += 1;
+            v2_sync
+                .send_header(header_message(block))
+                .await
+                .expect("send failed");
+            let v3 = v3_sync.clone();
+            let late_header = header_message(block);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                v3.send_header(late_header)
+                    .await
+                    .expect("send failed");
+            });
+            let feed = timeout(block_time, rx.recv())
+                .await
+                .expect("round finishes")
+                .expect("feed open")
+                .expect("no error");
+            if matches!(feed.sync_states.get("uniswap-v3"), Some(SynchronizerState::Ready(_))) {
+                recovered = true;
+                break;
+            }
+        }
+        assert!(recovered, "v3 did not get back to Ready within three rounds");
+
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// Sends `block` to v2 and returns the round's feed. Fails if the round takes `max_wait`.
+    async fn v2_round(
+        v2_sync: &MockStateSync,
+        rx: &mut Receiver<BlockSyncResult<FeedMessage>>,
+        block: u8,
+        max_wait: Duration,
+    ) -> FeedMessage {
+        v2_sync
+            .send_header(header_message(block))
+            .await
+            .expect("send failed");
+        timeout(max_wait, rx.recv())
+            .await
+            .expect("round held for longer than max_wait")
+            .expect("feed open")
+            .expect("no error")
+    }
+
+    /// A stale stream that comes back replaying its missed blocks stays stale while they are more
+    /// than `max_missed_blocks` behind the tip. As Delayed it would hold every round until the
+    /// replay caught up.
+    #[test(tokio::test)]
+    async fn test_stale_synchronizer_replaying_old_blocks() {
+        let block_time = Duration::from_millis(300);
+        let (v2_sync, v3_sync, nanny_handle, mut rx) =
+            setup_fast_stale_block_sync(block_time).await;
+        let mut block = send_to_v2_until_v3_stale(&v2_sync, &mut rx, block_time).await;
+        for _ in 0..3 {
+            block += 1;
+            v2_round(&v2_sync, &mut rx, block, block_time / 2).await;
+        }
+
+        // v3 replays the start of its gap, more than one block behind the tip.
+        for old in 2..=4 {
+            v3_sync
+                .send_header(header_message(old))
+                .await
+                .expect("send failed");
+        }
+        for _ in 0..2 {
+            block += 1;
+            let feed = v2_round(&v2_sync, &mut rx, block, block_time / 2).await;
+            assert!(matches!(
+                feed.sync_states.get("uniswap-v3"),
+                Some(SynchronizerState::Stale(_))
+            ));
+        }
+
+        // v3 replays the rest of its gap and reaches the tip with v2.
+        block += 1;
+        for old in 5..=block {
+            v3_sync
+                .send_header(header_message(old))
+                .await
+                .expect("send failed");
+        }
+        let feed = v2_round(&v2_sync, &mut rx, block, block_time / 2).await;
+
+        assert_ready_at(&feed, "uniswap-v3", u64::from(block), None);
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// With every stream stale there is no round to keep up with, so each round still waits
+    /// `block_time` rather than spinning the main loop.
+    #[test(tokio::test)]
+    async fn test_round_with_all_synchronizers_stale() {
+        let block_time = Duration::from_millis(100);
+        let (_v2_sync, _v3_sync, nanny_handle, mut rx) =
+            setup_fast_stale_block_sync(block_time).await;
+        let mut all_stale = false;
+        for _ in 0..10 {
+            let feed = timeout(block_time * 3, rx.recv())
+                .await
+                .expect("round finishes")
+                .expect("feed open")
+                .expect("no error");
+            if feed
+                .sync_states
+                .values()
+                .all(|state| matches!(state, SynchronizerState::Stale(_)))
+            {
+                all_stale = true;
+                break;
+            }
+        }
+        assert!(all_stale, "both synchronizers should go stale");
+
+        // The round that started when the all-stale feed went out is already part-way through,
+        // so time the one after it.
+        timeout(block_time * 3, rx.recv())
+            .await
+            .expect("round finishes");
+        let started = std::time::Instant::now();
+        timeout(block_time * 3, rx.recv())
+            .await
+            .expect("round finishes");
+        let round = started.elapsed();
+
+        assert!(round >= block_time / 2, "all-stale round took {round:?}");
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// With `skip_wait`, a Delayed stream reads the blocks already queued instead of returning
+    /// nothing.
+    #[test(tokio::test)]
+    async fn test_delayed_stream_with_skip_wait() {
+        let (tx, rx) = mpsc::channel(SYNC_CHANNEL_CAPACITY);
+        let id = ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v2".to_string() };
+        let block1 = header_message(1).header;
+        let mut stream = SynchronizerStream::new(&id, rx);
+        stream.state = SynchronizerState::Delayed(block1.clone());
+        let history = BlockHistory::new(vec![block1], BLOCK_HISTORY_SIZE).expect("valid history");
+        tx.send(Ok(header_message(2)))
+            .await
+            .expect("send failed");
+
+        let msg = stream
+            .try_advance(
+                &history,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                StaleLimits { threshold: Duration::from_secs(60), max_missed_blocks: 60 },
+                true,
+            )
+            .await
+            .expect("no error");
+
+        assert_eq!(msg.map(|msg| msg.header.number), Some(2));
+        assert!(matches!(stream.state, SynchronizerState::Ready(ref header) if header.number == 2));
+    }
+
+    /// The startup timeout is set apart from the stale threshold, so a first message that takes
+    /// longer than `block_time * max_missed_blocks` still starts the synchronizer.
+    #[test(tokio::test)]
+    async fn test_startup_timeout() {
+        let v2_sync = MockStateSync::new();
+        // The stale threshold, and the default startup timeout, is 10 ms.
+        let mut block_sync =
+            BlockSynchronizer::new(Duration::from_millis(10), Duration::from_millis(10), 1);
+        block_sync.startup_timeout(Duration::from_secs(1));
+        let block_sync = block_sync.register_synchronizer(
+            ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v2".to_string() },
+            v2_sync.clone(),
+        );
+        let slow_first_message = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            v2_sync
+                .send_header(header_message(1))
+                .await
+                .expect("send failed");
+        });
+
+        let (nanny_handle, mut rx) = block_sync
+            .run()
+            .await
+            .expect("BlockSynchronizer failed to start");
+        let feed = receive_message(&mut rx).await;
+
+        assert_ready_at(&feed, "uniswap-v2", 1, None);
+        slow_first_message
+            .await
+            .expect("sender panicked");
         shutdown_block_synchronizer(nanny_handle, rx).await;
     }
 
@@ -2172,9 +2584,10 @@ mod tests {
         // Send second messages to v2 only, shortly before both would go stale
         tokio::time::sleep(Duration::from_millis(50)).await;
         let block2_msg = header_message(2);
-        let _ = v2_sync
+        v2_sync
             .send_header(block2_msg.clone())
-            .await;
+            .await
+            .unwrap();
 
         // we should get two messages here
         for _ in 0..2 {
@@ -2203,9 +2616,10 @@ mod tests {
         // Now v3 should be stale
         tokio::time::sleep(Duration::from_millis(15)).await;
         let block3_msg = header_message(3);
-        let _ = v2_sync
+        v2_sync
             .send_header(block3_msg.clone())
-            .await;
+            .await
+            .unwrap();
         let third_msg = receive_message(&mut rx).await;
         dbg!(&third_msg);
         assert!(matches!(
@@ -2224,18 +2638,22 @@ mod tests {
         ));
 
         let block4_msg = header_message(4);
-        let _ = v3_sync
+        v3_sync
             .send_header(block2_msg.clone())
-            .await;
-        let _ = v3_sync
+            .await
+            .unwrap();
+        v3_sync
             .send_header(block3_msg.clone())
-            .await;
-        let _ = v3_sync
+            .await
+            .unwrap();
+        v3_sync
             .send_header(block4_msg.clone())
-            .await;
-        let _ = v2_sync
+            .await
+            .unwrap();
+        v2_sync
             .send_header(block4_msg.clone())
-            .await;
+            .await
+            .unwrap();
         let fourth_msg = receive_message(&mut rx).await;
         assert!(matches!(
             fourth_msg
@@ -2490,5 +2908,645 @@ mod tests {
         assert!(v3_ready, "v3 caught up to partial 2");
 
         shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// Revert header as the indexer builds it for a flashblock undo: block `block` under its
+    /// sealed hash, `partial_block_index` = the index of the dropped partial of `block + 1`.
+    fn partial_revert_message(block: u8, dropped_idx: u32) -> StateSyncMessage<BlockHeader> {
+        let mut msg = revert_header_message(block);
+        msg.header.partial_block_index = Some(dropped_idx);
+        msg
+    }
+
+    /// Sends `msg` on both streams and asserts both are Ready afterwards.
+    async fn advance_both(
+        v2: &MockStateSync,
+        v3: &MockStateSync,
+        rx: &mut Receiver<BlockSyncResult<FeedMessage>>,
+        msg: StateSyncMessage<BlockHeader>,
+    ) {
+        v2.send_header(msg.clone())
+            .await
+            .expect("v2 send failed");
+        v3.send_header(msg)
+            .await
+            .expect("v3 send failed");
+        let feed = receive_message(rx).await;
+        for name in ["uniswap-v2", "uniswap-v3"] {
+            assert!(
+                matches!(feed.sync_states.get(name).unwrap(), SynchronizerState::Ready(_)),
+                "{name} not Ready: {:?}",
+                feed.sync_states
+            );
+        }
+    }
+
+    fn assert_ready_at(feed: &FeedMessage, name: &str, number: u64, partial: Option<u32>) {
+        match feed.sync_states.get(name).unwrap() {
+            SynchronizerState::Ready(h) => {
+                assert_eq!((h.number, h.partial_block_index), (number, partial), "{name}");
+            }
+            other @ (SynchronizerState::Started |
+            SynchronizerState::Delayed(_) |
+            SynchronizerState::Stale(_) |
+            SynchronizerState::Advanced(_) |
+            SynchronizerState::Ended(_)) => panic!("{name}: expected Ready, got {other:?}"),
+        }
+    }
+
+    /// Ready or Delayed at the given block: a stream whose round message classified `Latest`
+    /// transitions to Delayed while holding the right header.
+    fn assert_at(feed: &FeedMessage, name: &str, number: u64, partial: Option<u32>) {
+        match feed.sync_states.get(name).unwrap() {
+            SynchronizerState::Ready(h) | SynchronizerState::Delayed(h) => {
+                assert_eq!((h.number, h.partial_block_index), (number, partial), "{name}");
+            }
+            other @ (SynchronizerState::Started |
+            SynchronizerState::Stale(_) |
+            SynchronizerState::Advanced(_) |
+            SynchronizerState::Ended(_)) => {
+                panic!("{name}: expected Ready or Delayed, got {other:?}")
+            }
+        }
+    }
+
+    /// Both streams deliver the revert in the same round. Control for the lagging case.
+    #[test(tokio::test)]
+    async fn test_partial_revert_applied_when_streams_aligned() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(3)).await;
+        advance_both(&v2, &v3, &mut rx, partial_header_message(4, 0)).await;
+        advance_both(&v2, &v3, &mut rx, partial_header_message(4, 3)).await;
+
+        advance_both(&v2, &v3, &mut rx, partial_revert_message(3, 3)).await;
+        // Rebuilt block 4 starts again at partial 0, parented on the sealed hash of 3.
+        advance_both(&v2, &v3, &mut rx, partial_header_message(4, 0)).await;
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// v3 has not delivered the revert when the round closes. The round must still push the
+    /// revert: selecting `max_by_key(number)` over every stream's last header would pick v3's
+    /// stale `#4 (partial 3)` and drop it, and the rebuilt `#4 (partial 0)` would then classify
+    /// Delayed on both streams (the prod-fynd signature on Base).
+    #[test(tokio::test)]
+    async fn test_partial_revert_applied_when_one_stream_lags() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(3)).await;
+        advance_both(&v2, &v3, &mut rx, partial_header_message(4, 0)).await;
+        advance_both(&v2, &v3, &mut rx, partial_header_message(4, 3)).await;
+
+        v2.send_header(partial_revert_message(3, 3))
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 3, Some(3));
+        assert!(matches!(
+            feed.sync_states
+                .get("uniswap-v3")
+                .unwrap(),
+            SynchronizerState::Delayed(_)
+        ));
+
+        // v3 catches up with the same revert; both receive the rebuilt first partial of 4.
+        v3.send_header(partial_revert_message(3, 3))
+            .await
+            .expect("v3 send failed");
+        v2.send_header(partial_header_message(4, 0))
+            .await
+            .expect("v2 send failed");
+        v3.send_header(partial_header_message(4, 0))
+            .await
+            .expect("v3 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 4, Some(0));
+        assert_ready_at(&feed, "uniswap-v3", 4, Some(0));
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// Two reverts with different targets in one round: the deeper one wins, and the next block
+    /// on that fork connects.
+    #[test(tokio::test)]
+    async fn test_deeper_revert_wins_the_round() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(3)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(4)).await;
+
+        v2.send_header(revert_header_message(3))
+            .await
+            .expect("v2 send failed");
+        v3.send_header(revert_header_message(2))
+            .await
+            .expect("v3 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 3, None);
+        assert_ready_at(&feed, "uniswap-v3", 2, None);
+
+        // New fork from block 2: a different block 3 whose parent is 2.
+        let mut new_3 = header_message(3);
+        new_3.header.hash = Bytes::from(vec![0x33]);
+        advance_both(&v2, &v3, &mut rx, new_3).await;
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// v3 re-delivers the revert in a round where v2 is silent, so the revert header is the
+    /// round's header a second time. On `main` that popped the tip (`Latest` + revert in `push`),
+    /// leaving a history that could not resolve the next revert to block 3.
+    #[test(tokio::test)]
+    async fn test_redelivered_revert_keeps_history() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(3)).await;
+        advance_both(&v2, &v3, &mut rx, partial_header_message(4, 0)).await;
+
+        v2.send_header(partial_revert_message(3, 0))
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 3, Some(0));
+
+        v3.send_header(partial_revert_message(3, 0))
+            .await
+            .expect("v3 send failed");
+        // v3's message classifies Latest, so v3 ends the round Delayed at the revert header;
+        // the round still pushes that header, which must be a no-op.
+        let feed = receive_message(&mut rx).await;
+        assert_at(&feed, "uniswap-v3", 3, Some(0));
+
+        // The rebuilt block 4 connects on the revert header's sealed hash.
+        advance_both(&v2, &v3, &mut rx, partial_header_message(4, 0)).await;
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// A Delayed stream whose queue does not connect to the tip must report the first block above
+    /// the tip, not consume until its deadline and report the last one. The stale-tip case on
+    /// Base turned a one-block gap into a seven-block gap this way.
+    #[test(tokio::test)]
+    async fn test_catch_up_stops_on_first_advanced_block() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+
+        // v2 moves to block 2; v3 is silent and becomes Delayed at block 1.
+        v2.send_header(header_message(2))
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 2, None);
+        assert!(matches!(
+            feed.sync_states
+                .get("uniswap-v3")
+                .unwrap(),
+            SynchronizerState::Delayed(_)
+        ));
+
+        // v3's queue: block 3 on an unknown parent (does not connect), then block 4 on it.
+        let mut detached_3 = header_message(3);
+        detached_3.header.parent_hash = Bytes::from(vec![0xAA]);
+        v3.send_header(detached_3)
+            .await
+            .expect("v3 send failed");
+        v3.send_header(header_message(4))
+            .await
+            .expect("v3 send failed");
+
+        // The round reinitialises on v3's advanced header. After reinit, v3 is Ready at the
+        // block it reported: 3 when catch-up stopped at the first advanced block, 4 when it
+        // read on to the deadline.
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v3", 3, None);
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// A revert already at the tip must not win the round: it applies to nothing, and pushing it
+    /// instead of the round's real advance freezes the tip. The next block then classifies
+    /// Advanced, the reinit finds a height gap and collapses the history to one block, which is
+    /// the state a later revert dies on.
+    #[test(tokio::test)]
+    async fn test_redelivered_revert_does_not_suppress_the_round() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(3)).await;
+
+        // v2 reverts to block 2; v3 is silent and falls behind holding the revert in its queue.
+        v2.send_header(revert_header_message(2))
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 2, None);
+
+        // v3 re-delivers the revert in the round where v2 delivers the new fork's block 3.
+        let mut new_3 = header_message(3);
+        new_3.header.hash = Bytes::from(vec![0x33]);
+        v3.send_header(revert_header_message(2))
+            .await
+            .expect("v3 send failed");
+        v2.send_header(new_3.clone())
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 3, None);
+
+        let mut block_4 = header_message(4);
+        block_4.header.parent_hash = new_3.header.hash.clone();
+        v2.send_header(block_4)
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 4, None);
+
+        // Undo block 4. The fork point is only reachable if the round above kept the history.
+        let mut revert_3 = revert_header_message(3);
+        revert_3.header.hash = new_3.header.hash.clone();
+        revert_3.header.parent_hash = Bytes::from(vec![0x02]);
+        v2.send_header(revert_3)
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 3, None);
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    #[test]
+    fn test_block_header_display_marks_reverts() {
+        let mut header = revert_header_message(7).header;
+        assert_eq!(header.to_string(), "Block #7 [0x07..] (revert)");
+        header.partial_block_index = Some(2);
+        assert_eq!(header.to_string(), "Block #7 [0x07..] (partial 2) (revert)");
+        header.revert = false;
+        assert_eq!(header.to_string(), "Block #7 [0x07..] (partial 2)");
+    }
+
+    /// A Delayed stream reads its backlog up to the tip and then a revert. The revert undoes
+    /// from the tip, so it is fresh: the stream is Ready on it and the round applies it even
+    /// though no Ready stream delivered it.
+    #[test(tokio::test)]
+    async fn test_catch_up_revert_from_the_tip_is_fresh() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(3)).await;
+
+        // v2 moves to 4 and 5; v3 is silent and falls behind at 3.
+        v2.send_header(header_message(4))
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 4, None);
+        v2.send_header(header_message(5))
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 5, None);
+
+        // v3's queue: 4, 5, then the undo of 5. v2 is silent this round.
+        v3.send_header(header_message(4))
+            .await
+            .expect("v3 send failed");
+        v3.send_header(header_message(5))
+            .await
+            .expect("v3 send failed");
+        v3.send_header(revert_header_message(4))
+            .await
+            .expect("v3 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v3", 4, None);
+
+        // The new fork's 5' parents on 4: it connects only if the round applied v3's revert.
+        let mut new_5 = header_message(5);
+        new_5.header.hash = Bytes::from(vec![0x55]);
+        advance_both(&v2, &v3, &mut rx, new_5).await;
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// v3 lags two rounds, so its queue still holds the revert to 2 when v2 has already built
+    /// 3' and 4' on the new fork. The replayed revert must not rewind the shared history.
+    #[test(tokio::test)]
+    async fn test_replayed_revert_two_rounds_late_does_not_rewind_history() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(3)).await;
+
+        // Round A: v2 reverts to 2; v3 is silent.
+        v2.send_header(revert_header_message(2))
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 2, None);
+
+        // Round B: v2 delivers the new fork's 3'; v3 is still silent.
+        let mut new_3 = header_message(3);
+        new_3.header.hash = Bytes::from(vec![0x33]);
+        v2.send_header(new_3.clone())
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 3, None);
+
+        // Round C: v3 finally reads its queued copy of the revert while v2 delivers 4'.
+        let mut new_4 = header_message(4);
+        new_4.header.hash = Bytes::from(vec![0x44]);
+        new_4.header.parent_hash = new_3.header.hash.clone();
+        v3.send_header(revert_header_message(2))
+            .await
+            .expect("v3 send failed");
+        v2.send_header(new_4.clone())
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 4, None);
+
+        // Round D: v2 delivers 5'. If the history was rewound to 2, this is Advanced and the
+        // reinit roots the history at 5' alone.
+        let mut new_5 = header_message(5);
+        new_5.header.hash = Bytes::from(vec![0x55]);
+        new_5.header.parent_hash = new_4.header.hash.clone();
+        v2.send_header(new_5)
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 5, None);
+
+        // Round E: undo 5'. The revert to 4' resolves only if the history kept 3' and 4'.
+        let mut revert_4 = revert_header_message(4);
+        revert_4.header.hash = new_4.header.hash.clone();
+        revert_4.header.parent_hash = new_3.header.hash.clone();
+        v2.send_header(revert_4)
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 4, None);
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// Two extractors report the same undo of block 4's partials with different dropped-partial
+    /// indices. The index is not part of the revert's identity: the lagging stream's copy is the
+    /// revert already applied, and must not hold back the rebuilt block another stream delivers.
+    #[test(tokio::test)]
+    async fn test_same_revert_with_another_dropped_index_does_not_hold_the_round() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(3)).await;
+        advance_both(&v2, &v3, &mut rx, partial_header_message(4, 0)).await;
+
+        v2.send_header(partial_revert_message(3, 0))
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 3, Some(0));
+
+        v3.send_header(partial_revert_message(3, 5))
+            .await
+            .expect("v3 send failed");
+        v2.send_header(partial_header_message(4, 0))
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 4, Some(0));
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// The undo pattern seen on Base: the pending partials of the next block are dropped, the
+    /// rebuilt block arrives sealed, and the same happens one block later. A different stream
+    /// lags each undo by one round. Each revert must reach the history in the round it arrives.
+    #[test(tokio::test)]
+    async fn test_back_to_back_partial_undos_with_alternating_lag() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(3)).await;
+        advance_both(&v2, &v3, &mut rx, partial_header_message(4, 0)).await;
+        advance_both(&v2, &v3, &mut rx, partial_header_message(4, 3)).await;
+
+        // Undo of block 4's partials. v3 lags.
+        v2.send_header(partial_revert_message(3, 3))
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 3, Some(3));
+
+        // The rebuilt block 4 arrives sealed, as the partial-0 copy of a full block.
+        let mut sealed_4 = header_message(4);
+        sealed_4.header.partial_block_index = Some(0);
+        v3.send_header(partial_revert_message(3, 3))
+            .await
+            .expect("v3 send failed");
+        advance_both(&v2, &v3, &mut rx, sealed_4).await;
+        advance_both(&v2, &v3, &mut rx, partial_header_message(5, 0)).await;
+
+        // Undo of block 5's partials. v2 lags this time.
+        v3.send_header(partial_revert_message(4, 0))
+            .await
+            .expect("v3 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v3", 4, Some(0));
+
+        let mut sealed_5 = header_message(5);
+        sealed_5.header.partial_block_index = Some(0);
+        v2.send_header(partial_revert_message(4, 0))
+            .await
+            .expect("v2 send failed");
+        v2.send_header(sealed_5.clone())
+            .await
+            .expect("v2 send failed");
+        v3.send_header(sealed_5)
+            .await
+            .expect("v3 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 5, Some(0));
+        assert_ready_at(&feed, "uniswap-v3", 5, Some(0));
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// After a jump the memory holds only block 5. An undo of block 6's partials targets block 5
+    /// itself, whose parent the memory never held.
+    #[test(tokio::test)]
+    async fn test_undo_to_the_first_block_after_a_jump_resolves() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        // Both streams jump from block 1 to block 5; its parent, block 4, never arrived.
+        advance_both(&v2, &v3, &mut rx, partial_header_message(5, 0)).await;
+        // The last partial of block 5 carries the sealed hash.
+        let mut sealed_5 = header_message(5);
+        sealed_5.header.partial_block_index = Some(1);
+        advance_both(&v2, &v3, &mut rx, sealed_5).await;
+        advance_both(&v2, &v3, &mut rx, partial_header_message(6, 0)).await;
+        // Undo of block 6's partials: revert to sealed block 5.
+        advance_both(&v2, &v3, &mut rx, partial_revert_message(5, 0)).await;
+        let mut rebuilt_6 = partial_header_message(6, 0);
+        rebuilt_6.header.hash = Bytes::from(vec![0x60]);
+        advance_both(&v2, &v3, &mut rx, rebuilt_6).await;
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// A revert to a block the memory never held, whose parent is the tip: block 5 reached the
+    /// client only inside a snapshot. The revert must append on top of block 4.
+    #[test(tokio::test)]
+    async fn test_revert_to_an_unseen_block_on_the_tip_resolves() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(3)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(4)).await;
+        advance_both(&v2, &v3, &mut rx, revert_header_message(5)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(6)).await;
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// The reviewer's sequence. Both streams are Delayed at block 3 when they resubscribe. The
+    /// synchronizer snapshots at sealed block 4 and emits partial 5(0): block 4 never arrives as a
+    /// message. Then an undo to sealed 4, the rebuilt block 5 sealed, partial 6(0), and an undo to
+    /// sealed 5.
+    #[test(tokio::test)]
+    async fn test_undo_to_the_snapshot_block_after_a_resubscribe_resolves() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(3)).await;
+        // Both streams are silent for a round and turn Delayed.
+        receive_message(&mut rx).await;
+        // The first message after the resubscribe and the undo of its block are queued together.
+        for sync in [&v2, &v3] {
+            sync.send_header(partial_header_message(5, 0))
+                .await
+                .expect("send failed");
+            sync.send_header(partial_revert_message(4, 0))
+                .await
+                .expect("send failed");
+        }
+        receive_message(&mut rx).await;
+        let mut sealed_5 = header_message(5);
+        sealed_5.header.partial_block_index = Some(0);
+        advance_both(&v2, &v3, &mut rx, sealed_5).await;
+        advance_both(&v2, &v3, &mut rx, partial_header_message(6, 0)).await;
+        advance_both(&v2, &v3, &mut rx, partial_revert_message(5, 0)).await;
+        let mut sealed_6 = header_message(6);
+        sealed_6.header.partial_block_index = Some(0);
+        advance_both(&v2, &v3, &mut rx, sealed_6).await;
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// Full blocks. Both streams jump from block 1 to block 5, then a one-block reorg replaces
+    /// block 5: revert to block 4, which the memory only knows as block 5's parent.
+    #[test(tokio::test)]
+    async fn test_one_block_reorg_right_after_a_jump_resolves() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(5)).await;
+        advance_both(&v2, &v3, &mut rx, revert_header_message(4)).await;
+        let mut new_5 = header_message(5);
+        new_5.header.hash = Bytes::from(vec![0x55]);
+        advance_both(&v2, &v3, &mut rx, new_5.clone()).await;
+        let mut new_6 = header_message(6);
+        new_6.header.parent_hash = new_5.header.hash.clone();
+        advance_both(&v2, &v3, &mut rx, new_6).await;
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// Gives `msg` block changes, with a new token at the address of 20 `token` bytes.
+    fn with_new_token(
+        mut msg: StateSyncMessage<BlockHeader>,
+        token: Option<u8>,
+    ) -> StateSyncMessage<BlockHeader> {
+        let mut changes = BlockAggregatedChanges::default();
+        if let Some(byte) = token {
+            let addr = Bytes::from(vec![byte; 20]);
+            changes.new_tokens = HashMap::from([(
+                addr.clone(),
+                Token::new(&addr, "T", 18, 0, &[], Chain::Ethereum, 100),
+            )]);
+        }
+        msg.deltas = Some(changes);
+        msg
+    }
+
+    fn has_new_token(feed: &FeedMessage, name: &str, token: u8) -> bool {
+        feed.state_msgs
+            .get(name)
+            .and_then(|msg| msg.deltas.as_ref())
+            .is_some_and(|changes| {
+                changes
+                    .new_tokens
+                    .contains_key(&Bytes::from(vec![token; 20]))
+            })
+    }
+
+    /// A lagging stream catches up on two blocks, and the second one introduces a token. The
+    /// catch-up merges both messages, and the merged message must still carry the token.
+    #[test(tokio::test)]
+    async fn test_lagging_catch_up_keeps_new_tokens() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, with_new_token(header_message(2), None)).await;
+
+        v2.send_header(with_new_token(header_message(3), None))
+            .await
+            .expect("v2 send failed");
+        receive_message(&mut rx).await;
+
+        v3.send_header(with_new_token(header_message(3), None))
+            .await
+            .expect("v3 send failed");
+        v3.send_header(with_new_token(header_message(4), Some(0xee)))
+            .await
+            .expect("v3 send failed");
+        v2.send_header(with_new_token(header_message(4), None))
+            .await
+            .expect("v2 send failed");
+
+        let mut found = false;
+        for _ in 0..3 {
+            if has_new_token(&receive_message(&mut rx).await, "uniswap-v3", 0xee) {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "token 0xee never reached the feed");
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// A lagging stream reads an undo the history already applied, then the rebuilt block with a
+    /// new token. The catch-up merges both messages, and the merged message must still carry
+    /// the token.
+    #[test(tokio::test)]
+    async fn test_applied_undo_merged_with_rebuilt_block_keeps_new_tokens() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        for block in 2..=4 {
+            advance_both(&v2, &v3, &mut rx, with_new_token(header_message(block), None)).await;
+        }
+
+        v2.send_header(with_new_token(revert_header_message(3), None))
+            .await
+            .expect("v2 send failed");
+        receive_message(&mut rx).await;
+
+        let mut rebuilt_4 = header_message(4);
+        rebuilt_4.header.hash = Bytes::from(vec![0x34]);
+        rebuilt_4.header.parent_hash = Bytes::from(vec![3]);
+        v3.send_header(with_new_token(revert_header_message(3), None))
+            .await
+            .expect("v3 send failed");
+        v3.send_header(with_new_token(rebuilt_4, Some(0xee)))
+            .await
+            .expect("v3 send failed");
+
+        let mut found = false;
+        for _ in 0..3 {
+            if has_new_token(&receive_message(&mut rx).await, "uniswap-v3", 0xee) {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "token 0xee never reached the feed");
+
+        shutdown_block_synchronizer(nanny, rx).await;
     }
 }

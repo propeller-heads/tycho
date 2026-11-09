@@ -2,10 +2,15 @@ use tycho_common::dto::PaginationLimits;
 
 use crate::services::rpc::RpcError;
 
-/// Validates pagination limits with compression-aware maximums.
+/// Validates pagination: a page of at least 0, and a page size from 1 up to a compression-aware
+/// maximum.
 pub trait RequestPaginationValidation: PaginationLimits {
     fn validate_pagination(&self, req: &actix_web::HttpRequest) -> Result<(), RpcError> {
+        let page = self.pagination().page;
         let page_size = self.pagination().page_size;
+        if page < 0 || page_size < 1 {
+            return Err(RpcError::InvalidPagination { page, page_size });
+        }
 
         let supports_compression = req
             .headers()
@@ -17,7 +22,7 @@ pub trait RequestPaginationValidation: PaginationLimits {
         let max_allowed = Self::effective_max_page_size(supports_compression);
 
         if page_size > max_allowed {
-            Err(RpcError::Pagination(max_allowed as usize))
+            Err(RpcError::Pagination(max_allowed))
         } else {
             Ok(())
         }
@@ -48,6 +53,35 @@ mod tests {
 
         fn pagination(&self) -> &PaginationParams {
             &self.pagination
+        }
+    }
+
+    #[rstest]
+    #[case::first_page(0, 1, true)]
+    #[case::negative_page(-1, 2, false)]
+    #[case::negative_page_size(0, -1, false)]
+    #[case::zero_page_size(0, 0, false)]
+    #[actix_web::test]
+    async fn test_pagination_lower_bounds(
+        #[case] page: i64,
+        #[case] page_size: i64,
+        #[case] should_pass: bool,
+    ) {
+        let request = TestPaginationRequest { pagination: PaginationParams { page, page_size } };
+        let req = test::TestRequest::get().to_http_request();
+
+        let result = request.validate_pagination(&req);
+
+        if should_pass {
+            assert!(result.is_ok(), "page {page}, page_size {page_size} should pass: {result:?}");
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(RpcError::InvalidPagination { page: p, page_size: s }) if p == page && s == page_size
+                ),
+                "page {page}, page_size {page_size} should be rejected: {result:?}"
+            );
         }
     }
 
@@ -86,11 +120,8 @@ mod tests {
 
             if let Err(RpcError::Pagination(limit)) = result {
                 let has_zstd = accept_encoding.is_some_and(|e| e.contains("zstd"));
-                let expected_limit = if has_zstd {
-                    MAX_PAGE_SIZE_COMPRESSED as usize
-                } else {
-                    MAX_PAGE_SIZE_UNCOMPRESSED as usize
-                };
+                let expected_limit =
+                    if has_zstd { MAX_PAGE_SIZE_COMPRESSED } else { MAX_PAGE_SIZE_UNCOMPRESSED };
                 assert_eq!(limit, expected_limit, "Wrong limit reported");
             }
         }

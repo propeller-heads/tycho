@@ -30,7 +30,7 @@ pub struct CurveSwapEncoder {
 }
 
 impl CurveSwapEncoder {
-    fn get_pool_type(&self, pool_id: &str, factory_address: &str) -> Result<U8, EncodingError> {
+    fn get_pool_type(pool_id: &str, factory_address: &str) -> Result<U8, EncodingError> {
         match pool_id {
             // TriPool
             "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7" => Ok(U8::from(1)),
@@ -97,15 +97,19 @@ impl CurveSwapEncoder {
         let i = coins
             .iter()
             .position(|&addr| addr == token_in)
-            .ok_or(EncodingError::FatalError(format!(
-                "Token in address {token_in} not found in curve pool coins"
-            )))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError(format!(
+                    "Token in address {token_in} not found in curve pool coins"
+                ))
+            })?;
         let j = coins
             .iter()
             .position(|&addr| addr == token_out)
-            .ok_or(EncodingError::FatalError(format!(
-                "Token in address {token_out} not found in curve pool coins"
-            )))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError(format!(
+                    "Token in address {token_out} not found in curve pool coins"
+                ))
+            })?;
         Ok((U8::from(i), U8::from(j)))
     }
 }
@@ -116,10 +120,19 @@ impl SwapEncoder for CurveSwapEncoder {
         chain: Chain,
         _config: Option<HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
+        let native_asset = chain.native_asset();
+        let wrapper = native_asset.wrapper().ok_or_else(|| {
+            EncodingError::FatalError(format!(
+                "Curve encoding requires a native wrapper contract on {chain}"
+            ))
+        })?;
         Ok(Self {
             executor_address,
-            native_token_address: chain.native_token().address,
-            wrapped_native_token_address: chain.wrapped_native_token().address,
+            native_token_address: native_asset
+                .native_token()
+                .address
+                .clone(),
+            wrapped_native_token_address: wrapper.address.clone(),
         })
     }
 
@@ -141,22 +154,24 @@ impl SwapEncoder for CurveSwapEncoder {
         };
 
         let component_address = Address::from_str(&swap.component().id)
-            .map_err(|_| EncodingError::FatalError("Invalid curve pool address".to_string()))?;
+            .map_err(|e| EncodingError::FatalError(format!("Invalid curve pool address: {e}")))?;
 
         let factory_bytes = get_static_attribute(swap, "factory")?.to_vec();
         // the conversion to Address is necessary to checksum the address
         let factory_address =
-            Address::from_str(std::str::from_utf8(&factory_bytes).map_err(|_| {
-                EncodingError::FatalError(
-                    "Failed to convert curve factory address to string".to_string(),
-                )
+            Address::from_str(std::str::from_utf8(&factory_bytes).map_err(|e| {
+                EncodingError::FatalError(format!(
+                    "Failed to convert curve factory address to string: {e}"
+                ))
             })?)
-            .map_err(|_| EncodingError::FatalError("Invalid curve factory address".to_string()))?;
+            .map_err(|e| {
+                EncodingError::FatalError(format!("Invalid curve factory address: {e}"))
+            })?;
 
         let pool_address = Address::from_str(&swap.component().id)
-            .map_err(|_| EncodingError::FatalError("Invalid curve pool address".to_string()))?;
+            .map_err(|e| EncodingError::FatalError(format!("Invalid curve pool address: {e}")))?;
         let pool_type =
-            self.get_pool_type(&pool_address.to_string(), &factory_address.to_string())?;
+            Self::get_pool_type(&pool_address.to_string(), &factory_address.to_string())?;
 
         let (i, j) = self.get_coin_indexes(swap, token_in, token_out)?;
 
@@ -192,6 +207,16 @@ mod tests {
 
     fn curve_config() -> Option<HashMap<String, String>> {
         None
+    }
+
+    #[test]
+    fn test_curve_rejects_arc_without_wrapper() {
+        assert_eq!(
+            CurveSwapEncoder::new(Bytes::default(), Chain::Arc, curve_config()).err(),
+            Some(EncodingError::FatalError(
+                "Curve encoding requires a native wrapper contract on arc".to_string()
+            ))
+        );
     }
 
     #[rstest]
@@ -302,8 +327,9 @@ mod tests {
 
         let encoding_context = EncodingContext {
             router_address: None,
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
         };
         let encoder = CurveSwapEncoder::new(
             Bytes::from("0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f"),
@@ -363,8 +389,9 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: None,
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
         };
         let encoder = CurveSwapEncoder::new(
             Bytes::from("0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f"),
@@ -425,8 +452,9 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: None,
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
         };
         let encoder = CurveSwapEncoder::new(
             Bytes::from("0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f"),

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
@@ -6,35 +6,18 @@ import {
     SafeERC20,
     IERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {TransferManager} from "../TransferManager.sol";
-import {TychoRouterV3} from "../TychoRouterV3.sol";
+import {
+    ICurveCryptoPool,
+    ICurveCryptoPoolETH,
+    ICurveStablePool,
+    isCurveStablePool
+} from "@interfaces/ICurvePool.sol";
 
 error CurveExecutor__AddressZero();
 error CurveExecutor__InvalidDataLength();
 error CurveExecutor__TokenAddressZero();
-
-interface CryptoPool {
-    function exchange(uint256 i, uint256 j, uint256 dx, uint256 minDy)
-        external
-        payable;
-}
-
-interface StablePool {
-    function exchange(int128 i, int128 j, uint256 dx, uint256 minDy)
-        external
-        payable;
-}
-
-interface CryptoPoolETH {
-    function exchange(
-        uint256 i,
-        uint256 j,
-        uint256 dx,
-        uint256 minDy,
-        bool useEth
-    ) external payable;
-}
+error CurveExecutor__NotAContract(address addr);
 
 contract CurveExecutor is IExecutor {
     using SafeERC20 for IERC20;
@@ -43,6 +26,7 @@ contract CurveExecutor is IExecutor {
     address public immutable stEthAddress;
     bool public immutable hasStETH;
 
+    // forge-lint: disable-next-line(missing-zero-check) address(0) means the chain has no stETH pool.
     constructor(address nativeToken_, address stEthAddress_) {
         if (nativeToken_ == address(0)) {
             revert CurveExecutor__AddressZero();
@@ -67,7 +51,6 @@ contract CurveExecutor is IExecutor {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -88,19 +71,18 @@ contract CurveExecutor is IExecutor {
             ethAmount = amountIn;
         }
 
-        if (poolType == 1 || poolType == 10) {
-            // stable and stable_ng
-            // slither-disable-next-line arbitrary-send-eth
-            StablePool(pool).exchange{value: ethAmount}(i, j, amountIn, 0);
+        if (isCurveStablePool(poolType)) {
+            // forge-lint: disable-next-line(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
+            ICurveStablePool(pool).exchange{value: ethAmount}(i, j, amountIn, 0);
         } else {
             // crypto or llamma
             if (tokenIn == nativeToken || tokenOut == nativeToken) {
-                // slither-disable-next-line arbitrary-send-eth
-                CryptoPoolETH(pool).exchange{value: ethAmount}(
+                // forge-lint: disable-next-item(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
+                ICurveCryptoPoolETH(pool).exchange{value: ethAmount}(
                     uint256(int256(i)), uint256(int256(j)), amountIn, 0, true
                 );
             } else {
-                CryptoPool(pool)
+                ICurveCryptoPool(pool)
                     .exchange(
                         uint256(int256(i)), uint256(int256(j)), amountIn, 0
                     );
@@ -137,7 +119,9 @@ contract CurveExecutor is IExecutor {
      * There are some curve pools that take ETH directly.
      */
     receive() external payable {
-        require(msg.sender.code.length != 0);
+        require(
+            msg.sender.code.length != 0, CurveExecutor__NotAContract(msg.sender)
+        );
     }
 
     function getTransferData(bytes calldata data)

@@ -158,8 +158,12 @@ V2 used a `NativeAction` enum on the `Solution` with `Wrap` and `Unwrap` variant
 flags.
 
 **V3 removes this entirely.** Instead, a WETH executor handles wrapping and unwrapping as regular swap steps. Include a
-swap on the `native_wrapper` protocol wherever the route crosses between ETH and WETH — the Tycho stream injects a
-`native_wrapper` component you can route through like any other pool.
+swap on the `native_wrapper` protocol wherever the route crosses between ETH and WETH — the Tycho stream injects that
+component only on chains with a wrapper contract, and you route through it like any other pool.
+
+Arc has no wrapper: native USDC and ERC-20 USDC at
+<code>0x3600000000000000000000000000000000000000</code> share one balance. Route through that ERC-20
+address directly; do not add a <code>native_wrapper</code> step. See <a href="https://docs.arc.network/arc/concepts/stablecoin-native-model" target="_blank" rel="noopener noreferrer">Arc's stablecoin-native model</a>.
 
 ```rust
 // V2

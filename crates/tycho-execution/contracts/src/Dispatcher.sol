@@ -1,6 +1,8 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
+import {LowLevelCall} from "@openzeppelin/contracts/utils/LowLevelCall.sol";
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
 import {TransferManager} from "./TransferManager.sol";
@@ -11,12 +13,16 @@ import {
 error Dispatcher__UnapprovedExecutor(address executor);
 error Dispatcher__ExecutorIsTimelocked(address executor);
 error Dispatcher__NonContractExecutor();
-error Dispatcher__InvalidDataLength();
-error Dispatcher__AddressZero();
 error Dispatcher__UnsupportedSingleHopCycle(address token);
 error Dispatcher__ExecutorAlreadyExists(address executor);
 error Dispatcher__SwapReverted(address executor);
 error Dispatcher__CallbackReverted(address executor);
+
+// Shared with TychoSubsidizingExecutor, which points the router's fallback at
+// its inner executor.
+TransientSlot.AddressSlot constant CURRENTLY_SWAPPING_EXECUTOR_SLOT =
+    TransientSlot.AddressSlot
+        .wrap(keccak256("Dispatcher#CURRENTLY_SWAPPING_EXECUTOR_SLOT"));
 
 /**
  * @title Dispatcher - Dispatch execution to external contracts
@@ -30,25 +36,27 @@ error Dispatcher__CallbackReverted(address executor);
  *  an alternate selector is specified.
  */
 contract Dispatcher is TransferManager {
+    // One directive per slot type: Slither 0.11.6 can fail to analyse a
+    // contract that uses `using TransientSlot for *`.
+    using TransientSlot for TransientSlot.AddressSlot;
+    using TransientSlot for TransientSlot.BooleanSlot;
+    using TransientSlot for TransientSlot.Uint256Slot;
     using SafeERC20 for IERC20;
 
     mapping(address => uint256) public executorsActivationTimestamp;
 
-    // keccak256("Dispatcher#CURRENTLY_SWAPPING_EXECUTOR_SLOT")
-    uint256 private constant _CURRENTLY_SWAPPING_EXECUTOR_SLOT =
-        0x098a7a3b47801589e8cdf9ec791b93ad44273246946c32ef1fc4dbe45390c80e;
-    // keccak256("Dispatcher#IS_SPLIT_SWAP_SLOT")
-    uint256 private constant _IS_SPLIT_SWAP_SLOT =
-        0x7b3c4e5f6a8d9e0f1c2b3a4d5e6f7c8d9e0f1c2b3a4d5e6f7c8d9e0f1c2b3a4d;
-    // keccak256("Dispatcher#IS_FIRST_SWAP_SLOT")
-    uint256 private constant _IS_FIRST_SWAP_SLOT =
-        0x8c47a7e3f4c2e1b5a6d9f0e8c7b3a2d1e4f5c6b7a8d9e0f1c2b3a4d5e6f7c8d9;
-    // keccak256("Dispatcher#SWAP_INPUT_AMOUNT_SLOT")
-    uint256 private constant _SWAP_INPUT_AMOUNT_SLOT =
-        0xce9e2e8e50d57f2d688020ea7ab16e2039bcf4dc7175eba827e178586597bb39;
-    // keccak256("Dispatcher#SWAP_INPUT_TOKEN_SLOT")
-    uint256 private constant _SWAP_INPUT_TOKEN_SLOT =
-        0x0c22c14aba48b0e26e3b58475c66f358c352532122e537c32e8184c0159e6e10;
+    TransientSlot.BooleanSlot private constant _IS_SPLIT_SWAP_SLOT =
+        TransientSlot.BooleanSlot
+            .wrap(keccak256("Dispatcher#IS_SPLIT_SWAP_SLOT"));
+    TransientSlot.BooleanSlot private constant _IS_FIRST_SWAP_SLOT =
+        TransientSlot.BooleanSlot
+            .wrap(keccak256("Dispatcher#IS_FIRST_SWAP_SLOT"));
+    TransientSlot.Uint256Slot private constant _SWAP_INPUT_AMOUNT_SLOT =
+        TransientSlot.Uint256Slot
+            .wrap(keccak256("Dispatcher#SWAP_INPUT_AMOUNT_SLOT"));
+    TransientSlot.AddressSlot private constant _SWAP_INPUT_TOKEN_SLOT =
+        TransientSlot.AddressSlot
+            .wrap(keccak256("Dispatcher#SWAP_INPUT_TOKEN_SLOT"));
 
     uint256 public constant DELAY_EXECUTOR_ACTIVATION = 1 days;
 
@@ -63,11 +71,12 @@ contract Dispatcher is TransferManager {
      */
     function _setExecutor(address target) internal {
         if (target.code.length == 0) {
+            // forge-lint: disable-next-line(require-revert-in-loop) setExecutors applies a batch completely or not at all.
             revert Dispatcher__NonContractExecutor();
         }
 
-        // slither-disable-next-line timestamp
         if (executorsActivationTimestamp[target] != 0) {
+            // forge-lint: disable-next-line(require-revert-in-loop) setExecutors applies a batch completely or not at all.
             revert Dispatcher__ExecutorAlreadyExists(target);
         }
 
@@ -89,7 +98,7 @@ contract Dispatcher is TransferManager {
      * @dev Calls an executor, assumes swap.protocolData contains
      *  protocol-specific data required by the executor.
      */
-    // slither-disable-next-line delegatecall-loop,assembly,controlled-delegatecall,cyclomatic-complexity
+    // slither-disable-next-line controlled-delegatecall _validateExecutor only lets through executors approved and past their timelock.
     function _callSwapOnExecutor(
         address executor,
         uint256 amount,
@@ -100,14 +109,12 @@ contract Dispatcher is TransferManager {
     ) internal returns (uint256 amountOut) {
         _validateExecutor(executor);
 
-        assembly {
-            tstore(_CURRENTLY_SWAPPING_EXECUTOR_SLOT, executor)
-            tstore(_IS_FIRST_SWAP_SLOT, isFirstSwap)
-            tstore(_IS_SPLIT_SWAP_SLOT, isSplitSwap)
-            tstore(_SWAP_INPUT_AMOUNT_SLOT, amount)
-        }
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.tstore(executor);
+        _IS_FIRST_SWAP_SLOT.tstore(isFirstSwap);
+        _IS_SPLIT_SWAP_SLOT.tstore(isSplitSwap);
+        _SWAP_INPUT_AMOUNT_SLOT.tstore(amount);
 
-        // slither-disable-next-line calls-loop
+        // forge-lint: disable-next-item(calls-loop) Each hop calls its own executor; a failing hop fails the route.
         (
             TransferManager.TransferType transferType,
             address transferReceiver,
@@ -119,14 +126,13 @@ contract Dispatcher is TransferManager {
         if (tokenIn == tokenOut) {
             // Single-hop cycles (such as those made possible via UniswapV4 flash
             // accounting) are not supported.
+            // forge-lint: disable-next-line(require-revert-in-loop) A route runs completely or not at all.
             revert Dispatcher__UnsupportedSingleHopCycle(tokenIn);
         }
 
         // Store tokenIn so it can be passed to getCallbackTransferData if a
         // callback occurs during the swap.
-        assembly {
-            tstore(_SWAP_INPUT_TOKEN_SLOT, tokenIn)
-        }
+        _SWAP_INPUT_TOKEN_SLOT.tstore(tokenIn);
 
         // Measure output before _transfer so cyclic handling is uniform
         // across callback and direct-transfer types.
@@ -143,7 +149,7 @@ contract Dispatcher is TransferManager {
             false
         );
 
-        // slither-disable-next-line controlled-delegatecall,low-level-calls,calls-loop,reentrancy-balance
+        // forge-lint: disable-next-item(delegatecall-loop, low-level-calls, calls-loop) Each hop delegatecalls its own executor and bubbles its revert data.
         (bool success, bytes memory result) = executor.delegatecall(
             abi.encodeWithSelector(
                 IExecutor.swap.selector, amount, data, receiver
@@ -151,13 +157,11 @@ contract Dispatcher is TransferManager {
         );
 
         // Clear transient storage in case no callback was performed
-        assembly {
-            tstore(_CURRENTLY_SWAPPING_EXECUTOR_SLOT, 0)
-            tstore(_IS_FIRST_SWAP_SLOT, 0)
-            tstore(_IS_SPLIT_SWAP_SLOT, 0)
-            tstore(_SWAP_INPUT_AMOUNT_SLOT, 0)
-            tstore(_SWAP_INPUT_TOKEN_SLOT, 0)
-        }
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.tstore(address(0));
+        _IS_FIRST_SWAP_SLOT.tstore(false);
+        _IS_SPLIT_SWAP_SLOT.tstore(false);
+        _SWAP_INPUT_AMOUNT_SLOT.tstore(0);
+        _SWAP_INPUT_TOKEN_SLOT.tstore(address(0));
 
         // Revoke any lingering allowance the protocol didn't consume.
         if (transferType == TransferType.ProtocolWillDebit) {
@@ -165,13 +169,15 @@ contract Dispatcher is TransferManager {
         }
 
         if (!success) {
-            // slither-disable-next-line incorrect-equality
             if (result.length == 0) {
+                // forge-lint: disable-next-line(require-revert-in-loop) A route runs completely or not at all.
                 revert Dispatcher__SwapReverted(executor);
             }
             // Bubble the executor's revert payload byte-for-byte so callers
-            // see the original Error(string)/Panic/custom-error
+            // see the original Error(string)/Panic/custom-error.
+            // forge-lint: disable-next-line(inline-assembly) LowLevelCall.bubbleRevert(result) exceeds the stack limit here, and a later call overwrites the return data.
             assembly {
+                // forge-lint: disable-next-line(require-revert-in-loop) A route runs completely or not at all.
                 revert(add(result, 0x20), mload(result))
             }
         }
@@ -186,12 +192,10 @@ contract Dispatcher is TransferManager {
 
         // Delta accounting if tokens stay at router
         if (receiver == address(this)) {
-            // slither-disable-next-line calls-loop
             _updateDeltaAccounting(tokenOut, int256(amountOut));
         }
     }
 
-    // slither-disable-next-line assembly
     function _callHandleCallbackOnExecutor(bytes calldata data, address caller)
         internal
         returns (bytes memory)
@@ -201,13 +205,11 @@ contract Dispatcher is TransferManager {
         bool isSplitSwap;
         uint256 amount;
         address tokenIn;
-        assembly {
-            executor := tload(_CURRENTLY_SWAPPING_EXECUTOR_SLOT)
-            isFirstSwap := tload(_IS_FIRST_SWAP_SLOT)
-            isSplitSwap := tload(_IS_SPLIT_SWAP_SLOT)
-            amount := tload(_SWAP_INPUT_AMOUNT_SLOT)
-            tokenIn := tload(_SWAP_INPUT_TOKEN_SLOT)
-        }
+        executor = CURRENTLY_SWAPPING_EXECUTOR_SLOT.tload();
+        isFirstSwap = _IS_FIRST_SWAP_SLOT.tload();
+        isSplitSwap = _IS_SPLIT_SWAP_SLOT.tload();
+        amount = _SWAP_INPUT_AMOUNT_SLOT.tload();
+        tokenIn = _SWAP_INPUT_TOKEN_SLOT.tload();
 
         _validateExecutor(executor);
 
@@ -224,21 +226,18 @@ contract Dispatcher is TransferManager {
             true
         );
 
-        // slither-disable-next-line controlled-delegatecall,low-level-calls
+        // forge-lint: disable-next-item(low-level-calls) Solidity has no high-level delegatecall.
         (bool success, bytes memory result) = executor.delegatecall(
             abi.encodeWithSelector(ICallback.handleCallback.selector, data)
         );
 
         if (!success) {
-            // slither-disable-next-line incorrect-equality
             if (result.length == 0) {
                 revert Dispatcher__CallbackReverted(executor);
             }
             // Bubble the executor's revert payload byte-for-byte so callers
             // see the original Error(string)/Panic/custom-error
-            assembly {
-                revert(add(result, 0x20), mload(result))
-            }
+            LowLevelCall.bubbleRevert(result);
         }
 
         // Revoke any lingering allowance the protocol didn't consume.
@@ -247,11 +246,9 @@ contract Dispatcher is TransferManager {
         }
 
         // to prevent multiple callbacks
-        assembly {
-            tstore(_CURRENTLY_SWAPPING_EXECUTOR_SLOT, 0)
-            tstore(_IS_FIRST_SWAP_SLOT, 0)
-            tstore(_IS_SPLIT_SWAP_SLOT, 0)
-        }
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.tstore(address(0));
+        _IS_FIRST_SWAP_SLOT.tstore(false);
+        _IS_SPLIT_SWAP_SLOT.tstore(false);
 
         // The final callback result should not be ABI encoded. That is why we are decoding here.
         // ABI encoding is very gas expensive and we want to avoid it if possible.
@@ -267,19 +264,20 @@ contract Dispatcher is TransferManager {
     {
         _validateExecutor(executor);
 
-        // slither-disable-next-line calls-loop
+        // forge-lint: disable-next-line(calls-loop) Each hop calls its own executor; a failing hop fails the route.
         receiver = IExecutor(executor).fundsExpectedAddress(data);
     }
 
     function _validateExecutor(address executor) private view {
         uint256 activationTimestamp = executorsActivationTimestamp[executor];
 
-        // slither-disable-next-line incorrect-equality
         if (activationTimestamp == 0) {
+            // forge-lint: disable-next-line(require-revert-in-loop) A hop through an unapproved executor fails the route.
             revert Dispatcher__UnapprovedExecutor(executor);
         }
-        // slither-disable-next-line timestamp
+        // forge-lint: disable-next-line(block-timestamp) A one-day timelock is unaffected by seconds of block-time drift.
         if (block.timestamp < activationTimestamp) {
+            // forge-lint: disable-next-line(require-revert-in-loop) A hop through an unapproved executor fails the route.
             revert Dispatcher__ExecutorIsTimelocked(executor);
         }
     }
