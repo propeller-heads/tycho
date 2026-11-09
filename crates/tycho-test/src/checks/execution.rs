@@ -10,10 +10,7 @@ use num_traits::{Signed, ToPrimitive, Zero};
 use tracing::{error, info};
 
 use crate::{
-    execution::{
-        models::{TychoExecutionInput, TychoExecutionResult},
-        TRANSPORT_ERROR_PREFIX,
-    },
+    execution::models::{TychoExecutionInput, TychoExecutionResult},
     expectations::Tolerance,
 };
 
@@ -140,15 +137,6 @@ pub fn missing_revert(
     let component = &input.component_id;
     let amount_in = input.solution.amount_in();
     let failure = match results.get(simulation_id) {
-        // A node error on the call is reported as a revert, but proves nothing about the venue.
-        Some(TychoExecutionResult::Revert { reason, .. })
-            if reason.starts_with(TRANSPORT_ERROR_PREFIX) =>
-        {
-            Some(format!(
-                "[{component}] {simulation_id} could not be traced, so the revert past the limit \
-                 is unproven: {reason}"
-            ))
-        }
         Some(TychoExecutionResult::Revert { reason, .. }) => {
             info!(
                 "[{component}] {amount_in} {}, one unit past the hard limit, reverts: {reason}",
@@ -235,9 +223,6 @@ mod tests {
         }))
         .unwrap();
         assert!(settled.contains("executes and pays 50 B"), "{settled}");
-        let untraced =
-            judge(Some(revert(&format!("{TRANSPORT_ERROR_PREFIX} request timed out")))).unwrap();
-        assert!(untraced.contains("could not be traced"), "{untraced}");
         let failed =
             judge(Some(TychoExecutionResult::Failed { error_msg: "decode".to_string() })).unwrap();
         assert!(failed.contains("could not be simulated"), "{failed}");

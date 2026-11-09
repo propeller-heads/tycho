@@ -214,6 +214,23 @@ struct Streamed {
 }
 
 impl Streamed {
+    /// Logs an error of the stream as it happens, and keeps it for the comparison with the
+    /// snapshot.
+    fn error(&mut self, test: &str, error: String) {
+        warn!("[{test}] stream error: {error}");
+        self.errors.push(error);
+    }
+
+    /// `message`, followed by the errors the stream reported before it, so a stream that stops
+    /// early names its likely cause.
+    fn failure(&self, message: &str) -> miette::Report {
+        if self.errors.is_empty() {
+            miette!("{message}")
+        } else {
+            miette!("{message}; the stream reported: {}", self.errors.join("; "))
+        }
+    }
+
     /// The sheets to compare with the snapshot at `block`.
     fn sheets_at(&self, block: u64) -> miette::Result<&HashMap<String, Sheet>> {
         self.sheets
@@ -752,12 +769,7 @@ impl TestRunner {
 
                     // Step 3: Execute the batch against the real block
                     match self
-                        .run_execution(
-                            execution_data,
-                            &block,
-                            &config.protocol_system,
-                            &[], // No skip filters for live testing
-                        )
+                        .run_execution(execution_data, &block, &config.protocol_system)
                         .await
                     {
                         Ok(_) => {
@@ -875,19 +887,11 @@ impl TestRunner {
                 }
             }
             if let Some(Ok(streamed)) = &mut streamed {
-                let executes_nothing = (!test.expected_components.is_empty() &&
-                    test.expected_components
-                        .iter()
-                        .all(|component| {
-                            component
-                                .execution_skip_reason()
-                                .is_some()
-                        }))
-                .then_some("every expected component skips execution");
+                let executes_nothing = LadderSkips::of(&test.expected_components).execution;
                 self.execute_streamed(streamed, config, executes_nothing, &mut checks);
             }
             let rpc_server = tycho_runner.start_rpc_server();
-            let result = match self
+            let run = match self
                 .runtime
                 .block_on(self.last_indexed_block(&config.protocol_system))
                 .and_then(|last_indexed| snapshot_block(last_indexed, test.stop_block))
@@ -898,7 +902,7 @@ impl TestRunner {
                          (stop block {})",
                         test.stop_block
                     );
-                    let run = self.run_test(
+                    self.run_test(
                         test,
                         config,
                         block,
@@ -908,26 +912,7 @@ impl TestRunner {
                                 .map_err(String::as_str)
                         }),
                         &mut checks,
-                    );
-                    match streamed {
-                        Some(Ok(streamed)) => {
-                            let floor_problems = streamed.coverage.shortfalls(
-                                stream::Floor::DEFAULT,
-                                &simulated_ids(test),
-                                &executed_ids(test),
-                            );
-                            checks.warn(CheckId::StreamCoverage, &floor_problems);
-                            report.coverage.push(streamed.coverage);
-                        }
-                        Some(Err(_)) => {
-                            checks.not_run(CheckId::StreamCoverage, CheckId::StreamMatchesSnapshot)
-                        }
-                        None => {}
-                    }
-                    report.drift.extend(checks.take_drift());
-                    let (outcome, results) = checks.finish();
-                    report.results.extend(results);
-                    run.and(outcome)
+                    )
                 }
                 Err(e) => {
                     // A stream that failed is the likelier cause of a range indexed short.
@@ -942,10 +927,33 @@ impl TestRunner {
                         Some(Ok(_)) | None => e,
                     };
                     checks.fail(CheckId::Index, &e);
-                    report.results.extend(checks.finish().1);
+                    if let Some(Ok(_)) = &streamed {
+                        checks.not_run(CheckId::StreamMatchesSnapshot, CheckId::Index);
+                    }
                     Err(e)
                 }
             };
+            // The stream's coverage and the drift of its executions are reported even when the
+            // snapshot cannot be read, since they do not depend on it.
+            match streamed {
+                Some(Ok(streamed)) => {
+                    let floor_problems = streamed.coverage.shortfalls(
+                        stream::Floor::DEFAULT,
+                        &simulated_ids(test),
+                        &executed_ids(test),
+                    );
+                    checks.warn(CheckId::StreamCoverage, &floor_problems);
+                    report.coverage.push(streamed.coverage);
+                }
+                Some(Err(_)) => {
+                    checks.not_run(CheckId::StreamCoverage, CheckId::StreamMatchesSnapshot)
+                }
+                None => {}
+            }
+            report.drift.extend(checks.take_drift());
+            let (outcome, results) = checks.finish();
+            report.results.extend(results);
+            let result = run.and(outcome);
             match result {
                 Ok(_) => {
                     info!("✅ {} passed\n", test.name);
@@ -1241,7 +1249,7 @@ impl TestRunner {
         if declared_limits.is_some() {
             return self.check_strict_executions(
                 output,
-                Some(&header),
+                Some(Ok(&header)),
                 &config.protocol_system,
                 config.tolerance(),
                 executes_nothing,
@@ -1255,12 +1263,7 @@ impl TestRunner {
 
         let executed = self
             .runtime
-            .block_on(self.execute_unskipped(
-                output.executions,
-                &header,
-                &config.protocol_system,
-                &test.expected_components,
-            ));
+            .block_on(self.execute_inputs(output.executions, &header, &config.protocol_system));
         // Noted before the check, so a failing run still reports how far off it was.
         if let Ok((inputs, results)) = &executed {
             observe_executions(checks, inputs, results);
@@ -1732,7 +1735,6 @@ impl TestRunner {
     /// # Arguments
     /// * `update` - The decoded protocol state containing all component data
     /// * `protocol_components` - Mapping of component IDs to their ProtocolComponent models
-    /// * `expected_components` - Test configuration to determine which components to skip
     /// * `protocol_system` - The protocol system identifier
     /// * `declared_limits` - Strict mode: the limit each direction of each component declares,
     ///   keyed by `(lowercase component id, direction)`
@@ -2088,7 +2090,6 @@ impl TestRunner {
     /// * `execution_data` - HashMap of simulation IDs to TychoExecutionInput data
     /// * `block` - The historical block to use for execution testing
     /// * `protocol_system` - The protocol system identifier
-    /// * `expected_components` - Test configuration to determine which components to skip
     ///
     /// # Errors
     /// Returns an error if an execution cannot be simulated, reverts, or differs from its
@@ -2099,22 +2100,19 @@ impl TestRunner {
         execution_data: HashMap<String, TychoExecutionInput>,
         block: &Block,
         protocol_system: &str,
-        expected_components: &[ProtocolComponentWithTestConfig],
     ) -> miette::Result<()> {
         let (inputs, results) = self
-            .execute_unskipped(execution_data, block, protocol_system, expected_components)
+            .execute_inputs(execution_data, block, protocol_system)
             .await?;
         check_executions_match(&inputs, &results, Tolerance::LEGACY)
     }
 
-    /// Simulates executing every input whose component does not skip execution, returning the
-    /// inputs executed and their results.
-    async fn execute_unskipped(
+    /// Simulates executing every input, returning the inputs and their results.
+    async fn execute_inputs(
         &self,
         execution_data: HashMap<String, TychoExecutionInput>,
         block: &Block,
         protocol_system: &str,
-        expected_components: &[ProtocolComponentWithTestConfig],
     ) -> miette::Result<(HashMap<String, TychoExecutionInput>, HashMap<String, TychoExecutionResult>)>
     {
         if execution_data.is_empty() {
@@ -2122,23 +2120,10 @@ impl TestRunner {
             return Ok((HashMap::new(), HashMap::new()));
         }
 
-        let skip_execution = skip_reasons(expected_components, |c| &c.skip_execution);
-
-        // Filter out skipped components
-        let filtered_execution_data: HashMap<_, _> = execution_data
-            .into_iter()
-            .filter(|(_, input)| !skip_execution.contains_key(&input.component_id.to_lowercase()))
-            .collect();
-
-        if filtered_execution_data.is_empty() {
-            info!("All components skipped execution");
-            return Ok((HashMap::new(), HashMap::new()));
-        }
-
         let results = self
-            .simulate_executions(&filtered_execution_data, block, protocol_system)
+            .simulate_executions(&execution_data, block, protocol_system)
             .await?;
-        Ok((filtered_execution_data, results))
+        Ok((execution_data, results))
     }
 
     /// Simulates executing every input at `block` in one batch, keyed like the inputs.
@@ -2168,11 +2153,13 @@ impl TestRunner {
     /// limit check is recorded per component and direction. With `executes_nothing`, the reason
     /// every component skips execution, the ladder is recorded as skipped. With no `block` to
     /// execute at, nothing is executed or recorded for the ladder, and the limit checks are
-    /// recorded from the simulation alone: a streamed block that only simulates.
+    /// recorded from the simulation alone: a streamed block that only simulates. A `block` that
+    /// could not be read fails the ladder and every limit check that needs an execution, as a
+    /// batch that could not be simulated does.
     fn check_strict_executions(
         &self,
         output: SimulationOutput,
-        block: Option<&Block>,
+        block: Option<miette::Result<&Block>>,
         protocol_system: &str,
         tolerance: Tolerance,
         executes_nothing: Option<&str>,
@@ -2191,9 +2178,10 @@ impl TestRunner {
         inputs.extend(past_limit.clone());
         let execute = block.is_some();
         let executed = match block {
-            Some(block) => self
+            Some(Ok(block)) => self
                 .runtime
                 .block_on(self.simulate_executions(&inputs, block, protocol_system)),
+            Some(Err(e)) => Err(e.wrap_err("the block to execute at could not be read")),
             None => Ok(HashMap::new()),
         };
         let no_results = HashMap::new();
@@ -2470,7 +2458,7 @@ impl TestRunner {
             let update = match next {
                 Ok(Some(Ok(update))) => update,
                 Ok(Some(Err(e))) => {
-                    streamed.errors.push(format!("{e:#}"));
+                    streamed.error(&test.name, format!("{e:#}"));
                     continue;
                 }
                 Ok(None) => break,
@@ -2480,24 +2468,33 @@ impl TestRunner {
                         break;
                     }
                     if idle >= STREAM_IDLE_LIMIT {
-                        return Err(miette!(
+                        return Err(streamed.failure(&format!(
                             "the stream sent nothing for {}s before reaching block {}",
                             idle.as_secs(),
                             test.stop_block
-                        ));
+                        )));
                     }
                     continue;
                 }
             };
             idle = Duration::ZERO;
             let block = update.block_number;
-            // Every block of the range arrives, in order; a gap is a lost delta.
-            if let Some(last) = last_block.filter(|last| !first && block > last + 1) {
-                streamed.errors.push(format!(
-                    "blocks {}-{} never arrived in the stream",
-                    last + 1,
-                    block - 1
-                ));
+            // Every block of the range arrives once, in order: a gap is a lost delta, and a block
+            // at or before the last one would apply its deltas twice or out of order.
+            if let Some(last) = last_block {
+                if block <= last {
+                    streamed.error(
+                        &test.name,
+                        format!("block {block} arrived after block {last}; it is not applied"),
+                    );
+                    continue;
+                }
+                if block > last + 1 {
+                    streamed.error(
+                        &test.name,
+                        format!("blocks {}-{} never arrived in the stream", last + 1, block - 1),
+                    );
+                }
             }
             last_block = Some(block);
             for (id, component) in &update.new_pairs {
@@ -2585,11 +2582,11 @@ impl TestRunner {
 
         if !reached_stop {
             let indexer = if exited() { "; the indexer exited" } else { "" };
-            return Err(miette!(
+            return Err(streamed.failure(&format!(
                 "the stream ended at block {} before reaching the stop block {}{indexer}",
                 last_block.map_or_else(|| "none".to_string(), |block| block.to_string()),
                 test.stop_block
-            ));
+            )));
         }
 
         // The directions of the simulated components that trade at the end of the stream, which
@@ -2603,9 +2600,19 @@ impl TestRunner {
                 .iter()
                 .permutations(2)
                 .filter(|pair| {
-                    state
-                        .get_limits(pair[0].address.clone(), pair[1].address.clone())
-                        .is_ok_and(|(max_input, _)| !max_input.is_zero())
+                    match state.get_limits(pair[0].address.clone(), pair[1].address.clone()) {
+                        Ok((max_input, _)) => !max_input.is_zero(),
+                        // Kept, so the floor asks for the direction and the coverage warns
+                        // about it, rather than the error hiding it.
+                        Err(e) => {
+                            warn!(
+                                "[{}] {id} {} -> {}: the limits at the end of the stream cannot \
+                                 be read: {e}",
+                                test.name, pair[0].symbol, pair[1].symbol
+                            );
+                            true
+                        }
+                    }
                 })
                 .map(|pair| {
                     Direction {
@@ -2633,8 +2640,8 @@ impl TestRunner {
     /// Strict, after a streamed range: executes at the fewest simulated blocks, spread evenly,
     /// that meet the floor, and records the limit checks of every simulated block.
     ///
-    /// With `executes_nothing`, the reason every component skips execution, nothing is executed,
-    /// and the execution ladder is recorded as skipped once.
+    /// With `executes_nothing`, the reason every component skips execution, nothing is executed
+    /// and nothing is recorded for the execution ladder, which the snapshot's checks skip.
     fn execute_streamed(
         &self,
         streamed: &mut Streamed,
@@ -2658,31 +2665,20 @@ impl TestRunner {
             .map(|(block, output)| stream::Candidate { block: *block, executions: counts(output) })
             .collect();
         let to_execute = match executes_nothing {
-            Some(reason) => {
-                checks.skip(CheckId::ExecLadder, reason);
-                Vec::new()
-            }
+            Some(_) => Vec::new(),
             None => stream::blocks_to_execute(&candidates, stream::Floor::DEFAULT),
         };
         info!("Executing at {} of the {} simulated blocks", to_execute.len(), candidates.len());
 
         for (block, output) in std::mem::take(&mut streamed.simulated) {
             checks.at_block(Some(block));
-            let header = if to_execute.contains(&block) {
-                match self.runtime.block_on(
+            let header = to_execute.contains(&block).then(|| {
+                self.runtime.block_on(
                     self.rpc_provider
                         .get_block_header(block),
-                ) {
-                    Ok(header) => Some(header),
-                    Err(e) => {
-                        checks.fail(CheckId::ExecLadder, &e);
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            if header.is_some() {
+                )
+            });
+            if let Some(Ok(_)) = &header {
                 let coverage = &mut streamed.coverage;
                 for (id, count) in counts(&output) {
                     coverage.executions += count;
@@ -2696,7 +2692,11 @@ impl TestRunner {
             // Strict mode records each failure and goes on, so this never returns an error.
             if let Err(e) = self.check_strict_executions(
                 output,
-                header.as_ref(),
+                header.as_ref().map(|header| {
+                    header
+                        .as_ref()
+                        .map_err(|e| miette!("{e:#}"))
+                }),
                 &config.protocol_system,
                 config.tolerance(),
                 None,
@@ -2958,6 +2958,22 @@ struct LadderSkips {
     execution: Option<&'static str>,
 }
 
+impl LadderSkips {
+    /// Which ladder every one of `expected_components` skips; an empty list skips nothing, since
+    /// it stands for every component of the protocol.
+    fn of(expected_components: &[ProtocolComponentWithTestConfig]) -> Self {
+        let every = |skips: fn(&ProtocolComponentWithTestConfig) -> bool| {
+            !expected_components.is_empty() && expected_components.iter().all(skips)
+        };
+        LadderSkips {
+            simulation: every(|c| c.skip_simulation.is_skipped())
+                .then_some("every expected component skips simulation"),
+            execution: every(|c| c.execution_skip_reason().is_some())
+                .then_some("every expected component skips execution"),
+        }
+    }
+}
+
 /// Records and logs each expected component's ladder skips, once per component: a
 /// `skip_simulation` skips both ladders, a `skip_execution` the execution one. Returns which
 /// ladder every component skips, if any; an empty list skips nothing, since it stands for every
@@ -2977,15 +2993,7 @@ fn record_ladder_skips(
             checks.skip_component(CheckId::ExecLadder, id, reason);
         }
     }
-    let every = |skips: fn(&ProtocolComponentWithTestConfig) -> bool| {
-        !expected_components.is_empty() && expected_components.iter().all(skips)
-    };
-    LadderSkips {
-        simulation: every(|c| c.skip_simulation.is_skipped())
-            .then_some("every expected component skips simulation"),
-        execution: every(|c| c.execution_skip_reason().is_some())
-            .then_some("every expected component skips execution"),
-    }
+    LadderSkips::of(expected_components)
 }
 
 /// The lowercase ids of the expected components whose `flag` is skipped, each with its reason.
