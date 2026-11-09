@@ -127,10 +127,13 @@ fn register_exchanges(
                 .exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter, None)
         }
-        Chain::Arbitrum => {
-            builder = builder.exchange::<RamsesV3State>("ramses_v3", tvl_filter, None)
-        }
-        Chain::Starknet | Chain::ZkSync | Chain::Plasma | Chain::Arc | Chain::Custom(_) | _ => {}
+        Chain::Starknet |
+        Chain::ZkSync |
+        Chain::Arbitrum |
+        Chain::Plasma |
+        Chain::Arc |
+        Chain::Custom(_) |
+        _ => {}
     }
     builder
 }
