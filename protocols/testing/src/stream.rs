@@ -152,7 +152,8 @@ pub struct Coverage {
     pub executions_by_component: BTreeMap<String, u64>,
     /// Per component, the directions quoted at a simulated block after a delta.
     pub quoted_directions: BTreeMap<String, BTreeSet<String>>,
-    /// Per component, the directions that trade at the end of the stream.
+    /// Per component, the directions that trade at the end of the stream, and those whose limits
+    /// could not be read there.
     pub tradable_directions: BTreeMap<String, BTreeSet<String>>,
 }
 

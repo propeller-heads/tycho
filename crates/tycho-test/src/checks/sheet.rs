@@ -54,7 +54,8 @@ pub(crate) const LADDER_THOUSANDTHS: [u32; 3] = [1, 10, 100];
 
 /// Everything a state answers, by question: each direction's limits and spot price, and quotes at
 /// 0.1%, 1% and 10% of its max input after `sizing`, which caps it as the ladder does. Values are
-/// printed, so a sheet outlives the state, which a later decode may invalidate.
+/// printed, so a sheet outlives the state, which a later decode may invalidate. A token is named
+/// by its symbol, followed by its address when another of `tokens` has the same symbol.
 pub fn quote_sheet<Q: Quoter + ?Sized>(
     state: &Q,
     tokens: &[Token],
@@ -62,10 +63,22 @@ pub fn quote_sheet<Q: Quoter + ?Sized>(
 ) -> BTreeMap<String, String> {
     let show =
         |result: Result<String, String>| result.unwrap_or_else(|e| format!("an error ({e})"));
+    let name = |token: &Token| {
+        let shared = tokens
+            .iter()
+            .filter(|other| other.symbol == token.symbol)
+            .count() >
+            1;
+        if shared {
+            format!("{} ({})", token.symbol, token.address)
+        } else {
+            token.symbol.clone()
+        }
+    };
     let mut sheet = BTreeMap::new();
     for pair in tokens.iter().permutations(2) {
         let (token_in, token_out) = (pair[0], pair[1]);
-        let direction = format!("{} -> {}", token_in.symbol, token_out.symbol);
+        let direction = format!("{} -> {}", name(token_in), name(token_out));
         let limits = state.limits(token_in, token_out);
         sheet.insert(
             format!("{direction}: limits"),
@@ -189,6 +202,21 @@ mod tests {
         let one_way = quote_sheet(&Pool(100_000, 0), &tokens(), BigUint::clone);
         assert_eq!(one_way["B -> A: limits"], "max input 0, max output 100000");
         assert!(!one_way.contains_key("B -> A: the quote at 1.0% of the limit"));
+    }
+
+    #[test]
+    fn a_sheet_tells_apart_tokens_that_share_a_symbol() {
+        let tokens = [
+            token("0x00000000000000000000000000000000000000a1", "A"),
+            token("0x00000000000000000000000000000000000000a2", "A"),
+        ];
+        let sheet = quote_sheet(&Pool(100_000, 200_000), &tokens, BigUint::clone);
+        // Both directions are asked, rather than one overwriting the other.
+        assert_eq!(sheet.len(), 10);
+        assert!(sheet.contains_key(
+            "A (0x00000000000000000000000000000000000000a1) -> A \
+             (0x00000000000000000000000000000000000000a2): limits"
+        ));
     }
 
     #[test]
