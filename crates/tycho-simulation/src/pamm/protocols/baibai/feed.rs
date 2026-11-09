@@ -94,19 +94,22 @@ impl BaibaiFeedBuilder {
         self
     }
 
-    /// The feed tuning a new builder starts from.
+    /// The feed tuning a new builder starts from, in Base blocks.
     ///
-    /// Makers refresh their curves every Base block (2 s) and a curve expires a few seconds after
-    /// its update (the earlier of its `validUntil` and the book's TTL, both read every poll). The
-    /// feed polls every second to pick up each block soon after it lands, gives a poll 2 s, and
-    /// withdraws a book 4 s after its last refresh. A poll publishes only curves still live in
-    /// the next block, but while polls fail a book can outlive its curve by up to the withdrawal
-    /// age; a swap priced from an expired curve reverts at the venue.
+    /// Makers refresh their curves every block and a curve expires a few seconds after its
+    /// update (the earlier of its `validUntil` and the book's TTL, both read every poll). The
+    /// feed polls every half block to pick up each block soon after it lands, gives a poll one
+    /// block, and withdraws a book [`MAX_BLOCK_LAG`] blocks after its last refresh: 1 s, 2 s and
+    /// 4 s at Base's 2 s block time. A poll publishes only curves still live in the next block,
+    /// but while polls fail a book can outlive its curve by up to the withdrawal age; a swap
+    /// priced from an expired curve reverts at the venue.
     pub fn default_feed_config() -> HttpFeedConfig {
+        let block_secs = BASE_DEPLOYMENT.chain.block_time_secs();
+        let block = Duration::from_secs(block_secs);
         HttpFeedConfig {
-            poll_interval: Duration::from_secs(1),
-            request_timeout: Duration::from_secs(2),
-            max_snapshot_age: Some(Duration::from_secs(4)),
+            poll_interval: block / 2,
+            request_timeout: block,
+            max_snapshot_age: Some(Duration::from_secs(MAX_BLOCK_LAG * block_secs)),
             ..default_http_feed_config()
         }
     }
@@ -777,6 +780,17 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, FeedError::InvalidInput(_)), "{error}");
+    }
+
+    /// At Base's 2 s block time the defaults poll every half block, give a poll one block and
+    /// withdraw a book after two.
+    #[test]
+    fn the_default_tuning_follows_base_block_time() {
+        let config = BaibaiFeedBuilder::default_feed_config();
+
+        assert_eq!(config.poll_interval, Duration::from_secs(1));
+        assert_eq!(config.request_timeout, Duration::from_secs(2));
+        assert_eq!(config.max_snapshot_age, Some(Duration::from_secs(4)));
     }
 
     #[test]
