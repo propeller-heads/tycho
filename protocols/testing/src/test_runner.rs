@@ -66,7 +66,6 @@ use crate::{
 
 static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
-        ("ethereum-sushiswap-v2", "ethereum-uniswap-v2"),
         ("base-sushiswap-v2", "ethereum-uniswap-v2"),
         ("bsc-lunarbase", "base-lunarbase"),
         ("ethereum-pancakeswap-v2", "ethereum-uniswap-v2"),
@@ -74,9 +73,6 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("arc-uniswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("arc-uniswap-v4-no-hooks", "ethereum-uniswap-v4/no-hooks"),
         ("base-balancer-v3", "ethereum-balancer-v3"),
-        ("arbitrum-balancer-v3", "ethereum-balancer-v3"),
-        ("gnosis-balancer-v3", "ethereum-balancer-v3"),
-        ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-sushiswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-robinswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-gigadex-v3", "ethereum-pancakeswap-v3"),

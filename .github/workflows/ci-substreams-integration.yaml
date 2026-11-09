@@ -3,9 +3,11 @@ name: Substreams Integration Tests
 env:
   # Secrets are intentionally NOT defined here to keep them out of detect-changes scope.
   # They are set at job level in test-protocols, the only job that needs them.
-  # ethereum-ambient ships no integration test config, and ethereum-uniswap-v4 keeps its under
-  # with-hooks/, where the runner does not look for it.
-  EXCLUDED_SUBSTREAMS: target|crates|ethereum-template-factory|ethereum-template-singleton|ethereum-fluid|ethereum-ambient|ethereum-uniswap-v4
+  # Directories with no integration_test.tycho.yaml at their root, which the runner rejects:
+  # ethereum-ambient has no test config, ethereum-uniswap-v3-logs-only and ethereum-uniswap-v4 are
+  # tested only through their clones (CLONE_TO_BASE_PROTOCOL in protocols/testing/src/test_runner.rs),
+  # and tests holds the release script's tests.
+  EXCLUDED_SUBSTREAMS: target|crates|tests|ethereum-template-factory|ethereum-template-singleton|ethereum-fluid|ethereum-ambient|ethereum-uniswap-v3-logs-only|ethereum-uniswap-v4
 
 on:
   workflow_dispatch:
