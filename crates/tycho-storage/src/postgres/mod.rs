@@ -1392,6 +1392,19 @@ pub mod db_fixtures {
         id
     }
 
+    /// Points the protocol system at `instance_id`, or clears its pointer for `None`.
+    pub async fn set_active_instance(
+        conn: &mut AsyncPgConnection,
+        protocol_system_id: i64,
+        instance_id: Option<InstanceId>,
+    ) {
+        diesel::update(schema::protocol_system::table.find(protocol_system_id))
+            .set(schema::protocol_system::active_instance_id.eq(instance_id))
+            .execute(conn)
+            .await
+            .expect("setting the active instance failed");
+    }
+
     // Insert a new Protocol Type
     pub async fn insert_protocol_type(
         conn: &mut AsyncPgConnection,
