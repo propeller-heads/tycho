@@ -10,6 +10,9 @@ writes, per group, a pass checklist: the chunk's files and the group's records.
 It also writes `simplify.md` for the simplification pass: the records about removing and reusing
 code, two counterweights, the library rows that apply, and an inventory of every item the change
 adds (functions, types, constants, errors, events) with its uses at the head.
+A record that names another record in backticks gets that record's text quoted under it, unless
+the other record is already in the same checklist, so a rule that points elsewhere for part of its
+requirement reaches the pass whole.
 A `Checked by:` tool that is not set up at the base is marked `(not at base)` in the checklist, so a
 record never implies a tool check that cannot run; plan.json's `tools_missing` lists those tools.
 
@@ -486,6 +489,30 @@ def main():
             blocks.append(f"Source text ({path} § {sec}):\n\n" + "\n".join("> " + l for l in body.splitlines()))
         return "\n\n".join(blocks)
 
+    # every record at the base, from every knowledge file, so a reference into a file this chunk does
+    # not load (another layer's half of a rule) still resolves
+    every_record = {}
+    for p in git("ls-tree", "--name-only", f"{base}:{KNOWLEDGE}", check=False).split():
+        if p.endswith(".md"):
+            name = p[:-3]
+            recs = records[name] if name in records else parse_records(name, read_base(base, f"{KNOWLEDGE}/{p}") or "")
+            for r in recs:
+                every_record.setdefault(r["id"], r)
+
+    def referenced_records(rec, shown):
+        """The text of each record `rec` names in backticks that is not in `shown`, one level deep:
+        a rule that points to another for part of its requirement reaches the pass whole, whatever
+        group or file the other one lands in."""
+        blocks = []
+        for rid in dict.fromkeys(re.findall(r"`([a-z0-9][a-z0-9-]*)`", rec["text"])):
+            ref = every_record.get(rid)
+            if ref is None or rid == rec["id"] or rid in shown:
+                continue
+            body = ref["header"] + "\n" + ref["text"] if "header" in ref else ref["text"]
+            blocks.append(f"Referenced record ({KNOWLEDGE}/{ref['file']}.md):\n\n"
+                          + "\n".join("> " + l for l in body.splitlines()))
+        return "\n\n".join(blocks)
+
     contract = any(l in contract_layers for f in files for l in info[f]["layers"])
     present, missing = tools_at(base), set()
     plan = dict(base=base, head=a.head or ("worktree" if a.worktree else "paths"), pr=a.pr,
@@ -517,6 +544,7 @@ def main():
             if len(groups) > 1:
                 lines += ["", f"Other passes check the chunk's other {len(units) - len(group)} records against these files."]
             ids, last_name, last_header = [], None, None
+            shown = {r["id"] for _, r in group}
             for name, r in group:
                 if name != last_name:
                     lines += ["", f"## {name}.md", ""]
@@ -533,6 +561,9 @@ def main():
                     src = pointer_source(r)
                     if src:
                         lines += [src, ""]
+                    refs = referenced_records(r, shown)
+                    if refs:
+                        lines += [refs, ""]
             (out / f"pass-{i}.md").write_text("\n".join(lines).rstrip() + "\n")
             plan["passes"].append(dict(n=i, chunk=c, group=g, groups=len(groups), files=chunk,
                                        diff_lines=sum(info[f]["lines"] for f in chunk),
@@ -555,8 +586,12 @@ def main():
     if len(items) > 300:
         lines.append(f"| … | | {len(items) - 300} more, not listed | |")
     lines += ["", "## Records", ""]
+    shown = {r["id"] for r in simp} | {r["id"] for r in libs}
     for r in simp:
         lines += [("Counterweight. " if r["id"] in COUNTERWEIGHTS else "") + mark_checked(r["text"], present, missing), ""]
+        refs = referenced_records(r, shown)
+        if refs:
+            lines += [refs, ""]
     if libs:
         lines += ["## Library rows (an existing helper or crate feature replaces new code)", "", libs[0]["header"]]
         lines += [r["text"] for r in libs]
