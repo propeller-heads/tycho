@@ -250,6 +250,23 @@ struct Streamed {
 }
 
 impl Streamed {
+    /// Logs an error of the stream as it happens, and keeps it for the comparison with the
+    /// snapshot.
+    fn error(&mut self, test: &str, error: String) {
+        warn!("[{test}] stream error: {error}");
+        self.errors.push(error);
+    }
+
+    /// `message`, followed by the errors the stream reported before it, so a stream that stops
+    /// early names its likely cause.
+    fn failure(&self, message: String) -> miette::Report {
+        if self.errors.is_empty() {
+            miette!("{message}")
+        } else {
+            miette!("{message}; the stream reported: {}", self.errors.join("; "))
+        }
+    }
+
     /// The sheets to compare with the snapshot at `block`.
     fn sheets_at(&self, block: u64) -> miette::Result<&HashMap<String, Sheet>> {
         self.sheets
@@ -2578,7 +2595,7 @@ impl TestRunner {
             let update = match next {
                 Ok(Some(Ok(update))) => update,
                 Ok(Some(Err(e))) => {
-                    streamed.errors.push(format!("{e:#}"));
+                    streamed.error(&test.name, format!("{e:#}"));
                     continue;
                 }
                 Ok(None) => break,
@@ -2588,24 +2605,33 @@ impl TestRunner {
                         break;
                     }
                     if idle >= STREAM_IDLE_LIMIT {
-                        return Err(miette!(
+                        return Err(streamed.failure(format!(
                             "the stream sent nothing for {}s before reaching block {}",
                             idle.as_secs(),
                             test.stop_block
-                        ));
+                        )));
                     }
                     continue;
                 }
             };
             idle = Duration::ZERO;
             let block = update.block_number;
-            // Every block of the range arrives, in order; a gap is a lost delta.
-            if let Some(last) = last_block.filter(|last| !first && block > last + 1) {
-                streamed.errors.push(format!(
-                    "blocks {}-{} never arrived in the stream",
-                    last + 1,
-                    block - 1
-                ));
+            // Every block of the range arrives once, in order: a gap is a lost delta, and a block
+            // at or before the last one would apply its deltas twice or out of order.
+            if let Some(last) = last_block {
+                if block <= last {
+                    streamed.error(
+                        &test.name,
+                        format!("block {block} arrived after block {last}; it is not applied"),
+                    );
+                    continue;
+                }
+                if block > last + 1 {
+                    streamed.error(
+                        &test.name,
+                        format!("blocks {}-{} never arrived in the stream", last + 1, block - 1),
+                    );
+                }
             }
             last_block = Some(block);
             for (id, component) in &update.new_pairs {
@@ -2693,11 +2719,11 @@ impl TestRunner {
 
         if !reached_stop {
             let indexer = if exited() { "; the indexer exited" } else { "" };
-            return Err(miette!(
+            return Err(streamed.failure(format!(
                 "the stream ended at block {} before reaching the stop block {}{indexer}",
                 last_block.map_or_else(|| "none".to_string(), |block| block.to_string()),
                 test.stop_block
-            ));
+            )));
         }
 
         // The directions of the simulated components that trade at the end of the stream, which
@@ -2711,9 +2737,19 @@ impl TestRunner {
                 .iter()
                 .permutations(2)
                 .filter(|pair| {
-                    state
-                        .get_limits(pair[0].address.clone(), pair[1].address.clone())
-                        .is_ok_and(|(max_input, _)| !max_input.is_zero())
+                    match state.get_limits(pair[0].address.clone(), pair[1].address.clone()) {
+                        Ok((max_input, _)) => !max_input.is_zero(),
+                        // Kept, so the floor asks for the direction and the coverage warns
+                        // about it, rather than the error hiding it.
+                        Err(e) => {
+                            warn!(
+                                "[{}] {id} {} -> {}: the limits at the end of the stream cannot \
+                                 be read: {e}",
+                                test.name, pair[0].symbol, pair[1].symbol
+                            );
+                            true
+                        }
+                    }
                 })
                 .map(|pair| {
                     Direction {
