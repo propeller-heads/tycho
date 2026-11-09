@@ -7019,7 +7019,7 @@ dependencies = [
 
 [[package]]
 name = "protocol-testing"
-version = "0.504.1"
+version = "0.504.2"
 dependencies = [
  "alloy",
  "clap",
@@ -10000,7 +10000,7 @@ checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "tycho"
-version = "0.504.1"
+version = "0.504.2"
 dependencies = [
  "tokio",
  "tycho-client",
@@ -10011,7 +10011,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.504.1"
+version = "0.504.2"
 dependencies = [
  "async-trait",
  "backoff",
@@ -10045,7 +10045,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.504.1"
+version = "0.504.2"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -10079,7 +10079,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.504.1"
+version = "0.504.2"
 dependencies = [
  "alloy",
  "async-trait",
@@ -10103,7 +10103,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.504.1"
+version = "0.504.2"
 dependencies = [
  "alloy",
  "async-trait",
@@ -10129,7 +10129,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-indexer"
-version = "0.504.1"
+version = "0.504.2"
 dependencies = [
  "actix",
  "actix-cors",
@@ -10199,7 +10199,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-integration-test"
-version = "0.504.1"
+version = "0.504.2"
 dependencies = [
  "actix-web",
  "alloy",
@@ -10229,7 +10229,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-protobuf"
-version = "0.504.1"
+version = "0.504.2"
 dependencies = [
  "chrono",
  "num-bigint",
@@ -10253,7 +10253,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.504.1"
+version = "0.504.2"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -10323,7 +10323,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage"
-version = "0.504.1"
+version = "0.504.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10350,7 +10350,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-test"
-version = "0.504.1"
+version = "0.504.2"
 dependencies = [
  "alloy",
  "alloy-chains",

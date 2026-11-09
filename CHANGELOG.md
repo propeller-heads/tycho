@@ -1,3 +1,11 @@
+## [0.504.2](https://github.com/propeller-heads/tycho/compare/0.504.1...0.504.2) (2026-11-09)
+
+
+### Bug Fixes
+
+* unblock Fluid pools that have swaps unpaused again ([0b69dbd](https://github.com/propeller-heads/tycho/commit/0b69dbd3a7449b2db3720dda2030ad618383046d)), closes [#1709](https://github.com/propeller-heads/tycho/issues/1709) [#1709](https://github.com/propeller-heads/tycho/issues/1709)
+* unblock Fluid pools that have swaps unpaused again ([#1757](https://github.com/propeller-heads/tycho/issues/1757)) ([53cb909](https://github.com/propeller-heads/tycho/commit/53cb909f1c04f3cd31d2258c413c20dde0459462))
+
 ## [0.504.1](https://github.com/propeller-heads/tycho/compare/0.504.0...0.504.1) (2026-11-09)
 
 
