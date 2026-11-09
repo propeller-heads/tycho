@@ -169,7 +169,7 @@ contract EkuboV3Executor is IExecutor, ICallback {
             CORE_ADDRESS,
             abi.encodePacked(
                 IFlashAccountant.lock.selector,
-                bytes16(uint128(SafeCastLib.toInt128(amountIn))),
+                SafeCastLib.toInt128(amountIn),
                 bytes20(receiver),
                 data
             )

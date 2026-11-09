@@ -364,8 +364,7 @@ abstract contract TychoFallbackRouter is
         view
         returns (uint256 amountOut)
     {
-        (address pool, uint8 poolType, uint256 i, uint256 j) =
-            _decodeCurve(data);
+        (address pool, uint8 poolType, uint8 i, uint8 j) = _decodeCurve(data);
         if (isCurveStablePool(poolType)) {
             return ICurveStablePool(pool)
                 .get_dy(int128(uint128(i)), int128(uint128(j)), swap_.amountIn);
@@ -550,8 +549,7 @@ abstract contract TychoFallbackRouter is
 
     /// @dev Curve pays the caller, so this forwards to `receiver`.
     function _swapCurve(Swap calldata swap_, bytes calldata data) internal {
-        (address pool, uint8 poolType, uint256 i, uint256 j) =
-            _decodeCurve(data);
+        (address pool, uint8 poolType, uint8 i, uint8 j) = _decodeCurve(data);
 
         uint256 balanceBefore = IERC20(swap_.tokenOut).balanceOf(address(this));
 
@@ -574,7 +572,7 @@ abstract contract TychoFallbackRouter is
     function _decodeCurve(bytes calldata data)
         internal
         pure
-        returns (address pool, uint8 poolType, uint256 i, uint256 j)
+        returns (address pool, uint8 poolType, uint8 i, uint8 j)
     {
         if (data.length != 23) {
             revert TychoFallbackRouter__InvalidSwapLength(data.length);

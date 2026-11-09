@@ -7,6 +7,7 @@ import {
     IPancakeswapInfinityVault,
     IPancakeswapInfinityCLPoolManager,
     IPancakeswapInfinityBinPoolManager,
+    IPancakeswapInfinityLockCallback,
     InfinityPoolKey
 } from "@interfaces/IPancakeswapInfinity.sol";
 import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
@@ -56,7 +57,7 @@ contract PancakeswapInfinityRobinhoodExecutor is IExecutor, ICallback {
     // Same slice-bound false positive as _PAYLOAD_LENGTH.
     uint256 private constant _CALLBACK_HEADER = 68;
     bytes4 private constant _LOCK_ACQUIRED =
-        bytes4(keccak256("lockAcquired(bytes)"));
+        IPancakeswapInfinityLockCallback.lockAcquired.selector;
     uint8 private constant _POOL_TYPE_CL = 0;
     uint8 private constant _POOL_TYPE_BIN = 1;
 
