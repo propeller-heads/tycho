@@ -27,8 +27,7 @@ const SUBSIDY_KEY: &str = "subsidy";
 /// is a router. `map_fee_config_events` decodes a fee-config log from any emitter, so the key it
 /// filters on comes from those same decoders rather than from a list of addresses; nearly half
 /// of the fee-config events stored so far come from an emitter no manifest configures.
-/// `map_subsidy_events` reads one payer, but a chain without one has no key to filter on, so it
-/// too filters on a key its own decoders set: on such a chain the module never runs.
+/// `map_subsidy_events` configures no payer, so it too filters on a key its own decoders set.
 #[substreams::handlers::map]
 pub fn index_router_activity(block: Block) -> Result<Keys> {
     Ok(Keys { keys: router_activity_keys(&block) })
