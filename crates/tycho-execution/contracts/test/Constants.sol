@@ -84,6 +84,11 @@ contract Constants is
     address SKY_DAI_USDS_CONVERTER =
         address(0x3225737a9Bbb6473CB4a45b7244ACa2BeFdB276A);
 
+    // f(x) Protocol: fxSP (stability pool share) and fxSAVE (ERC4626 over it)
+    address FX_BASE_POOL = address(0x65C9A641afCEB9C0E6034e558A319488FA0FA3be);
+    address FXSAVE_ADDR = address(0x7743e50F534a7f9F1791DdE7dCD89F7783Eefc39);
+    address FXUSD_ADDR = address(0x085780639CC2cACd35E474e71f4d000e2405d8f6);
+
     // Assets
     address ETH_ADDR = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
     address WETH_ADDR = address(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
