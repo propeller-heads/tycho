@@ -81,9 +81,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1  # stable
-        with:
-          toolchain: stable
+      - name: Install the Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
         with:

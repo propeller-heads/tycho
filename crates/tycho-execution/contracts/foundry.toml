@@ -2,6 +2,12 @@
 src = 'src'
 out = 'out'
 libs = ['lib']
+# Remappings come from remappings.txt alone. Auto-detection scopes each dependency's
+# nested libraries to it with context remappings (`lib/<dep>/:<prefix>=...`), and the
+# Hardhat deploy scripts break on those: @nomicfoundation/hardhat-foundry reads
+# `forge remappings` and rejects any context. Re-enable it once deployments have moved
+# off Hardhat.
+auto_detect_remappings = false
 evm_version = 'osaka'
 optimizer = true
 optimizer_runs = 200
@@ -42,3 +48,43 @@ bsc = "${BSC_RPC_URL}"
 
 [fmt]
 line_length = 80
+
+# forge lint is the primary linter. Slither (slither.config.json, slither.md) runs the checks
+# excluded below and those forge does not have; a check runs in both only where the two catch
+# different cases. The split comes from comparing forge 1.9.0 with Slither 0.11.6 on src/.
+[lint]
+# An empty list turns the severity filter off, so every lint runs unless exclude_lints names it.
+severity = []
+exclude_lints = [
+    # Owned by Slither, whose detectors handle this codebase better:
+    "unused-return",              # Misses calls with `{value: ...}` options.
+    "reentrancy-events",          # Does not recognise nonReentrant guards.
+    "reentrancy-eth",             # Does not recognise nonReentrant guards.
+    "reentrancy-no-eth",          # Does not recognise nonReentrant guards.
+    "controlled-delegatecall",    # Distrusts immutable targets, like an executor's own address.
+    "locked-ether",               # Follows the bodies of external callees and stops at assembly.
+    "boolean-cst",                # Reports the bool literals in ternary tuple arms.
+    "unchecked-call",             # Passes a success value that is bound but never read.
+    "erc20-unchecked-transfer",   # Passes a success value that is bound but never read.
+    "incorrect-erc20-interface",  # Only checks contracts that inherit a base named (I)ERC20.
+    "incorrect-erc721-interface", # Only checks contracts that inherit a base named (I)ERC721.
+    "encode-packed-collision",    # Reports any two dynamic arguments, not only adjacent ones.
+
+    # Owned by Slither's naming-convention; the codebase uses mixedCase immutables:
+    "mixed-case-function",            # Function names.
+    "mixed-case-variable",            # Variable and parameter names.
+    "pascal-case-struct",             # Struct names.
+    "screaming-snake-case-const",     # Constant names.
+    "screaming-snake-case-immutable", # Immutable names; this rule conflicts with Slither's.
+
+    # Off for this codebase:
+    "unwrapped-modifier-logic", # Under via-IR, wrapping grows EkuboExecutor by 115 B and ~340 gas/swap (on c29ab76f7).
+    "modifier-used-only-once",  # A modifier puts an access check in the signature, where readers look for it.
+    "asm-keccak256",            # abi.encode follows a struct's fields; a hand-listed library hash would not.
+    "unsafe-typecast",          # Off until each cast it reports in src/ is checked against its range.
+    "unsafe-cheatcode",         # Tests read fixture files on purpose; fs_permissions limits the paths.
+]
+
+[lint.lint_specific]
+# An executor or router file also declares the protocol interfaces and libraries it uses.
+multi_contract_file_exceptions = ["interface", "library"]

@@ -6,6 +6,10 @@ if you actually read them. Respond like this:
 > Knowledge docs: Rust: [yes/no], Python: [yes/no], Solidity: [yes/no], Version-control: [yes/no], GitBook: [yes/no]
 > Files loaded in context: [list of loaded documents]
 
+All commands in this repo assume mise is activated and its tools are installed (`mise install`), so the
+tools and environment variables defined in `mise.toml` are available. In a shell without it, prefix
+commands with `mise exec --`.
+
 By default, don't use the Explore agent as a first step in a conversation. The first step should always be to identify
 and read the relevant documentation files.
 

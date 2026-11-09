@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use alloy::{
     dyn_abi::{DynSolValue, EventExt, FunctionExt, JsonAbiExt},
-    json_abi::{Event, Function, JsonAbi},
+    json_abi::{Event, Function},
     primitives::{Address, LogData, Selector, B256},
 };
 use revm_inspectors::tracing::{
@@ -113,39 +113,6 @@ impl CallTraceDecoder {
         decoder.signature_identifier = Some(SignaturesIdentifier::new(config.offline)?);
 
         Ok(decoder)
-    }
-
-    /// Add known ABI to the decoder
-    #[allow(dead_code)]
-    pub fn with_abi(mut self, abi: &JsonAbi, address: Option<Address>) -> Self {
-        // Add functions
-        for function in abi.functions() {
-            self.functions
-                .insert(function.selector(), function.clone());
-        }
-
-        // Add events
-        for event in abi.events() {
-            self.events
-                .insert(event.selector(), event.clone());
-        }
-
-        // If address is provided, add it as a known contract
-        if let Some(addr) = address {
-            if abi.constructor.is_some() {
-                self.contracts
-                    .insert(addr, "Contract".to_string()); // Generic name
-            }
-        }
-
-        self
-    }
-
-    /// Add a custom label for an address  
-    #[allow(dead_code)]
-    pub fn with_label(mut self, address: Address, label: String) -> Self {
-        self.labels.insert(address, label);
-        self
     }
 
     /// Identify unknown addresses in the trace

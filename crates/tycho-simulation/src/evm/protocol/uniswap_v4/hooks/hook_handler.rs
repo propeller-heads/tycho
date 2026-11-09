@@ -78,7 +78,7 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
         &self,
         params: AfterSwapParameters,
         overwrites: Option<HashMap<Address, HashMap<U256, U256>>>,
-        transient_storage_params: Option<HashMap<Address, HashMap<U256, U256>>>,
+        transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
     ) -> Result<WithGasEstimate<AfterSwapDelta>, SimulationError>;
 
     /// Runs every later call under a pending block's storage, native balances and block

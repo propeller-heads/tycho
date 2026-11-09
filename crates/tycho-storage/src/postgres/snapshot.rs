@@ -34,7 +34,7 @@ use tycho_common::{
 use super::{schema, PostgresError, PostgresGateway, MAX_TS};
 
 /// A read-only `REPEATABLE READ` transaction, so every read in it sees the same database snapshot.
-pub(crate) fn snapshot_transaction(
+pub fn snapshot_transaction(
     conn: &mut AsyncPgConnection,
 ) -> TransactionBuilder<'_, AsyncPgConnection> {
     conn.build_transaction()
@@ -54,9 +54,7 @@ const SNAPSHOT_CONNECTION_CHECK_INTERVAL: &str = "10s";
 /// [`SNAPSHOT_STATEMENT_TIMEOUT`], and stops within [`SNAPSHOT_CONNECTION_CHECK_INTERVAL`] of the
 /// client disconnecting. The settings end with the transaction, so the pooled connection keeps its
 /// own.
-pub(crate) async fn bound_snapshot_reads(
-    conn: &mut AsyncPgConnection,
-) -> Result<(), PostgresError> {
+pub async fn bound_snapshot_reads(conn: &mut AsyncPgConnection) -> Result<(), PostgresError> {
     for (name, value) in [
         ("statement_timeout", SNAPSHOT_STATEMENT_TIMEOUT),
         ("client_connection_check_interval", SNAPSHOT_CONNECTION_CHECK_INTERVAL),
@@ -592,7 +590,7 @@ mod test_serial_db {
             HashMap::from([(
                 usdc.clone(),
                 AccountBalance::new(
-                    address.clone(),
+                    address,
                     usdc.clone(),
                     Bytes::from(1000u64).lpad(32, 0),
                     Bytes::zero(32),

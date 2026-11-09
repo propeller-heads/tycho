@@ -24,7 +24,9 @@ fn bench_get_amount_out(c: &mut Criterion) {
         ] {
             group.bench_with_input(BenchmarkId::new(fixture, label), &amount, |b, amt| {
                 b.iter(|| {
-                    let _ = state.get_amount_out(amt.clone(), &t_in, &t_out);
+                    state
+                        .get_amount_out(amt.clone(), &t_in, &t_out)
+                        .expect("fixture swap quotes");
                 });
             });
         }
@@ -39,7 +41,9 @@ fn bench_spot_price(c: &mut Criterion) {
         let (t_in, t_out) = common::pool_tokens(fixture);
         group.bench_function(fixture, |b| {
             b.iter(|| {
-                let _ = state.spot_price(&t_in, &t_out);
+                state
+                    .spot_price(&t_in, &t_out)
+                    .expect("fixture has a spot price");
             });
         });
     }

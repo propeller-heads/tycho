@@ -3,8 +3,8 @@ use tycho_simulation::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
             aero_basic::state::AeroBasicState,
-            aerodrome_slipstreams::state::AerodromeSlipstreamsState, ekubo::state::EkuboState,
-            ekubo_v3::state::EkuboV3State, etherfi::state::EtherfiState,
+            aerodrome_slipstreams::state::AerodromeSlipstreamsState, biconomy::BiconomyState,
+            ekubo::state::EkuboState, ekubo_v3::state::EkuboV3State, etherfi::state::EtherfiState,
             filters::ekubo_v3_extension_filter, fluid::FluidV1, lido_v4::state::LidoV4State,
             lunarbase::LunarBaseState, pancakeswap_v2::state::PancakeswapV2State,
             ramses_v3::state::RamsesV3State, ring_swap_v2::state::RingSwapV2State,
@@ -26,10 +26,11 @@ pub fn register_protocol(
     protocol_system: &str,
     chain: Chain,
     decoder_context: DecoderContext,
-) -> miette::Result<ProtocolStreamBuilder> {
+) -> ProtocolStreamBuilder {
     let tvl = chain.default_tvl_threshold(TvlThresholdTier::Medium);
     let tvl_filter = ComponentFilter::with_tvl_range(tvl, tvl);
-    let stream_builder = match protocol_system {
+
+    match protocol_system {
         "uniswap_v2" | "sushiswap_v2" => stream_builder
             .exchange_with_decoder_context::<UniswapV2State>(
                 protocol_system,
@@ -124,6 +125,12 @@ pub fn register_protocol(
             None,
             decoder_context,
         ),
+        "biconomy" => stream_builder.exchange_with_decoder_context::<BiconomyState>(
+            protocol_system,
+            tvl_filter,
+            None,
+            decoder_context,
+        ),
         "aerodrome_slipstreams" => stream_builder
             .exchange_with_decoder_context::<AerodromeSlipstreamsState>(
                 protocol_system,
@@ -151,7 +158,5 @@ pub fn register_protocol(
             None,
             decoder_context,
         ),
-    };
-
-    Ok(stream_builder)
+    }
 }

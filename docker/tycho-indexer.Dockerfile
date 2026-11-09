@@ -1,12 +1,21 @@
 # Multi-stage build for tycho-indexer in the monorepo workspace.
 
+# Tools pinned in mise.toml, installed from mise.lock: mise refuses any version not locked there.
+FROM jdxcode/mise:2026.10.25-debian@sha256:00a8a9d05a300e5a15a89d6d3a87ea88ec4e78c4702b78d49aa1d3250af61427 AS tools
+WORKDIR /tools
+COPY mise.toml mise.lock ./
+ENV MISE_TRUSTED_CONFIG_PATHS=/tools
+RUN mise install github:LukeMathWalker/cargo-chef \
+    && mkdir /out \
+    && cp "$(mise which cargo-chef)" /out/
+
 # ── Stage 1: chef (rust + tools layer, cached) ─────────────────────────────
-FROM rust:1.91-bookworm AS chef
+FROM rust:1.99.1-bookworm AS chef
 WORKDIR /build
 RUN apt-get update && apt-get install -y libpq-dev && rm -rf /var/lib/apt/lists/*
-RUN cargo install cargo-chef
+COPY --from=tools /out/cargo-chef /usr/local/cargo/bin/
 COPY rust-toolchain.toml .
-RUN rustup set profile minimal && rustup show
+RUN rustup set profile minimal && rustup toolchain install
 
 # ── Stage 2: dependency planner ─────────────────────────────────────────────
 FROM chef AS planner

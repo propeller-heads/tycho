@@ -184,7 +184,17 @@ impl MetricBookAssembler {
             }
 
             let component_id = metadata.pool_address.clone();
-            let updated_at = DateTime::from_timestamp(bid_ask.server_ts as i64, 0);
+            let Some(updated_at) = i64::try_from(bid_ask.server_ts)
+                .ok()
+                .and_then(|secs| DateTime::from_timestamp(secs, 0))
+            else {
+                warn!(
+                    pool = %metadata.pool_address,
+                    server_ts = bid_ask.server_ts,
+                    "skipping pool, server timestamp out of range"
+                );
+                continue;
+            };
             let state = MetricState {
                 base_token: token0.clone(),
                 quote_token: token1.clone(),
@@ -197,7 +207,7 @@ impl MetricBookAssembler {
                 self.book_config.chain,
                 component_id,
                 state,
-                updated_at,
+                Some(updated_at),
             ));
         }
         books
@@ -259,7 +269,7 @@ mod tests {
             {
                 return Some(("200 OK", page.clone()));
             }
-            Some(("200 OK", batch_body(vec![quote_entry(POOL, &bid_ask_json(SERVER_TS, false))])))
+            Some(("200 OK", batch_body(&[quote_entry(POOL, &bid_ask_json(SERVER_TS, false))])))
         })
         .await;
         let mut source = source(Chain::Ethereum, &server.url(), "test_key");
@@ -314,7 +324,7 @@ mod tests {
             seen.lock()
                 .unwrap()
                 .extend(requested.clone());
-            let entries = requested
+            let entries: Vec<_> = requested
                 .into_iter()
                 .filter_map(|pool| match pool.as_str() {
                     FAILING => Some(error_entry(&pool, 500, "boom")),
@@ -323,7 +333,7 @@ mod tests {
                     _ => Some(quote_entry(&pool, &bid_ask_json(SERVER_TS, false))),
                 })
                 .collect();
-            Some(("200 OK", batch_body(entries)))
+            Some(("200 OK", batch_body(&entries)))
         })
         .await;
         let endpoint = server.url();
@@ -341,7 +351,7 @@ mod tests {
         assert_eq!(books.keys().collect::<Vec<_>>(), vec![&healthy_id]);
         let book = &books[&healthy_id];
         assert_eq!(book.component.id, Bytes::from(healthy_id.as_str()));
-        assert_eq!(book.updated_at, DateTime::from_timestamp(SERVER_TS as i64, 0));
+        assert_eq!(book.updated_at, DateTime::from_timestamp(i64::try_from(SERVER_TS).unwrap(), 0));
     }
 
     #[tokio::test]
@@ -392,14 +402,14 @@ mod tests {
                 Ok(errors) => errors,
                 Err((status, body)) => return Some((status, body.to_string())),
             };
-            let entries = requested_pools(request)
+            let entries: Vec<_> = requested_pools(request)
                 .iter()
                 .map(|pool| {
                     let error = if pool == FIRST_POOL { errors[0] } else { errors[1] };
                     error_entry(pool, 404, error)
                 })
                 .collect();
-            Some(("200 OK", batch_body(entries)))
+            Some(("200 OK", batch_body(&entries)))
         })
         .await;
         let endpoint = server.url();
@@ -447,11 +457,11 @@ mod tests {
             seen.lock()
                 .unwrap()
                 .push(requested.len());
-            let entries = requested
+            let entries: Vec<_> = requested
                 .iter()
                 .map(|pool| quote_entry(pool, &bid_ask_json(SERVER_TS, false)))
                 .collect();
-            Some(("200 OK", batch_body(entries)))
+            Some(("200 OK", batch_body(&entries)))
         })
         .await;
         let mut source = source(Chain::Ethereum, &server.url(), "key");
@@ -480,7 +490,7 @@ mod tests {
             }
             Some(MockResponse {
                 status: "200 OK",
-                body: batch_body(vec![]),
+                body: batch_body(&[]),
                 delay: Duration::from_secs(3600),
             })
         })
@@ -583,7 +593,7 @@ mod tests {
             {
                 return Some(("200 OK", page.clone()));
             }
-            Some(("200 OK", batch_body(vec![error_entry(FIRST_POOL, 500, "boom")])))
+            Some(("200 OK", batch_body(&[error_entry(FIRST_POOL, 500, "boom")])))
         })
         .await;
 

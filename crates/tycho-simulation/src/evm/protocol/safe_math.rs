@@ -171,6 +171,10 @@ pub fn sqrt_u512(value: U512) -> U512 {
 }
 
 /// Integer square root for U256, returning U256
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "public API; changing the signature is a breaking change"
+)]
 pub fn sqrt_u256(value: U256) -> Result<U256, SimulationError> {
     if value == U256::ZERO {
         return Ok(U256::ZERO);

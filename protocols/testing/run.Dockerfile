@@ -1,30 +1,27 @@
 # =========== Third Party ===========
-# Get substreams CLI
+# substreams CLI. Integration tests run v1.16.4; mise.toml pins the version the release
+# workflows use.
 FROM ghcr.io/streamingfast/substreams:v1.16.4 AS substreams-cli
 
-# Install Foundry (Forge)
-FROM debian:bookworm AS foundry-builder
-WORKDIR /build
-RUN apt-get update && apt-get install -y curl git
-RUN curl -L https://foundry.paradigm.xyz | bash
-RUN /root/.foundry/bin/foundryup
+# Tools pinned in mise.toml, installed from mise.lock: mise refuses any version not locked there.
+FROM jdxcode/mise:2026.10.25-debian@sha256:00a8a9d05a300e5a15a89d6d3a87ea88ec4e78c4702b78d49aa1d3250af61427 AS tools
+WORKDIR /tools
+COPY mise.toml mise.lock ./
+ENV MISE_TRUSTED_CONFIG_PATHS=/tools
+RUN mise install foundry \
+    && mkdir /out \
+    && cp "$(mise which forge)" "$(mise which cast)" /out/
 
 # =========== Protocol SDK (includes tycho-indexer) ===========
-FROM rust:1.89-bookworm AS protocol-sdk-builder
+FROM rust:1.99.1-bookworm AS protocol-sdk-builder
 ARG PROTOCOLS=""
 WORKDIR /build/tycho-protocol-sdk
 COPY . .
 
 # Build EVM contracts first (protocol-testing depends on the runtime JSON files)
 WORKDIR /build/tycho-protocol-sdk/protocols/adapter-integration/evm
-COPY --from=foundry-builder /root/.foundry/bin/forge /usr/local/bin/forge
-RUN chmod +x /usr/local/bin/forge
-# Fetch forge lib submodules (not present in Docker context due to .dockerignore
-# excluding .git/ and CI checkout not always fetching submodules).
-RUN apt-get update && apt-get install -y --no-install-recommends git && \
-    git init && \
-    forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git && \
-    apt-get purge -y git && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+COPY --from=tools /out/forge /usr/local/bin/forge
+# The forge libraries come from the lib/ submodules in the build context.
 RUN forge build
 
 # Build substreams (wasm targets only - source not needed in final image)
@@ -181,8 +178,7 @@ RUN find /app -name "*.rs" -delete && \
 # Copy external tools
 COPY --from=substreams-cli /app/substreams /usr/local/bin/substreams
 RUN chmod +x /usr/local/bin/substreams
-COPY --from=foundry-builder /root/.foundry/bin/forge /usr/local/bin/forge
-COPY --from=foundry-builder /root/.foundry/bin/cast /usr/local/bin/cast
+COPY --from=tools /out/forge /out/cast /usr/local/bin/
 
 # Strip binaries to reduce size
 RUN strip /usr/local/bin/* 2>/dev/null || true

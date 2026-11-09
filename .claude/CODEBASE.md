@@ -239,8 +239,8 @@ Everything else is controlled via CLI args, env vars, and YAML config.
 - DB serial tests: name must include `serial_db` (nextest test group, sequential)
 - DB harness: `run_against_db` (tycho-storage) manages setup/teardown
 - Archive RPC tests: `#[ignore]`-d
-- Lint: `cargo +nightly-2026-06-28 clippy --workspace --all-targets --all-features -- -D warnings`
-- Format: `cargo +nightly-2026-06-28 fmt --all --check`
+- Lint: `cargo +$RUST_NIGHTLY clippy --workspace --all-targets --all-features -- -D warnings`
+- Format: `cargo +$RUST_NIGHTLY fmt --all --check`
 - Also gated in CI: `cargo doc --workspace --no-deps --all-features --locked` and
   `cargo check --workspace --no-default-features --locked`
 

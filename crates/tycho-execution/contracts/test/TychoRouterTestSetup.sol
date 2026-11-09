@@ -44,6 +44,7 @@ import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
 import {RingSwapV2Executor} from "../src/executors/RingSwapV2Executor.sol";
 import {NativeExecutor} from "../src/executors/NativeExecutor.sol";
 import {SkyExecutor} from "../src/executors/SkyExecutor.sol";
+import {TransferManager} from "../src/TransferManager.sol";
 // Test utilities and mocks
 import "./Constants.sol";
 import "./TestUtils.sol";
@@ -74,15 +75,6 @@ contract TychoRouterExposed is TychoRouterV3 {
         )
     {}
 
-    function tstoreExposed(
-        address tokenIn,
-        uint256 amountIn,
-        bool isPermit2,
-        bool useVault
-    ) external {
-        _tstoreTransferFromInfo(tokenIn, amountIn, isPermit2, useVault);
-    }
-
     function exposedSplitSwap(
         uint256 amountIn,
         uint256 nTokens,
@@ -98,6 +90,31 @@ contract TychoRouterExposed is TychoRouterV3 {
         bytes calldata swaps,
         address receiver
     ) external returns (uint256) {
+        return _sequentialSwap(amountIn, swaps, receiver);
+    }
+
+    /// Authorises the swap to `transferFrom` `amountIn` of `tokenIn` from the
+    /// caller, then runs the split swap.
+    function exposedSplitSwapWithTransferFrom(
+        address tokenIn,
+        uint256 amountIn,
+        uint256 nTokens,
+        bytes calldata swaps,
+        address receiver,
+        bool isCyclical
+    ) external returns (uint256) {
+        _tstoreTransferFromInfo(tokenIn, amountIn, false, false);
+        return _splitSwap(amountIn, nTokens, swaps, receiver, isCyclical);
+    }
+
+    /// Sequential-swap counterpart of `exposedSplitSwapWithTransferFrom`.
+    function exposedSequentialSwapWithTransferFrom(
+        address tokenIn,
+        uint256 amountIn,
+        bytes calldata swaps,
+        address receiver
+    ) external returns (uint256) {
+        _tstoreTransferFromInfo(tokenIn, amountIn, false, false);
         return _sequentialSwap(amountIn, swaps, receiver);
     }
 
@@ -171,7 +188,7 @@ contract TychoRouterTestSetup is
         uint256 forkBlock = getForkBlock();
         vm.createSelectFork(vm.rpcUrl(chain), forkBlock);
 
-        forkTimestamp = block.timestamp;
+        forkTimestamp = vm.getBlockTimestamp();
         uint256 setupTime = forkTimestamp - _SETUP_TIME_OFFSET_NEW_EXECUTOR;
         vm.warp(setupTime);
 
@@ -190,7 +207,10 @@ contract TychoRouterTestSetup is
         vm.prank(FEE_SETTER);
         tychoRouter.setFeeCalculator(address(feeCalculator));
         // Warp past the timelock and activate
-        vm.warp(block.timestamp + tychoRouter.DELAY_FEE_CALCULATOR_ACTIVATION());
+        vm.warp(
+            vm.getBlockTimestamp()
+                + tychoRouter.DELAY_FEE_CALCULATOR_ACTIVATION()
+        );
         vm.prank(FEE_SETTER);
         tychoRouter.activateFeeCalculator();
         vm.warp(forkTimestamp);

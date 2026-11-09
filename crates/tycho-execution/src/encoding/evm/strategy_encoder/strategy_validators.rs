@@ -94,7 +94,7 @@ impl SplitSwapValidator {
     ///   to the router to send the remainder of the token to the designated protocol
     /// * The sum of all non-remainder splits for each token is < 1 (100%)
     /// * There are no negative split amounts
-    pub fn validate_split_percentages(&self, swaps: &[Swap]) -> Result<(), EncodingError> {
+    pub fn validate_split_percentages(swaps: &[Swap]) -> Result<(), EncodingError> {
         let mut swaps_by_token: HashMap<&Bytes, Vec<&Swap>> = HashMap::new();
         for swap in swaps {
             if swap.split() >= 1.0 {
@@ -161,11 +161,36 @@ impl SplitSwapValidator {
     }
 }
 
+/// Protocols whose venue is the next hop's `fundsExpectedAddress` and rejects itself as a swap
+/// recipient, so a sequential route through the same component twice in a row always reverts.
+const SELF_RECIPIENT_REJECTING_PROTOCOLS: &[&str] = &["biconomy"];
+
 /// Validates whether a sequence of sequential swaps represents a valid solution.
 #[derive(Clone)]
 pub struct SequentialSwapValidator;
 
 impl SwapValidator for SequentialSwapValidator {}
+
+impl SequentialSwapValidator {
+    /// Raises an error if two consecutive swaps run on the same component of a protocol whose
+    /// venue rejects itself as recipient: the router would pay the first hop's output to the
+    /// venue (the second hop's `fundsExpectedAddress`) and the venue would revert.
+    pub fn validate_no_back_to_back_venue_hops(swaps: &[Swap]) -> Result<(), EncodingError> {
+        for pair in swaps.windows(2) {
+            let (first, second) = (pair[0].component(), pair[1].component());
+            if first.id == second.id &&
+                SELF_RECIPIENT_REJECTING_PROTOCOLS.contains(&first.protocol_system.as_str())
+            {
+                return Err(EncodingError::InvalidInput(format!(
+                    "Consecutive swaps on {} component {} always revert: the venue cannot \
+                     receive the first hop's output",
+                    first.protocol_system, first.id
+                )));
+            }
+        }
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -220,7 +245,7 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                default_token(dai.clone()),
+                default_token(dai),
                 default_token(usdc.clone()),
                 BigUint::ZERO,
             ),
@@ -245,7 +270,7 @@ mod tests {
                     ..Default::default()
                 },
                 default_token(weth.clone()),
-                default_token(dai.clone()),
+                default_token(dai),
                 BigUint::ZERO,
             )
             .with_split(0.5f64),
@@ -256,7 +281,7 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                default_token(wbtc.clone()),
+                default_token(wbtc),
                 default_token(usdc.clone()),
                 BigUint::ZERO,
             ),
@@ -291,7 +316,7 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                default_token(weth.clone()),
+                default_token(weth),
                 default_token(usdc.clone()),
                 BigUint::ZERO,
             ),
@@ -316,7 +341,7 @@ mod tests {
                 ..Default::default()
             },
             default_token(weth.clone()),
-            default_token(dai.clone()),
+            default_token(dai),
             BigUint::ZERO,
         )
         .with_split(1.0)];
@@ -343,7 +368,6 @@ mod tests {
 
     #[test]
     fn test_validate_swap_single() {
-        let validator = SplitSwapValidator;
         let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
         let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
         let swaps = vec![Swap::new(
@@ -352,17 +376,16 @@ mod tests {
                 protocol_system: "uniswap_v2".to_string(),
                 ..Default::default()
             },
-            default_token(weth.clone()),
-            default_token(dai.clone()),
+            default_token(weth),
+            default_token(dai),
             BigUint::ZERO,
         )];
-        let result = validator.validate_split_percentages(&swaps);
+        let result = SplitSwapValidator::validate_split_percentages(&swaps);
         assert_eq!(result, Ok(()));
     }
 
     #[test]
     fn test_validate_swaps_multiple() {
-        let validator = SplitSwapValidator;
         let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
         let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
 
@@ -396,19 +419,16 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                default_token(weth.clone()),
-                default_token(dai.clone()),
+                default_token(weth),
+                default_token(dai),
                 BigUint::ZERO,
             ),
         ];
-        assert!(validator
-            .validate_split_percentages(&valid_swaps)
-            .is_ok());
+        assert!(SplitSwapValidator::validate_split_percentages(&valid_swaps).is_ok());
     }
 
     #[test]
     fn test_validate_swaps_no_remainder_split() {
-        let validator = SplitSwapValidator;
         let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
         let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
 
@@ -430,21 +450,20 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                default_token(weth.clone()),
-                default_token(dai.clone()),
+                default_token(weth),
+                default_token(dai),
                 BigUint::ZERO,
             )
             .with_split(0.3),
         ];
         assert!(matches!(
-            validator.validate_split_percentages(&invalid_total_swaps),
+            SplitSwapValidator::validate_split_percentages(&invalid_total_swaps),
             Err(EncodingError::InvalidInput(msg)) if msg.contains("must have exactly one 0% split")
         ));
     }
 
     #[test]
     fn test_validate_swaps_zero_split_not_at_end() {
-        let validator = SplitSwapValidator;
         let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
         let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
 
@@ -465,21 +484,20 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                default_token(weth.clone()),
-                default_token(dai.clone()),
+                default_token(weth),
+                default_token(dai),
                 BigUint::ZERO,
             )
             .with_split(0.5),
         ];
         assert!(matches!(
-            validator.validate_split_percentages(&invalid_zero_position_swaps),
+            SplitSwapValidator::validate_split_percentages(&invalid_zero_position_swaps),
             Err(EncodingError::InvalidInput(msg)) if msg.contains("must be the last swap")
         ));
     }
 
     #[test]
     fn test_validate_swaps_splits_exceed_hundred_percent() {
-        let validator = SplitSwapValidator;
         let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
         let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
 
@@ -512,14 +530,49 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                default_token(weth.clone()),
-                default_token(dai.clone()),
+                default_token(weth),
+                default_token(dai),
                 BigUint::ZERO,
             ),
         ];
         assert!(matches!(
-            validator.validate_split_percentages(&invalid_overflow_swaps),
+            SplitSwapValidator::validate_split_percentages(&invalid_overflow_swaps),
             Err(EncodingError::InvalidInput(msg)) if msg.contains("must be <100%")
         ));
+    }
+
+    #[test]
+    fn test_validate_back_to_back_venue_hops() {
+        let weth = Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap();
+        let usdc = Bytes::from_str("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913").unwrap();
+        let cbbtc = Bytes::from_str("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf").unwrap();
+        let hop = |id: &str, protocol_system: &str, token_in: &Bytes, token_out: &Bytes| {
+            Swap::new(
+                ProtocolComponent {
+                    id: id.to_string(),
+                    protocol_system: protocol_system.to_string(),
+                    ..Default::default()
+                },
+                default_token(token_in.clone()),
+                default_token(token_out.clone()),
+                BigUint::ZERO,
+            )
+        };
+        let venue = "0x0000009e5f98cdb4dd1e1d2e15b220217c88b3b8";
+
+        let twice = [hop(venue, "biconomy", &weth, &usdc), hop(venue, "biconomy", &usdc, &cbbtc)];
+        assert!(matches!(
+            SequentialSwapValidator::validate_no_back_to_back_venue_hops(&twice),
+            Err(EncodingError::InvalidInput(_))
+        ));
+
+        let via_other_pool = [
+            hop(venue, "biconomy", &weth, &usdc),
+            hop("pool", "uniswap_v3", &usdc, &weth),
+            hop(venue, "biconomy", &weth, &cbbtc),
+        ];
+        assert!(
+            SequentialSwapValidator::validate_no_back_to_back_venue_hops(&via_other_pool).is_ok()
+        );
     }
 }

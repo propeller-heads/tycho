@@ -31,7 +31,10 @@ pub struct Permit2 {
     address: Address,
     client: EVMProvider,
     runtime_handle: Handle,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "owns the runtime behind `runtime_handle`; dropping it would shut the runtime down"
+    )]
     runtime: SafeRuntime,
 }
 
@@ -103,8 +106,9 @@ impl Permit2 {
         let (handle, runtime) = create_encoding_runtime()?;
         let client = on_blocking_thread(|| handle.block_on(get_client()))??;
         Ok(Self {
-            address: Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3")
-                .map_err(|_| EncodingError::FatalError("Permit2 address not valid".to_string()))?,
+            address: Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3").map_err(
+                |e| EncodingError::FatalError(format!("Permit2 address not valid: {e}")),
+            )?,
             client,
             runtime_handle: handle,
             runtime,
@@ -132,10 +136,10 @@ impl Permit2 {
         })?;
         match output {
             Ok(response) => {
-                let allowance: Allowance = Allowance::abi_decode(&response).map_err(|_| {
-                    EncodingError::FatalError(
-                        "Failed to decode response for permit2 allowance".to_string(),
-                    )
+                let allowance: Allowance = Allowance::abi_decode(&response).map_err(|e| {
+                    EncodingError::FatalError(format!(
+                        "Failed to decode response for permit2 allowance: {e}"
+                    ))
                 })?;
                 Ok(allowance)
             }
@@ -152,10 +156,9 @@ impl Permit2 {
         token: &Bytes,
         amount: &BigUint,
     ) -> Result<models::PermitSingle, EncodingError> {
-        let current_time = Utc::now()
-            .naive_utc()
-            .and_utc()
-            .timestamp() as u64;
+        let current_time = u64::try_from(Utc::now().timestamp()).map_err(|e| {
+            EncodingError::FatalError(format!("System clock is before the Unix epoch: {e}"))
+        })?;
 
         let (_, _, nonce) = self.get_existing_allowance(owner, spender, token)?;
         let expiration = U48::from(current_time + PERMIT_EXPIRATION);
@@ -256,13 +259,19 @@ mod tests {
         let expected_details = models::PermitDetails::new(
             token,
             amount,
-            BigUint::from(Utc::now().timestamp() as u64 + PERMIT_EXPIRATION),
+            BigUint::from(
+                u64::try_from(Utc::now().timestamp()).expect("the clock is after the Unix epoch") +
+                    PERMIT_EXPIRATION,
+            ),
             BigUint::from(0u64),
         );
         let expected_permit_single = models::PermitSingle::new(
             expected_details,
             Bytes::from_str("0xba12222222228d8ba445958a75a0704d566bf2c8").unwrap(),
-            BigUint::from(Utc::now().timestamp() as u64 + PERMIT_SIG_EXPIRATION),
+            BigUint::from(
+                u64::try_from(Utc::now().timestamp()).expect("the clock is after the Unix epoch") +
+                    PERMIT_SIG_EXPIRATION,
+            ),
         );
 
         assert_eq!(
@@ -279,10 +288,10 @@ mod tests {
     fn sign_permit(
         chain_id: u64,
         permit_single: &models::PermitSingle,
-        signer: PrivateKeySigner,
+        signer: &PrivateKeySigner,
     ) -> Result<Signature, EncodingError> {
         let permit2_address = Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3")
-            .map_err(|_| EncodingError::FatalError("Permit2 address not valid".to_string()))?;
+            .map_err(|e| EncodingError::FatalError(format!("Permit2 address not valid: {e}")))?;
         let domain = eip712_domain! {
             name: "Permit2",
             chain_id: chain_id,
@@ -304,22 +313,22 @@ mod tests {
     /// --fork-url <RPC-URL> And set up the following env var as RPC_URL=127.0.0.1:8545
     /// Use an account from anvil to fill the anvil_account and anvil_private_key variables
     #[test]
-    #[cfg_attr(not(feature = "fork-tests"), ignore)]
+    #[cfg_attr(not(feature = "fork-tests"), ignore = "requires an Anvil fork at RPC_URL")]
     fn test_permit() {
         let anvil_account = Bytes::from_str("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266").unwrap();
         let anvil_private_key =
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string();
 
         let pk = B256::from_str(&anvil_private_key)
-            .map_err(|_| {
-                EncodingError::FatalError(
-                    "Failed to convert swapper private key to B256".to_string(),
-                )
+            .map_err(|e| {
+                EncodingError::FatalError(format!(
+                    "Failed to convert swapper private key to B256: {e}"
+                ))
             })
             .unwrap();
         let signer = PrivateKeySigner::from_bytes(&pk)
-            .map_err(|_| {
-                EncodingError::FatalError("Failed to create signer from private key".to_string())
+            .map_err(|e| {
+                EncodingError::FatalError(format!("Failed to create signer from private key: {e}"))
             })
             .unwrap();
         let permit2 = Permit2::new().expect("Failed to create Permit2");
@@ -359,7 +368,7 @@ mod tests {
         let sol_permit: PermitSingle =
             PermitSingle::try_from(&permit).expect("Failed to convert to PermitSingle");
 
-        let signature = sign_permit(eth_chain().id(), &permit, signer).unwrap();
+        let signature = sign_permit(eth_chain().id(), &permit, &signer).unwrap();
         let encoded =
             (bytes_to_address(&anvil_account).unwrap(), sol_permit, signature.as_bytes().to_vec())
                 .abi_encode();

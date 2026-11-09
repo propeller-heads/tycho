@@ -11,6 +11,10 @@ use tycho_ethereum::{
     rpc::EthereumRpcClient, services::token_analyzer::EthCallDetector, BytesCodec,
 };
 
+#[expect(
+    clippy::unwrap_in_result,
+    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
+)]
 #[tokio::main]
 async fn main() -> Result<(), ()> {
     let rpc_url = std::env::var("RPC_URL").expect("RPC URL must be set for testing");

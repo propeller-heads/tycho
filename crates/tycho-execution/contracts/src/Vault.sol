@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
     SafeERC20
@@ -19,8 +20,9 @@ error Vault__InsufficientBalance(
 error Vault__AmountZero();
 error Vault__AddressZero();
 error Vault__UnexpectedNonZeroCount(uint256 nonZeroCount);
-error Vault__InvalidInputDelta(address token, int256 expected, int256 actual);
 error Vault__UnexpectedInputDelta(int256 inputDelta);
+error Vault__ValueMismatch(uint256 msgValue, uint256 amount);
+error Vault__EthNotAccepted(uint256 msgValue);
 
 /**
  * @title Vault - ERC6909-compliant multi-token vault
@@ -28,18 +30,23 @@ error Vault__UnexpectedInputDelta(int256 inputDelta);
  * Users can deposit tokens, use them for swaps, and withdraw them.
  */
 abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
+    // One directive per slot type: Slither 0.11.6 can fail to analyse a
+    // contract that uses `using TransientSlot for *`.
+    using TransientSlot for bytes32;
+    using TransientSlot for TransientSlot.BooleanSlot;
+    using TransientSlot for TransientSlot.Int256Slot;
+    using TransientSlot for TransientSlot.Uint256Slot;
     using SafeERC20 for IERC20;
 
     // Vault balances - using our own mapping to avoid expensive Transfer events from ERC6909
     mapping(address => mapping(uint256 => uint256)) private _vaultBalances;
 
     // Transient storage slot for tracking deltas during swap sequences
-    // keccak256("TychoVault#NON_ZERO_DELTA_COUNT_SLOT")
-    uint256 private constant _NON_ZERO_DELTA_COUNT_SLOT =
-        0xee3c9c434505299f2450d3624302a27b8a6978e973825330bc744ba925eec199;
-    // keccak256("Vault#USE_VAULT_SLOT")
-    uint256 internal constant _USE_VAULT_SLOT =
-        0xce5ffa91873ede1b462af74ea59bab3721b06b0ff726b90311437efde2001795;
+    TransientSlot.Uint256Slot private constant _NON_ZERO_DELTA_COUNT_SLOT =
+        TransientSlot.Uint256Slot
+            .wrap(keccak256("TychoVault#NON_ZERO_DELTA_COUNT_SLOT"));
+    TransientSlot.BooleanSlot internal constant _USE_VAULT_SLOT =
+        TransientSlot.BooleanSlot.wrap(keccak256("Vault#USE_VAULT_SLOT"));
 
     // ============ ERC6909 Overrides and Extensions ============
 
@@ -69,6 +76,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         if (from != address(0)) {
             uint256 fromBalance = _vaultBalances[from][id];
             if (fromBalance < amount) {
+                // forge-lint: disable-next-item(require-revert-in-loop) A debit beyond the vault balance fails the call.
                 revert ERC6909.ERC6909InsufficientBalance(
                     from, fromBalance, amount, id
                 );
@@ -105,6 +113,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         internal
     {
         if (to == address(0)) {
+            // forge-lint: disable-next-line(require-revert-in-loop) A fee credited to address(0) would be lost, so the swap fails.
             revert ERC6909InvalidReceiver(address(0));
         }
         _updateWithoutEvent(address(0), to, id, amount);
@@ -120,8 +129,8 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
     function deposit(address token, uint256 amount)
         external
         payable
-        whenNotPaused
         nonReentrant
+        whenNotPaused
     {
         if (token == address(0)) {
             revert Vault__AddressZero();
@@ -134,10 +143,12 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
 
         if (token == ETH_ADDRESS) {
             // Native ETH deposit
-            require(msg.value == amount, "Value mismatch");
+            require(
+                msg.value == amount, Vault__ValueMismatch(msg.value, amount)
+            );
             _mint(msg.sender, id, amount);
         } else {
-            require(msg.value == 0, "ETH not accepted for ERC20 deposit");
+            require(msg.value == 0, Vault__EthNotAccepted(msg.value));
             // ERC20 deposit - transfer to this contract and measure actual received
             // amount to handle  fee-on-transfer and rebasing tokens
             uint256 balanceBefore = IERC20(token).balanceOf(address(this));
@@ -185,8 +196,8 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
      * @dev Internal helper to get transient storage slot for a token delta
      * @notice Only needs token since transient storage is scoped to current transaction's sender
      */
-    function _getDeltaSlot(address token) private pure returns (uint256 slot) {
-        slot = uint256(keccak256(abi.encodePacked(token, "TychoVault#DELTA")));
+    function _getDeltaSlot(address token) private pure returns (bytes32 slot) {
+        slot = keccak256(abi.encodePacked(token, "TychoVault#DELTA"));
         return slot;
     }
 
@@ -194,60 +205,36 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
      * @dev Get the current delta from transient storage
      * @notice Only needs token since transient storage is scoped to current transaction's sender
      */
-    // Assembly required for transient storage operations (tload)
     function _getDelta(address token) internal view returns (int256 delta) {
-        uint256 slot = _getDeltaSlot(token);
-        // slither-disable-next-line assembly
-        assembly {
-            delta := tload(slot)
-        }
+        delta = _getDeltaSlot(token).asInt256().tload();
     }
 
     /**
      * @dev Set the delta in transient storage
      */
-    // Assembly required for transient storage operations (tstore)
     function _setDelta(address token, int256 delta) internal {
-        uint256 slot = _getDeltaSlot(token);
-        // slither-disable-next-line assembly
-        assembly {
-            tstore(slot, delta)
-        }
+        _getDeltaSlot(token).asInt256().tstore(delta);
     }
 
     /**
      * @dev Get non zero delta count from transient storage
      */
-    // Assembly required for transient storage operations (tload)
     function _getNonZeroDeltaCount() internal view returns (uint256 count) {
-        // slither-disable-next-line assembly
-        assembly {
-            count := tload(_NON_ZERO_DELTA_COUNT_SLOT)
-        }
+        count = _NON_ZERO_DELTA_COUNT_SLOT.tload();
     }
 
     /**
      * @dev Set non zero delta count in transient storage
      */
-    // Assembly required for transient storage operations (tstore)
     function _setNonZeroDeltaCount(uint256 count) internal {
-        // slither-disable-next-line assembly
-        assembly {
-            tstore(_NON_ZERO_DELTA_COUNT_SLOT, count)
-        }
+        _NON_ZERO_DELTA_COUNT_SLOT.tstore(count);
     }
 
     /**
      * @dev Get the USE_VAULT flag from transient storage
      */
-    // Assembly required for transient storage operations (tload)
     function _getUseVault() internal view virtual returns (bool) {
-        uint256 useVault;
-        // slither-disable-next-line assembly
-        assembly {
-            useVault := tload(_USE_VAULT_SLOT)
-        }
-        return useVault == 1;
+        return _USE_VAULT_SLOT.tload();
     }
 
     /**
@@ -260,18 +247,15 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         internal
         virtual
     {
-        // slither-disable-next-line incorrect-equality
         if (deltaChange == 0) return;
 
         int256 oldDelta = _getDelta(token);
         int256 newDelta = oldDelta + deltaChange;
 
         // Update non zero delta counter based on transitions
-        // slither-disable-next-line incorrect-equality
         if (oldDelta != 0 && newDelta == 0) {
             // Was non zero, now zero: decrement counter
             _setNonZeroDeltaCount(_getNonZeroDeltaCount() - 1);
-            // slither-disable-next-line incorrect-equality
         } else if (oldDelta == 0 && newDelta != 0) {
             // Was zero, now non zero: increment counter
             _setNonZeroDeltaCount(_getNonZeroDeltaCount() + 1);
@@ -290,7 +274,6 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         internal
         virtual
     {
-        // slither-disable-next-line incorrect-equality
         if (amount == 0) return;
 
         uint256 id = _toId(token);
@@ -310,7 +293,6 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         internal
         virtual
     {
-        // slither-disable-next-line incorrect-equality
         if (amount == 0) return;
 
         uint256 id = _toId(token);
@@ -328,7 +310,6 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         internal
         virtual
     {
-        // slither-disable-next-line incorrect-equality
         if (amount == 0) return;
 
         uint256 id = _toId(token);
@@ -358,7 +339,6 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
                 revert Vault__UnexpectedNonZeroCount(nonZeroCount);
             } else if (nonZeroCount == 1) {
                 int256 inputDelta = _getDelta(inputToken);
-                // slither-disable-next-line incorrect-equality
                 if (inputDelta == 0 || inputDelta != -int256(inputAmount)) {
                     revert Vault__UnexpectedInputDelta(inputDelta);
                 }

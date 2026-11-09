@@ -26,7 +26,7 @@ use crate::rpc::config::RPCRetryConfig;
 /// Adapted from alloy-transport:
 /// https://github.com/alloy-rs/alloy/blob/a3899575fbc0c789275f95661516b99e9a92838d/crates/transport/src/error.rs#L156
 /// License: MIT OR Apache-2.0
-pub(crate) trait RetryableError {
+pub trait RetryableError {
     /// Analyzes whether to retry the request depending on the error.
     ///
     /// Returns `true` for transient errors that are likely to succeed on retry:
@@ -129,7 +129,7 @@ impl<E: std::borrow::Borrow<RawValue>> RetryableError for RpcError<TransportErro
             }
             Self::ErrorResp(err) => err.is_retry_err() || has_custom_retry_code(err),
             Self::NullResp => true,
-            _ => false,
+            Self::UnsupportedFeature(_) | Self::LocalUsageError(_) => false,
         }
     }
 
@@ -144,7 +144,9 @@ impl<E: std::borrow::Borrow<RawValue>> RetryableError for RpcError<TransportErro
                 }
                 // Then try f64 (decimals) - round up for safety
                 if let Some(seconds) = backoff_seconds.as_f64() {
-                    return Some(Duration::from_secs(seconds.ceil() as u64));
+                    if let Ok(backoff) = Duration::try_from_secs_f64(seconds.ceil()) {
+                        return Some(backoff);
+                    }
                 }
             }
         }
@@ -175,7 +177,7 @@ impl Backoff for RetryPolicy {
         debug!(
             attempts_left = self.attempts_left,
             max_retries = self.max_retries,
-            backoff_ms = backoff_duration.map(|d| d.as_millis() as u64),
+            backoff_ms = backoff_duration.and_then(|d| u64::try_from(d.as_millis()).ok()),
             "RPC request failed, retrying after backoff"
         );
         backoff_duration
@@ -197,8 +199,9 @@ impl From<&RetryPolicy> for RPCRetryConfig {
     fn from(value: &RetryPolicy) -> Self {
         Self {
             max_retries: value.max_retries,
-            initial_backoff_ms: value.inner.initial_interval.as_millis() as u64,
-            max_backoff_ms: value.inner.max_interval.as_millis() as u64,
+            initial_backoff_ms: u64::try_from(value.inner.initial_interval.as_millis())
+                .unwrap_or(u64::MAX),
+            max_backoff_ms: u64::try_from(value.inner.max_interval.as_millis()).unwrap_or(u64::MAX),
         }
     }
 }
@@ -237,7 +240,7 @@ impl RetryPolicy {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use std::{
         borrow::Cow,
         sync::{
@@ -254,9 +257,9 @@ pub(crate) mod tests {
 
     use super::*;
 
-    pub(crate) const MOCK_RETRY_POLICY_MAX_ATTEMPTS: usize = 3;
+    pub const MOCK_RETRY_POLICY_MAX_ATTEMPTS: usize = 3;
 
-    pub(crate) fn mock_retry_policy() -> RetryPolicy {
+    pub fn mock_retry_policy() -> RetryPolicy {
         let inner = ExponentialBackoffBuilder::new()
             .with_initial_interval(Duration::from_millis(10))
             .with_multiplier(2.0)
@@ -646,13 +649,14 @@ pub(crate) mod tests {
         let elapsed = start_time.elapsed();
 
         // Calculate expected elapsed time due-to-backoff as a geometric series sum
-        let expected_average = (multiplier.powi(max_retries as i32) - 1.0) / (multiplier - 1.0) *
+        let expected_average = (multiplier.powi(i32::try_from(max_retries).unwrap()) - 1.0) /
+            (multiplier - 1.0) *
             start_interval as f64;
         // Due to default 50% jitter applied by backoff crate we expect half of that time at minimum
         let expected_min = expected_average * 0.5;
 
         assert!(
-            elapsed >= Duration::from_millis(expected_min as u64),
+            elapsed >= Duration::from_secs_f64(expected_min / 1000.0),
             "Expected at least {}ms elapsed time due to backoff, got {:?}",
             expected_min,
             elapsed
