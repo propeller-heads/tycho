@@ -46,6 +46,7 @@ use tycho_simulation::{
     },
 };
 use tycho_test::{
+    checks::{sheet, tvl_only},
     execution::{
         encoding::{encode_swap, EXECUTOR_ADDRESS},
         models::{TychoExecutionInput, TychoExecutionResult},
@@ -65,7 +66,7 @@ use crate::{
     report::{drift, CheckId, Checks, Outcome, Report},
     rpc::RPCProvider,
     state_registry::{register_protocol, register_protocol_with_filter},
-    stream, tvl_only,
+    stream,
     tycho_rpc::TychoClient,
     tycho_runner::{StreamingIndexer, TychoRunner},
     utils::{build_spkg, extract_initial_block},
@@ -2712,12 +2713,12 @@ impl TestRunner {
                     .iter()
                     .filter_map(|(id, state)| {
                         let component = components.get(id)?;
-                        let sheet = stream::quote_sheet(
+                        let quotes = sheet::quote_sheet(
                             state.as_ref(),
                             &component.tokens,
                             executable_max_input,
                         );
-                        Some((id.to_lowercase(), sheet))
+                        Some((id.to_lowercase(), quotes))
                     })
                     .collect();
                 streamed.sheets.insert(block, sheets);
@@ -2877,11 +2878,11 @@ impl TestRunner {
                 continue;
             };
             let snapshot =
-                stream::quote_sheet(state.as_ref(), &component.tokens, executable_max_input);
+                sheet::quote_sheet(state.as_ref(), &component.tokens, executable_max_input);
             match sheets.get(&id) {
                 None => differences.push(format!("{id}: not in the stream")),
                 Some(streamed) => differences.extend(
-                    stream::sheet_differences(streamed, &snapshot)
+                    sheet::sheet_differences(streamed, &snapshot)
                         .into_iter()
                         .map(|difference| format!("{id}: {difference}")),
                 ),
