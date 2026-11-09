@@ -17,6 +17,8 @@
 //! Nothing reads or writes these tables yet; the read and write paths move onto them in later
 //! changes.
 
+#[cfg_attr(not(test), expect(dead_code, reason = "no read of the instance tables uses them yet"))]
+pub mod active;
 pub mod orm;
 pub mod schema;
 

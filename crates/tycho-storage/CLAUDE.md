@@ -24,6 +24,7 @@ postgres/
 ├── schema.rs           — auto-generated Diesel table! macros
 └── instance/           — per-instance `tycho` schema, not yet read or written by the gateways
     ├── mod.rs          — `InstanceId` newtype; joins with the shared `public` tables
+    ├── active.rs       — SQL subselects for the active instance of one protocol and for all active instances, read from `protocol_system.active_instance_id`
     ├── orm.rs          — Diesel row and insert structs for every `tycho` table
     ├── schema.rs       — auto-generated (`[print_schema.instance]` in diesel.toml)
     └── tests.rs        — schema behaviour: leaves, FKs, partition routing, history days
