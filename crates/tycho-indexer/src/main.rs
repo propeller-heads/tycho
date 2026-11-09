@@ -388,6 +388,7 @@ fn run_indexer(global_args: &GlobalArgs, index_args: &IndexArgs) -> Result<(), E
             extractors_config,
             Some(extraction_runtime.handle()),
             index_args.settlement_contract,
+            false,
         )
         .await?;
 
@@ -511,8 +512,26 @@ async fn run_spkg(global_args: &GlobalArgs, run_args: RunSpkgArgs) -> Result<(),
         config,
         None,
         run_args.settlement_contract,
+        run_args.wait_for_subscriber,
     )
     .await?;
+
+    if run_args.wait_for_subscriber {
+        // The extractor ending at the stop block does not end the process: the subscriber may
+        // still be reading the range, and the server serves it until the process is stopped.
+        let mut tasks: Vec<_> = supervisor_tasks
+            .into_iter()
+            .chain(other_tasks)
+            .collect();
+        while !tasks.is_empty() {
+            let (res, _, rest) = select_all(tasks).await;
+            res.map_err(|join_err| {
+                ExtractionError::Unknown(format!("Task panicked: {join_err}"))
+            })??;
+            tasks = rest;
+        }
+        return Ok(());
+    }
 
     let mut all_tasks: Vec<JoinHandle<Result<(), ExtractionError>>> = supervisor_tasks;
     all_tasks.append(&mut other_tasks);
@@ -575,6 +594,10 @@ async fn run_rpc(
 }
 
 /// Creates extraction and server tasks.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "forwards the process-wide settings of `index` and `run`"
+)]
 async fn create_indexing_tasks(
     global_args: &GlobalArgs,
     substreams_args: &SubstreamsArgs,
@@ -583,6 +606,7 @@ async fn create_indexing_tasks(
     extractors_config: ExtractorConfigs,
     extraction_runtime: Option<&Handle>,
     settlement_contract: alloy::primitives::Address,
+    wait_for_subscriber: bool,
 ) -> Result<(ExtractionTasks, ServerTasks), ExtractionError> {
     let rpc_client = global_args.rpc.build_client()?;
 
@@ -689,7 +713,12 @@ async fn create_indexing_tasks(
 
     let supervisor_tasks = supervisors
         .into_iter()
-        .map(|supervisor| runtime.spawn(supervisor.run()))
+        .map(|mut supervisor| {
+            if wait_for_subscriber {
+                supervisor.wait_for_subscriber();
+            }
+            runtime.spawn(supervisor.run())
+        })
         .collect::<Vec<_>>();
 
     Ok((supervisor_tasks, vec![server_task, shutdown_task]))

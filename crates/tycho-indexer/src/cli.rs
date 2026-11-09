@@ -345,6 +345,14 @@ pub struct RunSpkgArgs {
     /// Defaults to the CoW Swap settlement contract on Ethereum mainnet.
     #[clap(long, default_value = "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58")]
     pub settlement_contract: alloy::primitives::Address,
+
+    /// Wait for the first websocket subscriber before extracting, and keep serving after the
+    /// stop block until the process is stopped
+    ///
+    /// The extractor delivers every block to that subscriber, waiting for room in its channel,
+    /// so a client can follow a historical range block by block. For tests.
+    #[clap(long)]
+    pub wait_for_subscriber: bool,
 }
 
 impl RunSpkgArgs {
@@ -481,6 +489,7 @@ mod cli_tests {
                 settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
                     .parse()
                     .unwrap(),
+                wait_for_subscriber: false,
             }),
         };
 

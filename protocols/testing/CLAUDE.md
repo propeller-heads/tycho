@@ -38,4 +38,9 @@ Strict mode also tests each direction's declared limit (README, "Limits").
 Strict mode also requires executions to match simulation exactly unless the package declares
 `execution_tolerance: {bps and/or wei, cause, measured}`; legacy mode allows 0.5%. Only `range`
 reads these; `full` allows 0.5% for every package.
+Strict
+`range` streams the range while indexing (`--no-stream` turns it off): it applies every block,
+simulates at up to 50 changed blocks, executes at as few as meet the coverage floor, and requires
+the streamed state to quote as the stop-block snapshot (`stream.matches_snapshot`);
+`stream.coverage` reports the floor as a warning for now.
 `range --report <path>` writes each check's outcome as JSON. See `README.md`, "Strict mode".

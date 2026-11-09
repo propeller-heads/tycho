@@ -130,7 +130,7 @@
 //! database operations.
 use std::{collections::HashMap, hash::Hash, ops::Deref, str::FromStr, sync::Arc, time::Duration};
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, NaiveDateTime};
 use diesel::prelude::*;
 use diesel_async::{
     pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
@@ -474,11 +474,39 @@ async fn maybe_lookup_block_ts(
                 .map_err(|err| storage_error_from_diesel(err, "Block", &format!("{no}"), None))?
                 .ts)
         }
+        // Before the first block of a known chain is stored, the latest version is empty: every
+        // row is valid from a later time. A reader that merges pending blocks over the stored
+        // state, as the RPC does while the first blocks are uncommitted, then gets them alone. A
+        // chain the database does not hold stays an error, so a misconfigured chain is not
+        // served as empty.
         BlockOrTimestamp::Block(BlockIdentifier::Latest(chain)) => {
-            Ok(orm::Block::most_recent(*chain, conn)
-                .await
-                .map_err(|err| storage_error_from_diesel(err, "Block", "latest", None))?
-                .ts)
+            match orm::Block::most_recent(*chain, conn).await {
+                Ok(block) => Ok(block.ts),
+                Err(diesel::result::Error::NotFound) => {
+                    let known = schema::chain::table
+                        .filter(schema::chain::name.eq(chain.to_string()))
+                        .select(schema::chain::id)
+                        .first::<i64>(conn)
+                        .await
+                        .optional()
+                        .map_err(|err| {
+                            storage_error_from_diesel(err, "Chain", &chain.to_string(), None)
+                        })?
+                        .is_some();
+                    if known {
+                        Ok(DateTime::UNIX_EPOCH.naive_utc())
+                    } else {
+                        Err(storage_error_from_diesel(
+                            diesel::result::Error::NotFound,
+                            "Block",
+                            "latest",
+                            None,
+                        )
+                        .into())
+                    }
+                }
+                Err(err) => Err(storage_error_from_diesel(err, "Block", "latest", None).into()),
+            }
         }
         BlockOrTimestamp::Timestamp(ts) => Ok(*ts),
     }
