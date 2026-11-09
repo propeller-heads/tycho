@@ -8,6 +8,8 @@ adapter_build_signature: "constructor(address)"
 adapter_build_args: "0x0000000000000000000000000000000000000000"
 # To skip checking the balances of the protocol components, set this to the reason, e.g.
 # skip_balance_check: "the component id does not hold the balances; a vault does"
+# A test file with `harness: strict` rejects it: declare each component's `balance_check`
+# instead (see protocols/testing/README.md).
 # A list of accounts that need to be indexed to run the tests properly.
 # Usually used when there is a global component required by all pools and created before the tested range of blocks. For example a factory or a vault.
 # Please note that this component needs to be indexed by your substreams module, this feature is only for testing purpose.
