@@ -31,6 +31,7 @@ contract MetricExecutor is IExecutor, ICallback {
     // contract that uses `using TransientSlot for *`.
     using TransientSlot for TransientSlot.AddressSlot;
     uint256 private constant _DATA_LENGTH = 61;
+    // forge-lint: disable-next-line(unsafe-typecast) type(int128).max fits uint128.
     uint256 private constant _INT128_MAX = uint256(uint128(type(int128).max));
 
     // metricOmmSwapCallback(int256,int256,bytes) — the only callback the pool emits.
@@ -61,8 +62,8 @@ contract MetricExecutor is IExecutor, ICallback {
             revert MetricExecutor__AmountInTooLarge();
         }
 
-        uint128 amountIn128 = uint128(amountIn);
-        int128 amountSpecified = int128(amountIn128);
+        // forge-lint: disable-next-line(unsafe-typecast) amountIn is checked above against int128's maximum.
+        int128 amountSpecified = int128(uint128(amountIn));
 
         _setCurrentPool(pool);
         // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.

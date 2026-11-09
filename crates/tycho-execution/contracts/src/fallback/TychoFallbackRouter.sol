@@ -341,8 +341,13 @@ abstract contract TychoFallbackRouter is
         address pool = _decodeUniswapV3(data);
         (bool zeroForOne, uint160 sqrtPriceLimit) = _uniswapV3Params(swap_);
         (int256 amount0, int256 amount1) = uniswapV3StaticQuoter.quote(
-            pool, zeroForOne, int256(swap_.amountIn), sqrtPriceLimit
+            pool,
+            zeroForOne,
+            // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
+            int256(swap_.amountIn),
+            sqrtPriceLimit
         );
+        // forge-lint: disable-next-line(unsafe-typecast) Exact-input V3 swap math never yields a positive output delta.
         return uint256(-(zeroForOne ? amount1 : amount0));
     }
 
@@ -394,6 +399,7 @@ abstract contract TychoFallbackRouter is
         pure
         returns (uint256 amountOut)
     {
+        // forge-lint: disable-next-line(unsafe-typecast) Reads the selector of a 36-byte revert.
         if (revertData.length != 36 || bytes4(revertData) != selector) {
             return 0;
         }
@@ -509,6 +515,7 @@ abstract contract TychoFallbackRouter is
             .swap(
                 swap_.receiver,
                 zeroForOne,
+                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
                 int256(swap_.amountIn),
                 sqrtPriceLimit,
                 ""
@@ -706,6 +713,7 @@ abstract contract TychoFallbackRouter is
             key,
             SwapParams({
                 zeroForOne: zeroForOne,
+                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
                 amountSpecified: -int256(swap_.amountIn),
                 sqrtPriceLimitX96: zeroForOne
                     ? TickMath.MIN_SQRT_PRICE + 1
@@ -721,6 +729,7 @@ abstract contract TychoFallbackRouter is
         poolManager.take(
             Currency.wrap(swap_.tokenOut),
             swap_.receiver,
+            // forge-lint: disable-next-line(unsafe-typecast) A negative delta exceeds int128 after the cast, so PoolManager.take reverts.
             uint256(uint128(amountOut))
         );
         return "";

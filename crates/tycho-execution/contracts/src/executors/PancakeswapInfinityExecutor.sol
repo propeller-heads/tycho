@@ -265,6 +265,7 @@ contract PancakeswapInfinityExecutor is IExecutor, ICallback {
         if (_amount < 0) {
             revert PancakeswapInfinityExecutor__DeltaNegative(currency);
         }
+        // forge-lint: disable-next-line(unsafe-typecast) The check above reverts on a negative delta.
         amount = uint256(_amount);
     }
 

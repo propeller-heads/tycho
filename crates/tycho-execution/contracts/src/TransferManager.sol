@@ -138,6 +138,7 @@ contract TransferManager is Vault {
         if (transferType == TransferType.TransferNativeInExecutor) {
             // Protocols like Fluid or Lido require us to send the ETH as
             // msg.value when calling the swap function from inside the executor.
+            // forge-lint: disable-next-line(unsafe-typecast) amount is sent as native currency; no chain's native supply comes near 2^255.
             _updateDeltaAccounting(tokenIn, -int256(amount));
             return amount;
         }
@@ -155,6 +156,7 @@ contract TransferManager is Vault {
                 _approveIfNeeded(tokenIn, receiver, amount);
             } else {
                 // Scenario 4: Funds already in router (from vault or previous swap)
+                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
                 _updateDeltaAccounting(tokenIn, -int256(amount));
                 _approveIfNeeded(tokenIn, receiver, amount);
             }
@@ -181,6 +183,7 @@ contract TransferManager is Vault {
                 // Scenario 6: Transfer from router balance to pool
                 // This could mean the funds come from the user's vault (first swap with vault)
                 // or funds are in the router from the previous swap.
+                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
                 _updateDeltaAccounting(tokenIn, -int256(amount));
                 amount = _transferOut(tokenIn, receiver, amount);
             }
@@ -260,7 +263,7 @@ contract TransferManager is Vault {
         // Perform the actual transfer
         if (isPermit2) {
             // Permit2.permit is already called from the TychoRouterV3
-            // forge-lint: disable-next-line(calls-loop) Each split from the input token pulls its share from the user; a failing pull fails the route.
+            // forge-lint: disable-next-line(calls-loop, unsafe-typecast) Each split from the input token pulls its share from the user; a failing pull fails the route. Permit2 amounts are uint160, and the balance diff below measures what arrived.
             permit2.transferFrom(sender, receiver, uint160(amount), token);
         } else {
             // forge-lint: disable-next-line(arbitrary-send-erc20) sender is the router's msg.sender, stored by the entry point.
