@@ -85,6 +85,11 @@ module.exports = {
             url: process.env.RPC_URL,
             accounts: [process.env.PRIVATE_KEY],
             chainId: 5042
+        },
+        elysium: {
+            url: process.env.RPC_URL,
+            accounts: [process.env.PRIVATE_KEY],
+            chainId: 99901
         }
     },
 
