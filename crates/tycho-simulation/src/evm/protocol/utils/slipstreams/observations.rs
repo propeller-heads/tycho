@@ -83,17 +83,6 @@ impl From<SimulationError> for ObserveError {
     }
 }
 
-impl From<ObserveError> for SimulationError {
-    fn from(err: ObserveError) -> Self {
-        match err {
-            ObserveError::TooOld => Self::FatalError(
-                "Observation target is older than the oldest observation".to_string(),
-            ),
-            ObserveError::Data(err) => err,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Observations {
     observations: Vec<Observation>,
