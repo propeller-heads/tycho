@@ -496,13 +496,7 @@ async fn maybe_lookup_block_ts(
                     if known {
                         Ok(DateTime::UNIX_EPOCH.naive_utc())
                     } else {
-                        Err(storage_error_from_diesel(
-                            diesel::result::Error::NotFound,
-                            "Block",
-                            "latest",
-                            None,
-                        )
-                        .into())
+                        Err(StorageError::NotFound("Chain".to_string(), chain.to_string()))
                     }
                 }
                 Err(err) => Err(storage_error_from_diesel(err, "Block", "latest", None).into()),
