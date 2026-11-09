@@ -18,7 +18,7 @@ use alloy::{
     rpc::types::{state::AccountOverride, Block, BlockId},
 };
 use clap::Parser;
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, NarratableReportHandler, WrapErr};
 use num_bigint::BigUint;

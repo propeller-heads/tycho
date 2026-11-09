@@ -12,7 +12,7 @@ mod utils;
 use std::{fmt::Display, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use miette::{miette, IntoDiagnostic, WrapErr};
 use tracing_subscriber::EnvFilter;
 use tycho_simulation::tycho_common::models::Chain;

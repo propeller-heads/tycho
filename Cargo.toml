@@ -92,7 +92,7 @@ ruint = { version = "1.17.1", features = ["num-traits"] }
 itertools = "0.13.0"
 lru = "0.16.3"
 roaring = "0.10"
-dotenv = "0.15.0"
+dotenvy = "0.15.7"
 deepsize = "0.2.0"
 unicode-segmentation = "1.12.0"
 clap = "4.5.48"
