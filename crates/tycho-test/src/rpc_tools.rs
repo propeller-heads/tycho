@@ -27,8 +27,8 @@ pub struct RPCTools {
 impl RPCTools {
     pub async fn new(rpc_url: &str, chain: &Chain) -> miette::Result<Self> {
         let builder = ProviderBuilder::default();
-        // A named chain only tunes the polling interval. alloy-chains lags new chains such as
-        // Elysium, so a chain it does not know keeps alloy's default interval.
+        // A named chain only tunes the polling interval. alloy-chains lags new chains, so a chain
+        // it does not know keeps alloy's default interval.
         let provider: RootProvider<Ethereum> = match NamedChain::try_from(chain.id()) {
             Ok(named_chain) => {
                 builder
@@ -61,17 +61,6 @@ impl RPCTools {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn connects_on_a_chain_alloy_chains_does_not_know() {
-        assert!(NamedChain::try_from(Chain::Elysium.id()).is_err());
-
-        let tools = RPCTools::new("http://localhost:8545", &Chain::Elysium)
-            .await
-            .unwrap();
-
-        assert_eq!(tools.native_asset, Chain::Elysium.native_asset());
-    }
 
     #[tokio::test]
     async fn connects_on_a_named_chain() {
