@@ -1014,7 +1014,7 @@ impl TestRunner {
                 self.execute_streamed(streamed, config, executes_nothing, &mut checks);
             }
             let rpc_server = tycho_runner.start_rpc_server();
-            let result = match self
+            let run = match self
                 .runtime
                 .block_on(self.last_indexed_block(&config.protocol_system))
                 .and_then(|last_indexed| snapshot_block(last_indexed, test.stop_block))
@@ -1025,7 +1025,7 @@ impl TestRunner {
                          (stop block {})",
                         test.stop_block
                     );
-                    let run = self.run_test(
+                    self.run_test(
                         test,
                         config,
                         block,
@@ -1035,26 +1035,7 @@ impl TestRunner {
                                 .map_err(String::as_str)
                         }),
                         &mut checks,
-                    );
-                    match streamed {
-                        Some(Ok(streamed)) => {
-                            let floor_problems = streamed.coverage.shortfalls(
-                                stream::Floor::DEFAULT,
-                                &simulated_ids(test),
-                                &executed_ids(test),
-                            );
-                            checks.warn(CheckId::StreamCoverage, &floor_problems);
-                            report.coverage.push(streamed.coverage);
-                        }
-                        Some(Err(_)) => {
-                            checks.not_run(CheckId::StreamCoverage, CheckId::StreamMatchesSnapshot)
-                        }
-                        None => {}
-                    }
-                    report.drift.extend(checks.take_drift());
-                    let (outcome, results) = checks.finish();
-                    report.results.extend(results);
-                    run.and(outcome)
+                    )
                 }
                 Err(e) => {
                     // A stream that failed is the likelier cause of a range indexed short.
@@ -1069,10 +1050,33 @@ impl TestRunner {
                         Some(Ok(_)) | None => e,
                     };
                     checks.fail(CheckId::Index, &e);
-                    report.results.extend(checks.finish().1);
+                    if let Some(Ok(_)) = &streamed {
+                        checks.not_run(CheckId::StreamMatchesSnapshot, CheckId::Index);
+                    }
                     Err(e)
                 }
             };
+            // The stream's coverage and the drift of its executions are reported even when the
+            // snapshot cannot be read, since they do not depend on it.
+            match streamed {
+                Some(Ok(streamed)) => {
+                    let floor_problems = streamed.coverage.shortfalls(
+                        stream::Floor::DEFAULT,
+                        &simulated_ids(test),
+                        &executed_ids(test),
+                    );
+                    checks.warn(CheckId::StreamCoverage, &floor_problems);
+                    report.coverage.push(streamed.coverage);
+                }
+                Some(Err(_)) => {
+                    checks.not_run(CheckId::StreamCoverage, CheckId::StreamMatchesSnapshot)
+                }
+                None => {}
+            }
+            report.drift.extend(checks.take_drift());
+            let (outcome, results) = checks.finish();
+            report.results.extend(results);
+            let result = run.and(outcome);
             match result {
                 Ok(_) => {
                     info!("✅ {} passed\n", test.name);
