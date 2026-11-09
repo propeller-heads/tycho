@@ -391,17 +391,21 @@ fn parse_divisor(divisor: &serde_yaml::Value) -> Result<BigUint, String> {
 /// A divisor written as a string: more than 1, and at most 1e77, the largest power of ten a
 /// `uint256` holds, since a larger one would turn every amount into zero.
 fn parse_divisor_str(divisor: &str) -> Result<BigUint, String> {
+    const MAX_EXPONENT: u32 = 77;
+    let too_large =
+        || format!("`divide_by: {divisor}` exceeds 1e77, the largest power of ten a uint256 holds");
     let parsed = match divisor.strip_prefix("1e") {
-        Some(exponent) => exponent
-            .parse::<u32>()
-            .ok()
-            .map(|exponent| BigUint::from(10u32).pow(exponent)),
+        // Bound the exponent before computing the power: `1e4000000000` would otherwise
+        // build a number of several gigabytes before the bound rejects it.
+        Some(exponent) => match exponent.parse::<u32>() {
+            Ok(exponent) if exponent > MAX_EXPONENT => return Err(too_large()),
+            Ok(exponent) => Some(BigUint::from(10u32).pow(exponent)),
+            Err(_) => None,
+        },
         None => divisor.parse::<BigUint>().ok(),
     };
     match parsed {
-        Some(divisor) if divisor > BigUint::from(10u32).pow(77) => Err(format!(
-            "`divide_by: {divisor}` exceeds 1e77, the largest power of ten a uint256 holds"
-        )),
+        Some(parsed) if parsed > BigUint::from(10u32).pow(MAX_EXPONENT) => Err(too_large()),
         Some(divisor) if divisor > BigUint::from(1u32) => Ok(divisor),
         Some(_) => Err(format!("`divide_by: {divisor}` must be more than 1; leave it out instead")),
         None => Err(format!("`divide_by: {divisor}` is not an integer or `1eN`")),
@@ -1448,7 +1452,7 @@ mod tests {
             .contains("is not an integer or `1eN`"));
         // Past 1e77 every amount would divide to zero, quoted or not.
         assert_eq!(divisor(call("1e77").unwrap()), Some(BigUint::from(10u32).pow(77)));
-        for too_large in ["1e78", "\"1e78\"", "\"1e80\""] {
+        for too_large in ["1e78", "\"1e78\"", "\"1e80\"", "\"1e4000000000\""] {
             assert!(
                 call(too_large)
                     .unwrap_err()
