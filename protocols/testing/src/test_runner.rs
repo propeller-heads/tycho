@@ -1758,7 +1758,7 @@ fn undecoded_components<'a>(
 mod tests {
     use std::{collections::HashMap, env, str::FromStr};
 
-    use dotenv::dotenv;
+    use dotenvy::dotenv;
     use glob::glob;
     use tycho_simulation::tycho_common::{models::protocol::ProtocolComponentState, Bytes};
 

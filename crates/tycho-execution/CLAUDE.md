@@ -673,7 +673,8 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 ### CI
 
 - **`.github/workflows/ci-foundry.yaml`**: per-project `forge fmt --check` + `forge test` + gas
-  snapshot (`forge test` includes the runtime bytecode fixture check), and a Slither static-analysis job
+  snapshot (`forge test` includes the runtime bytecode fixture check), `forge lint` for these
+  contracts, and a Slither static-analysis job
 - **`.github/workflows/ci-router-trades.yaml`**: the `substreams/` router-trades workspace
 
 ## Adding a New Executor
@@ -740,7 +741,8 @@ Executors run via `delegatecall` inside TychoRouterV3 — they have full access 
 - Transient storage slots use keccak256 of descriptive names
 - Custom errors with contract-prefixed names: `TychoRouter__EmptySwaps`, `Vault__AmountZero`
 - Format with `forge fmt` (80 char line length)
-- Slither `// slither-disable-next-line` annotations where false positives occur
+- Suppress false positives with `// forge-lint: disable-next-line(<lint>)` or
+  `// slither-disable-next-line <detector>`, whichever tool owns the check (see `slither.md`)
 
 ### Testing
 

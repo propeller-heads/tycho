@@ -48,11 +48,9 @@ contract PancakeswapInfinityExecutor is IExecutor, ICallback {
     uint256 private constant _DATA_LENGTH = 97;
     /// @dev Lock payload: 32 + 20 + _DATA_LENGTH.
     // Used only as a calldata slice bound, which Slither does not count as a use.
-    // slither-disable-next-line unused-state
     uint256 private constant _PAYLOAD_LENGTH = 149;
     /// @dev lockAcquired header: 4 + 32 + 32.
     // Same slice-bound false positive as _PAYLOAD_LENGTH.
-    // slither-disable-next-line unused-state
     uint256 private constant _CALLBACK_HEADER = 68;
     bytes4 private constant _LOCK_ACQUIRED =
         bytes4(keccak256("lockAcquired(bytes)"));
@@ -98,7 +96,6 @@ contract PancakeswapInfinityExecutor is IExecutor, ICallback {
         _;
     }
 
-    // slither-disable-next-line locked-ether
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -114,7 +111,7 @@ contract PancakeswapInfinityExecutor is IExecutor, ICallback {
             vault.sync(tokenIn);
         }
         // Vault re-enters the router with lockAcquired -> handleCallback.
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         vault.lock(abi.encodePacked(amountIn, receiver, data));
     }
 
@@ -234,7 +231,7 @@ contract PancakeswapInfinityExecutor is IExecutor, ICallback {
         // purpose: take amount comes from _getFullCredit. Sizing a transfer from a returned
         // delta is forbidden (executor checklist in crates/tycho-execution/CLAUDE.md).
         if (poolType == _POOL_TYPE_CL) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             IPancakeswapInfinityCLPoolManager(manager)
                 .swap(
                     key,
@@ -249,7 +246,7 @@ contract PancakeswapInfinityExecutor is IExecutor, ICallback {
                 );
         } else {
             // swapForY == zeroForOne: spend token0/X, receive token1/Y.
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             IPancakeswapInfinityBinPoolManager(manager)
                 .swap(key, zeroForOne, -swapAmountIn.toInt128(), "");
         }
@@ -275,10 +272,10 @@ contract PancakeswapInfinityExecutor is IExecutor, ICallback {
     function _settle(address currency, uint256 amount) internal {
         if (amount == 0) return;
         if (currency == address(0)) {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return settle returns the amount paid, which is the amount just transferred.
             vault.settle{value: amount}();
         } else {
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return settle returns the amount paid, which is the amount just transferred.
             vault.settle();
         }
     }
