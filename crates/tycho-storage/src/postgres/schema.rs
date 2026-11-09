@@ -256,6 +256,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    partition_retention_config (id) {
+        id -> Bool,
+        retention -> Interval,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     protocol_component (id) {
         id -> Int8,
         chain_id -> Int8,
@@ -313,6 +321,7 @@ diesel::table! {
         name -> Varchar,
         inserted_ts -> Timestamptz,
         modified_ts -> Timestamptz,
+        active_instance_id -> Nullable<Int4>,
     }
 }
 
@@ -345,6 +354,7 @@ diesel::table! {
         inserted_ts -> Timestamptz,
         modified_ts -> Timestamptz,
         quality -> Int4,
+        address -> Nullable<Bytea>,
     }
 }
 
@@ -429,6 +439,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     entry_point_tracing_params_calls_account,
     entry_point_tracing_result,
     extraction_state,
+    partition_retention_config,
     protocol_component,
     protocol_component_has_entry_point_tracing_params,
     protocol_component_holds_contract,
