@@ -40,10 +40,6 @@ pub mod models;
 pub mod tenderly;
 mod traces;
 
-/// The start of a [`TychoExecutionResult::Revert`] reason that comes from a JSON-RPC error on the
-/// call rather than from the EVM: the node could not trace it, so nothing executed.
-pub const TRANSPORT_ERROR_PREFIX: &str = "Transaction failed:";
-
 /// Every `debug_traceCall` carries its full state overwrites, so one unbounded JSON-RPC batch per
 /// block outgrows the request size limit of the RPC (HTTP 413) and loses every simulation.
 const MAX_CALLS_PER_BATCH: usize = 30;
@@ -343,6 +339,10 @@ async fn simulate_swap_transaction_on(
                     simulation_id,
                     TychoExecutionResult::Revert { reason, state_overwrites, overwrite_metadata },
                 );
+            }
+            SimulationResult::Failed { error_msg } => {
+                tycho_execution_results
+                    .insert(simulation_id, TychoExecutionResult::Failed { error_msg });
             }
         }
     }
