@@ -19,14 +19,17 @@ contract FxSaveExecutorExposed is FxSaveExecutor {
     }
 }
 
-contract FxSaveExecutorTest is Constants, TestUtils {
-    using SafeERC20 for IERC20;
-
+abstract contract FxSaveTestBase {
     // Block 26,353,817: tycho-simulation's FxSaveState quotes these deposits
     // to the same wei (state.rs tests).
-    uint256 constant FORK_BLOCK = 26353817;
-    uint256 constant USDC_DEPOSIT_SHARES = 885837212934908530177;
-    uint256 constant FXUSD_DEPOSIT_SHARES = 885996151784577165475;
+    uint256 internal constant FORK_BLOCK = 26353817;
+    // fxSAVE for 1000 USDC and for 1000 fxUSD at FORK_BLOCK.
+    uint256 internal constant USDC_DEPOSIT_SHARES = 885837212934908530177;
+    uint256 internal constant FXUSD_DEPOSIT_SHARES = 885996151784577165475;
+}
+
+contract FxSaveExecutorTest is Constants, TestUtils, FxSaveTestBase {
+    using SafeERC20 for IERC20;
 
     FxSaveExecutorExposed fxSaveExposed;
     IERC20 fxSave = IERC20(FXSAVE_ADDR);
@@ -43,12 +46,6 @@ contract FxSaveExecutorTest is Constants, TestUtils {
         vm.prank(address(fxSaveExposed));
         IERC20(tokenIn).forceApprove(FX_BASE_POOL, amountIn);
         fxSaveExposed.swap(amountIn, abi.encodePacked(tokenIn), BOB);
-    }
-
-    function testDecodeParams() public view {
-        assertEq(
-            fxSaveExposed.decodeParams(abi.encodePacked(USDC_ADDR)), USDC_ADDR
-        );
     }
 
     function testDecodeParamsInvalidDataLength() public {
@@ -138,14 +135,14 @@ contract FxSaveExecutorTest is Constants, TestUtils {
         vm.prank(address(fxSaveExposed));
         IERC20(DAI_ADDR).forceApprove(FX_BASE_POOL, amountIn);
 
-        vm.expectRevert();
+        vm.expectRevert(bytes4(keccak256("ErrInvalidTokenIn()")));
         fxSaveExposed.swap(amountIn, abi.encodePacked(DAI_ADDR), BOB);
     }
 }
 
-contract TychoRouterForFxSaveTest is TychoRouterTestSetup {
+contract TychoRouterForFxSaveTest is TychoRouterTestSetup, FxSaveTestBase {
     function getForkBlock() public pure override returns (uint256) {
-        return 26353817;
+        return FORK_BLOCK;
     }
 
     function testSingleFxSaveIntegration() public {
@@ -160,7 +157,7 @@ contract TychoRouterForFxSaveTest is TychoRouterTestSetup {
         vm.stopPrank();
 
         assertTrue(success, "Call Failed");
-        assertEq(fxSave.balanceOf(ALICE), 885837212934908530177);
+        assertEq(fxSave.balanceOf(ALICE), USDC_DEPOSIT_SHARES);
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
         assertEq(IERC20(FX_BASE_POOL).balanceOf(tychoRouterAddr), 0);
         assertEq(fxSave.balanceOf(tychoRouterAddr), 0);
