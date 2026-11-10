@@ -178,8 +178,8 @@ contract TychoRouterForFxSaveTest is TychoRouterTestSetup, FxSaveTestBase {
 
         assertTrue(success, "Call Failed");
         // Chain previews at FORK_BLOCK: Uniswap V2 getAmountsOut gives
-        // 2213382852 USDC for 1 WETH; fxSP.previewDeposit then fxSAVE.previewDeposit
-        // turn that into this many fxSAVE.
+        // 2213.382852 USDC for 1 WETH, and fxSP.previewDeposit then
+        // fxSAVE.previewDeposit turn that into this many fxSAVE.
         assertEq(fxSave.balanceOf(ALICE), 1960696896773599132885);
         assertEq(IERC20(WETH_ADDR).balanceOf(tychoRouterAddr), 0);
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
