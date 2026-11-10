@@ -1529,7 +1529,7 @@ async fn process_update(
         );
     }
 
-    limit_probes::judge(&strict, &probes, &block_execution_info, &results, router_fee);
+    limit_probes::judge(&probes, &block_execution_info, &results, router_fee);
 
     let mut n_reverts = 0;
     let mut n_failures = 0;
