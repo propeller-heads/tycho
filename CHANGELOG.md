@@ -1,3 +1,11 @@
+## [0.507.0](https://github.com/propeller-heads/tycho/compare/0.506.0...0.507.0) (2026-11-10)
+
+
+### Features
+
+* **execution:** deploy TychoRouterV3 to Elysium ([bbc65cb](https://github.com/propeller-heads/tycho/commit/bbc65cba54218ac6db36ba86ee1134b082f2489e))
+* **execution:** deploy TychoRouterV3 to Elysium ([#1762](https://github.com/propeller-heads/tycho/issues/1762)) ([9a955ba](https://github.com/propeller-heads/tycho/commit/9a955bae82309f0327c5bc0569f99581e9b63186))
+
 ## [0.506.0](https://github.com/propeller-heads/tycho/compare/0.505.0...0.506.0) (2026-11-10)
 
 
