@@ -1,3 +1,18 @@
+## [0.506.0](https://github.com/propeller-heads/tycho/compare/0.505.0...0.506.0) (2026-11-10)
+
+
+### Features
+
+* **router-trades:** store what the SubsidyPayer did with each subsidy ([2f0c28e](https://github.com/propeller-heads/tycho/commit/2f0c28ee4a5821fd2afde37b59d235cf98a114c6))
+* **router-trades:** store what the SubsidyPayer did with each subsidy ([#1752](https://github.com/propeller-heads/tycho/issues/1752)) ([45aa44d](https://github.com/propeller-heads/tycho/commit/45aa44de7eb5caff9deb3b98fc5b548ae0046d7a))
+
+
+### Bug Fixes
+
+* **claude:** count padded nextest failures in tycho-review's checks ([f9a7608](https://github.com/propeller-heads/tycho/commit/f9a7608e83cb4e294e2f7623f0b5e353527ebccb))
+* **claude:** quote referenced records in tycho-review checklists ([b2b575f](https://github.com/propeller-heads/tycho/commit/b2b575f84c30c005d6193edf9f488e1595d407f7))
+* **execution:** revert an Ekubo swap whose amountIn exceeds int128 ([897ef0a](https://github.com/propeller-heads/tycho/commit/897ef0ae14a86d8f7ac9912c868e7fec8360fc9d))
+
 ## [0.505.0](https://github.com/propeller-heads/tycho/compare/0.504.3...0.505.0) (2026-11-10)
 
 
