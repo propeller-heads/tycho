@@ -351,11 +351,18 @@ mod tests {
         let book = EuclidBook::try_from(frame.pairs[0].clone()).unwrap();
         assert_eq!(book.base, bytes(WETH));
         assert_eq!(book.quote, bytes(USDC));
-        assert!(!book.bids.is_empty() && !book.asks.is_empty());
-        // The gateway publishes its minimum trade as the first level at the best price, so two
-        // levels can share a price.
-        assert_eq!(book.bids[0].price, book.bids[1].price);
-        assert!(book.asks[0].price > book.bids[0].price);
+        assert_eq!(book.updated_at_ms, 1_794_312_452_328);
+        // The gateway publishes its minimum trade as the first level of each side, at that
+        // side's best price, so the first two levels share a price.
+        let level = |price, quantity| PriceLevel { price, quantity };
+        assert_eq!(
+            book.bids[..],
+            [level(2074.90778485, 0.00096390), level(2074.90778485, 0.00534533)]
+        );
+        assert_eq!(
+            book.asks[..],
+            [level(2103.07940882, 0.00095099), level(2103.07940882, 0.00152401)]
+        );
     }
 
     #[test]

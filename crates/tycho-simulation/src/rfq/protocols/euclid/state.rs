@@ -354,9 +354,10 @@ mod tests {
             3000.0
         );
         state.book.bids = Levels::default();
-        assert!(state
-            .spot_price(&weth(), &usdc())
-            .is_err());
+        assert!(matches!(
+            state.spot_price(&weth(), &usdc()),
+            Err(SimulationError::RecoverableError(_))
+        ));
     }
 
     #[test]
@@ -419,27 +420,32 @@ mod tests {
             "{result:?}"
         );
         // 0.0011 WETH sells for 3.3 USDC, which the gateway signs for.
-        assert!(state
+        let priced = state
             .get_amount_out(BigUint::from_str("1100000000000000").unwrap(), &weth(), &usdc())
-            .is_ok());
+            .unwrap();
+        assert_eq!(priced.amount, BigUint::from(3_300_000u64));
     }
 
     #[test]
     fn rejects_a_zero_amount_and_tokens_outside_the_pair() {
         let state = test_state();
-        assert!(state
-            .get_amount_out(BigUint::ZERO, &weth(), &usdc())
-            .is_err());
+        assert!(matches!(
+            state.get_amount_out(BigUint::ZERO, &weth(), &usdc()),
+            Err(SimulationError::InvalidInput(_, None))
+        ));
         let dai = token("0x6b175474e89094c44da98b954eedeac495271d0f", "DAI", 18);
-        assert!(state
-            .get_amount_out(BigUint::from(1u64), &dai, &usdc())
-            .is_err());
-        assert!(state
-            .get_limits(dai.address.clone(), usdc().address)
-            .is_err());
-        assert!(state
-            .marginal_price(&dai.address, &usdc().address, &BigUint::ZERO)
-            .is_err());
+        assert!(matches!(
+            state.get_amount_out(BigUint::from(1u64), &dai, &usdc()),
+            Err(SimulationError::InvalidInput(_, None))
+        ));
+        assert!(matches!(
+            state.get_limits(dai.address.clone(), usdc().address),
+            Err(SimulationError::InvalidInput(_, None))
+        ));
+        assert!(matches!(
+            state.marginal_price(&dai.address, &usdc().address, &BigUint::ZERO),
+            Err(SimulationError::InvalidInput(_, None))
+        ));
     }
 
     #[test]
@@ -478,9 +484,10 @@ mod tests {
                 .unwrap(),
             2900.0
         );
-        assert!(state
-            .marginal_price(&weth, &usdc, &BigUint::from_str("5000000000000000000").unwrap())
-            .is_err());
+        assert!(matches!(
+            state.marginal_price(&weth, &usdc, &BigUint::from_str("5000000000000000000").unwrap()),
+            Err(SimulationError::RecoverableError(_))
+        ));
         // Buying WETH: the first USDC buys at the best ask, 1 / 3100 WETH per USDC.
         let per_usdc = state
             .marginal_price(&usdc, &weth, &BigUint::ZERO)
@@ -493,12 +500,19 @@ mod tests {
         let mut state = test_state();
         state.book.bids = Levels::default();
         assert_eq!(state.directions(), vec![(usdc().address, weth().address)]);
-        assert!(state
-            .get_limits(weth().address, usdc().address)
-            .is_err());
-        assert!(state
-            .get_amount_out(BigUint::from_str("1000000000000000000").unwrap(), &weth(), &usdc())
-            .is_err());
+        assert!(matches!(
+            state.get_limits(weth().address, usdc().address),
+            Err(SimulationError::RecoverableError(_))
+        ));
+        // Nothing fills, so no part of the amount comes back priced.
+        assert!(matches!(
+            state.get_amount_out(
+                BigUint::from_str("1000000000000000000").unwrap(),
+                &weth(),
+                &usdc()
+            ),
+            Err(SimulationError::InvalidInput(_, None))
+        ));
     }
 
     #[test]
@@ -517,9 +531,11 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
 
         assert!(ProtocolSim::eq(&state, &replayed));
-        assert!(replayed
+        // 1 WETH sells into the two 3000 levels.
+        let priced = replayed
             .get_amount_out(BigUint::from_str("1000000000000000000").unwrap(), &weth(), &usdc())
-            .is_ok());
+            .unwrap();
+        assert_eq!(priced.amount, BigUint::from(3_000_000_000u64));
 
         let params = GetAmountOutParams {
             amount_in: BigUint::from_str("1000000000000000000").unwrap(),
@@ -529,9 +545,11 @@ mod tests {
             receiver: Bytes::zero(20),
             origin: None,
         };
-        assert!(replayed
-            .request_signed_quote(params)
-            .await
-            .is_err());
+        assert!(matches!(
+            replayed
+                .request_signed_quote(params)
+                .await,
+            Err(SimulationError::FatalError(_))
+        ));
     }
 }

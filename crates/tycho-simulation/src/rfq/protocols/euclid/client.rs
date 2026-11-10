@@ -214,10 +214,14 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    use alloy::{primitives::U256, sol_types::SolCall};
     use num_bigint::BigUint;
 
     use super::*;
-    use crate::snapshot_feed::http::test_support::{spawn_http_server, MockResponse};
+    use crate::{
+        rfq::protocols::euclid::models::fillOrderRFQToCall,
+        snapshot_feed::http::test_support::{spawn_http_server, MockResponse},
+    };
 
     /// A binding quote recorded from Euclid's gateway on Ethereum.
     const FIRM_QUOTE: &str = include_str!("test_responses/firm_quote.json");
@@ -230,19 +234,14 @@ mod tests {
     const RECORDED_AMOUNT_OUT: &str = "6241692";
 
     /// The recorded quote with its order's expiry moved far ahead: the recording lasted thirty
-    /// seconds. The expiry sits in the 64 bits above the nonce of the order's `info` word, the
-    /// first word after the selector.
+    /// seconds. The expiry sits in the 64 bits above the nonce of the order's `info`.
     fn live_firm_quote() -> String {
         let mut quote: serde_json::Value = serde_json::from_str(FIRM_QUOTE).unwrap();
-        let calldata = quote["calldata"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let (head, rest) = calldata.split_at(2 + 8);
-        let (info, tail) = rest.split_at(64);
-        let nonce = &info[48..];
-        quote["calldata"] =
-            serde_json::json!(format!("{head}{:0>16}{:0>32}{nonce}{tail}", "", "ffffffffffffffff"));
+        let recorded: Bytes = serde_json::from_value(quote["calldata"].clone()).unwrap();
+        let mut call = fillOrderRFQToCall::abi_decode(recorded.as_ref()).unwrap();
+        call.order.info =
+            (call.order.info & U256::from(u64::MAX)) | (U256::from(u64::MAX) << 64usize);
+        quote["calldata"] = serde_json::json!(Bytes::from(call.abi_encode()));
         quote.to_string()
     }
 
