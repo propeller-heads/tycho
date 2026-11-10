@@ -1,0 +1,2530 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 5,
+      "panels": [],
+      "title": "Indexing",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "fillOpacity": 70,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1
+          },
+          "fieldMinMax": false,
+          "mappings": [
+            {
+              "options": {
+                "1": {
+                  "color": "blue",
+                  "index": 0,
+                  "text": "Started"
+                },
+                "2": {
+                  "color": "green",
+                  "index": 1,
+                  "text": "Ready"
+                },
+                "3": {
+                  "color": "orange",
+                  "index": 2,
+                  "text": "Delayed"
+                },
+                "4": {
+                  "color": "red",
+                  "index": 3,
+                  "text": "Stale"
+                },
+                "5": {
+                  "color": "purple",
+                  "index": 4,
+                  "text": "Advanced"
+                },
+                "6": {
+                  "color": "#808080",
+                  "index": 5,
+                  "text": "Ended"
+                },
+                "7": {
+                  "color": "super-light-orange",
+                  "index": 6,
+                  "text": "Skipped"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 22,
+        "x": 0,
+        "y": 1
+      },
+      "id": 18,
+      "interval": "30s",
+      "options": {
+        "colWidth": 0.9,
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "rowHeight": 0.9,
+        "showValue": "auto",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "max by (namespace, protocol) (tycho_integration_protocol_sync_state{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"})",
+          "format": "time_series",
+          "instant": false,
+          "legendFormat": "{{protocol}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Synchronizer state per protocol",
+      "type": "status-history"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "description": "99th percentile of the time it takes from when a block is timestamped on-chain to when the corresponding protocol components are received by the test. The P99 means\n  that 99% of all measurements are below this value.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "fieldMinMax": false,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "id": 3,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.97,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "xField": "le",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"-2\", container=~\".*$Chain.*\"}[$__range]))",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"-2\", container=~\".*$Chain.*\"}[$__range]))) + sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"-1\", container=~\".*$Chain.*\"}[$__range]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "P"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"-1\", container=~\".*$Chain.*\"}[$__range]))) + sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"-0.5\", container=~\".*$Chain.*\"}[$__range]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "O"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"-0.5\", container=~\".*$Chain.*\"}[$__range]))) + sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"0\", container=~\".*$Chain.*\"}[$__range]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "N"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"0\", container=~\".*$Chain.*\"}[$__range]))) + sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"0.5\", container=~\".*$Chain.*\"}[$__range]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "M"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"0.5\", container=~\".*$Chain.*\"}[$__range]))) + sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"1\", container=~\".*$Chain.*\"}[$__range]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"1\", container=~\".*$Chain.*\"}[$__range]))) + sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"2\", container=~\".*$Chain.*\"}[$__range])) ",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"2\", container=~\".*$Chain.*\"}[$__range]))) +\nsum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"3\", container=~\".*$Chain.*\"}[$__range]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"3\", container=~\".*$Chain.*\"}[$__range]))) +\nsum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"4\", container=~\".*$Chain.*\"}[$__range])) ",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"4\", container=~\".*$Chain.*\"}[$__range]))) +\nsum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"5\", container=~\".*$Chain.*\"}[$__range])) ",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"5\", container=~\".*$Chain.*\"}[$__range]))) +\nsum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"6\", container=~\".*$Chain.*\"}[$__range])) ",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"6\", container=~\".*$Chain.*\"}[$__range]))) +\nsum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"8\", container=~\".*$Chain.*\"}[$__range])) ",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "H"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"8\", container=~\".*$Chain.*\"}[$__range]))) +\nsum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"10\", container=~\".*$Chain.*\"}[$__range])) ",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "I"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"10\", container=~\".*$Chain.*\"}[$__range]))) +\nsum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"12\", container=~\".*$Chain.*\"}[$__range])) ",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "J"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"12\", container=~\".*$Chain.*\"}[$__range]))) +\nsum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"15\", container=~\".*$Chain.*\"}[$__range])) ",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "K"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "(- sum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"15\", container=~\".*$Chain.*\"}[$__range]))) +\nsum(increase(tycho_integration_block_processing_duration_seconds_bucket{namespace=\"$Namespace\", le=\"20\", container=~\".*$Chain.*\"}[$__range])) ",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "L"
+        }
+      ],
+      "title": "Block processing latency",
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "labelsToFields": false,
+            "reducers": [
+              "last"
+            ]
+          }
+        },
+        {
+          "id": "extractFields",
+          "options": {
+            "source": "Field"
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {}
+        }
+      ],
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "description": "The test skips a block when it takes too long to process a previous update and there are newer blocks. It skips forward to the latest block",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 5,
+        "x": 12,
+        "y": 9
+      },
+      "id": 19,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "sum(increase(tycho_integration_protocol_updates_skipped_total{namespace=\"$Namespace\", container=~\".*$Chain.*\"}[$__range])) / (sum(increase(tycho_integration_protocol_updates_skipped_total{namespace=\"$Namespace\", container=~\".*$Chain.*\"}[$__range])) + sum(increase(tycho_integration_block_processing_duration_seconds_count{namespace=\"$Namespace\", container=~\".*$Chain.*\"}[$__range]))) * 100",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Percentage of skipped blocks",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "description": "Current number of pools (components) being streamed per protocol.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 7,
+        "x": 0,
+        "y": 17
+      },
+      "id": 72,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": true
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Number of pools"
+          }
+        ]
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "max by (protocol) (tycho_integration_protocol_pool_count{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"})",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Pools per protocol",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "keepLabels": [
+              "protocol"
+            ],
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "cluster": true,
+              "container": true,
+              "endpoint": true,
+              "instance": true,
+              "job": true,
+              "namespace": true,
+              "pod": true,
+              "prometheus": true
+            },
+            "includeByName": {},
+            "indexByName": {
+              "Time": 0,
+              "Value": 2,
+              "protocol": 1
+            },
+            "renameByName": {
+              "Value": "Number of pools",
+              "protocol": "Protocol"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "id": 6,
+      "panels": [],
+      "title": "Simulation",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "fieldMinMax": false,
+          "mappings": [],
+          "max": 0.01,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 22,
+        "x": 0,
+        "y": 26
+      },
+      "id": 8,
+      "options": {
+        "displayMode": "gradient",
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "  (\n    sum by (protocol) (rate(tycho_integration_simulation_get_amount_out_duration_seconds_sum{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__rate_interval])) /\n    sum by (protocol) (rate(tycho_integration_simulation_get_amount_out_duration_seconds_count{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__rate_interval]))\n  ) and on(protocol) (\n    sum by (protocol) (rate(tycho_integration_simulation_get_amount_out_duration_seconds_count{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__rate_interval])) > 0\n  )\n",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "Average time to run get amount out per protocol",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#808080",
+            "mode": "continuous-greens"
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 50
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 22,
+        "x": 0,
+        "y": 35
+      },
+      "id": 20,
+      "options": {
+        "displayMode": "gradient",
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "  (\n    (sum by (protocol) (increase(tycho_integration_simulation_get_limits_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) or\n     sum by (protocol) (increase(tycho_integration_simulation_get_limits_failures_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) * 0)\n    /\n    (\n      (sum by (protocol) (increase(tycho_integration_simulation_get_limits_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) or\n       sum by (protocol) (increase(tycho_integration_simulation_get_limits_failures_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) * 0) +\n      (sum by (protocol) (increase(tycho_integration_simulation_get_limits_failures_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) or\n       sum by (protocol) (increase(tycho_integration_simulation_get_limits_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) * 0)\n    )\n  ) * 100",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "expr": "",
+          "hide": false,
+          "instant": false,
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "% of successful get limits per protocol",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#808080",
+            "mode": "continuous-greens"
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 50
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 22,
+        "x": 0,
+        "y": 42
+      },
+      "id": 21,
+      "options": {
+        "displayMode": "gradient",
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "  (\n    (sum by (protocol) (increase(tycho_integration_simulation_get_amount_out_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) or\n     sum by (protocol) (increase(tycho_integration_simulation_get_amount_out_failures_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) * 0)\n    /\n    (\n      (sum by (protocol) (increase(tycho_integration_simulation_get_amount_out_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) or\n       sum by (protocol) (increase(tycho_integration_simulation_get_amount_out_failures_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) * 0) +\n      (sum by (protocol) (increase(tycho_integration_simulation_get_amount_out_failures_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) or\n       sum by (protocol) (increase(tycho_integration_simulation_get_amount_out_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) * 0)\n    )\n  ) * 100",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "% of successful get amount out per protocol",
+      "type": "bargauge"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 49
+      },
+      "id": 9,
+      "panels": [],
+      "title": "Execution",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "description": "Number of simulation of execution that succeeded",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 3,
+        "x": 0,
+        "y": 50
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "sum(increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range]))",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "Execution successes",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "description": "Number of simulations of execution that reverted",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 3,
+        "x": 3,
+        "y": 50
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "sum(increase(tycho_integration_simulation_execution_reverts_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range]))",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "Execution reverts",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "description": "Number of simulations of execution that failed. This means that the RPC request might not even have been successful. Common causes for failures here are: storage slots not found, RPC request limits reached, etc..",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 3,
+        "x": 6,
+        "y": 50
+      },
+      "id": 36,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "sum(increase(tycho_integration_simulation_execution_failures_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range]))",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "Execution failures",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "description": "Only the simulations that actually ran on the RPC are accounted here. This uses the successful executions and the reverted ones. The failed executions are not accounted for in this panel. ",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#808080",
+            "mode": "continuous-greens"
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "#EAB839",
+                "value": 50
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 22,
+        "x": 0,
+        "y": 56
+      },
+      "id": 10,
+      "options": {
+        "displayMode": "gradient",
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "  (\n    (sum by (protocol) (increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) or\n     sum by (protocol) (increase(tycho_integration_simulation_execution_reverts_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) * 0)\n    /\n    (\n      (sum by (protocol) (increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) or\n       sum by (protocol) (increase(tycho_integration_simulation_execution_reverts_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) * 0) +\n      (sum by (protocol) (increase(tycho_integration_simulation_execution_reverts_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) or\n       sum by (protocol) (increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range])) * 0)\n    )\n  ) * 100",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "% of successful simulations of execution per protocol",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "description": "Slippage between simulation and execution per protocol. Negative = got less than expected, Positive = got more than expected.\nThe x values are %",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "green",
+            "mode": "fixed"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "fieldMinMax": false,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 63
+      },
+      "id": 11,
+      "maxPerRow": 3,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.88,
+        "fullHighlight": true,
+        "groupWidth": 0.18,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "xField": "le",
+        "xTickLabelRotation": -30,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "10.4.1",
+      "repeat": "Protocol",
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": " label_replace(\n  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"-10\", container=~\".*$Chain.*\"}[$__range])),\n \"le\", \"-10\", \"\", \"\"\n  )",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "  label_replace(\n    sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"-1\", container=~\".*$Chain.*\"}[$__range])) - sum by \n  (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"-10\", container=~\".*$Chain.*\"}[$__range])),\n    \"le\", \"-1\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "S"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "  label_replace(\n    sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"-0.5\", container=~\".*$Chain.*\"}[$__range])) - sum by \n  (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"-1\", container=~\".*$Chain.*\"}[$__range])),\n    \"le\", \"-0.5\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "R"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "  label_replace(\n    sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"-0.25\", container=~\".*$Chain.*\"}[$__range])) - sum by \n  (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"-0.5\", container=~\".*$Chain.*\"}[$__range])),\n    \"le\", \"-0.25\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "N"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "  label_replace(\n    sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"-0.2\", container=~\".*$Chain.*\"}[$__range])) - sum by \n  (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"-0.25\", container=~\".*$Chain.*\"}[$__range])),\n    \"le\", \"-0.2\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(\n   (-  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\",\n  le=\"-0.2\", container=~\".*$Chain.*\"}[$__range])))+  sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"-0.15\", container=~\".*$Chain.*\"}[$__range])) ,\n   \"le\", \"-0.15\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(\n   (-  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\",\n  le=\"-0.15\", container=~\".*$Chain.*\"}[$__range])))+  sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"-0.1\", container=~\".*$Chain.*\"}[$__range])) ,\n   \"le\", \"-0.1\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(\n   (-  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\",\n  le=\"-0.1\", container=~\".*$Chain.*\"}[$__range])))+  sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"-0.05\", container=~\".*$Chain.*\"}[$__range])) ,\n   \"le\", \"-0.05\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(\n   (-  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\",\n  le=\"-0.05\", container=~\".*$Chain.*\"}[$__range])))+  sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"-0.01\", container=~\".*$Chain.*\"}[$__range])) ,\n   \"le\", \"-0.01\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(\n   (-  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\",\n  le=\"-0.01\", container=~\".*$Chain.*\"}[$__range])))+  sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"0\", container=~\".*$Chain.*\"}[$__range])) ,\n   \"le\", \"0\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(\n   (-  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\",\n  le=\"0\", container=~\".*$Chain.*\"}[$__range])))+  sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"0.01\", container=~\".*$Chain.*\"}[$__range])) ,\n   \"le\", \"0.01\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "H"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(\n   (-  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\",\n  le=\"0.01\", container=~\".*$Chain.*\"}[$__range])))+  sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"0.05\", container=~\".*$Chain.*\"}[$__range])) ,\n   \"le\", \"0.05\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "I"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(\n   (-  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\",\n  le=\"0.05\", container=~\".*$Chain.*\"}[$__range])))+  sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"0.1\", container=~\".*$Chain.*\"}[$__range])) ,\n   \"le\", \"0.1\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "J"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(\n   (-  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\",\n  le=\"0.1\", container=~\".*$Chain.*\"}[$__range])))+  sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"0.15\", container=~\".*$Chain.*\"}[$__range])) ,\n   \"le\", \"0.15\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "K"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(\n   (-  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\",\n  le=\"0.15\", container=~\".*$Chain.*\"}[$__range])))+  sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"0.2\", container=~\".*$Chain.*\"}[$__range])) ,\n   \"le\", \"0.2\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "L"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(\n   (-  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\",\n  le=\"0.2\", container=~\".*$Chain.*\"}[$__range])))+  sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"0.25\", container=~\".*$Chain.*\"}[$__range])) ,\n   \"le\", \"0.25\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "M"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(\n   (-  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\",\n  le=\"0.25\", container=~\".*$Chain.*\"}[$__range])))+  sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"0.5\", container=~\".*$Chain.*\"}[$__range])) ,\n   \"le\", \"0.5\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "O"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(\n   (-  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\",\n  le=\"0.5\", container=~\".*$Chain.*\"}[$__range])))+  sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"1\", container=~\".*$Chain.*\"}[$__range])) ,\n   \"le\", \"1\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "P"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(\n   (-  sum by (protocol) (increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\",\n  le=\"1\", container=~\".*$Chain.*\"}[$__range])))+  sum by (protocol)(increase(tycho_integration_simulation_execution_slippage_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", le=\"10\", container=~\".*$Chain.*\"}[$__range])) ,\n   \"le\", \"10\", \"\", \"\"\n  )",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "Q"
+        }
+      ],
+      "title": "Simulation vs Execution Slippage  - $Protocol",
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "last"
+            ]
+          }
+        },
+        {
+          "id": "extractFields",
+          "options": {
+            "source": "Field"
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "destinationType": "number",
+                "targetField": "le"
+              }
+            ],
+            "fields": {}
+          }
+        }
+      ],
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "description": "The error categories are hardcoded and limited to:\nStorage slot not found, TychoRouter__NegativeSlippage, Fee Token and other (for all other errors)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 220
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "protocol"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 194
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error_category"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 312
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 9,
+        "x": 0,
+        "y": 99
+      },
+      "id": 13,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "frameIndex": 71,
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Value"
+          }
+        ]
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "sum by (error_category, protocol) (tycho_integration_simulation_execution_reverts_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"})",
+          "format": "table",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "Simulation execution reverts aggregated by error type and protocol",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "keepLabels": [
+              "block",
+              "component_id",
+              "error_message",
+              "error_name",
+              "protocol"
+            ],
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": false,
+              "cluster": true,
+              "container": true,
+              "endpoint": true,
+              "instance": true,
+              "job": true,
+              "namespace": true,
+              "pod": true,
+              "prometheus": true
+            },
+            "includeByName": {},
+            "indexByName": {
+              "Time": 0,
+              "Value": 3,
+              "error_category": 2,
+              "protocol": 1
+            },
+            "renameByName": {}
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "description": "Median (p50) of signed gas estimation error in gas units per protocol: estimated - actual. Positive = overestimate, negative = underestimate.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 50000
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 109
+      },
+      "id": 71,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "Median gas error"
+          }
+        ]
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "tycho_integration_simulation_gas_signed_error_absolute{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", quantile=\"0.5\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Median gas estimation error per protocol (gas units)",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "keepLabels": [
+              "protocol"
+            ],
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "cluster": true,
+              "container": true,
+              "endpoint": true,
+              "instance": true,
+              "job": true,
+              "namespace": true,
+              "pod": true,
+              "prometheus": true,
+              "quantile": true
+            },
+            "includeByName": {},
+            "indexByName": {
+              "Time": 0,
+              "Value": 2,
+              "protocol": 1
+            },
+            "renameByName": {
+              "Value": "Median gas error"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "description": "Signed gas estimation error as a fraction of actual gas: (estimated - actual) / actual. \\\nPositive = overestimate, negative = underestimate",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "__systemRef": "hideSeriesFrom",
+            "matcher": {
+              "id": "byNames",
+              "options": {
+                "mode": "exclude",
+                "names": [
+                  "uniswap_v3"
+                ],
+                "prefix": "All except:",
+                "readOnly": true
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 6,
+        "y": 109
+      },
+      "id": 53,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.97,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "xField": "bucket",
+        "xTickLabelRotation": -30,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "label_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-1\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"01\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"< -100%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.75\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-1\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"02\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"-100% to -75%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.5\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.75\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"03\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"-75% to -50%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.25\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.5\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"04\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"-50% to -25%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.1\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.25\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"05\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"-25% to -10%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.08\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.1\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"06\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"-10% to -8%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.06\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.08\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"07\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"-8% to -6%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.04\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.06\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"08\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"-6% to -4%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.02\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.04\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"09\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"-4% to -2%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"-0.02\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"10\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"-2% to 0%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.02\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"11\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"0% to 2%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.04\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.02\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"12\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"2% to 4%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.06\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.04\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"13\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"4% to 6%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.08\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.06\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"14\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"6% to 8%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.1\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.08\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"15\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"8% to 10%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.25\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.1\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"16\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"10% to 25%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.5\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.25\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"17\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"25% to 50%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.75\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.5\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"18\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"50% to 75%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"1\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"0.75\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"19\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \"75% to 100%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  label_replace(\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"+Inf\"\n      }[$__range])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{\n        namespace=\"$Namespace\", protocol=~\"$Protocol\",\n        container=~\".*$Chain.*\",\n        le=\"1\"\n      }[$__range])\n    ),\n    \"bucket_order\", \"20\", \"protocol\", \".*\"\n  ),\n  \"bucket\", \">100%\", \"protocol\", \".*\"\n)",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "I"
+        }
+      ],
+      "title": "Signed gas estimation error ",
+      "transformations": [
+        {
+          "id": "groupingToMatrix",
+          "options": {
+            "columnField": "protocol",
+            "rowField": "bucket",
+            "valueField": "Value"
+          }
+        },
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "bucket\\\\protocol",
+            "renamePattern": "bucket"
+          }
+        }
+      ],
+      "type": "barchart"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 117
+      },
+      "id": 70,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "description": "Shows the percentage of successful simulations grouped by gas estimation error range per protocol.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 60,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "always",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "normal"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^<= -100%$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#7f0000",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^-100% to -75%$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#b30000",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "-75% to -50%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#e7562a",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "-50% to -25%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#ff7318",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "-25% to -10%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#fc8d59",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "-10% to -8%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#f59e0b",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "-8% to -6%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#eab308",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "-6% to -4%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#84cc16",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "-4% to -2%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#22c55e",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "-2% to 0%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#238b45",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "0% to 2%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#238b45",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "2% to 4%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#22c55e",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "4% to 6%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#84cc16",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "6% to 8%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#eab308",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "8% to 10%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#f59e0b",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "10% to 25%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#fc8d59",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "25% to 50%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#ff7318",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "50% to 75%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#e7562a",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "75% to 100%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#980006",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": ">100%"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#7f0000",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 110
+          },
+          "id": 54,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "10.4.1",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "P4169E866C3094E38"
+              },
+              "editorMode": "code",
+              "exemplar": false,
+              "expr": "label_replace(\n  sum by (protocol) (\n    increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-1\"}[5m])\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"01 <= -100%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.75\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-1\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"02 -100% to -75%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.5\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.75\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"03 -75% to -50%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.25\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.5\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"04 -50% to -25%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.1\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.25\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"05 -25% to -10%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.08\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.1\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"06 -10% to -8%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.06\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.08\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"07 -8% to -6%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.04\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.06\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"08 -6% to -4%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.02\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.04\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"09 -4% to -2%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"-0.02\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"10 -2% to 0%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.02\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"11 0% to 2%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.04\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.02\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"12 2% to 4%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.06\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.04\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"13 4% to 6%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.08\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.06\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"14 6% to 8%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.1\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.08\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"15 8% to 10%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.25\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.1\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"16 10% to 25%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.5\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.25\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"17 25% to 50%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.75\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.5\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"18 50% to 75%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"1\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"0.75\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"19 75% to 100%\", \"protocol\", \".*\"\n)\nor\nlabel_replace(\n  (\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"+Inf\"}[5m])\n    )\n    -\n    sum by (protocol) (\n      increase(tycho_integration_simulation_gas_signed_error_ratio_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", le=\"1\"}[5m])\n    )\n  )\n  / ignoring(bucket) group_left\n  sum by (protocol) (\n    increase(tycho_integration_simulation_execution_success_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[5m])\n  )\n  * 100,\n  \"bucket\", \"20 >100%\", \"protocol\", \".*\"\n)",
+              "format": "time_series",
+              "hide": false,
+              "instant": false,
+              "legendFormat": "{{bucket}}",
+              "range": true,
+              "refId": "I"
+            }
+          ],
+          "title": "Gas Error Ratio Distribution",
+          "transformations": [
+            {
+              "id": "groupingToMatrix",
+              "options": {
+                "columnField": "protocol",
+                "rowField": "bucket",
+                "valueField": "Value"
+              }
+            },
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "bucket\\\\protocol",
+                "renamePattern": "bucket"
+              }
+            },
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "^(\\d+\\s+)(.*)$",
+                "renamePattern": "$2"
+              }
+            }
+          ],
+          "type": "timeseries"
+        }
+      ],
+      "title": "Debugging",
+      "type": "row"
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 39,
+  "tags": [],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "dev-tycho",
+          "value": "dev-tycho"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "P4169E866C3094E38"
+        },
+        "definition": "label_values(namespace)",
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "name": "Namespace",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(namespace)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "/^[^-]+-tycho(?:-fynd)?$/",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "ethereum",
+          "value": "ethereum"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "P4169E866C3094E38"
+        },
+        "definition": "label_values(chain)",
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "name": "Chain",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(chain)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "P4169E866C3094E38"
+        },
+        "definition": "label_values(tycho_integration_protocol_sync_state{namespace=\"$Namespace\", container=~\".*$Chain.*\"},protocol)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": false,
+        "name": "Protocol",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(tycho_integration_protocol_sync_state{namespace=\"$Namespace\", container=~\".*$Chain.*\"},protocol)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Integration test",
+  "uid": "ceztze8otfk00c",
+  "version": 1,
+  "weekStart": ""
+}
