@@ -22,8 +22,10 @@ postgres/
 ├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
 ├── orm.rs              — Diesel Queryable/Insertable structs for every table
 ├── schema.rs           — auto-generated Diesel table! macros
-└── instance/           — per-instance `tycho` schema, not yet read or written by the gateways
+└── instance/           — per-instance `tycho` schema; written by gateways bound to an instance, not read yet
     ├── mod.rs          — `InstanceId` newtype; joins with the shared `public` tables
+    ├── origins.rs      — BatchOrigins: block timestamp and tx index of each change in a batch
+    ├── writer.rs       — InstanceWriter: executes a batch's ops on the tables of one instance
     ├── orm.rs          — Diesel row and insert structs for every `tycho` table
     ├── schema.rs       — auto-generated (`[print_schema.instance]` in diesel.toml)
     └── tests.rs        — schema behaviour: leaves, FKs, partition routing, history days
@@ -46,6 +48,11 @@ instances. No table has a DEFAULT partition.
   history tables.
 - `public.protocol_system.active_instance_id` records which instance readers see.
   `public.token.address` is how instance tables refer to tokens.
+- `CachedGateway::for_instance(id)` makes a gateway whose batches go through
+  `instance::writer::InstanceWriter` instead of the old SQL. The writer stores no transactions:
+  rows take their block timestamp and tx index from the batch (`instance::origins`). It writes
+  blocks and `tycho.extraction_state` so far; any other op fails the whole batch with
+  `StorageError::Unsupported`.
 
 ## Architecture
 
