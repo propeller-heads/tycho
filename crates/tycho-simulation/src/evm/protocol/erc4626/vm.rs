@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Debug, sync::LazyLock};
+use std::{collections::HashMap, fmt::Debug, ops::Range, sync::LazyLock};
 
 use alloy::{
     core::sol,
@@ -39,8 +39,7 @@ sol! {
 /// Base slots of the share-balance mapping in the vault layouts in use: a plain Solidity mapping
 /// declared among the first ten slots (sDAI at 1, sUSDS, sUSDC and stUSDS at 2, the Spark vaults
 /// at 9).
-static SHARE_BALANCE_MAPPING_SLOTS: LazyLock<Vec<SlotId>> =
-    LazyLock::new(|| (0u64..10).map(U256::from).collect());
+const SHARE_BALANCE_MAPPING_SLOTS: Range<u64> = 0..10;
 
 /// Marker written into the candidate balance slots; far above any real share balance.
 static BALANCE_SLOT_SENTINEL: LazyLock<U256> = LazyLock::new(|| U256::from(0x5e17_1e10_u64) << 160);
@@ -149,7 +148,7 @@ where
     <D as EngineDatabaseInterface>::Error: Debug,
 {
     let balance_slot = find_share_balance_slot(vm_engine, pool, owner)?;
-    let whole_supply_balance = HashMap::from([(
+    let whole_supply_overrides = HashMap::from([(
         AlloyAddress::from_bytes(pool),
         HashMap::from([(balance_slot, total_supply)]),
     )]);
@@ -158,16 +157,16 @@ where
         pool,
         owner,
         &maxRedeemCall { owner },
-        Some(whole_supply_balance),
+        Some(whole_supply_overrides),
         "maxRedeem",
     )
 }
 
 /// Returns the storage slot of the vault holding `owner`'s share balance.
 ///
-/// Writes a distinct sentinel into `owner`'s entry of every mapping in
-/// `SHARE_BALANCE_MAPPING_SLOTS` and reads it back through `balanceOf`, in a single call. Fails
-/// when the vault keeps balances anywhere else.
+/// Writes `BALANCE_SLOT_SENTINEL + base slot` into `owner`'s entry of a Solidity mapping at every
+/// base slot in `SHARE_BALANCE_MAPPING_SLOTS` and reads it back through `balanceOf`, in a single
+/// call. Fails when `balanceOf` returns none of them.
 fn find_share_balance_slot<D: EngineDatabaseInterface + Clone + Debug>(
     vm_engine: &SimulationEngine<D>,
     pool: &Address,
@@ -177,32 +176,35 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
+    let balance_slot = |mapping_slot: u64| {
+        get_storage_slot_index_at_key(owner, U256::from(mapping_slot), ContractCompiler::Solidity)
+    };
     let mut candidates: Overwrites = HashMap::new();
-    for (index, mapping_slot) in SHARE_BALANCE_MAPPING_SLOTS
-        .iter()
-        .enumerate()
-    {
-        let slot = get_storage_slot_index_at_key(owner, *mapping_slot, ContractCompiler::Solidity);
-        candidates.insert(slot, *BALANCE_SLOT_SENTINEL + U256::from(index));
+    for mapping_slot in SHARE_BALANCE_MAPPING_SLOTS {
+        candidates
+            .insert(balance_slot(mapping_slot), *BALANCE_SLOT_SENTINEL + U256::from(mapping_slot));
     }
-    let balance = simulate_and_decode_call(
+    let balance: U256 = simulate_and_decode_call(
         vm_engine,
         pool,
         owner,
         &balanceOfCall { owner },
-        Some(HashMap::from([(AlloyAddress::from_bytes(pool), candidates.clone())])),
+        Some(HashMap::from([(AlloyAddress::from_bytes(pool), candidates)])),
         "balanceOf",
     )?;
 
-    for (slot, sentinel) in candidates {
-        if sentinel == balance {
-            return Ok(slot);
-        }
-    }
-    Err(SimulationError::FatalError(format!(
-        "Vault {pool} keeps share balances outside the known mapping slots (balanceOf returned \
-         {balance}); add its layout to SHARE_BALANCE_MAPPING_SLOTS"
-    )))
+    balance
+        .checked_sub(*BALANCE_SLOT_SENTINEL)
+        .and_then(|offset| u64::try_from(offset).ok())
+        .filter(|mapping_slot| SHARE_BALANCE_MAPPING_SLOTS.contains(mapping_slot))
+        .map(balance_slot)
+        .ok_or_else(|| {
+            SimulationError::FatalError(format!(
+                "Vault {pool}: balanceOf returned {balance}, none of the sentinels written into a \
+                 Solidity mapping at base slots {SHARE_BALANCE_MAPPING_SLOTS:?}; its share \
+                 balances are stored elsewhere or transformed on read"
+            ))
+        })
 }
 
 fn simulate_and_decode_call<D, Call, Ret>(
@@ -239,6 +241,7 @@ mod test {
     use alloy::primitives::{Address as AlloyAddress, Bytes as AlloyBytes, U256};
     use num_bigint::BigUint;
     use revm::{bytecode::Bytecode, state::AccountInfo};
+    use rstest::rstest;
     use tycho_client::feed::BlockHeader;
     use tycho_common::{
         models::{token::Token, Chain},
@@ -246,7 +249,7 @@ mod test {
         Bytes,
     };
 
-    use super::find_share_balance_slot;
+    use super::{decode_from_vm, find_share_balance_slot};
     use crate::evm::{
         engine_db::{
             engine_db_interface::EngineDatabaseInterface,
@@ -254,7 +257,7 @@ mod test {
             tycho_db::PreCachedDB,
             utils::{get_client, get_runtime},
         },
-        protocol::{erc4626::vm::decode_from_vm, vm::utils::get_storage_slot_index_at_key},
+        protocol::vm::utils::get_storage_slot_index_at_key,
         simulation::SimulationEngine,
         ContractCompiler,
     };
@@ -263,9 +266,9 @@ mod test {
     const OWNER: AlloyAddress = AlloyAddress::repeat_byte(0xab);
 
     /// An engine holding `OWNER` and, at `VAULT`, a contract that runs `runtime` for any call.
-    fn engine_with_vault(runtime: &'static [u8]) -> SimulationEngine<PreCachedDB> {
+    fn engine_with_vault(runtime: &[u8]) -> SimulationEngine<PreCachedDB> {
         let state = PreCachedDB::new().expect("PreCachedDB creation succeeds");
-        let bytecode = Bytecode::new_raw(AlloyBytes::from_static(runtime));
+        let bytecode = Bytecode::new_raw(AlloyBytes::copy_from_slice(runtime));
         let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
         state
             .init_account(AlloyAddress::from_str(VAULT).unwrap(), account, None, true)
@@ -282,25 +285,50 @@ mod test {
         SimulationEngine::new(state, false)
     }
 
-    #[test]
-    fn test_find_share_balance_slot_in_solidity_mapping() {
-        // Returns `sload(keccak256(abi.encode(calldataload(4), 2)))`: a `balanceOf` reading a
-        // mapping declared at slot 2.
+    #[rstest]
+    #[case::sdai(1)]
+    #[case::susds_susdc_stusds(2)]
+    #[case::spark(9)]
+    fn test_find_share_balance_slot_in_solidity_mapping(#[case] mapping_slot: u8) {
+        // Returns `sload(keccak256(abi.encode(calldataload(4), mapping_slot)))`: a `balanceOf`
+        // reading a mapping declared at `mapping_slot`.
         let engine = engine_with_vault(&[
-            0x60, 0x04, 0x35, // CALLDATALOAD(4)
-            0x60, 0x00, 0x52, // MSTORE(0, owner)
-            0x60, 0x02, 0x60, 0x20, 0x52, // MSTORE(32, 2)
-            0x60, 0x40, 0x60, 0x00, 0x20, // KECCAK256(0, 64)
+            0x60,
+            0x04,
+            0x35, // CALLDATALOAD(4)
+            0x60,
+            0x00,
+            0x52, // MSTORE(0, owner)
+            0x60,
+            mapping_slot,
+            0x60,
+            0x20,
+            0x52, // MSTORE(32, mapping_slot)
+            0x60,
+            0x40,
+            0x60,
+            0x00,
+            0x20, // KECCAK256(0, 64)
             0x54, // SLOAD
-            0x60, 0x00, 0x52, // MSTORE(0, balance)
-            0x60, 0x20, 0x60, 0x00, 0xf3, // RETURN(0, 32)
+            0x60,
+            0x00,
+            0x52, // MSTORE(0, balance)
+            0x60,
+            0x20,
+            0x60,
+            0x00,
+            0xf3, // RETURN(0, 32)
         ]);
         let slot = find_share_balance_slot(&engine, &Bytes::from_str(VAULT).unwrap(), OWNER)
-            .expect("slot 2 is a known layout");
+            .expect("a known layout");
 
         assert_eq!(
             slot,
-            get_storage_slot_index_at_key(OWNER, U256::from(2), ContractCompiler::Solidity)
+            get_storage_slot_index_at_key(
+                OWNER,
+                U256::from(mapping_slot),
+                ContractCompiler::Solidity
+            )
         );
     }
 
@@ -317,7 +345,7 @@ mod test {
         let Err(err) = result else { panic!("found a slot in a vault without balances") };
         assert!(
             err.to_string()
-                .contains("outside the known mapping slots"),
+                .contains("balanceOf returned 7, none of the sentinels"),
             "{err}"
         );
     }
@@ -365,8 +393,29 @@ mod test {
         .expect("decoding failed");
     }
 
-    fn test_block() -> BlockHeader {
-        BlockHeader {
+    /// The redeem limit decoded at block 26332682 equals the vault's `maxRedeem` for an owner of
+    /// the whole supply, read from chain at that block.
+    #[rstest]
+    #[case::stusds_unused_funds(
+        // 10.7% of the 166.9M stUSDS supply: the rest is lent to Lockstake borrowers.
+        "0x99cd4ec3f88a45940936f469e4bb72a2a701eeb9",
+        "stUSDS",
+        17_863_966_528_431_831_941_791_025
+    )]
+    #[case::susds_whole_supply(
+        "0xa3931d71877c0e7a3148cb7eb4463524fec27fbd",
+        "sUSDS",
+        4_072_928_603_697_856_501_415_619_567
+    )]
+    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
+    fn test_redeem_limit_is_max_redeem_of_whole_supply(
+        #[case] vault: &str,
+        #[case] symbol: &str,
+        #[case] expected: u128,
+    ) {
+        let usds = token("0xdc035d45d973e3ec169d2276ddab16f1e407384f", "USDS", 18);
+        let share = token(vault, symbol, 18);
+        let block = BlockHeader {
             number: 26332682,
             hash: Bytes::from_str(
                 "0xaf14ba2c3bc28c67197fbf5b38f3e2f3aed42b174f86e612ea219308a670a2bd",
@@ -374,46 +423,15 @@ mod test {
             .unwrap(),
             timestamp: 1793689739,
             ..Default::default()
-        }
-    }
+        };
 
-    /// Asserts the redeem limit decoded at block 26332682 equals the vault's `maxRedeem` for an
-    /// owner of the whole supply, read from chain at that block.
-    fn assert_redeem_limit(vault: &str, asset: &Token, share: &Token, expected: u128) {
-        let state = decode_from_vm(
-            &Bytes::from_str(vault).unwrap(),
-            asset,
-            share,
-            rpc_engine(test_block()),
-        )
-        .expect("decoding failed");
+        let state =
+            decode_from_vm(&Bytes::from_str(vault).unwrap(), &usds, &share, rpc_engine(block))
+                .expect("decoding failed");
 
         let (max_shares_in, _) = state
-            .get_limits(share.address.clone(), asset.address.clone())
+            .get_limits(share.address, usds.address)
             .expect("limits");
         assert_eq!(max_shares_in, BigUint::from(expected));
-    }
-
-    #[test]
-    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
-    fn test_stusds_redeem_limit_is_unused_funds() {
-        // 10.7% of the 166.9M stUSDS supply: the rest is lent to Lockstake borrowers.
-        assert_redeem_limit(
-            "0x99cd4ec3f88a45940936f469e4bb72a2a701eeb9",
-            &token("0xdc035d45d973e3ec169d2276ddab16f1e407384f", "USDS", 18),
-            &token("0x99cd4ec3f88a45940936f469e4bb72a2a701eeb9", "stUSDS", 18),
-            17_863_966_528_431_831_941_791_025,
-        );
-    }
-
-    #[test]
-    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
-    fn test_susds_redeem_limit_is_whole_supply() {
-        assert_redeem_limit(
-            "0xa3931d71877c0e7a3148cb7eb4463524fec27fbd",
-            &token("0xdc035d45d973e3ec169d2276ddab16f1e407384f", "USDS", 18),
-            &token("0xa3931d71877c0e7a3148cb7eb4463524fec27fbd", "sUSDS", 18),
-            4_072_928_603_697_856_501_415_619_567,
-        );
     }
 }
