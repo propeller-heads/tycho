@@ -108,7 +108,7 @@ pub const SUBSIDY_GAS: u64 = 65_000;
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
 pub const PROTOCOLS_OUTPUT_TO_ROUTER: &[&str] =
-    &["vm:curve", "rocketpool", "fluid_v1", "native_wrapper", "lido_v4"];
+    &["vm:curve", "rocketpool", "fluid_v1", "native_wrapper", "lido_v4", "rfq:euclid"];
 
 /// Mainnet stETH, the only Lido input token whose leg the router has to approve. Lido is
 /// configured on mainnet only, so a plain constant is enough.
@@ -569,6 +569,24 @@ mod tests {
         // hop1 input transfer (router → pool)   60_000  ← vm:curve is not optimizable/callback
         // hop1 approval (ProtocolWillDebit)     25_000  ← TOKEN_APPROVAL_GAS
         // hop1 output to router                 60_000  ← vm:curve in OUTPUT_TO_ROUTER
+        // hop2 pool gas                        100_000
+        // hop2 input transfer                       0  ← uniswap_v2 is optimizable
+        // fee output transfer (last hop)        60_000  ← uniswap_v2 not in OUTPUT_TO_ROUTER
+        assert_eq!(gas, BigUint::from(445_000u64));
+    }
+
+    #[test]
+    fn test_sequential_two_hops_signed_quote_output_to_router() {
+        // Sequential rfq:euclid → uniswap_v2:
+        // the 1inch router pays the TychoRouter, which sends the output on to the next pool
+        let solution = make_solution(vec![make_swap("rfq:euclid"), make_swap("uniswap_v2")]);
+        let gas = estimate_gas_usage(&solution, Strategy::Sequential);
+
+        // user transfer (first hop, TransferFrom) 40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // hop1 pool gas                        100_000
+        // hop1 input transfer (router → pool)   60_000  ← rfq:euclid is not optimizable/callback
+        // hop1 approval (ProtocolWillDebit)     25_000  ← TOKEN_APPROVAL_GAS
+        // hop1 output to router                 60_000  ← rfq:euclid in OUTPUT_TO_ROUTER
         // hop2 pool gas                        100_000
         // hop2 input transfer                       0  ← uniswap_v2 is optimizable
         // fee output transfer (last hop)        60_000  ← uniswap_v2 not in OUTPUT_TO_ROUTER
