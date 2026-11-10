@@ -3,5 +3,7 @@
 mod abi;
 mod modules;
 mod pb;
+#[cfg(test)]
+mod pb_tests;
 
 pub use modules::*;

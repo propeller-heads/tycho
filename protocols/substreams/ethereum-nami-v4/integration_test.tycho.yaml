@@ -8,7 +8,7 @@ initialized_accounts:
 tests:
   - name: test_weth_usdc_pool
     start_block: 26171941
-    stop_block: 26187031
+    stop_block: 26330000
     expected_components:
       - id: "0x152cfc187a0c0695eb946c3a2f0a8c6604f0026d"
         tokens:

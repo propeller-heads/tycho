@@ -19,7 +19,7 @@ pub struct TickDelta {
     /// The liquidity net delta of this tick. Bigint encoded as signed big endian bytes.
     #[prost(bytes="vec", tag="3")]
     pub liquidity_net_delta: ::prost::alloc::vec::Vec<u8>,
-    /// Used to determine the order of the balance changes. Necessary for the balance store.
+    /// The log's ordinal, which orders this change within the block.
     #[prost(uint64, tag="4")]
     pub ordinal: u64,
     #[prost(message, optional, tag="5")]
@@ -48,7 +48,7 @@ pub struct LiquidityChange {
     /// The type of update, can be absolute or delta.
     #[prost(enumeration="LiquidityChangeType", tag="3")]
     pub change_type: i32,
-    /// Used to determine the order of the balance changes. Necessary for the balance store.
+    /// The log's ordinal, which orders this change within the block.
     #[prost(uint64, tag="4")]
     pub ordinal: u64,
     #[prost(message, optional, tag="5")]
@@ -74,13 +74,9 @@ pub mod events {
         pub log_ordinal: u64,
         #[prost(bytes="vec", tag="12")]
         pub pool_address: ::prost::alloc::vec::Vec<u8>,
-        #[prost(bytes="vec", tag="13")]
-        pub token0: ::prost::alloc::vec::Vec<u8>,
-        #[prost(bytes="vec", tag="14")]
-        pub token1: ::prost::alloc::vec::Vec<u8>,
         #[prost(message, optional, tag="15")]
         pub transaction: ::core::option::Option<::tycho_substreams::prelude::Transaction>,
-        #[prost(oneof="pool_event::Typ", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
+        #[prost(oneof="pool_event::Typ", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 17, 18, 19")]
         pub typ: ::core::option::Option<pool_event::Typ>,
     }
     /// Nested message and enum types in `PoolEvent`.

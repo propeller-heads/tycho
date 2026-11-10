@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "robinhood_nami_v4"
-  version: v0.2.0
+  version: v0.1.0
   url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/ethereum-nami-v4"
 
 protobuf:
@@ -52,7 +52,8 @@ modules:
   - name: map_balance_changes
     kind: map
     inputs:
-      - map: map_events
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
     output:
       type: proto:tycho.evm.v1.BlockBalanceDeltas
 

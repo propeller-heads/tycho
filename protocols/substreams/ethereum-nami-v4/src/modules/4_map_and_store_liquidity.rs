@@ -72,11 +72,23 @@ pub fn store_liquidity(ticks_deltas: LiquidityChanges, store: StoreSetSumBigInt)
 }
 
 fn maybe_current_tick(ty: Typ) -> Option<i32> {
-    Some(match ty {
-        Typ::Initialize(init) => init.tick,
-        Typ::Swap(swap) => swap.tick,
-        _ => return None,
-    })
+    match ty {
+        Typ::Initialize(init) => Some(init.tick),
+        Typ::Swap(swap) => Some(swap.tick),
+        // Spelled out so a new event type must be classified here.
+        Typ::Mint(_) |
+        Typ::Collect(_) |
+        Typ::Burn(_) |
+        Typ::Flash(_) |
+        Typ::Skim(_) |
+        Typ::Fee(_) |
+        Typ::Plugin(_) |
+        Typ::PluginConfig(_) |
+        Typ::MevxRouter(_) |
+        Typ::MinGasLeft(_) |
+        Typ::CallGasBudget(_) |
+        Typ::Incentive(_) => None,
+    }
 }
 
 fn maybe_liquidity_change(
@@ -108,6 +120,17 @@ fn maybe_liquidity_change(
             BigInt::from_unsigned_bytes_be(&swap.liquidity).to_signed_bytes_be(),
             LiquidityChangeType::Absolute,
         )),
-        _ => None,
+        // Spelled out so a new event type must be classified here.
+        Typ::Initialize(_) |
+        Typ::Collect(_) |
+        Typ::Flash(_) |
+        Typ::Skim(_) |
+        Typ::Fee(_) |
+        Typ::Plugin(_) |
+        Typ::PluginConfig(_) |
+        Typ::MevxRouter(_) |
+        Typ::MinGasLeft(_) |
+        Typ::CallGasBudget(_) |
+        Typ::Incentive(_) => None,
     }
 }

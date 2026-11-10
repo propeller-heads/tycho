@@ -104,16 +104,10 @@ pub fn map_protocol_changes(
         };
         let net = read(net_liquidity_key(&tick_delta.pool_address, tick_delta.tick_index));
         let gross = read(gross_liquidity_key(&tick_delta.pool_address, tick_delta.tick_index));
-        let gross_before =
-            gross.clone() - BigInt::from_signed_bytes_be(&tick_delta.liquidity_gross_delta);
-
-        let change = if gross.is_zero() {
-            ChangeType::Deletion
-        } else if gross_before.is_zero() {
-            ChangeType::Creation
-        } else {
-            ChangeType::Update
-        };
+        let change = tick_change_type(
+            &gross,
+            &BigInt::from_signed_bytes_be(&tick_delta.liquidity_gross_delta),
+        );
         let tx = tick_delta.transaction.unwrap();
         let builder = transaction_changes
             .entry(tx.index)
@@ -161,10 +155,27 @@ pub fn map_protocol_changes(
     // Indexer whenever a pool enables it, so the plugin's code and storage (and the pool's) are
     // indexed for fee simulation. It is registered on `PluginConfig` rather than on `Plugin`
     // because the plugin's oracle is only initialized once the pool is, and a trace before that
-    // reverts. It is registered again on every swap: a plugin that refuses swaps until a start
-    // time fails its trace too, and the indexer traces a failed entrypoint again when it is
-    // emitted again, while one it already traced costs it a lookup.
+    // reverts. It is registered again on every swap, on purpose: a plugin that refuses swaps
+    // until a start time fails its trace, and the indexer retraces a failed entrypoint each time
+    // it is emitted again, outside its retry cap, so the pool is picked up once trading opens.
+    // An entrypoint already traced costs the indexer a few database statements per swap.
     let mut registered_entrypoints = HashSet::new();
+
+    // Settings the pool's current plugin emitted in this block. They survive a plugin switch
+    // in a later transaction of the block, since they are the new plugin's.
+    let mut settings_this_block: HashMap<Vec<u8>, HashSet<&'static str>> = HashMap::new();
+    for event in &plugin_events.pool_events {
+        if let Some(name) = event
+            .typ
+            .as_ref()
+            .and_then(plugin_setting_name)
+        {
+            settings_this_block
+                .entry(event.pool_address.clone())
+                .or_default()
+                .insert(name);
+        }
+    }
     for event in events.pool_events {
         let typ = event.typ.unwrap();
         let tx = event.transaction.unwrap();
@@ -178,7 +189,19 @@ pub fn map_protocol_changes(
             Typ::Swap(_) => pool_plugins_store
                 .get_at(event.log_ordinal, pool_config_key(&event.pool_address))
                 .and_then(|config| config.parse().ok()),
-            _ => None,
+            // Spelled out so a new event type must be classified here.
+            Typ::Initialize(_) |
+            Typ::Mint(_) |
+            Typ::Collect(_) |
+            Typ::Burn(_) |
+            Typ::Flash(_) |
+            Typ::Skim(_) |
+            Typ::Fee(_) |
+            Typ::Plugin(_) |
+            Typ::MevxRouter(_) |
+            Typ::MinGasLeft(_) |
+            Typ::CallGasBudget(_) |
+            Typ::Incentive(_) => None,
         };
         if plugin_config.is_some_and(|config| config & BEFORE_SWAP_FLAG != 0) {
             let plugin = decode_plugin(pool_plugins_store.get_at(event.log_ordinal, &pool));
@@ -191,15 +214,19 @@ pub fn map_protocol_changes(
             }
         }
 
-        // A pool that switches plugin drops the detached plugin's settings. The new plugin's own
-        // events are applied after this loop, so whatever it emits in this block stays.
+        // A pool that switches plugin drops the detached plugin's settings, except the ones the
+        // new plugin set in this block. A setting it emitted in an earlier block is lost.
         if let Typ::Plugin(plugin) = &typ {
             let previous = decode_plugin(pool_plugins_store.get_first(&pool));
             if previous.is_some_and(|previous| previous != plugin.plugin) {
-                builder.add_entity_change(&EntityChanges {
-                    component_id: event.pool_address.to_hex(),
-                    attributes: plugin_settings_reset(),
-                });
+                let attributes =
+                    plugin_settings_reset(settings_this_block.get(&event.pool_address));
+                if !attributes.is_empty() {
+                    builder.add_entity_change(&EntityChanges {
+                        component_id: event.pool_address.to_hex(),
+                        attributes,
+                    });
+                }
             }
         }
 
@@ -237,7 +264,9 @@ pub fn map_protocol_changes(
 }
 
 /// Entrypoint tracing the plugin's `beforeSwap` as the pool calls it: a one-wei zero-for-one
-/// swap, which touches the same oracle, fee configuration and pool state as any other swap.
+/// swap, which touches the same oracle, fee configuration and pool state as any other swap. The
+/// other direction reads its premium and override from the same fee-override layout and reaches
+/// the same fee source, so one direction loads everything the other reads.
 fn before_swap_entrypoint(pool: &[u8], plugin: Vec<u8>) -> (EntryPoint, EntryPointParams) {
     let calldata = BeforeSwap {
         sender: pool.to_vec(),
@@ -257,6 +286,18 @@ fn before_swap_entrypoint(pool: &[u8], plugin: Vec<u8>) -> (EntryPoint, EntryPoi
     )
 }
 
+/// A tick is created when its gross liquidity turns positive and deleted when it returns to
+/// zero, whatever its net liquidity does.
+fn tick_change_type(gross: &BigInt, gross_delta: &BigInt) -> ChangeType {
+    if gross.is_zero() {
+        ChangeType::Deletion
+    } else if (gross.clone() - gross_delta.clone()).is_zero() {
+        ChangeType::Creation
+    } else {
+        ChangeType::Update
+    }
+}
+
 /// A stored plugin address, or `None` when the store has no entry or holds the zero address.
 fn decode_plugin(stored: Option<String>) -> Option<Vec<u8>> {
     stored
@@ -268,14 +309,47 @@ fn update_attribute(name: &str, value: Vec<u8>) -> Attribute {
     Attribute { name: name.to_string(), value, change: ChangeType::Update.into() }
 }
 
-/// The attributes a pool's plugin sets for itself, cleared when the pool switches plugin.
-fn plugin_settings_reset() -> Vec<Attribute> {
-    vec![
+/// The attribute a plugin setting event updates, if the event is one.
+fn plugin_setting_name(typ: &Typ) -> Option<&'static str> {
+    match typ {
+        Typ::MevxRouter(_) => Some("mevx_router"),
+        Typ::MinGasLeft(_) => Some("min_gas_left"),
+        Typ::CallGasBudget(_) => Some("call_gas_budget"),
+        Typ::Incentive(_) => Some("incentive"),
+        Typ::Initialize(_) |
+        Typ::Mint(_) |
+        Typ::Collect(_) |
+        Typ::Burn(_) |
+        Typ::Swap(_) |
+        Typ::Flash(_) |
+        Typ::Skim(_) |
+        Typ::Fee(_) |
+        Typ::Plugin(_) |
+        Typ::PluginConfig(_) => None,
+    }
+}
+
+/// The attributes a pool's plugin sets for itself, cleared when the pool switches plugin, less
+/// the ones in `keep`.
+fn plugin_settings_reset(keep: Option<&HashSet<&'static str>>) -> Vec<Attribute> {
+    [
         update_attribute("mevx_router", vec![]),
         update_attribute("min_gas_left", BigInt::from(0).to_bytes_be().1),
         update_attribute("call_gas_budget", BigInt::from(0).to_bytes_be().1),
         update_attribute("incentive", vec![]),
     ]
+    .into_iter()
+    .filter(|attribute| !keep.is_some_and(|keep| keep.contains(attribute.name.as_str())))
+    .collect()
+}
+
+/// An address attribute, empty for the zero address so "none" has one spelling.
+fn address_attribute(address: Vec<u8>) -> Vec<u8> {
+    if address.iter().all(|byte| *byte == 0) {
+        vec![]
+    } else {
+        address
+    }
 }
 
 fn event_to_attributes_updates(ty: Typ) -> Vec<Attribute> {
@@ -299,10 +373,104 @@ fn event_to_attributes_updates(ty: Typ) -> Vec<Attribute> {
                     .1,
             )]
         }
-        Typ::MevxRouter(router) => vec![update("mevx_router", router.router)],
+        Typ::MevxRouter(router) => vec![update("mevx_router", address_attribute(router.router))],
         Typ::MinGasLeft(gas) => vec![update("min_gas_left", gas.min_gas_left)],
         Typ::CallGasBudget(gas) => vec![update("call_gas_budget", gas.call_gas_budget)],
-        Typ::Incentive(incentive) => vec![update("incentive", incentive.incentive)],
+        Typ::Incentive(incentive) => {
+            vec![update("incentive", address_attribute(incentive.incentive))]
+        }
         Typ::Mint(_) | Typ::Burn(_) | Typ::Collect(_) | Typ::Flash(_) | Typ::Skim(_) => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pb::nami::v4::events::pool_event;
+
+    #[test]
+    fn test_tick_is_created_on_first_gross_liquidity_and_deleted_on_last() {
+        let big = |value: i64| BigInt::from(value);
+
+        assert_eq!(tick_change_type(&big(1_000), &big(1_000)), ChangeType::Creation);
+        assert_eq!(tick_change_type(&big(1_500), &big(500)), ChangeType::Update);
+        assert_eq!(tick_change_type(&big(1_000), &big(-500)), ChangeType::Update);
+        assert_eq!(tick_change_type(&big(0), &big(-1_000)), ChangeType::Deletion);
+    }
+
+    #[test]
+    fn test_plugin_settings_reset_clears_every_plugin_scoped_attribute() {
+        let reset: Vec<_> = plugin_settings_reset(None)
+            .into_iter()
+            .map(|attribute| (attribute.name, attribute.value, attribute.change))
+            .collect();
+
+        let update = ChangeType::Update as i32;
+        assert_eq!(
+            reset,
+            vec![
+                ("mevx_router".to_string(), vec![], update),
+                ("min_gas_left".to_string(), vec![0], update),
+                ("call_gas_budget".to_string(), vec![0], update),
+                ("incentive".to_string(), vec![], update),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_plugin_settings_reset_keeps_what_the_new_plugin_set_this_block() {
+        let keep = HashSet::from(["min_gas_left", "incentive"]);
+
+        let names: Vec<_> = plugin_settings_reset(Some(&keep))
+            .into_iter()
+            .map(|attribute| attribute.name)
+            .collect();
+
+        assert_eq!(names, vec!["mevx_router".to_string(), "call_gas_budget".to_string()]);
+    }
+
+    #[test]
+    fn test_zero_address_settings_are_stored_empty() {
+        let router = event_to_attributes_updates(Typ::MevxRouter(pool_event::MevxRouter {
+            router: vec![0; 20],
+        }));
+        let incentive = event_to_attributes_updates(Typ::Incentive(pool_event::Incentive {
+            incentive: vec![0; 20],
+        }));
+
+        assert_eq!(router[0].value, Vec::<u8>::new());
+        assert_eq!(incentive[0].value, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn test_plugin_events_become_their_attributes() {
+        let cases = [
+            (
+                Typ::MevxRouter(pool_event::MevxRouter { router: vec![0xAA; 20] }),
+                ("mevx_router", vec![0xAA; 20]),
+            ),
+            (
+                Typ::MinGasLeft(pool_event::MinGasLeft { min_gas_left: vec![0x0F, 0x42, 0x40] }),
+                ("min_gas_left", vec![0x0F, 0x42, 0x40]),
+            ),
+            (
+                Typ::CallGasBudget(pool_event::CallGasBudget {
+                    call_gas_budget: vec![0x4C, 0x4B, 0x40],
+                }),
+                ("call_gas_budget", vec![0x4C, 0x4B, 0x40]),
+            ),
+            (
+                Typ::Incentive(pool_event::Incentive { incentive: vec![0xCC; 20] }),
+                ("incentive", vec![0xCC; 20]),
+            ),
+        ];
+
+        for (event, (name, value)) in cases {
+            let attributes = event_to_attributes_updates(event);
+            assert_eq!(attributes.len(), 1, "{name}");
+            assert_eq!(attributes[0].name, name);
+            assert_eq!(attributes[0].value, value, "{name}");
+            assert_eq!(attributes[0].change, ChangeType::Update as i32, "{name}");
+        }
     }
 }

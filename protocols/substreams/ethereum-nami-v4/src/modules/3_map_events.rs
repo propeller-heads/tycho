@@ -24,8 +24,11 @@ pub fn map_events(block: eth::Block, pools_store: StoreGetProto<Pool>) -> Events
         .flat_map(|tx| {
             tx.logs_with_calls()
                 .filter_map(|(log, _)| {
-                    let pool = pools_store.get_last(hex::encode(&log.address))?;
-                    maybe_pool_event(log, pool, tx)
+                    // Decode first: few logs are pool events, and a store read costs more than
+                    // a topic match.
+                    let event = maybe_pool_event(log, tx)?;
+                    pools_store.get_last(hex::encode(&log.address))?;
+                    Some(event)
                 })
         })
         .collect();
@@ -35,7 +38,7 @@ pub fn map_events(block: eth::Block, pools_store: StoreGetProto<Pool>) -> Events
 
 // The symmetric `else if let Some(..)` chain reads better here than the `?` form clippy wants.
 #[allow(clippy::question_mark)]
-fn maybe_pool_event(log: &Log, pool: Pool, tx: &TransactionTrace) -> Option<PoolEvent> {
+fn maybe_pool_event(log: &Log, tx: &TransactionTrace) -> Option<PoolEvent> {
     let typ = if let Some(init) = Initialize::match_and_decode(log) {
         Typ::Initialize(pool_event::Initialize {
             sqrt_price: init.price.to_bytes_be().1,
@@ -93,8 +96,6 @@ fn maybe_pool_event(log: &Log, pool: Pool, tx: &TransactionTrace) -> Option<Pool
     Some(PoolEvent {
         log_ordinal: log.ordinal,
         pool_address: log.address.clone(),
-        token0: pool.token0,
-        token1: pool.token1,
         transaction: Some(tx.into()),
         typ: Some(typ),
     })

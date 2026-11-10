@@ -76,6 +76,91 @@ fn maybe_tick_deltas(ty: Typ) -> Option<[(i32, BigInt, BigInt); 2]> {
                 (burn.tick_upper, amount.clone(), amount.neg()),
             ]
         }
-        _ => return None,
+        // Spelled out so a new event type must be classified here.
+        Typ::Initialize(_) |
+        Typ::Collect(_) |
+        Typ::Swap(_) |
+        Typ::Flash(_) |
+        Typ::Skim(_) |
+        Typ::Fee(_) |
+        Typ::Plugin(_) |
+        Typ::PluginConfig(_) |
+        Typ::MevxRouter(_) |
+        Typ::MinGasLeft(_) |
+        Typ::CallGasBudget(_) |
+        Typ::Incentive(_) => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pb::nami::v4::events::pool_event;
+
+    fn amount(value: u64) -> Vec<u8> {
+        BigInt::from(value).to_bytes_be().1
+    }
+
+    /// `(tick, net delta, gross delta)` as strings, sorted by tick.
+    fn sorted(deltas: [(i32, BigInt, BigInt); 2]) -> Vec<(i32, String, String)> {
+        let mut deltas: Vec<_> = deltas
+            .into_iter()
+            .map(|(tick, net, gross)| (tick, net.to_string(), gross.to_string()))
+            .collect();
+        deltas.sort();
+        deltas
+    }
+
+    #[test]
+    fn test_mint_adds_gross_liquidity_to_both_ticks() {
+        let deltas = maybe_tick_deltas(Typ::Mint(pool_event::Mint {
+            tick_lower: -60,
+            tick_upper: 60,
+            amount: amount(1_000),
+            amount_0: amount(1),
+            amount_1: amount(2),
+        }))
+        .unwrap();
+
+        assert_eq!(
+            sorted(deltas),
+            vec![
+                (-60, "1000".to_string(), "1000".to_string()),
+                (60, "-1000".to_string(), "1000".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn test_burn_removes_gross_liquidity_from_both_ticks() {
+        let deltas = maybe_tick_deltas(Typ::Burn(pool_event::Burn {
+            tick_lower: -60,
+            tick_upper: 60,
+            amount: amount(1_000),
+        }))
+        .unwrap();
+
+        assert_eq!(
+            sorted(deltas),
+            vec![
+                (-60, "-1000".to_string(), "-1000".to_string()),
+                (60, "1000".to_string(), "-1000".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn test_other_events_move_no_ticks() {
+        let swap = Typ::Swap(pool_event::Swap {
+            amount_0: amount(1),
+            amount_1: amount(2),
+            sqrt_price: amount(3),
+            liquidity: amount(4),
+            tick: 5,
+        });
+        let setting = Typ::MinGasLeft(pool_event::MinGasLeft { min_gas_left: amount(1_000_000) });
+
+        assert!(maybe_tick_deltas(swap).is_none());
+        assert!(maybe_tick_deltas(setting).is_none());
+    }
 }

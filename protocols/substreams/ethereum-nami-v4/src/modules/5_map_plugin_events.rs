@@ -18,10 +18,10 @@ use crate::{
 
 /// Settings a pool's plugin emits from its own address, attributed to the pool.
 ///
-/// The plugin resolves to its pool through the store's value at the end of the block: in the
-/// creation transaction the plugin's initializer emits these events before the pool's `Plugin`
-/// event names the plugin. Only the pool's current plugin counts, so a plugin the pool has
-/// replaced no longer reaches it.
+/// The plugin resolves to its pool through the store's value at the end of the block: for a pool
+/// created after the plugin upgrade that added these settings, the plugin's initializer emits
+/// them in the creation transaction before the pool's `Plugin` event names the plugin. Only the
+/// pool's current plugin counts, so a plugin the pool has replaced no longer reaches it.
 #[substreams::handlers::map]
 pub fn map_plugin_events(block: eth::Block, pool_plugins_store: StoreGetString) -> Events {
     let pool_events = block
@@ -37,9 +37,6 @@ pub fn map_plugin_events(block: eth::Block, pool_plugins_store: StoreGetString) 
                     Some(PoolEvent {
                         log_ordinal: log.ordinal,
                         pool_address: hex::decode(pool).ok()?,
-                        // Only balance changes read the tokens, and those come from `map_events`.
-                        token0: vec![],
-                        token1: vec![],
                         transaction: Some(tx.into()),
                         typ: Some(typ),
                     })

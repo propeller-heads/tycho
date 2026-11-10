@@ -2,7 +2,8 @@ use substreams::store::{StoreNew, StoreSet, StoreSetString};
 
 use crate::pb::nami::v4::{events::pool_event::Typ, Events};
 
-/// Store key of the reverse lookup, plugin address to pool address (both hex).
+/// Store key of the reverse lookup, plugin address to pool address (both hex). Every deployed
+/// plugin serves one pool; a plugin shared by pools would need a list here.
 pub fn plugin_pool_key(plugin: &[u8]) -> String {
     format!("plugin:{}", hex::encode(plugin))
 }
@@ -30,7 +31,22 @@ pub fn store_pool_plugins(events: Events, store: StoreSetString) {
                     &config.plugin_config.to_string(),
                 );
             }
-            _ => {}
+            // Spelled out so a new event type must be classified here.
+            Some(
+                Typ::Initialize(_) |
+                Typ::Mint(_) |
+                Typ::Collect(_) |
+                Typ::Burn(_) |
+                Typ::Swap(_) |
+                Typ::Flash(_) |
+                Typ::Skim(_) |
+                Typ::Fee(_) |
+                Typ::MevxRouter(_) |
+                Typ::MinGasLeft(_) |
+                Typ::CallGasBudget(_) |
+                Typ::Incentive(_),
+            ) |
+            None => {}
         }
     }
 }
