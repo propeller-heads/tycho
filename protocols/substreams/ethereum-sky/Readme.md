@@ -30,7 +30,7 @@ subDAO) share one ecosystem, and their venues are split across Tycho protocols b
   - sDAI `0x83f20f44975d03b1b09e64809b757c47f942beea` — Sky core (DSR). Live. Its rate
     reads only `pot`, which DCI indexes in full.
   - spUSDC/spUSDT/spETH — Spark's own vaults backed by its Liquidity Layer. Configured;
-    intended to be filtered client-side.
+    spUSDC and spUSDT are filtered client-side (`erc4626_filter`), spETH is not.
   - stUSDS `0x99cd4ec3f88a45940936f469e4bb72a2a701eeb9` — Sky core (Lockstake engine).
     Indexed by `ethereum-erc4626`. Its deposit cap and utilization-gated withdrawals reach the
     simulation through `maxDeposit` and `maxRedeem`.
