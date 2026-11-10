@@ -412,5 +412,24 @@
         "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
       ]
     }
+  },
+  "elysium": {
+    "uniswap_v2": {
+      "contract": "UniswapV2Executor",
+      "args": [
+        30
+      ]
+    },
+    "uniswap_v3": {
+      "contract": "UniswapV3Executor",
+      "args": []
+    },
+    "uniswap_v4": {
+      "contract": "UniswapV4Executor",
+      "args": [
+        "0xe2e105d3f7209a9da11f83ccf3e7398a753823f1",
+        "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
+      ]
+    }
   }
 }

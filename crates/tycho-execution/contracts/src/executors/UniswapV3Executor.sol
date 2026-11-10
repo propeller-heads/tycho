@@ -49,6 +49,7 @@ contract UniswapV3Executor is IExecutor, ICallback {
             receiver,
             zeroForOne,
             // positive means exactIn
+            // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
             int256(amountIn),
             zeroForOne ? _MIN_SQRT_RATIO + 1 : _MAX_SQRT_RATIO - 1,
             ""

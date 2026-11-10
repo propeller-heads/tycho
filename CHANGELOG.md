@@ -1,3 +1,34 @@
+## [0.507.1](https://github.com/propeller-heads/tycho/compare/0.507.0...0.507.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **uniswap_v4:** pass hooks the full price range as the swap limit ([ab9bd81](https://github.com/propeller-heads/tycho/commit/ab9bd810d3be56f126b68c133fcadca0852f70d3))
+* **uniswap_v4:** pass hooks the full price range as the swap limit ([#1770](https://github.com/propeller-heads/tycho/issues/1770)) ([f83dc90](https://github.com/propeller-heads/tycho/commit/f83dc909a9df2e752330eed1201f512a51eb36c1))
+
+## [0.507.0](https://github.com/propeller-heads/tycho/compare/0.506.0...0.507.0) (2026-11-10)
+
+
+### Features
+
+* **execution:** deploy TychoRouterV3 to Elysium ([bbc65cb](https://github.com/propeller-heads/tycho/commit/bbc65cba54218ac6db36ba86ee1134b082f2489e))
+* **execution:** deploy TychoRouterV3 to Elysium ([#1762](https://github.com/propeller-heads/tycho/issues/1762)) ([9a955ba](https://github.com/propeller-heads/tycho/commit/9a955bae82309f0327c5bc0569f99581e9b63186))
+
+## [0.506.0](https://github.com/propeller-heads/tycho/compare/0.505.0...0.506.0) (2026-11-10)
+
+
+### Features
+
+* **router-trades:** store what the SubsidyPayer did with each subsidy ([2f0c28e](https://github.com/propeller-heads/tycho/commit/2f0c28ee4a5821fd2afde37b59d235cf98a114c6))
+* **router-trades:** store what the SubsidyPayer did with each subsidy ([#1752](https://github.com/propeller-heads/tycho/issues/1752)) ([45aa44d](https://github.com/propeller-heads/tycho/commit/45aa44de7eb5caff9deb3b98fc5b548ae0046d7a))
+
+
+### Bug Fixes
+
+* **claude:** count padded nextest failures in tycho-review's checks ([f9a7608](https://github.com/propeller-heads/tycho/commit/f9a7608e83cb4e294e2f7623f0b5e353527ebccb))
+* **claude:** quote referenced records in tycho-review checklists ([b2b575f](https://github.com/propeller-heads/tycho/commit/b2b575f84c30c005d6193edf9f488e1595d407f7))
+* **execution:** revert an Ekubo swap whose amountIn exceeds int128 ([897ef0a](https://github.com/propeller-heads/tycho/commit/897ef0ae14a86d8f7ac9912c868e7fec8360fc9d))
+
 ## [0.505.0](https://github.com/propeller-heads/tycho/compare/0.504.3...0.505.0) (2026-11-10)
 
 

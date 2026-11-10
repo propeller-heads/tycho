@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: tycho_router_trades
-  version: v0.3.0
+  version: v0.4.0
   url: https://github.com/propeller-heads/tycho/tree/main/crates/tycho-execution/substreams
 
 imports:
@@ -75,6 +75,19 @@ modules:
     output:
       type: proto:tycho.router.v1.VaultTransfers
 
+  - name: map_subsidy_events
+    kind: map
+    initialBlock: 463130033
+    blockFilter:
+      module: index_router_activity
+      query:
+        string: "subsidy"
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.router.v1.SubsidyEvents
+
   - name: db_out
     kind: map
     initialBlock: 463130033
@@ -82,6 +95,7 @@ modules:
       - map: map_trades
       - map: map_fee_config_events
       - map: map_vault_transfers
+      - map: map_subsidy_events
     output:
       type: proto:sf.substreams.sink.database.v1.DatabaseChanges
 
@@ -91,6 +105,7 @@ params:
   map_fee_config_events: chain=arbitrum&routers=0xc1f838a5382bbb5729a0801c8ba73dfc861c4d34:v3_0,0x8a8ba3973c84252bf7d357e4c0244b7eedb8b658:v3_1,0x924f147c50ea59f5180a26031a8b65b2aa1e81cd:v3_1&fee_calculators=0xc1f838a5382bbb5729a0801c8ba73dfc861c4d34:0x8265ef25cda2b34968e1a47e54fa5fa01ca1a598,0x8a8ba3973c84252bf7d357e4c0244b7eedb8b658:0x3a61c2a6ee1a752800a561435bf362bbaf25aa00,0x924f147c50ea59f5180a26031a8b65b2aa1e81cd:0x9ca59bd78aab97db9692e43684b12072e910f0b7
   map_trades: chain=arbitrum&routers=0xc1f838a5382bbb5729a0801c8ba73dfc861c4d34:v3_0,0x8a8ba3973c84252bf7d357e4c0244b7eedb8b658:v3_1,0x924f147c50ea59f5180a26031a8b65b2aa1e81cd:v3_1&fee_calculators=0xc1f838a5382bbb5729a0801c8ba73dfc861c4d34:0x8265ef25cda2b34968e1a47e54fa5fa01ca1a598,0x8a8ba3973c84252bf7d357e4c0244b7eedb8b658:0x3a61c2a6ee1a752800a561435bf362bbaf25aa00,0x924f147c50ea59f5180a26031a8b65b2aa1e81cd:0x9ca59bd78aab97db9692e43684b12072e910f0b7
   map_vault_transfers: chain=arbitrum&routers=0xc1f838a5382bbb5729a0801c8ba73dfc861c4d34:v3_0,0x8a8ba3973c84252bf7d357e4c0244b7eedb8b658:v3_1,0x924f147c50ea59f5180a26031a8b65b2aa1e81cd:v3_1&fee_calculators=0xc1f838a5382bbb5729a0801c8ba73dfc861c4d34:0x8265ef25cda2b34968e1a47e54fa5fa01ca1a598,0x8a8ba3973c84252bf7d357e4c0244b7eedb8b658:0x3a61c2a6ee1a752800a561435bf362bbaf25aa00,0x924f147c50ea59f5180a26031a8b65b2aa1e81cd:0x9ca59bd78aab97db9692e43684b12072e910f0b7
+  map_subsidy_events: chain=arbitrum&routers=0xc1f838a5382bbb5729a0801c8ba73dfc861c4d34:v3_0,0x8a8ba3973c84252bf7d357e4c0244b7eedb8b658:v3_1,0x924f147c50ea59f5180a26031a8b65b2aa1e81cd:v3_1&fee_calculators=0xc1f838a5382bbb5729a0801c8ba73dfc861c4d34:0x8265ef25cda2b34968e1a47e54fa5fa01ca1a598,0x8a8ba3973c84252bf7d357e4c0244b7eedb8b658:0x3a61c2a6ee1a752800a561435bf362bbaf25aa00,0x924f147c50ea59f5180a26031a8b65b2aa1e81cd:0x9ca59bd78aab97db9692e43684b12072e910f0b7
 
 sink:
   module: db_out
