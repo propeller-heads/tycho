@@ -13,6 +13,7 @@ use alloy::{
     sol_types::SolCall,
 };
 use miette::miette;
+use num_bigint::BigUint;
 use tycho_common::Bytes;
 
 sol! {
@@ -43,6 +44,16 @@ impl RouterFeeOnOutput {
     /// The fee denominator (the FeeCalculator's precision scale, where this value represents 100%).
     pub fn denominator(&self) -> u64 {
         self.denominator
+    }
+
+    #[cfg(test)]
+    pub fn new_for_tests(numerator: u64, denominator: u64) -> Self {
+        Self { numerator, denominator }
+    }
+
+    /// `amount_out` less the router fee, as the router pays it out of a swap's output.
+    pub fn deduct(&self, amount_out: &BigUint) -> BigUint {
+        amount_out - amount_out * BigUint::from(self.numerator) / BigUint::from(self.denominator)
     }
 }
 

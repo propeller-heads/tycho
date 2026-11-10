@@ -1,5 +1,7 @@
 mod fee_fetcher;
+mod limit_probes;
 mod metrics;
+mod packages;
 mod statistics;
 mod stream_processor;
 
@@ -56,6 +58,8 @@ use tycho_test::{
 
 use crate::{
     fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
+    limit_probes::{Probe, StrictChecks},
+    packages::StrictPackages,
     statistics::TestStatistics,
     stream_processor::{
         book_stream_processor::{BookStreamProcessor, PammSelection, PammVenue, RfqSelection},
@@ -458,6 +462,14 @@ async fn run(cli: Cli) -> miette::Result<()> {
         "Loaded router fee on output from on-chain FeeCalculator"
     );
 
+    // The strict packages' declarations, embedded at build time; their protocols get limit
+    // probes on top of the realistic swap.
+    let strict = Arc::new(StrictChecks::new(StrictPackages::load(chain)?));
+    for protocol in strict.protocols() {
+        info!(protocol, "Strict package: probing its limits");
+        metrics::record_strict_protocol(protocol);
+    }
+
     // Load tokens from Tycho
     info!(%cli.tycho_url, "Loading tokens...");
     let all_tokens = Arc::new(
@@ -692,6 +704,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
+                        let strict = strict.clone();
                         let permit = protocol_semaphore
                             .clone()
                             .acquire_owned()
@@ -699,7 +712,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire protocol permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data, strict).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -730,6 +743,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
+                        let strict = strict.clone();
                         let permit = book_semaphore
                             .clone()
                             .acquire_owned()
@@ -737,7 +751,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire book permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data, strict).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -773,6 +787,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
+                        let strict = strict.clone();
                         let permit = price_level_semaphore
                             .clone()
                             .acquire_owned()
@@ -780,7 +795,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire price level stream permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data, strict).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -1044,6 +1059,7 @@ async fn process_update(
     router_fee: RouterFeeOnOutput,
     update: &StreamUpdate,
     router_overwrites_data: RouterOverwritesData,
+    strict: Arc<StrictChecks>,
 ) -> miette::Result<()> {
     match &update.payload {
         StreamUpdatePayload::Protocol(protocol_update) => info!(
@@ -1394,6 +1410,7 @@ async fn process_update(
         let block = block.clone();
         let statistics = statistics.clone();
         let token_prices = token_prices.clone();
+        let strict = strict.clone();
         let permit = semaphore
             .clone()
             .acquire_owned()
@@ -1413,6 +1430,7 @@ async fn process_update(
                 statistics,
                 token_prices,
                 max_swap_directions,
+                &strict,
             )
             .await;
             drop(permit);
@@ -1422,11 +1440,13 @@ async fn process_update(
     }
 
     let mut block_execution_info = HashMap::new();
+    let mut probes = HashMap::new();
 
     for task in tasks {
         match task.await {
-            Ok(execution_data) => {
+            Ok((execution_data, state_probes)) => {
                 block_execution_info.extend(execution_data);
+                probes.extend(state_probes);
             }
             Err(e) => {
                 warn!("Task failed: {:?}", e);
@@ -1505,10 +1525,16 @@ async fn process_update(
         );
     }
 
+    limit_probes::judge(&probes, &block_execution_info, &results, router_fee);
+
     let mut n_reverts = 0;
     let mut n_failures = 0;
     let total_simulations = results.len();
     for (simulation_id, result) in &results {
+        // A probe is judged on its own, apart from the realistic swaps' metrics.
+        if probes.contains_key(simulation_id) {
+            continue;
+        }
         let execution_info = match block_execution_info.get(simulation_id) {
             Some(info) => info,
             None => {
@@ -1769,11 +1795,12 @@ async fn process_state(
     statistics: Option<Arc<RwLock<TestStatistics>>>,
     token_prices: Arc<HashMap<Bytes, f64>>,
     max_swap_directions: usize,
-) -> HashMap<String, TychoExecutionInput> {
+    strict: &StrictChecks,
+) -> (HashMap<String, TychoExecutionInput>, HashMap<String, Probe>) {
     let tokens_len = component.tokens.len();
     if tokens_len < 2 {
         error!("Component has less than 2 tokens, skipping...");
-        return HashMap::new();
+        return Default::default();
     }
     // Get all the possible swap directions
     let swap_directions = match component
@@ -1787,7 +1814,7 @@ async fn process_state(
             Ok(directions) => sample_swap_directions(directions, max_swap_directions),
             Err(e) => {
                 error!("Invalid swap directions attribute, skipping: {e}");
-                return HashMap::new();
+                return Default::default();
             }
         },
         None => component
@@ -1798,7 +1825,9 @@ async fn process_state(
             .collect(),
     };
     let account_overwrites = simulation_overwrites(state.as_ref());
+    let package = strict.package(&component.protocol_system);
     let mut execution_infos = HashMap::new();
+    let mut probes = HashMap::new();
     for (i, (token_in, token_out)) in swap_directions.iter().enumerate() {
         debug!(
             "Processing {} pool {state_id}, from {} to {}",
@@ -1850,6 +1879,31 @@ async fn process_state(
             "Retrieved limits: max input {max_input} {}; max output {max_output} {}",
             token_in.symbol, token_out.symbol
         );
+
+        if let Some(package) = package {
+            match unprobeable(&component.protocol_system) {
+                Some(reason) => {
+                    limit_probes::not_probed(strict, &component, token_in, token_out, reason)
+                }
+                None => {
+                    let target = limit_probes::Target {
+                        chain,
+                        component: &component,
+                        state: state.as_ref(),
+                        token_in,
+                        token_out,
+                        max_input: &max_input,
+                        max_output: &max_output,
+                        simulation_id: format!("{simulation_id}-{i}"),
+                    };
+                    for (id, input, probe) in limit_probes::probe_direction(strict, package, target)
+                    {
+                        execution_infos.insert(id.clone(), input);
+                        probes.insert(id, probe);
+                    }
+                }
+            }
+        }
 
         // Cap the limit to a realistic input value (~10k USD) using the weekly token prices.
         // Tick-based protocols (Uniswap V3/V4) report near-infinite limits; tokens missing
@@ -1975,7 +2029,22 @@ async fn process_state(
             },
         );
     }
-    execution_infos
+    (execution_infos, probes)
+}
+
+/// Why a strict protocol's swaps cannot be probed, if they cannot: a price level venue quotes a
+/// block not built yet, a next-block protocol's quote moves with the block it executes in, and
+/// CoWAMM is not executed at all.
+fn unprobeable(protocol_system: &str) -> Option<&'static str> {
+    if simulates_before_block(protocol_system) {
+        Some("book_venue")
+    } else if executes_in_next_block(protocol_system) {
+        Some("next_block")
+    } else if protocol_system == COWAMM_PROTOCOL_SYSTEM {
+        Some("not_executable")
+    } else {
+        None
+    }
 }
 
 /// Processes the result of a Tycho simulation execution and emits metrics.
@@ -2030,9 +2099,8 @@ fn process_execution_result(
             // deducts this fee from the swap output, so the simulated amount out (which is
             // fee-free) must be reduced by the same fraction before comparing against the
             // executed amount.
-            let simulated_amount_out_without_fee = &execution_info.expected_amount_out -
-                (&execution_info.expected_amount_out * BigUint::from(router_fee.numerator())) /
-                    BigUint::from(router_fee.denominator());
+            let simulated_amount_out_without_fee =
+                router_fee.deduct(&execution_info.expected_amount_out);
 
             // Calculate slippage: positive = simulated > expected, negative = simulated <
             // expected
