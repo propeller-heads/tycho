@@ -4,35 +4,65 @@
     "address": "28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d",
     "block": 23484422,
     "tx_hash": "ebbeb171c33498b2ad47af8bb8bfcc17990db86dd0444b8e64754c250ae1a0b2",
-    "asset": "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    "asset": "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "extra_entrypoints": [
+      {
+        "signature": "vsr()",
+        "calldata": "1e7b14d3"
+      }
+    ]
   },
   {
     "name": "spUSDT",
     "address": "e2e7a17dff93280dec073c995595155283e3c372",
     "block": 23484439,
     "tx_hash": "4fe047d7749d8c1fbfcad10ebd54dd34adeb296356d9c5d8a77f0a60e4c8bab2",
-    "asset": "dac17f958d2ee523a2206206994597c13d831ec7"
+    "asset": "dac17f958d2ee523a2206206994597c13d831ec7",
+    "extra_entrypoints": [
+      {
+        "signature": "vsr()",
+        "calldata": "1e7b14d3"
+      }
+    ]
   },
   {
     "name": "spETH",
     "address": "fe6eb3b609a7c8352a241f7f3a21cea4e9209b8f",
     "block": 23484474,
     "tx_hash": "e8e324769d1e79969eb2febc30dc3371a96cb428094782a8488dbeb6541dfe7f",
-    "asset": "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    "asset": "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+    "extra_entrypoints": [
+      {
+        "signature": "vsr()",
+        "calldata": "1e7b14d3"
+      }
+    ]
   },
   {
     "name": "sUSDS",
     "address": "a3931d71877c0e7a3148cb7eb4463524fec27fbd",
     "block": 20677434,
     "tx_hash": "e1be00c4ea3c21cf536b98ac082a5bba8485cf75d6b2b94f4d6e3edd06472c00",
-    "asset": "dc035d45d973e3ec169d2276ddab16f1e407384f"
+    "asset": "dc035d45d973e3ec169d2276ddab16f1e407384f",
+    "extra_entrypoints": [
+      {
+        "signature": "ssr()",
+        "calldata": "03607ceb"
+      }
+    ]
   },
   {
     "name": "sUSDC",
     "address": "bc65ad17c5c0a2a4d159fa5a503f4992c7b545fe",
     "block": 21969024,
     "tx_hash": "549d8f23f755f10ac453949f7ce76f19cfd3007ca8402588fe66b0e54ada627c",
-    "asset": "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    "asset": "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "extra_entrypoints": [
+      {
+        "signature": "ssr()",
+        "calldata": "03607ceb"
+      }
+    ]
   },
   {
     "name": "sDAI",

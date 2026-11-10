@@ -36,6 +36,9 @@ entrypoint that reads that state directly:
 
 - `stUSDS`: `str()`. Its rate reads `str` only when `block.timestamp > rho`, and every deposit and
   withdrawal sets `rho` to the block's timestamp, so the first trace never reads it.
+- `spUSDC`, `spUSDT`, `spETH`: `vsr()`. Spark Vault V2's `nowChi()` reads `vsr` on the same
+  accrual-only branch.
+- `sUSDS`: `ssr()`, for the same reason. `sUSDC`: `ssr()`, which it forwards to sUSDS.
 
 Extra entrypoints are emitted only at a vault's first interaction, so adding one to an indexed
 vault takes effect only after a resync from that vault's first interaction.
