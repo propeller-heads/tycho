@@ -1,0 +1,25 @@
+substreams_yaml_path: ./elysium-kleos-v3.yaml
+protocol_system: "kleos_v3"
+protocol_type_names:
+  - "kleos_v3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # Kleos's Wrapped HYPE / KLEOS, the factory's most traded pool. Kleos pairs every V3 pool with
+  # its own Wrapped HYPE (0x0269…), not the chain's canonical WHYPE.
+  - name: test_whype_kleos_pool
+    # PoolCreated, Initialize, the first Mint and the first Swap all land in block 18026.
+    start_block: 18026
+    # First Burn: block 19220.
+    stop_block: 19220
+    expected_components:
+      - id: "0x5196466e53a041f8c67ecbf538d3cb952dc18d07"
+        tokens:
+          - "0x0269031ace34a7821e9D9980d087c35cE7c19EEF" # Wrapped HYPE (Kleos)
+          - "0x51C343Ed5131F17895991849860B61C2cb0E7e7a" # KLEOS
+        static_attributes:
+          fee: "0x2710"
+          tick_spacing: "0x00c8"
+        creation_tx: "0x0e3269e6505586d8fee3ebd7ecfeaecfcb1f029e37b8e47100fce622b1eaae13"
+        skip_simulation: false

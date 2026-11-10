@@ -1,3 +1,52 @@
+## [0.506.0](https://github.com/propeller-heads/tycho/compare/0.505.0...0.506.0) (2026-11-10)
+
+
+### Features
+
+* **router-trades:** store what the SubsidyPayer did with each subsidy ([2f0c28e](https://github.com/propeller-heads/tycho/commit/2f0c28ee4a5821fd2afde37b59d235cf98a114c6))
+* **router-trades:** store what the SubsidyPayer did with each subsidy ([#1752](https://github.com/propeller-heads/tycho/issues/1752)) ([45aa44d](https://github.com/propeller-heads/tycho/commit/45aa44de7eb5caff9deb3b98fc5b548ae0046d7a))
+
+
+### Bug Fixes
+
+* **claude:** count padded nextest failures in tycho-review's checks ([f9a7608](https://github.com/propeller-heads/tycho/commit/f9a7608e83cb4e294e2f7623f0b5e353527ebccb))
+* **claude:** quote referenced records in tycho-review checklists ([b2b575f](https://github.com/propeller-heads/tycho/commit/b2b575f84c30c005d6193edf9f488e1595d407f7))
+* **execution:** revert an Ekubo swap whose amountIn exceeds int128 ([897ef0a](https://github.com/propeller-heads/tycho/commit/897ef0ae14a86d8f7ac9912c868e7fec8360fc9d))
+
+## [0.505.0](https://github.com/propeller-heads/tycho/compare/0.504.3...0.505.0) (2026-11-10)
+
+
+### Features
+
+* index Kleos, ElysPump and StockiumSwap V3 on Elysium ([#1759](https://github.com/propeller-heads/tycho/issues/1759)) ([4532a44](https://github.com/propeller-heads/tycho/commit/4532a44cda4184ae64109d0bc25f6fa99a64f50d))
+* **substreams:** index AERO v1.1 basic and CL pools on Elysium ([fb06b2d](https://github.com/propeller-heads/tycho/commit/fb06b2d499e7586afa45d5bd4116c7fb884720ca))
+* **substreams:** index AERO v1.1 basic and CL pools on Elysium ([#1766](https://github.com/propeller-heads/tycho/issues/1766)) ([0190788](https://github.com/propeller-heads/tycho/commit/0190788195c00ae9cea7b198b4d14e554e6fdc0e))
+* **substreams:** index Kleos, ElysPump and StockiumSwap V3 on Elysium ([42687c8](https://github.com/propeller-heads/tycho/commit/42687c8e4025d1475e67a81532765b1d9125862f))
+* **testing:** run elysium-* packages against an Elysium archive RPC ([dae5e6d](https://github.com/propeller-heads/tycho/commit/dae5e6d1ed4c1ff77efecc0a776ad43dfe2c342a))
+
+
+### Bug Fixes
+
+* **testing:** connect RPC tools on chains alloy-chains does not name ([875d7ba](https://github.com/propeller-heads/tycho/commit/875d7ba3a7624e33cac6371192b8e324a033bc67))
+
+## [0.504.3](https://github.com/propeller-heads/tycho/compare/0.504.2...0.504.3) (2026-11-09)
+
+
+### Bug Fixes
+
+* **deps:** bump openssl to 0.10.81 for RUSTSEC-2026-0463 ([dc2eaad](https://github.com/propeller-heads/tycho/commit/dc2eaad05aef529eae004b398a45bdbb15ab686a))
+* **deps:** bump openssl to 0.10.81 for RUSTSEC-2026-0463 ([#1763](https://github.com/propeller-heads/tycho/issues/1763)) ([729c860](https://github.com/propeller-heads/tycho/commit/729c860a0675a9b6bd92d5e42c5a5b359fa74d31))
+* **simulation:** link pending account overrides to the extractor's own pools ([54abe7f](https://github.com/propeller-heads/tycho/commit/54abe7fc70b2deaf0d44b1bbde0b052d76709ff9))
+* **simulation:** link pending account overrides to the extractor's own pools ([#1750](https://github.com/propeller-heads/tycho/issues/1750)) ([e4fe71c](https://github.com/propeller-heads/tycho/commit/e4fe71c3cc7bf5adb476af6cd171bf5ea8550b9e))
+
+## [0.504.2](https://github.com/propeller-heads/tycho/compare/0.504.1...0.504.2) (2026-11-09)
+
+
+### Bug Fixes
+
+* unblock Fluid pools that have swaps unpaused again ([0b69dbd](https://github.com/propeller-heads/tycho/commit/0b69dbd3a7449b2db3720dda2030ad618383046d)), closes [#1709](https://github.com/propeller-heads/tycho/issues/1709) [#1709](https://github.com/propeller-heads/tycho/issues/1709)
+* unblock Fluid pools that have swaps unpaused again ([#1757](https://github.com/propeller-heads/tycho/issues/1757)) ([53cb909](https://github.com/propeller-heads/tycho/commit/53cb909f1c04f3cd31d2258c413c20dde0459462))
+
 ## [0.504.1](https://github.com/propeller-heads/tycho/compare/0.504.0...0.504.1) (2026-11-09)
 
 
