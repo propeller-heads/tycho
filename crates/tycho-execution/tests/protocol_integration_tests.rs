@@ -4325,6 +4325,65 @@ fn test_single_encoding_strategy_fxsave() {
 }
 
 #[test]
+fn test_sequential_encoding_strategy_fxsave() {
+    // WETH -> (Uniswap V2) -> USDC -> (fxSP, fxSAVE) -> fxSAVE
+    let fxsave = Bytes::from("0x7743e50f534a7f9f1791dde7dcd89f7783eefc39");
+    let uniswap_v2_swap = Swap::new(
+        ProtocolComponent {
+            id: String::from("0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc"),
+            protocol_system: String::from("uniswap_v2"),
+            ..Default::default()
+        },
+        default_token(weth()),
+        default_token(usdc()),
+        BigUint::ZERO,
+    );
+    let fxsave_swap = Swap::new(
+        ProtocolComponent {
+            id: String::from("0x7743e50f534a7f9f1791dde7dcd89f7783eefc39"),
+            protocol_system: String::from("fxsave"),
+            ..Default::default()
+        },
+        default_token(usdc()),
+        default_token(fxsave.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        weth(),
+        fxsave,
+        BigUint::from_str("1000000000000000000").unwrap(), // 1 WETH
+        BigUint::from_str("1960696896773599132885").unwrap(),
+        BigUint::from_str("1950000000000000000000").unwrap(),
+        vec![uniswap_v2_swap, fxsave_swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        &encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+
+    write_calldata_to_file("test_sequential_encoding_strategy_fxsave", encode(&calldata).as_str());
+}
+
+#[test]
 fn test_sequential_encoding_strategy_sky() {
     // DAI -> (DaiUsds converter) -> USDS -> (UsdsPsmWrapper) -> USDC
     let dai = Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f");
