@@ -1152,6 +1152,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethereum-fxsave"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "itertools 0.10.5",
+ "rstest",
+ "serde",
+ "serde_qs 0.13.0",
+ "substreams 0.5.22",
+ "substreams-ethereum 0.9.13",
+ "tycho-substreams 0.8.2 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "ethereum-lido"
 version = "0.1.0"
 dependencies = [

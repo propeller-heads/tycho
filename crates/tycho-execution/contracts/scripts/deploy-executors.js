@@ -39,6 +39,7 @@ const deploy_protocols = {
         "sky",
         "lido_v4",
         "etherfi",
+        "fxsave",
         "fallback",
         "fallback:rfq:metric",
         "fallback:rfq:bebop",

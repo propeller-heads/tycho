@@ -44,6 +44,7 @@ import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
 import {RingSwapV2Executor} from "../src/executors/RingSwapV2Executor.sol";
 import {NativeExecutor} from "../src/executors/NativeExecutor.sol";
 import {SkyExecutor} from "../src/executors/SkyExecutor.sol";
+import {FxSaveExecutor} from "../src/executors/FxSaveExecutor.sol";
 import {TransferManager} from "../src/TransferManager.sol";
 // Test utilities and mocks
 import "./Constants.sol";
@@ -166,6 +167,7 @@ contract TychoRouterTestSetup is
     NativeExecutor public nativeExecutor;
     PropAMMExecutor public propAMMExecutor;
     SkyExecutor public skyExecutor;
+    FxSaveExecutor public fxSaveExecutor;
     PropAMMFallbackRouter public propAMMFallbackRouter;
     PropAMMFallbackExecutor public propAMMFallbackExecutor;
 
@@ -341,9 +343,17 @@ contract TychoRouterTestSetup is
             0xC697d2898e0D09264376196696c51D7aBbbAA4a9
         );
         aeroBasicExecutor = new AeroBasicExecutor();
+        // The constructor reads fxSAVE's asset, so, like Sky, it cannot deploy
+        // on forks where fxSAVE has no code. It is deployed last, so skipping
+        // it shifts no other address.
+        bool fxSaveDeployable = FXSAVE_ADDR.code.length != 0;
+        if (fxSaveDeployable) {
+            fxSaveExecutor = new FxSaveExecutor(FX_BASE_POOL, FXSAVE_ADDR);
+        }
 
         address[] memory executors = new address[](
             30 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
+                + (fxSaveDeployable ? 1 : 0)
         );
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
@@ -382,6 +392,10 @@ contract TychoRouterTestSetup is
         }
         if (supportsNative) {
             executors[nextExecutorIndex] = address(nativeExecutor);
+            nextExecutorIndex++;
+        }
+        if (fxSaveDeployable) {
+            executors[nextExecutorIndex] = address(fxSaveExecutor);
         }
 
         return executors;

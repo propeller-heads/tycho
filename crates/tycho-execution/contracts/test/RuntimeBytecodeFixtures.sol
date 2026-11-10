@@ -86,6 +86,7 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         _executor("EkuboV3Robinhood", "robinhood", "ekubo_v3");
         _executor("FermiSwap", "ethereum", "vm:fermiswap");
         _executor("FluidV1", "ethereum", "fluid_v1");
+        _executor("FxSave", "ethereum", "fxsave");
         _executor("LidoV4", "ethereum", "lido_v4");
         _executor("LiquidityParty", "ethereum", "vm:liquidityparty");
         _executor("LunarBase", "base", "lunarbase");

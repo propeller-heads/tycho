@@ -14,6 +14,7 @@ mod fallback;
 pub use fallback::{FallbackProtocol, FallbackSwapData};
 mod fermiswap;
 mod fluid_v1;
+mod fxsave;
 mod hashflow;
 mod hashflow_fallback;
 mod lido_v4;

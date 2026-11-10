@@ -30,6 +30,7 @@ use tycho_simulation::{
                 fluid_v1_paused_pools_filter, liquidityparty_killed_pools_filter,
             },
             fluid::FluidV1,
+            fxsave::state::FxSaveState,
             lido_v4::state::LidoV4State,
             lunarbase::LunarBaseState,
             pancakeswap_v2::state::PancakeswapV2State,
@@ -284,6 +285,7 @@ impl ProtocolStreamProcessor {
                 "ekubo_v3".to_string(),
                 "rocketpool".to_string(),
                 "sky".to_string(),
+                "fxsave".to_string(),
                 "lido_v4".to_string(),
                 "etherfi".to_string(),
                 "vm:liquidityparty".to_string(),
@@ -493,6 +495,9 @@ impl ProtocolStreamProcessor {
             }
             "sky" => {
                 stream = stream.exchange::<SkyState>("sky", tvl_filter.clone(), None);
+            }
+            "fxsave" => {
+                stream = stream.exchange::<FxSaveState>("fxsave", tvl_filter.clone(), None);
             }
             "lido_v4" => {
                 stream = stream.exchange::<LidoV4State>("lido_v4", tvl_filter.clone(), None);

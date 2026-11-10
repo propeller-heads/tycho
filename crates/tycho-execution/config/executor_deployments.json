@@ -120,6 +120,13 @@
         "0x3225737a9Bbb6473CB4a45b7244ACa2BeFdB276A"
       ]
     },
+    "fxsave": {
+      "contract": "FxSaveExecutor",
+      "args": [
+        "0x65C9A641afCEB9C0E6034e558A319488FA0FA3be",
+        "0x7743e50F534a7f9F1791DdE7dCD89F7783Eefc39"
+      ]
+    },
     "lido_v4": {
       "contract": "LidoV4Executor",
       "args": [

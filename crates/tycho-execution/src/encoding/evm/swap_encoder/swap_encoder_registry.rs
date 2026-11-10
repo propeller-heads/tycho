@@ -21,7 +21,7 @@ use crate::encoding::{
             curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
             erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder,
             fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
-            fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
+            fluid_v1::FluidV1SwapEncoder, fxsave::FxSaveSwapEncoder, hashflow::HashflowSwapEncoder,
             hashflow_fallback::HashflowFallbackSwapEncoder, lido_v4::LidoV4SwapEncoder,
             liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
             liquorice_fallback::LiquoriceFallbackSwapEncoder, lunarbase::LunarBaseSwapEncoder,
@@ -272,6 +272,7 @@ impl SwapEncoderRegistry {
                 Ok(Box::new(RocketpoolSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "sky" => Ok(Box::new(SkySwapEncoder::new(executor_address, self.chain, config)?)),
+            "fxsave" => Ok(Box::new(FxSaveSwapEncoder::new(executor_address, self.chain, config)?)),
             "erc4626" => {
                 Ok(Box::new(ERC4626SwapEncoder::new(executor_address, self.chain, config)?))
             }

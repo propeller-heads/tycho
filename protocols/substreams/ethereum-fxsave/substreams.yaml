@@ -1,0 +1,43 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_fxsave"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_fxsave.wasm
+
+network: mainnet
+
+modules:
+  - name: map_protocol_components
+    kind: map
+    initialBlock: &start_block 26349181
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: *start_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_protocol_components: &config "fxsave=0x7743e50f534a7f9f1791dde7dcd89f7783eefc39&fx_base_pool=0x65c9a641afceb9c0e6034e558a319488fa0fa3be&fxusd=0x085780639cc2cacd35e474e71f4d000e2405d8f6&usdc=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48&creation_block=26349181&creation_tx=0x0763603bd2699b43a9ecdf3de8ceed345a98c5571cc4a98375cc4ce0c266b84d"
+  map_protocol_changes: *config

@@ -1,0 +1,21 @@
+[package]
+name = "ethereum-fxsave"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ethereum_fxsave"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+alloy-primitives = { version = "1.4.1", features = ["serde"] }
+anyhow = "1.0.95"
+itertools = "0.10.5"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_qs = "0.13.0"
+substreams = "0.5.22"
+substreams-ethereum = "0.9.9"
+tycho-substreams = "0.8.0"
+
+[dev-dependencies]
+rstest = "0.24.0"

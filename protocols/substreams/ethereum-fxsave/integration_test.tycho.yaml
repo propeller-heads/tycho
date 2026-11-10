@@ -1,0 +1,24 @@
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "fxsave"
+protocol_type_names:
+  - "fxsave"
+module_name: "map_protocol_changes"
+# Balance checks compare against on-chain balanceOf(component). The component reports fxSP's
+# fxUSD and USDC holdings instead, which fxSAVE itself does not hold.
+skip_balance_check: true
+tests:
+  - name: test_fxsave_deposits
+    start_block: 26349181
+    stop_block: 26352000
+    expected_components:
+      - id: "0x7743e50f534a7f9f1791dde7dcd89f7783eefc39"
+        tokens:
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+          - "0x085780639cc2cacd35e474e71f4d000e2405d8f6"
+          - "0x7743e50f534a7f9f1791dde7dcd89f7783eefc39"
+        static_attributes:
+          swap_directions: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb487743e50f534a7f9f1791dde7dcd89f7783eefc39085780639cc2cacd35e474e71f4d000e2405d8f67743e50f534a7f9f1791dde7dcd89f7783eefc39"
+          fx_base_pool: "0x65c9a641afceb9c0e6034e558a319488fa0fa3be"
+        creation_tx: "0x0763603bd2699b43a9ecdf3de8ceed345a98c5571cc4a98375cc4ce0c266b84d"
+        skip_simulation: false
+        skip_execution: false
