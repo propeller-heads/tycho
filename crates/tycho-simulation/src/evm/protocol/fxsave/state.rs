@@ -1,6 +1,6 @@
 use std::{any::Any, collections::HashMap};
 
-use alloy::primitives::U256;
+use alloy::primitives::{address, Address as AlloyAddress, U256};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
@@ -8,7 +8,10 @@ use tycho_common::{
     models::token::Token,
     simulation::{
         errors::{SimulationError, TransitionError},
-        protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        protocol_sim::{
+            Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
+            SwapConstraint,
+        },
     },
     Bytes,
 };
@@ -18,21 +21,33 @@ use crate::evm::{
     protocol::{
         fxsave::vm::{self, VaultReadings},
         u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+        utils::solidity_math,
     },
 };
 
-/// `fxSP.deposit` followed by `fxSAVE.deposit`, measured at 495k through the router on a
-/// mainnet fork (block 26,353,817). About 246k of it is fxSAVE staking its idle fxSP into the
-/// gauge, which it does once that balance reaches its threshold (100 fxSP), so on almost every
-/// deposit.
-const DEPOSIT_GAS: u64 = 500_000;
+/// Gas of the executor's leg, `fxSP.deposit` then `fxSAVE.deposit`, when fxSAVE keeps the fxSP
+/// idle. The router's transfers and approval around the leg are left out: `estimate_gas_usage`
+/// adds them.
+const DEPOSIT_GAS: u64 = 250_000;
+
+/// Gas fxSAVE adds when a deposit brings its idle fxSP to `getThreshold` and it stakes all of it
+/// into the gauge (`SavingFxUSD._deposit`).
+const GAUGE_STAKE_GAS: u64 = 250_000;
+
+/// The fxSP (`FxUSDBasePool`) implementation the deposit math and depeg gate port.
+const BASE_POOL_IMPLEMENTATION: AlloyAddress = address!("9cfefd90d4c8428d4cbac9baaa6d52c6ba7897f9");
+
+/// The fxSAVE (`SavingFxUSD`, OpenZeppelin `ERC4626`) implementation the share math and gauge
+/// staking port.
+const VAULT_IMPLEMENTATION: AlloyAddress = address!("e4031e271809d20074e4bef1caeefec5f710e8a6");
 
 /// fxSP's fixed-point unit.
 const PRECISION: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]);
 
-/// The largest deposit quoted, in whole tokens of either input. Deposits are uncapped; fxSP's share
-/// math (`amountUSD * totalSupply`) overflows `uint256` and reverts long before `2^128` USDC units,
-/// so the bound has to sit well below it.
+/// The largest deposit quoted, in whole tokens of either input. Deposits are uncapped, but fxSP's
+/// share math (`amountUSD * totalSupply`) overflows `uint256` and reverts: at fxSP's supply of
+/// about 6.4e25 shares, from about 1.8e39 USDC units, or 1.8e33 whole tokens of either input.
+/// This is a conservative cap far below that.
 const MAX_DEPOSIT_WHOLE_TOKENS: u64 = 1_000_000_000_000_000_000;
 
 /// Deposits into fxSAVE: USDC or fxUSD into fxSP (f(x) Protocol's stability pool share), then the
@@ -40,84 +55,78 @@ const MAX_DEPOSIT_WHOLE_TOKENS: u64 = 1_000_000_000_000_000_000;
 ///
 /// Leaving fxSAVE redeems fxSP for fxUSD and USDC after a cooldown, so only the two directions
 /// into fxSAVE are quoted.
+///
+/// The math is a port of fxSP's and fxSAVE's current implementations, which both proxies can
+/// replace: fxSP's has changed three times since block 22,000,000. An upgrade can add a fee, a cap,
+/// a pause or a new valuation the port would not see, so while either proxy points elsewhere no
+/// deposit is quoted, until the port is checked against the new code and its address pinned here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FxSaveState {
-    vault: Bytes,
     base_pool: Bytes,
     vault_token: Token,
     stable_token: Token,
     yield_token: Token,
-    total_yield_token: U256,
-    total_stable_token: U256,
-    base_pool_supply: U256,
-    /// USDC price scaled to 18 decimals of USDC; `None` while the oracle reverts.
-    stable_price: Option<U256>,
-    stable_depeg_price: U256,
-    vault_assets: U256,
-    vault_supply: U256,
+    readings: VaultReadings,
 }
 
 impl FxSaveState {
-    /// Builds the state from the vault's readings.
-    ///
-    /// Fails when `stable_token` or `yield_token` is not the token fxSP reports.
+    /// Builds the state from fxSP's two tokens and the vault's readings.
     pub fn new(
         vault_token: Token,
         base_pool: Bytes,
         stable_token: Token,
         yield_token: Token,
-        readings: &VaultReadings,
-    ) -> Result<Self, SimulationError> {
-        if stable_token.address != readings.stable_token ||
-            yield_token.address != readings.yield_token
-        {
-            return Err(SimulationError::FatalError(format!(
-                "fxSP {base_pool} takes {} and {}, not {} and {}",
-                readings.stable_token,
-                readings.yield_token,
-                stable_token.address,
-                yield_token.address
-            )));
-        }
-        let mut state = Self {
-            vault: vault_token.address.clone(),
-            base_pool,
-            vault_token,
-            stable_token,
-            yield_token,
-            total_yield_token: U256::ZERO,
-            total_stable_token: U256::ZERO,
-            base_pool_supply: U256::ZERO,
-            stable_price: None,
-            stable_depeg_price: U256::ZERO,
-            vault_assets: U256::ZERO,
-            vault_supply: U256::ZERO,
-        };
-        state.apply_readings(readings);
-        Ok(state)
+        readings: VaultReadings,
+    ) -> Self {
+        Self { base_pool, vault_token, stable_token, yield_token, readings }
     }
 
-    fn apply_readings(&mut self, readings: &VaultReadings) {
-        self.total_yield_token = readings.total_yield_token;
-        self.total_stable_token = readings.total_stable_token;
-        self.base_pool_supply = readings.base_pool_supply;
-        self.stable_price = readings.stable_price;
-        self.stable_depeg_price = readings.stable_depeg_price;
-        self.vault_assets = readings.vault_assets;
-        self.vault_supply = readings.vault_supply;
+    /// Fails when either proxy delegates to an implementation the math was not ported from.
+    fn check_implementations(&self) -> Result<(), SimulationError> {
+        let proxies = [
+            (
+                "fxSP",
+                &self.base_pool,
+                self.readings.base_pool_implementation,
+                BASE_POOL_IMPLEMENTATION,
+            ),
+            (
+                "fxSAVE",
+                &self.vault_token.address,
+                self.readings.vault_implementation,
+                VAULT_IMPLEMENTATION,
+            ),
+        ];
+        for (name, proxy, implementation, ported) in proxies {
+            if implementation != ported {
+                return Err(SimulationError::RecoverableError(format!(
+                    "{name} {proxy} delegates to implementation {implementation}, not {ported} \
+                     whose deposit math is ported: deposits are not quoted until the port is \
+                     checked against it"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// USDC's price, when fxSP accepts deposits: the oracle answers and USDC is not below
-    /// `stableDepegPrice`. fxSP checks this for both tokens.
+    /// `stableDepegPrice`. fxSP checks this for both tokens. Also fails while either proxy runs an
+    /// implementation the math was not ported from.
     fn deposit_price(&self) -> Result<U256, SimulationError> {
-        let Some(price) = self.stable_price else {
+        self.check_implementations()?;
+        let Some(price) = self.readings.stable_price else {
             return Err(SimulationError::RecoverableError(format!(
-                "fxSP {} rejects deposits: its USDC price oracle is stale",
+                "fxSP {} rejects deposits: its USDC price oracle reverts",
                 self.base_pool
             )));
         };
         let scale = U256::from(10).pow(U256::from(18 - self.stable_token.decimals));
-        if price < self.stable_depeg_price * scale {
+        let depeg_price = self
+            .readings
+            .stable_depeg_price
+            .checked_mul(scale)
+            .ok_or_else(|| overflow("fxSP stableDepegPrice * stableTokenScale"))?;
+        if price < depeg_price {
             return Err(SimulationError::RecoverableError(format!(
                 "fxSP {} rejects deposits: USDC price {price} is below the depeg price",
                 self.base_pool
@@ -126,9 +135,13 @@ impl FxSaveState {
         Ok(price)
     }
 
+    fn is_stable_token(&self, token: &Bytes) -> bool {
+        *token == self.stable_token.address
+    }
+
     /// The largest deposit of `token_in` quoted, in its smallest unit.
     fn max_deposit(&self, token_in: &Bytes) -> U256 {
-        let decimals = if *token_in == self.stable_token.address {
+        let decimals = if self.is_stable_token(token_in) {
             self.stable_token.decimals
         } else {
             self.yield_token.decimals
@@ -137,57 +150,98 @@ impl FxSaveState {
     }
 
     fn is_deposit(&self, token_in: &Bytes, token_out: &Bytes) -> bool {
-        *token_out == self.vault &&
-            (*token_in == self.stable_token.address || *token_in == self.yield_token.address)
+        *token_out == self.vault_token.address &&
+            (self.is_stable_token(token_in) || *token_in == self.yield_token.address)
     }
 
     /// Returns the fxSP and fxSAVE shares minted for `amount` of `token_in`, as
     /// `FxUSDBasePool._deposit` and OpenZeppelin's `ERC4626.previewDeposit` compute them.
     fn deposit(&self, token_in: &Bytes, amount: U256) -> Result<(U256, U256), SimulationError> {
         let price = self.deposit_price()?;
-        let amount_usd = if *token_in == self.stable_token.address {
-            mul_div(amount, price, PRECISION)?
+        let readings = &self.readings;
+        let amount_usd = if self.is_stable_token(token_in) {
+            checked_mul_div(amount, price, PRECISION, "fxSP amountUSD")?
         } else {
             amount
         };
-        let base_pool_shares = if self.base_pool_supply.is_zero() {
+        let base_pool_shares = if readings.base_pool_supply.is_zero() {
             amount_usd
         } else {
-            let stable_usd = mul_div(self.total_stable_token, price, PRECISION)?;
-            let total_usd = self
-                .total_yield_token
-                .checked_add(stable_usd)
-                .ok_or_else(|| overflow("fxSP total USD"))?;
-            mul_div(amount_usd, self.base_pool_supply, total_usd)?
+            let stable_usd =
+                checked_mul_div(readings.total_stable_token, price, PRECISION, "fxSP stable USD")?;
+            let total_usd = checked_add(readings.total_yield_token, stable_usd, "fxSP totalUSD")?;
+            checked_mul_div(amount_usd, readings.base_pool_supply, total_usd, "fxSP shares")?
         };
-        let vault_shares = mul_div(
+        let vault_shares = solidity_math::mul_div(
             base_pool_shares,
-            self.vault_supply + U256::ONE,
-            self.vault_assets + U256::ONE,
-        )?;
+            checked_add(readings.vault_supply, U256::ONE, "fxSAVE totalSupply + 1")?,
+            checked_add(readings.vault_assets, U256::ONE, "fxSAVE totalAssets + 1")?,
+        )
+        .map_err(|e| {
+            SimulationError::InvalidInput(format!("fxSAVE previewDeposit failed: {e}"), None)
+        })?;
         Ok((base_pool_shares, vault_shares))
+    }
+
+    /// The state after a deposit minting `base_pool_shares` and `vault_shares`, and whether fxSAVE
+    /// then stakes its idle fxSP into the gauge.
+    fn after_deposit(
+        &self,
+        token_in: &Bytes,
+        amount: U256,
+        base_pool_shares: U256,
+        vault_shares: U256,
+    ) -> Result<(Self, bool), SimulationError> {
+        let mut new_state = self.clone();
+        let readings = &mut new_state.readings;
+        if self.is_stable_token(token_in) {
+            readings.total_stable_token =
+                checked_add(readings.total_stable_token, amount, "fxSP totalStableToken")?;
+        } else {
+            readings.total_yield_token =
+                checked_add(readings.total_yield_token, amount, "fxSP totalYieldToken")?;
+        }
+        readings.base_pool_supply =
+            checked_add(readings.base_pool_supply, base_pool_shares, "fxSP totalSupply")?;
+        readings.vault_assets =
+            checked_add(readings.vault_assets, base_pool_shares, "fxSAVE totalAssets")?;
+        readings.vault_supply =
+            checked_add(readings.vault_supply, vault_shares, "fxSAVE totalSupply")?;
+        let idle = checked_add(readings.vault_idle_assets, base_pool_shares, "fxSAVE idle fxSP")?;
+        let stakes = idle >= readings.stake_threshold;
+        // Staking moves the idle fxSP into the gauge; `totalAssets` counts both.
+        readings.vault_idle_assets = if stakes { U256::ZERO } else { idle };
+        Ok((new_state, stakes))
     }
 
     fn unsupported_pair(&self, token_in: &Bytes, token_out: &Bytes) -> SimulationError {
         SimulationError::InvalidInput(
             format!(
                 "fxSAVE {} only takes USDC or fxUSD deposits, not {token_in} -> {token_out}",
-                self.vault
+                self.vault_token.address
             ),
             None,
         )
     }
 }
 
-/// `a * b / c` as Solidity computes it, failing where the contract would revert.
-fn mul_div(a: U256, b: U256, c: U256) -> Result<U256, SimulationError> {
-    a.checked_mul(b)
-        .and_then(|product| product.checked_div(c))
-        .ok_or_else(|| overflow("fxSP or fxSAVE share math"))
+/// `a * b / c` with Solidity 0.8's checked arithmetic, failing where fxSP would revert.
+fn checked_mul_div(a: U256, b: U256, c: U256, operation: &str) -> Result<U256, SimulationError> {
+    let product = a
+        .checked_mul(b)
+        .ok_or_else(|| overflow(operation))?;
+    product
+        .checked_div(c)
+        .ok_or_else(|| SimulationError::InvalidInput(format!("{operation} divides by zero"), None))
 }
 
-fn overflow(what: &str) -> SimulationError {
-    SimulationError::InvalidInput(format!("{what} overflows or divides by zero"), None)
+fn checked_add(a: U256, b: U256, operation: &str) -> Result<U256, SimulationError> {
+    a.checked_add(b)
+        .ok_or_else(|| overflow(operation))
+}
+
+fn overflow(operation: &str) -> SimulationError {
+    SimulationError::InvalidInput(format!("{operation} overflows uint256"), None)
 }
 
 #[typetag::serde]
@@ -230,20 +284,13 @@ impl ProtocolSim for FxSaveState {
             ));
         }
         let (base_pool_shares, vault_shares) = self.deposit(&token_in.address, amount)?;
-
-        let mut new_state = self.clone();
-        if token_in.address == self.stable_token.address {
-            new_state.total_stable_token += amount;
-        } else {
-            new_state.total_yield_token += amount;
-        }
-        new_state.base_pool_supply += base_pool_shares;
-        new_state.vault_assets += base_pool_shares;
-        new_state.vault_supply += vault_shares;
+        let (new_state, stakes) =
+            self.after_deposit(&token_in.address, amount, base_pool_shares, vault_shares)?;
+        let gas = if stakes { DEPOSIT_GAS + GAUGE_STAKE_GAS } else { DEPOSIT_GAS };
 
         Ok(GetAmountOutResult {
             amount: u256_to_biguint(vault_shares),
-            gas: BigUint::from(DEPOSIT_GAS),
+            gas: BigUint::from(gas),
             new_state: Box::new(new_state),
         })
     }
@@ -253,7 +300,8 @@ impl ProtocolSim for FxSaveState {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        let tokens = [&self.stable_token.address, &self.yield_token.address, &self.vault];
+        let tokens =
+            [&self.stable_token.address, &self.yield_token.address, &self.vault_token.address];
         if !tokens.contains(&&sell_token) ||
             !tokens.contains(&&buy_token) ||
             sell_token == buy_token
@@ -275,8 +323,7 @@ impl ProtocolSim for FxSaveState {
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
         let engine = create_engine(SHARED_TYCHO_DB.clone(), false)?;
-        let readings = vm::read_vault(&engine, &self.vault, &self.base_pool)?;
-        self.apply_readings(&readings);
+        self.readings = vm::read_vault(&engine, &self.vault_token.address, &self.base_pool)?;
         Ok(())
     }
 
@@ -299,11 +346,27 @@ impl ProtocolSim for FxSaveState {
             .is_some_and(|other| self == other)
     }
 
-    fn query_pool_swap(
-        &self,
-        params: &tycho_common::simulation::protocol_sim::QueryPoolSwapParams,
-    ) -> Result<tycho_common::simulation::protocol_sim::PoolSwap, SimulationError> {
-        crate::evm::query_pool_swap::query_pool_swap(self, params)
+    /// A deposit's price does not depend on its size, so the generic search, which needs the
+    /// price to fall as the amount grows, cannot bracket it. Both constraints are answered from
+    /// the rate of the largest quoted deposit, compared exactly as `amount_out / amount_in`: a
+    /// deposit never moves the price, so the whole limit is deposited when that rate meets the
+    /// limit or target price, and nothing otherwise (also while deposits are closed).
+    ///
+    /// `tolerance`, `min_amount_in` and `max_amount_in` are ignored, as in the generic helper.
+    fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        let token_in = params.token_in();
+        let token_out = params.token_out();
+        let price = match params.swap_constraint() {
+            SwapConstraint::TradeLimitPrice { limit, .. } => limit,
+            SwapConstraint::PoolTargetPrice { target, .. } => target,
+        };
+        let (max_in, max_out) =
+            self.get_limits(token_in.address.clone(), token_out.address.clone())?;
+        if max_in == BigUint::ZERO || &max_out * &price.denominator < &price.numerator * &max_in {
+            return Ok(PoolSwap::new(BigUint::ZERO, BigUint::ZERO, self.clone_box(), None));
+        }
+        let result = self.get_amount_out(max_in.clone(), token_in, token_out)?;
+        Ok(PoolSwap::new(max_in, result.amount, result.new_state, None))
     }
 }
 
@@ -311,7 +374,8 @@ impl ProtocolSim for FxSaveState {
 pub(crate) mod tests {
     use std::str::FromStr;
 
-    use tycho_common::models::Chain;
+    use rstest::rstest;
+    use tycho_common::{models::Chain, simulation::protocol_sim::Price};
 
     use super::*;
 
@@ -332,11 +396,23 @@ pub(crate) mod tests {
         )
     }
 
+    fn usdc() -> Token {
+        token(USDC, "USDC", 6)
+    }
+
+    fn fxusd() -> Token {
+        token(FXUSD, "fxUSD", 18)
+    }
+
+    fn fxsave() -> Token {
+        token(FXSAVE, "fxSAVE", 18)
+    }
+
     /// fxSP and fxSAVE at block 26,353,817.
     pub fn readings() -> VaultReadings {
         VaultReadings {
-            stable_token: Bytes::from_str(USDC).unwrap(),
-            yield_token: Bytes::from_str(FXUSD).unwrap(),
+            base_pool_implementation: address!("9cfefd90d4c8428d4cbac9baaa6d52c6ba7897f9"),
+            vault_implementation: address!("e4031e271809d20074e4bef1caeefec5f710e8a6"),
             total_yield_token: U256::from(53_403_819_603_874_249_470_787_312_u128),
             total_stable_token: U256::from(10_867_685_419_190_u64),
             base_pool_supply: U256::from(63_616_689_726_854_618_890_912_910_u128),
@@ -344,92 +420,138 @@ pub(crate) mod tests {
             stable_depeg_price: U256::from(995_000_000_000_000_000_u64),
             vault_assets: U256::from(61_676_520_292_070_393_820_457_103_u128),
             vault_supply: U256::from(55_205_955_124_401_984_731_778_539_u128),
+            vault_idle_assets: U256::ZERO,
+            stake_threshold: U256::from(100_000_000_000_000_000_000_u128),
         }
     }
 
-    fn state_with(readings: &VaultReadings) -> FxSaveState {
+    fn state_with(readings: VaultReadings) -> FxSaveState {
         FxSaveState::new(
-            token(FXSAVE, "fxSAVE", 18),
+            fxsave(),
             Bytes::from_str(FX_BASE_POOL).unwrap(),
-            token(USDC, "USDC", 6),
-            token(FXUSD, "fxUSD", 18),
+            usdc(),
+            fxusd(),
             readings,
         )
-        .unwrap()
     }
 
-    fn amount_out(state: &FxSaveState, amount: u128, token_in: &Token) -> BigUint {
+    fn deposit(state: &FxSaveState, amount: u128, token_in: &Token) -> GetAmountOutResult {
         state
-            .get_amount_out(BigUint::from(amount), token_in, &token(FXSAVE, "fxSAVE", 18))
+            .get_amount_out(BigUint::from(amount), token_in, &fxsave())
             .unwrap()
-            .amount
     }
 
-    #[test]
-    fn usdc_deposit_matches_the_chain_preview() {
-        let state = state_with(&readings());
-
-        // fxSP.previewDeposit(USDC, 1e9) then fxSAVE.previewDeposit at block 26,353,817.
-        assert_eq!(
-            amount_out(&state, 1_000_000_000, &token(USDC, "USDC", 6)),
-            BigUint::from(885_837_212_934_908_530_177_u128)
-        );
-    }
-
-    #[test]
-    fn fxusd_deposit_matches_the_chain_preview() {
-        let state = state_with(&readings());
-
-        assert_eq!(
-            amount_out(&state, 1_000_000_000_000_000_000_000, &token(FXUSD, "fxUSD", 18)),
-            BigUint::from(885_996_151_784_577_165_475_u128)
-        );
-    }
-
-    #[test]
-    fn deposit_returns_a_state_holding_it() {
-        let state = state_with(&readings());
-        let usdc = token(USDC, "USDC", 6);
-
-        let result = state
-            .get_amount_out(BigUint::from(1_000_000_000u64), &usdc, &token(FXSAVE, "fxSAVE", 18))
-            .unwrap();
-
-        let new_state = result
+    fn returned_state(result: &GetAmountOutResult) -> &FxSaveState {
+        result
             .new_state
             .as_any()
             .downcast_ref::<FxSaveState>()
-            .unwrap();
-        assert_eq!(
-            new_state.total_stable_token,
-            state.total_stable_token + U256::from(1_000_000_000u64)
-        );
-        assert_eq!(new_state.vault_supply, state.vault_supply + biguint_to_u256(&result.amount));
-        assert_eq!(
-            new_state.vault_assets - state.vault_assets,
-            new_state.base_pool_supply - state.base_pool_supply
-        );
+            .unwrap()
+    }
+
+    /// fxSP and fxSAVE shares minted by `fxSP.previewDeposit` then `fxSAVE.previewDeposit` at
+    /// block 26,353,817.
+    const USDC_1000_FXSP: u128 = 989_664_189_595_756_090_058;
+    const USDC_1000_FXSAVE: u128 = 885_837_212_934_908_530_177;
+    const FXUSD_1000_FXSP: u128 = 989_841_757_308_599_679_755;
+    const FXUSD_1000_FXSAVE: u128 = 885_996_151_784_577_165_475;
+    const USDC_10_FXSP: u128 = 9_896_641_895_957_560_900;
+    const USDC_10_FXSAVE: u128 = 8_858_372_129_349_085_301;
+    /// The same for the largest quoted USDC deposit, 1e18 USDC.
+    const USDC_MAX_IN: u128 = 1_000_000_000_000_000_000_000_000;
+    const USDC_MAX_FXSAVE: u128 = 885_837_212_934_908_530_178_367_802_461_475_189;
+
+    #[test]
+    fn usdc_deposit_matches_the_chain_and_returns_the_state_holding_it() {
+        let state = state_with(readings());
+
+        let result = deposit(&state, 1_000_000_000, &usdc());
+
+        assert_eq!(result.amount, BigUint::from(USDC_1000_FXSAVE));
+        let fxsp = U256::from(USDC_1000_FXSP);
+        let expected = state_with(VaultReadings {
+            total_stable_token: readings().total_stable_token + U256::from(1_000_000_000u64),
+            base_pool_supply: readings().base_pool_supply + fxsp,
+            vault_assets: readings().vault_assets + fxsp,
+            vault_supply: readings().vault_supply + U256::from(USDC_1000_FXSAVE),
+            // 989 fxSP reach the 100 fxSP threshold, so fxSAVE stakes them.
+            vault_idle_assets: U256::ZERO,
+            ..readings()
+        });
+        assert_eq!(returned_state(&result), &expected);
+        assert_eq!(result.gas, BigUint::from(DEPOSIT_GAS + GAUGE_STAKE_GAS));
+    }
+
+    #[test]
+    fn fxusd_deposit_matches_the_chain_and_returns_the_state_holding_it() {
+        let state = state_with(readings());
+
+        let result = deposit(&state, 1_000_000_000_000_000_000_000, &fxusd());
+
+        assert_eq!(result.amount, BigUint::from(FXUSD_1000_FXSAVE));
+        let fxsp = U256::from(FXUSD_1000_FXSP);
+        let expected = state_with(VaultReadings {
+            total_yield_token: readings().total_yield_token +
+                U256::from(1_000_000_000_000_000_000_000_u128),
+            base_pool_supply: readings().base_pool_supply + fxsp,
+            vault_assets: readings().vault_assets + fxsp,
+            vault_supply: readings().vault_supply + U256::from(FXUSD_1000_FXSAVE),
+            vault_idle_assets: U256::ZERO,
+            ..readings()
+        });
+        assert_eq!(returned_state(&result), &expected);
+    }
+
+    #[rstest]
+    #[case::idle_stays_below_the_threshold(0, USDC_10_FXSP, DEPOSIT_GAS)]
+    #[case::one_unit_short_of_the_threshold(
+        90_103_358_104_042_439_099,
+        90_103_358_104_042_439_099 + USDC_10_FXSP,
+        DEPOSIT_GAS
+    )]
+    #[case::idle_reaches_the_threshold(
+        90_103_358_104_042_439_100,
+        0,
+        DEPOSIT_GAS + GAUGE_STAKE_GAS
+    )]
+    fn gauge_stake_is_charged_when_idle_fxsp_reaches_the_threshold(
+        #[case] idle_before: u128,
+        #[case] idle_after: u128,
+        #[case] gas: u64,
+    ) {
+        let state =
+            state_with(VaultReadings { vault_idle_assets: U256::from(idle_before), ..readings() });
+
+        let result = deposit(&state, 10_000_000, &usdc());
+
+        assert_eq!(result.amount, BigUint::from(USDC_10_FXSAVE));
+        assert_eq!(result.gas, BigUint::from(gas));
+        let new_readings = &returned_state(&result).readings;
+        assert_eq!(new_readings.vault_idle_assets, U256::from(idle_after));
+        assert_eq!(new_readings.vault_assets, readings().vault_assets + U256::from(USDC_10_FXSP));
     }
 
     #[test]
     fn redeeming_fxsave_is_not_quoted() {
-        let state = state_with(&readings());
-        let fxsave = token(FXSAVE, "fxSAVE", 18);
-        let usdc = token(USDC, "USDC", 6);
+        let state = state_with(readings());
 
         assert!(matches!(
-            state.get_amount_out(BigUint::from(1u64), &fxsave, &usdc),
+            state.get_amount_out(BigUint::from(1u64), &fxsave(), &usdc()),
+            Err(SimulationError::InvalidInput(_, None))
+        ));
+        assert!(matches!(
+            state.spot_price(&fxsave(), &usdc()),
             Err(SimulationError::InvalidInput(_, None))
         ));
         assert_eq!(
             state
-                .get_limits(fxsave.address, usdc.address.clone())
+                .get_limits(fxsave().address, usdc().address)
                 .unwrap(),
             (BigUint::ZERO, BigUint::ZERO)
         );
         assert_eq!(
             state
-                .get_limits(usdc.address, Bytes::from_str(FXUSD).unwrap())
+                .get_limits(usdc().address, fxusd().address)
                 .unwrap(),
             (BigUint::ZERO, BigUint::ZERO)
         );
@@ -437,135 +559,205 @@ pub(crate) mod tests {
 
     #[test]
     fn foreign_tokens_are_rejected() {
-        let state = state_with(&readings());
-        let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
-
-        assert!(state
-            .get_limits(dai, Bytes::from_str(FXSAVE).unwrap())
-            .is_err());
-    }
-
-    #[test]
-    fn stale_oracle_closes_deposits() {
-        let state = state_with(&VaultReadings { stable_price: None, ..readings() });
-        let usdc = token(USDC, "USDC", 6);
+        let state = state_with(readings());
+        let dai = token("0x6b175474e89094c44da98b954eedeac495271d0f", "DAI", 18);
 
         assert!(matches!(
-            state.get_amount_out(BigUint::from(1_000_000u64), &usdc, &token(FXSAVE, "fxSAVE", 18)),
-            Err(SimulationError::RecoverableError(_))
+            state.get_limits(dai.address.clone(), fxsave().address),
+            Err(SimulationError::InvalidInput(_, None))
         ));
-        assert_eq!(
-            state
-                .get_limits(usdc.address, Bytes::from_str(FXSAVE).unwrap())
-                .unwrap(),
-            (BigUint::ZERO, BigUint::ZERO)
-        );
+        assert!(matches!(
+            state.spot_price(&dai, &fxsave()),
+            Err(SimulationError::InvalidInput(_, None))
+        ));
     }
 
-    #[test]
-    fn depegged_usdc_closes_fxusd_deposits_too() {
-        let depegged = U256::from(994_999_999_999_999_999_u64) * U256::from(1_000_000_000_000u64);
-        let state = state_with(&VaultReadings { stable_price: Some(depegged), ..readings() });
+    /// 1 wei of 18-decimal USDC price below `stableDepegPrice` (0.995).
+    fn depegged() -> VaultReadings {
+        let price = U256::from(994_999_999_999_999_999_u64) * U256::from(1_000_000_000_000u64);
+        VaultReadings { stable_price: Some(price), ..readings() }
+    }
 
-        assert!(state
-            .get_amount_out(
-                BigUint::from(1_000_000_000_000_000_000u64),
-                &token(FXUSD, "fxUSD", 18),
-                &token(FXSAVE, "fxSAVE", 18),
-            )
-            .is_err());
+    fn upgraded_base_pool() -> VaultReadings {
+        VaultReadings {
+            base_pool_implementation: address!("1111111111111111111111111111111111111111"),
+            ..readings()
+        }
+    }
+
+    fn upgraded_vault() -> VaultReadings {
+        VaultReadings { vault_implementation: AlloyAddress::ZERO, ..readings() }
+    }
+
+    #[rstest]
+    #[case::stale_oracle(VaultReadings { stable_price: None, ..readings() }, "oracle reverts")]
+    #[case::depegged_usdc(depegged(), "below the depeg price")]
+    #[case::upgraded_base_pool(
+        upgraded_base_pool(),
+        "fxSP 0x65c9a641afceb9c0e6034e558a319488fa0fa3be delegates to implementation \
+         0x1111111111111111111111111111111111111111, not 0x9CFeFD90d4C8428D4CBaC9bAAA6D52C6BA7897f9"
+    )]
+    #[case::upgraded_vault(
+        upgraded_vault(),
+        "fxSAVE 0x7743e50f534a7f9f1791dde7dcd89f7783eefc39 delegates to implementation \
+         0x0000000000000000000000000000000000000000, not 0xE4031e271809d20074E4bef1caeEfEc5f710e8A6"
+    )]
+    fn closed_deposits_are_refused_for_both_tokens(
+        #[case] readings: VaultReadings,
+        #[case] reason: &str,
+    ) {
+        let state = state_with(readings);
+
+        for token_in in [usdc(), fxusd()] {
+            let symbol = &token_in.symbol;
+            assert!(
+                matches!(
+                    state.get_amount_out(BigUint::from(1_000_000u64), &token_in, &fxsave()),
+                    Err(SimulationError::RecoverableError(message)) if message.contains(reason)
+                ),
+                "{symbol}"
+            );
+            assert!(
+                matches!(
+                    state.spot_price(&token_in, &fxsave()),
+                    Err(SimulationError::RecoverableError(message)) if message.contains(reason)
+                ),
+                "{symbol}"
+            );
+            assert_eq!(
+                state
+                    .get_limits(token_in.address.clone(), fxsave().address)
+                    .unwrap(),
+                (BigUint::ZERO, BigUint::ZERO),
+                "{symbol}"
+            );
+            let swap = state
+                .query_pool_swap(&QueryPoolSwapParams::new(
+                    token_in.clone(),
+                    fxsave(),
+                    trade_limit(1),
+                ))
+                .unwrap();
+            assert_eq!(swap.amount_in(), &BigUint::ZERO, "{symbol}");
+        }
     }
 
     #[test]
     fn usdc_at_the_depeg_price_still_deposits() {
         let at_depeg = U256::from(995_000_000_000_000_000_u64) * U256::from(1_000_000_000_000u64);
-        let state = state_with(&VaultReadings { stable_price: Some(at_depeg), ..readings() });
+        let state = state_with(VaultReadings { stable_price: Some(at_depeg), ..readings() });
 
         assert!(state
-            .get_amount_out(
-                BigUint::from(1_000_000u64),
-                &token(USDC, "USDC", 6),
-                &token(FXSAVE, "fxSAVE", 18),
-            )
+            .get_amount_out(BigUint::from(1_000_000u64), &usdc(), &fxsave())
             .is_ok());
     }
 
     #[test]
     fn zero_and_oversized_deposits_are_rejected() {
-        let state = state_with(&readings());
-        let usdc = token(USDC, "USDC", 6);
-        let fxsave = token(FXSAVE, "fxSAVE", 18);
-
-        assert!(state
-            .get_amount_out(BigUint::ZERO, &usdc, &fxsave)
-            .is_err());
-        assert!(state
-            .get_amount_out(BigUint::from(10u32).pow(24) + 1u32, &usdc, &fxsave)
-            .is_err());
-    }
-
-    #[test]
-    fn limits_quote_a_quintillion_tokens_of_either_input() {
-        let state = state_with(&readings());
-
-        for (address, symbol, decimals) in [(USDC, "USDC", 6), (FXUSD, "fxUSD", 18)] {
-            let (max_in, max_out) = state
-                .get_limits(Bytes::from_str(address).unwrap(), Bytes::from_str(FXSAVE).unwrap())
-                .unwrap();
-
-            let expected_in = BigUint::from(10u32).pow(18 + decimals);
-            assert_eq!(max_in, expected_in, "{symbol}");
-            let quoted = state
-                .get_amount_out(
-                    expected_in,
-                    &token(address, symbol, decimals),
-                    &token(FXSAVE, "fxSAVE", 18),
-                )
-                .unwrap()
-                .amount;
-            assert_eq!(max_out, quoted, "{symbol}");
-        }
-    }
-
-    #[test]
-    fn share_math_overflow_is_rejected_not_wrapped() {
-        let state = state_with(&VaultReadings {
-            base_pool_supply: U256::MAX / U256::from(2),
-            ..readings()
-        });
+        let state = state_with(readings());
 
         assert!(matches!(
-            state.get_amount_out(
-                BigUint::from(1_000_000_000u64),
-                &token(USDC, "USDC", 6),
-                &token(FXSAVE, "fxSAVE", 18),
-            ),
+            state.get_amount_out(BigUint::ZERO, &usdc(), &fxsave()),
+            Err(SimulationError::InvalidInput(_, None))
+        ));
+        assert!(matches!(
+            state.get_amount_out(BigUint::from(USDC_MAX_IN) + 1u32, &usdc(), &fxsave()),
             Err(SimulationError::InvalidInput(_, None))
         ));
     }
 
     #[test]
-    fn mismatched_tokens_are_rejected() {
-        let result = FxSaveState::new(
-            token(FXSAVE, "fxSAVE", 18),
-            Bytes::from_str(FX_BASE_POOL).unwrap(),
-            token(FXUSD, "fxUSD", 18),
-            token(USDC, "USDC", 6),
-            &readings(),
-        );
+    fn limits_quote_a_quintillion_tokens_of_either_input() {
+        let state = state_with(readings());
 
-        assert!(result.is_err());
+        assert_eq!(
+            state
+                .get_limits(usdc().address, fxsave().address)
+                .unwrap(),
+            (BigUint::from(USDC_MAX_IN), BigUint::from(USDC_MAX_FXSAVE))
+        );
+        // fxSAVE.previewDeposit(fxSP.previewDeposit(fxUSD, 1e36)) at block 26,353,817.
+        assert_eq!(
+            state
+                .get_limits(fxusd().address, fxsave().address)
+                .unwrap(),
+            (
+                BigUint::from(10u32).pow(36),
+                BigUint::from(885_996_151_784_577_165_476_082_556_911_359_518_u128)
+            )
+        );
+    }
+
+    #[test]
+    fn share_math_overflow_is_rejected_not_wrapped() {
+        let state =
+            state_with(VaultReadings { base_pool_supply: U256::MAX / U256::from(2), ..readings() });
+
+        assert!(matches!(
+            state.get_amount_out(BigUint::from(1_000_000_000u64), &usdc(), &fxsave()),
+            Err(SimulationError::InvalidInput(message, None))
+                if message == "fxSP shares overflows uint256"
+        ));
     }
 
     #[test]
     fn spot_price_is_one_unit_deposited() {
-        let state = state_with(&readings());
+        let state = state_with(readings());
 
         let price = state
-            .spot_price(&token(USDC, "USDC", 6), &token(FXSAVE, "fxSAVE", 18))
+            .spot_price(&usdc(), &fxsave())
             .unwrap();
 
         // 1 USDC buys about 0.8858 fxSAVE at block 26,353,817.
         assert!((price - 0.885_837).abs() < 1e-6, "{price}");
+    }
+
+    /// A price of `numerator` fxSAVE units per 1e18 USDC.
+    fn usdc_price(numerator: u128) -> Price {
+        Price::new(BigUint::from(numerator), BigUint::from(USDC_MAX_IN))
+    }
+
+    fn trade_limit(numerator: u128) -> SwapConstraint {
+        SwapConstraint::TradeLimitPrice {
+            limit: usdc_price(numerator),
+            tolerance: 0.0,
+            min_amount_in: None,
+            max_amount_in: None,
+        }
+    }
+
+    fn pool_target(numerator: u128) -> SwapConstraint {
+        SwapConstraint::PoolTargetPrice {
+            target: usdc_price(numerator),
+            tolerance: 0.0,
+            min_amount_in: None,
+            max_amount_in: None,
+        }
+    }
+
+    #[rstest]
+    #[case::trade_limit_below_the_rate(trade_limit(USDC_MAX_FXSAVE / 2), true)]
+    #[case::trade_limit_at_the_rate(trade_limit(USDC_MAX_FXSAVE), true)]
+    #[case::trade_limit_above_the_rate(trade_limit(USDC_MAX_FXSAVE + 1), false)]
+    #[case::pool_target_below_the_rate(pool_target(USDC_MAX_FXSAVE / 2), true)]
+    #[case::pool_target_at_the_rate(pool_target(USDC_MAX_FXSAVE), true)]
+    #[case::pool_target_above_the_rate(pool_target(USDC_MAX_FXSAVE + 1), false)]
+    fn price_query_deposits_the_whole_limit_or_nothing(
+        #[case] constraint: SwapConstraint,
+        #[case] fills: bool,
+    ) {
+        let state = state_with(readings());
+
+        let swap = state
+            .query_pool_swap(&QueryPoolSwapParams::new(usdc(), fxsave(), constraint))
+            .unwrap();
+
+        let (amount_in, amount_out) = if fills {
+            (BigUint::from(USDC_MAX_IN), BigUint::from(USDC_MAX_FXSAVE))
+        } else {
+            (BigUint::ZERO, BigUint::ZERO)
+        };
+        assert_eq!(swap.amount_in(), &amount_in);
+        assert_eq!(swap.amount_out(), &amount_out);
     }
 }
