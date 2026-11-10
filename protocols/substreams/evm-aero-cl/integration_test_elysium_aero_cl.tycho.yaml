@@ -8,6 +8,12 @@ initialized_accounts:
 tests:
   # Starts at the factory deployment: its constructor enables the tick spacings and sets the
   # default swap hook, and the hook's constructor writes its settings, which pool creation reads.
+  #
+  # Simulation and execution are skipped because a range that reaches them is too long: the pools
+  # gain liquidity at blocks 3468354 and 3488685, 1.5M blocks after their creation, which takes
+  # the harness about 12 hours to index. The Elysium contracts are byte-identical to Robinhood's
+  # (factory, pool implementation, DynamicSwapFeeHook), apart from compiler metadata hashes and the
+  # CLFactory address the hook stores.
   - name: test_first_pools
     start_block: 1947859
     stop_block: 1952400
@@ -21,7 +27,6 @@ tests:
           tick_spacing: "0x00c8"
           pool_address: "0x5ecb73050f35d8bd67231512c3bef91ad0b3dcc7"
         creation_tx: "0x177fc73d7d86291af98d91e741432f44d26cdd6ac63c3b21bb9336ce145e85db"
-        # No liquidity until block 3468354; indexing that far would take ~12h.
         skip_simulation: true
         skip_execution: true
       - id: "0x97796d80b6a1db78632f7451196b04f307329eb6"
@@ -33,6 +38,5 @@ tests:
           tick_spacing: "0x64"
           pool_address: "0x97796d80b6a1db78632f7451196b04f307329eb6"
         creation_tx: "0x42f2b2f3707fb9acccb7bfa2d5e190e4ca422604f5600cefb521dc8fd409439a"
-        # No liquidity until block 3488685; indexing that far would take ~12h.
         skip_simulation: true
         skip_execution: true
