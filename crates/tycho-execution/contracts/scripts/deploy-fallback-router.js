@@ -3,7 +3,7 @@ const hre = require("hardhat");
 const {deployCreate2} = require("./utils");
 
 // Deploys the fallback router named by FALLBACK_ROUTER: `propamm` (the default),
-// `metric`, `bebop`, `hashflow`, `native` or `liquorice`.
+// `metric`, `bebop`, `hashflow`, `native`, `liquorice` or `tessera`.
 //
 // Every fallback router takes three per-chain singletons: Uniswap V4's PoolManager,
 // Fluid's liquidity layer and the Uniswap V3 static quoter. The first two come
@@ -18,14 +18,16 @@ const {deployCreate2} = require("./utils");
 // chain's `rfq:hashflow` entry. NativeFallbackRouter also takes the Native router, from
 // the chain's `rfq:native` entry. LiquoriceFallbackRouter also takes the Liquorice
 // settlement and balance manager, from the chain's `rfq:liquorice` entry; Liquorice
-// must then allow the router as a solver.
+// must then allow the router as a solver. TesseraFallbackRouter also takes Tessera's
+// TesseraSwap, from the chain's `pamm:tessera` entry.
 //
 // Then deploy the matching executor with deploy-executors.js: add an entry with
 // the printed router address to executor_deployments.json (`fallback` for
 // PropAMMFallbackExecutor, `fallback:rfq:metric` for MetricFallbackExecutor,
 // `fallback:rfq:bebop` for BebopFallbackExecutor, `fallback:rfq:hashflow` for
 // HashflowFallbackExecutor, `fallback:rfq:native` for NativeFallbackExecutor,
-// `fallback:rfq:liquorice` for LiquoriceFallbackExecutor). A Bebop, Hashflow, Native or
+// `fallback:rfq:liquorice` for LiquoriceFallbackExecutor, `fallback:pamm:tessera` for
+// TesseraFallbackExecutor). A Bebop, Hashflow, Native or
 // Liquorice router also needs its address as `fallback_router` under its protocol in
 // protocol_specific_addresses.json; Native also needs `router_v6` there.
 const executorDeployments = require("../../config/executor_deployments.json");
@@ -39,6 +41,7 @@ const ROUTERS = {
     hashflow: "HashflowFallbackRouter",
     native: "NativeFallbackRouter",
     liquorice: "LiquoriceFallbackRouter",
+    tessera: "TesseraFallbackRouter",
 };
 
 // Eden Network's Uniswap V3 static quoter, per chain:
@@ -115,6 +118,16 @@ async function main() {
         }
         args.push(...liquoriceArgs);
     }
+    if (kind === "tessera") {
+        const tesseraSwap = deployments["pamm:tessera"]?.args?.[0];
+        if (!tesseraSwap) {
+            throw new Error(
+                `No pamm:tessera entry for network '${base}' in ` +
+                "executor_deployments.json: Tessera's TesseraSwap is needed"
+            );
+        }
+        args.push(tesseraSwap);
+    }
 
     console.log(`Deploying ${contractName} to ${network} with:`);
     console.log(
@@ -143,6 +156,9 @@ async function main() {
     if (kind === "liquorice") {
         console.log(`- liquoriceSettlement: ${args[3]}`);
         console.log(`- liquoriceBalanceManager: ${args[4]}`);
+    }
+    if (kind === "tessera") {
+        console.log(`- tesseraSwap: ${args[3]}`);
     }
 
     await deployCreate2({
