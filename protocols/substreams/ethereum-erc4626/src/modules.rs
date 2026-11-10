@@ -228,6 +228,7 @@ pub fn store_component_first_interaction(
 /// attributes, or if you need any additional static contracts indexed.
 #[substreams::handlers::map]
 pub fn map_protocol_changes(
+    params: String,
     block: eth::v2::Block,
     new_components: BlockTransactionProtocolComponents,
     tokens_store: StoreGetString,
@@ -274,6 +275,11 @@ pub fn map_protocol_changes(
         .collect();
 
     if !first_pools.is_empty() {
+        let pool_params_by_vault: HashMap<String, PoolParams> =
+            PoolParams::parse_params(params.as_str())?
+                .into_iter()
+                .map(|pool| (format!("0x{}", pool.address), pool))
+                .collect();
         for tx in block.transactions() {
             for (log, _call) in tx.logs_with_calls().filter(|(log, _)| {
                 if !first_pools.contains(&log.address.to_hex()) {
@@ -326,10 +332,23 @@ pub fn map_protocol_changes(
                     "maxDeposit(address)",
                     erc4626::functions::MaxDeposit { receiver: user.clone() }.encode(),
                 );
+                // stUSDS's `maxRedeem` reads the MakerDAO Vat, which DCI indexes in full unless
+                // the deployment blacklists it: see the Readme's "Deployment" section.
                 add_entrypoint(
                     "maxRedeem(address)",
                     erc4626::functions::MaxRedeem { owner: user.clone() }.encode(),
                 );
+                // DCI indexes only the slots these traces read, on the branch the vault takes at
+                // this block. A vault whose conversion reads some state only on other branches
+                // (stUSDS's `str`) lists an entrypoint reading it in `params.json`; the Readme
+                // gives each vault's reason.
+                let vault = log.address.to_hex();
+                let pool = pool_params_by_vault
+                    .get(&vault)
+                    .ok_or_else(|| anyhow::anyhow!("Vault {vault} has no params"))?;
+                for entrypoint in &pool.extra_entrypoints {
+                    add_entrypoint(&entrypoint.signature, entrypoint.calldata.clone());
+                }
             }
         }
     }

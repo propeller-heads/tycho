@@ -3,12 +3,24 @@ from typing import Any
 
 PARAMETERS = "params.json"
 EMPTY = "0x0000000000000000000000000000000000000000"
+VAULT_KEYS = {"name", "address", "tx_hash", "asset", "block", "extra_entrypoints"}
+ENTRYPOINT_KEYS = {"signature", "calldata"}
+
+
+def reject_unknown_keys(entry: dict[str, Any], known: set[str], where: str) -> None:
+    unknown = entry.keys() - known
+    if unknown:
+        raise ValueError(
+            f"Unknown key(s) {sorted(unknown)} in {where} of {PARAMETERS}; "
+            f"expected only {sorted(known)}"
+        )
 
 
 def encode_erc4626_params(params: list[dict[str, Any]]) -> str:
     encoded_params = []
 
     for i, param in enumerate(params):
+        reject_unknown_keys(param, VAULT_KEYS, f"vault `{i}`")
         try:
             name: str = param["name"]
             address: str = param["address"]
@@ -33,12 +45,26 @@ def encode_erc4626_params(params: list[dict[str, Any]]) -> str:
                 ]
             )
 
+            extra_entrypoints = param.get("extra_entrypoints", [])
+            for j, entrypoint in enumerate(extra_entrypoints):
+                reject_unknown_keys(
+                    entrypoint, ENTRYPOINT_KEYS, f"vault `{i}` extra entrypoint `{j}`"
+                )
+            encoded_extra_entrypoints = "&".join(
+                [
+                    f"extra_entrypoints[{j}][signature]={entrypoint['signature']}"
+                    f"&extra_entrypoints[{j}][calldata]={entrypoint['calldata']}"
+                    for j, entrypoint in enumerate(extra_entrypoints)
+                ]
+            )
+
             encoded_param = (
                 f"{encoded_address}&"
                 f"{encoded_tx}&"
                 f"{encoded_asset}&"
                 f"{encoded_block}&"
-                f"{encoded_static_attributes}"
+                f"{encoded_static_attributes}&"
+                f"{encoded_extra_entrypoints}"
             ).rstrip("&")
 
             encoded_params.append(encoded_param)

@@ -76,6 +76,20 @@ tests:
         skip_simulation: false
         skip_execution: true
 
+  - name: test_stUSDS
+    start_block: 23219535
+    stop_block: 23700000
+    expected_components:
+      - id: "0x99cd4ec3f88a45940936f469e4bb72a2a701eeb9"
+        tokens:
+          - "0xdc035d45d973e3ec169d2276ddab16f1e407384f"
+          - "0x99cd4ec3f88a45940936f469e4bb72a2a701eeb9"
+        static_attributes:
+          name: "0x737455534453"
+        creation_tx: "0x719ef7cf10e4497963bd2c0a7d4123240331d94991c5ee5010ba1beee9effcfd"
+        skip_simulation: false
+        skip_execution: false
+
   # - name: test_sDAI
   #   start_block: 16428133
   #   stop_block: 17317480 # skip test, over 1m blocks
