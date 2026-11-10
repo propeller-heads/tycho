@@ -17,6 +17,15 @@ use crate::encoding::{
     swap_encoder::SwapEncoder,
 };
 
+/// Selector of the one call the executor forwards, on the 1inch Aggregation Router v5:
+/// `fillOrderRFQTo(OrderRFQ,bytes,uint256,address)`, with `OrderRFQ` the tuple
+/// `(uint256,address,address,address,address,uint256,uint256)`.
+const FILL_ORDER_RFQ_TO_SELECTOR: [u8; 4] = [0x5a, 0x09, 0x98, 0x43];
+
+/// The selector and the ten head words of that call. The executor refuses shorter calldata: the
+/// amount word it lowers would lie outside it.
+const MIN_FILL_CALLDATA_LENGTH: usize = 4 + 10 * 32;
+
 /// Encodes a swap on Euclid (RFQ) through the given executor address.
 ///
 /// Euclid's gateway signs a 1inch limit-order-protocol v3 RFQ order for each binding quote and
@@ -108,6 +117,20 @@ impl SwapEncoder for EuclidSwapEncoder {
             .ok_or_else(|| {
                 EncodingError::FatalError("Euclid quote must have a calldata attribute".to_string())
             })?;
+        // The executor reverts on anything but a whole fill call, so such a quote fails here.
+        if euclid_calldata.len() < MIN_FILL_CALLDATA_LENGTH {
+            return Err(EncodingError::InvalidInput(format!(
+                "Euclid calldata is {} bytes, a fillOrderRFQTo call takes at least \
+                 {MIN_FILL_CALLDATA_LENGTH}",
+                euclid_calldata.len()
+            )));
+        }
+        if euclid_calldata[..4] != FILL_ORDER_RFQ_TO_SELECTOR {
+            return Err(EncodingError::InvalidInput(format!(
+                "Euclid calldata calls {}, not fillOrderRFQTo",
+                Bytes::from(euclid_calldata[..4].to_vec())
+            )));
+        }
         // The amount the order was signed for, in taker units: the executor compares the amount
         // it is given with this and lowers the fill when it has less.
         let original_filled_taker_amount = biguint_to_u256(&signed_quote.amount_in);
@@ -141,6 +164,7 @@ mod tests {
 
     use alloy::hex;
     use num_bigint::BigUint;
+    use rstest::rstest;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
@@ -182,22 +206,44 @@ mod tests {
         EuclidSwapEncoder::new(Bytes::zero(20), Chain::Ethereum, None).unwrap()
     }
 
-    /// A quote for 1 WETH -> 3496 USDC whose levels price it at `level_amount_out`.
-    fn quote(level_amount_out: u64) -> MockRFQState {
+    /// Calldata of `selector` and `head_bytes` bytes after it. A `fillOrderRFQTo` call has at
+    /// least ten head words there.
+    fn fill_calldata(selector: [u8; 4], head_bytes: usize) -> Bytes {
+        let mut calldata = selector.to_vec();
+        calldata.extend(vec![0xab; head_bytes]);
+        calldata.into()
+    }
+
+    /// A quote for 1 WETH -> 3496 USDC that carries `calldata` and whose levels price it at
+    /// `level_amount_out`.
+    fn quote_carrying(calldata: Bytes, level_amount_out: u64) -> MockRFQState {
         MockRFQState {
             quote_amount_in: Some(BigUint::from(1_000_000_000_000_000_000u64)),
             quote_amount_out: BigUint::from(3_496_000_000u64),
-            quote_data: HashMap::from([(
-                "calldata".to_string(),
-                Bytes::from_str("0x5a099843deadbeef").unwrap(),
-            )]),
+            quote_data: HashMap::from([("calldata".to_string(), calldata)]),
             level_amount_out: Some(BigUint::from(level_amount_out)),
             ..Default::default()
         }
     }
 
-    /// The whole encoded swap: the two tokens, the signed amount as a 32-byte word, then the
-    /// gateway's calldata untouched.
+    /// A quote for 1 WETH -> 3496 USDC whose levels price it at `level_amount_out`.
+    fn quote(level_amount_out: u64) -> MockRFQState {
+        quote_carrying(fill_calldata([0x5a, 0x09, 0x98, 0x43], 10 * 32), level_amount_out)
+    }
+
+    /// The whole encoded swap of [`quote`]: the two tokens, the signed amount as a 32-byte word,
+    /// then the gateway's calldata untouched.
+    fn encoded_quote() -> String {
+        [
+            "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "0000000000000000000000000000000000000000000000000de0b6b3a7640000",
+            "5a099843",
+            &"ab".repeat(10 * 32),
+        ]
+        .concat()
+    }
+
     #[test]
     fn test_encode_euclid_swap_with_protocol_state() {
         let encoded = encoder()
@@ -207,14 +253,30 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            hex::encode(encoded),
-            concat!(
-                "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-                "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-                "0000000000000000000000000000000000000000000000000de0b6b3a7640000",
-                "5a099843deadbeef",
+        assert_eq!(hex::encode(encoded), encoded_quote());
+    }
+
+    /// Calldata the executor would revert on is refused at encode time: one byte short of a
+    /// whole fill call, and a whole call to another function.
+    #[rstest]
+    #[case::short(fill_calldata([0x5a, 0x09, 0x98, 0x43], 10 * 32 - 1), "is 323 bytes")]
+    #[case::selector(fill_calldata([0xde, 0xad, 0xbe, 0xef], 10 * 32), "calls 0xdeadbeef")]
+    fn test_encode_refuses_calldata_the_executor_rejects(
+        #[case] calldata: Bytes,
+        #[case] reason: &str,
+    ) {
+        let error = encoder()
+            .encode_swap(
+                &euclid_swap(
+                    Some(quote_carrying(calldata, 3_500_000_000)),
+                    Some(1_000_000_000_000_000_000),
+                ),
+                &context(Some(Bytes::zero(20))),
             )
+            .unwrap_err();
+        assert!(
+            matches!(error, EncodingError::InvalidInput(ref message) if message.contains(reason)),
+            "{error:?}"
         );
     }
 
@@ -237,12 +299,13 @@ mod tests {
             "{error:?}"
         );
 
-        assert!(encoder()
+        let encoded = encoder()
             .encode_swap(
                 &swap.with_max_signed_quote_shortfall_bps(12),
-                &context(Some(Bytes::zero(20)))
+                &context(Some(Bytes::zero(20))),
             )
-            .is_ok());
+            .unwrap();
+        assert_eq!(hex::encode(encoded), encoded_quote());
     }
 
     #[test]
