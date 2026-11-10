@@ -713,12 +713,24 @@ pub fn load_packages(
     root: &Path,
     chain: Chain,
 ) -> miette::Result<HashMap<String, PackageExpectations>> {
-    let mut packages: HashMap<String, (PackageExpectations, String)> = HashMap::new();
+    let mut yamls = Vec::new();
     for path in test_yamls(root, false)? {
-        let source = path.display().to_string();
         let yaml = fs::read_to_string(&path)
             .into_diagnostic()
-            .wrap_err_with(|| format!("Failed to read {source}"))?;
+            .wrap_err_with(|| format!("Failed to read {}", path.display()))?;
+        yamls.push((path.display().to_string(), yaml));
+    }
+    load_packages_from(yamls, chain)
+}
+
+/// [`load_packages`] over yamls already read, each with the name its errors give it: for a
+/// runner that carries the yamls instead of a checkout. Merges and errors as `load_packages` does.
+pub fn load_packages_from(
+    yamls: impl IntoIterator<Item = (String, String)>,
+    chain: Chain,
+) -> miette::Result<HashMap<String, PackageExpectations>> {
+    let mut packages: HashMap<String, (PackageExpectations, String)> = HashMap::new();
+    for (source, yaml) in yamls {
         let manifest: ManifestEntry = serde_yaml::from_str(&yaml)
             .into_diagnostic()
             .wrap_err_with(|| format!("Failed to read the substreams_yaml_path of {source}"))?;
@@ -943,6 +955,21 @@ tests:
                 .contains("different package limits"),
             "{err}"
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn packages_load_the_same_from_memory_as_from_disk() {
+        let dir = yaml_dir("memory");
+        fs::write(dir.join("integration_test.tycho.yaml"), PACKAGE).unwrap();
+        let from_disk = load_packages(&dir, Chain::Ethereum).unwrap();
+        let from_memory =
+            load_packages_from([("vault".to_string(), PACKAGE.to_string())], Chain::Ethereum)
+                .unwrap();
+        assert_eq!(from_memory, from_disk);
+        assert!(load_packages_from([("vault".to_string(), PACKAGE.to_string())], Chain::Base)
+            .unwrap()
+            .is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 
