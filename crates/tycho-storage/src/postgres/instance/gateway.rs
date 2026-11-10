@@ -28,6 +28,20 @@ impl PostgresGatewayNew {
         })
     }
 
+    #[cfg(test)]
+    pub async fn from_connection(conn: &mut AsyncPgConnection) -> Self {
+        let chain_id_cache = ChainEnumCache::from_connection(conn)
+            .await
+            .expect("loading the chain cache failed");
+        let protocol_system_id_cache = ProtocolSystemEnumCache::from_connection(conn)
+            .await
+            .expect("loading the protocol system cache failed");
+        Self {
+            chain_id_cache: Arc::new(chain_id_cache),
+            protocol_system_id_cache: Arc::new(protocol_system_id_cache),
+        }
+    }
+
     /// The database id of `chain`, or `NotFound` for a chain the database does not know.
     pub(super) fn get_chain_id(&self, chain: &Chain) -> Result<i64, StorageError> {
         self.chain_id_cache.try_get_id(chain)

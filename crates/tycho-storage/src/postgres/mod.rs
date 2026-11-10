@@ -1405,6 +1405,109 @@ pub mod db_fixtures {
             .expect("setting the active instance failed");
     }
 
+    /// Inserts a component of the instance, of protocol type "pool", created at 2020-01-01 00:00
+    /// in block 1 by the transaction `0x01`. Its tokens get `token_index` 0..n in the given order.
+    /// Returns the component id.
+    pub async fn insert_instance_component(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        external_id: &str,
+        tokens: &[Bytes],
+    ) -> i64 {
+        use instance::schema::tycho::{protocol_component, protocol_component_holds_token};
+
+        let created_at = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        let component_id: i64 = diesel::insert_into(protocol_component::table)
+            .values(instance::orm::NewProtocolComponent {
+                instance_id,
+                external_id: external_id.to_string(),
+                protocol_type: "pool".to_string(),
+                attributes: None,
+                created_at,
+                creation_block: 1,
+                creation_tx_hash: Bytes::from("0x01"),
+                deleted_at: None,
+                deletion_tx_hash: None,
+            })
+            .returning(protocol_component::id)
+            .get_result(conn)
+            .await
+            .expect("inserting the instance component failed");
+        let links: Vec<_> = tokens
+            .iter()
+            .enumerate()
+            .map(|(index, token)| instance::orm::NewProtocolComponentHoldsToken {
+                instance_id,
+                protocol_component_id: component_id,
+                token: token.clone(),
+                token_index: i16::try_from(index).expect("fewer than 2^15 tokens"),
+            })
+            .collect();
+        diesel::insert_into(protocol_component_holds_token::table)
+            .values(links)
+            .execute(conn)
+            .await
+            .expect("inserting the component tokens failed");
+        component_id
+    }
+
+    /// Inserts an account of the instance at `address` and links it to the component as a
+    /// contract. Returns the account id.
+    pub async fn insert_instance_contract_link(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        address: Bytes,
+    ) -> i64 {
+        use instance::schema::tycho::{account, protocol_component_holds_contract};
+
+        let account_id: i64 = diesel::insert_into(account::table)
+            .values(instance::orm::NewAccount {
+                instance_id,
+                address,
+                title: String::new(),
+                created_at: None,
+                creation_block: None,
+                creation_tx_hash: None,
+                deleted_at: None,
+                deletion_tx_hash: None,
+            })
+            .returning(account::id)
+            .get_result(conn)
+            .await
+            .expect("inserting the instance account failed");
+        diesel::insert_into(protocol_component_holds_contract::table)
+            .values(instance::orm::NewProtocolComponentHoldsContract {
+                instance_id,
+                protocol_component_id: component_id,
+                account_id,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the contract link failed");
+        account_id
+    }
+
+    /// Inserts the TVL of a component of the instance.
+    pub async fn insert_instance_tvl(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        tvl: f64,
+    ) {
+        diesel::insert_into(instance::schema::tycho::component_tvl::table)
+            .values(instance::orm::NewComponentTvl {
+                instance_id,
+                protocol_component_id: component_id,
+                tvl,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the component TVL failed");
+    }
+
     // Insert a new Protocol Type
     pub async fn insert_protocol_type(
         conn: &mut AsyncPgConnection,
