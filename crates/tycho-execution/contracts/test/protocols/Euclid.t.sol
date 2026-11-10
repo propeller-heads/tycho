@@ -6,9 +6,6 @@ import "@src/executors/EuclidExecutor.sol";
 import {Constants} from "../Constants.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-/// @dev AggregationRouterV5.fillOrderRFQTo
-bytes4 constant FILL_ORDER_RFQ_TO_SELECTOR = 0x5a099843;
-
 /// @dev The 1inch v5 router's own reverts, from OrderRFQMixin.
 error OrderExpired();
 error RFQBadSignature();
@@ -32,6 +29,10 @@ interface IAggregationRouterV5 {
         address target
     ) external payable returns (uint256, uint256, bytes32);
 }
+
+/// @dev The call the executor forwards, taken from the router's interface.
+bytes4 constant FILL_ORDER_RFQ_TO_SELECTOR =
+    IAggregationRouterV5.fillOrderRFQTo.selector;
 
 contract EuclidExecutorExposed is EuclidExecutor {
     constructor(address _euclidSettlement) EuclidExecutor(_euclidSettlement) {}
@@ -437,9 +438,9 @@ contract EuclidExecutorTest is Constants, TestUtils {
 
 /// @dev Runs calldata the Rust encoder produced for a quote recorded from
 ///      Euclid's gateway through the router. The order was requested for the
-///      router this setup deploys, and signed for it, so the fork is pinned to
-///      the block the quote was recorded at, where the maker's inventory and
-///      allowance stood behind it.
+///      router this setup deploys, and signed for it. The fork is pinned to
+///      the block the quote was recorded at, where the order is unexpired and
+///      its nonce unused; the maker's inventory and allowance are set here.
 contract TychoRouterForEuclidTest is TychoRouterTestSetup {
     function getForkBlock() public pure override returns (uint256) {
         return 26384407;
@@ -447,6 +448,8 @@ contract TychoRouterForEuclidTest is TychoRouterTestSetup {
 
     /// @dev The user the Rust test encodes for; WETH in, USDC out.
     address constant USER = 0xd2068e04Cf586f76EEcE7BA5bEB779D7bB1474A1;
+    /// @dev The maker that signed the recorded order.
+    address constant MAKER = 0x2e5c8aB45381393443CbB18542B7f4C38c560492;
     uint256 constant QUOTED_AMOUNT_IN = 3_000_000_000_000_000; // 0.003 WETH
     uint256 constant QUOTED_AMOUNT_OUT = 6241692;
 
@@ -455,6 +458,9 @@ contract TychoRouterForEuclidTest is TychoRouterTestSetup {
         returns (uint256 usdcReceived)
     {
         deal(WETH_ADDR, USER, amountIn);
+        deal(USDC_ADDR, MAKER, QUOTED_AMOUNT_OUT);
+        vm.prank(MAKER);
+        IERC20(USDC_ADDR).approve(ONEINCH_ROUTER_V5, QUOTED_AMOUNT_OUT);
         uint256 usdcBefore = IERC20(USDC_ADDR).balanceOf(USER);
 
         vm.startPrank(USER);
