@@ -289,9 +289,8 @@ Legacy mode reads the declarations but runs none of these checks.
 ### Execution tolerance
 
 An execution matches its simulation when the executed amount out is within the tolerance, in basis
-points of the executed amount. Legacy mode allows 0.5% for every package. In `range`, strict mode
-requires an exact match (`full` reads neither `harness` nor `execution_tolerance`, and allows 0.5%
-for every package): a simulation that ports the venue's math, or runs its bytecode, should not differ by
+points of the executed amount. Legacy mode allows 0.5% for every package. Strict mode, in `range`
+and in `full`, requires an exact match: a simulation that ports the venue's math, or runs its bytecode, should not differ by
 a wei, and 0.5% hides rounding and fee bugs. Where exact is out of reach, the package declares a
 tolerance, with why and what a run measured:
 
@@ -370,6 +369,25 @@ After the stream:
   The report's `coverage` section has the counts per test.
 
 The stream follows only the expected components, including one created inside the range.
+
+### Full mode
+
+`full` indexes from the protocol's start block and then tests every update the stream delivers,
+for every pool of the protocol, not only the expected components. A legacy package runs the ladder
+and executes its quotes within 0.5%, logs whatever fails, and keeps going.
+
+A strict package runs, on every update:
+
+- the ladder (`sim.ladder`) and its executions (`exec.ladder`), within the package's tolerance;
+- the limit checks (`limits.at_limit`, `limits.past_limit`, `limits.max_output`) on every
+  direction with a declaration: an expected component's own `limits`, or else the package's.
+  A pool the tests do not list gets the package's `limits`; without them, its limits are not
+  checked.
+
+Skips do not apply: a skip covers one test's range, and `full` has none. The first update with a
+failed check ends the run with an error naming the block and the checks; `full --report <path>`
+writes that block's checks as JSON, in the report format below. A block the node does not serve,
+or executions it cannot simulate, are logged and the update is passed over.
 
 ### Test report
 
@@ -459,8 +477,8 @@ docker compose down
 
 By default this runs `range` tests. To run the `full` test (continuous sync from the initial block
 to the chain tip) set `MODE=full`. In full mode the optional `=` suffix is the start block
-(`--initial-block`). Full mode never exits, so omit `--abort-on-container-exit` and tear down
-manually:
+(`--initial-block`). Full mode runs until a strict package fails a check, and a legacy one never
+exits, so omit `--abort-on-container-exit` and tear down manually:
 
 ```bash
 export MODE=full

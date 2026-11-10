@@ -54,6 +54,7 @@ use tycho_test::{
         models::{TychoExecutionInput, TychoExecutionResult},
         simulate_swap_transaction,
     },
+    expectations::PackageExpectations,
     RPCTools,
 };
 
@@ -216,6 +217,31 @@ impl Streamed {
     }
 }
 
+/// The limit `package` declares for every direction of every component in `update`, keyed as
+/// [`ladder::run_ladder`] reads it: by lowercase id and direction. A direction with no declaration,
+/// in neither the component's nor the package's `limits`, is left out, and its limit is not
+/// checked.
+fn update_limits(
+    update: &Update,
+    protocol_components: &HashMap<String, ProtocolComponentModel>,
+    package: &PackageExpectations,
+) -> HashMap<(String, Direction), Limits> {
+    let mut declared = HashMap::new();
+    for id in update.states.keys() {
+        let Some(component) = protocol_components.get(id) else {
+            continue;
+        };
+        for pair in component.tokens.iter().permutations(2) {
+            let direction =
+                Direction { token_in: pair[0].address.clone(), token_out: pair[1].address.clone() };
+            if let Some(limits) = package.limits_for(id, &direction) {
+                declared.insert((id.to_lowercase(), direction), limits.clone());
+            }
+        }
+    }
+    declared
+}
+
 /// Every execution strict mode checks after a ladder: its quotes, and the swaps at and past each
 /// declared limit, by simulation id.
 fn strict_inputs(output: &LadderOutput) -> HashMap<String, TychoExecutionInput> {
@@ -306,6 +332,8 @@ pub enum TestType {
 
 pub struct TestTypeFull {
     pub initial_block: Option<u64>,
+    /// Strict: where to write the checks of the block that failed, if anywhere.
+    pub report: Option<PathBuf>,
 }
 
 pub struct TestTypeRange {
@@ -518,13 +546,26 @@ impl TestRunner {
         self.run_tvl_import()?;
 
         // Start live testing with streaming (updates will come as indexer catches up)
-        self.run_live_testing(&config).await
+        self.run_live_testing(&config, test_type.report.as_deref())
+            .await
     }
 
     /// Runs live testing by streaming from Tycho RPC and processing updates in real-time.
     /// Processes each update immediately with simulation and batched execution for scalability.
-    async fn run_live_testing(&self, config: &IntegrationTestsConfig) -> miette::Result<()> {
+    ///
+    /// A strict package's checks run on every update, and the first update with a failed check
+    /// ends the run with an error, after writing that update's checks to `report`. A legacy
+    /// package logs failures and keeps going.
+    async fn run_live_testing(
+        &self,
+        config: &IntegrationTestsConfig,
+        report: Option<&Path>,
+    ) -> miette::Result<()> {
         info!("Starting live testing for protocol {}", &config.protocol_system);
+        let strict = match config.harness {
+            Harness::Strict => Some(self.package_expectations()?),
+            Harness::Legacy => None,
+        };
 
         let chain = self.chain;
         // Load tokens for the stream
@@ -631,66 +672,20 @@ impl TestRunner {
                         }
                     };
 
-                    // Step 1: Run simulation get amount out
-                    let execution_data = match self.run_simulation(
-                        &update,
-                        &protocol_components,
-                        &[], // No skip filters for live testing
-                        &config.protocol_system,
-                        None,
-                    ) {
-                        Ok(output) => output.executions,
-                        Err(e) => {
-                            error!("Failed to run simulation: {:#}", e);
-                            continue;
+                    match &strict {
+                        Some(package) => {
+                            self.check_strict_update(
+                                &update,
+                                &protocol_components,
+                                config,
+                                package,
+                                report,
+                            )
+                            .await?
                         }
-                    };
-
-                    if execution_data.is_empty() {
-                        info!("No simulation data to execute for this update");
-                        continue;
-                    }
-
-                    info!(
-                        "Gathered {} simulation entries, sleeping for block time...",
-                        execution_data.len()
-                    );
-
-                    // Step 2: Get the actual block from RPC
-                    let block = match self
-                        .rpc_provider
-                        .get_block(BlockNumberOrTag::Number(update.block_number))
-                        .await
-                    {
-                        Ok(block) => block,
-                        Err(e) => {
-                            error!("Failed to fetch block {}: {}", update.block_number, e);
-                            continue;
-                        }
-                    };
-
-                    info!(
-                        "Fetched block {}, executing {} execution simulations...",
-                        block.header.number,
-                        execution_data.len()
-                    );
-
-                    // Step 3: Execute the batch against the real block
-                    match self
-                        .run_execution(execution_data, &block, &config.protocol_system)
-                        .await
-                    {
-                        Ok(_) => {
-                            info!(
-                                "Batch execution completed successfully for block {}",
-                                block.header.number
-                            );
-                        }
-                        Err(e) => {
-                            error!(
-                                "Batch execution failed for block {}: {}",
-                                block.header.number, e
-                            );
+                        None => {
+                            self.run_legacy_update(&update, &protocol_components, config)
+                                .await
                         }
                     }
                 }
@@ -703,6 +698,174 @@ impl TestRunner {
 
         info!("Stream ended, live testing completed");
         Ok(())
+    }
+
+    /// The package's declarations, from its test yaml, for checking pools its tests do not list.
+    fn package_expectations(&self) -> miette::Result<PackageExpectations> {
+        let source = self
+            .config_file_path
+            .display()
+            .to_string();
+        let file = std::fs::File::open(&self.config_file_path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("Failed to open {source}"))?;
+        PackageExpectations::from_yaml(file, &source)
+    }
+
+    /// Legacy full mode on one update: runs the ladder, executes its quotes at the update's block,
+    /// and logs whatever fails.
+    async fn run_legacy_update(
+        &self,
+        update: &Update,
+        protocol_components: &HashMap<String, ProtocolComponentModel>,
+        config: &IntegrationTestsConfig,
+    ) {
+        // Step 1: Run simulation get amount out
+        let execution_data = match self.run_simulation(
+            update,
+            protocol_components,
+            &[], // No skip filters for live testing
+            &config.protocol_system,
+            None,
+        ) {
+            Ok(output) => output.executions,
+            Err(e) => {
+                error!("Failed to run simulation: {:#}", e);
+                return;
+            }
+        };
+
+        if execution_data.is_empty() {
+            info!("No simulation data to execute for this update");
+            return;
+        }
+
+        info!("Gathered {} simulation entries, sleeping for block time...", execution_data.len());
+
+        // Step 2: Get the actual block from RPC
+        let block = match self
+            .rpc_provider
+            .get_block(BlockNumberOrTag::Number(update.block_number))
+            .await
+        {
+            Ok(block) => block,
+            Err(e) => {
+                error!("Failed to fetch block {}: {}", update.block_number, e);
+                return;
+            }
+        };
+
+        info!(
+            "Fetched block {}, executing {} execution simulations...",
+            block.header.number,
+            execution_data.len()
+        );
+
+        // Step 3: Execute the batch against the real block
+        match self
+            .run_execution(execution_data, &block, &config.protocol_system)
+            .await
+        {
+            Ok(_) => {
+                info!("Batch execution completed successfully for block {}", block.header.number);
+            }
+            Err(e) => {
+                error!("Batch execution failed for block {}: {}", block.header.number, e);
+            }
+        }
+    }
+
+    /// Strict full mode on one update: runs the ladder and the declared limits' checks, executes
+    /// at the update's block, and records every check at that block.
+    ///
+    /// A block the node does not serve, or executions it cannot simulate, are logged and the update
+    /// is passed over, since they say nothing about the package.
+    ///
+    /// # Errors
+    /// When a check fails, naming every failed check, after writing this update's checks to
+    /// `report`.
+    async fn check_strict_update(
+        &self,
+        update: &Update,
+        protocol_components: &HashMap<String, ProtocolComponentModel>,
+        config: &IntegrationTestsConfig,
+        package: &PackageExpectations,
+        report: Option<&Path>,
+    ) -> miette::Result<()> {
+        let block_number = update.block_number;
+        let mut checks = Checks::new(Harness::Strict, "full");
+        checks.at_block(Some(block_number));
+        let declared = update_limits(update, protocol_components, package);
+        let no_skips = HashMap::new();
+        let ladder = checks.run(CheckId::SimLadder, || {
+            ladder::run_ladder(
+                self.chain,
+                update,
+                protocol_components,
+                ladder::Skips { simulation: &no_skips, execution: &no_skips },
+                &config.protocol_system,
+                Some(&declared),
+            )
+        })?;
+        match ladder {
+            None => {
+                checks.not_run(CheckId::ExecLadder, CheckId::SimLadder);
+                for id in CheckId::LIMITS {
+                    checks.not_run(id, CheckId::SimLadder);
+                }
+            }
+            Some(output) => {
+                let inputs = strict_inputs(&output);
+                let executed = if inputs.is_empty() {
+                    None
+                } else {
+                    let block = match self
+                        .rpc_provider
+                        .get_block(BlockNumberOrTag::Number(block_number))
+                        .await
+                    {
+                        Ok(block) => block,
+                        Err(e) => {
+                            error!("Failed to fetch block {block_number}, passing it over: {e}");
+                            return Ok(());
+                        }
+                    };
+                    match self
+                        .simulate_executions(&inputs, &block, &config.protocol_system)
+                        .await
+                    {
+                        Ok(results) => Some(Ok(results)),
+                        Err(e) => {
+                            error!(
+                                "Failed to simulate the executions at block {block_number}, \
+                                 passing it over: {e:#}"
+                            );
+                            return Ok(());
+                        }
+                    }
+                };
+                record_strict_executions(&output, executed, config.tolerance(), None, &mut checks)?;
+            }
+        }
+        let drift = checks.take_drift();
+        let (outcome, results) = checks.finish();
+        if outcome.is_err() {
+            if let Some(path) = report {
+                Report {
+                    package: self.protocol.clone(),
+                    chain: self.chain.to_string(),
+                    harness: Harness::Strict,
+                    results,
+                    drift: drift.into_iter().collect(),
+                    coverage: Vec::new(),
+                }
+                .write(path)?;
+                info!("Wrote the checks of block {block_number} to {}", path.display());
+            }
+        } else {
+            info!("Block {block_number}: every check passed");
+        }
+        outcome.wrap_err_with(|| format!("Block {block_number}"))
     }
 
     fn run_tests_in_range(
@@ -1664,8 +1827,7 @@ impl TestRunner {
     ///
     /// # Errors
     /// Returns an error if an execution cannot be simulated, reverts, or differs from its
-    /// simulation by more than 0.5%. Live mode has no package configuration to read, so it
-    /// ignores `harness` and `execution_tolerance` and always allows 0.5%.
+    /// simulation by more than 0.5%, the legacy tolerance, whatever the package declares.
     async fn run_execution(
         &self,
         execution_data: HashMap<String, TychoExecutionInput>,
@@ -2504,6 +2666,78 @@ mod tests {
             })
             .collect();
         (recorded, skips)
+    }
+
+    /// An update with a uniswap v2 pool for each id, all over tokens 0x01 and 0x02.
+    fn pools_update(ids: &[&str]) -> (Update, HashMap<String, ProtocolComponentModel>) {
+        use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
+        let token = |address: &str| {
+            Token::new(&Bytes::from_str(address).unwrap(), "T", 18, 0, &[], Chain::Ethereum, 100)
+        };
+        let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut components = HashMap::new();
+        for id in ids {
+            let reserve = U256::from(1_000_000u64);
+            states.insert(id.to_string(), Box::new(UniswapV2State::new(reserve, reserve)));
+            components.insert(
+                id.to_string(),
+                ProtocolComponentModel::new(
+                    Bytes::from_str(id).unwrap(),
+                    "vault".to_string(),
+                    "pool".to_string(),
+                    Chain::Ethereum,
+                    vec![token("0x01"), token("0x02")],
+                    Vec::new(),
+                    HashMap::new(),
+                    Bytes::default(),
+                    Default::default(),
+                ),
+            );
+        }
+        (Update::new(1, states, components.clone()), components)
+    }
+
+    #[test]
+    fn full_mode_checks_a_listed_pool_as_declared_and_any_other_by_the_package_default() {
+        let package = PackageExpectations::from_yaml(
+            r#"
+protocol_system: "vault"
+harness: strict
+limits: {kind: soft, reason: "any input trades"}
+substreams_yaml_path: ./substreams.yaml
+tests:
+  - name: first
+    expected_components:
+      - id: "0xAA"
+        tokens: ["0x01", "0x02"]
+        limits:
+          "0x01->0x02": {kind: hard}
+"#
+            .as_bytes(),
+            "vault",
+        )
+        .unwrap();
+        let (update, components) = pools_update(&["0xAA", "0xbb"]);
+        let declared = update_limits(&update, &components, &package);
+        let kind = |id: &str, token_in: &str, token_out: &str| {
+            let direction = Direction {
+                token_in: Bytes::from_str(token_in).unwrap(),
+                token_out: Bytes::from_str(token_out).unwrap(),
+            };
+            declared
+                .get(&(id.to_string(), direction))
+                .map(|limits| limits.kind)
+        };
+        // Keyed by lowercase id, as the ladder looks limits up.
+        assert_eq!(kind("0xaa", "0x01", "0x02"), Some(tycho_test::expectations::LimitKind::Hard));
+        assert_eq!(kind("0xaa", "0x02", "0x01"), Some(tycho_test::expectations::LimitKind::Soft));
+        assert_eq!(kind("0xbb", "0x01", "0x02"), Some(tycho_test::expectations::LimitKind::Soft));
+        assert_eq!(declared.len(), 4);
+
+        // Without a package default, an unlisted pool's directions are left unchecked.
+        let listed_only = PackageExpectations { limits: None, ..package };
+        let declared = update_limits(&update, &components, &listed_only);
+        assert_eq!(declared.len(), 1);
     }
 
     #[test]
