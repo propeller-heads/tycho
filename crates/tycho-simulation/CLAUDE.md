@@ -149,7 +149,11 @@ for any protocol indexed by Tycho.
   fallback routers trade ERC20s only, so Native's fallback feed offers no native-token books
 - **`pamm/`**: book feeds for pAMMs — venues priced off-chain but executed directly against
   the pool, no binding quote (Metric today; its state does not implement `IndicativelyPriced`,
-  and its client is held by the feed alone rather than by every state).
+  and its client is held by the feed alone rather than by every state). `MetricState` records
+  each swap's fill like the price level stream's state: a later swap on the same direction
+  continues the merged swap from the original depth (less the output so far, at zero gas), and
+  `spot_price`, `get_limits` and `directions` answer for what is left; the other direction is
+  refused.
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
   it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
