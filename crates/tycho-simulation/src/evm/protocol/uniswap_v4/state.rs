@@ -2391,6 +2391,129 @@ mod tests {
         );
     }
 
+    /// Hook that fills part of an exact-in swap from its own inventory, the way a limit order
+    /// does: only when the taker's price limit reaches the order's price.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct LimitOrderTestHook {
+        fill_sqrt_price: U256,
+        /// Input the hook takes from the taker, and output it pays back, when it fills.
+        fill_in: u128,
+        fill_out: u128,
+    }
+
+    impl LimitOrderTestHook {
+        fn fill_delta(&self) -> BeforeSwapDelta {
+            let specified = U256::from(self.fill_in) << 128;
+            // The hook pays the output, so the unspecified delta is `-fill_out`, in two's
+            // complement over the lower 128 bits.
+            let unspecified = U256::from(self.fill_out.wrapping_neg());
+            BeforeSwapDelta(I256::from_raw(specified | unspecified))
+        }
+    }
+
+    impl HookHandler for LimitOrderTestHook {
+        fn address(&self) -> Address {
+            construct_hook_address(&[HookOptions::BeforeSwap, HookOptions::BeforeSwapReturnsDelta])
+        }
+
+        fn before_swap(
+            &self,
+            params: BeforeSwapParameters,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+        ) -> Result<WithGasEstimate<BeforeSwapOutput>, SimulationError> {
+            let limit = params.swap_params.sqrt_price_limit;
+            let limit_reaches_order = if params.swap_params.zero_for_one {
+                limit <= self.fill_sqrt_price
+            } else {
+                limit >= self.fill_sqrt_price
+            };
+            let amount_delta =
+                if limit_reaches_order { self.fill_delta() } else { BeforeSwapDelta(I256::ZERO) };
+            Ok(WithGasEstimate {
+                gas_estimate: 0,
+                result: BeforeSwapOutput {
+                    amount_delta,
+                    fee: U24::ZERO,
+                    overwrites: HashMap::new(),
+                    transient_storage: HashMap::new(),
+                },
+            })
+        }
+
+        fn after_swap(
+            &self,
+            _: AfterSwapParameters,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+        ) -> Result<WithGasEstimate<AfterSwapDelta>, SimulationError> {
+            Err(SimulationError::FatalError("hook has no afterSwap permission".into()))
+        }
+
+        fn fee(&self, _: &UniswapV4State, _: SwapParams) -> Result<f64, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn spot_price(&self, _: &Token, _: &Token) -> Result<f64, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn get_amount_ranges(&self, _: Bytes, _: Bytes) -> Result<AmountRanges, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn delta_transition(
+            &mut self,
+            _: ProtocolStateDelta,
+            _: &HashMap<Bytes, Token>,
+            _: &Balances,
+        ) -> Result<(), TransitionError> {
+            Ok(())
+        }
+
+        fn clone_box(&self) -> Box<dyn HookHandler> {
+            Box::new(self.clone())
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn is_equal(&self, other: &dyn HookHandler) -> bool {
+            other.as_any().downcast_ref::<Self>() == Some(self)
+        }
+    }
+
+    /// `beforeSwap` sees the full-range price limit the executor sends on chain, so a hook that
+    /// fills only at a price beyond the pool's current one is quoted as filling.
+    #[rstest]
+    #[case::zero_for_one(true)]
+    #[case::one_for_zero(false)]
+    fn test_before_swap_limit_order_fill(#[case] zero_for_one: bool) {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(zero_for_one);
+        let amount_in = 1_000_000_000_000_000_000u128;
+        let fill_in = amount_in / 2;
+        let fill_out = 123_456_789u128;
+
+        let mut pool = create_basic_v4_test_pool();
+        // An order one percent past the current price, in the direction the swap moves it.
+        let fill_sqrt_price = if zero_for_one {
+            pool.sqrt_price * U256::from(99u8) / U256::from(100u8)
+        } else {
+            pool.sqrt_price * U256::from(101u8) / U256::from(100u8)
+        };
+        let remainder = create_basic_v4_test_pool()
+            .get_amount_out(BigUint::from(amount_in - fill_in), &token_in, &token_out)
+            .expect("hookless swap of the remainder should succeed");
+
+        pool.set_hook_handler(Box::new(LimitOrderTestHook { fill_sqrt_price, fill_in, fill_out }));
+        let quote = pool
+            .get_amount_out(BigUint::from(amount_in), &token_in, &token_out)
+            .expect("hooked swap should succeed");
+
+        assert_eq!(quote.amount, remainder.amount + BigUint::from(fill_out));
+    }
+
     const FEELESS_POOL_LIQUIDITY: u128 = 100_000_000_000_000_000_000; // 100e18
 
     /// A pool with no LP fee and no protocol fee, holding a single position that spans the whole
