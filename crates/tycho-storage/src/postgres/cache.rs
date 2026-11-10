@@ -44,10 +44,11 @@ use tycho_common::{
 };
 
 use super::{
+    instance::writer::InstanceWriter,
     is_transaction_conflict,
     pool::{self, PooledConnection, EXTRACTION_POOL},
     snapshot::{bound_snapshot_reads, snapshot_transaction},
-    PostgresError, PostgresGateway,
+    InstanceId, PostgresError, PostgresGateway,
 };
 
 /// Represents different types of database write operations.
@@ -157,6 +158,9 @@ pub struct DBTransaction {
     block_range: BlockRange,
     size: usize,
     operations: Vec<WriteOp>,
+    /// Instance whose tables the operations go to. `None` writes the shared tables of the old
+    /// schema.
+    instance: Option<InstanceId>,
     tx: oneshot::Sender<Result<(), StorageError>>,
     /// Purely used to add an attribute to the span when the transaction is commited
     owner: Option<String>,
@@ -386,8 +390,22 @@ impl DBCacheWriteExecutor {
                 .repeatable_read()
                 .run(|conn| {
                     async {
+                        let instance_writer = new_db_tx
+                            .instance
+                            .map(|instance| {
+                                InstanceWriter::new(
+                                    instance,
+                                    &self.state_gateway,
+                                    &new_db_tx.operations,
+                                )
+                            })
+                            .transpose()?;
                         for op in new_db_tx.operations.iter() {
-                            match self.execute_write_op(op, conn).await {
+                            let res = match &instance_writer {
+                                Some(writer) => writer.write_op(op, conn).await,
+                                None => self.execute_write_op(op, conn).await,
+                            };
+                            match res {
                                 Err(PostgresError(StorageError::DuplicateEntry(entity, id))) => {
                                     // As this db transaction is old. It can contain
                                     // already stored txs, we log the duplicate entry
@@ -588,6 +606,8 @@ pub struct CachedGateway {
 
     // TODO: Remove Mutex. It is not needed but avoids changing the Extractor trait.
     open_tx: Arc<Mutex<Option<OpenTx>>>,
+    /// Instance this gateway writes for, see [`CachedGateway::for_instance`].
+    instance: Option<InstanceId>,
     /// Height of the newest block whose staged writes reached the store. `0` means
     /// nothing flushed yet, so a real flushed height of 0 reads as `None`.
     flushed_block_height: AtomicU64,
@@ -603,6 +623,7 @@ impl Clone for CachedGateway {
         Self {
             // create a separate open tx state for new instances
             open_tx: Arc::new(Mutex::new(None)),
+            instance: self.instance,
             // each instance tracks the flush progress of its own transactions
             flushed_block_height: AtomicU64::new(0),
             tx: self.tx.clone(),
@@ -628,6 +649,7 @@ impl CachedGateway {
                     block_range: BlockRange::new(block, block),
                     size: 0,
                     operations: vec![],
+                    instance: self.instance,
                     tx,
                     owner: owner.map(String::from),
                     caller_span: tracing::Span::none(),
@@ -718,6 +740,7 @@ impl CachedGateway {
         CachedGateway {
             tx,
             open_tx: Arc::new(Mutex::new(None)),
+            instance: None,
             flushed_block_height: AtomicU64::new(0),
             pool,
             pool_label: EXTRACTION_POOL,
@@ -735,6 +758,7 @@ impl CachedGateway {
         CachedGateway {
             tx: self.tx.clone(),
             open_tx: Arc::new(Mutex::new(None)),
+            instance: self.instance,
             // a fresh writer has not flushed anything yet
             flushed_block_height: AtomicU64::new(0),
             pool: self.pool.clone(),
@@ -742,6 +766,15 @@ impl CachedGateway {
             state_gateway: self.state_gateway.clone(),
             lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
         }
+    }
+
+    /// Creates a fresh gateway, as [`CachedGateway::new_instance`] does, whose writes go to the
+    /// tables of `instance` instead of the shared tables.
+    ///
+    /// A batch of this gateway fails when it holds an operation that the instance tables don't
+    /// support yet, and nothing of that batch is written.
+    pub fn for_instance(&self, instance: InstanceId) -> Self {
+        CachedGateway { instance: Some(instance), ..self.new_instance() }
     }
 
     /// Creates a gateway that shares this one's write channel and state caches but takes its
