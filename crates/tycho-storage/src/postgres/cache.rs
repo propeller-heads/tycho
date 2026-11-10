@@ -90,7 +90,7 @@ pub(crate) enum WriteOp {
 }
 
 impl WriteOp {
-    fn variant_name(&self) -> &'static str {
+    pub(crate) fn variant_name(&self) -> &'static str {
         match self {
             WriteOp::UpsertBlock(_) => "UpsertBlock",
             WriteOp::UpsertTx(_) => "UpsertTx",
