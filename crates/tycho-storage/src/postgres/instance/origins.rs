@@ -110,3 +110,114 @@ impl BatchOrigins {
         self.blocks.get(hash).copied()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::NaiveDate;
+    use tycho_common::{models::Chain, Bytes};
+
+    use super::*;
+
+    fn ts(second: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 11, 10)
+            .and_then(|d| d.and_hms_opt(12, 0, second))
+            .expect("valid timestamp")
+    }
+
+    fn block(number: u64, second: u32) -> Block {
+        Block::new(
+            number,
+            Chain::Ethereum,
+            Bytes::from(number.to_be_bytes().to_vec()),
+            Bytes::default(),
+            ts(second),
+        )
+    }
+
+    fn tx(hash: u8, block: &Block, index: u64) -> Transaction {
+        Transaction::new(Bytes::from(vec![hash]), block.hash.clone(), Bytes::default(), None, index)
+    }
+
+    #[test]
+    fn test_change_takes_block_ts_and_tx_index() {
+        let b10 = block(10, 1);
+        let b11 = block(11, 13);
+        let ops = vec![
+            WriteOp::UpsertBlock(vec![b10.clone(), b11.clone()]),
+            WriteOp::UpsertTx(vec![tx(1, &b10, 3), tx(2, &b11, 0)]),
+        ];
+
+        let origins = BatchOrigins::from_ops(&ops).unwrap();
+
+        assert_eq!(
+            origins
+                .change(&Bytes::from(vec![1]))
+                .unwrap(),
+            ChangeOrigin { valid_from: ts(1), tx_index: 3 }
+        );
+        assert_eq!(
+            origins
+                .change(&Bytes::from(vec![2]))
+                .unwrap(),
+            ChangeOrigin { valid_from: ts(13), tx_index: 0 }
+        );
+        assert_eq!(origins.block(&b11.hash), Some(BlockOrigin { number: 11, ts: ts(13) }));
+    }
+
+    #[test]
+    fn test_tx_ops_before_block_ops() {
+        let b10 = block(10, 1);
+        let ops =
+            vec![WriteOp::UpsertTx(vec![tx(1, &b10, 0)]), WriteOp::UpsertBlock(vec![b10.clone()])];
+
+        let origins = BatchOrigins::from_ops(&ops).unwrap();
+
+        assert_eq!(
+            origins
+                .change(&Bytes::from(vec![1]))
+                .unwrap()
+                .valid_from,
+            ts(1)
+        );
+    }
+
+    #[test]
+    fn test_change_order_follows_block_then_tx() {
+        let first = ChangeOrigin { valid_from: ts(1), tx_index: 7 };
+        let second = ChangeOrigin { valid_from: ts(13), tx_index: 0 };
+        let third = ChangeOrigin { valid_from: ts(13), tx_index: 1 };
+
+        assert!(first < second);
+        assert!(second < third);
+    }
+
+    #[test]
+    fn test_empty_batch() {
+        let origins = BatchOrigins::from_ops(&[]).unwrap();
+
+        assert!(matches!(origins.change(&Bytes::from(vec![1])), Err(StorageError::NotFound(_, _))));
+        assert_eq!(origins.block(&Bytes::from(vec![1])), None);
+    }
+
+    #[test]
+    fn test_tx_of_block_outside_batch_fails() {
+        let ops = vec![WriteOp::UpsertTx(vec![tx(1, &block(10, 1), 0)])];
+
+        let res = BatchOrigins::from_ops(&ops);
+
+        assert!(matches!(res, Err(StorageError::NoRelatedEntity(_, _, _))));
+    }
+
+    #[test]
+    fn test_tx_index_out_of_range_fails() {
+        let b10 = block(10, 1);
+        let ops = vec![
+            WriteOp::UpsertBlock(vec![b10.clone()]),
+            WriteOp::UpsertTx(vec![tx(1, &b10, u64::from(u32::MAX))]),
+        ];
+
+        let res = BatchOrigins::from_ops(&ops);
+
+        assert!(matches!(res, Err(StorageError::DecodeError(_))));
+    }
+}
