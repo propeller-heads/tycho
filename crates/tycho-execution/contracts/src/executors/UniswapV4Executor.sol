@@ -264,6 +264,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
         for (uint256 i = 0; i < encodedPools.length; i++) {
             bytes memory poolData = encodedPools[i];
 
+            // forge-lint: disable-start(unsafe-typecast) Reads each packed field at the front of its loaded word.
             address intermediaryToken =
                 _toV4Token(address(bytes20(LibBytes.load(poolData, 0))));
             uint24 fee = uint24(bytes3(LibBytes.load(poolData, 20)));
@@ -271,6 +272,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
                 int24(uint24(bytes3(LibBytes.load(poolData, 23))));
             address hook = address(bytes20(LibBytes.load(poolData, 26)));
             uint16 hookDataLength = uint16(bytes2(LibBytes.load(poolData, 46)));
+            // forge-lint: disable-end(unsafe-typecast)
 
             if (poolData.length < _POOL_HEADER_LENGTH + hookDataLength) {
                 // forge-lint: disable-next-line(require-revert-in-loop) Malformed swap data fails the swap.
@@ -369,7 +371,11 @@ contract UniswapV4Executor is IExecutor, ICallback {
         uint256 swapAmountIn = _getFullCredit(currencyIn);
 
         uint128 amountOut = _swap(
-                poolKey, zeroForOne, -int256(swapAmountIn), hookData
+                poolKey,
+                zeroForOne,
+                // forge-lint: disable-next-line(unsafe-typecast) swapAmountIn is a non-negative int256 delta.
+                -int256(swapAmountIn),
+                hookData
             )
             .toUint128();
 
@@ -409,6 +415,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
                 amountOut = _swap(
                         poolKey,
                         zeroForOne,
+                        // forge-lint: disable-next-line(unsafe-typecast) swapAmountIn is a non-negative int256 delta or a uint128 output.
                         -int256(uint256(swapAmountIn)),
                         pathKey.hookData
                     )
@@ -463,6 +470,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
         int256 _amount = poolManager.currencyDelta(address(this), currency);
         // If the amount is negative, it should be settled not taken.
         if (_amount < 0) revert UniswapV4Executor__DeltaNotPositive(currency);
+        // forge-lint: disable-next-line(unsafe-typecast) The check above reverts on a negative delta.
         amount = uint256(_amount);
     }
 
@@ -532,6 +540,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
         for (uint256 i = 0; i < attestationCount; i++) {
             uint256 offset = i * totalLength;
 
+            // forge-lint: disable-next-item(unsafe-typecast) Reads the block number at the front of the loaded word.
             uint64 blockNumber =
                 uint64(bytes8(LibBytes.load(attestationData, offset)));
 
