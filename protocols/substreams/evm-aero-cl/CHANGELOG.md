@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.1
+
+- Add the Elysium manifest (`elysium-aero-cl.yaml`): CL factory
+  `0xEfd7A089D3057F05189B05f74Ffcf30610c42891` from its deployment block 1947859, and the same
+  `DynamicSwapFeeHook` as the other chains. The wasm is unchanged.
+
 ## v0.1.0
 
 - Index AERO v1.1.0 concentrated-liquidity pools (protocol system `aero_cl`, type
