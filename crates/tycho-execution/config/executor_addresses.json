@@ -142,6 +142,10 @@
   "elysium": {
     "uniswap_v2": "0x6B8DFbbef1f5EF947427985F7C27D1c50CD025ea",
     "uniswap_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
-    "uniswap_v4": "0x74145BbB8F3E51f7138eD3F7C96dFb3d56F784b5"
+    "uniswap_v4": "0x74145BbB8F3E51f7138eD3F7C96dFb3d56F784b5",
+    "kleos_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+    "elyspump_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+    "stockiumswap_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+    "aero_cl": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe"
   }
 }
