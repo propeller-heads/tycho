@@ -21,6 +21,7 @@
 pub mod active;
 #[cfg_attr(not(test), expect(dead_code, reason = "no public gateway calls it until cut-over"))]
 pub mod gateway;
+pub mod origins;
 pub mod orm;
 #[cfg_attr(not(test), expect(dead_code, reason = "no public gateway calls it until cut-over"))]
 mod read;
