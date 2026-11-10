@@ -216,6 +216,67 @@ impl Streamed {
     }
 }
 
+/// Every execution strict mode checks after a ladder: its quotes, and the swaps at and past each
+/// declared limit, by simulation id.
+fn strict_inputs(output: &LadderOutput) -> HashMap<String, TychoExecutionInput> {
+    let mut inputs = output.executions.clone();
+    inputs.extend(output.at_limit.clone());
+    inputs.extend(output.past_limit.clone());
+    inputs
+}
+
+/// Records strict mode's execution checks for `output`: the ladder, then per direction the quote
+/// at the limit, the revert one unit past a hard limit, and the max output.
+///
+/// `executed` is `None` at a block that only simulates: nothing is recorded for the ladder, and
+/// the limit checks are recorded from the simulation alone. An error, the batch's or the block's,
+/// fails the ladder and every limit check that needs an execution. With `executes_nothing`, the
+/// reason every component skips execution, the ladder is recorded as skipped.
+fn record_strict_executions(
+    output: &LadderOutput,
+    executed: Option<miette::Result<HashMap<String, TychoExecutionResult>>>,
+    tolerance: Tolerance,
+    executes_nothing: Option<&str>,
+    checks: &mut Checks,
+) -> miette::Result<()> {
+    let executed = match executed {
+        None => None,
+        Some(Ok(results)) => {
+            observe_executions(checks, &output.executions, &results);
+            observe_executions(checks, &output.at_limit, &results);
+            match executes_nothing {
+                Some(reason) => checks.skip(CheckId::ExecLadder, reason),
+                None => {
+                    checks.run(CheckId::ExecLadder, || {
+                        check_executions_match(&output.executions, &results, tolerance)
+                    })?;
+                }
+            }
+            Some(Ok(results))
+        }
+        Some(Err(e)) => {
+            checks.fail(CheckId::ExecLadder, &e);
+            // Every execution a limit check needs fails with the batch's error.
+            Some(Err(format!("the executions could not be simulated: {e:#}")))
+        }
+    };
+    let executed = executed.as_ref().map(|executed| {
+        executed
+            .as_ref()
+            .map_err(String::as_str)
+    });
+    for judged in ladder::judge_limits(output, executed, tolerance) {
+        checks.record_direction(
+            judged.check,
+            &judged.component,
+            &judged.direction,
+            judged.unfailed,
+            &judged.failures,
+        );
+    }
+    Ok(())
+}
+
 /// Notes every execution in `inputs` that returned an output, for the report's drift.
 fn observe_executions(
     checks: &mut Checks,
@@ -1675,68 +1736,13 @@ impl TestRunner {
         executes_nothing: Option<&str>,
         checks: &mut Checks,
     ) -> miette::Result<()> {
-        let LadderOutput {
-            executions,
-            at_limit,
-            past_limit,
-            limit_directions: _,
-            unchecked_limits: _,
-        } = output;
-
-        let mut inputs = executions.clone();
-        inputs.extend(at_limit.clone());
-        inputs.extend(past_limit.clone());
-        let execute = block.is_some();
-        let executed = match block {
-            Some(Ok(block)) => self
+        let executed = block.map(|block| match block {
+            Ok(block) => self
                 .runtime
-                .block_on(self.simulate_executions(&inputs, block, protocol_system)),
-            Some(Err(e)) => Err(e.wrap_err("the block to execute at could not be read")),
-            None => Ok(HashMap::new()),
-        };
-        let no_results = HashMap::new();
-        let results = match &executed {
-            Ok(results) if !execute => results,
-            Ok(results) => {
-                observe_executions(checks, executions, results);
-                observe_executions(checks, at_limit, results);
-                match executes_nothing {
-                    Some(reason) => checks.skip(CheckId::ExecLadder, reason),
-                    None => {
-                        checks.run(CheckId::ExecLadder, || {
-                            check_executions_match(executions, results, tolerance)
-                        })?;
-                    }
-                }
-                results
-            }
-            Err(e) => {
-                checks.fail(CheckId::ExecLadder, e);
-                &no_results
-            }
-        };
-        // When the batch could not run, every execution a limit check needs fails with its error.
-        let executed = match &executed {
-            _ if !execute => None,
-            Ok(_) => Some(Ok(results)),
-            Err(e) => Some(Err(format!("the executions could not be simulated: {e:#}"))),
-        };
-        let executed = executed.as_ref().map(|executed| {
-            executed
-                .as_ref()
-                .map(|results| *results)
-                .map_err(String::as_str)
+                .block_on(self.simulate_executions(&strict_inputs(output), block, protocol_system)),
+            Err(e) => Err(e.wrap_err("the block to execute at could not be read")),
         });
-        for judged in ladder::judge_limits(output, executed, tolerance) {
-            checks.record_direction(
-                judged.check,
-                &judged.component,
-                &judged.direction,
-                judged.unfailed,
-                &judged.failures,
-            );
-        }
-        Ok(())
+        record_strict_executions(output, executed, tolerance, executes_nothing, checks)
     }
 
     /// Strict: indexes the test's range while streaming it. The indexer runs in the background,
