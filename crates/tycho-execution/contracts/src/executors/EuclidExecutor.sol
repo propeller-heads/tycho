@@ -23,7 +23,9 @@ contract EuclidExecutor is IExecutor {
     error EuclidExecutor__ZeroAddress();
     error EuclidExecutor__InvalidSelector();
 
-    /// @notice AggregationRouterV5.fillOrderRFQTo
+    /// @notice The only call this executor forwards, on the 1inch Aggregation
+    ///         Router v5:
+    ///         fillOrderRFQTo((uint256,address,address,address,address,uint256,uint256),bytes,uint256,address)
     bytes4 public constant FILL_ORDER_RFQ_TO_SELECTOR = 0x5a099843;
 
     // tokenIn (20) + tokenOut (20) + originalFilledTakerAmount (32)
@@ -73,18 +75,21 @@ contract EuclidExecutor is IExecutor {
             _decodeData(data);
 
         // Only the router's RFQ fill function.
+        // forge-lint: disable-next-line(unsafe-typecast) _decodeData guarantees the ten head words after the selector; the cast reads the selector.
         if (bytes4(fillCalldata) != FILL_ORDER_RFQ_TO_SELECTOR) {
             revert EuclidExecutor__InvalidSelector();
         }
 
-        // Cap the filled taker amount at what earlier route legs actually
-        // delivered. Only ever downward: the signed order carries the quoted
-        // amounts and the maker never over-delivers.
+        // The maker signs the order and leaves flagsAndAmount to the taker.
+        // Cap it at what earlier route legs actually delivered, only ever
+        // downward: the order fills at most the amount it was signed for.
+        // 1inch reads a zero amount as the whole order, which the router's
+        // approval of exactly amountIn does not cover, so that fill reverts.
         if (amountIn < originalFilledTakerAmount) {
             _setFilledTakerAmount(fillCalldata, amountIn);
         }
 
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         euclidSettlement.functionCall(fillCalldata);
     }
 
@@ -115,6 +120,7 @@ contract EuclidExecutor is IExecutor {
         private
         pure
     {
+        // forge-lint: disable-next-line(inline-assembly) Solidity cannot write a word into memory bytes at an offset.
         assembly ("memory-safe") {
             mstore(
                 add(add(fillCalldata, 0x20), _FLAGS_AND_AMOUNT_OFFSET),
