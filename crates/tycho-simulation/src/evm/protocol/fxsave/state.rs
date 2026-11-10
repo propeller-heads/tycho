@@ -26,13 +26,14 @@ use crate::evm::{
 };
 
 /// Gas of the executor's leg, `fxSP.deposit` then `fxSAVE.deposit`, when fxSAVE keeps the fxSP
-/// idle. The router's transfers and approval around the leg are left out: `estimate_gas_usage`
-/// adds them.
-const DEPOSIT_GAS: u64 = 250_000;
+/// idle: `FxSaveExecutor.swap` used 302k for USDC and 306k for fxUSD before refunds on a mainnet
+/// fork at block 26,353,817. The router's transfers and approval around the leg are left out:
+/// `estimate_gas_usage` adds them.
+const DEPOSIT_GAS: u64 = 306_000;
 
 /// Gas fxSAVE adds when a deposit brings its idle fxSP to `getThreshold` and it stakes all of it
-/// into the gauge (`SavingFxUSD._deposit`).
-const GAUGE_STAKE_GAS: u64 = 250_000;
+/// into the gauge (`SavingFxUSD._deposit`): 246k for either token, measured as above.
+const GAUGE_STAKE_GAS: u64 = 247_000;
 
 /// The fxSP (`FxUSDBasePool`) implementation the deposit math and depeg gate port.
 const BASE_POOL_IMPLEMENTATION: AlloyAddress = address!("9cfefd90d4c8428d4cbac9baaa6d52c6ba7897f9");
@@ -479,7 +480,7 @@ pub(crate) mod tests {
             ..readings()
         });
         assert_eq!(returned_state(&result), &expected);
-        assert_eq!(result.gas, BigUint::from(DEPOSIT_GAS + GAUGE_STAKE_GAS));
+        assert_eq!(result.gas, BigUint::from(553_000_u64));
     }
 
     #[test]
@@ -503,16 +504,16 @@ pub(crate) mod tests {
     }
 
     #[rstest]
-    #[case::idle_stays_below_the_threshold(0, USDC_10_FXSP, DEPOSIT_GAS)]
+    #[case::idle_stays_below_the_threshold(0, USDC_10_FXSP, 306_000)]
     #[case::one_unit_short_of_the_threshold(
         90_103_358_104_042_439_099,
         90_103_358_104_042_439_099 + USDC_10_FXSP,
-        DEPOSIT_GAS
+        306_000
     )]
     #[case::idle_reaches_the_threshold(
         90_103_358_104_042_439_100,
         0,
-        DEPOSIT_GAS + GAUGE_STAKE_GAS
+        553_000
     )]
     fn gauge_stake_is_charged_when_idle_fxsp_reaches_the_threshold(
         #[case] idle_before: u128,
