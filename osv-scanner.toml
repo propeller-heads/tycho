@@ -137,8 +137,3 @@ reason = "crypto-bigint 0.5.5: timing variability; via elliptic-curve 0.13 (allo
 id = "RUSTSEC-2026-0253"
 ignoreUntil = 2027-05-10
 reason = "lru 0.16.4 unsound; alloy-provider 1.x requires ^0.16, fixed in 0.18.2"
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0436"
-ignoreUntil = 2027-05-10
-reason = "paste 1.0.15 unmaintained; proc macro of alloy-primitives, including 1.7.3"
