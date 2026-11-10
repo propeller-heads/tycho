@@ -62,9 +62,13 @@ pub fn map_protocol_changes(
     })
 }
 
-/// Traces the calls the simulation reads, so DCI indexes every contract and slot they touch: the
-/// USDC Chainlink feed and fxSP's USDC strategy through `previewDeposit`, and fxSAVE's staked
-/// fxSP through its `previewDeposit`.
+/// Traces calls that read the state the simulation reads, so DCI indexes every contract and slot
+/// behind it. fxSP's `previewDeposit(USDC)` reaches its supply and holdings, the USDC oracle and
+/// Chainlink feed, and the USDC strategy; `previewRedeem` reaches the same fxSP state without the
+/// oracle, so it stays traced while the oracle reverts; `stableDepegPrice` reaches the depeg gate.
+/// fxSAVE's `previewDeposit` reaches its supply, its idle fxSP (`fxSP.balanceOf(fxSAVE)`) and its
+/// gauge stake; `getThreshold` reaches the slot that decides whether a deposit stakes into the
+/// gauge.
 fn add_entrypoints(builder: &mut TransactionChangesBuilder, config: &Config) {
     let usdc_unit: B256 = U256::from(1_000_000u64).into();
     let wad: B256 = U256::from(10u64.pow(18)).into();
@@ -74,14 +78,10 @@ fn add_entrypoints(builder: &mut TransactionChangesBuilder, config: &Config) {
             "previewDeposit(address,uint256)",
             vec![config.usdc.into_word(), usdc_unit],
         ),
-        (
-            config.fx_base_pool,
-            "previewDeposit(address,uint256)",
-            vec![config.fxusd.into_word(), wad],
-        ),
         (config.fx_base_pool, "previewRedeem(uint256)", vec![wad]),
         (config.fx_base_pool, "stableDepegPrice()", vec![]),
         (config.fxsave, "previewDeposit(uint256)", vec![wad]),
+        (config.fxsave, "getThreshold()", vec![]),
     ];
     for (target, signature, args) in calls {
         let (entrypoint, entrypoint_params) = create_entrypoint(
@@ -208,6 +208,7 @@ mod tests {
     #[case::fxsp_preview_redeem("previewRedeem(uint256)", "4cdad506")]
     #[case::fxsp_stable_depeg_price("stableDepegPrice()", "611e996d")]
     #[case::fxsave_preview_deposit("previewDeposit(uint256)", "ef8b30f7")]
+    #[case::fxsave_get_threshold("getThreshold()", "e75235b8")]
     #[case::fxsp_total_yield_token("totalYieldToken()", "65d2cb08")]
     #[case::fxsp_total_stable_token("totalStableToken()", "9ff39038")]
     fn test_selector_matches_cast_sig(#[case] signature: &str, #[case] selector: &str) {
@@ -260,12 +261,6 @@ mod tests {
                 (
                     FX_BASE_POOL,
                     "previewDeposit(address,uint256)",
-                    "b8f82b26000000000000000000000000085780639cc2cacd35e474e71f4d000e2405d8f6\
-                     0000000000000000000000000000000000000000000000000de0b6b3a7640000",
-                ),
-                (
-                    FX_BASE_POOL,
-                    "previewDeposit(address,uint256)",
                     "b8f82b26000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48\
                      00000000000000000000000000000000000000000000000000000000000f4240",
                 ),
@@ -275,6 +270,7 @@ mod tests {
                     "4cdad5060000000000000000000000000000000000000000000000000de0b6b3a7640000",
                 ),
                 (FX_BASE_POOL, "stableDepegPrice()", "611e996d"),
+                (FXSAVE, "getThreshold()", "e75235b8"),
                 (
                     FXSAVE,
                     "previewDeposit(uint256)",
