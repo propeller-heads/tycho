@@ -6189,15 +6189,14 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openssl"
-version = "0.10.73"
+version = "0.10.81"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8505734d46c8ab1e19a1dce3aef597ad87dcb4c37e7188231769bd6bd51cebf8"
+checksum = "77823a27f0babb03091cb9ed9ef80af3b39dbc82f97e8fa530374b7dafd87a45"
 dependencies = [
  "bitflags 2.11.1",
  "cfg-if",
  "foreign-types",
  "libc",
- "once_cell",
  "openssl-macros",
  "openssl-sys",
 ]
@@ -6221,9 +6220,9 @@ checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
 
 [[package]]
 name = "openssl-sys"
-version = "0.9.109"
+version = "0.9.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90096e2e47630d78b7d1c20952dc621f957103f8bc2c8359ec81290d75238571"
+checksum = "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695"
 dependencies = [
  "cc",
  "libc",
@@ -7019,7 +7018,7 @@ dependencies = [
 
 [[package]]
 name = "protocol-testing"
-version = "0.504.2"
+version = "0.504.3"
 dependencies = [
  "alloy",
  "clap",
@@ -10000,7 +9999,7 @@ checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "tycho"
-version = "0.504.2"
+version = "0.504.3"
 dependencies = [
  "tokio",
  "tycho-client",
@@ -10011,7 +10010,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.504.2"
+version = "0.504.3"
 dependencies = [
  "async-trait",
  "backoff",
@@ -10045,7 +10044,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.504.2"
+version = "0.504.3"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -10079,7 +10078,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.504.2"
+version = "0.504.3"
 dependencies = [
  "alloy",
  "async-trait",
@@ -10103,7 +10102,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.504.2"
+version = "0.504.3"
 dependencies = [
  "alloy",
  "async-trait",
@@ -10129,7 +10128,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-indexer"
-version = "0.504.2"
+version = "0.504.3"
 dependencies = [
  "actix",
  "actix-cors",
@@ -10199,7 +10198,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-integration-test"
-version = "0.504.2"
+version = "0.504.3"
 dependencies = [
  "actix-web",
  "alloy",
@@ -10229,7 +10228,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-protobuf"
-version = "0.504.2"
+version = "0.504.3"
 dependencies = [
  "chrono",
  "num-bigint",
@@ -10253,7 +10252,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.504.2"
+version = "0.504.3"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -10323,7 +10322,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage"
-version = "0.504.2"
+version = "0.504.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10350,7 +10349,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-test"
-version = "0.504.2"
+version = "0.504.3"
 dependencies = [
  "alloy",
  "alloy-chains",
