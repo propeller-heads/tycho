@@ -15,6 +15,7 @@ struct FeeInfo {
     router_fee_on_client_fee_bps: i64,
     positive_slippage_enabled: bool,
     positive_slippage_exempt: bool,
+    client_positive_slippage_share_bps: i64,
 }
 
 fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
@@ -56,11 +57,19 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
         false
     };
 
+    let client_positive_slippage_share_bps =
+        if positive_slippage_enabled && !positive_slippage_exempt {
+            params.request("client_positive_slippage_share_bps", vec![0, MAX_BPS / 2, MAX_BPS])?
+        } else {
+            0
+        };
+
     Ok(FeeInfo {
         router_fee_on_output_bps,
         router_fee_on_client_fee_bps,
         positive_slippage_enabled,
         positive_slippage_exempt,
+        client_positive_slippage_share_bps,
     })
 }
 
@@ -81,6 +90,10 @@ pub fn calculate_fee(
 
     let positive_slippage =
         _calculate_positive_slippage(actual_amount_out, expected_amount_out, &fee_info);
+    let client_positive_slippage = fee_to_i64(
+        positive_slippage as i128 * fee_info.client_positive_slippage_share_bps as i128 /
+            MAX_BPS as i128,
+    )?;
 
     let fee_base = actual_amount_out - positive_slippage;
 
@@ -89,9 +102,12 @@ pub fn calculate_fee(
     Ok(vec![
         FeeRecipient {
             recipient: Address::RouterFeeReceiver,
-            fee_amount: router_fee + positive_slippage,
+            fee_amount: router_fee + positive_slippage - client_positive_slippage,
         },
-        FeeRecipient { recipient: Address::ClientFeeReceiver, fee_amount: client_fee },
+        FeeRecipient {
+            recipient: Address::ClientFeeReceiver,
+            fee_amount: client_fee + client_positive_slippage,
+        },
     ])
 }
 
@@ -168,7 +184,7 @@ fn _calculate_fee(
 
 /// Mirrors `FeeCalculator._calculatePositiveSlippage` in Solidity.
 ///
-/// Returns the positive slippage surplus, all of which goes to the router;
+/// Returns the positive slippage surplus that the router captures;
 /// zero if disabled, the client is exempt, or there is no surplus.
 fn _calculate_positive_slippage(
     actual_amount_out: i64,

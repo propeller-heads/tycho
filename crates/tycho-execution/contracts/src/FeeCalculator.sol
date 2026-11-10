@@ -48,6 +48,10 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     // while positive slippage capture is enabled
     mapping(address => bool) private _positiveSlippageExempt;
 
+    // Each client's share of the captured surplus in fee units. The router
+    // keeps the rest, so the default of zero leaves the full surplus to it.
+    mapping(address => uint32) private _clientPositiveSlippageShareBps;
+
     bytes32 public constant ROUTER_FEE_SETTER_ROLE =
         keccak256("ROUTER_FEE_SETTER_ROLE");
 
@@ -66,6 +70,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     );
     event PositiveSlippageToggled(bool enabled);
     event PositiveSlippageExemptionSet(address indexed client, bool exempt);
+    event ClientPositiveSlippageShareUpdated(
+        address indexed client, uint32 oldShareBps, uint32 newShareBps
+    );
 
     /**
      * @param routerFeeSetter Address granted ROUTER_FEE_SETTER_ROLE
@@ -96,7 +103,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      *      Deduction order:
      *      1. When positive slippage capture is enabled and the client is not
      *         exempt, the surplus (actualAmountOut - expectedAmountOut) is
-     *         taken by the router first.
+     *         taken first. The client gets its share of the surplus and
+     *         the router keeps the rest.
      *      2. Fees (client fee + router fees) are then calculated on
      *         the amount *after* surplus extraction (expectedAmountOut when
      *         surplus was taken, actualAmountOut otherwise).
@@ -116,6 +124,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         uint256 positiveSlippage = _calculatePositiveSlippage(
             feeInput.actualAmountOut, feeInput.expectedAmountOut, resolvedClient
         );
+        uint256 clientPositiveSlippage = positiveSlippage
+            * _clientPositiveSlippageShareBps[resolvedClient] / MAX_BPS;
 
         // Fee base = actual output minus any extracted surplus.
         // When surplus is taken: feeBase = expectedAmountOut.
@@ -128,10 +138,12 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         feeRecipients = new FeeRecipient[](2);
         feeRecipients[0] = FeeRecipient({
             recipient: _routerFeeReceiver,
-            feeAmount: routerFee + positiveSlippage
+            feeAmount: routerFee + positiveSlippage - clientPositiveSlippage
         });
-        feeRecipients[1] =
-            FeeRecipient({recipient: resolvedClient, feeAmount: clientFee});
+        feeRecipients[1] = FeeRecipient({
+            recipient: resolvedClient,
+            feeAmount: clientFee + clientPositiveSlippage
+        });
     }
 
     /**
@@ -226,7 +238,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
-     * @dev Calculates the positive slippage surplus, all of which goes to the router
+     * @dev Calculates the positive slippage surplus that the router captures
      * @return positiveSlippage The surplus (zero if disabled, the client is
      *         exempt, or there is no surplus)
      */
@@ -492,5 +504,32 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         returns (bool)
     {
         return _positiveSlippageExempt[client];
+    }
+
+    /**
+     * @dev Sets a client's share of the captured surplus. The router keeps
+     *      the rest. Zero gives the full surplus to the router.
+     * @param client The client address to update
+     * @param shareBps Share in fee units (100_000_000 = the full surplus)
+     */
+    function setClientPositiveSlippageShare(address client, uint32 shareBps)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        if (shareBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
+        uint32 oldShareBps = _clientPositiveSlippageShareBps[client];
+        _clientPositiveSlippageShareBps[client] = shareBps;
+        emit ClientPositiveSlippageShareUpdated(client, oldShareBps, shareBps);
+    }
+
+    /**
+     * @dev Returns a client's share of the captured surplus in fee units
+     */
+    function getClientPositiveSlippageShare(address client)
+        external
+        view
+        returns (uint32)
+    {
+        return _clientPositiveSlippageShareBps[client];
     }
 }

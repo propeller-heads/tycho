@@ -1201,6 +1201,64 @@ contract FeeCalculatorSlippageTest is Constants {
         assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
     }
 
+    function testClientShareOfPositiveSlippage() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setClientPositiveSlippageShare(BOB, _50_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 1.1 ether,
+                expectedAmountOut: 1 ether,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: _1_PCT,
+                client: BOB
+            })
+        );
+
+        // surplus = 0.1 ether, split 50/50
+        // feeBase = 1 ether: client fee 0.01 ether, router fee 0.01 ether
+        assertEq(fees[0].recipient, ADMIN);
+        assertEq(fees[0].feeAmount, 0.06 ether);
+        assertEq(fees[1].recipient, BOB);
+        assertEq(fees[1].feeAmount, 0.06 ether);
+    }
+
+    function testClientShareOfPositiveSlippageRoundsToRouter() public {
+        vm.prank(FEE_SETTER);
+        feeCalculator.setClientPositiveSlippageShare(BOB, _50_PCT);
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 103,
+                expectedAmountOut: 100,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
+        );
+
+        assertEq(fees[0].feeAmount, 2);
+        assertEq(fees[1].feeAmount, 1);
+    }
+
+    function testSetClientPositiveSlippageShareTooHighReverts() public {
+        vm.prank(FEE_SETTER);
+        vm.expectRevert(FeeCalculator__FeeTooHigh.selector);
+        feeCalculator.setClientPositiveSlippageShare(BOB, 100_000_001);
+    }
+
+    function testSetClientPositiveSlippageShareUnauthorized() public {
+        vm.prank(BOB);
+        vm.expectRevert();
+        feeCalculator.setClientPositiveSlippageShare(BOB, _50_PCT);
+    }
+
     function testZeroSlippageNoSurplus() public {
         vm.prank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
