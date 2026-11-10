@@ -248,6 +248,69 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         );
     }
 
+    function testSingleSwapSplitsPositiveSlippageWithClient() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageEnabled(true);
+        feeCalculator.setClientPositiveSlippageShare(
+            clientFeeReceiver, 50_000_000
+        );
+        vm.stopPrank();
+
+        uint256 amountIn = 1 ether;
+        // 1 WETH buys 2018.8 DAI on the USV2 pool, quoted at a round 2000
+        uint256 quotedAmountOut = 2000 ether;
+        uint256 surplus = 2018817438608734439722 - quotedAmountOut;
+
+        deal(WETH_ADDR, ALICE, amountIn);
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
+
+        bytes memory swap = encodeSingleSwap(
+            address(usv2Executor),
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
+        );
+        ClientFeeParams memory feeParams = makeClientFeeParams(
+            0,
+            0,
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            quotedAmountOut,
+            quotedAmountOut,
+            ALICE,
+            swap,
+            tychoRouterAddr,
+            CLIENT_FEE_RECEIVER_PK
+        );
+        uint256 amountOut = tychoRouter.singleSwap(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            quotedAmountOut,
+            quotedAmountOut,
+            ALICE,
+            feeParams,
+            swap
+        );
+        vm.stopPrank();
+
+        // ALICE receives the quote, the surplus is split 50/50
+        assertEq(amountOut, quotedAmountOut);
+        assertEq(IERC20(DAI_ADDR).balanceOf(ALICE), quotedAmountOut);
+        assertEq(
+            tychoRouter.balanceOf(
+                routerFeeReceiver, uint256(uint160(DAI_ADDR))
+            ),
+            surplus / 2
+        );
+        assertEq(
+            tychoRouter.balanceOf(
+                clientFeeReceiver, uint256(uint160(DAI_ADDR))
+            ),
+            surplus / 2
+        );
+    }
+
     function testSingleSwapWithFeesAndContribution() public {
         // Tests swapping WETH -> DAI on a USV2 pool with fees and client contribution
         // Swap is 1 WETH for      2018.8 DAI (2018817438608734439722, gross output)
