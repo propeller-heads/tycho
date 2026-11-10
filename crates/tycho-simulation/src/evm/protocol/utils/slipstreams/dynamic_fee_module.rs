@@ -7,9 +7,9 @@ use tycho_common::{simulation::errors::SimulationError, Bytes};
 use crate::evm::protocol::utils::slipstreams::observations::{Observations, ObserveError};
 
 pub const ZERO_FEE_INDICATOR: u32 = 420;
-// The `secondsAgo` the dynamic fee modules are deployed with, and the one a config serialized
-// before it became per module takes. `SUPPORTED_DYNAMIC_FEE_MODULES` holds each module's own.
-pub const DEFAULT_SECONDS_AGO: u32 = 600;
+/// The `secondsAgo` the dynamic fee modules are deployed with, and the one a config serialized
+/// before it became per module takes. `SUPPORTED_DYNAMIC_FEE_MODULES` holds each module's own.
+const DEFAULT_SECONDS_AGO: u32 = 600;
 pub const MIN_SECONDS_AGO: u32 = 2;
 pub const DEFAULT_SCALING_FACTOR: u64 = 0;
 // The upgraded DynamicSwapFeeModule deployments use 30_000 as their default fee cap.
@@ -28,8 +28,9 @@ struct SupportedModule {
 }
 
 const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 4] = [
-    // The three Base modules moved from 600 to 480 in tx 0x42122c80…7550 (block 52,307,488), and
-    // 0x87D8 again to 30 in tx 0x1aeb7f17…2ae4 (block 53,228,614).
+    // The three Base modules moved from 600 to 480 in block 52,307,488, tx
+    // 0x42122c80d854f0f4705f0f93d2a16c4d67a631d04359c50066328b47a2857550, and 0x87D8 again to 30
+    // in block 53,228,614, tx 0x1aeb7f17c557c571a008797cc214f2d2c4d46d98fc3847855ac88f1889f92ae4.
     SupportedModule {
         address: address!("090b2A6bb475c00e2256e2095A60887cD710803b"),
         seconds_ago: 480,
@@ -47,7 +48,7 @@ const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 4] = [
     // differ.
     SupportedModule {
         address: address!("a8Bdc945bE050E451C97f935d7c0D6B0087cF94c"),
-        seconds_ago: DEFAULT_SECONDS_AGO,
+        seconds_ago: 600,
     },
 ];
 
@@ -189,6 +190,16 @@ impl DynamicFeeConfig {
     pub fn scaling_factor(&self) -> u64 {
         self.scaling_factor
     }
+
+    /// The scaling factor and fee cap the module prices with: the pool's own once it has set a
+    /// scaling factor, the module defaults otherwise.
+    fn scaling(&self) -> (u64, u32) {
+        if self.scaling_factor != 0 {
+            (self.scaling_factor, self.fee_cap)
+        } else {
+            (DEFAULT_SCALING_FACTOR, DEFAULT_FEE_CAP)
+        }
+    }
 }
 
 /// A resolved swap fee, in pips, plus whether resolving it required a TWAP `observe`.
@@ -292,45 +303,40 @@ fn resolve_dynamic_fee(
     observations: &Observations,
     execution_timestamp: u32,
 ) -> Result<ResolvedFee, SimulationError> {
-    let (scaling_factor, fee_cap) = if dfc.scaling_factor != 0 {
-        (dfc.scaling_factor, dfc.fee_cap)
-    } else {
-        (DEFAULT_SCALING_FACTOR, DEFAULT_FEE_CAP)
-    };
-    // The module runs the TWAP computation for any scaling factor — a zero factor just
-    // multiplies the deviation away — so the observe gas is paid whenever the cardinality guard
-    // passes. Verified with debug_traceCall of fee() on a zero-scaling pool: the observe subcall
-    // burns ~50k gas.
     let (dynamic_component, observed_twap) = calculate_dynamic_fee(
+        dfc,
         current_tick,
         liquidity,
         observation_index,
         observation_cardinality,
         observations,
         execution_timestamp,
-        scaling_factor,
-        dfc.seconds_ago,
     )?;
+    let (_, fee_cap) = dfc.scaling();
     Ok(ResolvedFee { fee: (base_fee + dynamic_component).min(fee_cap), observed_twap })
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "inputs mirror the on-chain dynamic fee module and pool state"
-)]
 fn calculate_dynamic_fee(
+    dfc: &DynamicFeeConfig,
     current_tick: i32,
     liquidity: u128,
     observation_index: u16,
     observation_cardinality: u16,
     observations: &Observations,
     blocktime: u32,
-    scaling_factor: u64,
-    seconds_ago: u32,
 ) -> Result<(u32, bool), SimulationError> {
+    let seconds_ago = dfc.seconds_ago;
     if u32::from(observation_cardinality) < seconds_ago / MIN_SECONDS_AGO {
         // The module returns before reaching the oracle: no observe gas.
         return Ok((0, false));
+    }
+    // The module runs the TWAP computation for any scaling factor, so the observe gas is paid
+    // whenever the guard passes (debug_traceCall of fee() on a zero-scaling pool: the observe
+    // subcall burns ~50k gas). A zero factor multiplies the deviation away, so the fee does not
+    // depend on what the oracle answers, and a ring this copy cannot read does not fail the quote.
+    let (scaling_factor, _) = dfc.scaling();
+    if scaling_factor == 0 {
+        return Ok((0, true));
     }
     // The module wraps `observe` in try/catch and adds no dynamic component when it reverts,
     // which the oracle does with `OLD` when the window reaches past the oldest observation. Any
@@ -571,11 +577,31 @@ mod tests {
     }
 
     #[test]
+    fn zero_scaling_quotes_the_base_fee_when_oracle_data_is_missing() {
+        // No supported module: base fee 0, scaling 0, 600 s. Cardinality 300 passes the guard and
+        // the current slot (5) is not in the ring, but a zero factor makes the fee independent of
+        // the oracle, so the quote stands.
+        let dfc = DynamicFeeConfig::default();
+        let observations = Observations::new(vec![Observation {
+            block_timestamp: 999_000,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        }]);
+
+        let fee = get_dynamic_fee(&dfc, 3000, 7, 1, 5, 300, &observations, 1_000_000, false)
+            .expect("scaling 0: the oracle cannot change the fee");
+
+        assert_eq!(fee, ResolvedFee { fee: 3000, observed_twap: true });
+    }
+
+    #[test]
     fn young_ring_reads_unwritten_slots_as_uninitialized() {
         // Robinhood pool 0x8132252bd65e7c03f7b57739e1db1c58d6ee792f at block 61,011,933: slots
-        // 0-2 written, cardinality 500, the rest prefilled but unwritten. Config (50, 500, 1e7)
-        // under a 600 s module; `getFee` returns 110 on chain, 50 base plus 6 ticks of TWAP
-        // deviation at 1e7 / 1e6.
+        // 0-2 written, cardinality 500, the rest prefilled but unwritten. Its module, Topaz's
+        // 0x0Dca13b1039277d82B27ADd86d06195B8E9BBfDb, has `secondsAgo` 600 and returns
+        // `dynamicFeeConfig` (50, 500, 1e7); `getFee` returns 110 on chain, 50 base plus 6 ticks
+        // of TWAP deviation at 1e7 / 1e6.
         let dfc = DynamicFeeConfig::new(50, 500, 10_000_000, false, 0);
         let observations = ring(
             500,
