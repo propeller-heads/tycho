@@ -17,6 +17,7 @@
 //! Nothing reads or writes these tables yet; the read and write paths move onto them in later
 //! changes.
 
+pub mod origins;
 pub mod orm;
 pub mod schema;
 
