@@ -28,9 +28,9 @@ const CURVE_BYTECODE_JSON: &str = include_str!("../fixtures/Curve.runtime.json")
 const FERMISWAP_BYTECODE_JSON: &str = include_str!("../fixtures/FermiSwap.runtime.json");
 const MAVERICK_V2_BYTECODE_JSON: &str = include_str!("../fixtures/MaverickV2.runtime.json");
 const EKUBO_V3_BYTECODE_JSON: &str = include_str!("../fixtures/EkuboV3.runtime.json");
-const ERC4626_BYTECODE_JSON: &str = include_str!("../fixtures/ERC4626.runtime.json");
 const EKUBO_V3_ROBINHOOD_BYTECODE_JSON: &str =
     include_str!("../fixtures/EkuboV3Robinhood.runtime.json");
+const ERC4626_BYTECODE_JSON: &str = include_str!("../fixtures/ERC4626.runtime.json");
 const UNISWAP_V4_ROBINHOOD_BYTECODE_JSON: &str =
     include_str!("../fixtures/UniswapV4Robinhood.runtime.json");
 const FLUIDV1_BYTECODE_JSON: &str = include_str!("../fixtures/FluidV1.runtime.json");
