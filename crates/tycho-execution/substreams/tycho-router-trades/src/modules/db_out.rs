@@ -1,25 +1,41 @@
-//! Conversion of trades and fee events into `DatabaseChanges` rows for substreams-sink-sql.
-use anyhow::{bail, Result};
+//! Conversion of trades, fee events, vault transfers and subsidy events into `DatabaseChanges`
+//! rows for substreams-sink-sql.
+use anyhow::{anyhow, bail, Result};
 use substreams::scalar::{BigDecimal, BigInt};
 use substreams_database_change::{
     pb::sf::substreams::sink::database::v1::DatabaseChanges, tables::Tables,
 };
 
 use super::hex_addr;
-use crate::pb::tycho::router::v1::{FeeConfigEvents, Trade, Trades, VaultTransfers};
+use crate::pb::tycho::router::v1::{
+    subsidy_event::Outcome, FeeConfigEvents, SubsidyEvent, SubsidyEvents, Trade, Trades,
+    VaultTransfers,
+};
+
+/// The row id of a call: a trade and a router call error, and the `trade_id` that points at a
+/// trade.
+fn call_id(chain: &str, tx_hash: &[u8], call_index: u32) -> String {
+    format!("{chain}:{}:{call_index}", hex_addr(tx_hash))
+}
+
+/// The row id of a log: a fee-config event, a vault transfer and a subsidy event.
+fn log_id(chain: &str, tx_hash: &[u8], log_index: u32) -> String {
+    format!("{chain}:{}:{log_index}", hex_addr(tx_hash))
+}
 
 #[substreams::handlers::map]
 pub fn db_out(
     trades: Trades,
     fee_events: FeeConfigEvents,
     vault: VaultTransfers,
+    subsidies: SubsidyEvents,
 ) -> Result<DatabaseChanges> {
     let mut tables = Tables::new();
     for trade in &trades.trades {
         insert_trade(&mut tables, trade)?;
     }
     for error in &trades.errors {
-        let id = format!("{}:{}:{}", error.chain, hex_addr(&error.tx_hash), error.call_index);
+        let id = call_id(&error.chain, &error.tx_hash, error.call_index);
         tables
             .create_row("router_call_errors", id)
             .set("chain", &error.chain)
@@ -37,7 +53,7 @@ pub fn db_out(
             .set("state_committed", error.state_committed);
     }
     for ev in &fee_events.events {
-        let id = format!("{}:{}:{}", ev.chain, hex_addr(&ev.tx_hash), ev.log_index);
+        let id = log_id(&ev.chain, &ev.tx_hash, ev.log_index);
         let row = tables.create_row("fee_config_events", id);
         row.set("chain", &ev.chain)
             .set("block_number", ev.block_number)
@@ -60,7 +76,7 @@ pub fn db_out(
         }
     }
     for t in &vault.transfers {
-        let id = format!("{}:{}:{}", t.chain, hex_addr(&t.tx_hash), t.log_index);
+        let id = log_id(&t.chain, &t.tx_hash, t.log_index);
         tables
             .create_row("vault_transfers", id)
             .set("chain", &t.chain)
@@ -76,11 +92,45 @@ pub fn db_out(
             .set("amount", &t.amount)
             .set("kind", &t.kind);
     }
+    for s in &subsidies.events {
+        insert_subsidy(&mut tables, s)?;
+    }
     Ok(tables.to_database_changes())
 }
 
+fn insert_subsidy(tables: &mut Tables, s: &SubsidyEvent) -> Result<()> {
+    let id = log_id(&s.chain, &s.tx_hash, s.log_index);
+    let outcome = s
+        .outcome
+        .as_ref()
+        .ok_or_else(|| anyhow!("subsidy event {id} has no outcome"))?;
+    let row = tables.create_row("subsidies", id);
+    row.set("chain", &s.chain)
+        .set("block_number", s.block_number)
+        .set("block_time", rfc3339(s.block_timestamp))
+        .set("tx_hash", hex_addr(&s.tx_hash))
+        .set("log_index", s.log_index)
+        .set("payer", hex_addr(&s.payer))
+        .set("nonce", hex_addr(&s.nonce))
+        .set("trade_id", call_id(&s.chain, &s.tx_hash, s.trade_call_index));
+    match outcome {
+        Outcome::Paid(paid) => {
+            row.set("event", "paid")
+                .set("bound_to", hex_addr(&paid.bound_to))
+                .set("receiver", hex_addr(&paid.receiver))
+                .set("token", hex_addr(&paid.token))
+                .set("amount", &paid.amount);
+        }
+        Outcome::Skipped(skip) => {
+            row.set("event", "skipped")
+                .set("reason", &skip.reason);
+        }
+    }
+    Ok(())
+}
+
 fn insert_trade(tables: &mut Tables, t: &Trade) -> Result<()> {
-    let trade_id = format!("{}:{}:{}", t.chain, hex_addr(&t.tx_hash), t.call_index);
+    let trade_id = call_id(&t.chain, &t.tx_hash, t.call_index);
     let executors: Vec<String> = t
         .hops
         .iter()
