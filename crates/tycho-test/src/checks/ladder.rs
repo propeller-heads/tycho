@@ -184,6 +184,51 @@ pub fn executable_max_input(limit: &BigUint) -> BigUint {
     }
 }
 
+/// A size a direction is swapped at, relative to its limit after the `int128` cap
+/// ([`executable_max_input`]): one of the ladder's fractions, or the limit itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProbeSize {
+    /// The limit times this many thousandths.
+    Fraction(u32),
+    /// The limit itself, where the limit checks run.
+    Limit,
+}
+
+impl ProbeSize {
+    /// The ladder's fractions, then the limit: every size a direction is swapped at, smallest
+    /// first.
+    pub const ALL: [ProbeSize; 4] = [
+        ProbeSize::Fraction(LADDER_THOUSANDTHS[0]),
+        ProbeSize::Fraction(LADDER_THOUSANDTHS[1]),
+        ProbeSize::Fraction(LADDER_THOUSANDTHS[2]),
+        ProbeSize::Limit,
+    ];
+
+    /// The amount to swap for an `executable_limit`, the limit after the `int128` cap. Zero when
+    /// a fraction of a small limit rounds down to nothing.
+    pub fn amount(self, executable_limit: &BigUint) -> BigUint {
+        match self {
+            ProbeSize::Fraction(thousandths) => executable_limit * thousandths / 1000u32,
+            ProbeSize::Limit => executable_limit.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for ProbeSize {
+    /// `0.1%`, `1%`, `10%` or `limit`: the label reports and metrics use.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProbeSize::Fraction(thousandths) if thousandths % 10 == 0 => {
+                write!(f, "{}%", thousandths / 10)
+            }
+            ProbeSize::Fraction(thousandths) => {
+                write!(f, "{}.{}%", thousandths / 10, thousandths % 10)
+            }
+            ProbeSize::Limit => f.write_str("limit"),
+        }
+    }
+}
+
 /// `int128::MAX`, the cap the runner applies to every protocol's executions (see
 /// [`executable_max_input`]).
 fn int128_ceiling() -> BigUint {
@@ -193,7 +238,7 @@ fn int128_ceiling() -> BigUint {
 /// Whether `limit` is at or above `int128::MAX`. Such a limit is the execution cap, not the venue's
 /// bound: even at exactly `int128::MAX`, one unit past it reverts in the executor's cast, whatever
 /// the venue allows.
-fn at_execution_cap(limit: &BigUint) -> bool {
+pub fn at_execution_cap(limit: &BigUint) -> bool {
     *limit >= int128_ceiling()
 }
 
@@ -333,12 +378,11 @@ pub fn run_ladder(
             // The limit sizes the ladder: a venue may revert at 10 or at 10 million USDC, and a
             // fraction of its own limit is safe for it.
             for thousandths in LADDER_THOUSANDTHS {
+                let size = ProbeSize::Fraction(thousandths);
                 let percentage = f64::from(thousandths) / 10.0;
-                let amount_in = &max_input * thousandths / 1000u32;
+                let amount_in = size.amount(&max_input);
                 if amount_in.is_zero() {
-                    return Err(miette!(
-                        "Amount in at {percentage}% of the limit is zero for pool {id}."
-                    ));
+                    return Err(miette!("Amount in at {size} of the limit is zero for pool {id}."));
                 }
 
                 let amount_out_result = state
@@ -671,6 +715,28 @@ mod tests {
 
     use super::*;
     use crate::{execution::models::Transaction, expectations::LimitKind};
+
+    #[test]
+    fn probe_sizes_are_the_ladder_then_the_limit() {
+        let limit = BigUint::from(1_000_000u32);
+        let amounts: Vec<(String, BigUint)> = ProbeSize::ALL
+            .iter()
+            .map(|size| (size.to_string(), size.amount(&limit)))
+            .collect();
+        assert_eq!(
+            amounts,
+            vec![
+                ("0.1%".to_string(), BigUint::from(1_000u32)),
+                ("1%".to_string(), BigUint::from(10_000u32)),
+                ("10%".to_string(), BigUint::from(100_000u32)),
+                ("limit".to_string(), limit.clone()),
+            ]
+        );
+        // A fraction of a tiny limit rounds down to nothing.
+        assert!(ProbeSize::Fraction(1)
+            .amount(&BigUint::from(999u32))
+            .is_zero());
+    }
 
     #[test]
     fn execution_trades_are_sized_within_uniswap_v4s_int128_range() {
