@@ -1351,13 +1351,14 @@ impl StateSnapshotGateway for CachedGateway {
 mod test_serial_db {
     use std::{collections::HashSet, slice, str::FromStr, time::Duration};
 
-    use diesel::{sql_query, QueryableByName};
+    use diesel::{prelude::*, sql_query, QueryableByName};
     use diesel_async::RunQueryDsl;
     use tycho_common::models::ChangeType;
 
     use super::*;
     use crate::postgres::{
-        db_fixtures, db_fixtures::yesterday_one_am, orm, testing::run_against_db,
+        db_fixtures, db_fixtures::yesterday_one_am, instance::schema::tycho as instance_schema,
+        orm, testing::run_against_db,
     };
 
     #[tokio::test]
@@ -1857,6 +1858,135 @@ mod test_serial_db {
         .await;
     }
 
+    /// Starts a write executor and returns a gateway bound to a new, ready instance.
+    async fn setup_instance_gateway(
+        connection_pool: &Pool<AsyncPgConnection>,
+    ) -> (CachedGateway, InstanceId, JoinHandle<()>) {
+        let mut connection = connection_pool
+            .get()
+            .await
+            .expect("Failed to get a connection from the pool");
+        let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+        db_fixtures::insert_token(
+            &mut connection,
+            chain_id,
+            "0000000000000000000000000000000000000000",
+            "ETH",
+            18,
+            Some(100),
+        )
+        .await;
+        let protocol_system_id =
+            db_fixtures::insert_protocol_system(&mut connection, "vm:test".to_owned()).await;
+        let instance = db_fixtures::insert_instance(&mut connection, protocol_system_id, "1").await;
+        let gateway = PostgresGateway::from_connection(&mut connection).await;
+        let (tx, rx) = mpsc::channel(10);
+        let write_executor = DBCacheWriteExecutor::new(
+            "ethereum".to_owned(),
+            Chain::Ethereum,
+            connection_pool.clone(),
+            gateway.clone(),
+            rx,
+        )
+        .await;
+        let handle = write_executor.run();
+        let cached_gw =
+            CachedGateway::new(tx, connection_pool.clone(), gateway).for_instance(instance);
+        (cached_gw, instance, handle)
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_instance_gateway_writes_instance_tables() {
+        run_against_db(|connection_pool| async move {
+            let (cached_gw, instance, handle) = setup_instance_gateway(&connection_pool).await;
+            let block_1 = get_sample_block(1);
+            let tx_1 = get_sample_transaction(1);
+            let state = get_sample_extraction(1);
+
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+            cached_gw
+                .upsert_tx(slice::from_ref(&tx_1))
+                .await
+                .expect("Upsert tx 1 ok");
+            cached_gw
+                .save_state(&state)
+                .await
+                .expect("Save state ok");
+            cached_gw
+                .commit_transaction(0)
+                .await
+                .expect("committing tx failed");
+            handle.abort();
+
+            let fetched_block = cached_gw
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)))
+                .await
+                .expect("Failed to fetch block");
+            assert_eq!(fetched_block, block_1);
+            let fetched_tx = cached_gw.get_tx(&tx_1.hash).await;
+            assert!(matches!(fetched_tx, Err(StorageError::NotFound(_, _))), "{fetched_tx:?}");
+            let old_state = cached_gw
+                .get_state(&state.name, &Chain::Ethereum)
+                .await;
+            assert!(matches!(old_state, Err(StorageError::NotFound(_, _))), "{old_state:?}");
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let (cursor, block_number): (Option<Bytes>, i64) =
+                instance_schema::extraction_state::table
+                    .filter(instance_schema::extraction_state::instance_id.eq(instance))
+                    .select((
+                        instance_schema::extraction_state::cursor,
+                        instance_schema::extraction_state::block_number,
+                    ))
+                    .get_result(&mut connection)
+                    .await
+                    .expect("instance extraction state stored");
+            assert_eq!(cursor, Some(Bytes::from(state.cursor.clone())));
+            assert_eq!(block_number, 1);
+        })
+        .await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_instance_batch_with_unsupported_op_writes_nothing() {
+        run_against_db(|connection_pool| async move {
+            let (cached_gw, _instance, handle) = setup_instance_gateway(&connection_pool).await;
+            let block_1 = get_sample_block(1);
+
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+            cached_gw
+                .add_component_balances(&[])
+                .await
+                .expect("Staging balances ok");
+            let res = cached_gw.commit_transaction(0).await;
+            handle.abort();
+
+            assert!(matches!(res, Err(StorageError::Unsupported(_))), "{res:?}");
+            let fetched_block = cached_gw
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)))
+                .await;
+            assert!(
+                matches!(fetched_block, Err(StorageError::NotFound(_, _))),
+                "{fetched_block:?}"
+            );
+        })
+        .await;
+    }
+
     #[test_log::test(tokio::test)]
     async fn test_cached_gateway_flushed_block_height() {
         run_against_db(|connection_pool| async move {
@@ -2017,6 +2147,7 @@ mod test_serial_db {
             block_range: BlockRange::new(&block, &block),
             size: operations.len(),
             operations,
+            instance: None,
             tx: os_tx,
             owner: None,
             caller_span: tracing::Span::none(),
