@@ -40,6 +40,7 @@ RUN resolve_base() { \
             elysium-kleos-v3|elysium-elyspump-v3|elysium-stockiumswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
+            elysium-aero-cl) echo "evm-aero-cl" ;; \
             base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
             arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
             arc-uniswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
@@ -92,6 +93,7 @@ RUN resolve_base() { \
             elysium-kleos-v3|elysium-elyspump-v3|elysium-stockiumswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
+            elysium-aero-cl) echo "evm-aero-cl" ;; \
             base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
             arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
             arc-uniswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \

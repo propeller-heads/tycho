@@ -63,6 +63,9 @@ actix-web = { version = "4.18.2", default-features = false, features = [
     "macros",
     "compress-zstd",
     "http2",
+    # actix-web-actors needs actix-http's ws module. Since 4.12, actix-web turns it on only
+    # through this feature.
+    "ws",
 ] }
 # Pinned: actix-http >=3.12 removed the ws module used by actix-web-actors 4.3.1
 actix-cors = "0.6.5"

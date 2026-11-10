@@ -1,3 +1,29 @@
+## [0.504.3](https://github.com/propeller-heads/tycho/compare/0.504.2...0.504.3) (2026-11-09)
+
+
+### Bug Fixes
+
+* **deps:** bump openssl to 0.10.81 for RUSTSEC-2026-0463 ([dc2eaad](https://github.com/propeller-heads/tycho/commit/dc2eaad05aef529eae004b398a45bdbb15ab686a))
+* **deps:** bump openssl to 0.10.81 for RUSTSEC-2026-0463 ([#1763](https://github.com/propeller-heads/tycho/issues/1763)) ([729c860](https://github.com/propeller-heads/tycho/commit/729c860a0675a9b6bd92d5e42c5a5b359fa74d31))
+* **simulation:** link pending account overrides to the extractor's own pools ([54abe7f](https://github.com/propeller-heads/tycho/commit/54abe7fc70b2deaf0d44b1bbde0b052d76709ff9))
+* **simulation:** link pending account overrides to the extractor's own pools ([#1750](https://github.com/propeller-heads/tycho/issues/1750)) ([e4fe71c](https://github.com/propeller-heads/tycho/commit/e4fe71c3cc7bf5adb476af6cd171bf5ea8550b9e))
+
+## [0.504.2](https://github.com/propeller-heads/tycho/compare/0.504.1...0.504.2) (2026-11-09)
+
+
+### Bug Fixes
+
+* unblock Fluid pools that have swaps unpaused again ([0b69dbd](https://github.com/propeller-heads/tycho/commit/0b69dbd3a7449b2db3720dda2030ad618383046d)), closes [#1709](https://github.com/propeller-heads/tycho/issues/1709) [#1709](https://github.com/propeller-heads/tycho/issues/1709)
+* unblock Fluid pools that have swaps unpaused again ([#1757](https://github.com/propeller-heads/tycho/issues/1757)) ([53cb909](https://github.com/propeller-heads/tycho/commit/53cb909f1c04f3cd31d2258c413c20dde0459462))
+
+## [0.504.1](https://github.com/propeller-heads/tycho/compare/0.504.0...0.504.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **deps:** enable the actix-web ws feature for tycho-indexer ([9571532](https://github.com/propeller-heads/tycho/commit/9571532b65a372a9c87f78f7ccb5303b3f2de87e))
+* **deps:** enable the actix-web ws feature for tycho-indexer ([#1758](https://github.com/propeller-heads/tycho/issues/1758)) ([337e112](https://github.com/propeller-heads/tycho/commit/337e112a78aa7d26965ff52627db1d8d0d940b3c))
+
 ## [0.504.0](https://github.com/propeller-heads/tycho/compare/0.503.0...0.504.0) (2026-11-09)
 
 
