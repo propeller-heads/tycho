@@ -1990,12 +1990,749 @@
       "type": "barchart"
     },
     {
-      "collapsed": true,
+      "type": "row",
+      "title": "Strict checks",
+      "collapsed": false,
+      "id": 73,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 117
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Strict protocols",
+      "description": "Protocols whose package sets `harness: strict`, which get limit probes on top of the realistic swap.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "id": 74,
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 0,
+        "y": 118
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "0",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "count(max by (protocol) (tycho_integration_strict_protocol{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}))",
+          "refId": "A",
+          "range": false,
+          "instant": true
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Failed checks",
+      "description": "Strict checks of limit probes that failed over the range. Each failure is also logged with event_type=\"check_failure\", naming the component, direction and size.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "id": 75,
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 4,
+        "y": 118
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "0",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(tycho_integration_check_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", outcome=\"fail\"}[$__range]))",
+          "refId": "A",
+          "range": false,
+          "instant": true
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Probes run",
+      "description": "Share of probe checks that ran rather than being not run (a limit above what a swap can take, a venue priced for another block, no declared limit).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "id": 76,
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 8,
+        "y": 118
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "0",
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(tycho_integration_check_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", outcome!=\"not_run\"}[$__range])) / sum(increase(tycho_integration_check_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range]))",
+          "refId": "A",
+          "range": false,
+          "instant": true
+        }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "% of passing checks per protocol and check",
+      "description": "Of the probe checks that ran over the range, the share that passed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "id": 77,
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 118
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "noValue": "0",
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "sum by (protocol, check) (increase(tycho_integration_check_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", outcome=\"pass\"}[$__range])) / sum by (protocol, check) (increase(tycho_integration_check_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", outcome!=\"not_run\"}[$__range]))",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "legendFormat": "{{protocol}} {{check}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Failed checks by protocol and check",
+      "description": "Rate of failed probe checks.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "id": 78,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 124
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "sum by (protocol, check) (rate(tycho_integration_check_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", outcome=\"fail\"}[$__rate_interval]))",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{protocol}} {{check}}"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Failures by protocol, check and reason",
+      "description": "Failed probe checks over the range. mismatch: paid other than simulated beyond the tolerance; revert / rpc: the swap reverted or could not be simulated; settled: a swap past a hard limit executed; quote: the simulation broke a limit check.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "id": 79,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 124
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "noValue": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Failures"
+          }
+        ]
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "sum by (protocol, check, reason, size) (increase(tycho_integration_check_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", outcome=\"fail\"}[$__range])) > 0",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "protocol": "Protocol",
+              "check": "Check",
+              "reason": "Reason",
+              "size": "Size",
+              "Value": "Failures"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "Probe coverage by size",
+      "description": "Probe checks over the range by size and outcome: the rotation should reach every size.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "id": 80,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 132
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "noValue": "0",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "sum by (size, outcome) (increase(tycho_integration_check_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__range]))",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "legendFormat": "{{size}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Probe drift against the declared tolerance",
+      "description": "p50 and p99 of executed minus simulated, in bps of the executed amount, by size; the dashed line is the largest declared bps tolerance of the selected protocols (0 is exact).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "id": 81,
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 8,
+        "y": 132
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "declared tolerance"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    10,
+                    10
+                  ],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.5, sum by (le, size) (rate(tycho_integration_probe_drift_bps_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__rate_interval])))",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "p50 {{size}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le, size) (rate(tycho_integration_probe_drift_bps_bucket{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"}[$__rate_interval])))",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "legendFormat": "p99 {{size}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "max(tycho_integration_strict_tolerance_bps{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\"})",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "legendFormat": "declared tolerance"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Not-run reasons by protocol",
+      "description": "Probe checks that did not run over the range, and why: execution_cap, next_block, book_venue, not_executable, no_declaration, not_hard, zero_limit, zero_amount, at_limit_failed, at_limit_not_executed, encoding.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "id": 82,
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 132
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "noValue": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Not run"
+          }
+        ]
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "sum by (protocol, reason) (increase(tycho_integration_check_total{namespace=\"$Namespace\", protocol=~\"$Protocol\", container=~\".*$Chain.*\", outcome=\"not_run\"}[$__range])) > 0",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "protocol": "Protocol",
+              "reason": "Reason",
+              "Value": "Not run"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 140
       },
       "id": 70,
       "panels": [
@@ -2363,7 +3100,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 110
+            "y": 133
           },
           "id": 54,
           "options": {
