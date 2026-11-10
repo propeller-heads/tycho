@@ -1,7 +1,7 @@
 use std::{any::Any, collections::HashMap};
 
 use num_bigint::BigUint;
-use num_traits::Zero;
+use num_traits::{CheckedSub, Zero};
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
@@ -61,6 +61,51 @@ impl MetricState {
             MetricDirection::OneForZero => self.bid_ask.ask_price()?,
         };
         Ok(price)
+    }
+
+    /// The state left after a fill of `amount_in` for `amount_out` against `direction`'s side of
+    /// the book.
+    ///
+    /// That side's depth loses what the fill consumed: bins the fill used up are removed and the
+    /// rest are measured from the new position. The output inventory drops by `amount_out`. When
+    /// the fill uses up the side's whole depth its output inventory goes to zero, so a later fill
+    /// is refused rather than priced at the flat top-of-book quote. The other side of the book is
+    /// left unchanged until the next quote.
+    fn after_fill(
+        &self,
+        direction: MetricDirection,
+        amount_in: &BigUint,
+        amount_out: &BigUint,
+    ) -> MetricState {
+        let mut next = self.clone();
+        let (bins, available) = match direction {
+            MetricDirection::ZeroForOne => {
+                (&mut next.bid_ask.depth.bids, &mut next.bid_ask.total_token1_available)
+            }
+            MetricDirection::OneForZero => {
+                (&mut next.bid_ask.depth.asks, &mut next.bid_ask.total_token0_available)
+            }
+        };
+        let had_depth = !bins.is_empty();
+        let mut remaining = Vec::with_capacity(bins.len());
+        for bin in bins.drain(..) {
+            if &bin.cumulative_input_volume <= amount_in {
+                continue;
+            }
+            // Within a bin the walk prices linearly, so the fill's end point lies on the line of
+            // the bin it stopped in and the shifted boundaries price the rest of it exactly.
+            remaining.push(MetricDepthBin {
+                cumulative_volume: saturating_sub(&bin.cumulative_volume, amount_out),
+                cumulative_input_volume: &bin.cumulative_input_volume - amount_in,
+                ..bin
+            });
+        }
+        let depth_used_up = had_depth && remaining.is_empty();
+        *bins = remaining;
+        if let Some(total) = available.as_mut() {
+            *total = if depth_used_up { BigUint::ZERO } else { saturating_sub(total, amount_out) };
+        }
+        next
     }
 
     fn quote_with_depth(
@@ -191,12 +236,12 @@ impl ProtocolSim for MetricState {
         // is exhausted is exact (no f64 round-trip); see `depth_output_for_input` for the
         // intra-bin rounding.
         if let Some(quote) = self.quote_with_depth(direction, &amount_in, &max_output)? {
-            let res = GetAmountOutResult {
-                amount: quote.amount_out,
-                gas: BigUint::from(METRIC_SWAP_GAS),
-                new_state: self.clone_box(),
-            };
             if quote.exhausted {
+                let res = GetAmountOutResult {
+                    amount: quote.amount_out,
+                    gas: BigUint::from(METRIC_SWAP_GAS),
+                    new_state: self.clone_box(),
+                };
                 return Err(SimulationError::InvalidInput(
                     format!(
                         "Metric pool depth exhausted. Input {amount_in} cannot be fully filled; \
@@ -206,7 +251,12 @@ impl ProtocolSim for MetricState {
                     Some(res),
                 ));
             }
-            return Ok(res);
+            let new_state = self.after_fill(direction, &amount_in, &quote.amount_out);
+            return Ok(GetAmountOutResult {
+                amount: quote.amount_out,
+                gas: BigUint::from(METRIC_SWAP_GAS),
+                new_state: Box::new(new_state),
+            });
         }
 
         // No depth bins: flat top-of-book quote, capped only by the aggregate inventory.
@@ -216,14 +266,12 @@ impl ProtocolSim for MetricState {
             MetricDirection::OneForZero => amount_in_human / price,
         };
         let amount_out = sim::to_atomic(flat_amount_out_human, token_out.decimals)?;
-        let res = GetAmountOutResult {
-            amount: amount_out
-                .clone()
-                .min(max_output.clone()),
-            gas: BigUint::from(METRIC_SWAP_GAS),
-            new_state: self.clone_box(),
-        };
         if amount_out > max_output {
+            let res = GetAmountOutResult {
+                amount: max_output.clone(),
+                gas: BigUint::from(METRIC_SWAP_GAS),
+                new_state: self.clone_box(),
+            };
             return Err(SimulationError::InvalidInput(
                 format!(
                     "Metric pool has not enough liquidity. Requested output {amount_out} exceeds \
@@ -232,7 +280,12 @@ impl ProtocolSim for MetricState {
                 Some(res),
             ));
         }
-        Ok(res)
+        let new_state = self.after_fill(direction, &amount_in, &amount_out);
+        Ok(GetAmountOutResult {
+            amount: amount_out,
+            gas: BigUint::from(METRIC_SWAP_GAS),
+            new_state: Box::new(new_state),
+        })
     }
 
     fn get_limits(
@@ -323,6 +376,12 @@ impl ProtocolSim for MetricState {
             false
         }
     }
+}
+
+fn saturating_sub(amount: &BigUint, taken: &BigUint) -> BigUint {
+    amount
+        .checked_sub(taken)
+        .unwrap_or_default()
 }
 
 fn depth_max_output(bins: &[MetricDepthBin]) -> Option<BigUint> {
@@ -937,6 +996,84 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, SimulationError::RecoverableError(_)));
+    }
+
+    fn sell_weth(state: &MetricState, amount: u128) -> Result<GetAmountOutResult, SimulationError> {
+        state.get_amount_out(BigUint::from(amount), &state.base_token, &state.quote_token)
+    }
+
+    fn metric_state(result: &GetAmountOutResult) -> &MetricState {
+        result
+            .new_state
+            .as_any()
+            .downcast_ref::<MetricState>()
+            .unwrap()
+    }
+
+    #[test]
+    fn fills_in_sequence_pay_what_one_fill_of_their_total_pays() {
+        let mut state = state();
+        // Bin 1 buys 1 WETH for 3000 USDC; bin 2 buys another 1.1 WETH for 3000 USDC.
+        state.bid_ask.depth.bids = vec![
+            depth_bin("3000000000", "1000000000000000000"),
+            depth_bin("6000000000", "2100000000000000000"),
+        ];
+
+        let first = sell_weth(&state, 1_000_000_000_000_000_000).unwrap();
+        let after_first = metric_state(&first);
+        let second = sell_weth(after_first, 550_000_000_000_000_000).unwrap();
+        let whole = sell_weth(&state, 1_550_000_000_000_000_000).unwrap();
+
+        assert_eq!(first.amount, BigUint::from(3_000_000_000u64));
+        assert_eq!(second.amount, BigUint::from(1_500_000_000u64));
+        assert_eq!(&first.amount + &second.amount, whole.amount);
+        assert_eq!(
+            after_first
+                .bid_ask
+                .total_token1_available,
+            Some(big("27000000000"))
+        );
+        // The fill does not touch the side of the book it did not trade against.
+        assert_eq!(after_first.bid_ask.depth.asks, state.bid_ask.depth.asks);
+        assert_eq!(
+            after_first
+                .bid_ask
+                .total_token0_available,
+            state.bid_ask.total_token0_available
+        );
+    }
+
+    #[test]
+    fn fill_that_uses_up_the_depth_refuses_the_next_one() {
+        let mut state = state();
+        state.bid_ask.depth.bids = vec![depth_bin("3000000000", "1000000000000000000")];
+
+        let first = sell_weth(&state, 1_000_000_000_000_000_000).unwrap();
+        let next = sell_weth(metric_state(&first), 100_000_000_000_000_000);
+
+        assert_eq!(first.amount, BigUint::from(3_000_000_000u64));
+        assert!(matches!(next, Err(SimulationError::InvalidInput(..))), "got {next:?}");
+    }
+
+    #[test]
+    fn flat_fill_lowers_the_output_inventory() {
+        // No depth bins: 3000 USDC per WETH up to the 30000 USDC inventory.
+        let state = state();
+
+        let first = sell_weth(&state, 5_000_000_000_000_000_000).unwrap();
+        let after_first = metric_state(&first);
+
+        assert_eq!(
+            after_first
+                .bid_ask
+                .total_token1_available,
+            Some(big("15000000000"))
+        );
+        assert!(sell_weth(&state, 6_000_000_000_000_000_000).is_ok());
+        assert!(matches!(
+            sell_weth(after_first, 6_000_000_000_000_000_000),
+            Err(SimulationError::InvalidInput(..))
+        ));
     }
 
     #[tokio::test]
