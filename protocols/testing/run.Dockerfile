@@ -39,6 +39,7 @@ RUN resolve_base() { \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
+            base-nami-v4|robinhood-nami-v4) echo "ethereum-nami-v4" ;; \
             robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
             robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
@@ -90,6 +91,7 @@ RUN resolve_base() { \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
+            base-nami-v4|robinhood-nami-v4) echo "ethereum-nami-v4" ;; \
             robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
             robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \

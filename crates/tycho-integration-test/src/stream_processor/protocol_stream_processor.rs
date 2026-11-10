@@ -294,6 +294,7 @@ impl ProtocolStreamProcessor {
                 "vm:balancer_v3".to_string(),
                 "aero_cl".to_string(),
                 "aero_basic".to_string(),
+                "nami_v4".to_string(),
             ],
             Chain::Base => vec![
                 "uniswap_v2".to_string(),
@@ -307,6 +308,7 @@ impl ProtocolStreamProcessor {
                 "pancakeswap_infinity_cl".to_string(),
                 "aero_cl".to_string(),
                 "aero_basic".to_string(),
+                "nami_v4".to_string(),
             ],
             Chain::Bsc => vec![
                 "uniswap_v2".to_string(),
@@ -353,6 +355,7 @@ impl ProtocolStreamProcessor {
                     "pancakeswap_infinity_cl".to_string(),
                     "aero_cl".to_string(),
                     "aero_basic".to_string(),
+                    "nami_v4".to_string(),
                 ]
             }
             Chain::Arbitrum => {
