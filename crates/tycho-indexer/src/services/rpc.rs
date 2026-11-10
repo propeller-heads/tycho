@@ -3982,8 +3982,8 @@ mod tests {
         };
         let mut plans = std::collections::HashMap::new();
         plans.insert("restricted".to_string(), restrictions);
-        serde_yaml::from_str(
-            &serde_yaml::to_string(&std::collections::HashMap::from([("plans", plans)])).unwrap(),
+        yaml_serde::from_str(
+            &yaml_serde::to_string(&std::collections::HashMap::from([("plans", plans)])).unwrap(),
         )
         .unwrap()
     }
@@ -4127,7 +4127,7 @@ plans:
       op: gte
       value: 100.0
 "#;
-        let config: PlansConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: PlansConfig = yaml_serde::from_str(yaml).unwrap();
 
         let gw_free = MockGateway::new();
         let handler_free =
@@ -4383,7 +4383,7 @@ plans:
   no_history:
     max_version_age_minutes: 5
 "#;
-        serde_yaml::from_str(yaml).unwrap()
+        yaml_serde::from_str(yaml).unwrap()
     }
 
     #[rstest]

@@ -90,7 +90,7 @@ opentelemetry-otlp = { version = "0.15", default-features = false, features = [
 ] }
 opentelemetry_sdk = { version = "0.22", features = ["rt-tokio"] }
 rand.workspace = true
-serde_yaml = "0.9.32"
+yaml_serde = "0.10.7"
 tracing-opentelemetry = { version = "0.23", default-features = false }
 tycho-protobuf.workspace = true
 utoipa = { version = "4.2.0", features = ["chrono"] }

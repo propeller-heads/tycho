@@ -1787,7 +1787,7 @@ mod tests {
 
     #[test]
     fn undecoded_components_lists_expected_components_missing_from_the_update() {
-        let expected: Vec<ProtocolComponentWithTestConfig> = serde_yaml::from_str(
+        let expected: Vec<ProtocolComponentWithTestConfig> = yaml_serde::from_str(
             r#"
             - id: "0xAA"
               tokens: []

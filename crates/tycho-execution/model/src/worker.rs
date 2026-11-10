@@ -189,7 +189,7 @@ pub fn worker_thread(
                     }
                     counters.suspicious.increment();
                     telemetry.executors_suspicious(executors);
-                    serde_yaml::to_writer(stdout, &outcome).unwrap();
+                    yaml_serde::to_writer(stdout, &outcome).unwrap();
                 }
             }
             Err(Error::RequestParamError(RequestParamError::RequestParam(param_request))) => {

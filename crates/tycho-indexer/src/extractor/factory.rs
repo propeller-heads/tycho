@@ -536,7 +536,7 @@ module_name: map_pool_events
 "#;
 
         let config: ExtractorConfig =
-            serde_yaml::from_str(yaml).expect("Failed to deserialize YAML");
+            yaml_serde::from_str(yaml).expect("Failed to deserialize YAML");
 
         assert_eq!(config.name, "uniswap_v2");
         assert!(config.dci_plugin.is_none());
@@ -560,7 +560,7 @@ dci_plugin:
 "#;
 
         let config: ExtractorConfig =
-            serde_yaml::from_str(yaml).expect("Failed to deserialize YAML");
+            yaml_serde::from_str(yaml).expect("Failed to deserialize YAML");
 
         assert_eq!(config.name, "uniswap_v3");
         assert!(
@@ -590,7 +590,7 @@ dci_plugin:
 "#;
 
         let config: ExtractorConfig =
-            serde_yaml::from_str(yaml).expect("Failed to deserialize YAML");
+            yaml_serde::from_str(yaml).expect("Failed to deserialize YAML");
 
         assert_eq!(config.name, "uniswap_v4");
         assert_eq!(config.chain, Chain::Ethereum);

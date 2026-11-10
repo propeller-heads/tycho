@@ -96,7 +96,7 @@ impl ExtractorConfigs {
         let mut file = File::open(path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
-        let config: ExtractorConfigs = serde_yaml::from_str(&contents)?;
+        let config: ExtractorConfigs = yaml_serde::from_str(&contents)?;
         Ok(config)
     }
 }

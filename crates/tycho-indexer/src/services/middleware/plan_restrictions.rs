@@ -203,7 +203,7 @@ impl PlansConfig {
         }
         let contents = fs::read_to_string(path)
             .map_err(|e| format!("Failed to read plans config at {}: {e}", path.display()))?;
-        serde_yaml::from_str(&contents)
+        yaml_serde::from_str(&contents)
             .map_err(|e| format!("Failed to parse plans config at {}: {e}", path.display()))
     }
 }
@@ -329,7 +329,7 @@ plans:
       op: eq
       value: 7
 "#;
-        let config: PlansConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: PlansConfig = yaml_serde::from_str(yaml).unwrap();
         assert_eq!(config.plans.len(), 2);
 
         let default = config.resolve("default").unwrap();
@@ -709,7 +709,7 @@ plans:
   custom:
     max_version_age_minutes: 30
 "#;
-        let config: PlansConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: PlansConfig = yaml_serde::from_str(yaml).unwrap();
 
         let free = config.resolve("free").unwrap();
         assert_eq!(free.max_version_age_minutes, Some(5));
