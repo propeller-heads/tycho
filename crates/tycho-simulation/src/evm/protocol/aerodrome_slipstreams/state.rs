@@ -775,11 +775,12 @@ impl ProtocolSim for AerodromeSlipstreamsState {
 
             // observations keys are in the format "observations/{observation_index}"
             if let Some(idx_str) = key.strip_prefix("observations/") {
-                if let Ok(idx) = idx_str.parse::<i32>() {
-                    self.observations
-                        .upsert_observation(idx, value)
-                        .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
-                }
+                let idx = idx_str
+                    .parse::<i32>()
+                    .map_err(|err| TransitionError::DecodeError(format!("{key}: {err}")))?;
+                self.observations
+                    .upsert_observation(idx, value)
+                    .map_err(|err| TransitionError::DecodeError(format!("{key}: {err}")))?;
             }
         }
         // delete ticks - ignores deletes for attributes other than tick liquidity
@@ -799,11 +800,12 @@ impl ProtocolSim for AerodromeSlipstreamsState {
 
             // observations keys are in the format "observations/{observation_index}"
             if let Some(idx_str) = key.strip_prefix("observations/") {
-                if let Ok(idx) = idx_str.parse::<i32>() {
-                    self.observations
-                        .upsert_observation(idx, &[])
-                        .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
-                }
+                let idx = idx_str
+                    .parse::<i32>()
+                    .map_err(|err| TransitionError::DecodeError(format!("{key}: {err}")))?;
+                self.observations
+                    .upsert_observation(idx, &[])
+                    .map_err(|err| TransitionError::DecodeError(format!("{key}: {err}")))?;
             }
         }
         Ok(())
@@ -1319,8 +1321,16 @@ mod tests {
     #[test]
     fn applies_a_cardinality_increase() {
         // `increaseObservationCardinalityNext(4)` prefills slots 1-3 with timestamp 1, which the
-        // stream sends as the single byte 0x01.
+        // stream sends as the single byte 0x01. Lookups read them as uninitialized whether stored
+        // or not, so the ring is left as it was.
         let mut pool = create_basic_test_pool();
+        let ring = Observations::new(vec![Observation {
+            block_timestamp: 999_990,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        }]);
+        pool.observations = ring.clone();
         let delta = ProtocolStateDelta {
             component_id: "test-pool".to_string(),
             updated_attributes: (1..4)
@@ -1331,6 +1341,27 @@ mod tests {
 
         pool.delta_transition(delta, &HashMap::new(), &Balances::default())
             .expect("prefilled observation slots should be valid");
+
+        assert_eq!(pool.observations, ring);
+    }
+
+    #[rstest]
+    #[case::not_a_number("observations/next")]
+    #[case::past_the_ring("observations/65536")]
+    fn malformed_observation_key_fails_the_transition(#[case] key: &str) {
+        let mut pool = create_basic_test_pool();
+        let delta = ProtocolStateDelta {
+            component_id: "test-pool".to_string(),
+            updated_attributes: HashMap::from([(key.to_string(), Bytes::from([0x01_u8]))]),
+            ..Default::default()
+        };
+
+        let result = pool.delta_transition(delta, &HashMap::new(), &Balances::default());
+
+        let Err(TransitionError::DecodeError(message)) = result else {
+            panic!("expected a DecodeError, got {result:?}");
+        };
+        assert!(message.starts_with(key), "{message}");
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::{
     evm::protocol::utils::{
         slipstreams::{
             aero_hook_fee::AeroHookFee, dynamic_fee_module::DynamicFeeConfig,
-            observations::Observation,
+            observations::Observations,
         },
         uniswap::{i24_be_bytes_to_i32, tick_list::TickInfo},
     },
@@ -191,36 +191,21 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
         ticks.sort_by_key(|tick| tick.index);
 
         // The oracle is a ring addressed by index, and lookups read slot `i` as position `i`, so
-        // each observation goes to its own index. A slot that `increaseObservationCardinalityNext`
-        // prefilled but no swap has written yet is uninitialized, which is how lookups read any
-        // slot not stored, so only initialized slots are kept: every quote clones the ring.
-        let mut observations: Vec<Observation> = Vec::new();
+        // each observation goes to its own index.
+        let mut words = Vec::new();
         for (key, value) in &snapshot.state.attributes {
-            let Some(index) = key
-                .strip_prefix("observations/")
-                .and_then(|index| index.parse::<usize>().ok())
-            else {
+            let Some(slot) = key.strip_prefix("observations/") else {
                 continue;
             };
-            let observation = i32::try_from(index)
-                .map_err(|err| err.to_string())
-                .and_then(|slot| {
-                    Observation::from_attribute(slot, value).map_err(|err| err.to_string())
-                })
+            let slot = slot
+                .parse::<u16>()
                 .map_err(|err| InvalidSnapshotError::ValueError(format!("{key}: {err}")))?;
-            if !observation.initialized {
-                continue;
-            }
-            if observations.len() <= index {
-                observations.resize_with(index + 1, Observation::default);
-            }
-            observations[index] = observation;
+            words.push((slot, value.as_ref()));
         }
-
-        if !observations
-            .iter()
-            .any(|observation| observation.initialized)
-        {
+        let observations = Observations::from_words(words)
+            .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))?
+            .into_slots();
+        if observations.is_empty() {
             return Err(InvalidSnapshotError::MissingAttribute("observations".to_string()));
         }
 
@@ -380,6 +365,24 @@ mod tests {
                 ],
             )
         );
+    }
+
+    #[tokio::test]
+    async fn observation_slot_past_the_ring_fails_to_decode() {
+        // The ring holds at most 65,536 slots, so a larger index is malformed rather than a slot
+        // to grow the ring to.
+        let mut snapshot = snapshot(None);
+        snapshot.state.attributes.insert(
+            "observations/65536".to_string(),
+            Bytes::from((U256::from(1) << 248_u32).to_be_bytes::<32>()),
+        );
+
+        let result = try_decode_snapshot_with_defaults::<AerodromeSlipstreamsState>(snapshot).await;
+
+        let Err(InvalidSnapshotError::ValueError(message)) = result else {
+            panic!("expected a ValueError, got {result:?}");
+        };
+        assert!(message.starts_with("observations/65536"), "{message}");
     }
 
     #[rstest]

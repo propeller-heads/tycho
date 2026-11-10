@@ -103,18 +103,40 @@ impl Observations {
         ))
     }
 
+    /// Builds a ring from a snapshot's observation storage words, keyed by slot index.
+    ///
+    /// Uninitialized words, such as the slots `increaseObservationCardinalityNext` prefilled, are
+    /// not stored: lookups read a slot not stored as uninitialized, and every quote clones the
+    /// ring.
+    pub(crate) fn from_words<'a>(
+        words: impl IntoIterator<Item = (u16, &'a [u8])>,
+    ) -> Result<Self, SimulationError> {
+        let mut ring = Self::new(Vec::new());
+        for (slot, word) in words {
+            let observation =
+                Observation::from_attribute(i32::from(slot), word).map_err(|err| {
+                    SimulationError::FatalError(format!("Observation slot {slot}: {err}"))
+                })?;
+            if observation.initialized {
+                ring.place(usize::from(slot), observation);
+            }
+        }
+        Ok(ring)
+    }
+
+    /// The ring's slots, in index order.
+    pub(crate) fn into_slots(self) -> Vec<Observation> {
+        self.observations
+    }
+
     pub fn upsert_observation(&mut self, index: i32, bytes: &[u8]) -> Result<(), SimulationError> {
-        let idx = usize::try_from(index).map_err(|e| {
+        // The pool's ring holds at most `type(uint16).max + 1` slots.
+        let slot = u16::try_from(index).map_err(|e| {
             SimulationError::FatalError(format!("Invalid observation index {index}: {e}"))
         })?;
-        // A deleted attribute is a zeroed storage word. Removing the slot instead would shift every
-        // later slot off its ring index.
-        let observation = if bytes.is_empty() {
-            Observation { index, ..Default::default() }
-        } else {
-            Observation::from_attribute(index, bytes)?
-        };
-        self.place(idx, observation);
+        // A deleted attribute is a zeroed storage word, which decodes as an uninitialized slot.
+        // Removing the slot instead would shift every later slot off its ring index.
+        self.place(usize::from(slot), Observation::from_attribute(index, bytes)?);
         Ok(())
     }
 
@@ -193,7 +215,9 @@ impl Observations {
         Ok(self.observations[idx].block_timestamp)
     }
 
-    pub fn observe(
+    /// Mirrors `Oracle.observe`: the tick and seconds-per-liquidity cumulatives `seconds_agos`
+    /// before `time`. On `Ok`, both vectors hold one entry per `seconds_agos` element, in order.
+    pub(crate) fn observe(
         &self,
         time: u32,
         seconds_agos: &[u32],
@@ -682,6 +706,17 @@ mod tests {
 
         assert_eq!(observations.observations.len(), 1);
         assert!(!observations.slot(500).initialized);
+    }
+
+    #[test]
+    fn slot_past_the_ring_is_rejected() {
+        let mut observations = Observations::new(Vec::new());
+        let word = encode_observation_bytes(10, 0, U256::ZERO, true);
+
+        let result = observations.upsert_observation(65_536, &word);
+
+        assert!(result.is_err(), "got {result:?}");
+        assert_eq!(observations, Observations::new(Vec::new()));
     }
 
     #[test]
