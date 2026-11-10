@@ -151,7 +151,7 @@ impl EuclidClient {
                 .await
                 .map_err(RFQError::from)
             {
-                Ok(quote_response) => return Self::process_quote_response(quote_response, params),
+                Ok(quote_response) => return self.process_quote_response(quote_response, params),
                 Err(error) => {
                     warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, %error, "quote response failed");
                     last_error = Some(error);
@@ -175,6 +175,7 @@ impl EuclidClient {
     }
 
     fn process_quote_response(
+        &self,
         quote_response: EuclidFirmResponse,
         params: &GetAmountOutParams,
     ) -> Result<SignedQuote, RFQError> {
@@ -182,7 +183,7 @@ impl EuclidClient {
             EuclidFirmResponse::Quote(quote) => {
                 // What the signed order pays, once the quote is checked to be the trade asked
                 // for.
-                let amount_out = quote.amount_out(params)?;
+                let amount_out = quote.amount_out(self.chain, params)?;
                 // The order hash is how Euclid's gateway records the fill, so it is what to quote
                 // when reporting one.
                 debug!(order_hash = %quote.order_hash, %amount_out, "received quote");
@@ -288,7 +289,9 @@ mod tests {
     #[test]
     fn a_quote_becomes_the_calldata_the_encoder_forwards() {
         let response: EuclidFirmResponse = serde_json::from_str(&live_firm_quote()).unwrap();
-        let quote = EuclidClient::process_quote_response(response, &recorded_params()).unwrap();
+        let quote = client_for(EUCLID_API_URL, Duration::from_secs(5))
+            .process_quote_response(response, &recorded_params())
+            .unwrap();
 
         assert_eq!(quote.amount_in, BigUint::from_str("3000000000000000").unwrap());
         assert_eq!(quote.amount_out, BigUint::from_str(RECORDED_AMOUNT_OUT).unwrap());
@@ -300,7 +303,9 @@ mod tests {
     fn a_decline_is_no_quote() {
         let response: EuclidFirmResponse =
             serde_json::from_str(r#"{"error":"insufficient_liquidity"}"#).unwrap();
-        let error = EuclidClient::process_quote_response(response, &recorded_params()).unwrap_err();
+        let error = client_for(EUCLID_API_URL, Duration::from_secs(5))
+            .process_quote_response(response, &recorded_params())
+            .unwrap_err();
         assert!(
             matches!(error, RFQError::QuoteNotFound(ref message) if message.contains("insufficient_liquidity")),
             "{error:?}"

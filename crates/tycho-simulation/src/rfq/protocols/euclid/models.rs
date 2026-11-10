@@ -40,10 +40,6 @@ sol! {
     function fillOrderRFQTo(OrderRFQ order, bytes signature, uint256 flagsAndAmount, address target);
 }
 
-/// The 1inch Aggregation Router v5, which settles every Euclid order; the executor pins the same
-/// address.
-pub const AGGREGATION_ROUTER_V5: Address = address!("1111111254EEB25477B68fb85Ed929f73A960582");
-
 /// The chains Euclid's RFQ gateway quotes on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EuclidSupportedChain {
@@ -55,6 +51,14 @@ impl EuclidSupportedChain {
     pub fn id(self) -> u64 {
         match self {
             EuclidSupportedChain::Ethereum => 1,
+        }
+    }
+
+    /// The 1inch Aggregation Router v5 on this chain, which settles every Euclid order there;
+    /// the executor is deployed with the same address.
+    pub fn settlement_router(self) -> Address {
+        match self {
+            EuclidSupportedChain::Ethereum => address!("1111111254EEB25477B68fb85Ed929f73A960582"),
         }
     }
 }
@@ -199,18 +203,22 @@ pub struct EuclidDeclined {
 }
 
 impl EuclidFirmQuote {
-    /// What the signed order pays for the trade `params` asked for, once the quote is checked
-    /// to be that trade: the amount, the router and call the executor allows, the assets, the
-    /// fill amount the executor patches, the recipient, the filler the order admits, and an
-    /// expiry still ahead. A quote that fails here would only revert on chain.
-    pub fn amount_out(&self, params: &GetAmountOutParams) -> Result<BigUint, RFQError> {
+    /// What the signed order pays for the trade `params` asked for on `chain`, once the quote
+    /// is checked to be that trade: the amount, the router and call the executor allows, the
+    /// assets, the fill amount the executor patches, the recipient, the filler the order admits,
+    /// and an expiry still ahead. A quote that fails here would only revert on chain.
+    pub fn amount_out(
+        &self,
+        chain: EuclidSupportedChain,
+        params: &GetAmountOutParams,
+    ) -> Result<BigUint, RFQError> {
         if self.amount_in != params.amount_in {
             return Err(RFQError::FatalError(format!(
                 "Euclid quoted amount_in {}, requested {}",
                 self.amount_in, params.amount_in
             )));
         }
-        if self.tx_to.as_ref() != AGGREGATION_ROUTER_V5.as_slice() {
+        if self.tx_to.as_ref() != chain.settlement_router().as_slice() {
             return Err(RFQError::FatalError(format!(
                 "Euclid order settles through {}, not the 1inch Aggregation Router v5",
                 self.tx_to
@@ -454,7 +462,7 @@ mod tests {
     #[test]
     fn the_recorded_quote_pays_what_its_order_signs() {
         let amount_out = quote_with(|_| {})
-            .amount_out(&recorded_params())
+            .amount_out(EuclidSupportedChain::Ethereum, &recorded_params())
             .unwrap();
         assert_eq!(amount_out, BigUint::from_str(RECORDED_AMOUNT_OUT).unwrap());
     }
@@ -467,7 +475,9 @@ mod tests {
         let quote = EuclidFirmQuote { amount_in: half.clone(), ..quote };
         let params = GetAmountOutParams { amount_in: half, ..recorded_params() };
         assert_eq!(
-            quote.amount_out(&params).unwrap(),
+            quote
+                .amount_out(EuclidSupportedChain::Ethereum, &params)
+                .unwrap(),
             BigUint::from_str(RECORDED_AMOUNT_OUT).unwrap() / 2u8
         );
     }
@@ -511,7 +521,9 @@ mod tests {
     ) {
         let mut params = recorded_params();
         let quote = quote_with(|call| tamper(&mut params, call));
-        let error = quote.amount_out(&params).unwrap_err();
+        let error = quote
+            .amount_out(EuclidSupportedChain::Ethereum, &params)
+            .unwrap_err();
         assert!(
             matches!(&error, RFQError::FatalError(message) if message.contains(reason)),
             "expected a failure about {reason:?}, got {error:?}"
@@ -530,7 +542,9 @@ mod tests {
             params.amount_in = to_biguint(call.flagsAndAmount);
         });
         let quote = EuclidFirmQuote { amount_in: params.amount_in.clone(), ..quote };
-        let error = quote.amount_out(&params).unwrap_err();
+        let error = quote
+            .amount_out(EuclidSupportedChain::Ethereum, &params)
+            .unwrap_err();
         assert!(
             matches!(&error, RFQError::FatalError(message) if message.contains("of an order taking")),
             "{error:?}"
@@ -556,7 +570,7 @@ mod tests {
         let mut quote = quote_with(|_| {});
         tamper(&mut quote);
         let error = quote
-            .amount_out(&recorded_params())
+            .amount_out(EuclidSupportedChain::Ethereum, &recorded_params())
             .unwrap_err();
         assert!(
             matches!(&error, RFQError::FatalError(message) if message.contains(reason)),
