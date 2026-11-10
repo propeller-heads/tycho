@@ -6,7 +6,7 @@
 //! `tycho_integration_probe_drift_bps`.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
@@ -39,15 +39,93 @@ fn max_probe_amount() -> BigUint {
     BigUint::from(2u128.pow(96) - 1)
 }
 
-/// The strict packages, and the size each direction is probed at next.
+/// Fragments of a revert reason, lowercase, that only a token gives: a transfer the token refused,
+/// for a blacklist, a tax it cannot cover or a cap on one transaction's amount.
+const TOKEN_REVERTS: [&str; 8] = [
+    "transfer_failed",
+    "transfer_from_failed",
+    "blacklisted",
+    "insufficient balance for amount + tax",
+    "tx limit",
+    "maxtx",
+    "max transaction",
+    "maxtransaction",
+];
+
+/// The strict packages, the size each direction is probed at next, and the tokens known to
+/// transfer exactly.
 pub struct StrictChecks {
     packages: StrictPackages,
     rotation: Mutex<HashMap<(String, Direction), usize>>,
+    tokens: Mutex<VerifiedTokens>,
+}
+
+/// Tokens an execution, of any protocol, swapped exactly as simulated: sold (`token_in`) or
+/// bought (`token_out`). A taxed or restricted token never pays exactly, so a probe failure
+/// through a token not verified on its side is the token's, not the venue's. Sides are kept
+/// apart since many taxed tokens tax only buys or only sells.
+#[derive(Default)]
+struct VerifiedTokens {
+    sold: HashSet<String>,
+    bought: HashSet<String>,
 }
 
 impl StrictChecks {
     pub fn new(packages: StrictPackages) -> Self {
-        Self { packages, rotation: Mutex::new(HashMap::new()) }
+        Self {
+            packages,
+            rotation: Mutex::new(HashMap::new()),
+            tokens: Mutex::new(VerifiedTokens::default()),
+        }
+    }
+
+    /// Records the tokens of every execution in `results` that paid its quote exactly, less the
+    /// router fee: the realistic swaps of every protocol and the probes.
+    fn verify_tokens(
+        &self,
+        inputs: &HashMap<String, TychoExecutionInput>,
+        results: &HashMap<String, TychoExecutionResult>,
+        router_fee: RouterFeeOnOutput,
+    ) {
+        let mut tokens = self
+            .tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (simulation_id, input) in inputs {
+            if let Some(TychoExecutionResult::Success { amount_out, .. }) =
+                results.get(simulation_id)
+            {
+                if router_fee.deduct(&input.expected_amount_out) == *amount_out {
+                    tokens
+                        .sold
+                        .insert(input.token_in.to_lowercase());
+                    tokens
+                        .bought
+                        .insert(input.token_out.to_lowercase());
+                }
+            }
+        }
+    }
+
+    /// The token of `input` no execution verified on its side yet, if any.
+    fn unverified_token<'i>(&self, input: &'i TychoExecutionInput) -> Option<&'i str> {
+        let tokens = self
+            .tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !tokens
+            .sold
+            .contains(&input.token_in.to_lowercase())
+        {
+            Some(&input.token_in)
+        } else if !tokens
+            .bought
+            .contains(&input.token_out.to_lowercase())
+        {
+            Some(&input.token_out)
+        } else {
+            None
+        }
     }
 
     /// The declarations of `protocol_system`, when its package is strict.
@@ -411,12 +489,17 @@ pub fn not_probed(
 /// Judges every executed probe: a fraction or the limit must execute within the package's
 /// tolerance of its quote, after the router fee; one unit past a hard limit must revert, given
 /// that the limit itself executed.
+///
+/// `inputs` and `results` hold every execution of the batch: the exact ones verify their tokens
+/// first, so a probe can rely on a realistic swap of the same block.
 pub fn judge(
+    strict: &StrictChecks,
     probes: &HashMap<String, Probe>,
     inputs: &HashMap<String, TychoExecutionInput>,
     results: &HashMap<String, TychoExecutionResult>,
     router_fee: RouterFeeOnOutput,
 ) {
+    strict.verify_tokens(inputs, results, router_fee);
     for (simulation_id, probe) in probes {
         let Some(input) = inputs.get(simulation_id) else {
             continue;
@@ -427,13 +510,14 @@ pub fn judge(
             direction: &probe.direction,
             size: probe.size,
         };
-        let outcome = judged(&context, simulation_id, probe, input, results, router_fee);
+        let outcome = judged(strict, &context, simulation_id, probe, input, results, router_fee);
         record(&context, probe.check(), outcome);
     }
 }
 
 /// The outcome of one executed probe.
 fn judged<'a>(
+    strict: &StrictChecks,
     context: &ProbeContext<'_>,
     simulation_id: &str,
     probe: &Probe,
@@ -443,6 +527,7 @@ fn judged<'a>(
 ) -> Outcome<'a> {
     match &probe.role {
         ProbeRole::Fraction | ProbeRole::AtLimit => execution_outcome(
+            strict,
             context,
             input,
             results.get(simulation_id),
@@ -470,7 +555,11 @@ fn judged<'a>(
 }
 
 /// Whether an execution paid its quote, less the router fee, within `tolerance`.
+///
+/// A mismatch or a revert counts against the venue only when both tokens are verified on their
+/// side; otherwise the token may have caused it, and the check is not run, with the detail logged.
 fn execution_outcome<'a>(
+    strict: &StrictChecks,
     context: &ProbeContext<'_>,
     input: &TychoExecutionInput,
     result: Option<&TychoExecutionResult>,
@@ -478,30 +567,58 @@ fn execution_outcome<'a>(
     router_fee: RouterFeeOnOutput,
 ) -> Outcome<'a> {
     let amount_in = input.solution.amount_in();
-    match result {
+    let (reason, detail) = match result {
         Some(TychoExecutionResult::Success { amount_out, .. }) => {
             let expected = router_fee.deduct(&input.expected_amount_out);
-            if let Some((_, bps)) = drift(&expected, amount_out) {
-                metrics::record_probe_drift(context.protocol, &context.size.to_string(), bps);
+            let mismatch = check_execution_slippage(&expected, amount_out, tolerance).err();
+            let attributed = mismatch.is_some() && strict.unverified_token(input).is_some();
+            if !attributed {
+                if let Some((_, bps)) = drift(&expected, amount_out) {
+                    metrics::record_probe_drift(context.protocol, &context.size.to_string(), bps);
+                }
             }
-            match check_execution_slippage(&expected, amount_out, tolerance) {
-                Ok(()) => Outcome::Pass,
-                Err(reason) => Outcome::Fail {
-                    reason: "mismatch",
-                    detail: format!(
-                        "{amount_in} {} executed for {amount_out} {}, simulated {expected}: {reason}",
-                        input.token_in, input.token_out
-                    ),
-                },
-            }
+            let Some(mismatch) = mismatch else {
+                return Outcome::Pass;
+            };
+            (
+                "mismatch",
+                format!(
+                    "{amount_in} {} executed for {amount_out} {}, simulated {expected}: {mismatch}",
+                    input.token_in, input.token_out
+                ),
+            )
         }
-        Some(TychoExecutionResult::Revert { reason, .. }) => Outcome::Fail {
-            reason: "revert",
-            detail: format!("{amount_in} {} reverted: {reason}", input.token_in),
-        },
-        Some(TychoExecutionResult::Failed { error_msg }) => not_executed(context, error_msg),
-        None => Outcome::NotRun { reason: "no_result" },
+        Some(TychoExecutionResult::Revert { reason, .. }) => {
+            let detail = format!("{amount_in} {} reverted: {reason}", input.token_in);
+            let lowercase = reason.to_lowercase();
+            if TOKEN_REVERTS
+                .iter()
+                .any(|fragment| lowercase.contains(fragment))
+            {
+                return token_failure(context, "token", &detail);
+            }
+            ("revert", detail)
+        }
+        Some(TychoExecutionResult::Failed { error_msg }) => return not_executed(context, error_msg),
+        None => return Outcome::NotRun { reason: "no_result" },
+    };
+    match strict.unverified_token(input) {
+        Some(token) => token_failure(
+            context,
+            "unverified_token",
+            &format!("{detail}; {token} has not yet swapped exactly on that side"),
+        ),
+        None => Outcome::Fail { reason, detail },
     }
+}
+
+/// A probe failure a token caused or may have caused: logged, and the check not run.
+fn token_failure<'a>(context: &ProbeContext<'_>, reason: &'a str, detail: &str) -> Outcome<'a> {
+    info!(
+        "[{}] {} probe at {}: {reason}: {detail}",
+        context.component, context.direction, context.size
+    );
+    Outcome::NotRun { reason }
 }
 
 /// A probe the node could not execute: the error is the harness's or the node's, such as a token
@@ -692,8 +809,27 @@ mod tests {
         }
     }
 
-    /// The outcome label and reason of judging `probe` against `results`.
+    /// Strict checks with both tokens of `input` verified on their side.
+    fn verified(input: &TychoExecutionInput) -> StrictChecks {
+        let strict = strict(None);
+        let exact = HashMap::from([("exact".to_string(), input.clone())]);
+        let paid = success(fee().deduct(&input.expected_amount_out));
+        strict.verify_tokens(&exact, &HashMap::from([("exact".to_string(), paid)]), fee());
+        strict
+    }
+
+    /// The outcome label and reason of judging `probe` against `results`, with its tokens verified.
     fn judge_one(
+        probe: &Probe,
+        input: &TychoExecutionInput,
+        id: &str,
+        results: &HashMap<String, TychoExecutionResult>,
+    ) -> (&'static str, String) {
+        judge_with(&verified(input), probe, input, id, results)
+    }
+
+    fn judge_with(
+        strict: &StrictChecks,
         probe: &Probe,
         input: &TychoExecutionInput,
         id: &str,
@@ -705,7 +841,7 @@ mod tests {
             direction: &probe.direction,
             size: probe.size,
         };
-        match judged(&context, id, probe, input, results, fee()) {
+        match judged(strict, &context, id, probe, input, results, fee()) {
             Outcome::Pass => ("pass", String::new()),
             Outcome::Fail { reason, .. } => ("fail", reason.to_string()),
             Outcome::NotRun { reason } => ("not_run", reason.to_string()),
@@ -727,6 +863,56 @@ mod tests {
         assert_eq!(
             judge_one(probe, input, id, &HashMap::new()),
             ("not_run", "no_result".to_string())
+        );
+    }
+
+    fn revert_with(reason: &str) -> TychoExecutionResult {
+        TychoExecutionResult::Revert {
+            reason: reason.to_string(),
+            state_overwrites: None,
+            overwrite_metadata: None,
+        }
+    }
+
+    #[test]
+    fn a_failure_through_a_token_not_yet_swapped_exactly_is_not_the_venues() {
+        let swaps = probe(&strict(None), 1);
+        let (id, input, probe) = &swaps[0];
+        let short = success(fee().deduct(&input.expected_amount_out) - 1u32);
+        let fresh = strict(None);
+        let judge = |strict: &StrictChecks, result: TychoExecutionResult| {
+            judge_with(strict, probe, input, id, &HashMap::from([(id.clone(), result)]))
+        };
+        // A taxed token pays short, or reverts, on every pool: until both tokens swapped
+        // exactly, neither says anything of the venue.
+        assert_eq!(judge(&fresh, short.clone()), ("not_run", "unverified_token".to_string()));
+        assert_eq!(judge(&fresh, revert()), ("not_run", "unverified_token".to_string()));
+        // The reverse direction swapped exactly verifies buying the probe's token in and selling
+        // its token out, not this direction: a token can tax sells only.
+        let reverse_only = strict(None);
+        let mut reverse = input.clone();
+        (reverse.token_in, reverse.token_out) = (input.token_out.clone(), input.token_in.clone());
+        let paid = success(fee().deduct(&reverse.expected_amount_out));
+        reverse_only.verify_tokens(
+            &HashMap::from([("reverse".to_string(), reverse)]),
+            &HashMap::from([("reverse".to_string(), paid)]),
+            fee(),
+        );
+        assert_eq!(
+            judge(&reverse_only, short.clone()),
+            ("not_run", "unverified_token".to_string())
+        );
+        // Once both are verified, the venue is to blame, unless the token refused the transfer.
+        let known = verified(input);
+        assert_eq!(judge(&known, short), ("fail", "mismatch".to_string()));
+        assert_eq!(judge(&known, revert()), ("fail", "revert".to_string()));
+        assert_eq!(
+            judge(&known, revert_with("Blacklistable: account is blacklisted")),
+            ("not_run", "token".to_string())
+        );
+        assert_eq!(
+            judge(&known, revert_with("Error(\"Amount exceeds the tx limit.\")")),
+            ("not_run", "token".to_string())
         );
     }
 

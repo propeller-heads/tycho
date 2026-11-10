@@ -133,7 +133,16 @@ check that cannot run is reported as `not_run` with a reason: `execution_cap` (a
 `not_executable` (CoWAMM), `no_declaration`, `not_hard`, `zero_limit`, `zero_amount`,
 `at_limit_failed`, `at_limit_not_executed`, `encoding`, and for a swap the node could not
 execute, which says nothing of the venue, `storage_slot` (the token's balance slot was not found)
-or `rpc` (such as a block the node has not reached). Outcomes go to
+or `rpc` (such as a block the node has not reached).
+
+A mismatch or a revert counts against the venue only when both tokens are verified: an execution
+of any protocol in the run, realistic swap or probe, paid its quote exactly through the token on
+the same side (sold or bought, since many taxed tokens tax one side only). Otherwise it is
+`not_run`, reason `unverified_token`; a revert in which the token refused the transfer
+(`TRANSFER_FAILED`, a blacklist, a cap on one transaction's amount) is `not_run`, reason `token`, verified or not. Both are logged
+with the detail. Tycho's token data does not flag every taxed token, so the run's own exact swaps
+are the evidence. A venue whose every token is unverified is not judged until one swap through
+them executes exactly, and drift is recorded only for executions judged against the venue. Outcomes go to
 `tycho_integration_check_total{protocol, check, outcome, reason, size}` and executed drift to
 `tycho_integration_probe_drift_bps{protocol, size}`, never to the realistic swap's metrics; a
 failure is also logged with `event_type="check_failure"` and the component.
