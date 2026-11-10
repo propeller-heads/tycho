@@ -76,7 +76,7 @@ alloy = { workspace = true, default-features = false, features = [
     "reqwest",
 ] }
 aws-config = { version = "1.1.8", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1.77"
+aws-sdk-s3 = { version = "1.77", default-features = false }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 mini-moka = "0.10.3"
