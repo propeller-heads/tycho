@@ -510,11 +510,7 @@ pub(crate) mod tests {
         90_103_358_104_042_439_099 + USDC_10_FXSP,
         306_000
     )]
-    #[case::idle_reaches_the_threshold(
-        90_103_358_104_042_439_100,
-        0,
-        553_000
-    )]
+    #[case::idle_reaches_the_threshold(90_103_358_104_042_439_100, 0, 553_000)]
     fn gauge_stake_is_charged_when_idle_fxsp_reaches_the_threshold(
         #[case] idle_before: u128,
         #[case] idle_after: u128,
