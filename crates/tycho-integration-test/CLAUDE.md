@@ -92,6 +92,12 @@ shows up as a failure.
 - **`fee_fetcher.rs`**: One-shot start-up read of the router fee on output from the deployed
   FeeCalculator, so the test backs the current fee out of the simulated amount instead of
   hard-coding it
+- **`packages.rs`**: `StrictPackages`, the strict-mode packages of the chain, read at start-up from
+  every `protocols/substreams/**/integration_test*.tycho.yaml`, which `build.rs` embeds. The binary
+  refuses to start when none was embedded (`.dockerignore` lets those yamls into the image build)
+- **`limit_probes.rs`**: limit probes for strict protocols (see "Strict packages" below)
+- **`grafana/integration-test.json`**: the Integration test dashboard (uid `ceztze8otfk00c`,
+  folder `tycho`), including the "Strict checks" row. Import it by hand after editing
 - **`grafana/pamm-simulation-quality.json`**: Grafana dashboard (VictoriaMetrics datasource) for
   the price level swaps this service checks and the stream's own `price_level_stream_*` series.
   Its `job` variable also lists Fynd's jobs, which fill the stream rows. Import it by hand
@@ -104,3 +110,28 @@ For each block update, for a random sample of components (up to `--max-simulatio
 3. Encodes a swap via `tycho-execution` and simulates it via RPC (`debug_traceCall` with balance
    and allowance overrides) — checks it doesn't revert and that on-chain output is within
    slippage tolerance of simulated output
+
+## Strict packages
+
+A protocol whose package sets `harness: strict` (protocols/testing/README.md, "Strict mode")
+gets limit probes on top of the swap above; every other protocol is tested exactly as before.
+For each direction the swap above tests, the probe swaps one size relative to the limit, in
+turn: 0.1%, 1%, 10%, then the limit (`ProbeSize::ALL`, the ladder's sizes), and at a hard limit
+also one unit past it, in the same batch.
+
+| Check | Passes when |
+|---|---|
+| `exec.ladder` | a fraction executes for its quote, less the router fee, within the package's tolerance (exact without one) |
+| `limits.at_limit` | the limit quotes, and executes as the fractions must |
+| `limits.past_limit` | past a hard limit, the quote errors and, once the limit executed, the swap reverts |
+| `limits.max_output` | the quote at the limit pays no more than `get_limits`' max output |
+| `sim.ladder` | a fraction quotes |
+
+The limit comes from the component's `limits` when a test lists it, or else the package's. A
+check that cannot run is reported as `not_run` with a reason: `execution_cap` (above 96 bits or
+`int128::MAX`), `next_block` and `book_venue` (quotes priced for another block),
+`not_executable` (CoWAMM), `no_declaration`, `not_hard`, `zero_limit`, `zero_amount`,
+`at_limit_failed`, `at_limit_not_executed`, `encoding`. Outcomes go to
+`tycho_integration_check_total{protocol, check, outcome, reason, size}` and executed drift to
+`tycho_integration_probe_drift_bps{protocol, size}`, never to the realistic swap's metrics; a
+failure is also logged with `event_type="check_failure"` and the component.
