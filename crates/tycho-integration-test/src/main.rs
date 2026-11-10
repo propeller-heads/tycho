@@ -466,8 +466,12 @@ async fn run(cli: Cli) -> miette::Result<()> {
     // probes on top of the realistic swap.
     let strict = Arc::new(StrictChecks::new(StrictPackages::load(chain)?));
     for protocol in strict.protocols() {
-        info!(protocol, "Strict package: probing its limits");
-        metrics::record_strict_protocol(protocol);
+        let tolerance = strict
+            .package(protocol)
+            .expect("listed by protocols()")
+            .tolerance();
+        info!(protocol, %tolerance, "Strict package: probing its limits");
+        metrics::record_strict_protocol(protocol, tolerance.bps);
     }
 
     // Load tokens from Tycho
