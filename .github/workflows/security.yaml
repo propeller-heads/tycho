@@ -5,57 +5,105 @@ on:
     branches:
       - main
   pull_request:
+  schedule:
+    # 07:00 UTC daily. Advisories are published continuously, so without this an
+    # advisory that lands between merges is only noticed by the next push to main.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
 
-permissions:
-  contents: read
-
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
+permissions: {}
 
 jobs:
-  audit:
-    name: Cargo Audit
+  # Checks the crates the workspace builds against OSV (RustSec and GitHub advisories), with the
+  # exceptions in osv-scanner.toml. It scans the list osv-package-list.sh resolves with `cargo tree`,
+  # since Cargo.lock also lists optional dependencies that nothing compiles. On PRs it fails only on
+  # advisories the PR introduces over the base commit, so an advisory published against main does
+  # not block unrelated PRs; otherwise on every advisory, and findings become code-scanning alerts.
+  osv-scan:
+    name: OSV-Scanner
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Upload SARIF to code scanning.
+      security-events: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
 
       - name: Install the Rust toolchain from rust-toolchain.toml
         run: rustup toolchain install --no-self-update --profile minimal
 
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
+        with:
+          cache-on-failure: true
+
       - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e  # v5.2.3
         with:
           version: 2026.10.25
-          install_args: github:rustsec/rustsec jq
+          install_args: go go:github.com/google/osv-scanner/v2/cmd/...
 
-      - name: Run cargo audit
+      # After rust-cache and mise, which would otherwise read its Cargo and mise files. It is its own
+      # workspace root, so cargo never mixes it with the PR's workspace.
+      - name: Checkout the base commit
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      # The base commit's own toolchain and osv-scanner.toml apply, so a PR that drops an exception
+      # introduces its advisory. The scripts and the scanner come from the PR, since the base may
+      # have neither. Both scans write their list to the same file, which osv-reporter requires.
+      - name: Scan the base commit
+        if: github.event_name == 'pull_request'
         run: |
-
-          cargo audit --json > audit.json || true
-
-          COUNT=$(jq '.vulnerabilities.count' audit.json)
-
-          if [ "$COUNT" -ne 0 ]; then
-            echo "=============================="
-            echo "CARGO AUDIT FAILED ($COUNT issues)"
-            echo "=============================="
-
-            jq -r '
-              .vulnerabilities.list[] |
-              "[" + (.advisory.severity // "unknown" | ascii_upcase) + "] " +
-              "ID: " + .advisory.id + " | " +
-              "Crate: " + .package.name + " | " +
-              "Version: " + .package.version + " | " +
-              "Error: " + .advisory.title
-            ' audit.json
-
-            exit 1
-          else
-            echo "cargo audit passed — no vulnerabilities found"
+          # A base without osv-scanner.toml is scanned without exceptions.
+          config=/dev/null
+          if [ -f base/osv-scanner.toml ]; then
+            config=base/osv-scanner.toml
           fi
+
+          .github/scripts/osv-scan.sh base "$config" "$RUNNER_TEMP/osv-package-list.json" \
+            "$RUNNER_TEMP/osv-base-results.json"
+
+      - name: Scan
+        run: |
+          .github/scripts/osv-scan.sh . osv-scanner.toml "$RUNNER_TEMP/osv-package-list.json" \
+            "$RUNNER_TEMP/osv-results.json"
+
+      # Writes the failing findings to the job summary, on PRs those the base does not have,
+      # otherwise all, and as SARIF.
+      - name: Fail on advisories
+        id: report
+        run: |
+          old=()
+          if [ -f "$RUNNER_TEMP/osv-base-results.json" ]; then
+            old=(--old="$RUNNER_TEMP/osv-base-results.json")
+          fi
+
+          osv-reporter "${old[@]}" --new="$RUNNER_TEMP/osv-results.json" \
+            --output-files="markdown:$GITHUB_STEP_SUMMARY,sarif:$RUNNER_TEMP/osv-results.sarif"
+
+      # Findings on main become tracked code-scanning alerts. The reporter writes the SARIF before
+      # it fails.
+      - name: Upload SARIF
+        if: >-
+          !cancelled() && github.ref == 'refs/heads/main'
+          && steps.report.outcome != 'skipped'
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63  # v4.38.0
+        with:
+          sarif_file: ${{ runner.temp }}/osv-results.sarif
+          category: osv-scanner
+
+      # Unused, expired or invalid exceptions, which osv-scanner itself only warns about. Runs even
+      # when the scan fails, so a stale exception and a new advisory are both reported, and on PRs
+      # too, so the PR that removes the last match of an exception deletes it.
+      - name: Check osv-scanner.toml
+        if: ${{ !cancelled() }}
+        run: .github/scripts/check-osv-scanner-config.sh "$RUNNER_TEMP/osv-package-list.json"
 
   detect-unused-dependencies:
     name: Cargo machete
