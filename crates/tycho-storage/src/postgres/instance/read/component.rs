@@ -20,7 +20,7 @@ use crate::postgres::{
         InstanceId,
     },
     schema::protocol_system,
-    PostgresError,
+    storage_error_from_diesel, PostgresError,
 };
 
 impl PostgresGatewayNew {
@@ -64,6 +64,77 @@ impl PostgresGatewayNew {
             .build_components(rows, chain, conn)
             .await?;
         Ok(WithTotal { entity, total: Some(total) })
+    }
+
+    /// Returns the TVL of the components of `system`'s active instance, by external id, and the
+    /// number of matching components on all pages.
+    ///
+    /// - `system`: the protocol system. Required, because the answer is keyed by external id and an
+    ///   external id can repeat across protocol systems: `None` is `Unsupported`. `NotFound` for an
+    ///   unknown name. A protocol system without an active instance has no TVL.
+    /// - `component_ids`: only components with these external ids.
+    /// - `pagination_params`: the page to return, in component id order.
+    ///
+    /// Components without a TVL row are absent. `NotFound` for an unknown chain.
+    pub async fn get_component_tvls(
+        &self,
+        chain: &Chain,
+        system: Option<String>,
+        component_ids: Option<&[&str]>,
+        pagination_params: Option<&PaginationParams>,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<WithTotal<HashMap<String, f64>>, StorageError> {
+        if !self.chain_id_cache.value_exists(chain) {
+            return Err(StorageError::NotFound("Chain".to_string(), chain.to_string()));
+        }
+        let Some(system) = system else {
+            return Err(StorageError::Unsupported(
+                "component TVL needs a protocol system: the response is keyed by pool id"
+                    .to_string(),
+            ));
+        };
+        self.get_protocol_system_id(&system)?;
+
+        let filtered = || {
+            let mut query = component_tvl::table
+                .inner_join(
+                    protocol_component::table.on(protocol_component::instance_id
+                        .eq(component_tvl::instance_id)
+                        .and(protocol_component::id.eq(component_tvl::protocol_component_id))),
+                )
+                .filter(
+                    component_tvl::instance_id
+                        .nullable()
+                        .eq(active_instance_of(&system)),
+                )
+                .into_boxed::<Pg>();
+            if let Some(ids) = component_ids {
+                query = query.filter(protocol_component::external_id.eq_any(ids));
+            }
+            query
+        };
+
+        let total = filtered()
+            .count()
+            .get_result::<i64>(conn)
+            .await
+            .map_err(PostgresError::from)?;
+
+        let mut query = filtered().select((protocol_component::external_id, component_tvl::tvl));
+        if let Some(pagination) = pagination_params {
+            query = query
+                .order_by(component_tvl::protocol_component_id)
+                .limit(pagination.page_size)
+                .offset(pagination.offset());
+        }
+        let rows: Vec<(String, f64)> = query.load(conn).await.map_err(|err| {
+            let id_hint = component_ids
+                .and_then(|ids| ids.first().copied())
+                .unwrap_or_default();
+            storage_error_from_diesel(err, "ComponentTVL", id_hint, None)
+        })?;
+
+        Ok(WithTotal { entity: rows.into_iter().collect(), total: Some(total) })
     }
 
     /// Builds the models of component rows, each with the name of its protocol system. Tokens and
@@ -381,6 +452,18 @@ mod tests {
             entity.sort_by(|a, b| a.id.cmp(&b.id));
         }
         Ok((entity, page.total))
+    }
+
+    async fn tvls(
+        gateway: &PostgresGatewayNew,
+        conn: &mut AsyncPgConnection,
+        system: Option<&str>,
+        ids: Option<&[&str]>,
+    ) -> Result<(HashMap<String, f64>, Option<i64>), StorageError> {
+        let page = gateway
+            .get_component_tvls(&Chain::Ethereum, system.map(str::to_string), ids, None, conn)
+            .await?;
+        Ok((page.entity, page.total))
     }
 
     /// Inserts a component with an explicit id, as an import does, and one token.
@@ -732,6 +815,83 @@ mod tests {
 
         let result = components(&s.gateway, &mut conn, None, Some(ids), None, None).await;
         assert!(matches!(result, Err(StorageError::Unsupported(_))), "got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_tvls_of_a_protocol() {
+        let mut conn = setup_db().await;
+        let s = setup(&mut conn).await;
+        for (instance, external_id, tvl) in
+            [(s.curve, "a", 1.0), (s.curve, "b", 2.0), (s.uniswap_v4, "u", 3.0)]
+        {
+            let id = db_fixtures::insert_instance_component(
+                &mut conn,
+                instance,
+                external_id,
+                &[b("0x01")],
+            )
+            .await;
+            db_fixtures::insert_instance_tvl(&mut conn, instance, id, tvl).await;
+        }
+
+        let (found, total) = tvls(&s.gateway, &mut conn, Some("vm:curve"), None)
+            .await
+            .expect("reading the TVLs failed");
+
+        assert_eq!(found, HashMap::from([("a".to_string(), 1.0), ("b".to_string(), 2.0)]));
+        assert_eq!(total, Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_tvls_with_same_pool_id_stay_apart() {
+        let mut conn = setup_db().await;
+        let s = setup(&mut conn).await;
+        for (instance, tvl) in [(s.curve, 1.0), (s.uniswap_v4, 2.0)] {
+            let id =
+                db_fixtures::insert_instance_component(&mut conn, instance, "0xpool", &[b("0x01")])
+                    .await;
+            db_fixtures::insert_instance_tvl(&mut conn, instance, id, tvl).await;
+        }
+
+        for (system, tvl) in [("vm:curve", 1.0), ("uniswap_v4", 2.0)] {
+            for ids in [None, Some(&["0xpool"][..])] {
+                let (found, total) = tvls(&s.gateway, &mut conn, Some(system), ids)
+                    .await
+                    .expect("reading the TVLs failed");
+                assert_eq!(found, HashMap::from([("0xpool".to_string(), tvl)]), "{system}");
+                assert_eq!(total, Some(1));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tvls_need_a_protocol() {
+        let mut conn = setup_db().await;
+        let s = setup(&mut conn).await;
+
+        let result = tvls(&s.gateway, &mut conn, None, None).await;
+
+        assert!(matches!(result, Err(StorageError::Unsupported(_))), "got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_tvls_skip_instances_that_are_not_active() {
+        let mut conn = setup_db().await;
+        let s = setup(&mut conn).await;
+        let id =
+            db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        db_fixtures::insert_instance_tvl(&mut conn, s.curve, id, 1.0).await;
+        let ready = db_fixtures::insert_instance(&mut conn, s.curve_system_id, "0.0.2").await;
+        let id =
+            db_fixtures::insert_instance_component(&mut conn, ready, "old", &[b("0x01")]).await;
+        db_fixtures::insert_instance_tvl(&mut conn, ready, id, 5.0).await;
+
+        let (found, total) = tvls(&s.gateway, &mut conn, Some("vm:curve"), None)
+            .await
+            .expect("reading the TVLs failed");
+
+        assert_eq!(found, HashMap::from([("a".to_string(), 1.0)]));
+        assert_eq!(total, Some(1));
     }
 
     #[tokio::test]
