@@ -740,11 +740,16 @@ impl ProtocolSim for UniswapV4State {
             tick_spacing: self.tick_spacing,
         };
 
-        let swap_params = SwapParams {
-            zero_for_one,
-            amount_specified: amount_to_swap,
-            sqrt_price_limit: self.sqrt_price,
+        // The hooks must see the limit an executed swap sends: the full price range, like the
+        // default `swap` applies. A hook that fills only up to the taker's limit would otherwise
+        // fill nothing in simulation and everything on chain.
+        let sqrt_price_limit = if zero_for_one {
+            safe_add_u256(MIN_SQRT_RATIO, U256::from(1u64))?
+        } else {
+            safe_sub_u256(MAX_SQRT_RATIO, U256::from(1u64))?
         };
+        let swap_params =
+            SwapParams { zero_for_one, amount_specified: amount_to_swap, sqrt_price_limit };
 
         // Check if hook is set and has before_swap permissions
         if let Some(ref hook) = self.hook {
