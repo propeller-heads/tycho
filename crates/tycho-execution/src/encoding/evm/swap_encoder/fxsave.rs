@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, str::FromStr};
 
+use alloy::primitives::Address;
 use tycho_common::{models::Chain, Bytes};
 
 use crate::encoding::{
@@ -25,9 +26,9 @@ impl SwapEncoder for FxSaveSwapEncoder {
         _config: Option<HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
         if chain != Chain::Ethereum {
-            return Err(EncodingError::FatalError(
-                "fxSAVE deposits are only supported on Ethereum".to_string(),
-            ));
+            return Err(EncodingError::FatalError(format!(
+                "fxSAVE deposits are only supported on Ethereum, not on {chain}"
+            )));
         }
         Ok(Self { executor_address })
     }
@@ -37,8 +38,13 @@ impl SwapEncoder for FxSaveSwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let vault = Bytes::from(swap.component().id.as_str());
-        if swap.token_out().address != vault {
+        let vault = Address::from_str(&swap.component().id).map_err(|e| {
+            EncodingError::FatalError(format!(
+                "Invalid fxSAVE component id {}: {e}",
+                swap.component().id
+            ))
+        })?;
+        if swap.token_out().address.as_ref() != vault.as_slice() {
             return Err(EncodingError::InvalidInput(format!(
                 "fxSAVE component {} only deposits into fxSAVE, not into {}",
                 swap.component().id,
@@ -70,19 +76,15 @@ mod tests {
     const FXSAVE: &str = "0x7743e50f534a7f9f1791dde7dcd89f7783eefc39";
     const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
     const FXUSD: &str = "0x085780639cc2cacd35e474e71f4d000e2405d8f6";
+    const EXECUTOR: &str = "0x5c2f5a71f67c01775180adc06909288b4c329308";
 
-    fn encoder() -> FxSaveSwapEncoder {
-        FxSaveSwapEncoder::new(
-            Bytes::from("0x5c2f5a71f67c01775180adc06909288b4c329308"),
-            Chain::Ethereum,
-            None,
-        )
-        .unwrap()
-    }
-
-    fn encode_deposit(token_in: &str, token_out: &str) -> Result<Vec<u8>, EncodingError> {
+    fn encode_deposit(
+        component_id: &str,
+        token_in: &str,
+        token_out: &str,
+    ) -> Result<Vec<u8>, EncodingError> {
         let component = ProtocolComponent {
-            id: FXSAVE.to_string(),
+            id: component_id.to_string(),
             protocol_system: "fxsave".to_string(),
             ..Default::default()
         };
@@ -98,14 +100,15 @@ mod tests {
             group_token_out: Bytes::from(token_out),
             origin: None,
         };
-        encoder().encode_swap(&swap, &encoding_context)
+        FxSaveSwapEncoder::new(Bytes::from(EXECUTOR), Chain::Ethereum, None)?
+            .encode_swap(&swap, &encoding_context)
     }
 
     #[rstest]
     #[case::usdc(USDC, "fxsave_usdc_deposit")]
     #[case::fxusd(FXUSD, "fxsave_fxusd_deposit")]
     fn test_encode_deposit(#[case] token_in: &str, #[case] test_name: &str) {
-        let encoded = encode_deposit(token_in, FXSAVE).unwrap();
+        let encoded = encode_deposit(FXSAVE, token_in, FXSAVE).unwrap();
 
         assert_eq!(encoded, Bytes::from(token_in).to_vec());
         write_calldata_to_file(test_name, encode(&encoded).as_str());
@@ -113,17 +116,34 @@ mod tests {
 
     #[test]
     fn test_redeem_is_rejected() {
-        assert!(matches!(encode_deposit(FXSAVE, USDC), Err(EncodingError::InvalidInput(_))));
+        assert!(matches!(
+            encode_deposit(FXSAVE, FXSAVE, USDC),
+            Err(EncodingError::InvalidInput(_))
+        ));
+    }
+
+    #[rstest]
+    #[case::not_hex("not-hex")]
+    #[case::odd_length("0xabc")]
+    #[case::too_short("0x7743e50f534a7f9f1791dde7dcd89f7783eefc")]
+    fn test_invalid_component_id_is_rejected(#[case] component_id: &str) {
+        let Err(EncodingError::FatalError(message)) = encode_deposit(component_id, USDC, FXSAVE)
+        else {
+            panic!("component id {component_id} was not rejected as a fatal error");
+        };
+
+        assert!(message.contains(component_id), "error does not name the id: {message}");
     }
 
     #[test]
-    fn test_chain_restriction() {
-        let result = FxSaveSwapEncoder::new(
-            Bytes::from("0x5c2f5a71f67c01775180adc06909288b4c329308"),
-            Chain::Base,
-            None,
-        );
+    fn test_rejects_chains_other_than_ethereum() {
+        let result = FxSaveSwapEncoder::new(Bytes::from(EXECUTOR), Chain::Base, None);
 
-        assert!(result.is_err());
+        assert_eq!(
+            result.err(),
+            Some(EncodingError::FatalError(
+                "fxSAVE deposits are only supported on Ethereum, not on base".to_string()
+            ))
+        );
     }
 }
