@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.5
+
+- Add Elysium manifests for three Uniswap V3 copies: `elysium-kleos-v3.yaml` (`kleos_v3`),
+  `elysium-elyspump-v3.yaml` (`elyspump_v3`) and `elysium-stockiumswap-v3.yaml`
+  (`stockiumswap_v3`). The wasm is unchanged.
+
 ## v0.1.4
 
 - Take `protocol_type_name` as a `map_pools_created` parameter instead of hardcoding

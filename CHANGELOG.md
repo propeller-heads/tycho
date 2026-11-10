@@ -1,3 +1,59 @@
+## [0.505.0](https://github.com/propeller-heads/tycho/compare/0.504.3...0.505.0) (2026-11-10)
+
+
+### Features
+
+* index Kleos, ElysPump and StockiumSwap V3 on Elysium ([#1759](https://github.com/propeller-heads/tycho/issues/1759)) ([4532a44](https://github.com/propeller-heads/tycho/commit/4532a44cda4184ae64109d0bc25f6fa99a64f50d))
+* **substreams:** index AERO v1.1 basic and CL pools on Elysium ([fb06b2d](https://github.com/propeller-heads/tycho/commit/fb06b2d499e7586afa45d5bd4116c7fb884720ca))
+* **substreams:** index AERO v1.1 basic and CL pools on Elysium ([#1766](https://github.com/propeller-heads/tycho/issues/1766)) ([0190788](https://github.com/propeller-heads/tycho/commit/0190788195c00ae9cea7b198b4d14e554e6fdc0e))
+* **substreams:** index Kleos, ElysPump and StockiumSwap V3 on Elysium ([42687c8](https://github.com/propeller-heads/tycho/commit/42687c8e4025d1475e67a81532765b1d9125862f))
+* **testing:** run elysium-* packages against an Elysium archive RPC ([dae5e6d](https://github.com/propeller-heads/tycho/commit/dae5e6d1ed4c1ff77efecc0a776ad43dfe2c342a))
+
+
+### Bug Fixes
+
+* **testing:** connect RPC tools on chains alloy-chains does not name ([875d7ba](https://github.com/propeller-heads/tycho/commit/875d7ba3a7624e33cac6371192b8e324a033bc67))
+
+## [0.504.3](https://github.com/propeller-heads/tycho/compare/0.504.2...0.504.3) (2026-11-09)
+
+
+### Bug Fixes
+
+* **deps:** bump openssl to 0.10.81 for RUSTSEC-2026-0463 ([dc2eaad](https://github.com/propeller-heads/tycho/commit/dc2eaad05aef529eae004b398a45bdbb15ab686a))
+* **deps:** bump openssl to 0.10.81 for RUSTSEC-2026-0463 ([#1763](https://github.com/propeller-heads/tycho/issues/1763)) ([729c860](https://github.com/propeller-heads/tycho/commit/729c860a0675a9b6bd92d5e42c5a5b359fa74d31))
+* **simulation:** link pending account overrides to the extractor's own pools ([54abe7f](https://github.com/propeller-heads/tycho/commit/54abe7fc70b2deaf0d44b1bbde0b052d76709ff9))
+* **simulation:** link pending account overrides to the extractor's own pools ([#1750](https://github.com/propeller-heads/tycho/issues/1750)) ([e4fe71c](https://github.com/propeller-heads/tycho/commit/e4fe71c3cc7bf5adb476af6cd171bf5ea8550b9e))
+
+## [0.504.2](https://github.com/propeller-heads/tycho/compare/0.504.1...0.504.2) (2026-11-09)
+
+
+### Bug Fixes
+
+* unblock Fluid pools that have swaps unpaused again ([0b69dbd](https://github.com/propeller-heads/tycho/commit/0b69dbd3a7449b2db3720dda2030ad618383046d)), closes [#1709](https://github.com/propeller-heads/tycho/issues/1709) [#1709](https://github.com/propeller-heads/tycho/issues/1709)
+* unblock Fluid pools that have swaps unpaused again ([#1757](https://github.com/propeller-heads/tycho/issues/1757)) ([53cb909](https://github.com/propeller-heads/tycho/commit/53cb909f1c04f3cd31d2258c413c20dde0459462))
+
+## [0.504.1](https://github.com/propeller-heads/tycho/compare/0.504.0...0.504.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **deps:** enable the actix-web ws feature for tycho-indexer ([9571532](https://github.com/propeller-heads/tycho/commit/9571532b65a372a9c87f78f7ccb5303b3f2de87e))
+* **deps:** enable the actix-web ws feature for tycho-indexer ([#1758](https://github.com/propeller-heads/tycho/issues/1758)) ([337e112](https://github.com/propeller-heads/tycho/commit/337e112a78aa7d26965ff52627db1d8d0d940b3c))
+
+## [0.504.0](https://github.com/propeller-heads/tycho/compare/0.503.0...0.504.0) (2026-11-09)
+
+
+### Features
+
+* add Ramses V3 Arbitrum support ([ebfb793](https://github.com/propeller-heads/tycho/commit/ebfb79375f09afd36d33759a0dfb9b6ff36265ca))
+* add Ramses V3 Arbitrum support ([#1235](https://github.com/propeller-heads/tycho/issues/1235)) ([38b87de](https://github.com/propeller-heads/tycho/commit/38b87de63a8b8e700891d079d14c471b260224a5))
+
+
+### Bug Fixes
+
+* address review findings on the Ramses V3 Arbitrum integration ([c947ea4](https://github.com/propeller-heads/tycho/commit/c947ea415afb456355fc83b2f6b99b108db75a43))
+* keep ramses_v3 out of the Arbitrum examples until it is synced in prod ([3239f8b](https://github.com/propeller-heads/tycho/commit/3239f8b93bcddbcc7c070929b4e061c808e6929e))
+
 ## [0.503.0](https://github.com/propeller-heads/tycho/compare/0.502.3...0.503.0) (2026-11-09)
 
 
