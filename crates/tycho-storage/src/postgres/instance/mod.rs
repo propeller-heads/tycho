@@ -14,11 +14,13 @@
 //! Tables in `public` (tokens, blocks, protocol types and names) stay shared; instance tables
 //! refer to them by natural key, with no foreign key.
 //!
-//! Nothing reads or writes these tables yet; the read and write paths move onto them in later
-//! changes.
+//! Nothing reads these tables yet. [`writer::InstanceWriter`] writes the batches of a gateway
+//! bound to an instance; ops it does not support fail the batch.
 
+pub mod origins;
 pub mod orm;
 pub mod schema;
+pub mod writer;
 
 use std::fmt;
 
