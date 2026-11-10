@@ -453,13 +453,15 @@ fn judged<'a>(
             Some(TychoExecutionResult::Success { .. }) => {
                 match missing_revert(simulation_id, input, results) {
                     None => Outcome::Pass,
-                    Some(detail) => {
-                        let reason = match results.get(simulation_id) {
-                            Some(TychoExecutionResult::Success { .. }) => "settled",
-                            _ => "rpc",
-                        };
-                        Outcome::Fail { reason, detail }
-                    }
+                    Some(detail) => match results.get(simulation_id) {
+                        Some(TychoExecutionResult::Success { .. }) => {
+                            Outcome::Fail { reason: "settled", detail }
+                        }
+                        Some(TychoExecutionResult::Failed { error_msg }) => {
+                            not_executed(context, error_msg)
+                        }
+                        _ => Outcome::NotRun { reason: "no_result" },
+                    },
                 }
             }
             _ => Outcome::NotRun { reason: "at_limit_not_executed" },
@@ -497,12 +499,24 @@ fn execution_outcome<'a>(
             reason: "revert",
             detail: format!("{amount_in} {} reverted: {reason}", input.token_in),
         },
-        Some(TychoExecutionResult::Failed { error_msg }) => Outcome::Fail {
-            reason: "rpc",
-            detail: format!("{amount_in} {} could not be simulated: {error_msg}", input.token_in),
-        },
+        Some(TychoExecutionResult::Failed { error_msg }) => not_executed(context, error_msg),
         None => Outcome::NotRun { reason: "no_result" },
     }
+}
+
+/// A probe the node could not execute: the error is the harness's or the node's, such as a token
+/// whose balance slot was not found or a block the node has not reached, so it says nothing of the
+/// venue.
+fn not_executed<'a>(context: &ProbeContext<'_>, error_msg: &str) -> Outcome<'a> {
+    info!(
+        "[{}] {} probe at {}: not executed: {error_msg}",
+        context.component, context.direction, context.size
+    );
+    let reason = match crate::categorize_error(error_msg) {
+        "Storage slot not found" => "storage_slot",
+        _ => "rpc",
+    };
+    Outcome::NotRun { reason }
 }
 
 #[cfg(test)]
@@ -716,6 +730,27 @@ mod tests {
         );
     }
 
+    fn failed(error_msg: &str) -> TychoExecutionResult {
+        TychoExecutionResult::Failed { error_msg: error_msg.to_string() }
+    }
+
+    #[test]
+    fn an_execution_the_node_could_not_run_is_not_run() {
+        let swaps = probe(&strict(None), 1);
+        let (id, input, probe) = &swaps[0];
+        let judge = |result| judge_one(probe, input, id, &HashMap::from([(id.clone(), result)]));
+        assert_eq!(
+            judge(failed(
+                "Couldn't find storage slots for token 0xc5fb36dd2fb59d3b98deff88425a3f425ee469ed"
+            )),
+            ("not_run", "storage_slot".to_string())
+        );
+        assert_eq!(
+            judge(failed("Transaction failed: server returned an error response: error code -32000: block 0x1929fcc not found")),
+            ("not_run", "rpc".to_string())
+        );
+    }
+
     #[test]
     fn a_swap_past_the_limit_must_revert_once_the_limit_executed() {
         let swaps = probe(&strict(None), 1);
@@ -736,6 +771,10 @@ mod tests {
         assert_eq!(
             judge(Some(revert()), revert()),
             ("not_run", "at_limit_not_executed".to_string())
+        );
+        assert_eq!(
+            judge(executed(), failed("block 0x1929fcc not found")),
+            ("not_run", "rpc".to_string())
         );
     }
 }

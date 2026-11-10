@@ -131,7 +131,9 @@ The limit comes from the component's `limits` when a test lists it, or else the 
 check that cannot run is reported as `not_run` with a reason: `execution_cap` (above 96 bits or
 `int128::MAX`), `next_block` and `book_venue` (quotes priced for another block),
 `not_executable` (CoWAMM), `no_declaration`, `not_hard`, `zero_limit`, `zero_amount`,
-`at_limit_failed`, `at_limit_not_executed`, `encoding`. Outcomes go to
+`at_limit_failed`, `at_limit_not_executed`, `encoding`, and for a swap the node could not
+execute, which says nothing of the venue, `storage_slot` (the token's balance slot was not found)
+or `rpc` (such as a block the node has not reached). Outcomes go to
 `tycho_integration_check_total{protocol, check, outcome, reason, size}` and executed drift to
 `tycho_integration_probe_drift_bps{protocol, size}`, never to the realistic swap's metrics; a
 failure is also logged with `event_type="check_failure"` and the component.
