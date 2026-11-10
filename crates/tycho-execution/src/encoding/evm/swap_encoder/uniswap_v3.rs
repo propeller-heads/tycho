@@ -1,6 +1,9 @@
 use std::{collections::HashMap, str::FromStr};
 
-use alloy::{primitives::Address, sol_types::SolValue};
+use alloy::{
+    primitives::{aliases::U24, Address},
+    sol_types::SolValue,
+};
 use tycho_common::{models::Chain, Bytes};
 
 use crate::encoding::{
@@ -49,9 +52,13 @@ impl SwapEncoder for UniswapV3SwapEncoder {
         let pool_fee_u24 = pad_or_truncate_to_size::<3>(&pool_fee_bytes)
             .map_err(|_| EncodingError::FatalError("Failed to extract fee bytes".to_string()))?;
 
-        let args = (token_in_address, token_out_address, pool_fee_u24, component_id, zero_to_one);
-
-        Ok(args.abi_encode_packed())
+        Ok(encode_uniswap_v3_swap(
+            token_in_address,
+            token_out_address,
+            U24::from_be_bytes(pool_fee_u24),
+            component_id,
+            zero_to_one,
+        ))
     }
 
     fn executor_address(&self) -> &Bytes {
@@ -60,6 +67,18 @@ impl SwapEncoder for UniswapV3SwapEncoder {
     fn clone_box(&self) -> Box<dyn SwapEncoder> {
         Box::new(self.clone())
     }
+}
+
+/// `UniswapV3Executor`'s calldata: the tokens, the fee tier, the pool and the direction, packed.
+/// Protocols whose pools share Uniswap V3's `swap` run on the same executor and use it too.
+pub(super) fn encode_uniswap_v3_swap(
+    token_in: Address,
+    token_out: Address,
+    fee: U24,
+    pool: Address,
+    zero_to_one: bool,
+) -> Vec<u8> {
+    (token_in, token_out, fee, pool, zero_to_one).abi_encode_packed()
 }
 
 #[cfg(test)]

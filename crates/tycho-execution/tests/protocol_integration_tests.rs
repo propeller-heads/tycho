@@ -2159,6 +2159,121 @@ fn test_sequential_encoding_strategy_aero_cl() {
 }
 
 #[test]
+fn test_single_encoding_strategy_nami_v4() {
+    // WETH -> (Nami V4) -> USDC on Nami's Base WETH/USDC pool.
+    let pool = ProtocolComponent {
+        id: String::from("0x0e8af367dba0c9cb4674d38539ef3465a25a7237"),
+        protocol_system: String::from("nami_v4"),
+        ..Default::default()
+    };
+    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
+    let usdc = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+    let swap =
+        Swap::new(pool, default_token(weth.clone()), default_token(usdc.clone()), BigUint::ZERO);
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        weth,
+        usdc,
+        BigUint::from_str("10000000000000000").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_nami_v4", hex_calldata.as_str());
+}
+
+#[test]
+fn test_sequential_encoding_strategy_nami_v4() {
+    // cbBTC -> (AERO CL) -> WETH -> (Nami V4) -> USDC: the Nami hop takes the previous hop's
+    // output as its input. Nami has one Base pool with liquidity, so the first hop is AERO CL.
+    let weth_cbbtc_pool = ProtocolComponent {
+        id: String::from("0xbb5507daae822ba89c4da61bbfdf4b49a1666bac"),
+        protocol_system: String::from("aero_cl"),
+        static_attributes: HashMap::from([(
+            "tick_spacing".to_string(),
+            Bytes::from(BigInt::from(10).to_signed_bytes_be()),
+        )]),
+        ..Default::default()
+    };
+    let weth_usdc_pool = ProtocolComponent {
+        id: String::from("0x0e8af367dba0c9cb4674d38539ef3465a25a7237"),
+        protocol_system: String::from("nami_v4"),
+        ..Default::default()
+    };
+    let cbbtc = Bytes::from("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf");
+    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
+    let usdc = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+    let swap1 = Swap::new(
+        weth_cbbtc_pool,
+        default_token(cbbtc.clone()),
+        default_token(weth.clone()),
+        BigUint::ZERO,
+    );
+    let swap2 = Swap::new(
+        weth_usdc_pool,
+        default_token(weth.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        cbbtc,
+        usdc,
+        BigUint::from_str("100000").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        vec![swap1, swap2],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_sequential_encoding_strategy_nami_v4", hex_calldata.as_str());
+}
+
+#[test]
 fn test_sequential_encoding_strategy_slipstreams() {
     // WETH -> (Slipstreams) -> USDC -> (Slipstreams) -> cbBTC
     let slipstreams_weth_usdc_pool = ProtocolComponent {

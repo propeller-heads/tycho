@@ -1,11 +1,9 @@
 use std::{collections::HashMap, str::FromStr};
 
-use alloy::{
-    primitives::{aliases::U24, Address},
-    sol_types::SolValue,
-};
+use alloy::primitives::{aliases::U24, Address};
 use tycho_common::{models::Chain, Bytes};
 
+use super::uniswap_v3::encode_uniswap_v3_swap;
 use crate::encoding::{
     errors::EncodingError,
     evm::utils::bytes_to_address,
@@ -45,15 +43,14 @@ impl SwapEncoder for NamiV4SwapEncoder {
         let token_in = bytes_to_address(&swap.token_in().address)?;
         let token_out = bytes_to_address(&swap.token_out().address)?;
         let zero_to_one = token_in < token_out;
-        let pool = Address::from_str(&swap.component().id).map_err(|_| {
+        let pool = Address::from_str(&swap.component().id).map_err(|err| {
             EncodingError::FatalError(format!(
-                "Invalid Nami V4 component id {}: expected the pool address",
+                "Invalid Nami V4 component id {}: expected the pool address: {err}",
                 swap.component().id
             ))
         })?;
 
-        let args = (token_in, token_out, U24::ZERO, pool, zero_to_one);
-        Ok(args.abi_encode_packed())
+        Ok(encode_uniswap_v3_swap(token_in, token_out, U24::ZERO, pool, zero_to_one))
     }
 
     fn executor_address(&self) -> &Bytes {
@@ -72,11 +69,16 @@ mod tests {
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
-    use crate::encoding::models::default_token;
+    use crate::encoding::{evm::utils::write_calldata_to_file, models::default_token};
+
+    /// Nami's WETH/USDC pool on Base.
+    const POOL: &str = "0x0e8af367dba0c9cb4674d38539ef3465a25a7237";
+    const WETH: &str = "0x4200000000000000000000000000000000000006";
+    const USDC: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
 
     fn encode_nami_swap(token_in: &str, token_out: &str) -> String {
         let pool = ProtocolComponent {
-            id: String::from("0x1111111111111111111111111111111111111111"),
+            id: String::from(POOL),
             protocol_system: String::from("nami_v4"),
             ..Default::default()
         };
@@ -108,11 +110,10 @@ mod tests {
     }
 
     #[test]
-    fn encodes_the_uniswap_v3_executor_layout_with_a_zero_fee() {
-        let encoded = encode_nami_swap(
-            "0x4200000000000000000000000000000000000006",
-            "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
-        );
+    fn test_encode_nami_v4() {
+        // WETH -> USDC: WETH is token0, so zero for one. `NamiV4.t.sol` checks the same bytes
+        // against the executor's layout.
+        let encoded = encode_nami_swap(WETH, USDC);
 
         assert_eq!(
             encoded,
@@ -124,20 +125,32 @@ mod tests {
                 // unused fee
                 "000000",
                 // pool
-                "1111111111111111111111111111111111111111",
+                "0e8af367dba0c9cb4674d38539ef3465a25a7237",
                 // zero for one
                 "01",
             ))
         );
+        write_calldata_to_file("test_encode_nami_v4", encoded.as_str());
     }
 
     #[test]
-    fn selling_token1_is_one_for_zero() {
-        let encoded = encode_nami_swap(
-            "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
-            "0x4200000000000000000000000000000000000006",
-        );
+    fn test_encode_nami_v4_one_for_zero() {
+        let encoded = encode_nami_swap(USDC, WETH);
 
-        assert!(encoded.ends_with("00"));
+        assert_eq!(
+            encoded,
+            String::from(concat!(
+                // in token
+                "833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                // out token
+                "4200000000000000000000000000000000000006",
+                // unused fee
+                "000000",
+                // pool
+                "0e8af367dba0c9cb4674d38539ef3465a25a7237",
+                // one for zero
+                "00",
+            ))
+        );
     }
 }
