@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-uniswap-v3-logs-only"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "evm-aero-basic"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -1520,7 +1520,7 @@ dependencies = [
 
 [[package]]
 name = "evm-aero-cl"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
