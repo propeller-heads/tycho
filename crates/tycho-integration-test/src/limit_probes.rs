@@ -126,7 +126,7 @@ pub struct Target<'a> {
 /// Records one check outcome, and logs a failure with the component and the detail, which the
 /// metric leaves out.
 fn record(probe: &ProbeContext<'_>, check: CheckId, outcome: Outcome<'_>) {
-    let (label, reason) = match &outcome {
+    let (label, reason) = match outcome {
         Outcome::Pass => ("pass", ""),
         Outcome::Fail { reason, detail } => {
             error!(
@@ -139,9 +139,9 @@ fn record(probe: &ProbeContext<'_>, check: CheckId, outcome: Outcome<'_>) {
                 reason,
                 "{detail}"
             );
-            ("fail", *reason)
+            ("fail", reason)
         }
-        Outcome::NotRun { reason } => ("not_run", *reason),
+        Outcome::NotRun { reason } => ("not_run", reason),
     };
     metrics::record_check(probe.protocol, check.as_str(), label, reason, &probe.size.to_string());
 }
@@ -169,9 +169,9 @@ struct ProbeContext<'a> {
 pub fn probe_direction(
     strict: &StrictChecks,
     package: &PackageExpectations,
-    target: Target<'_>,
+    target: &Target<'_>,
 ) -> Vec<(String, TychoExecutionInput, Probe)> {
-    let Target { component, state, token_in, token_out, max_input, max_output, .. } = &target;
+    let Target { component, state, token_in, token_out, max_input, max_output, .. } = target;
     let component_id = component.id.to_string();
     let direction =
         Direction { token_in: token_in.address.clone(), token_out: token_out.address.clone() };
@@ -239,7 +239,7 @@ pub fn probe_direction(
                     return Vec::new();
                 }
             };
-            encoded(&target, &context, "fraction", amount, &quoted, probe(ProbeRole::Fraction))
+            encoded(target, &context, "fraction", amount, &quoted, probe(ProbeRole::Fraction))
                 .into_iter()
                 .collect()
         }
@@ -300,10 +300,10 @@ pub fn probe_direction(
                 return Vec::new();
             };
             let Some(at_limit) = encoded(
-                &target,
+                target,
                 &context,
                 "at_limit",
-                executable.clone(),
+                executable,
                 at_quote,
                 probe(ProbeRole::AtLimit),
             ) else {
@@ -312,7 +312,7 @@ pub fn probe_direction(
             let mut swaps = vec![at_limit];
             if let Some(past) = checked.past_limit {
                 if let Some(past_limit) = encoded(
-                    &target,
+                    target,
                     &context,
                     "past_limit",
                     past,
@@ -593,7 +593,7 @@ mod tests {
             swaps = probe_direction(
                 strict,
                 package,
-                Target {
+                &Target {
                     chain: Chain::Ethereum,
                     component: &component,
                     state: &state,

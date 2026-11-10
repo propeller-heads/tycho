@@ -1900,7 +1900,8 @@ async fn process_state(
                         max_output: &max_output,
                         simulation_id: format!("{simulation_id}-{i}"),
                     };
-                    for (id, input, probe) in limit_probes::probe_direction(strict, package, target)
+                    for (id, input, probe) in
+                        limit_probes::probe_direction(strict, package, &target)
                     {
                         execution_infos.insert(id.clone(), input);
                         probes.insert(id, probe);
