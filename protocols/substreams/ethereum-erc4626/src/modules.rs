@@ -236,12 +236,6 @@ pub fn map_protocol_changes(
     deltas: BlockBalanceDeltas,
     first_interaction_store: StoreDeltas,
 ) -> Result<BlockChanges, substreams::errors::Error> {
-    let pool_params = PoolParams::parse_params(params.as_str())?;
-    let mut extra_entrypoints: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
-    for pool in &pool_params {
-        extra_entrypoints.insert(format!("0x{}", pool.address), pool.extra_entrypoints()?);
-    }
-
     // We merge contract changes by transaction (identified by transaction index)
     // making it easy to sort them at the very end.
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
@@ -281,6 +275,11 @@ pub fn map_protocol_changes(
         .collect();
 
     if !first_pools.is_empty() {
+        let pool_params_by_vault: HashMap<String, PoolParams> =
+            PoolParams::parse_params(params.as_str())?
+                .into_iter()
+                .map(|pool| (format!("0x{}", pool.address), pool))
+                .collect();
         for tx in block.transactions() {
             for (log, _call) in tx.logs_with_calls().filter(|(log, _)| {
                 if !first_pools.contains(&log.address.to_hex()) {
@@ -333,6 +332,8 @@ pub fn map_protocol_changes(
                     "maxDeposit(address)",
                     erc4626::functions::MaxDeposit { receiver: user.clone() }.encode(),
                 );
+                // stUSDS's `maxRedeem` reads the MakerDAO Vat, which DCI indexes in full unless
+                // the deployment blacklists it: see the Readme's "Deployment" section.
                 add_entrypoint(
                     "maxRedeem(address)",
                     erc4626::functions::MaxRedeem { owner: user.clone() }.encode(),
@@ -341,12 +342,12 @@ pub fn map_protocol_changes(
                 // this block. A vault whose conversion reads some state only on other branches
                 // (stUSDS's `str`) lists an entrypoint reading it in `params.json`; the Readme
                 // gives each vault's reason.
-                for (signature, calldata) in extra_entrypoints
-                    .get(&log.address.to_hex())
-                    .into_iter()
-                    .flatten()
-                {
-                    add_entrypoint(signature, calldata.clone());
+                let vault = log.address.to_hex();
+                let pool = pool_params_by_vault
+                    .get(&vault)
+                    .ok_or_else(|| anyhow::anyhow!("Vault {vault} has no params"))?;
+                for entrypoint in &pool.extra_entrypoints {
+                    add_entrypoint(&entrypoint.signature, entrypoint.calldata.clone());
                 }
             }
         }
