@@ -270,7 +270,9 @@ impl EuclidFirmQuote {
         let expiry = ((order.info >> 64usize) & U256::from(u64::MAX)).to::<u64>();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|e| RFQError::FatalError(format!("system clock is before the epoch: {e}")))?
+            .map_err(|_before_epoch| {
+                RFQError::FatalError("system clock is before the epoch".to_string())
+            })?
             .as_secs();
         if expiry <= now {
             return Err(RFQError::FatalError(format!(
