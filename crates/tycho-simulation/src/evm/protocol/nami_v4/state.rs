@@ -1,12 +1,13 @@
 use std::{
     any::Any,
     collections::{BTreeMap, HashMap},
+    sync::Arc,
 };
 
 use alloy::primitives::{Address, Sign, I256, U256};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
-use tracing::trace;
+use tracing::{trace, warn};
 use tycho_common::{
     dto::ProtocolStateDelta,
     models::token::Token,
@@ -22,7 +23,10 @@ use tycho_common::{
 
 use super::{
     plugin::{self, BeforeSwapRequest, StorageOverrides, AFTER_SWAP_FLAG, BEFORE_SWAP_FLAG},
-    swap_math::{amount_to_i256, get_token0_delta, get_token1_delta, move_price_towards_target},
+    swap_math::{
+        amount_to_i256, get_token0_delta, get_token1_delta, move_price_towards_target,
+        FEE_DENOMINATOR,
+    },
 };
 use crate::evm::{
     engine_db::{create_engine, SHARED_TYCHO_DB},
@@ -32,6 +36,7 @@ use crate::evm::{
         u256_num::u256_to_biguint,
         utils::{
             add_fee_markup,
+            solidity_math::mul_div_rounding_up,
             uniswap::{
                 liquidity_math::add_liquidity_delta,
                 sqrt_price_math::sqrt_price_q96_to_f64,
@@ -43,55 +48,79 @@ use crate::evm::{
             },
         },
     },
+    simulation::PendingOverrides,
 };
 
-// Gas model for a Nami V4 (Algebra Integral) swap. Initial estimates from the Uniswap V3 model,
-// without the bitmap word scans (Algebra walks a linked list of initialized ticks). They are meant
-// to be recalibrated against on-chain swaps once pools with liquidity exist.
+// Gas model of a Nami V4 (Algebra Integral) swap: what the pool's `swap` frame spends. The
+// figures come from cold swaps on Nami's Base WETH/USDC pool `0x0E8AF367…`, traced on a Base fork
+// at block 52562900 (no MEVX router) and block 52924436 (router set), in both directions, and
+// from Base swap traces for what those swaps did not exercise. The executor's and callback's own
+// gas, the input transfer included, is the execution gas estimator's business.
 
-// Pre/post loop overhead: globalState, liquidity and fee growth reads and writes.
-const SWAP_BASE_GAS: u64 = 70_000;
-// One `movePriceTowardsTarget` step plus its accounting.
+/// `swap` outside its external calls: state reads and writes, fee accounting and the swap loop.
+/// Measured at 54.0k to 54.3k.
+const SWAP_BASE_GAS: u64 = 54_000;
+/// One `movePriceTowardsTarget` step plus its accounting, as in the Uniswap V3 model.
 const GAS_PER_SWAP_MATH_STEP: u64 = 5_400;
-// Crossing an initialized tick: `ticks.cross` updates the tick's fee growth outside.
-const GAS_PER_INITIALIZED_TICK_CROSS: u64 = 25_000;
-// Output transfer, callback, balance checks and reserve update.
-const SWAP_SETTLEMENT_GAS: u64 = 70_000;
-// Calling into the plugin for `beforeSwap`, on top of the gas the hook itself reports.
-const PLUGIN_CALL_OVERHEAD_GAS: u64 = 5_000;
-// `afterSwap`: the farming tick update and the MEVX back-run check. The back-run can spend up to
-// the plugin's `callGasBudget` when an arbitrage exists; this is the cost when none does, which is
-// what a solver should compare quotes on.
-const AFTER_SWAP_GAS: u64 = 60_000;
-// Conservative max gas budget for a single swap (Ethereum transaction gas limit).
+/// Crossing an initialized tick: `ticks.cross` updates the tick's fee growth outside. About 22k
+/// in Base swap traces.
+const GAS_PER_INITIALIZED_TICK_CROSS: u64 = 22_000;
+/// The pool's balance reads around the swap and the output transfer. Measured at 24.7k to 44.7k:
+/// a recipient holding none of the output token yet costs 20k more, and USDC's proxy costs more
+/// than WETH. Set near the recurring case, so the fork test's cold first swap comes out slightly
+/// under and the warm ones slightly over.
+const SWAP_SETTLEMENT_GAS: u64 = 30_000;
+/// The pool's cold `CALL` into the plugin, on top of the gas the hook itself reports.
+const PLUGIN_CALL_OVERHEAD_GAS: u64 = 2_600;
+/// `afterSwap` with no MEVX router set: the plugin returns after its checks. Measured at 9.1k.
+const AFTER_SWAP_GAS: u64 = 9_000;
+/// `afterSwap` with a MEVX router set: the back-run check finds no arbitrage. Measured at 65.8k
+/// to 66.8k. When it finds one it spends up to `call_gas_budget` more, and a solver should compare
+/// quotes on the cost without it.
+const AFTER_SWAP_ROUTER_GAS: u64 = 66_000;
+/// `afterSwap` with a farming incentive set: updating the incentive's virtual pool, about 60k
+/// more in Base swap traces when the swap crossed a tick.
+const AFTER_SWAP_INCENTIVE_GAS: u64 = 60_000;
+/// Gas budget of a single swap: the Ethereum transaction gas cap, as in the Uniswap V3 model.
 const MAX_SWAP_GAS: u64 = 16_700_000;
-const MAX_TICKS_CROSSED: u64 = (MAX_SWAP_GAS - SWAP_BASE_GAS) / GAS_PER_INITIALIZED_TICK_CROSS;
+/// Fixed plugin costs a swap can carry: `beforeSwap`, the call into it, and the dearest
+/// `afterSwap` branch. Set aside before counting ticks.
+const MAX_PLUGIN_GAS: u64 = 200_000;
+/// Initialized ticks one swap can cross within `MAX_SWAP_GAS`.
+const MAX_TICKS_CROSSED: u64 =
+    (MAX_SWAP_GAS - SWAP_BASE_GAS - SWAP_SETTLEMENT_GAS - MAX_PLUGIN_GAS) /
+        (GAS_PER_INITIALIZED_TICK_CROSS + GAS_PER_SWAP_MATH_STEP);
 
 /// State of a Nami V4 pool, an Algebra Integral 1.2 fork.
 ///
-/// Swap math runs natively. When the pool's plugin config enables `beforeSwap` and `DYNAMIC_FEE`,
-/// the fee of every quote comes from running the plugin's `beforeSwap` hook in the EVM against
-/// indexed plugin state; otherwise the pool's stored fee applies.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Swap math runs natively. When the pool's plugin config enables `beforeSwap`, the fee of every
+/// quote comes from running the plugin's `beforeSwap` hook in the EVM against indexed plugin
+/// state; otherwise the pool's stored fee applies.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NamiV4State {
     pool: Address,
     liquidity: u128,
     sqrt_price: U256,
     tick: i32,
-    /// Initialized ticks and their net liquidity. A tick stays initialized while any position
-    /// references it, so it can carry zero net liquidity and still bound a swap step.
-    ticks: BTreeMap<i32, i128>,
+    /// Initialized ticks and their net liquidity, shared with the states a quote returns. A tick
+    /// stays initialized while any position references it, so it can carry zero net liquidity
+    /// and still bound a swap step.
+    ticks: Arc<BTreeMap<i32, i128>>,
     /// `globalState.lastFee`: the fee used when the plugin does not override it.
     last_fee: u32,
     plugin: Option<Address>,
     plugin_config: u8,
-    /// The plugin's MEVX router. While it is set and the pool calls `afterSwap`, the plugin
-    /// requires `min_gas_left` gas to remain at that hook and reverts the swap otherwise.
+    /// The plugin's MEVX router. While it is set, `afterSwap` checks for a back-run, which the
+    /// gas estimate counts, and requires `min_gas_left` gas to remain at that hook.
     mevx_router: Option<Address>,
+    /// Gas the plugin requires to remain when `afterSwap` runs with a router set. Reported for
+    /// solvers; the quote does not depend on it.
     min_gas_left: u64,
-    /// Gas the plugin forwards to its back-run self-call. It does not change a quote.
+    /// Gas the plugin forwards to its back-run self-call. Reported for solvers; the quote does
+    /// not depend on it.
     call_gas_budget: u64,
-    /// The farming incentive the plugin's `afterSwap` updates, when one is set.
+    /// The farming incentive the plugin's `afterSwap` updates, when one is set. Its update is
+    /// counted in the gas estimate.
     incentive: Option<Address>,
     /// Block the next quote is expected to execute in.
     execution_block_number: u64,
@@ -100,9 +129,37 @@ pub struct NamiV4State {
     /// execution block. The plugin writes its oracle timepoint once per block, so a later swap in
     /// the same block must see it.
     plugin_storage: StorageOverrides,
+    /// Storage and block environment a pending quote runs the plugin under. `None` on confirmed
+    /// state; set only on the clones `apply_deltas_ephemeral` hands out.
+    #[serde(skip)]
+    pending_overrides: Option<Arc<PendingOverrides>>,
 }
 
+impl PartialEq for NamiV4State {
+    /// Pending overrides are quote-time context rather than pool state, so they do not count.
+    fn eq(&self, other: &Self) -> bool {
+        self.pool == other.pool &&
+            self.liquidity == other.liquidity &&
+            self.sqrt_price == other.sqrt_price &&
+            self.tick == other.tick &&
+            self.ticks == other.ticks &&
+            self.last_fee == other.last_fee &&
+            self.plugin == other.plugin &&
+            self.plugin_config == other.plugin_config &&
+            self.mevx_router == other.mevx_router &&
+            self.min_gas_left == other.min_gas_left &&
+            self.call_gas_budget == other.call_gas_budget &&
+            self.incentive == other.incentive &&
+            self.execution_block_number == other.execution_block_number &&
+            self.execution_block_timestamp == other.execution_block_timestamp &&
+            self.plugin_storage == other.plugin_storage
+    }
+}
+
+impl Eq for NamiV4State {}
+
 /// Fee a swap pays, the gas spent resolving it and the plugin storage it leaves behind.
+#[derive(Clone)]
 struct ResolvedFee {
     fee: u32,
     gas: u64,
@@ -114,6 +171,7 @@ impl NamiV4State {
     ///
     /// `fees` are in hundredths of a bip (1_000_000 = 100%). `ticks` lists every initialized tick
     /// with its net liquidity, including ticks whose net liquidity is zero.
+    // The pool's own fields in the pool's order. A wrapper type would only move the list.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: Address,
@@ -131,7 +189,7 @@ impl NamiV4State {
             liquidity,
             sqrt_price,
             tick,
-            ticks: ticks.into_iter().collect(),
+            ticks: Arc::new(ticks.into_iter().collect()),
             last_fee,
             plugin,
             plugin_config,
@@ -142,6 +200,7 @@ impl NamiV4State {
             execution_block_number: execution_block.number(),
             execution_block_timestamp: execution_block.timestamp(),
             plugin_storage: StorageOverrides::new(),
+            pending_overrides: None,
         }
     }
 
@@ -161,17 +220,29 @@ impl NamiV4State {
         self
     }
 
-    /// The fee a swap in the given direction would pay now, as a ratio, falling back to the
-    /// stored fee when the plugin cannot be queried.
-    fn fee_ratio(&self, zero_for_one: bool) -> f64 {
-        let fee = Self::default_price_limit(zero_for_one)
-            .and_then(|limit| self.resolve_fee(zero_for_one, I256::ONE, limit))
-            .map_or(self.last_fee, |resolved| resolved.fee);
-        fee as f64 / 1_000_000.0
+    /// The fee a swap in the given direction would pay now, as a ratio.
+    fn fee_ratio(&self, zero_for_one: bool) -> Result<f64, SimulationError> {
+        let fee = self
+            .resolve_fee(zero_for_one, I256::ONE, Self::default_price_limit(zero_for_one)?)?
+            .fee;
+        Ok(f64::from(fee) / f64::from(FEE_DENOMINATOR))
     }
 
-    fn has_dynamic_fee_plugin(&self) -> bool {
+    /// Whether the pool calls its plugin's `beforeSwap`, which then sets the fee.
+    fn calls_before_swap(&self) -> bool {
         self.plugin.is_some() && self.plugin_config & BEFORE_SWAP_FLAG != 0
+    }
+
+    /// Gas the plugin's `afterSwap` spends on the branch its settings select, when the pool calls
+    /// it: the back-run check with a router set, and the incentive update with one set.
+    fn after_swap_gas(&self) -> u64 {
+        if self.plugin_config & AFTER_SWAP_FLAG == 0 {
+            return 0;
+        }
+        let back_run_check =
+            if self.mevx_router.is_some() { AFTER_SWAP_ROUTER_GAS } else { AFTER_SWAP_GAS };
+        let incentive = if self.incentive.is_some() { AFTER_SWAP_INCENTIVE_GAS } else { 0 };
+        back_run_check + incentive
     }
 
     /// Resolves the fee the pool would charge for this swap, asking the plugin when the pool
@@ -210,6 +281,7 @@ impl NamiV4State {
                 block_number: self.execution_block_number,
                 block_timestamp: self.execution_block_timestamp,
                 storage_overrides: &self.plugin_storage,
+                pending_overrides: self.pending_overrides.as_deref(),
             },
         )?;
         Ok(ResolvedFee {
@@ -243,15 +315,27 @@ impl NamiV4State {
         }
     }
 
-    /// Mirrors `SwapCalculation._calculateSwap`: walks initialized ticks from the current price
-    /// until the amount is used up or the price limit is reached. Also returns the plugin storage
-    /// the swap leaves behind.
+    /// Swaps at the fee the plugin or the pool sets for it. See [`Self::swap_with_fee`].
     fn swap(
         &self,
         zero_for_one: bool,
         amount_specified: I256,
         sqrt_price_limit: Option<U256>,
     ) -> Result<(SwapResults, StorageOverrides), SimulationError> {
+        let price_limit =
+            self.swap_price_limit(zero_for_one, amount_specified, sqrt_price_limit)?;
+        let resolved_fee = self.resolve_fee(zero_for_one, amount_specified, price_limit)?;
+        self.swap_with_fee(zero_for_one, amount_specified, price_limit, resolved_fee)
+    }
+
+    /// Checks the pool can run this swap and returns its price limit, the loosest one when none
+    /// is given.
+    fn swap_price_limit(
+        &self,
+        zero_for_one: bool,
+        amount_specified: I256,
+        sqrt_price_limit: Option<U256>,
+    ) -> Result<U256, SimulationError> {
         if self.sqrt_price.is_zero() {
             return Err(SimulationError::RecoverableError("Pool not initialized".to_string()));
         }
@@ -274,8 +358,19 @@ impl NamiV4State {
         if !price_limit_valid {
             return Err(SimulationError::InvalidInput("Price limit out of range".into(), None));
         }
+        Ok(price_limit)
+    }
 
-        let resolved_fee = self.resolve_fee(zero_for_one, amount_specified, price_limit)?;
+    /// Mirrors `SwapCalculation._calculateSwap`: walks initialized ticks from the current price
+    /// until the amount is used up or the price limit is reached. Also returns the plugin storage
+    /// the swap leaves behind.
+    fn swap_with_fee(
+        &self,
+        zero_for_one: bool,
+        amount_specified: I256,
+        price_limit: U256,
+        resolved_fee: ResolvedFee,
+    ) -> Result<(SwapResults, StorageOverrides), SimulationError> {
         let exact_input = amount_specified.is_positive();
 
         let mut amount_required = amount_specified;
@@ -317,10 +412,14 @@ impl NamiV4State {
             };
             amount_required = required_change
                 .and_then(|change| amount_required.checked_add(change))
-                .ok_or_else(|| SimulationError::FatalError("Swap amount overflow".into()))?;
+                .ok_or_else(|| {
+                    SimulationError::FatalError("Swap overflow: amount required".into())
+                })?;
             amount_calculated = calculated_change
                 .and_then(|change| amount_calculated.checked_add(change))
-                .ok_or_else(|| SimulationError::FatalError("Swap amount overflow".into()))?;
+                .ok_or_else(|| {
+                    SimulationError::FatalError("Swap overflow: amount calculated".into())
+                })?;
 
             if current_price == step_tick_price {
                 let net_liquidity = self
@@ -351,9 +450,7 @@ impl NamiV4State {
             }
         }
 
-        if self.plugin_config & AFTER_SWAP_FLAG != 0 {
-            gas_used += AFTER_SWAP_GAS;
-        }
+        gas_used += self.after_swap_gas();
 
         let result = SwapResults {
             amount_calculated,
@@ -395,28 +492,44 @@ pub(super) fn decode_optional_address(value: &Bytes) -> Result<Option<Address>, 
 
 /// Decodes an unsigned big-endian integer attribute, saturating at `u64::MAX`.
 pub(super) fn decode_u64(value: &Bytes) -> u64 {
+    if value.len() > 32 {
+        return u64::MAX;
+    }
     u64::try_from(U256::from_be_slice(value)).unwrap_or(u64::MAX)
+}
+
+/// The tick index of a `ticks/<index>` attribute key, or `None` for any other key.
+pub(super) fn parse_tick_key(key: &str) -> Option<Result<i32, String>> {
+    let index = key.strip_prefix("ticks/")?;
+    Some(
+        index
+            .parse::<i32>()
+            .map_err(|err| format!("attribute {key}: {err}")),
+    )
 }
 
 #[typetag::serde]
 impl ProtocolSim for NamiV4State {
-    /// The fee a zero-for-one swap would pay now, falling back to the stored fee when the plugin
-    /// cannot be queried. The plugin may charge the other direction a different fee; `spot_price`
-    /// accounts for that, this single value cannot.
+    /// The fee a zero-for-one swap would pay now. The trait cannot report an error, so when the
+    /// plugin refuses the probe the stored fee stands in, with a warning. The plugin may charge
+    /// the other direction a different fee; `spot_price` accounts for that, this single value
+    /// cannot.
     fn fee(&self) -> f64 {
-        self.fee_ratio(true)
+        self.fee_ratio(true).unwrap_or_else(|err| {
+            warn!(pool = %self.pool, %err, "Nami V4 plugin refused the fee probe, using the stored fee");
+            f64::from(self.last_fee) / f64::from(FEE_DENOMINATOR)
+        })
     }
 
-    /// The price of `a` in `b` including the fee a swap in that direction would pay. The plugin
-    /// may charge the two directions different fees.
+    /// The price of `a` in `b`, marked up by the fee of the swap that buys `a`: the one whose
+    /// input is `b`. The plugin may charge the two directions different fees.
     fn spot_price(&self, a: &Token, b: &Token) -> Result<f64, SimulationError> {
-        let zero_for_one = a < b;
-        let price = if zero_for_one {
+        let price = if a < b {
             sqrt_price_q96_to_f64(self.sqrt_price, a.decimals, b.decimals)?
         } else {
             1.0f64 / sqrt_price_q96_to_f64(self.sqrt_price, b.decimals, a.decimals)?
         };
-        Ok(add_fee_markup(price, self.fee_ratio(zero_for_one)))
+        Ok(add_fee_markup(price, self.fee_ratio(b < a)?))
     }
 
     fn get_amount_out(
@@ -458,6 +571,10 @@ impl ProtocolSim for NamiV4State {
         token_out: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let zero_for_one = token_in < token_out;
+        // The plugin decides whether the pool swaps at all, and its fee comes out of the input.
+        let fee = self
+            .resolve_fee(zero_for_one, I256::ONE, Self::default_price_limit(zero_for_one)?)?
+            .fee;
         let mut current_tick = self.tick;
         let mut current_price = self.sqrt_price;
         let mut current_liquidity = self.liquidity;
@@ -485,7 +602,12 @@ impl ProtocolSim for NamiV4State {
                     get_token0_delta(current_price, step_price, current_liquidity, false)?,
                 )
             };
-            total_in = safe_add_u256(total_in, amount_in)?;
+            let amount_in_with_fee = mul_div_rounding_up(
+                amount_in,
+                U256::from(FEE_DENOMINATOR),
+                U256::from(FEE_DENOMINATOR - fee),
+            )?;
+            total_in = safe_add_u256(total_in, amount_in_with_fee)?;
             total_out = safe_add_u256(total_out, amount_out)?;
 
             let net_liquidity = self
@@ -494,6 +616,7 @@ impl ProtocolSim for NamiV4State {
                 .copied()
                 .unwrap_or(0);
             let liquidity_delta = if zero_for_one { -net_liquidity } else { net_liquidity };
+            // A tick the state cannot cross ends the walk, as in the Uniswap V3 model.
             let Ok(new_liquidity) = add_liquidity_delta(current_liquidity, liquidity_delta) else {
                 break;
             };
@@ -511,93 +634,88 @@ impl ProtocolSim for NamiV4State {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        // Indexed state now includes whatever the simulated swaps anticipated.
-        self.plugin_storage.clear();
-        if let Some(liquidity) = delta
-            .updated_attributes
-            .remove("liquidity")
-        {
-            self.liquidity = liquidity.into();
+        // Decode everything first, so a delta that fails to decode leaves the state untouched.
+        let mut take = |key: &str| delta.updated_attributes.remove(key);
+        let liquidity = take("liquidity").map(u128::from);
+        let sqrt_price = take("sqrt_price_x96").map(|value| U256::from_be_slice(&value));
+        let tick = take("tick").map(i32::from);
+        let last_fee = take("fee").map(u32::from);
+        let plugin = take("plugin")
+            .map(|value| decode_optional_address(&value))
+            .transpose()
+            .map_err(decode_error)?;
+        let plugin_config = take("plugin_config").map(u8::from);
+        let mevx_router = take("mevx_router")
+            .map(|value| decode_optional_address(&value))
+            .transpose()
+            .map_err(decode_error)?;
+        let min_gas_left = take("min_gas_left").map(|value| decode_u64(&value));
+        let call_gas_budget = take("call_gas_budget").map(|value| decode_u64(&value));
+        let incentive = take("incentive")
+            .map(|value| decode_optional_address(&value))
+            .transpose()
+            .map_err(decode_error)?;
+        let mut tick_updates = Vec::new();
+        for (key, value) in &delta.updated_attributes {
+            if let Some(index) = parse_tick_key(key) {
+                tick_updates.push((index.map_err(decode_error)?, i128::from(value.clone())));
+            }
         }
-        if let Some(sqrt_price) = delta
-            .updated_attributes
-            .remove("sqrt_price_x96")
-        {
-            self.sqrt_price = U256::from_be_slice(&sqrt_price);
-        }
-        if let Some(tick) = delta.updated_attributes.remove("tick") {
-            self.tick = tick.into();
-        }
-        if let Some(fee) = delta.updated_attributes.remove("fee") {
-            self.last_fee = fee.into();
-        }
-        if let Some(plugin) = delta
-            .updated_attributes
-            .remove("plugin")
-        {
-            self.plugin = decode_optional_address(&plugin).map_err(decode_error)?;
-        }
-        if let Some(plugin_config) = delta
-            .updated_attributes
-            .remove("plugin_config")
-        {
-            self.plugin_config = u8::from(plugin_config);
-        }
-        if let Some(router) = delta
-            .updated_attributes
-            .remove("mevx_router")
-        {
-            self.mevx_router = decode_optional_address(&router).map_err(decode_error)?;
-        }
-        if let Some(min_gas_left) = delta
-            .updated_attributes
-            .remove("min_gas_left")
-        {
-            self.min_gas_left = decode_u64(&min_gas_left);
-        }
-        if let Some(call_gas_budget) = delta
-            .updated_attributes
-            .remove("call_gas_budget")
-        {
-            self.call_gas_budget = decode_u64(&call_gas_budget);
-        }
-        if let Some(incentive) = delta
-            .updated_attributes
-            .remove("incentive")
-        {
-            self.incentive = decode_optional_address(&incentive).map_err(decode_error)?;
+        let mut tick_removals = Vec::new();
+        for key in &delta.deleted_attributes {
+            if let Some(index) = parse_tick_key(key) {
+                tick_removals.push(index.map_err(decode_error)?);
+            }
         }
 
-        for (key, value) in delta.updated_attributes {
-            let Some(tick) = key.strip_prefix("ticks/") else {
-                continue;
-            };
-            let tick = tick
-                .parse::<i32>()
-                .map_err(decode_error)?;
-            self.ticks
-                .insert(tick, i128::from(value));
+        // Indexed state now includes whatever the simulated swaps anticipated.
+        self.plugin_storage.clear();
+        if let Some(liquidity) = liquidity {
+            self.liquidity = liquidity;
         }
-        for key in delta.deleted_attributes {
-            if key == "plugin" {
-                self.plugin = None;
-                continue;
+        if let Some(sqrt_price) = sqrt_price {
+            self.sqrt_price = sqrt_price;
+        }
+        if let Some(tick) = tick {
+            self.tick = tick;
+        }
+        if let Some(last_fee) = last_fee {
+            self.last_fee = last_fee;
+        }
+        if let Some(plugin) = plugin {
+            self.plugin = plugin;
+        }
+        if let Some(plugin_config) = plugin_config {
+            self.plugin_config = plugin_config;
+        }
+        if let Some(mevx_router) = mevx_router {
+            self.mevx_router = mevx_router;
+        }
+        if let Some(min_gas_left) = min_gas_left {
+            self.min_gas_left = min_gas_left;
+        }
+        if let Some(call_gas_budget) = call_gas_budget {
+            self.call_gas_budget = call_gas_budget;
+        }
+        if let Some(incentive) = incentive {
+            self.incentive = incentive;
+        }
+        if !tick_updates.is_empty() || !tick_removals.is_empty() {
+            let ticks = Arc::make_mut(&mut self.ticks);
+            for (index, net_liquidity) in tick_updates {
+                ticks.insert(index, net_liquidity);
             }
-            if key == "mevx_router" {
-                self.mevx_router = None;
-                continue;
+            for index in tick_removals {
+                ticks.remove(&index);
             }
-            if key == "incentive" {
-                self.incentive = None;
-                continue;
+        }
+        for key in &delta.deleted_attributes {
+            match key.as_str() {
+                "plugin" => self.plugin = None,
+                "mevx_router" => self.mevx_router = None,
+                "incentive" => self.incentive = None,
+                _ => {}
             }
-            let Some(tick) = key.strip_prefix("ticks/") else {
-                continue;
-            };
-            let tick = tick
-                .parse::<i32>()
-                .map_err(decode_error)?;
-            self.ticks.remove(&tick);
         }
         Ok(())
     }
@@ -619,24 +737,44 @@ impl ProtocolSim for NamiV4State {
                 max_amount_in: _,
             } => {
                 let zero_for_one = params.token_in().address < params.token_out().address;
-                let fee = Self::default_price_limit(zero_for_one)
-                    .and_then(|limit| self.resolve_fee(zero_for_one, I256::ONE, limit))?
-                    .fee;
+                // The plugin's fee does not depend on the amount, so one probe prices the swap.
+                let resolved_fee = self.resolve_fee(
+                    zero_for_one,
+                    I256::ONE,
+                    Self::default_price_limit(zero_for_one)?,
+                )?;
                 let mut plugin_storage = StorageOverrides::new();
                 let (amount_in, amount_out, swap_result) = clmm_swap_to_price(
                     self.sqrt_price,
                     &params.token_in().address,
                     &params.token_out().address,
                     target,
-                    fee,
+                    resolved_fee.fee,
                     Sign::Positive,
                     |zero_for_one, amount_specified, sqrt_price_limit| {
-                        let (result, storage) =
-                            self.swap(zero_for_one, amount_specified, Some(sqrt_price_limit))?;
+                        let price_limit = self.swap_price_limit(
+                            zero_for_one,
+                            amount_specified,
+                            Some(sqrt_price_limit),
+                        )?;
+                        let (result, storage) = self.swap_with_fee(
+                            zero_for_one,
+                            amount_specified,
+                            price_limit,
+                            resolved_fee.clone(),
+                        )?;
                         plugin_storage = storage;
                         Ok(result)
                     },
                 )?;
+                if amount_in == BigUint::ZERO {
+                    // No active liquidity between the price and the target: the helper reports a
+                    // zeroed swap, and on chain the price would move for nothing.
+                    return Err(SimulationError::RecoverableError(format!(
+                        "Nami V4 pool {} has no liquidity between its price and the target",
+                        self.pool
+                    )));
+                }
 
                 Ok(PoolSwap::new(
                     amount_in,
@@ -662,7 +800,22 @@ impl ProtocolSim for NamiV4State {
         self.execution_block_timestamp = block.timestamp();
         // Storage anticipated for the previous execution block does not carry over.
         self.plugin_storage.clear();
-        timestamp_changed && self.has_dynamic_fee_plugin()
+        timestamp_changed && self.calls_before_swap()
+    }
+
+    fn set_pending_overrides(
+        &mut self,
+        overrides: Arc<dyn Any + Send + Sync>,
+    ) -> Result<(), SimulationError> {
+        let overrides = overrides
+            .downcast::<PendingOverrides>()
+            .map_err(|_| {
+                SimulationError::FatalError(
+                    "Nami V4 pending overrides must be `PendingOverrides`".to_string(),
+                )
+            })?;
+        self.pending_overrides = Some(overrides);
+        Ok(())
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
@@ -693,10 +846,15 @@ mod fork_differential_tests;
 mod tests {
     use std::{collections::HashSet, str::FromStr};
 
+    use alloy::sol_types::SolValue;
+    use tycho_client::feed::BlockHeader;
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::evm::protocol::nami_v4::plugin::DYNAMIC_FEE_FLAG;
+    use crate::evm::{
+        protocol::nami_v4::plugin::{BEFORE_SWAP_SELECTOR, DYNAMIC_FEE_FLAG},
+        tycho_models::{AccountUpdate, ChangeType},
+    };
 
     fn token(address: &str, symbol: &str, decimals: u32) -> Token {
         Token::new(
@@ -735,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_input_within_one_range_charges_the_stored_fee() {
+    fn test_exact_input_within_one_range_charges_the_stored_fee() {
         let pool = static_fee_pool();
         let amount_in = BigUint::from(10u64).pow(18);
 
@@ -757,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn swap_crosses_out_of_range_and_stops_at_the_limit() {
+    fn test_swap_crosses_out_of_range_and_stops_at_the_limit() {
         let pool = static_fee_pool();
         // Far more than the range holds: the swap exhausts liquidity at tick -600, walks the
         // empty range to the price limit and leaves part of the input unswapped.
@@ -785,9 +943,9 @@ mod tests {
     }
 
     #[test]
-    fn zero_net_liquidity_tick_still_bounds_a_step() {
+    fn test_zero_net_liquidity_tick_still_bounds_a_step() {
         let mut pool = static_fee_pool();
-        pool.ticks.insert(-60, 0);
+        Arc::make_mut(&mut pool.ticks).insert(-60, 0);
 
         assert_eq!(pool.prev_initialized_tick(-1), -60);
         assert_eq!(pool.prev_initialized_tick(-61), -600);
@@ -795,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn uninitialized_pool_is_not_quotable() {
+    fn test_uninitialized_pool_is_not_quotable() {
         let mut pool = static_fee_pool();
         pool.sqrt_price = U256::ZERO;
 
@@ -805,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn delta_transition_updates_fee_plugin_and_ticks() {
+    fn test_delta_transition_updates_fee_plugin_and_ticks() {
         let mut pool = static_fee_pool();
         let plugin = Address::repeat_byte(0x22);
         let updated_attributes: HashMap<String, Bytes> = [
@@ -833,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_block_reports_changes_only_for_plugin_fees() {
+    fn test_apply_block_reports_changes_only_for_plugin_fees() {
         let mut static_pool = static_fee_pool();
         assert!(!static_pool.apply_block(&BlockContext::new(101, 1_002)));
 
@@ -845,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn before_swap_flag_without_plugin_is_an_error() {
+    fn test_before_swap_flag_without_plugin_is_an_error() {
         let mut pool = static_fee_pool();
         pool.plugin_config = BEFORE_SWAP_FLAG;
 
@@ -855,18 +1013,19 @@ mod tests {
     }
 
     #[test]
-    fn decode_optional_address_treats_empty_and_zero_as_none() {
+    fn test_decode_optional_address_treats_empty_and_zero_as_none() {
         assert_eq!(decode_optional_address(&Bytes::new()), Ok(None));
         assert_eq!(decode_optional_address(&Bytes::from(vec![0u8; 20])), Ok(None));
         assert!(decode_optional_address(&Bytes::from(vec![1u8; 3])).is_err());
     }
 
     #[test]
-    fn decode_u64_reads_any_width_and_saturates() {
+    fn test_decode_u64_reads_any_width_and_saturates() {
         assert_eq!(decode_u64(&Bytes::new()), 0);
         assert_eq!(decode_u64(&Bytes::from(vec![0x0F, 0x42, 0x40])), 1_000_000);
         assert_eq!(decode_u64(&Bytes::from(1_000_000_u64)), 1_000_000);
         assert_eq!(decode_u64(&Bytes::from(vec![0xFF; 32])), u64::MAX);
+        assert_eq!(decode_u64(&Bytes::from(vec![0x01; 33])), u64::MAX);
     }
 
     // The static pool with the plugin's `afterSwap` enabled and a minimum gas left of 1M.
@@ -883,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn delta_transition_updates_and_clears_the_plugin_settings() {
+    fn test_delta_transition_updates_and_clears_the_plugin_settings() {
         let mut pool = gated_pool();
         let updated_attributes: HashMap<String, Bytes> = [
             ("min_gas_left".to_string(), Bytes::from(vec![0x03, 0xD0, 0x90])),
@@ -927,5 +1086,186 @@ mod tests {
             .unwrap();
         assert_eq!(pool.mevx_router, None);
         assert_eq!(pool.incentive, None);
+    }
+
+    /// EVM bytecode of a plugin whose `beforeSwap` answers with the override fee
+    /// `zero_for_one_fee` for zero-for-one swaps and `one_for_zero_fee` otherwise, and no plugin
+    /// fee.
+    fn fee_plugin_code(zero_for_one_fee: u16, one_for_zero_fee: u16) -> Vec<u8> {
+        assert!(one_for_zero_fee >= zero_for_one_fee);
+        // PUSH4 selector, PUSH1 0xE0, SHL, PUSH1 0, MSTORE: the selector word at memory 0.
+        let mut code = vec![0x63];
+        code.extend_from_slice(&BEFORE_SWAP_SELECTOR);
+        code.extend_from_slice(&[0x60, 0xE0, 0x1B, 0x60, 0x00, 0x52]);
+        // one_for_zero_fee - zeroToOne * (one_for_zero_fee - zero_for_one_fee) at memory 32:
+        // PUSH2, PUSH2, PUSH1 0x44, CALLDATALOAD, MUL, SWAP1, SUB, PUSH1 0x20, MSTORE.
+        code.push(0x61);
+        code.extend_from_slice(&one_for_zero_fee.to_be_bytes());
+        code.push(0x61);
+        code.extend_from_slice(&(one_for_zero_fee - zero_for_one_fee).to_be_bytes());
+        code.extend_from_slice(&[0x60, 0x44, 0x35, 0x02, 0x90, 0x03, 0x60, 0x20, 0x52]);
+        // PUSH1 0x60, PUSH1 0, RETURN: three words, the plugin fee word still zero.
+        code.extend_from_slice(&[0x60, 0x60, 0x60, 0x00, 0xF3]);
+        code
+    }
+
+    /// EVM bytecode that reverts every call with `Error(reason)`.
+    fn reverting_plugin_code(reason: &str) -> Vec<u8> {
+        let mut data = vec![0x08, 0xC3, 0x79, 0xA0];
+        data.extend_from_slice(&reason.to_string().abi_encode());
+        let mut code = Vec::new();
+        for (index, word) in data.chunks(32).enumerate() {
+            let mut padded = [0u8; 32];
+            padded[..word.len()].copy_from_slice(word);
+            // PUSH32 word, PUSH1 offset, MSTORE
+            code.push(0x7F);
+            code.extend_from_slice(&padded);
+            code.extend_from_slice(&[0x60, u8::try_from(index * 32).unwrap(), 0x52]);
+        }
+        // PUSH1 length, PUSH1 0, REVERT
+        code.extend_from_slice(&[0x60, u8::try_from(data.len()).unwrap(), 0x60, 0x00, 0xFD]);
+        code
+    }
+
+    /// The static pool at `pool`, calling `plugin` for its fee, with both loaded into the shared
+    /// simulation DB: the pool with a `globalState` slot, the plugin with `plugin_code`.
+    fn plugin_pool(pool: Address, plugin: Address, plugin_code: Vec<u8>) -> NamiV4State {
+        SHARED_TYCHO_DB
+            .update(
+                vec![
+                    AccountUpdate::new(
+                        pool,
+                        Chain::Base,
+                        HashMap::from([(U256::from(2), U256::ONE)]),
+                        Some(U256::ZERO),
+                        Some(vec![0x00]),
+                        ChangeType::Creation,
+                    ),
+                    AccountUpdate::new(
+                        plugin,
+                        Chain::Base,
+                        HashMap::new(),
+                        Some(U256::ZERO),
+                        Some(plugin_code),
+                        ChangeType::Creation,
+                    ),
+                ],
+                Some(BlockHeader { number: 100, timestamp: 1_000, ..Default::default() }),
+            )
+            .unwrap();
+        let mut state = static_fee_pool();
+        state.pool = pool;
+        state.plugin = Some(plugin);
+        state.plugin_config = BEFORE_SWAP_FLAG | DYNAMIC_FEE_FLAG;
+        state
+    }
+
+    #[test]
+    fn test_plugin_fee_follows_the_swap_direction() {
+        let pool = plugin_pool(
+            Address::repeat_byte(0xA1),
+            Address::repeat_byte(0xA2),
+            fee_plugin_code(1_000, 2_000),
+        );
+
+        assert_eq!(pool.fee_ratio(true).unwrap(), 0.001);
+        assert_eq!(pool.fee_ratio(false).unwrap(), 0.002);
+        assert_eq!(pool.fee(), 0.001);
+        // Buying token0 with token1 is a one-for-zero swap, so that fee marks up token0's price.
+        assert_eq!(
+            pool.spot_price(&token0(), &token1())
+                .unwrap(),
+            add_fee_markup(1.0, 0.002)
+        );
+        assert_eq!(
+            pool.spot_price(&token1(), &token0())
+                .unwrap(),
+            add_fee_markup(1.0, 0.001)
+        );
+
+        let amount_in = BigUint::from(10u64).pow(18);
+        let quote = pool
+            .get_amount_out(amount_in.clone(), &token0(), &token1())
+            .unwrap();
+        let fee_free = &amount_in - &amount_in / 1000u32;
+        assert!(quote.amount < fee_free);
+        assert!(quote.amount > &fee_free - &fee_free / 1000u32);
+        let without_plugin =
+            SWAP_BASE_GAS + GAS_PER_SWAP_MATH_STEP + SWAP_SETTLEMENT_GAS + PLUGIN_CALL_OVERHEAD_GAS;
+        assert!(quote.gas > BigUint::from(without_plugin), "{}", quote.gas);
+    }
+
+    #[test]
+    fn test_plugin_refusal_fails_quotes_prices_and_limits() {
+        let pool = plugin_pool(
+            Address::repeat_byte(0xB1),
+            Address::repeat_byte(0xB2),
+            reverting_plugin_code("Trading disabled"),
+        );
+
+        let err = pool
+            .get_amount_out(BigUint::from(1_000u64), &token0(), &token1())
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Trading disabled"),
+            "{err}"
+        );
+        assert!(pool
+            .spot_price(&token0(), &token1())
+            .is_err());
+        assert!(pool
+            .get_limits(token0().address, token1().address)
+            .is_err());
+        // The trait's `fee` cannot fail, so the stored fee stands in.
+        assert_eq!(pool.fee(), 0.003);
+    }
+
+    #[test]
+    fn test_after_swap_gas_follows_the_plugin_settings() {
+        let gas = |pool: &NamiV4State| {
+            pool.get_amount_out(BigUint::from(10u64).pow(18), &token0(), &token1())
+                .unwrap()
+                .gas
+        };
+        let no_hook = static_fee_pool();
+        let mut hooked = static_fee_pool();
+        hooked.plugin = Some(Address::repeat_byte(0x22));
+        hooked.plugin_config = AFTER_SWAP_FLAG;
+        let router = Some(Address::repeat_byte(0x33));
+        let routed = hooked
+            .clone()
+            .with_plugin_settings(router, 0, 5_000_000, None);
+        let farmed = hooked.clone().with_plugin_settings(
+            router,
+            0,
+            5_000_000,
+            Some(Address::repeat_byte(0x44)),
+        );
+
+        assert_eq!(gas(&hooked), &gas(&no_hook) + AFTER_SWAP_GAS);
+        assert_eq!(gas(&routed), &gas(&no_hook) + AFTER_SWAP_ROUTER_GAS);
+        assert_eq!(gas(&farmed), &gas(&no_hook) + AFTER_SWAP_ROUTER_GAS + AFTER_SWAP_INCENTIVE_GAS);
+    }
+
+    #[test]
+    fn test_bad_delta_leaves_the_state_untouched() {
+        let mut pool = static_fee_pool();
+        let before = pool.clone();
+        let delta = ProtocolStateDelta {
+            component_id: "pool".to_owned(),
+            updated_attributes: HashMap::from([
+                ("fee".to_string(), Bytes::from(500_u32.to_be_bytes().to_vec())),
+                ("ticks/x".to_string(), Bytes::from(0_i128.to_be_bytes().to_vec())),
+            ]),
+            deleted_attributes: HashSet::new(),
+        };
+
+        let err = pool
+            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap_err();
+
+        assert!(format!("{err:?}").contains("ticks/x"), "{err:?}");
+        assert_eq!(pool, before);
     }
 }

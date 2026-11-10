@@ -86,7 +86,7 @@ pub(crate) fn coerce_error(
     }
 }
 
-fn parse_solidity_error_message(data: &str) -> String {
+pub(crate) fn parse_solidity_error_message(data: &str) -> String {
     // 10 for "0x" + 8 hex chars error signature
     if data.len() >= 10 {
         let data_bytes = match Vec::from_hex(&data[2..]) {

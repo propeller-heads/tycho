@@ -6,7 +6,9 @@
 //! test dry-runs it once, which loads every account and storage slot the swap reads (the plugin's
 //! oracle included) from the RPC into the local cache, then loads that cache into
 //! `SHARED_TYCHO_DB`, quotes with `NamiV4State`, executes the swap and requires the quote and the
-//! post-swap pool state to match it exactly.
+//! post-swap pool state to match it exactly. Each swap is also quoted from the state the previous
+//! quote returned, in the same block or the next, and the quoted gas is held against the gas the
+//! pool's `swap` frame spent.
 use std::{collections::HashSet, time::Instant};
 
 use alloy::{
@@ -25,14 +27,18 @@ use revm::{
         BlockEnv, CfgEnv, Context, TxEnv,
     },
     database::{AlloyDB, CacheDB, WrapDatabaseAsync},
+    interpreter::{CallInputs, CallOutcome},
     primitives::{hardfork::SpecId, TxKind},
     state::AccountInfo,
-    Database, ExecuteCommitEvm, ExecuteEvm, MainBuilder, MainContext,
+    Database, ExecuteEvm, InspectCommitEvm, Inspector, MainBuilder, MainContext,
 };
 use tycho_client::feed::BlockHeader;
 use tycho_common::{
     models::{token::Token, Chain},
-    simulation::protocol_sim::{BlockContext, ProtocolSim},
+    simulation::{
+        errors::SimulationError,
+        protocol_sim::{BlockContext, GetAmountOutResult, ProtocolSim},
+    },
     Bytes,
 };
 
@@ -40,8 +46,9 @@ use super::NamiV4State;
 use crate::evm::{
     engine_db::SHARED_TYCHO_DB,
     protocol::{
+        nami_v4::swap_math::get_token0_delta,
         u256_num::u256_to_biguint,
-        utils::uniswap::tick_math::{MAX_TICK, MIN_TICK},
+        utils::uniswap::tick_math::{get_sqrt_ratio_at_tick, MAX_TICK, MIN_TICK},
     },
     tycho_models::{AccountUpdate, ChangeType},
 };
@@ -108,6 +115,33 @@ const WETH: Address = alloy::primitives::address!("42000000000000000000000000000
 const USDC: Address = alloy::primitives::address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
 
 type ForkDb = CacheDB<WrapDatabaseAsync<AlloyDB<alloy::network::Ethereum, DynProvider>>>;
+
+/// Gas the pool's `swap` frame spent in a transaction, less the callback it made into the swap
+/// router, which pays the input and is the caller's cost rather than the pool's.
+#[derive(Default)]
+struct PoolSwapGas {
+    swap_frame: u64,
+    callback: u64,
+}
+
+impl<CTX> Inspector<CTX> for PoolSwapGas {
+    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        let spent = outcome.result.gas.spent();
+        // `swap` is the pool's largest frame in the transaction; its other frames are reads.
+        if inputs.target_address == POOL {
+            self.swap_frame = self.swap_frame.max(spent);
+        }
+        if inputs.caller == POOL && inputs.target_address == SWAP_ROUTER {
+            self.callback = spent;
+        }
+    }
+}
+
+/// A committed call: its output, its logs and the gas the pool's `swap` spent on its own account.
+struct Executed {
+    logs: Vec<Log>,
+    pool_swap_gas: u64,
+}
 
 /// Base forked at `FORK_BLOCK`, advanced locally: every transaction is sent by `owner`.
 struct ForkedBase {
@@ -179,18 +213,25 @@ impl ForkedBase {
     }
 
     /// Executes a call and commits it.
-    fn call(&mut self, to: Address, data: Vec<u8>, value: U256) -> (AlloyBytes, Vec<Log>) {
+    fn call(&mut self, to: Address, data: Vec<u8>, value: U256) -> Executed {
         let tx = self.tx(to, data, value);
-        let mut evm = Context::mainnet()
-            .with_db(&mut self.db)
-            .with_cfg(Self::cfg())
-            .with_block(self.block.clone())
-            .build_mainnet();
-        match evm
-            .transact_commit(tx)
-            .expect("EVM execution error")
-        {
-            ExecutionResult::Success { output: Output::Call(output), logs, .. } => (output, logs),
+        let mut gas = PoolSwapGas::default();
+        let result = {
+            let mut evm = Context::mainnet()
+                .with_db(&mut self.db)
+                .with_cfg(Self::cfg())
+                .with_block(self.block.clone())
+                .build_mainnet_with_inspector(&mut gas);
+            evm.inspect_tx_commit(tx)
+                .expect("EVM execution error")
+        };
+        match result {
+            ExecutionResult::Success { output: Output::Call(_), logs, .. } => Executed {
+                logs,
+                pool_swap_gas: gas
+                    .swap_frame
+                    .saturating_sub(gas.callback),
+            },
             other => panic!("call to {to} failed: {other:?}"),
         }
     }
@@ -260,6 +301,10 @@ impl ForkedBase {
         self.block.timestamp += U256::from(seconds);
     }
 
+    fn block_context(&self) -> BlockContext {
+        BlockContext::new(self.block.number.to::<u64>(), self.block.timestamp.to::<u64>())
+    }
+
     fn swap_calldata(&self, zero_for_one: bool, amount_in: U256) -> Vec<u8> {
         let (token_in, token_out) = if zero_for_one { (WETH, USDC) } else { (USDC, WETH) };
         ISwapRouter::exactInputSingleCall {
@@ -313,9 +358,53 @@ impl ForkedBase {
             u32::from(global_state.lastFee),
             Some(plugin),
             global_state.pluginConfig,
-            BlockContext::new(self.block.number.to::<u64>(), self.block.timestamp.to::<u64>()),
+            self.block_context(),
         )
     }
+}
+
+/// Quotes `state` for `amount_in` and fails the test on an error.
+fn quote(
+    state: &dyn ProtocolSim,
+    amount_in: U256,
+    token_in: &Token,
+    token_out: &Token,
+    what: &str,
+) -> GetAmountOutResult {
+    state
+        .get_amount_out(u256_to_biguint(amount_in), token_in, token_out)
+        .unwrap_or_else(|err| panic!("{what}: quote failed: {err:?}"))
+}
+
+/// Requires the quoted output and post-swap pool state to match the chain's.
+fn assert_quote_matches(
+    quote: &GetAmountOutResult,
+    amount_out: U256,
+    real: &NamiV4State,
+    what: &str,
+) {
+    assert_eq!(quote.amount, u256_to_biguint(amount_out), "{what}: amount out");
+    let simulated = quote
+        .new_state
+        .as_any()
+        .downcast_ref::<NamiV4State>()
+        .unwrap();
+    assert_eq!(simulated.sqrt_price, real.sqrt_price, "{what}: sqrt price");
+    assert_eq!(simulated.tick, real.tick, "{what}: tick");
+    assert_eq!(simulated.liquidity, real.liquidity, "{what}: liquidity");
+}
+
+/// Requires the quoted gas to sit within the band around what the pool's `swap` frame spent, and
+/// returns their ratio. A swap that follows another in the same block finds warm storage, so it
+/// spends less than the model, which prices a cold swap.
+fn assert_gas_quoted(quote: &GetAmountOutResult, measured: u64, what: &str) -> f64 {
+    let quoted: u64 = quote.gas.to_string().parse().unwrap();
+    let ratio = quoted as f64 / measured as f64;
+    assert!(
+        (0.85..=1.25).contains(&ratio),
+        "{what}: quoted {quoted} gas against {measured} spent by the pool's swap"
+    );
+    ratio
 }
 
 fn token(address: Address, decimals: u32) -> Token {
@@ -346,7 +435,7 @@ fn swap_result(logs: &[Log], zero_for_one: bool) -> (U256, u32) {
 
 #[test]
 #[ignore = "Requires BASE_RPC_URL (archive)"]
-fn quotes_match_the_live_base_pool() {
+fn test_quotes_match_the_live_base_pool() {
     let started = Instant::now();
     let rpc_url = std::env::var("BASE_RPC_URL").expect("BASE_RPC_URL");
     let mut chain = ForkedBase::new(&rpc_url);
@@ -362,14 +451,16 @@ fn quotes_match_the_live_base_pool() {
     let weth = token(WETH, 18);
     let usdc = token(USDC, 6);
 
-    // (zero_for_one, amount in, seconds since the previous swap). The pool's liquidity sits in a
-    // narrow range, so amounts stay small enough not to cross out of it; the first swap sells
-    // WETH, which funds the USDC side.
+    // (zero_for_one, amount in, seconds since the previous swap; zero keeps the same block). The
+    // pool's liquidity sits in a narrow range, so amounts stay small enough not to cross out of
+    // it; the first swap sells WETH, which funds the USDC side.
     let milli_eth = 10u128.pow(15);
-    let schedule: [(bool, u128, u64); 10] = [
+    let schedule: [(bool, u128, u64); 12] = [
         (true, 2 * milli_eth, 12),
+        (false, 1_000_000, 0),
         (false, 3_000_000, 600),
         (true, 3 * milli_eth, 1_800),
+        (true, milli_eth, 0),
         (false, 5_000_000, 3_600),
         (true, milli_eth, 900),
         (true, 2 * milli_eth, 2_400),
@@ -380,40 +471,103 @@ fn quotes_match_the_live_base_pool() {
     ];
 
     let mut fees = HashSet::new();
+    let mut gas_ratios = Vec::new();
+    let mut chained: Option<Box<dyn ProtocolSim>> = None;
     for (step, (zero_for_one, amount_in, seconds)) in schedule.into_iter().enumerate() {
-        chain.advance(seconds);
+        let same_block = seconds == 0;
+        if !same_block {
+            chain.advance(seconds);
+        }
         let amount_in = U256::from(amount_in);
         let calldata = chain.swap_calldata(zero_for_one, amount_in);
+        let (token_in, token_out) = if zero_for_one { (&weth, &usdc) } else { (&usdc, &weth) };
+        let what = format!("step {step}");
 
+        // A quote chained from the previous quote's state. In the same block it runs before the
+        // previous swap's writes reach the shared DB, so the plugin storage the quote carried
+        // must stand in for them. In a new block it reads them like any other quote.
+        let mut chained_quote = None;
+        if same_block {
+            chained_quote = chained.as_deref().map(|state| {
+                quote(state, amount_in, token_in, token_out, &format!("{what} chained"))
+            });
+        }
         let state = chain.pool_state();
         chain.dry_run(SWAP_ROUTER, calldata.clone());
         chain.sync_to_shared_db();
+        if !same_block {
+            if let Some(state) = chained.as_deref_mut() {
+                state.apply_block(&chain.block_context());
+                chained_quote =
+                    Some(quote(state, amount_in, token_in, token_out, &format!("{what} chained")));
+            }
+        }
+        let fresh_quote = quote(&state, amount_in, token_in, token_out, &what);
 
-        let (token_in, token_out) = if zero_for_one { (&weth, &usdc) } else { (&usdc, &weth) };
-        let quote = state
-            .get_amount_out(u256_to_biguint(amount_in), token_in, token_out)
-            .unwrap_or_else(|err| panic!("step {step}: quote failed: {err:?}"));
-
-        let (_, logs) = chain.call(SWAP_ROUTER, calldata, U256::ZERO);
-        let (amount_out, fee) = swap_result(&logs, zero_for_one);
-
-        assert_eq!(quote.amount, u256_to_biguint(amount_out), "step {step}: amount out, fee {fee}");
-        let simulated = quote
-            .new_state
-            .as_any()
-            .downcast_ref::<NamiV4State>()
-            .unwrap();
+        let executed = chain.call(SWAP_ROUTER, calldata, U256::ZERO);
+        let (amount_out, fee) = swap_result(&executed.logs, zero_for_one);
         let real = chain.pool_state();
-        assert_eq!(simulated.sqrt_price, real.sqrt_price, "step {step}: sqrt price");
-        assert_eq!(simulated.tick, real.tick, "step {step}: tick");
-        assert_eq!(simulated.liquidity, real.liquidity, "step {step}: liquidity");
+
+        assert_quote_matches(&fresh_quote, amount_out, &real, &format!("{what}, fee {fee}"));
+        if let Some(chained_quote) = &chained_quote {
+            assert_quote_matches(chained_quote, amount_out, &real, &format!("{what} chained"));
+        }
+        gas_ratios.push(assert_gas_quoted(&fresh_quote, executed.pool_swap_gas, &what));
+        chained = Some(chained_quote.map_or(fresh_quote.new_state, |chained| chained.new_state));
         fees.insert(fee);
     }
 
+    // One more swap, funded well past the first initialized tick below the price, so it crosses
+    // it. Past the pool's last tick it walks empty ranges to the price limit and leaves input
+    // unswapped, which the quote reports as a partial result.
+    chain.advance(60);
+    let state = chain.pool_state();
+    let tick_below = state.prev_initialized_tick(state.tick);
+    let max_funding = U256::from(100u128 * 10u128.pow(18));
+    let amount_to_tick = get_token0_delta(
+        get_sqrt_ratio_at_tick(tick_below).unwrap(),
+        state.sqrt_price,
+        state.liquidity,
+        true,
+    )
+    .unwrap();
+    let amount_in = amount_to_tick * U256::from(111) / U256::from(100);
+    if tick_below > MIN_TICK && amount_in <= max_funding {
+        chain.call(WETH, IWeth::depositCall {}.abi_encode(), amount_in);
+        let calldata = chain.swap_calldata(true, amount_in);
+        chain.dry_run(SWAP_ROUTER, calldata.clone());
+        chain.sync_to_shared_db();
+        let crossing = match state.get_amount_out(u256_to_biguint(amount_in), &weth, &usdc) {
+            Ok(quote) => quote,
+            Err(SimulationError::InvalidInput(_, Some(partial))) => partial,
+            Err(err) => panic!("tick crossing: quote failed: {err:?}"),
+        };
+
+        let executed = chain.call(SWAP_ROUTER, calldata, U256::ZERO);
+        let (amount_out, fee) = swap_result(&executed.logs, true);
+        let real = chain.pool_state();
+
+        assert!(real.tick < tick_below, "the crossing swap must pass tick {tick_below}");
+        assert_quote_matches(&crossing, amount_out, &real, &format!("tick crossing, fee {fee}"));
+        gas_ratios.push(assert_gas_quoted(&crossing, executed.pool_swap_gas, "tick crossing"));
+        fees.insert(fee);
+    } else {
+        eprintln!(
+            "skipping the tick crossing swap: tick below {tick_below}, {amount_in} wei of WETH \
+             needed"
+        );
+    }
+
     eprintln!(
-        "live-pool differential test: {} swaps, fees seen {fees:?}, took {:.1?}",
-        schedule.len(),
+        "live-pool differential test: {} swaps, fees seen {fees:?}, quoted/spent gas {:?}, took \
+         {:.1?}",
+        gas_ratios.len(),
+        gas_ratios
+            .iter()
+            .map(|ratio| format!("{ratio:.2}"))
+            .collect::<Vec<_>>(),
         started.elapsed()
     );
     assert!(!fees.contains(&0), "the plugin must set every fee, saw {fees:?}");
+    assert!(fees.len() > 1, "the plugin's fee must move over the schedule, saw {fees:?}");
 }

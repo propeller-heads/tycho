@@ -4,7 +4,7 @@ use alloy::primitives::{Address, U256};
 use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
 use tycho_common::{models::token::Token, simulation::protocol_sim::BlockContext, Bytes};
 
-use super::state::{decode_optional_address, decode_u64, NamiV4State};
+use super::state::{decode_optional_address, decode_u64, parse_tick_key, NamiV4State};
 use crate::protocol::{
     errors::InvalidSnapshotError,
     models::{DecoderContext, TryFromWithBlock},
@@ -56,13 +56,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for NamiV4State {
 
         let mut ticks = Vec::new();
         for (key, value) in &attrs {
-            let Some(index) = key.strip_prefix("ticks/") else {
-                continue;
-            };
-            let index = index
-                .parse::<i32>()
-                .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))?;
-            ticks.push((index, i128::from(value.clone())));
+            if let Some(index) = parse_tick_key(key) {
+                let index = index.map_err(InvalidSnapshotError::ValueError)?;
+                ticks.push((index, i128::from(value.clone())));
+            }
         }
 
         Ok(NamiV4State::new(
@@ -151,7 +148,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decodes_state_and_keeps_zero_net_liquidity_ticks() {
+    async fn test_decodes_state_and_keeps_zero_net_liquidity_ticks() {
         let decoded: NamiV4State = try_decode_snapshot_with_defaults(snapshot(attributes()))
             .await
             .unwrap();
@@ -171,7 +168,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decodes_the_plugin_settings() {
+    async fn test_decodes_the_plugin_settings() {
         let mut attributes = attributes();
         attributes.insert("mevx_router".to_string(), Bytes::from(vec![0x33; 20]));
         attributes.insert("min_gas_left".to_string(), Bytes::from(vec![0x0F, 0x42, 0x40]));
@@ -203,7 +200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_without_plugin_attributes_decodes_as_plugin_less() {
+    async fn test_pool_without_plugin_attributes_decodes_as_plugin_less() {
         let mut attributes = attributes();
         attributes.remove("plugin");
         attributes.remove("plugin_config");
@@ -232,7 +229,7 @@ mod tests {
     #[case::missing_sqrt_price("sqrt_price_x96")]
     #[case::missing_tick("tick")]
     #[case::missing_fee("fee")]
-    async fn missing_required_attribute_is_rejected(#[case] missing_attribute: String) {
+    async fn test_missing_required_attribute_is_rejected(#[case] missing_attribute: String) {
         let mut attributes = attributes();
         attributes.remove(&missing_attribute);
 

@@ -1,26 +1,27 @@
-//! Algebra Integral swap-step math (`PriceMovementMath` and `TokenDeltaMath`).
+//! Algebra Integral 1.2 swap-step math (`PriceMovementMath` and `TokenDeltaMath`), ported line
+//! by line.
 //!
-//! The shared `utils::uniswap` math is Uniswap V3's. Algebra differs in rounding and branch
-//! conditions in ways that change results by a few wei (exact-output uses `>=` to decide whether
-//! the target is reached, the rounded-down token0 delta is a floor `mulDiv`, and overflowing
-//! products fall back to a second formula instead of reverting), so this module ports the Algebra
-//! libraries line by line.
+//! The shared `utils::uniswap` port deviates from both Algebra and Uniswap V3's own libraries in
+//! three places that change results by a few wei: exact output decides the target is reached with
+//! `>` instead of `>=`, the rounded-down token0 delta is not a floor `mulDiv`, and an overflowing
+//! product errors where the contracts fall back to a second formula. This port matches the
+//! contracts. `NamiV4State` only ever swaps exact input; the exact-output branches stay so the
+//! port stays whole and testable against the contracts.
 use alloy::primitives::{I256, U256};
 use tycho_common::simulation::errors::SimulationError;
 
-use crate::evm::protocol::utils::solidity_math::{mul_div, mul_div_rounding_up};
+use crate::evm::protocol::utils::{
+    solidity_math::{mul_div, mul_div_rounding_up},
+    uniswap::FEE_PIPS_DENOMINATOR,
+};
 
-/// Fee denominator: fees are expressed in hundredths of a bip (1e-6).
-pub(super) const FEE_DENOMINATOR: u32 = 1_000_000;
+/// Fee denominator: fees are expressed in hundredths of a bip (1e-6), as in Uniswap V3.
+pub(super) const FEE_DENOMINATOR: u32 = FEE_PIPS_DENOMINATOR;
 const RESOLUTION: usize = 96;
-
-fn q96() -> U256 {
-    U256::ONE << RESOLUTION
-}
-
-fn max_u160() -> U256 {
-    (U256::ONE << 160) - U256::ONE
-}
+/// 2^96.
+const Q96: U256 = U256::from_limbs([0, 1 << (RESOLUTION - 64), 0, 0]);
+/// 2^160 - 1.
+const MAX_U160: U256 = U256::from_limbs([u64::MAX, u64::MAX, u32::MAX as u64, 0]);
 
 fn revert(reason: &str) -> SimulationError {
     SimulationError::RecoverableError(format!("Algebra math revert: {reason}"))
@@ -30,12 +31,11 @@ fn div_rounding_up(x: U256, y: U256) -> Result<U256, SimulationError> {
     if y.is_zero() {
         return Err(revert("division by zero"));
     }
-    let (quotient, remainder) = x.div_rem(y);
-    Ok(if remainder.is_zero() { quotient } else { quotient + U256::ONE })
+    Ok(x.div_ceil(y))
 }
 
 fn to_u160(value: U256) -> Result<U256, SimulationError> {
-    if value > max_u160() {
+    if value > MAX_U160 {
         return Err(revert("uint160 overflow"));
     }
     Ok(value)
@@ -80,9 +80,9 @@ pub(super) fn get_token1_delta(
     }
     let price_delta = price_upper - price_lower;
     if round_up {
-        mul_div_rounding_up(price_delta, U256::from(liquidity), q96())
+        mul_div_rounding_up(price_delta, U256::from(liquidity), Q96)
     } else {
-        mul_div(price_delta, U256::from(liquidity), q96())
+        mul_div(price_delta, U256::from(liquidity), Q96)
     }
 }
 
@@ -125,10 +125,10 @@ fn get_new_price(
             to_u160(mul_div_rounding_up(liquidity_shifted, price, liquidity_shifted - product)?)
         }
     } else if from_input {
-        let quotient = if amount <= max_u160() {
+        let quotient = if amount <= MAX_U160 {
             (amount << RESOLUTION) / U256::from(liquidity)
         } else {
-            mul_div(amount, q96(), U256::from(liquidity))?
+            mul_div(amount, Q96, U256::from(liquidity))?
         };
         to_u160(
             price
@@ -136,10 +136,10 @@ fn get_new_price(
                 .ok_or_else(|| revert("new price: price overflow"))?,
         )
     } else {
-        let quotient = if amount <= max_u160() {
+        let quotient = if amount <= MAX_U160 {
             div_rounding_up(amount << RESOLUTION, U256::from(liquidity))?
         } else {
-            mul_div_rounding_up(amount, q96(), U256::from(liquidity))?
+            mul_div_rounding_up(amount, Q96, U256::from(liquidity))?
         };
         if price <= quotient {
             return Err(revert("new price: price underflow"));
@@ -258,11 +258,11 @@ mod tests {
 
     // sqrt(1) in Q64.96
     fn price_one() -> U256 {
-        q96()
+        Q96
     }
 
     #[test]
-    fn token_deltas_round_in_the_pools_favor() {
+    fn test_token_deltas_round_in_the_pools_favor() {
         let lower = price_one();
         let upper = U256::from_str("87150978765690771352898345369").unwrap(); // ~sqrt(1.21)
         let liquidity = 1_000_000_000_000_000_000u128;
@@ -277,12 +277,12 @@ mod tests {
     }
 
     #[test]
-    fn token0_delta_rejects_zero_lower_price() {
+    fn test_token0_delta_rejects_zero_lower_price() {
         assert!(get_token0_delta(U256::ZERO, price_one(), 1, true).is_err());
     }
 
     #[test]
-    fn exact_input_reaching_target_charges_fee_on_input() {
+    fn test_exact_input_reaching_target_charges_fee_on_input() {
         let current = price_one();
         let target = current - (current >> 10);
         let step = move_price_towards_target(
@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_input_partial_step_keeps_the_remainder_as_fee() {
+    fn test_exact_input_partial_step_keeps_the_remainder_as_fee() {
         let current = price_one();
         let target = current >> 1;
         let amount = U256::from(1_000_000u64);
@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_output_equal_to_step_output_reaches_the_target() {
+    fn test_exact_output_equal_to_step_output_reaches_the_target() {
         // Algebra treats `amount == output` as reaching the target (Uniswap V3 uses `>`).
         let current = price_one();
         let target = current - (current >> 20);
@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_liquidity_jumps_to_target_without_fee() {
+    fn test_zero_liquidity_jumps_to_target_without_fee() {
         let current = price_one();
         let target = current >> 1;
         let step = move_price_towards_target(

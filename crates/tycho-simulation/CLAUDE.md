@@ -43,7 +43,10 @@ for any protocol indexed by Tycho.
     that changes a state's price, tick, liquidity, fee or ticks must start an empty step cache,
     and changes ticks only through `Arc::make_mut`
   - **Hybrid** (`fluid/`, `balancer_v3/`, `curve/`): native Rust quote math over VM-indexed pool
-    state (each has both `state.rs` and `vm.rs`)
+    state (each has both `state.rs` and `vm.rs`). `nami_v4/` (Nami V4, an Algebra Integral
+    1.2 fork) runs its own swap loop natively and, when a pool's plugin sets the fee, the
+    plugin's `beforeSwap` in the EVM against DCI-indexed plugin state; its gas model counts the
+    plugin's `afterSwap` branch from the indexed MEVX router and incentive settings
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
     protocols without a native implementation
 - **`snapshot_feed/`**: latest-value snapshot feeds, both ends, generic in the snapshot and the

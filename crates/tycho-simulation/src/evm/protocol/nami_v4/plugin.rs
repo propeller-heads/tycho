@@ -1,4 +1,7 @@
 //! Runs the pool's plugin `beforeSwap` hook in the EVM to obtain the fee a swap would pay.
+//!
+//! The hook's interface is Algebra Integral 1.2's `IAlgebraPlugin.beforeSwap`, as Nami's plugin
+//! implements it.
 use std::{collections::HashMap, fmt::Debug};
 
 use alloy::{
@@ -12,8 +15,11 @@ use tycho_common::simulation::errors::SimulationError;
 use super::swap_math::FEE_DENOMINATOR;
 use crate::evm::{
     engine_db::engine_db_interface::EngineDatabaseInterface,
-    protocol::vm::constants::EXTERNAL_ACCOUNT,
-    simulation::{BlockEnvOverrides, SimulationEngine, SimulationParameters},
+    protocol::vm::{constants::EXTERNAL_ACCOUNT, utils::parse_solidity_error_message},
+    simulation::{
+        BlockEnvOverrides, PendingOverrides, SimulationEngine, SimulationEngineError,
+        SimulationParameters,
+    },
 };
 
 sol! {
@@ -28,6 +34,8 @@ sol! {
     ) external returns (bytes4 selector, uint24 feeOverride, uint24 pluginFee);
 }
 
+/// Selector of the `beforeSwap` call, which the hook also returns as its acknowledgement.
+pub(super) const BEFORE_SWAP_SELECTOR: [u8; 4] = beforeSwapCall::SELECTOR;
 /// Pool calls the plugin's `beforeSwap` when this `pluginConfig` flag is set.
 pub(super) const BEFORE_SWAP_FLAG: u8 = 1;
 /// Pool calls the plugin's `afterSwap` when this `pluginConfig` flag is set.
@@ -39,9 +47,15 @@ pub(super) const DYNAMIC_FEE_FLAG: u8 = 1 << 7;
 const GLOBAL_STATE_SLOT: u64 = 2;
 /// `globalState` packs `price` (160 bits) then `tick` (24 bits) from the low end of the slot.
 const PRICE_AND_TICK_BITS: usize = 184;
-/// Gas every simulated transaction is charged up front. In a real swap the pool calls the plugin
-/// from inside the transaction, so this part is not spent.
-const INTRINSIC_TX_GAS: u64 = 21_000;
+/// Gas every simulated transaction is charged up front: the base cost and its calldata. In a real
+/// swap the pool calls the plugin from inside the transaction, so neither part is spent.
+fn intrinsic_gas(calldata: &[u8]) -> u64 {
+    21_000 +
+        calldata
+            .iter()
+            .map(|byte| if *byte == 0 { 4 } else { 16 })
+            .sum::<u64>()
+}
 
 /// Storage slot values per contract.
 pub(super) type StorageOverrides = HashMap<Address, HashMap<U256, U256>>;
@@ -60,6 +74,8 @@ pub(super) struct BeforeSwapRequest<'a> {
     pub(super) block_timestamp: u64,
     /// Storage written by earlier simulated swaps in the same block, applied over indexed state.
     pub(super) storage_overrides: &'a StorageOverrides,
+    /// The pending block's storage and environment, under a pending quote.
+    pub(super) pending_overrides: Option<&'a PendingOverrides>,
 }
 
 /// Fees returned by the plugin for one swap, in hundredths of a bip.
@@ -90,6 +106,8 @@ where
     <D as EngineDatabaseInterface>::Error: Debug,
 {
     let data = beforeSwapCall {
+        // The plugin may price by sender: the deployed one charges its MEVX executor another fee.
+        // A quote is for any other sender, which is what a solver's swap is.
         sender: *EXTERNAL_ACCOUNT,
         recipient: *EXTERNAL_ACCOUNT,
         zeroToOne: request.zero_to_one,
@@ -102,40 +120,73 @@ where
     }
     .abi_encode();
 
-    let global_state = engine
-        .state
-        .storage_ref(request.pool, U256::from(GLOBAL_STATE_SLOT))
-        .map_err(|err| {
-            SimulationError::RecoverableError(format!(
-                "Nami V4 pool {} globalState missing from the simulation DB: {err:?}",
-                request.pool
-            ))
-        })?;
-    let mut overrides = request.storage_overrides.clone();
+    // The pending block's storage first, then what earlier simulated swaps wrote, then the pool's
+    // price and tick as the quote has them.
+    let mut overrides = request
+        .pending_overrides
+        .and_then(|pending| pending.storage.clone())
+        .unwrap_or_default();
+    for (address, slots) in request.storage_overrides {
+        overrides
+            .entry(*address)
+            .or_default()
+            .extend(
+                slots
+                    .iter()
+                    .map(|(slot, value)| (*slot, *value)),
+            );
+    }
+    let global_state_slot = U256::from(GLOBAL_STATE_SLOT);
+    let global_state = match overrides
+        .get(&request.pool)
+        .and_then(|slots| slots.get(&global_state_slot))
+    {
+        Some(value) => *value,
+        None => engine
+            .state
+            .storage_ref(request.pool, global_state_slot)
+            .map_err(|err| {
+                SimulationError::RecoverableError(format!(
+                    "Nami V4 pool {} globalState missing from the simulation DB: {err:?}",
+                    request.pool
+                ))
+            })?,
+    };
     overrides
         .entry(request.pool)
         .or_default()
         .insert(
-            U256::from(GLOBAL_STATE_SLOT),
+            global_state_slot,
             with_price_and_tick(global_state, request.sqrt_price, request.tick),
         );
+    let block_overrides = request
+        .pending_overrides
+        .and_then(|pending| pending.block.clone())
+        .unwrap_or(BlockEnvOverrides {
+            number: Some(request.block_number),
+            timestamp: Some(request.block_timestamp),
+        });
 
+    let intrinsic_gas = intrinsic_gas(&data);
     let params = SimulationParameters {
         caller: request.pool,
         to: request.plugin,
         data,
         overrides: Some(overrides),
-        block_overrides: Some(BlockEnvOverrides {
-            number: Some(request.block_number),
-            timestamp: Some(request.block_timestamp),
-        }),
+        block_overrides: Some(block_overrides),
         ..Default::default()
     };
     let result = engine
         .simulate(&params)
         .map_err(|err| {
+            let reason = match &err {
+                SimulationEngineError::TransactionError { data, .. } if data.starts_with("0x") => {
+                    parse_solidity_error_message(data)
+                }
+                other => other.to_string(),
+            };
             SimulationError::RecoverableError(format!(
-                "Nami V4 plugin {} beforeSwap failed for pool {}: {err}",
+                "Nami V4 plugin {} beforeSwap failed for pool {}: {reason}",
                 request.plugin, request.pool
             ))
         })?;
@@ -145,7 +196,7 @@ where
             request.plugin
         ))
     })?;
-    if decoded.selector != beforeSwapCall::SELECTOR {
+    if decoded.selector != BEFORE_SWAP_SELECTOR {
         return Err(SimulationError::RecoverableError(format!(
             "Nami V4 plugin {} returned the wrong beforeSwap selector; the pool would revert",
             request.plugin
@@ -167,7 +218,7 @@ where
         plugin_fee: decoded.pluginFee.to::<u32>(),
         gas_used: result
             .gas_used
-            .saturating_sub(INTRINSIC_TX_GAS),
+            .saturating_sub(intrinsic_gas),
         storage_writes,
     })
 }
@@ -215,32 +266,32 @@ mod tests {
     const DYNAMIC: u8 = BEFORE_SWAP_FLAG | DYNAMIC_FEE_FLAG;
 
     #[test]
-    fn override_fee_replaces_the_stored_fee() {
+    fn test_override_fee_replaces_the_stored_fee() {
         assert_eq!(effective_fee(500, DYNAMIC, &fees(3_000, 0)).unwrap(), 3_000);
     }
 
     #[test]
-    fn zero_override_falls_back_to_the_stored_fee_plus_plugin_fee() {
+    fn test_zero_override_falls_back_to_the_stored_fee_plus_plugin_fee() {
         assert_eq!(effective_fee(500, DYNAMIC, &fees(0, 100)).unwrap(), 600);
     }
 
     #[test]
-    fn plugin_fee_is_added_to_the_override() {
+    fn test_plugin_fee_is_added_to_the_override() {
         assert_eq!(effective_fee(500, DYNAMIC, &fees(3_000, 100)).unwrap(), 3_100);
     }
 
     #[test]
-    fn fee_without_dynamic_flag_reverts() {
+    fn test_fee_without_dynamic_flag_reverts() {
         assert!(effective_fee(500, BEFORE_SWAP_FLAG, &fees(3_000, 0)).is_err());
     }
 
     #[test]
-    fn fee_at_or_above_denominator_reverts() {
+    fn test_fee_at_or_above_denominator_reverts() {
         assert!(effective_fee(0, DYNAMIC, &fees(999_999, 1)).is_err());
     }
 
     #[test]
-    fn global_state_override_keeps_fee_config_and_lock_bits() {
+    fn test_global_state_override_keeps_fee_config_and_lock_bits() {
         let upper_bits = U256::from(0xABCDu64) << PRICE_AND_TICK_BITS;
         let old = upper_bits | U256::from(12345u64);
         let price = U256::from(1u64) << 96;
