@@ -9,7 +9,7 @@ serves it over HTTP/WebSocket.
 main.rs                     CLI entry point; account initialisation; extractor startup; Pyroscope CPU (and, with jemalloc heap profiling on, memory) profiling when PYROSCOPE_SERVER_URL is set
 cli.rs                      Command definitions: Index, Run, AnalyzeTokens, Rpc
 ot.rs                       OpenTelemetry tracing configuration
-leadership.rs               Leader election: one process commits, the others follow; `elect` returns the WriterStatus + background task
+leadership.rs               Leader election: one process commits, the others follow; `elect` returns the WriterStatus + background task; a send on its `release` gives up the lock on shutdown
 testing.rs                  Test utilities
 
 extractor/
@@ -198,6 +198,15 @@ tries the `LeaderLock` once:
   follower. `tycho_leader` (gauge, 0/1) shows the role. `leader_lock_check_duration_seconds`
   (histogram) records each check. The check runs on the main runtime, so checks close to the 5s
   timeout show a runtime too busy to keep the lead.
+- **Shutdown**: on SIGTERM or SIGINT, `Shutdown::run` (`main.rs`) hands over in this order. It
+  closes every websocket connection with close code `Away` (`WsData::close_on_shutdown`; the server
+  already stops accepting connections on the signal), so clients connect to another instance, which
+  streams already. It stops the extractors and waits up to 10 s (`EXTRACTOR_STOP_TIMEOUT`) until
+  their supervisors end (`ExtractorHandle::stopped`). It then sends on the `release` of `elect`: a
+  leader closes its lock session, so a follower takes over within one poll instead of when this
+  process exits, and a follower stops retrying the lock, so a process that shuts down never becomes
+  the leader. A commit still running then fails on the writer fence. Last, it stops the server and
+  the write executor.
 - **Health**: each successful lock check is published in the `WriterStatus`
   (`time_since_lead_confirmed`). `GET /v1/health` returns 503 while this process leads and has not
   confirmed its lock for 30s, so a liveness probe restarts a leader that is stuck but still holds

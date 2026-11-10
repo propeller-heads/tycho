@@ -3,10 +3,15 @@
 //! Every `index` process extracts and serves; only the leader commits. A process that starts
 //! while another holds the leader lock follows: it publishes the leader's committed blocks to
 //! its extractors and retries the lock until it gets it. A leader that loses its lock session
-//! ends with an error, so the process exits instead of writing next to a new leader.
+//! ends with an error, so the process exits instead of writing next to a new leader. A process
+//! that shuts down releases the lock, so a follower can take over before this process exits.
 use std::{collections::HashMap, time::Duration};
 
-use tokio::{sync::watch, task::JoinHandle, time::Instant};
+use tokio::{
+    sync::{oneshot, watch},
+    task::JoinHandle,
+    time::Instant,
+};
 use tracing::{error, info, warn};
 use tycho_common::models::Chain;
 use tycho_storage::postgres::{
@@ -36,12 +41,19 @@ const LOCK_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Otherwise it is a follower: the task polls the committed blocks of `chain` and retries the
 /// lock. When it gets the lock, it increments the writer epoch and only then switches the role, so
 /// no extractor commits before the former leader is fenced. The lock checks start with the epoch
-/// increment. The task only ends when the leader's lock session is lost or fails.
+/// increment.
+///
+/// A send on `release` ends the task with `Ok`: a leader closes its lock session, which releases
+/// the lock at once, and a follower stops retrying the lock, so a process that shuts down never
+/// becomes the leader. A dropped `release` releases nothing. Otherwise the task only ends when
+/// the leader's lock session is lost or fails.
 pub async fn elect(
     database_url: &str,
     gateway: CachedGateway,
     chain: Chain,
+    release: oneshot::Receiver<()>,
 ) -> Result<(WriterStatus, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
+    let release = Box::pin(released(release));
     let mut lock = LeaderLock::connect(database_url).await?;
     let (committed_tx, committed_rx) = watch::channel(HashMap::new());
     let (confirmed_tx, confirmed_rx) = watch::channel(Instant::now());
@@ -52,7 +64,7 @@ pub async fn elect(
         metrics::gauge!("tycho_leader").set(1.0);
         let (_role_tx, role_rx) = watch::channel(Role::Leader);
         confirmed_tx.send_replace(Instant::now());
-        let task = tokio::spawn(hold_lead(lock, confirmed_tx));
+        let task = tokio::spawn(hold_lead(lock, confirmed_tx, release));
         return Ok((WriterStatus::new(role_rx, committed_rx, confirmed_rx), task));
     }
 
@@ -62,7 +74,14 @@ pub async fn elect(
     let (role_tx, role_rx) = watch::channel(Role::Follower);
     let database_url = database_url.to_string();
     let task = tokio::spawn(async move {
-        let lock = follow_until_elected(lock, &database_url, &gateway, &chain, &committed_tx).await;
+        let mut release = release;
+        let lock = tokio::select! {
+            lock = follow_until_elected(lock, &database_url, &gateway, &chain, &committed_tx) => lock,
+            () = &mut release => {
+                info!("Stopped retrying the leader lock: this process shuts down");
+                return Ok(());
+            }
+        };
         let epoch = gateway.increment_writer_epoch().await?;
         info!(epoch, "Elected database writer; taking over commits");
         confirmed_tx.send_replace(Instant::now());
@@ -72,9 +91,16 @@ pub async fn elect(
             .map_err(|_unreceived| {
                 ExtractionError::Unknown("Every writer status was dropped".into())
             })?;
-        hold_lead(lock, confirmed_tx).await
+        hold_lead(lock, confirmed_tx, release).await
     });
     Ok((WriterStatus::new(role_rx, committed_rx, confirmed_rx), task))
+}
+
+/// Resolves once `release` receives, and never when its sender is dropped without a send.
+async fn released(release: oneshot::Receiver<()>) {
+    if release.await.is_err() {
+        std::future::pending::<()>().await;
+    }
 }
 
 /// Publishes the committed blocks and retries the lock until this process holds it.
@@ -116,7 +142,8 @@ async fn publish_committed_blocks(
     Ok(())
 }
 
-/// Checks the lock session until it fails, and returns that failure.
+/// Checks the lock session until it fails, and returns that failure. Returns `Ok` once
+/// `release` resolves, after it closed the lock session, which releases the lock.
 ///
 /// Publishes the time of each successful check on `confirmed_tx`. The health endpoint uses it to
 /// report a leader whose checks stopped, for example because its runtime is stuck while it still
@@ -128,9 +155,19 @@ async fn publish_committed_blocks(
 async fn hold_lead(
     mut lock: LeaderLock,
     confirmed_tx: watch::Sender<Instant>,
+    release: impl std::future::Future<Output = ()>,
 ) -> Result<(), ExtractionError> {
+    tokio::pin!(release);
     loop {
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::select! {
+            () = tokio::time::sleep(POLL_INTERVAL) => {}
+            () = &mut release => {
+                drop(lock);
+                info!("Released the leader lock: this process shuts down");
+                metrics::gauge!("tycho_leader").set(0.0);
+                return Ok(());
+            }
+        }
         let check_started = Instant::now();
         let check = tokio::time::timeout(LOCK_CHECK_TIMEOUT, lock.check_alive()).await;
         metrics::histogram!("leader_lock_check_duration_seconds")
@@ -199,6 +236,11 @@ mod test_serial_db {
         gateway.commit_transaction(0).await
     }
 
+    /// A release whose sender is dropped, so it never releases.
+    fn never_released() -> oneshot::Receiver<()> {
+        oneshot::channel().1
+    }
+
     async fn wait_until(condition: impl Fn() -> bool) -> bool {
         for _ in 0..100 {
             if condition() {
@@ -222,7 +264,11 @@ mod test_serial_db {
             .expect("the lock query should run");
         let (confirmed_tx, _confirmed_rx) = watch::channel(Instant::now());
 
-        let held = tokio::time::timeout(POLL_INTERVAL * 3, hold_lead(lock, confirmed_tx)).await;
+        let held = tokio::time::timeout(
+            POLL_INTERVAL * 3,
+            hold_lead(lock, confirmed_tx, std::future::pending()),
+        )
+        .await;
 
         assert!(held.is_err(), "a leader with a live lock session keeps the lead");
         let durations: Vec<f64> = snapshotter
@@ -253,7 +299,7 @@ mod test_serial_db {
         run_against_db(|_| async move {
             let (leader_gw, _leader_executor) = writer_gateway().await;
             let (leader_status, leader_task) =
-                elect(&database_url(), leader_gw.clone(), Chain::Ethereum)
+                elect(&database_url(), leader_gw.clone(), Chain::Ethereum, never_released())
                     .await
                     .expect("first process should be elected");
             assert_eq!(leader_status.role(), Role::Leader);
@@ -271,7 +317,7 @@ mod test_serial_db {
 
             let (follower_gw, _follower_executor) = writer_gateway().await;
             let (follower_status, _follower_task) =
-                elect(&database_url(), follower_gw.clone(), Chain::Ethereum)
+                elect(&database_url(), follower_gw.clone(), Chain::Ethereum, never_released())
                     .await
                     .expect("second process should start");
             assert_eq!(follower_status.role(), Role::Follower);
@@ -300,6 +346,86 @@ mod test_serial_db {
                 matches!(stale, Err(StorageError::Fenced { .. })),
                 "the former leader must be fenced, got {stale:?}"
             );
+        })
+        .await;
+    }
+    #[tokio::test]
+    async fn test_released_leader_hands_the_lock_to_the_follower_at_once() {
+        run_against_db(|_| async move {
+            let (leader_gw, _leader_executor) = writer_gateway().await;
+            let (release_leader, leader_release) = oneshot::channel();
+            let (leader_status, leader_task) =
+                elect(&database_url(), leader_gw.clone(), Chain::Ethereum, leader_release)
+                    .await
+                    .expect("first process should be elected");
+            assert_eq!(leader_status.role(), Role::Leader);
+            let (follower_gw, _follower_executor) = writer_gateway().await;
+            let (follower_status, _follower_task) =
+                elect(&database_url(), follower_gw, Chain::Ethereum, never_released())
+                    .await
+                    .expect("second process should start");
+            assert_eq!(follower_status.role(), Role::Follower);
+
+            release_leader
+                .send(())
+                .expect("the leader task should wait for the release");
+            let ended = tokio::time::timeout(POLL_INTERVAL * 2, leader_task)
+                .await
+                .expect("a released leader task should end at once")
+                .expect("the leader task should not panic");
+
+            assert!(ended.is_ok(), "a release is no failure, got {ended:?}");
+            let released_at = Instant::now();
+            assert!(
+                wait_until(|| follower_status.role() == Role::Leader).await,
+                "the follower must take over once the leader released the lock"
+            );
+            assert!(
+                released_at.elapsed() < POLL_INTERVAL * 3,
+                "the follower must take over within a few polls, took {:?}",
+                released_at.elapsed()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_released_follower_stops_retrying_the_lock() {
+        run_against_db(|_| async move {
+            let (leader_gw, _leader_executor) = writer_gateway().await;
+            let (_leader_status, leader_task) =
+                elect(&database_url(), leader_gw, Chain::Ethereum, never_released())
+                    .await
+                    .expect("first process should be elected");
+            let (follower_gw, _follower_executor) = writer_gateway().await;
+            let (release_follower, follower_release) = oneshot::channel();
+            let (follower_status, follower_task) =
+                elect(&database_url(), follower_gw, Chain::Ethereum, follower_release)
+                    .await
+                    .expect("second process should start");
+
+            release_follower
+                .send(())
+                .expect("the follower task should wait for the release");
+            let ended = tokio::time::timeout(POLL_INTERVAL * 2, follower_task)
+                .await
+                .expect("a released follower task should end at once")
+                .expect("the follower task should not panic");
+            leader_task.abort();
+            tokio::time::sleep(POLL_INTERVAL * 3).await;
+
+            assert!(ended.is_ok(), "a release is no failure, got {ended:?}");
+            assert_eq!(
+                follower_status.role(),
+                Role::Follower,
+                "a released follower must not take the lock the leader left"
+            );
+            let (next_gw, _next_executor) = writer_gateway().await;
+            let (next_status, _next_task) =
+                elect(&database_url(), next_gw, Chain::Ethereum, never_released())
+                    .await
+                    .expect("third process should start");
+            assert_eq!(next_status.role(), Role::Leader, "the lock must stay free for others");
         })
         .await;
     }

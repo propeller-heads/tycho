@@ -78,6 +78,8 @@ pub struct ServicesBuilder<G> {
     disabled_rpc_caches: Vec<RpcCacheKind>,
     /// How old the newest block of a streamed extractor may be on a ready follower.
     ready_head_tolerance: chrono::Duration,
+    /// Turns `true` when the process shuts down, which closes every websocket connection.
+    ws_shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 /// Resolves with the first error either service task produces, or with `Ok` once both end
@@ -118,7 +120,15 @@ where
             disabled_rpc_caches: Vec::new(),
             writer_status: None,
             ready_head_tolerance: rpc::DEFAULT_READY_HEAD_TOLERANCE,
+            ws_shutdown: None,
         }
+    }
+
+    /// Closes every websocket connection once `shutdown` turns `true`, so that clients connect to
+    /// another instance.
+    pub fn close_websockets_on(mut self, shutdown: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.ws_shutdown = Some(shutdown);
+        self
     }
 
     /// Turns the given RPC response caches off. Requests to those endpoints always run the
@@ -298,7 +308,11 @@ where
             );
         }
 
-        let ws_data = web::Data::new(ws::WsData::new(self.extractor_handles.clone()));
+        let mut ws_data = ws::WsData::new(self.extractor_handles.clone());
+        if let Some(shutdown) = self.ws_shutdown.take() {
+            ws_data = ws_data.close_on_shutdown(shutdown);
+        }
+        let ws_data = web::Data::new(ws_data);
         let (server_handle, server_task) = self.start_server(
             Some(ws_data),
             openapi,

@@ -166,6 +166,11 @@ impl ExtractorHandle {
             .await
             .map_err(|err| ExtractionError::Unknown(err.to_string()))
     }
+
+    /// Resolves once the extractor's supervisor has ended, at once if it ended already.
+    pub async fn stopped(&self) {
+        self.control_tx.closed().await;
+    }
 }
 
 #[async_trait]

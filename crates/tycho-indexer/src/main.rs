@@ -17,13 +17,14 @@ use std::{
     process, slice,
     str::FromStr,
     sync::{mpsc, Arc},
+    time::Duration,
 };
 
 use actix_web::{dev::ServerHandle, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use chrono::{NaiveDateTime, Utc};
 use clap::Parser;
-use futures03::future::select_all;
+use futures03::future::{join_all, select_all};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use pyroscope::{
     backend::{pprof_backend, BackendConfig, PprofConfig},
@@ -34,6 +35,7 @@ use serde::Deserialize;
 use tokio::{
     runtime::Handle,
     signal::unix::{signal, SignalKind},
+    sync::{oneshot, watch},
     task::JoinHandle,
 };
 use tracing::{debug, error, info, instrument, warn};
@@ -562,7 +564,16 @@ async fn run_rpc(
             )
             .run()?;
     info!(server_url, "Http and Ws server started");
-    let shutdown_task = tokio::spawn(shutdown_handler(server_handle, vec![], None));
+    let shutdown_task = tokio::spawn(
+        Shutdown {
+            server: server_handle,
+            extractors: Vec::new(),
+            db_write_executor: None,
+            close_websockets: None,
+            release_lead: None,
+        }
+        .run(),
+    );
     let (res, _, _) = select_all([server_task, shutdown_task]).await;
     res.map_err(|join_err| ExtractionError::Unknown(format!("Service task panicked: {join_err}")))?
 }
@@ -610,8 +621,10 @@ async fn create_indexing_tasks(
         .values()
         .map(|config| (config.initialized_accounts.clone(), config.initialized_accounts_block))
         .collect();
+    let (release_lead, lead_release) = oneshot::channel();
     let (writer_status, election_task) =
-        leadership::elect(&global_args.database_url, cached_gw.clone(), chain).await?;
+        leadership::elect(&global_args.database_url, cached_gw.clone(), chain, lead_release)
+            .await?;
     // A process promoted later does not run this: the accounts are a testing aid to start
     // indexing from a later block, and the first leader has written them already.
     if writer_status.role() == Role::Leader {
@@ -644,6 +657,7 @@ async fn create_indexing_tasks(
     // The load runs after the extractors are built and before the server and the pump start:
     // the snapshot sees the initialized accounts, nothing writes during the build, and no
     // request or fold can reach a half-built cache.
+    let (close_websockets, websockets_closed) = watch::channel(false);
     let entity_cache = match global_args.entity_cache_mode {
         EntityCacheMode::Off => EntityCacheSetup::Off,
         mode @ (EntityCacheMode::Shadow | EntityCacheMode::Serve) => {
@@ -684,11 +698,20 @@ async fn create_indexing_tasks(
         .ready_head_tolerance(chrono::Duration::seconds(i64::from(
             global_args.ready_head_tolerance_secs,
         )))
+        .close_websockets_on(websockets_closed)
         .run()?;
     info!(server_url, "Http and Ws server started");
 
-    let shutdown_task =
-        tokio::spawn(shutdown_handler(server_handle, extractor_handles, Some(gw_writer_handle)));
+    let shutdown_task = tokio::spawn(
+        Shutdown {
+            server: server_handle,
+            extractors: extractor_handles,
+            db_write_executor: Some(gw_writer_handle),
+            close_websockets: Some(close_websockets),
+            release_lead: Some(release_lead),
+        }
+        .run(),
+    );
 
     #[expect(
         clippy::disallowed_methods,
@@ -923,34 +946,80 @@ async fn get_accounts_data(
     (block, extracted_accounts)
 }
 
-async fn shutdown_handler(
-    server_handle: ServerHandle,
+/// How long a shutdown waits for the extractors to stop before it releases the leader lock anyway.
+///
+/// Below the 30 s grace period of the pods, so the lock is released before the process is killed.
+/// A commit that is still running then fails on the writer fence of the new leader.
+const EXTRACTOR_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What a shutdown signal stops, in the order of [`Shutdown::run`].
+struct Shutdown {
+    server: ServerHandle,
     extractors: Vec<ExtractorHandle>,
-    db_write_executor_handle: Option<JoinHandle<()>>,
-) -> Result<(), ExtractionError> {
-    let ctrl_c = tokio::signal::ctrl_c();
-    let mut sigterm =
-        signal(SignalKind::terminate()).map_err(|e| ExtractionError::Unknown(e.to_string()))?;
+    db_write_executor: Option<JoinHandle<()>>,
+    /// Closes every websocket connection.
+    close_websockets: Option<watch::Sender<bool>>,
+    /// Releases the leader lock, or stops a follower from retrying it.
+    release_lead: Option<oneshot::Sender<()>>,
+}
 
-    tokio::select! {
-        _ = ctrl_c => {
-            info!("SIGINT (Ctrl+C) received. Cleaning up...");
-        },
-        _ = sigterm.recv() => {
-            info!("SIGTERM received. Cleaning up...");
-        },
-    }
+impl Shutdown {
+    /// Waits for SIGINT or SIGTERM, then hands the work to another instance and stops.
+    ///
+    /// The order makes the handover short, because the follower streams and serves already:
+    /// 1. Closes the websocket connections, so clients connect to another instance at once. The
+    ///    server stops to accept connections on the signal itself.
+    /// 2. Stops the extractors, and waits up to [`EXTRACTOR_STOP_TIMEOUT`] until they ended.
+    /// 3. Releases the leader lock, so a follower takes over without waiting for this process to
+    ///    exit.
+    /// 4. Stops the server and the database write executor.
+    async fn run(self) -> Result<(), ExtractionError> {
+        let ctrl_c = tokio::signal::ctrl_c();
+        let mut sigterm =
+            signal(SignalKind::terminate()).map_err(|e| ExtractionError::Unknown(e.to_string()))?;
 
-    for e in extractors.iter() {
-        if let Err(err) = e.stop().await {
-            warn!(error = %err, "Failed to stop extractor during shutdown");
+        tokio::select! {
+            _ = ctrl_c => {
+                info!("SIGINT (Ctrl+C) received. Cleaning up...");
+            },
+            _ = sigterm.recv() => {
+                info!("SIGTERM received. Cleaning up...");
+            },
         }
+
+        if let Some(close_websockets) = &self.close_websockets {
+            close_websockets.send_replace(true);
+        }
+        for e in self.extractors.iter() {
+            if let Err(err) = e.stop().await {
+                warn!(error = %err, "Failed to stop extractor during shutdown");
+            }
+        }
+        let all_stopped = join_all(
+            self.extractors
+                .iter()
+                .map(ExtractorHandle::stopped),
+        );
+        if tokio::time::timeout(EXTRACTOR_STOP_TIMEOUT, all_stopped)
+            .await
+            .is_err()
+        {
+            warn!(
+                timeout = ?EXTRACTOR_STOP_TIMEOUT,
+                "Extractors did not stop in time; releasing the leader lock anyway"
+            );
+        }
+        if let Some(release_lead) = self.release_lead {
+            if release_lead.send(()).is_err() {
+                info!("The election task ended already, and with it the leader lock session");
+            }
+        }
+        self.server.stop(true).await;
+        if let Some(handle) = self.db_write_executor {
+            handle.abort();
+        }
+        Ok(())
     }
-    server_handle.stop(true).await;
-    if let Some(handle) = db_write_executor_handle {
-        handle.abort();
-    }
-    Ok(())
 }
 
 #[tokio::main]

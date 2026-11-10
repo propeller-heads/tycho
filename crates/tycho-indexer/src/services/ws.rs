@@ -11,6 +11,7 @@ use actix::{
 use actix_web::{web, Error, HttpRequest, HttpResponse};
 use actix_web_actors::ws;
 use metrics::{counter, gauge, Label};
+use tokio::sync::watch;
 use tracing::{debug, error, info, instrument, trace, warn};
 use tycho_common::{
     dto::{BlockAggregatedChanges, Command, Response, WebSocketMessage},
@@ -37,12 +38,25 @@ pub type MessageSenderMap = HashMap<ExtractorIdentity, Arc<dyn MessageSender + S
 /// The subscribers map is read-only after initialization, so no mutex is needed
 pub struct WsData {
     /// There is one extractor subscriber per extractor identity
-    pub subscribers: Arc<MessageSenderMap>,
+    subscribers: Arc<MessageSenderMap>,
+    /// Turns `true` when the server shuts down. `None` when no shutdown closes the connections.
+    shutdown: Option<watch::Receiver<bool>>,
 }
 
 impl WsData {
     pub fn new(extractors: MessageSenderMap) -> Self {
-        Self { subscribers: Arc::new(extractors) }
+        Self { subscribers: Arc::new(extractors), shutdown: None }
+    }
+
+    /// Closes every connection, open or opened later, with close code `Away` once `shutdown`
+    /// turns `true`.
+    ///
+    /// The server stops to accept connections when it receives the shutdown signal, but it keeps
+    /// the open ones. A client on an open connection then subscribes again on the same
+    /// connection, to extractors that stop, instead of connecting to another instance.
+    pub fn close_on_shutdown(mut self, shutdown: watch::Receiver<bool>) -> Self {
+        self.shutdown = Some(shutdown);
+        self
     }
 }
 
@@ -176,6 +190,37 @@ impl WsActor {
             // Send ping
             ctx.ping(b"");
         });
+    }
+
+    /// Closes the connection with close code `Away` once the server shuts down.
+    ///
+    /// Does nothing when the shutdown sender is dropped before it signals a shutdown.
+    fn close_on_shutdown(&self, ctx: &mut <Self as Actor>::Context) {
+        let Some(mut shutdown) = self.app_state.shutdown.clone() else {
+            return;
+        };
+        let shutting_down = async move {
+            shutdown
+                .wait_for(|shutting_down| *shutting_down)
+                .await
+                .is_ok()
+        };
+        ctx.spawn(
+            shutting_down
+                .into_actor(self)
+                .map(|shutting_down, act, ctx| {
+                    if !shutting_down {
+                        return;
+                    }
+                    info!(WsActor.id = %act.id, "Server shuts down; closing the websocket connection");
+                    counter!("websocket_connections_dropped", "reason" => "shutdown").increment(1);
+                    ctx.close(Some(ws::CloseReason {
+                        code: ws::CloseCode::Away,
+                        description: Some("Server shuts down".into()),
+                    }));
+                    ctx.stop();
+                }),
+        );
     }
 
     /// Subscribe to an extractor
@@ -452,6 +497,7 @@ impl Actor for WsActor {
 
         // Start the heartbeat
         self.heartbeat(ctx);
+        self.close_on_shutdown(ctx);
     }
 
     #[instrument(skip_all, fields(WsActor.id = %self.id), name = "WsActor::stopped")]
@@ -2025,6 +2071,56 @@ mod tests {
         match closed {
             Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {}
             other => panic!("Expected connection close, got: {:?}", other),
+        }
+    }
+    /// Returns the next frame on `connection`, skipping pings.
+    async fn next_non_ping_frame(
+        connection: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<TcpStream>,
+        >,
+    ) -> Option<Result<Message, tokio_tungstenite::tungstenite::Error>> {
+        loop {
+            let frame = connection.next().await;
+            if !matches!(frame, Some(Ok(Message::Ping(_)))) {
+                return frame;
+            }
+        }
+    }
+
+    #[actix_rt::test]
+    async fn test_shutdown_closes_open_and_new_connections_with_away() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let app_state = web::Data::new(WsData::new(HashMap::new()).close_on_shutdown(shutdown_rx));
+        let server = start(move || {
+            App::new()
+                .app_data(app_state.clone())
+                .service(web::resource("/ws/").route(web::get().to(WsActor::ws_index)))
+        });
+        let url = server
+            .url("/ws/")
+            .replacen("http://", "ws://", 1);
+        let (mut open, _) = tokio_tungstenite::connect_async(url.clone())
+            .await
+            .expect("Failed to connect");
+
+        shutdown_tx.send_replace(true);
+
+        let closed = timeout(Duration::from_secs(2), next_non_ping_frame(&mut open))
+            .await
+            .expect("the open connection should close at once");
+        match closed {
+            Some(Ok(Message::Close(Some(frame)))) => assert_eq!(frame.code, CloseCode::Away),
+            other => panic!("Expected a close frame with code Away, got: {other:?}"),
+        }
+        let (mut late, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("Failed to connect");
+        let closed = timeout(Duration::from_secs(2), next_non_ping_frame(&mut late))
+            .await
+            .expect("a connection opened after the shutdown should close at once");
+        match closed {
+            Some(Ok(Message::Close(Some(frame)))) => assert_eq!(frame.code, CloseCode::Away),
+            other => panic!("Expected a close frame with code Away, got: {other:?}"),
         }
     }
 }
