@@ -55,6 +55,9 @@ use crate::{
 pub struct Inner {
     cursor: Vec<u8>,
     last_processed_block: Option<Block>,
+    /// The final block height Substreams sent with the newest block, `None` before the first.
+    /// Blocks below it are final.
+    final_block_height: Option<u64>,
     /// Used to give more informative logs
     last_report_ts: NaiveDateTime,
     last_report_block_number: u64,
@@ -65,6 +68,16 @@ type BatchCommitHandle = JoinHandle<Result<(), ExtractionError>>;
 
 /// A block drained from the reorg buffer, shared with the commit task.
 type DrainedBlock = Arc<BlockUpdateWithCursor<BlockChanges>>;
+
+/// Waits for a database commit task and returns its result.
+async fn join_commit_task(handle: BatchCommitHandle) -> Result<(), ExtractionError> {
+    match handle.await {
+        Ok(result) => result,
+        Err(join_err) => Err(ExtractionError::Storage(StorageError::Unexpected(format!(
+            "Failed to join database commit task: {join_err}"
+        )))),
+    }
+}
 
 /// Returns each token with a component balance change in `blocks`, with the timestamp of the
 /// newest such block. The leader's balance write sets a token's `last_traded` to the same value.
@@ -252,6 +265,7 @@ where
                     inner: Arc::new(Mutex::new(Inner {
                         cursor: vec![],
                         last_processed_block: None,
+                        final_block_height: None,
                         last_report_ts: chrono::Utc::now().naive_utc(),
                         last_report_block_number: 0,
                         first_message_processed: false,
@@ -296,6 +310,7 @@ where
                     inner: Arc::new(Mutex::new(Inner {
                         cursor,
                         last_processed_block: Some(last_processed_block),
+                        final_block_height: None,
                         last_report_ts: chrono::Local::now().naive_utc(),
                         last_report_block_number: 0,
                         first_message_processed: false,
@@ -1134,21 +1149,9 @@ where
                 let needs_await = !db_commit_handle_to_join.is_finished();
                 let now = chrono::Utc::now().naive_utc();
 
-                let result = db_commit_handle_to_join
+                join_commit_task(db_commit_handle_to_join)
                     .instrument(info_span!("await_previous_commit"))
-                    .await;
-
-                match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(storage_err)) => {
-                        return Err(storage_err);
-                    }
-                    Err(join_err) => {
-                        return Err(ExtractionError::Storage(StorageError::Unexpected(format!(
-                            "Failed to join database commit task: {join_err}"
-                        ))));
-                    }
-                }
+                    .await?;
 
                 if needs_await {
                     let wait_time = chrono::Utc::now()
@@ -1211,6 +1214,62 @@ where
         Ok(())
     }
 
+    /// Commits every final block in the reorg buffer and every staged write, and waits until
+    /// the database holds them. Does nothing while following: the leader commits those blocks.
+    async fn commit_final_blocks_now(&self) -> Result<(), ExtractionError> {
+        let CommitMode::Committing { floor } = *self.commit_mode.lock().await else {
+            return Ok(());
+        };
+        let Some(final_block_height) = self
+            .inner
+            .lock()
+            .await
+            .final_block_height
+        else {
+            return Ok(());
+        };
+        let mut drained = self
+            .reorg_buffer
+            .lock()
+            .await
+            .drain_into_committing(final_block_height)
+            .map_err(ExtractionError::Storage)?;
+        if let Some(floor) = floor {
+            drained.retain(|block| block.block_update().block.number > floor);
+        }
+        let drained_blocks = drained.len();
+        self.queue_commit(drained, false, WritePriority::Head)
+            .await?;
+        let commit_task = self
+            .gateway
+            .commit_handle
+            .lock()
+            .await
+            .take();
+        if let Some(commit_task) = commit_task {
+            join_commit_task(commit_task).await?;
+        }
+        self.gateway
+            .inner
+            .commit_staged_writes()
+            .await
+            .map_err(ExtractionError::Storage)?;
+        let flushed_block_height = self
+            .gateway
+            .inner
+            .flushed_block_height()
+            .await;
+        info!(
+            extractor_id = self.name,
+            chain = %self.chain,
+            drained_blocks,
+            final_block_height,
+            ?flushed_block_height,
+            "CommittedFinalBlocksBeforeStop"
+        );
+        Ok(())
+    }
+
     /// Process a full block
     ///
     /// This includes updating the reorg buffer, committing to the database, emitting sync updates
@@ -1252,6 +1311,10 @@ where
             .await;
 
         self.update_cursor(cursor).await;
+        self.inner
+            .lock()
+            .await
+            .final_block_height = Some(final_block_height);
 
         let committed_block_height = self
             .reported_committed_height(final_block_height)
@@ -2150,6 +2213,10 @@ where
         ))
     }
 
+    async fn commit_final_blocks(&self) -> Result<(), ExtractionError> {
+        self.commit_final_blocks_now().await
+    }
+
     async fn wait_for_capacity(&self) {
         let mut paused = false;
         loop {
@@ -2236,6 +2303,13 @@ pub trait ExtractorGateway: Send + Sync {
     /// Returns the height of the newest block whose staged writes reached the store, or
     /// `None` when nothing has been flushed since startup.
     async fn flushed_block_height(&self) -> Option<u64>;
+
+    /// Flushes the writes that [`ExtractorGateway::advance`] staged to the store, however few
+    /// they are, and waits for the write. Returns at once when no writes are staged.
+    ///
+    /// # Errors
+    /// Returns a [`StorageError`] if the write fails. The staged writes are then not committed.
+    async fn commit_staged_writes(&self) -> Result<(), StorageError>;
 
     /// Makes `tokens` available to token queries of this process without persisting them, then
     /// records when each token of `last_traded` last traded, for the "recently traded" filter.
@@ -2605,6 +2679,12 @@ impl ExtractorGateway for ExtractorPgGateway {
     async fn flushed_block_height(&self) -> Option<u64> {
         self.state_gateway
             .flushed_block_height()
+    }
+
+    async fn commit_staged_writes(&self) -> Result<(), StorageError> {
+        self.state_gateway
+            .commit_open_transaction()
+            .await
     }
 
     fn cache_tokens(&self, tokens: &[Token], last_traded: &[(Address, NaiveDateTime)]) {
@@ -2977,6 +3057,152 @@ mod test {
         wait_for_commits(&extractor).await;
 
         assert_eq!(*committed.lock().unwrap(), vec![(1, WritePriority::Head)]);
+    }
+
+    /// The number of every block a gateway was asked to commit, with whether the commit was
+    /// forced, and how many times it flushed its staged writes.
+    struct StopCommits {
+        advanced: Arc<std::sync::Mutex<Vec<(u64, bool)>>>,
+        staged_flushes: Arc<AtomicUsize>,
+    }
+
+    /// A gateway that records the blocks it commits and the flushes of its staged writes. Its
+    /// cursor is missing at startup and points at block `takeover_height` when read again.
+    fn stop_commit_gateway(takeover_height: u64) -> (MockExtractorGateway, StopCommits) {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        let cursor_reads = AtomicUsize::new(0);
+        gw.expect_get_cursor()
+            .returning(move || match cursor_reads.fetch_add(1, Ordering::SeqCst) {
+                0 => Err(StorageError::NotFound("ExtractionState".into(), EXTRACTOR_NAME.into())),
+                _ => Ok((b"cursor".to_vec(), crate::testing::block(takeover_height).hash)),
+            });
+        gw.expect_get_block()
+            .returning(move |_| Ok(crate::testing::block(takeover_height)));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        gw.expect_cache_tokens()
+            .returning(|_, _| ());
+        let commits = StopCommits {
+            advanced: Arc::new(std::sync::Mutex::new(Vec::new())),
+            staged_flushes: Arc::new(AtomicUsize::new(0)),
+        };
+        let advanced = commits.advanced.clone();
+        gw.expect_advance()
+            .returning(move |changes, _, force_commit, _| {
+                advanced
+                    .lock()
+                    .unwrap()
+                    .push((changes.block.number, force_commit));
+                Ok(())
+            });
+        let staged_flushes = commits.staged_flushes.clone();
+        gw.expect_commit_staged_writes()
+            .returning(move || {
+                staged_flushes.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+        (gw, commits)
+    }
+
+    #[tokio::test]
+    async fn test_commit_final_blocks_commits_a_partial_batch() {
+        let (gw, commits) = stop_commit_gateway(1);
+        let extractor = create_extractor_with_batch_size(gw, 10).await;
+        process_trailing_blocks(&extractor, 1..=5).await;
+        assert!(
+            commits
+                .advanced
+                .lock()
+                .unwrap()
+                .is_empty(),
+            "the batch is not complete yet"
+        );
+
+        extractor
+            .commit_final_blocks()
+            .await
+            .expect("final blocks should commit");
+
+        // Block 5 says block 4 is the final height: blocks 1 to 3 are final, 4 and 5 are not.
+        assert_eq!(
+            *commits.advanced.lock().unwrap(),
+            vec![(1, false), (2, false), (3, true)],
+            "the last final block forces the write"
+        );
+        assert_eq!(
+            commits
+                .staged_flushes
+                .load(Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_commit_final_blocks_skips_the_blocks_of_the_former_leader() {
+        let (gw, commits) = stop_commit_gateway(2);
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor_with_writer(gw, 10, Chain::Ethereum, writer).await;
+        process_trailing_blocks(&extractor, 1..=5).await;
+        channels.promote();
+        process_trailing_blocks(&extractor, 6..=6).await;
+
+        extractor
+            .commit_final_blocks()
+            .await
+            .expect("final blocks should commit");
+
+        // The former leader committed up to block 2. Block 6 makes blocks 1 to 4 final.
+        assert_eq!(*commits.advanced.lock().unwrap(), vec![(3, false), (4, true)]);
+    }
+
+    #[tokio::test]
+    async fn test_commit_final_blocks_writes_nothing_while_following() {
+        let (gw, commits) = stop_commit_gateway(1);
+        let (_channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor_with_writer(gw, 10, Chain::Ethereum, writer).await;
+        process_trailing_blocks(&extractor, 1..=5).await;
+
+        extractor
+            .commit_final_blocks()
+            .await
+            .expect("a follower has nothing to commit");
+
+        assert!(commits
+            .advanced
+            .lock()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            commits
+                .staged_flushes
+                .load(Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_commit_final_blocks_writes_nothing_before_the_first_block() {
+        let (gw, commits) = stop_commit_gateway(1);
+        let extractor = create_extractor_with_batch_size(gw, 10).await;
+
+        extractor
+            .commit_final_blocks()
+            .await
+            .expect("nothing to commit");
+
+        assert!(commits
+            .advanced
+            .lock()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            commits
+                .staged_flushes
+                .load(Ordering::SeqCst),
+            0
+        );
     }
 
     #[tokio::test]

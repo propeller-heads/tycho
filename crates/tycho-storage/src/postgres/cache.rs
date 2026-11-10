@@ -822,6 +822,15 @@ impl CachedGateway {
         }
     }
 
+    /// Sends the open transaction to the database, whatever its size, and waits for the write.
+    /// Returns at once when no transaction is open.
+    pub async fn commit_open_transaction(&self) -> Result<(), StorageError> {
+        if self.open_tx.lock().await.is_none() {
+            return Ok(());
+        }
+        self.commit_transaction(0).await
+    }
+
     pub async fn commit_transaction(&self, min_ops_batch_size: usize) -> Result<(), StorageError> {
         let mut open_tx = self.open_tx.lock().await;
         match open_tx.take() {
@@ -2512,6 +2521,77 @@ mod test_serial_db {
                 .expect("Failed to fetch block");
             assert_eq!(fetched_block, block_1);
 
+            handle.abort();
+        })
+        .await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_commit_open_transaction_writes_a_transaction_below_the_batch_size() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            // `from_connection` builds the native-token cache and panics without this row.
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, rx) = mpsc::channel(10);
+            let write_executor = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await;
+            increment_writer_epoch(&gateway, &connection_pool).await;
+            let handle = write_executor.run();
+            let cached_gw = CachedGateway::new(tx, connection_pool.clone(), gateway.clone());
+
+            cached_gw
+                .commit_open_transaction()
+                .await
+                .expect("without an open transaction there is nothing to write");
+
+            let block_1 = get_sample_block(1);
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+            cached_gw
+                .commit_transaction(100)
+                .await
+                .expect("staging below the batch size should succeed");
+            assert_eq!(cached_gw.flushed_block_height(), None);
+
+            cached_gw
+                .commit_open_transaction()
+                .await
+                .expect("the staged transaction should commit");
+
+            assert_eq!(cached_gw.flushed_block_height(), Some(block_1.number));
+            let fetched_block = gateway
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut connection)
+                .await
+                .expect("block 1 should be in the database");
+            assert_eq!(fetched_block, block_1);
+            cached_gw
+                .commit_open_transaction()
+                .await
+                .expect("the transaction is closed, so there is nothing to write");
             handle.abort();
         })
         .await;

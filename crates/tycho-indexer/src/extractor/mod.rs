@@ -195,6 +195,14 @@ pub trait Extractor: Send + Sync {
     /// Returns at once unless the extractor keeps blocks in memory for another process to
     /// write and already holds as many as it may.
     async fn wait_for_capacity(&self);
+
+    /// Writes every final block the extractor holds to the database and returns once the
+    /// writes are done. Returns at once when the extractor does not write to the database.
+    ///
+    /// # Errors
+    /// Returns an [`ExtractionError`] if a write fails. The database then ends at its last
+    /// successful write, and the blocks after it come back from the stream cursor.
+    async fn commit_final_blocks(&self) -> Result<(), ExtractionError>;
 }
 
 #[automock]

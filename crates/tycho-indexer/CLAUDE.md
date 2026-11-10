@@ -201,8 +201,11 @@ tries the `LeaderLock` once:
 - **Shutdown**: on SIGTERM or SIGINT, `Shutdown::run` (`main.rs`) hands over in this order. It
   closes every websocket connection with close code `Away` (`WsData::close_on_shutdown`; the server
   already stops accepting connections on the signal), so clients connect to another instance, which
-  streams already. It stops the extractors and waits up to 10 s (`EXTRACTOR_STOP_TIMEOUT`) until
-  their supervisors end (`ExtractorHandle::stopped`). It then sends on the `release` of `elect`: a
+  streams already. It stops the extractors and waits up to 120 s (`EXTRACTOR_STOP_TIMEOUT`) until
+  their supervisors end (`ExtractorHandle::stopped`). A stopping extractor of the leader first
+  commits every final block of its reorg buffer and its staged writes (`Extractor::commit_final_blocks`),
+  so the next leader starts from that cursor and a DCI extractor replays fewer blocks. With a large
+  `--database-insert-batch-size` this takes time: give the pods a grace period above the timeout. It then sends on the `release` of `elect`: a
   leader closes its lock session, so a follower takes over within one poll instead of when this
   process exits, and a follower stops retrying the lock, so a process that shuts down never becomes
   the leader. A commit still running then fails on the writer fence. Last, it stops the server and

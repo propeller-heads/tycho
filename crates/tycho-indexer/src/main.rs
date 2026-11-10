@@ -948,9 +948,12 @@ async fn get_accounts_data(
 
 /// How long a shutdown waits for the extractors to stop before it releases the leader lock anyway.
 ///
-/// Below the 30 s grace period of the pods, so the lock is released before the process is killed.
-/// A commit that is still running then fails on the writer fence of the new leader.
-const EXTRACTOR_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+/// A stopping extractor commits its final blocks first. With a large
+/// `--database-insert-batch-size` that is a full batch per extractor, and the write executor runs
+/// these one after the other: about 16 s each for the largest extractors on Base. Set the grace
+/// period of the pods above this timeout, so the lock is released before the process is killed.
+/// A commit that is still running at the timeout fails on the writer fence of the new leader.
+const EXTRACTOR_STOP_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What a shutdown signal stops, in the order of [`Shutdown::run`].
 struct Shutdown {
@@ -969,7 +972,9 @@ impl Shutdown {
     /// The order makes the handover short, because the follower streams and serves already:
     /// 1. Closes the websocket connections, so clients connect to another instance at once. The
     ///    server stops to accept connections on the signal itself.
-    /// 2. Stops the extractors, and waits up to [`EXTRACTOR_STOP_TIMEOUT`] until they ended.
+    /// 2. Stops the extractors, and waits up to [`EXTRACTOR_STOP_TIMEOUT`] until they ended. A
+    ///    leader's extractors commit their final blocks before they end, so the next leader starts
+    ///    from a newer cursor.
     /// 3. Releases the leader lock, so a follower takes over without waiting for this process to
     ///    exit.
     /// 4. Stops the server and the database write executor.

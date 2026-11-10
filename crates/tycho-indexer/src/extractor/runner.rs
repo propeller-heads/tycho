@@ -332,7 +332,14 @@ impl ExtractorRunner {
                     };
                     tokio::select! {
                         _ = &mut self.stop_rx => {
-                            warn!("Stop signal received; exiting!");
+                            warn!("Stop signal received; committing the final blocks and exiting");
+                            if let Err(err) = extractor.commit_final_blocks().await {
+                                error!(
+                                    error = %err,
+                                    "Failed to commit the final blocks before stopping; the next \
+                                     writer replays them from the stream cursor"
+                                );
+                            }
                             return Ok(false);
                         }
                         val = next_block.instrument(info_span!("substreams_waiting")) => {
