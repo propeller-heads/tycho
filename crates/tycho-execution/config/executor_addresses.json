@@ -138,5 +138,10 @@
     "uniswap_v4": "0xf7630dAAC56f3ee857cC3fCc758F67302542564D",
     "aero_basic": "0x68F46568a26d46E4fc7FB97BbbDDfd3c4FaBdd0a",
     "aero_cl": "0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015"
+  },
+  "elysium": {
+    "uniswap_v2": "0x6B8DFbbef1f5EF947427985F7C27D1c50CD025ea",
+    "uniswap_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+    "uniswap_v4": "0x74145BbB8F3E51f7138eD3F7C96dFb3d56F784b5"
   }
 }

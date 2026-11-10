@@ -438,6 +438,7 @@ mod tests {
             Chain::Plasma,
             Chain::Robinhood,
             Chain::Arc,
+            Chain::Elysium,
         ];
         for chain in chains {
             let registry = SwapEncoderRegistry::new_with_defaults(chain).unwrap_or_else(|e| {

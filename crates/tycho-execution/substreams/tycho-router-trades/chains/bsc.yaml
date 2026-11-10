@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: tycho_router_trades
-  version: v0.3.0
+  version: v0.4.0
   url: https://github.com/propeller-heads/tycho/tree/main/crates/tycho-execution/substreams
 
 imports:
@@ -75,6 +75,19 @@ modules:
     output:
       type: proto:tycho.router.v1.VaultTransfers
 
+  - name: map_subsidy_events
+    kind: map
+    initialBlock: 98458505
+    blockFilter:
+      module: index_router_activity
+      query:
+        string: "subsidy"
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.router.v1.SubsidyEvents
+
   - name: db_out
     kind: map
     initialBlock: 98458505
@@ -82,6 +95,7 @@ modules:
       - map: map_trades
       - map: map_fee_config_events
       - map: map_vault_transfers
+      - map: map_subsidy_events
     output:
       type: proto:sf.substreams.sink.database.v1.DatabaseChanges
 
@@ -91,6 +105,7 @@ params:
   map_fee_config_events: chain=bsc&routers=0x99748cbd931cb367dad265c5b2b4bd306d448e99:v3_0,0x712d0213439d99e56efe5453253c12131c4019c9:v3_1,0x7f3d12bbafb8955e51b3ab9588b34c8ad95bda4e:v3_1&fee_calculators=0x99748cbd931cb367dad265c5b2b4bd306d448e99:0x890f267d89017e5a76d7213458c4cd755a1119da,0x712d0213439d99e56efe5453253c12131c4019c9:0x12d75cc114c6a3216562fe345bcc19b6c78cec72,0x7f3d12bbafb8955e51b3ab9588b34c8ad95bda4e:0x6c62645e52d40a700f8219f18cd92ce8a668c8ea
   map_trades: chain=bsc&routers=0x99748cbd931cb367dad265c5b2b4bd306d448e99:v3_0,0x712d0213439d99e56efe5453253c12131c4019c9:v3_1,0x7f3d12bbafb8955e51b3ab9588b34c8ad95bda4e:v3_1&fee_calculators=0x99748cbd931cb367dad265c5b2b4bd306d448e99:0x890f267d89017e5a76d7213458c4cd755a1119da,0x712d0213439d99e56efe5453253c12131c4019c9:0x12d75cc114c6a3216562fe345bcc19b6c78cec72,0x7f3d12bbafb8955e51b3ab9588b34c8ad95bda4e:0x6c62645e52d40a700f8219f18cd92ce8a668c8ea
   map_vault_transfers: chain=bsc&routers=0x99748cbd931cb367dad265c5b2b4bd306d448e99:v3_0,0x712d0213439d99e56efe5453253c12131c4019c9:v3_1,0x7f3d12bbafb8955e51b3ab9588b34c8ad95bda4e:v3_1&fee_calculators=0x99748cbd931cb367dad265c5b2b4bd306d448e99:0x890f267d89017e5a76d7213458c4cd755a1119da,0x712d0213439d99e56efe5453253c12131c4019c9:0x12d75cc114c6a3216562fe345bcc19b6c78cec72,0x7f3d12bbafb8955e51b3ab9588b34c8ad95bda4e:0x6c62645e52d40a700f8219f18cd92ce8a668c8ea
+  map_subsidy_events: chain=bsc&routers=0x99748cbd931cb367dad265c5b2b4bd306d448e99:v3_0,0x712d0213439d99e56efe5453253c12131c4019c9:v3_1,0x7f3d12bbafb8955e51b3ab9588b34c8ad95bda4e:v3_1&fee_calculators=0x99748cbd931cb367dad265c5b2b4bd306d448e99:0x890f267d89017e5a76d7213458c4cd755a1119da,0x712d0213439d99e56efe5453253c12131c4019c9:0x12d75cc114c6a3216562fe345bcc19b6c78cec72,0x7f3d12bbafb8955e51b3ab9588b34c8ad95bda4e:0x6c62645e52d40a700f8219f18cd92ce8a668c8ea
 
 sink:
   module: db_out

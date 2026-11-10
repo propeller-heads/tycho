@@ -133,6 +133,11 @@ const deploy_protocols = {
         "uniswap_v3",
         "uniswap_v4",
     ],
+    "elysium": [
+        "uniswap_v2",
+        "uniswap_v3",
+        "uniswap_v4",
+    ],
 };
 
 async function main() {

@@ -391,6 +391,32 @@
         "aero_cl": "0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015"
       },
       "superseded": []
+    },
+    "elysium": {
+      "chain_id": 99901,
+      "status": "active",
+      "effective_at": "2026-11-09T16:41:04Z",
+      "notice_published_at": "2026-11-09T16:41:04Z",
+      "migration_deadline": null,
+      "scheduled_successor": null,
+      "deployment_record_commit": "460fc8f3950205502f7618a5fb591a15fde3d341",
+      "dependency_snapshot": {
+        "source_commit": "460fc8f3950205502f7618a5fb591a15fde3d341",
+        "executor_deployments_path": "crates/tycho-execution/config/executor_deployments.json",
+        "protocol_specific_addresses_path": "crates/tycho-execution/config/protocol_specific_addresses.json"
+      },
+      "router": {
+        "address": "0xf7d2Ec960Cb9714C97897Db395Ff7f0a11de1060"
+      },
+      "fee_calculator": {
+        "address": "0x4609Ed897E905F95C15159cb9cBC1A08486f5Fcf"
+      },
+      "executors": {
+        "uniswap_v2": "0x6B8DFbbef1f5EF947427985F7C27D1c50CD025ea",
+        "uniswap_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+        "uniswap_v4": "0x74145BbB8F3E51f7138eD3F7C96dFb3d56F784b5"
+      },
+      "superseded": []
     }
   }
 }
