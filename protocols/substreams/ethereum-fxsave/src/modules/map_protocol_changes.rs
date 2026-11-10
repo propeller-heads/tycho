@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use alloy_primitives::Address;
+use alloy_primitives::{keccak256, Address, B256, U256};
 use anyhow::{bail, Result};
 use itertools::Itertools;
 use substreams::scalar::BigInt;
@@ -18,17 +18,6 @@ const TOTAL_YIELD_TOKEN_SLOT: u8 = 50;
 /// fxSP storage slot of `totalStableToken`, the USDC it holds (idle and in its strategy) as of its
 /// last sync.
 const TOTAL_STABLE_TOKEN_SLOT: u8 = 51;
-
-const TOTAL_YIELD_TOKEN: [u8; 4] = [0x65, 0xd2, 0xcb, 0x08];
-const TOTAL_STABLE_TOKEN: [u8; 4] = [0x9f, 0xf3, 0x90, 0x38];
-/// fxSP `previewDeposit(address,uint256)`.
-const PREVIEW_DEPOSIT_TOKEN: [u8; 4] = [0xb8, 0xf8, 0x2b, 0x26];
-/// fxSP `previewRedeem(uint256)`.
-const PREVIEW_REDEEM: [u8; 4] = [0x4c, 0xda, 0xd5, 0x06];
-/// fxSP `stableDepegPrice()`.
-const STABLE_DEPEG_PRICE: [u8; 4] = [0x61, 0x1e, 0x99, 0x6d];
-/// fxSAVE `previewDeposit(uint256)`.
-const PREVIEW_DEPOSIT: [u8; 4] = [0xef, 0x8b, 0x30, 0xf7];
 
 /// Assembles the `BlockChanges`: the component with its DCI entrypoints and initial balances,
 /// then fxSP's fxUSD and USDC holdings whenever they change.
@@ -49,10 +38,10 @@ pub fn map_protocol_changes(
         for component in &tx_components.components {
             builder.add_protocol_component(component);
             add_entrypoints(builder, &config);
-            for (token, selector) in
-                [(config.fxusd, TOTAL_YIELD_TOKEN), (config.usdc, TOTAL_STABLE_TOKEN)]
+            for (token, getter) in
+                [(config.fxusd, "totalYieldToken()"), (config.usdc, "totalStableToken()")]
             {
-                let balance = call_uint(&config.fx_base_pool, selector)?;
+                let balance = call_uint(&config.fx_base_pool, getter)?;
                 builder.add_balance_change(&balance_change(&config, token, balance));
             }
         }
@@ -77,34 +66,29 @@ pub fn map_protocol_changes(
 /// USDC Chainlink feed and fxSP's USDC strategy through `previewDeposit`, and fxSAVE's staked
 /// fxSP through its `previewDeposit`.
 fn add_entrypoints(builder: &mut TransactionChangesBuilder, config: &Config) {
-    let usdc_unit = BigInt::from(1_000_000u64);
-    let wad = BigInt::from(10).pow(18);
-    let fx_base_pool = config.fx_base_pool.to_vec();
+    let usdc_unit: B256 = U256::from(1_000_000u64).into();
+    let wad: B256 = U256::from(10u64.pow(18)).into();
     let calls = [
         (
-            &fx_base_pool,
+            config.fx_base_pool,
             "previewDeposit(address,uint256)",
-            encode(&PREVIEW_DEPOSIT_TOKEN, &[address_word(&config.usdc), uint_word(&usdc_unit)]),
+            vec![config.usdc.into_word(), usdc_unit],
         ),
         (
-            &fx_base_pool,
+            config.fx_base_pool,
             "previewDeposit(address,uint256)",
-            encode(&PREVIEW_DEPOSIT_TOKEN, &[address_word(&config.fxusd), uint_word(&wad)]),
+            vec![config.fxusd.into_word(), wad],
         ),
-        (&fx_base_pool, "previewRedeem(uint256)", encode(&PREVIEW_REDEEM, &[uint_word(&wad)])),
-        (&fx_base_pool, "stableDepegPrice()", encode(&STABLE_DEPEG_PRICE, &[])),
-        (
-            &config.fxsave.to_vec(),
-            "previewDeposit(uint256)",
-            encode(&PREVIEW_DEPOSIT, &[uint_word(&wad)]),
-        ),
+        (config.fx_base_pool, "previewRedeem(uint256)", vec![wad]),
+        (config.fx_base_pool, "stableDepegPrice()", vec![]),
+        (config.fxsave, "previewDeposit(uint256)", vec![wad]),
     ];
-    for (target, signature, calldata) in calls {
+    for (target, signature, args) in calls {
         let (entrypoint, entrypoint_params) = create_entrypoint(
-            target.clone(),
+            target.to_vec(),
             signature.to_string(),
             config.component_id(),
-            TraceData::Rpc(RpcTraceData { caller: None, calldata }),
+            TraceData::Rpc(RpcTraceData { caller: None, calldata: calldata(signature, &args) }),
         );
         builder.add_entrypoint(&entrypoint);
         builder.add_entrypoint_params(&entrypoint_params);
@@ -167,49 +151,40 @@ fn balance_change(config: &Config, token: Address, balance: BigInt) -> BalanceCh
 }
 
 /// Reads a `uint256` getter of `target` at this block.
-fn call_uint(target: &Address, selector: [u8; 4]) -> Result<BigInt> {
+fn call_uint(target: &Address, getter: &str) -> Result<BigInt> {
     let calls = rpc::RpcCalls {
-        calls: vec![rpc::RpcCall { to_addr: target.to_vec(), data: selector.to_vec() }],
+        calls: vec![rpc::RpcCall { to_addr: target.to_vec(), data: calldata(getter, &[]) }],
     };
     let responses = substreams_ethereum::rpc::eth_call(&calls).responses;
     let Some(response) = responses.first() else { bail!("eth_call to {target} returned nothing") };
-    if response.failed || response.raw.len() != 32 {
-        bail!("eth_call 0x{} to {target} failed", hex_selector(&selector));
+    if response.failed {
+        bail!("eth_call {getter} to {target} reverted");
+    }
+    if response.raw.len() != 32 {
+        bail!("eth_call {getter} to {target} returned {} bytes, not 32", response.raw.len());
     }
     Ok(BigInt::from_unsigned_bytes_be(&response.raw))
 }
 
-fn hex_selector(selector: &[u8; 4]) -> String {
-    selector
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn encode(selector: &[u8; 4], words: &[[u8; 32]]) -> Vec<u8> {
-    let mut calldata = selector.to_vec();
-    for word in words {
-        calldata.extend_from_slice(word);
+/// ABI-encodes a call to `signature` whose arguments are all static words.
+fn calldata(signature: &str, args: &[B256]) -> Vec<u8> {
+    let mut calldata = keccak256(signature)[..4].to_vec();
+    for arg in args {
+        calldata.extend_from_slice(arg.as_slice());
     }
     calldata
 }
 
-fn address_word(address: &Address) -> [u8; 32] {
-    let mut word = [0u8; 32];
-    word[12..].copy_from_slice(address.as_slice());
-    word
-}
-
-fn uint_word(value: &BigInt) -> [u8; 32] {
-    let bytes = value.to_bytes_be().1;
-    let mut word = [0u8; 32];
-    word[32 - bytes.len()..].copy_from_slice(&bytes);
-    word
-}
-
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::{address, hex};
+    use rstest::rstest;
+
     use super::*;
+    use crate::config::tests::PARAMS;
+
+    const FX_BASE_POOL: Address = address!("65c9a641afceb9c0e6034e558a319488fa0fa3be");
+    const FXSAVE: Address = address!("7743e50f534a7f9f1791dde7dcd89f7783eefc39");
 
     fn slot_key(slot: u8) -> Vec<u8> {
         let mut key = vec![0u8; 32];
@@ -228,25 +203,84 @@ mod tests {
         assert_eq!(holding_slot(&mapping_key), None);
     }
 
+    #[rstest]
+    #[case::fxsp_preview_deposit("previewDeposit(address,uint256)", "b8f82b26")]
+    #[case::fxsp_preview_redeem("previewRedeem(uint256)", "4cdad506")]
+    #[case::fxsp_stable_depeg_price("stableDepegPrice()", "611e996d")]
+    #[case::fxsave_preview_deposit("previewDeposit(uint256)", "ef8b30f7")]
+    #[case::fxsp_total_yield_token("totalYieldToken()", "65d2cb08")]
+    #[case::fxsp_total_stable_token("totalStableToken()", "9ff39038")]
+    fn test_selector_matches_cast_sig(#[case] signature: &str, #[case] selector: &str) {
+        assert_eq!(hex::encode(calldata(signature, &[])), selector);
+    }
+
+    /// Calldata from `cast calldata`.
     #[test]
-    fn encodes_preview_deposit_calldata() {
-        let usdc: Address = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
-            .parse()
-            .unwrap();
+    fn test_entrypoints() {
+        let config = Config::parse(PARAMS).unwrap();
+        let mut builder = TransactionChangesBuilder::new(&Transaction::default());
+        // The builder drops a transaction that carries entrypoints alone.
+        builder.add_protocol_component(&ProtocolComponent {
+            id: config.component_id(),
+            ..Default::default()
+        });
 
-        let calldata = encode(
-            &PREVIEW_DEPOSIT_TOKEN,
-            &[address_word(&usdc), uint_word(&BigInt::from(1_000_000u64))],
-        );
+        add_entrypoints(&mut builder, &config);
 
+        let changes = builder.build().unwrap();
+        let signatures: HashMap<&str, (Address, &str)> = changes
+            .entrypoints
+            .iter()
+            .map(|entrypoint| {
+                let target = Address::from_slice(&entrypoint.target);
+                (entrypoint.id.as_str(), (target, entrypoint.signature.as_str()))
+            })
+            .collect();
+        let calldata: Vec<(&str, String)> = changes
+            .entrypoint_params
+            .iter()
+            .map(|params| match &params.trace_data {
+                Some(TraceData::Rpc(rpc)) => {
+                    (params.entrypoint_id.as_str(), hex::encode(&rpc.calldata))
+                }
+                other => panic!("expected RPC trace data, got {other:?}"),
+            })
+            .collect();
+        let traced: Vec<(Address, &str, &str)> = calldata
+            .iter()
+            .map(|(id, calldata)| {
+                let (target, signature) = signatures[id];
+                (target, signature, calldata.as_str())
+            })
+            .sorted_unstable()
+            .collect();
         assert_eq!(
-            calldata,
-            [
-                vec![0xb8, 0xf8, 0x2b, 0x26],
-                [vec![0u8; 12], usdc.to_vec()].concat(),
-                [vec![0u8; 29], vec![0x0f, 0x42, 0x40]].concat(),
+            traced,
+            vec![
+                (
+                    FX_BASE_POOL,
+                    "previewDeposit(address,uint256)",
+                    "b8f82b26000000000000000000000000085780639cc2cacd35e474e71f4d000e2405d8f6\
+                     0000000000000000000000000000000000000000000000000de0b6b3a7640000",
+                ),
+                (
+                    FX_BASE_POOL,
+                    "previewDeposit(address,uint256)",
+                    "b8f82b26000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48\
+                     00000000000000000000000000000000000000000000000000000000000f4240",
+                ),
+                (
+                    FX_BASE_POOL,
+                    "previewRedeem(uint256)",
+                    "4cdad5060000000000000000000000000000000000000000000000000de0b6b3a7640000",
+                ),
+                (FX_BASE_POOL, "stableDepegPrice()", "611e996d"),
+                (
+                    FXSAVE,
+                    "previewDeposit(uint256)",
+                    "ef8b30f70000000000000000000000000000000000000000000000000de0b6b3a7640000",
+                ),
             ]
-            .concat()
         );
     }
 }

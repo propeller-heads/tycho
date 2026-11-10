@@ -1158,6 +1158,7 @@ dependencies = [
  "alloy-primitives",
  "anyhow",
  "itertools 0.10.5",
+ "rstest",
  "serde",
  "serde_qs 0.13.0",
  "substreams 0.5.22",
