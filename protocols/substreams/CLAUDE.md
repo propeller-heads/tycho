@@ -35,11 +35,17 @@ contract) as a starting point. Implement the map modules, update the manifest, a
 
 ## Versioning and release
 
-Every PR that touches a package **must** bump that package's version in its `Cargo.toml` and add a
-`CHANGELOG.md` entry before merging to main — never merge changes without a version bump.
+A PR that changes what is built into a package's spkg (module code, generated code, ABIs, protos,
+an existing manifest, a dependency) **must** bump that package's version in its `Cargo.toml` and add
+a `CHANGELOG.md` entry before merging to main.
 
-- **Patch bump** (e.g. `0.3.2` → `0.3.3`): bug fixes, small adjustments
-- **Major bump** (e.g. `0.3.2` → `0.4.0`): significant changes, breaking output format
+- **Patch bump** (e.g. `0.3.2` → `0.3.3`): fixes that don't change the output
+- **Minor bump while 0.x** (e.g. `0.3.2` → `0.4.0`): a change to the output, or a significant
+  feature; from 1.0 on, a breaking output change is a major bump
+- **No bump** when only the README, `Cargo.lock` or test yamls change, or when the PR only adds a
+  new chain manifest (it publishes under a new spkg name)
+- **No bump before the first release**: a new package starts at `0.1.0`, and until its spkg is first
+  released, follow-up PRs keep that version and add to its `CHANGELOG.md` entry
 
 Releasing is manual and **tagging alone does nothing**:
 
