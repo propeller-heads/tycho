@@ -44,10 +44,12 @@ contract FermiSwapExecutor is IExecutor {
         payable
     {
         (address tokenIn, address tokenOut) = _decodeData(data);
+        // forge-lint: disable-next-line(unsafe-typecast) type(int256).max fits uint256.
         if (amountIn > uint256(type(int256).max)) {
             revert FermiSwapExecutor__AmountTooLarge();
         }
 
+        // forge-lint: disable-next-line(unsafe-typecast) amountIn is checked above against int256's maximum.
         int256 amountSpecified = int256(amountIn);
 
         // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.

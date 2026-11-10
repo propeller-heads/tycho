@@ -13,6 +13,7 @@ pragma solidity ^0.8.26;
  *   lock-gated; `settle` and `take` are.
  *   https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/interfaces/IVault.sol#L52
  *   https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/Vault.sol#L63-L73
+ *   https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/interfaces/ILockCallback.sol
  * - CLPoolManager.swap.
  *   https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-cl/interfaces/ICLPoolManager.sol#L150-L166
  * - BinPoolManager.swap.
@@ -38,6 +39,10 @@ interface IPancakeswapInfinityVault {
         external
         view
         returns (int256);
+}
+
+interface IPancakeswapInfinityLockCallback {
+    function lockAcquired(bytes calldata data) external returns (bytes memory);
 }
 
 interface IPancakeswapInfinityCLPoolManager {

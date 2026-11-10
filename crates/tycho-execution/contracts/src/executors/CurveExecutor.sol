@@ -62,8 +62,8 @@ contract CurveExecutor is IExecutor {
         address tokenOut;
         address pool;
         uint8 poolType;
-        int128 i;
-        int128 j;
+        uint8 i;
+        uint8 j;
         (tokenIn, tokenOut, pool, poolType, i, j) = _decodeData(data);
 
         uint256 ethAmount = 0;
@@ -72,20 +72,19 @@ contract CurveExecutor is IExecutor {
         }
 
         if (isCurveStablePool(poolType)) {
-            // forge-lint: disable-next-line(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
-            ICurveStablePool(pool).exchange{value: ethAmount}(i, j, amountIn, 0);
+            // forge-lint: disable-next-item(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
+            ICurveStablePool(pool).exchange{value: ethAmount}(
+                int128(uint128(i)), int128(uint128(j)), amountIn, 0
+            );
         } else {
             // crypto or llamma
             if (tokenIn == nativeToken || tokenOut == nativeToken) {
                 // forge-lint: disable-next-item(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
                 ICurveCryptoPoolETH(pool).exchange{value: ethAmount}(
-                    uint256(int256(i)), uint256(int256(j)), amountIn, 0, true
+                    i, j, amountIn, 0, true
                 );
             } else {
-                ICurveCryptoPool(pool)
-                    .exchange(
-                        uint256(int256(i)), uint256(int256(j)), amountIn, 0
-                    );
+                ICurveCryptoPool(pool).exchange(i, j, amountIn, 0);
             }
         }
     }
@@ -98,8 +97,8 @@ contract CurveExecutor is IExecutor {
             address tokenOut,
             address pool,
             uint8 poolType,
-            int128 i,
-            int128 j
+            uint8 i,
+            uint8 j
         )
     {
         tokenIn = address(bytes20(data[0:20]));
@@ -109,8 +108,8 @@ contract CurveExecutor is IExecutor {
         }
         pool = address(bytes20(data[40:60]));
         poolType = uint8(data[60]);
-        i = int128(uint128(uint8(data[61])));
-        j = int128(uint128(uint8(data[62])));
+        i = uint8(data[61]);
+        j = uint8(data[62]);
     }
 
     /**
