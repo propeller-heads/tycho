@@ -69,6 +69,11 @@ contract FxSaveExecutorTest is Constants, TestUtils {
         new FxSaveExecutorExposed(address(0), FXSAVE_ADDR);
     }
 
+    function testConstructorRejectsVaultOverAnotherAsset() public {
+        vm.expectRevert(FxSaveExecutor__VaultAssetMismatch.selector);
+        new FxSaveExecutorExposed(FXUSD_ADDR, FXSAVE_ADDR);
+    }
+
     function testGetTransferData() public view {
         (
             TransferManager.TransferType transferType,

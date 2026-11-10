@@ -22,6 +22,7 @@ interface IFxUSDBasePool {
 
 error FxSaveExecutor__InvalidDataLength();
 error FxSaveExecutor__ZeroAddress();
+error FxSaveExecutor__VaultAssetMismatch();
 
 /// @notice Deposits USDC or fxUSD into fxSAVE: the token into fxSP, then the
 /// fxSP into fxSAVE, an ERC4626 vault over it.
@@ -37,6 +38,11 @@ contract FxSaveExecutor is IExecutor {
     constructor(address fxBasePool_, address fxSave_) {
         if (fxBasePool_ == address(0) || fxSave_ == address(0)) {
             revert FxSaveExecutor__ZeroAddress();
+        }
+        // Every swap deposits fxBasePool shares into fxSave, so a vault over
+        // another asset would make every swap revert.
+        if (IERC4626(fxSave_).asset() != fxBasePool_) {
+            revert FxSaveExecutor__VaultAssetMismatch();
         }
         fxBasePool = IFxUSDBasePool(fxBasePool_);
         fxSave = IERC4626(fxSave_);
