@@ -1,3 +1,19 @@
+## [0.505.0](https://github.com/propeller-heads/tycho/compare/0.504.3...0.505.0) (2026-11-10)
+
+
+### Features
+
+* index Kleos, ElysPump and StockiumSwap V3 on Elysium ([#1759](https://github.com/propeller-heads/tycho/issues/1759)) ([4532a44](https://github.com/propeller-heads/tycho/commit/4532a44cda4184ae64109d0bc25f6fa99a64f50d))
+* **substreams:** index AERO v1.1 basic and CL pools on Elysium ([fb06b2d](https://github.com/propeller-heads/tycho/commit/fb06b2d499e7586afa45d5bd4116c7fb884720ca))
+* **substreams:** index AERO v1.1 basic and CL pools on Elysium ([#1766](https://github.com/propeller-heads/tycho/issues/1766)) ([0190788](https://github.com/propeller-heads/tycho/commit/0190788195c00ae9cea7b198b4d14e554e6fdc0e))
+* **substreams:** index Kleos, ElysPump and StockiumSwap V3 on Elysium ([42687c8](https://github.com/propeller-heads/tycho/commit/42687c8e4025d1475e67a81532765b1d9125862f))
+* **testing:** run elysium-* packages against an Elysium archive RPC ([dae5e6d](https://github.com/propeller-heads/tycho/commit/dae5e6d1ed4c1ff77efecc0a776ad43dfe2c342a))
+
+
+### Bug Fixes
+
+* **testing:** connect RPC tools on chains alloy-chains does not name ([875d7ba](https://github.com/propeller-heads/tycho/commit/875d7ba3a7624e33cac6371192b8e324a033bc67))
+
 ## [0.504.3](https://github.com/propeller-heads/tycho/compare/0.504.2...0.504.3) (2026-11-09)
 
 
