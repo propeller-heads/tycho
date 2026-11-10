@@ -298,4 +298,71 @@ pub struct VaultTransfer {
     #[prost(string, tag="12")]
     pub kind: ::prost::alloc::string::String,
 }
+/// Every SubsidyPaid and SubsidySkipped the SubsidyPayer emitted in one block.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubsidyEvents {
+    #[prost(message, repeated, tag="1")]
+    pub events: ::prost::alloc::vec::Vec<SubsidyEvent>,
+}
+/// One signed subsidy a payer settled, inside a router swap: paid, or skipped with the contract's
+/// reason.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubsidyEvent {
+    #[prost(string, tag="1")]
+    pub chain: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub block_number: u64,
+    #[prost(uint64, tag="3")]
+    pub block_timestamp: u64,
+    #[prost(bytes="vec", tag="4")]
+    pub tx_hash: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag="5")]
+    pub log_index: u32,
+    /// The contract that emitted the event.
+    #[prost(bytes="vec", tag="6")]
+    pub payer: ::prost::alloc::vec::Vec<u8>,
+    /// The nonce of the signed terms, 32 bytes.
+    #[prost(bytes="vec", tag="7")]
+    pub nonce: ::prost::alloc::vec::Vec<u8>,
+    /// The index of the router swap call the payer ran in: the call_index of the trade this
+    /// subsidy belongs to.
+    #[prost(uint32, tag="8")]
+    pub trade_call_index: u32,
+    #[prost(oneof="subsidy_event::Outcome", tags="9, 10")]
+    pub outcome: ::core::option::Option<subsidy_event::Outcome>,
+}
+/// Nested message and enum types in `SubsidyEvent`.
+pub mod subsidy_event {
+    #[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Outcome {
+        #[prost(message, tag="9")]
+        Paid(super::SubsidyPayment),
+        #[prost(message, tag="10")]
+        Skipped(super::SubsidySkip),
+    }
+}
+/// A SubsidyPaid: `amount` of `token` to `receiver`, the router, which pays the user with the
+/// swap's output. `bound_to` is the address the terms were signed for.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubsidyPayment {
+    #[prost(bytes="vec", tag="1")]
+    pub bound_to: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes="vec", tag="2")]
+    pub receiver: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes="vec", tag="3")]
+    pub token: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag="4")]
+    pub amount: ::prost::alloc::string::String,
+}
+/// A SubsidySkipped: the payer's SkipReason, in snake case, or its number when unknown.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubsidySkip {
+    #[prost(string, tag="1")]
+    pub reason: ::prost::alloc::string::String,
+}
 // @@protoc_insertion_point(module)
