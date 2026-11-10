@@ -19,6 +19,7 @@ Protocol-specific routes may also depend on constructor or integration addresses
 | Plasma | Active | 1 September 2026 | None |
 | Robinhood | Active | 1 September 2026 | None |
 | Arc | Active | 29 September 2026 | None |
+| Elysium | Active | 9 November 2026 | None |
 
 ## Scheduled successors
 
@@ -28,7 +29,7 @@ For notices published on or after 22 September 2026, PropellerHeads provides at 
 
 ## Migration history
 
-Commit <a href="https://github.com/propeller-heads/tycho/commit/91b7f1511facc4ea5808f9e82a9078583fd839c9" target="_blank" rel="noopener noreferrer"><code>91b7f151</code></a> introduced the deployment that took effect on 1 August 2026. Commit <a href="https://github.com/propeller-heads/tycho/commit/8cfd100c1da5b6e367417c281859496f189a9388" target="_blank" rel="noopener noreferrer"><code>8cfd100c</code></a> introduced the deployment that superseded it on 1 September 2026 across all eight chains. These deployments predate the notice policy. The machine-readable registry records both address sets. Commit <a href="https://github.com/propeller-heads/tycho/commit/629a473fe5b9ab24016f81eda1e968a6782aab53" target="_blank" rel="noopener noreferrer"><code>629a473f</code></a> introduced the Arc deployment that took effect on 29 September 2026. Arc had no earlier router. Structured registry history starts on 1 August 2026; the Router V2 tables below and Git history preserve earlier deployments.
+Commit <a href="https://github.com/propeller-heads/tycho/commit/91b7f1511facc4ea5808f9e82a9078583fd839c9" target="_blank" rel="noopener noreferrer"><code>91b7f151</code></a> introduced the deployment that took effect on 1 August 2026. Commit <a href="https://github.com/propeller-heads/tycho/commit/8cfd100c1da5b6e367417c281859496f189a9388" target="_blank" rel="noopener noreferrer"><code>8cfd100c</code></a> introduced the deployment that superseded it on 1 September 2026 across all eight chains. These deployments predate the notice policy. The machine-readable registry records both address sets. Commit <a href="https://github.com/propeller-heads/tycho/commit/629a473fe5b9ab24016f81eda1e968a6782aab53" target="_blank" rel="noopener noreferrer"><code>629a473f</code></a> introduced the Arc deployment that took effect on 29 September 2026. Arc had no earlier router. Commit <a href="https://github.com/propeller-heads/tycho/commit/460fc8f3950205502f7618a5fb591a15fde3d341" target="_blank" rel="noopener noreferrer"><code>460fc8f3</code></a> introduced the Elysium deployment that took effect on 9 November 2026. Elysium had no earlier router. Structured registry history starts on 1 August 2026; the Router V2 tables below and Git history preserve earlier deployments.
 
 ## Ethereum
 
@@ -207,6 +208,16 @@ Commit <a href="https://github.com/propeller-heads/tycho/commit/91b7f1511facc4ea
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/ee120f5bd2209c85bf3a6a3e4e58b94a83103ba2/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol" target="_blank" rel="noopener noreferrer">UniswapV3Executor</a></td><td><a href="https://arc-scan.org/address/0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015" target="_blank" rel="noopener noreferrer">0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/e5dbe9059d6324f40eb5e47badb416833420f5cd/crates/tycho-execution/contracts/src/executors/UniswapV4Executor.sol" target="_blank" rel="noopener noreferrer">UniswapV4Executor</a></td><td><a href="https://arc-scan.org/address/0xf7630dAAC56f3ee857cC3fCc758F67302542564D" target="_blank" rel="noopener noreferrer">0xf7630dAAC56f3ee857cC3fCc758F67302542564D</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/d9e4ef4ce7945d97854a9b33d7d670b8b0613b1f/crates/tycho-execution/contracts/src/executors/AeroBasicExecutor.sol" target="_blank" rel="noopener noreferrer">AeroBasicExecutor</a></td><td><a href="https://arc-scan.org/address/0x68F46568a26d46E4fc7FB97BbbDDfd3c4FaBdd0a" target="_blank" rel="noopener noreferrer">0x68F46568a26d46E4fc7FB97BbbDDfd3c4FaBdd0a</a></td></tr>
+</tbody></table>
+
+## Elysium
+
+<table data-full-width="false"><thead><tr><th>Contract</th><th width="484">Address</th></tr></thead><tbody>
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/460fc8f3950205502f7618a5fb591a15fde3d341/crates/tycho-execution/contracts/src/TychoRouterV3.sol" target="_blank" rel="noopener noreferrer">TychoRouterV3</a></td><td><a href="https://elysium.kinetiq.xyz/address/0xf7d2Ec960Cb9714C97897Db395Ff7f0a11de1060" target="_blank" rel="noopener noreferrer">0xf7d2Ec960Cb9714C97897Db395Ff7f0a11de1060</a></td></tr>
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/460fc8f3950205502f7618a5fb591a15fde3d341/crates/tycho-execution/contracts/src/FeeCalculator.sol" target="_blank" rel="noopener noreferrer">FeeCalculator</a></td><td><a href="https://elysium.kinetiq.xyz/address/0x4609Ed897E905F95C15159cb9cBC1A08486f5Fcf" target="_blank" rel="noopener noreferrer">0x4609Ed897E905F95C15159cb9cBC1A08486f5Fcf</a></td></tr>
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/460fc8f3950205502f7618a5fb591a15fde3d341/crates/tycho-execution/contracts/src/executors/UniswapV2Executor.sol" target="_blank" rel="noopener noreferrer">UniswapV2Executor</a></td><td><a href="https://elysium.kinetiq.xyz/address/0x6B8DFbbef1f5EF947427985F7C27D1c50CD025ea" target="_blank" rel="noopener noreferrer">0x6B8DFbbef1f5EF947427985F7C27D1c50CD025ea</a></td></tr>
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/460fc8f3950205502f7618a5fb591a15fde3d341/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol" target="_blank" rel="noopener noreferrer">UniswapV3Executor</a></td><td><a href="https://elysium.kinetiq.xyz/address/0x618bC57D1e133C861730e28b64C3ffe93bA264fe" target="_blank" rel="noopener noreferrer">0x618bC57D1e133C861730e28b64C3ffe93bA264fe</a></td></tr>
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/460fc8f3950205502f7618a5fb591a15fde3d341/crates/tycho-execution/contracts/src/executors/UniswapV4Executor.sol" target="_blank" rel="noopener noreferrer">UniswapV4Executor</a></td><td><a href="https://elysium.kinetiq.xyz/address/0x74145BbB8F3E51f7138eD3F7C96dFb3d56F784b5" target="_blank" rel="noopener noreferrer">0x74145BbB8F3E51f7138eD3F7C96dFb3d56F784b5</a></td></tr>
 </tbody></table>
 
 ## Router V2
