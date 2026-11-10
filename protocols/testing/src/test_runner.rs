@@ -66,7 +66,6 @@ use crate::{
 
 static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
-        ("ethereum-sushiswap-v2", "ethereum-uniswap-v2"),
         ("base-sushiswap-v2", "ethereum-uniswap-v2"),
         ("bsc-lunarbase", "base-lunarbase"),
         ("ethereum-pancakeswap-v2", "ethereum-uniswap-v2"),
@@ -74,9 +73,6 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("arc-uniswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("arc-uniswap-v4-no-hooks", "ethereum-uniswap-v4/no-hooks"),
         ("base-balancer-v3", "ethereum-balancer-v3"),
-        ("arbitrum-balancer-v3", "ethereum-balancer-v3"),
-        ("gnosis-balancer-v3", "ethereum-balancer-v3"),
-        ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-sushiswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-robinswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-gigadex-v3", "ethereum-pancakeswap-v3"),
@@ -256,10 +252,8 @@ impl TestRunner {
             .unwrap_or(80);
         info!("{}\n", "-".repeat(terminal_width));
 
-        // Skip if test files don't exist
         if !self.config_file_path.exists() {
-            warn!("Config file not found at {}.", self.config_file_path.display());
-            return Ok(());
+            return Err(miette!("Config file not found at {}", self.config_file_path.display()));
         }
 
         let config = Self::parse_config(&self.config_file_path)?;
@@ -268,8 +262,7 @@ impl TestRunner {
             .substreams_path
             .join(&config.substreams_yaml_path);
         if !substreams_yaml_path.exists() {
-            warn!("substreams.yaml file not found at {}", substreams_yaml_path.display());
-            return Ok(());
+            return Err(miette!("substreams.yaml not found at {}", substreams_yaml_path.display()));
         }
 
         match &self.test_type {
@@ -573,6 +566,16 @@ impl TestRunner {
                 .collect::<Vec<&IntegrationTest>>(),
         };
         let tests_count = tests.len();
+        if tests_count == 0 {
+            return match &test_type.match_test {
+                Some(filter) => Err(miette!(
+                    "No test in {} matches --match-test '{}'",
+                    self.config_file_path.display(),
+                    filter
+                )),
+                None => Err(miette!("{} defines no tests", self.config_file_path.display())),
+            };
+        }
 
         info!("Running {} tests on Chain {}...\n", tests_count, self.chain);
 
