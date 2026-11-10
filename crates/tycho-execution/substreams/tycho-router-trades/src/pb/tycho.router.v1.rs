@@ -336,7 +336,7 @@ pub struct SubsidyEvent {
 /// Nested message and enum types in `SubsidyEvent`.
 pub mod subsidy_event {
     #[allow(clippy::derive_partial_eq_without_eq)]
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
+#[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Outcome {
         #[prost(message, tag="9")]
         Paid(super::SubsidyPayment),
