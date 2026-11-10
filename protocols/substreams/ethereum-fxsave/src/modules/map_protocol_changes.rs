@@ -14,10 +14,10 @@ use tycho_substreams::{
 use crate::config::Config;
 
 /// fxSP storage slot of `totalYieldToken`, the fxUSD it holds.
-const TOTAL_YIELD_TOKEN_SLOT: u8 = 50;
+const TOTAL_YIELD_TOKEN_SLOT: B256 = B256::with_last_byte(50);
 /// fxSP storage slot of `totalStableToken`, the USDC it holds (idle and in its strategy) as of its
 /// last sync.
-const TOTAL_STABLE_TOKEN_SLOT: u8 = 51;
+const TOTAL_STABLE_TOKEN_SLOT: B256 = B256::with_last_byte(51);
 
 /// Assembles the `BlockChanges`: the component with its DCI entrypoints and initial balances,
 /// then fxSP's fxUSD and USDC holdings whenever they change.
@@ -28,6 +28,7 @@ pub fn map_protocol_changes(
     new_components: BlockTransactionProtocolComponents,
 ) -> Result<BlockChanges> {
     let config = Config::parse(&params)?;
+    let storage_changes = get_block_storage_changes(&block);
     let mut transaction_changes: HashMap<u64, TransactionChangesBuilder> = HashMap::new();
 
     for tx_components in new_components.tx_components {
@@ -47,9 +48,7 @@ pub fn map_protocol_changes(
         }
     }
 
-    if block.number > config.creation_block {
-        add_holding_changes(&block, &config, &mut transaction_changes);
-    }
+    add_holding_changes(block.number, &storage_changes, &config, &mut transaction_changes)?;
 
     Ok(BlockChanges {
         block: Some((&block).into()),
@@ -58,7 +57,7 @@ pub fn map_protocol_changes(
             .sorted_unstable_by_key(|(index, _)| *index)
             .filter_map(|(_, builder)| builder.build())
             .collect(),
-        storage_changes: get_block_storage_changes(&block),
+        storage_changes,
     })
 }
 
@@ -95,51 +94,49 @@ fn add_entrypoints(builder: &mut TransactionChangesBuilder, config: &Config) {
     }
 }
 
-/// Emits fxSP's fxUSD and USDC holdings from the last write to their slots in each transaction.
+/// Emits fxSP's fxUSD and USDC holdings as each transaction leaves them.
 fn add_holding_changes(
-    block: &eth::v2::Block,
+    block_number: u64,
+    storage_changes: &[TransactionStorageChanges],
     config: &Config,
     transaction_changes: &mut HashMap<u64, TransactionChangesBuilder>,
-) {
-    for tx in block.transactions() {
-        let mut latest: HashMap<u8, (u64, Vec<u8>)> = HashMap::new();
-        for call in tx
-            .calls
+) -> Result<()> {
+    // The creation block's balances are seeded by an `eth_call` that already reads its writes.
+    if block_number <= config.creation_block {
+        return Ok(());
+    }
+    for tx_changes in storage_changes {
+        let holdings: Vec<(Address, &Vec<u8>)> = tx_changes
+            .storage_changes
             .iter()
-            .filter(|call| !call.state_reverted)
-        {
-            for change in &call.storage_changes {
-                if change.address != config.fx_base_pool.as_slice() {
-                    continue;
-                }
-                let Some(slot) = holding_slot(&change.key) else { continue };
-                let is_later = latest
-                    .get(&slot)
-                    .is_none_or(|(ordinal, _)| change.ordinal > *ordinal);
-                if is_later {
-                    latest.insert(slot, (change.ordinal, change.new_value.clone()));
-                }
-            }
-        }
-        if latest.is_empty() {
+            .filter(|contract| contract.address == config.fx_base_pool.as_slice())
+            .flat_map(|contract| &contract.slots)
+            .filter_map(|slot| Some((holding_token(config, &slot.slot)?, &slot.value)))
+            .collect();
+        if holdings.is_empty() {
             continue;
         }
-        let tx_meta: Transaction = tx.into();
+        let Some(tx) = &tx_changes.tx else { bail!("storage changes without a transaction") };
         let builder = transaction_changes
-            .entry(tx_meta.index)
-            .or_insert_with(|| TransactionChangesBuilder::new(&tx_meta));
-        for (slot, (_, value)) in latest {
-            let token = if slot == TOTAL_YIELD_TOKEN_SLOT { config.fxusd } else { config.usdc };
-            let balance = BigInt::from_unsigned_bytes_be(&value);
+            .entry(tx.index)
+            .or_insert_with(|| TransactionChangesBuilder::new(tx));
+        for (token, value) in holdings {
+            let balance = BigInt::from_unsigned_bytes_be(value);
             builder.add_balance_change(&balance_change(config, token, balance));
         }
     }
+    Ok(())
 }
 
-fn holding_slot(key: &[u8]) -> Option<u8> {
-    let (last, rest) = key.split_last()?;
-    let is_holding = *last == TOTAL_YIELD_TOKEN_SLOT || *last == TOTAL_STABLE_TOKEN_SLOT;
-    (is_holding && rest.iter().all(|byte| *byte == 0)).then_some(*last)
+/// The token whose fxSP holding `slot` stores, if it stores one.
+fn holding_token(config: &Config, slot: &[u8]) -> Option<Address> {
+    if slot == TOTAL_YIELD_TOKEN_SLOT.as_slice() {
+        Some(config.fxusd)
+    } else if slot == TOTAL_STABLE_TOKEN_SLOT.as_slice() {
+        Some(config.usdc)
+    } else {
+        None
+    }
 }
 
 fn balance_change(config: &Config, token: Address, balance: BigInt) -> BalanceChange {
@@ -179,28 +176,132 @@ fn calldata(signature: &str, args: &[B256]) -> Vec<u8> {
 mod tests {
     use alloy_primitives::{address, hex};
     use rstest::rstest;
+    use substreams_ethereum::pb::eth::v2::{
+        block::DetailLevel, Block, Call, StorageChange, TransactionTrace, TransactionTraceStatus,
+    };
 
     use super::*;
     use crate::config::tests::PARAMS;
 
+    const CREATION_BLOCK: u64 = 26_349_181;
     const FX_BASE_POOL: Address = address!("65c9a641afceb9c0e6034e558a319488fa0fa3be");
     const FXSAVE: Address = address!("7743e50f534a7f9f1791dde7dcd89f7783eefc39");
+    const FXUSD: Address = address!("085780639cc2cacd35e474e71f4d000e2405d8f6");
+    const USDC: Address = address!("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
 
-    fn slot_key(slot: u8) -> Vec<u8> {
-        let mut key = vec![0u8; 32];
-        key[31] = slot;
-        key
+    fn write(address: Address, slot: u8, value: u8, ordinal: u64) -> StorageChange {
+        StorageChange {
+            address: address.to_vec(),
+            key: B256::with_last_byte(slot).to_vec(),
+            old_value: B256::ZERO.to_vec(),
+            new_value: B256::with_last_byte(value).to_vec(),
+            ordinal,
+        }
+    }
+
+    fn call(state_reverted: bool, storage_changes: Vec<StorageChange>) -> Call {
+        Call { state_reverted, storage_changes, ..Default::default() }
+    }
+
+    fn block(number: u64, calls: Vec<Call>) -> Block {
+        let transaction = TransactionTrace {
+            hash: vec![0x11; 32],
+            index: 7,
+            status: TransactionTraceStatus::Succeeded.into(),
+            calls,
+            ..Default::default()
+        };
+        Block {
+            number,
+            detail_level: DetailLevel::DetaillevelExtended.into(),
+            transaction_traces: vec![transaction],
+            ..Default::default()
+        }
+    }
+
+    /// The holdings `block` emits, per transaction index, sorted by token.
+    fn holdings(block: &Block) -> Vec<(u64, Vec<BalanceChange>)> {
+        let config = Config::parse(PARAMS).unwrap();
+        let mut transaction_changes = HashMap::new();
+
+        add_holding_changes(
+            block.number,
+            &get_block_storage_changes(block),
+            &config,
+            &mut transaction_changes,
+        )
+        .unwrap();
+
+        transaction_changes
+            .into_iter()
+            .sorted_unstable_by_key(|(index, _)| *index)
+            .map(|(index, builder)| {
+                let mut balances = builder.build().unwrap().balance_changes;
+                balances.sort_unstable_by(|a, b| a.token.cmp(&b.token));
+                (index, balances)
+            })
+            .collect()
+    }
+
+    fn holding(token: Address, balance: u8) -> BalanceChange {
+        BalanceChange {
+            token: token.to_vec(),
+            balance: vec![balance],
+            component_id: b"0x7743e50f534a7f9f1791dde7dcd89f7783eefc39".to_vec(),
+        }
     }
 
     #[test]
-    fn recognises_only_the_holding_slots() {
-        assert_eq!(holding_slot(&slot_key(50)), Some(TOTAL_YIELD_TOKEN_SLOT));
-        assert_eq!(holding_slot(&slot_key(51)), Some(TOTAL_STABLE_TOKEN_SLOT));
-        assert_eq!(holding_slot(&slot_key(52)), None);
+    fn test_holdings_map_slot_50_to_fxusd_and_51_to_usdc() {
+        let block = block(
+            CREATION_BLOCK + 1,
+            vec![call(false, vec![write(FX_BASE_POOL, 50, 9, 1), write(FX_BASE_POOL, 51, 4, 2)])],
+        );
 
-        let mut mapping_key = slot_key(50);
-        mapping_key[0] = 1;
-        assert_eq!(holding_slot(&mapping_key), None);
+        assert_eq!(holdings(&block), vec![(7, vec![holding(FXUSD, 9), holding(USDC, 4)])]);
+    }
+
+    /// The later write is listed first, so only ordering by ordinal picks it.
+    #[test]
+    fn test_holdings_take_the_transactions_last_write() {
+        let block = block(
+            CREATION_BLOCK + 1,
+            vec![
+                call(false, vec![write(FX_BASE_POOL, 51, 7, 20)]),
+                call(false, vec![write(FX_BASE_POOL, 51, 5, 10)]),
+            ],
+        );
+
+        assert_eq!(holdings(&block), vec![(7, vec![holding(USDC, 7)])]);
+    }
+
+    #[test]
+    fn test_holdings_ignore_reverted_writes() {
+        let block = block(
+            CREATION_BLOCK + 1,
+            vec![
+                call(false, vec![write(FX_BASE_POOL, 50, 1, 1)]),
+                call(true, vec![write(FX_BASE_POOL, 50, 2, 2)]),
+            ],
+        );
+
+        assert_eq!(holdings(&block), vec![(7, vec![holding(FXUSD, 1)])]);
+    }
+
+    #[rstest]
+    #[case::other_contract(FXSAVE, 50)]
+    #[case::other_slot(FX_BASE_POOL, 52)]
+    fn test_holdings_ignore_other_storage(#[case] address: Address, #[case] slot: u8) {
+        let block = block(CREATION_BLOCK + 1, vec![call(false, vec![write(address, slot, 3, 1)])]);
+
+        assert_eq!(holdings(&block), vec![]);
+    }
+
+    #[test]
+    fn test_holdings_skip_the_creation_block() {
+        let block = block(CREATION_BLOCK, vec![call(false, vec![write(FX_BASE_POOL, 51, 4, 1)])]);
+
+        assert_eq!(holdings(&block), vec![]);
     }
 
     #[rstest]
