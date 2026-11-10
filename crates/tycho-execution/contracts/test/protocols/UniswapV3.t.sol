@@ -13,7 +13,7 @@ contract UniswapV3ExecutorExposed is UniswapV3Executor {
     function decodeData(bytes calldata data)
         external
         pure
-        returns (address target, bool zeroForOne)
+        returns (address target, bool zeroForOne, bool outputViaExecutor)
     {
         return _decodeData(data);
     }
@@ -61,7 +61,7 @@ contract UniswapV3ExecutorTest is Test, TestUtils, Constants {
             WETH_ADDR, DAI_ADDR, expectedPoolFee, address(3), false
         );
 
-        (address target, bool zeroForOne) = uniswapV3Exposed.decodeData(data);
+        (address target, bool zeroForOne,) = uniswapV3Exposed.decodeData(data);
 
         assertEq(target, address(3));
         assertEq(zeroForOne, false);
@@ -139,6 +139,7 @@ contract UniswapV3ExecutorTest is Test, TestUtils, Constants {
             uint24(500),
             TransferManager.TransferType.Transfer,
             address(3),
+            false,
             false
         );
 

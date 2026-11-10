@@ -21,7 +21,13 @@ contract UniswapV3Executor is IExecutor, ICallback {
     uint160 private constant _MAX_SQRT_RATIO =
         1461446703485210103287273052203988822378723970342;
 
-    constructor() {}
+    /// @dev This executor's own address. `swap` runs as a delegatecall from
+    ///  the router, where `address(this)` is the router.
+    address private immutable _SELF;
+
+    constructor() {
+        _SELF = address(this);
+    }
 
     function fundsExpectedAddress(
         bytes calldata /* data */
@@ -38,21 +44,47 @@ contract UniswapV3Executor is IExecutor, ICallback {
         external
         payable
     {
-        address target;
-        bool zeroForOne;
-        (target, zeroForOne) = _decodeData(data);
+        (address target, bool zeroForOne, bool outputViaExecutor) =
+            _decodeData(data);
 
         IUniswapV3Pool pool = IUniswapV3Pool(target);
 
         // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         pool.swap(
-            receiver,
+            outputViaExecutor ? _SELF : receiver,
             zeroForOne,
             // positive means exactIn
             int256(amountIn),
             zeroForOne ? _MIN_SQRT_RATIO + 1 : _MAX_SQRT_RATIO - 1,
             ""
         );
+
+        if (outputViaExecutor) {
+            UniswapV3Executor(_SELF)
+                .forwardOutput(address(bytes20(data[20:40])), receiver);
+        }
+    }
+
+    /**
+     * @notice Accepts the ERC223 hook that some tokens call on a contract
+     *  recipient of `transfer`.
+     * @dev With `outputViaExecutor`, the pool sends the output here. Without
+     *  this function, the hook would reach the router fallback and use up the
+     *  callback executor before the pool's swap callback arrives.
+     */
+    function tokenFallback(address, uint256, bytes calldata) external pure {}
+
+    /**
+     * @notice Sends this contract's whole `token` balance to `to`.
+     * @dev Uses `transferFrom`, because ERC223 tokens call the hook only on
+     *  `transfer`. This contract holds tokens only inside one swap. Anyone can
+     *  call it, but a call during a swap lowers the swap output, and the
+     *  router then reverts on its minimum output check.
+     */
+    function forwardOutput(address token, address to) external {
+        uint256 amount = IERC20(token).balanceOf(address(this));
+        IERC20(token).forceApprove(address(this), amount);
+        IERC20(token).safeTransferFrom(address(this), to, amount);
     }
 
     function handleCallback(
@@ -69,13 +101,14 @@ contract UniswapV3Executor is IExecutor, ICallback {
     function _decodeData(bytes calldata data)
         internal
         pure
-        returns (address target, bool zeroForOne)
+        returns (address target, bool zeroForOne, bool outputViaExecutor)
     {
-        if (data.length != 64) {
+        if (data.length != 64 && data.length != 65) {
             revert UniswapV3Executor__InvalidDataLength();
         }
         target = address(bytes20(data[43:63]));
         zeroForOne = uint8(data[63]) > 0;
+        outputViaExecutor = data.length == 65 && uint8(data[64]) > 0;
     }
 
     function getTransferData(bytes calldata data)
