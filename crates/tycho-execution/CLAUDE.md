@@ -111,9 +111,11 @@ later. It is explicit rather than defaulted to `msg.sender` because deployment g
 mapping (`CustomFees` struct, single storage slot). If set, the custom rate replaces the default for that client. Can be
 removed to revert to defaults.
 
-**Token pair fees** (`_tokenPairFeeBps`, set via `setTokenPairFee`, read via `getTokenPairFee`): a router fee on
-output for swaps between two tokens, in both directions. It applies to every client and adds to the router fee on
-output. A non-zero pair fee forces `mustOutputThroughRouter` to return true. Setting the fee to zero removes it.
+**Token pair fees** (`_tokenPairFees`, set via `setTokenPairFee`, removed via `removeTokenPairFee`, read via
+`getTokenPairFee`): a router fee on output for swaps between two tokens, in both directions. A set pair fee replaces
+the default router fee on output, so it can raise or lower it, and zero removes it for the pair. For a client with a
+custom fee on output, the lower of the custom fee and the pair fee applies. `_getFeeInfo` resolves this order, so
+`calculateFee` and `mustOutputThroughRouter` see the same fee.
 
 **Client resolution** (`_resolveClient`): When `client == address(0)` (no EIP-712 signature supplied),
 `calculateFee` and `mustOutputThroughRouter` fall back to `tx.origin` for the custom fee lookup. This lets

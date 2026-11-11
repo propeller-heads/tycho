@@ -18,25 +18,27 @@ struct FeeInfo {
     client_positive_slippage_share_bps: i64,
 }
 
-/// Mirrors `FeeCalculator._getTokenPairFee` in Solidity.
-fn _get_token_pair_fee(params: &Params) -> Result<i64, Error> {
-    if !crate::config::ENABLE_NONZERO_FEE_BPS {
-        return Ok(0);
-    }
-    // A model run has one swap, so it has one token pair.
-    Ok(params.request("token_pair_fee_bps", vec![0, MAX_BPS])?)
-}
-
 fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
     let (router_fee_on_output_bps, router_fee_on_client_fee_bps) =
         if crate::config::ENABLE_NONZERO_FEE_BPS {
             let has_client_custom_fee_on_input =
                 params.request("has_client_custom_fee_on_input", vec![true, false])?;
 
-            let router_fee_on_output_bps = if has_client_custom_fee_on_input {
-                params.request("client_fee_bps_on_output", vec![0, MAX_BPS])?
-            } else {
-                params.request("router_fee_on_output_bps", vec![0, MAX_BPS])?
+            // A model run has one swap, so it has one token pair.
+            let pair_fee_bps: Option<i64> =
+                if params.request("has_token_pair_fee", vec![true, false])? {
+                    Some(params.request("token_pair_fee_bps", vec![0, MAX_BPS / 2, MAX_BPS])?)
+                } else {
+                    None
+                };
+
+            let router_fee_on_output_bps = match (has_client_custom_fee_on_input, pair_fee_bps) {
+                (true, Some(pair_fee_bps)) => params
+                    .request("client_fee_bps_on_output", vec![0, MAX_BPS])?
+                    .min(pair_fee_bps),
+                (true, None) => params.request("client_fee_bps_on_output", vec![0, MAX_BPS])?,
+                (false, Some(pair_fee_bps)) => pair_fee_bps,
+                (false, None) => params.request("router_fee_on_output_bps", vec![0, MAX_BPS])?,
             };
 
             let has_client_custom_fee_on_client_fee =
@@ -96,7 +98,6 @@ pub fn calculate_fee(
     _amount_in: i64,
 ) -> Result<Vec<FeeRecipient>, Error> {
     let fee_info = _get_fee_info(params)?;
-    let pair_fee_bps = _get_token_pair_fee(params)?;
 
     let positive_slippage =
         _calculate_positive_slippage(actual_amount_out, expected_amount_out, &fee_info);
@@ -107,8 +108,7 @@ pub fn calculate_fee(
 
     let fee_base = actual_amount_out - positive_slippage;
 
-    let (router_fee, client_fee) =
-        _calculate_fee(fee_base, client_fee_bps, pair_fee_bps, &fee_info)?;
+    let (router_fee, client_fee) = _calculate_fee(fee_base, client_fee_bps, &fee_info)?;
 
     Ok(vec![
         FeeRecipient {
@@ -143,9 +143,6 @@ pub fn must_output_through_router(
     if fee_info.router_fee_on_output_bps > 0 {
         return Ok(true);
     }
-    if _get_token_pair_fee(params)? > 0 {
-        return Ok(true);
-    }
 
     Ok(false)
 }
@@ -161,16 +158,13 @@ fn fee_to_i64(amount: i128) -> Result<i64, Error> {
 /// Mirrors `FeeCalculator._calculateFee` in Solidity.
 ///
 /// Returns `(router_fee, client_fee)`: the total router fee (fee on output +
-/// pair fee + cut of the client fee) and the client's portion of the client fee.
+/// cut of the client fee) and the client's portion of the client fee.
 fn _calculate_fee(
     fee_base: i64,
     client_fee_bps: i64,
-    pair_fee_bps: i64,
     fee_info: &FeeInfo,
 ) -> Result<(i64, i64), Error> {
-    let router_fee_on_output_bps = fee_info.router_fee_on_output_bps + pair_fee_bps;
-
-    if (client_fee_bps + router_fee_on_output_bps > MAX_BPS) ||
+    if (client_fee_bps + fee_info.router_fee_on_output_bps > MAX_BPS) ||
         fee_info.router_fee_on_client_fee_bps > MAX_BPS
     {
         return Err(Error::revert("_calculate_fee: fee bps too large"));
@@ -195,9 +189,10 @@ fn _calculate_fee(
 
     let mut router_fee = router_fee_on_client_fee;
 
-    if router_fee_on_output_bps > 0 {
-        router_fee +=
-            fee_to_i64(fee_base as i128 * router_fee_on_output_bps as i128 / MAX_BPS as i128)?;
+    if fee_info.router_fee_on_output_bps > 0 {
+        router_fee += fee_to_i64(
+            fee_base as i128 * fee_info.router_fee_on_output_bps as i128 / MAX_BPS as i128,
+        )?;
     }
 
     Ok((router_fee, client_fee))
