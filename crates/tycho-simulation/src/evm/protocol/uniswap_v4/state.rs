@@ -2247,6 +2247,181 @@ mod tests {
         assert_eq!(state.crossed_ticks(zero_for_one, new_tick), expected);
     }
 
+    fn cbbtc() -> Token {
+        Token::new(
+            &Bytes::from_str("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf").unwrap(),
+            "cbBTC",
+            8,
+            0,
+            &[Some(10_000)],
+            Default::default(),
+            100,
+        )
+    }
+
+    /// The ETH/cbBTC pool 0x8514…2203 at block 26384874, where its price sits just above the
+    /// lower price bound of its hook (AdaptivePoolPolicyHookV1). The hook reverts in `afterSwap`
+    /// when the swap leaves the price below that bound. Pool values are read from the
+    /// PoolManager at that block; the hook and the PoolManager run against an archive node.
+    fn bounded_hook_eth_cbbtc_pool() -> UniswapV4State {
+        let block = BlockHeader {
+            number: 26384874,
+            hash: Bytes::from_str(
+                "0xcc8d58a68ba1646816d5d2da1f1d90d97ee9403565fdfdc4389c687b3477d850",
+            )
+            .expect("Invalid block hash"),
+            timestamp: 1794325007,
+            ..Default::default()
+        };
+        let mut state = UniswapV4State::new(
+            16276219775253707,
+            U256::from_str("132890032218341853074606").unwrap(),
+            // 0x800000: dynamic fee; the hook overrides it in beforeSwap.
+            UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 0x800000 },
+            -265980,
+            10,
+            vec![
+                TickInfo::new(-266720, 3357011528574).unwrap(),
+                TickInfo::new(-266570, 228824122692015).unwrap(),
+                TickInfo::new(-266090, 16044038641033118).unwrap(),
+                TickInfo::new(-265500, 545141848435037).unwrap(),
+                TickInfo::new(-265310, -545141848435037).unwrap(),
+                TickInfo::new(-265240, -16044038641033118).unwrap(),
+                TickInfo::new(-264580, -228824122692015).unwrap(),
+                TickInfo::new(-262670, -3357011528574).unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let db = SimulationDB::new(
+            get_client(None).expect("Failed to create client"),
+            get_runtime().expect("Failed to get runtime"),
+            Some(block),
+        );
+        let engine = create_engine(db, false).expect("Failed to create simulation engine");
+        let hook_handler = GenericVMHookHandler::new(
+            Address::from_str("0x0ce2adeedcc62493cb3853a6f551426fd8b048c4").unwrap(),
+            engine,
+            Address::from_str("0x000000000004444c5dc75cb358380d2e3de08a90").unwrap(),
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            false,
+        )
+        .unwrap();
+        state.set_hook_handler(Box::new(hook_handler));
+        state
+    }
+
+    #[test]
+    #[ignore = "Requires RPC_URL (archive node)"]
+    fn test_get_amount_out_inside_hook_price_bound_matches_chain() {
+        // V4Quoter.quoteExactInputSingle at block 26384874 returns 2811 for 0.001 ETH.
+        let state = bounded_hook_eth_cbbtc_pool();
+
+        let out = state
+            .get_amount_out(BigUint::from(10u64.pow(15)), &eth(), &cbbtc())
+            .unwrap();
+
+        assert_eq!(out.amount, BigUint::from(2811u64));
+    }
+
+    #[test]
+    #[ignore = "Requires RPC_URL (archive node)"]
+    fn test_get_amount_out_fails_when_swap_ends_past_hook_price_bound() {
+        // At block 26384874 V4Quoter reverts with the hook's PriceOutOfBounds for 0.01 ETH, and
+        // Tycho Router swaps through this pool reverted on chain the same way.
+        let state = bounded_hook_eth_cbbtc_pool();
+
+        let result = state.get_amount_out(BigUint::from(10u64.pow(16)), &eth(), &cbbtc());
+
+        // 0xccb2e471 is the selector of the hook's PriceOutOfBounds error.
+        let error = result.expect_err("the hook must revert");
+        assert!(format!("{error:?}").contains("ccb2e471"), "unexpected error: {error:?}");
+    }
+
+    /// The BOLD/USDC pool 0x0257…d2ac at block 26391210. Its hook 0x89964d94…9040 calls
+    /// `modifyLiquidity` on the pool in `afterSwap`.
+    fn liquidity_moving_hook_bold_usdc_pool() -> UniswapV4State {
+        let block = BlockHeader {
+            number: 26391210,
+            hash: Bytes::from_str(
+                "0x7f51bb1b60673da5b16801a11d639d6b782414c173dc270b41c941c338dce60c",
+            )
+            .expect("Invalid block hash"),
+            timestamp: 1794394451,
+            ..Default::default()
+        };
+        let mut state = UniswapV4State::new(
+            25191840016694422,
+            U256::from_str("79081837763107755722937").unwrap(),
+            UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 10 },
+            -276361,
+            1,
+            vec![
+                TickInfo::new(-276405, 25191840016694422).unwrap(),
+                TickInfo::new(-276377, 598417759811976556783).unwrap(),
+                TickInfo::new(-276376, -132974310096160089026).unwrap(),
+                TickInfo::new(-276375, -166204333094184433501).unwrap(),
+                TickInfo::new(-276374, -99736295561616042570).unwrap(),
+                TickInfo::new(-276373, 10075139348584388).unwrap(),
+                TickInfo::new(-276372, 10073633227958595).unwrap(),
+                TickInfo::new(-276371, 10072127232749598).unwrap(),
+                TickInfo::new(-276370, 14978076859801574070).unwrap(),
+                TickInfo::new(-276369, -14957937142865602221).unwrap(),
+                TickInfo::new(-276368, 10067630045057883).unwrap(),
+                TickInfo::new(-276367, -199563249306806313999).unwrap(),
+                TickInfo::new(-276365, 200415145199663240337).unwrap(),
+                TickInfo::new(-276364, -10020005765812964).unwrap(),
+                TickInfo::new(-276363, -63485398163192465015).unwrap(),
+                TickInfo::new(-276362, -136919727030704962358).unwrap(),
+                TickInfo::new(-276245, -25191840016694422).unwrap(),
+            ],
+        )
+        .unwrap();
+        let db = SimulationDB::new(
+            get_client(None).expect("Failed to create client"),
+            get_runtime().expect("Failed to get runtime"),
+            Some(block),
+        );
+        let engine = create_engine(db, false).expect("Failed to create simulation engine");
+        let hook_handler = GenericVMHookHandler::new(
+            Address::from_str("0x89964d94bc548a8faf4615f87434abc01d9d9040").unwrap(),
+            engine,
+            Address::from_str("0x000000000004444c5dc75cb358380d2e3de08a90").unwrap(),
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            false,
+        )
+        .unwrap();
+        state.set_hook_handler(Box::new(hook_handler));
+        state
+    }
+
+    #[test]
+    #[ignore = "Requires RPC_URL (archive node)"]
+    fn test_get_amount_out_hook_modifies_liquidity_after_crossing_ticks_matches_chain() {
+        // The swap crosses initialized ticks, then the hook moves its liquidity in `afterSwap`.
+        // V4Quoter.quoteExactInputSingle at block 26391210 returns 16541919431.
+        let state = liquidity_moving_hook_bold_usdc_pool();
+        let bold = Token::new(
+            &Bytes::from_str("0x6440f144b7e50d6a8439336510312d2f54beb01d").unwrap(),
+            "BOLD",
+            18,
+            0,
+            &[Some(10_000)],
+            Default::default(),
+            100,
+        );
+
+        let out = state
+            .get_amount_out(BigUint::from_str("16606807511972129462844").unwrap(), &bold, &usdc())
+            .unwrap();
+
+        assert_eq!(out.amount, BigUint::from(16541919431u64));
+    }
+
     /// Hook that only answers `after_swap`, with a configurable address and returned delta.
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct AfterSwapTestHook {

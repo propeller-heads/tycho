@@ -1000,6 +1000,56 @@ mod tests {
     }
 
     #[test]
+    fn test_pool_slot0_slot() {
+        // The ETH/cbBTC pool 0x8514…2203: its slot0 sits at this PoolManager slot on mainnet.
+        let pool_key: PoolKey = (
+            Address::ZERO,
+            Address::from_str("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf").unwrap(),
+            Uint::<24, 1>::from(0x800000u32),
+            Signed::<24, 1>::try_from(10).unwrap(),
+            Address::from_str("0x0ce2adeedcc62493cb3853a6f551426fd8b048c4").unwrap(),
+        );
+
+        assert_eq!(
+            pool_slot0_slot(&pool_key),
+            U256::from_str("0x3411256eb99e84d9e9170aadf4ae5a0f3537fcb3510407c58776c92b67930323")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_tick_info_slot() {
+        // Tick -276362 of the BOLD/USDC pool 0x0257…d2ac on mainnet.
+        let slot0_slot =
+            U256::from_str("0x06349ddeda945499fabc5a4308bed36a89c7dd307947625d0377a50cf9af5c96")
+                .unwrap();
+
+        assert_eq!(
+            tick_info_slot(slot0_slot, -276362),
+            U256::from_str("0x74f8896d0f21c21d59e9a5c1978feb0a496cd111e19ed89fac638bac5e8ad7c0")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_slot0_with_price_and_tick_keeps_fee_bits() {
+        // Protocol fee 0x0a0b and LP fee 3000 above the price and tick -265980.
+        let slot0 =
+            U256::from_str("0xbb8000a0bfbf104000000000000000000001c23fbab3d04018f94ae").unwrap();
+
+        let updated = slot0_with_price_and_tick(
+            slot0,
+            U256::from_str("132889895374457276413430").unwrap(),
+            -265981,
+        );
+
+        assert_eq!(
+            updated,
+            U256::from_str("0xbb8000a0bfbf103000000000000000000001c23f9c5123a47af35f6").unwrap()
+        );
+    }
+
+    #[test]
     fn test_no_pending_storage_leaves_overwrites_untouched() {
         let hook = Address::repeat_byte(1);
         let overwrites = HashMap::from([(hook, HashMap::from([(U256::from(1), U256::from(11))]))]);
