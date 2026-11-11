@@ -1,3 +1,11 @@
+## [0.509.0](https://github.com/propeller-heads/tycho/compare/0.508.0...0.509.0) (2026-11-11)
+
+
+### Features
+
+* **integration-test:** stream the Elysium Uniswap V3 forks ([b278551](https://github.com/propeller-heads/tycho/commit/b278551c118559f7f36223504e959271c5c1ee1e))
+* **integration-test:** stream the Elysium Uniswap V3 forks ([#1781](https://github.com/propeller-heads/tycho/issues/1781)) ([c44402e](https://github.com/propeller-heads/tycho/commit/c44402e08bf1ab79437fa474cd41697fbc24f46e))
+
 ## [0.508.0](https://github.com/propeller-heads/tycho/compare/0.507.1...0.508.0) (2026-11-11)
 
 
