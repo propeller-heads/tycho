@@ -6,6 +6,7 @@ use std::{
 };
 
 use colored::Colorize;
+use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, WrapErr};
 use serde::{
     de::{self, Visitor},
@@ -576,7 +577,8 @@ impl IntegrationTestsConfig {
     /// - each has the fields its kind requires;
     /// - a component's direction is one of its token pairs, and a package's direction is one of
     ///   some expected component's;
-    /// - in strict mode, every direction of every expected component has a declaration.
+    /// - in strict mode, every direction of every expected component that does not skip simulation
+    ///   has a declaration.
     fn check_limits(&self, source: &str) -> miette::Result<()> {
         let mut problems = Vec::new();
         let mut undeclared = Vec::new();
@@ -588,7 +590,7 @@ impl IntegrationTestsConfig {
                 let directions = component_directions(component);
                 if let Some(declaration) = &component.limits {
                     check_declaration(declaration, &location, &mut problems);
-                    for direction in declaration.directions.keys() {
+                    for direction in declaration.directions.keys().sorted() {
                         if !directions.contains(direction) {
                             problems.push(format!(
                                 "{location}: {direction} is not one of its directions"
@@ -596,10 +598,12 @@ impl IntegrationTestsConfig {
                         }
                     }
                 }
+                // A component that skips simulation tests none of its limits.
+                let tested = !component.skip_simulation.is_skipped();
                 for direction in &directions {
-                    if self
-                        .limits_for(component, direction)
-                        .is_none()
+                    if tested &&
+                        self.limits_for(component, direction)
+                            .is_none()
                     {
                         undeclared.push(format!("{location}, {direction}"));
                     }
@@ -609,7 +613,7 @@ impl IntegrationTestsConfig {
         }
         if let Some(declaration) = &self.limits {
             check_declaration(declaration, "package", &mut problems);
-            for direction in declaration.directions.keys() {
+            for direction in declaration.directions.keys().sorted() {
                 if !all_directions.contains(direction) {
                     problems.push(format!(
                         "package: {direction} is not a direction of any expected component"
@@ -999,6 +1003,13 @@ tests:
 
         // Legacy mode tests no limits, so it needs no declaration.
         assert!(parse(&yaml("", "")).is_ok());
+    }
+
+    #[test]
+    fn a_component_that_skips_simulation_needs_no_declaration() {
+        assert!(
+            parse(&yaml("harness: strict", "        skip_simulation: \"no fork state\"")).is_ok()
+        );
     }
 
     #[test]

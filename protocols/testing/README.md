@@ -100,7 +100,7 @@ fixture added first.
 The ladder trades at most 10% of a direction's limit, so on its own it passes a limit ten times too
 high. Strict mode also tests the limit itself, per direction, after the `int128` cap the runner
 applies for execution. Every direction of every expected component declares the kind of limit
-`get_limits` reports. A `limits` value is one declaration for every direction, or a map from
+`get_limits` reports, unless the component skips simulation. A `limits` value is one declaration for every direction, or a map from
 directions to declarations, keyed `0x<token in>->0x<token out>`, with an optional `default` for the
 directions it does not list. A package declares limits for all its components, and a component can
 override them:
