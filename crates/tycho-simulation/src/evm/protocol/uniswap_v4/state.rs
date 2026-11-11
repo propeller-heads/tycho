@@ -30,7 +30,7 @@ use crate::{
                 hook_handler::HookHandler,
                 models::{
                     AfterSwapParameters, BalanceDelta, BeforeSwapDelta, BeforeSwapParameters,
-                    StateContext, SwapParams,
+                    PoolStateAfterSwap, StateContext, SwapParams,
                 },
             },
             utils::{
@@ -272,6 +272,25 @@ impl UniswapV4State {
         state.liquidity = liquidity;
         state.step_cache = SwapStepCache::default();
         state
+    }
+
+    /// The initialized ticks a swap from the current tick to `new_tick` crosses. A swap down
+    /// crosses a tick when it reaches the tick's price and ends one tick below it; a swap up ends
+    /// on the tick.
+    fn crossed_ticks(&self, zero_for_one: bool, new_tick: i32) -> Vec<i32> {
+        let old_tick = self.tick.value();
+        self.ticks
+            .ticks()
+            .iter()
+            .map(|tick| tick.index)
+            .filter(|&tick| {
+                if zero_for_one {
+                    new_tick < tick && tick <= old_tick
+                } else {
+                    old_tick < tick && tick <= new_tick
+                }
+            })
+            .collect()
     }
 
     fn swap(
@@ -833,6 +852,12 @@ impl ProtocolSim for UniswapV4State {
                     swap_params,
                     delta: swap_delta,
                     hook_data: Bytes::new(),
+                    pool_state: Some(PoolStateAfterSwap {
+                        sqrt_price_x96: result.sqrt_price,
+                        tick: result.tick.value(),
+                        liquidity: result.liquidity,
+                        crossed_ticks: self.crossed_ticks(zero_for_one, result.tick.value()),
+                    }),
                 };
 
                 let after_swap_result = hook
