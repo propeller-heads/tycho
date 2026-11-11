@@ -50,7 +50,7 @@ tests:
 
   - name: test_sUSDS
     start_block: 20677434
-    stop_block: 20727434
+    stop_block: 20780000
     expected_components:
       - id: "0xa3931d71877c0e7a3148cb7eb4463524fec27fbd"
         tokens:

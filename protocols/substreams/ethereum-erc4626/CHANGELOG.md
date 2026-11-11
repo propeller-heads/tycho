@@ -17,7 +17,6 @@
 
 Requires a full resync of the erc4626 extractor (from `initialBlock` 16428133): components are
 emitted at their params block and extra entrypoints only at a vault's first interaction, which for
-the vaults gaining one runs from sUSDS (block 20677434) to stUSDS (23517637). Before it, add the
-MakerDAO Vat
-(`0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b`) to the indexer's `DCI_BLACKLIST_ADDRESSES`: see the
-Readme's "Deployment" section.
+the vaults gaining one runs from sUSDS (block 20770669) to stUSDS (23517637). Before it, add the
+MakerDAO Vat (`0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b`) to the indexer's
+`DCI_BLACKLIST_ADDRESSES`: see the Readme's "Deployment" section.
