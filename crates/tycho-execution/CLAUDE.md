@@ -53,7 +53,8 @@ Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
 getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRouter],
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
 calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client → bool],
-getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]). Also
+getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)], getEffectiveRouterFees [takes
+client → (routerFeeOnOutputBps, routerFeeOnClientFeeBps)]). Also
 `IPropAMM` (the pAMM standard), `IUniversalRouter` and `ISubsidyPayer` (`pay`, the `Subsidy` struct, `SkipReason`).
 
 ### Vault (`Vault.sol`)
@@ -109,11 +110,12 @@ later. It is explicit rather than defaulted to `msg.sender` because deployment g
 
 **Per-client overrides**: Both router fees can be overridden per client address via `_customRouterFees`
 mapping (`CustomFees` struct, single storage slot). If set, the custom rate replaces the default for that client. Can be
-removed to revert to defaults.
+removed to revert to defaults. `getEffectiveRouterFees(client)` returns the pair of rates `calculateFee` applies
+to a client, so integrators can model the user's net output without reading every override.
 
 **Client resolution** (`_resolveClient`): When `client == address(0)` (no EIP-712 signature supplied),
-`calculateFee` and `mustOutputThroughRouter` fall back to `tx.origin` for the custom fee lookup. This lets
-unsigned calls still benefit from a custom rate when the originating EOA is a registered client.
+`calculateFee`, `mustOutputThroughRouter` and `getEffectiveRouterFees` fall back to `tx.origin` for the custom fee
+lookup. This lets unsigned calls still benefit from a custom rate when the originating EOA is a registered client.
 
 **Fee scale**: Fees use 8-decimal-BPS units (1 unit = 0.0001 BPS; 100% = 100 000 000). Two public constants are
 queryable via RPC:
