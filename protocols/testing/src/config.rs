@@ -282,7 +282,7 @@ impl fmt::Display for LimitKind {
 /// {kind: hard}
 /// {kind: hard, rounding: 1}
 /// {kind: soft, reason: "constant product: any input trades, at a worse price"}
-/// {kind: under_cap, reason: "the bound depends on a keeper-set rate we do not index; gives up up to 2% of the vault's capacity"}
+/// {kind: under_cap, reason: "a keeper-set rate we do not index; gives up to 2% of the cap"}
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

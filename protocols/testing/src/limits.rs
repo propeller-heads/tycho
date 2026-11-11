@@ -293,13 +293,16 @@ mod tests {
     }
 
     #[test]
-    fn the_quote_at_the_limit_must_not_pay_more_than_max_output() {
-        let understated = check(1000, PastBound::Errors, 1000, 1999, &hard());
-        assert_eq!(failed_checks(&understated), vec![CheckId::LimitsMaxOutput]);
+    fn a_quote_at_the_limit_above_max_output_fails() {
+        let result = check(1000, PastBound::Errors, 1000, 1999, &hard());
+        assert_eq!(failed_checks(&result), vec![CheckId::LimitsMaxOutput]);
+    }
 
-        // A max output above what the limit pays, such as a rounded-up price estimate, passes.
-        let overstated = check(1000, PastBound::Errors, 1000, 2001, &hard());
-        assert!(overstated.failures.is_empty(), "{:?}", overstated.failures);
+    #[test]
+    fn a_max_output_above_the_quote_at_the_limit_passes() {
+        // Such as a rounded-up price estimate.
+        let result = check(1000, PastBound::Errors, 1000, 2001, &hard());
+        assert!(result.failures.is_empty(), "{:?}", result.failures);
     }
 
     #[test]

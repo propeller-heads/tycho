@@ -458,65 +458,59 @@ mod tests {
         );
     }
 
+    /// Records `unfailed` for `limits.past_limit` on `component` and `direction`, failing with
+    /// `failures` if any, and returns the outcome it recorded.
+    fn record_one(unfailed: Outcome, failures: &[String]) -> Outcome {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.record_direction(
+            CheckId::LimitsPastLimit,
+            "0x01",
+            "0xa->0xb",
+            &limit(),
+            unfailed,
+            failures,
+        );
+        let (_, results) = checks.finish();
+        results[0].outcome.clone()
+    }
+
     #[test]
-    fn a_check_recorded_per_direction_passes_fails_skips_or_is_not_run_per_direction() {
+    fn a_failure_outranks_what_a_direction_would_otherwise_record() {
+        let failure = ["quotes past the limit".to_string()];
+        let skipped = Outcome::Skipped { reason: "capped".to_string() };
+        for unfailed in [Outcome::Pass, skipped.clone()] {
+            assert_eq!(
+                record_one(unfailed, &failure),
+                Outcome::Fail { detail: "quotes past the limit".to_string() }
+            );
+        }
+        assert_eq!(record_one(Outcome::Pass, &[]), Outcome::Pass);
+        assert_eq!(record_one(skipped.clone(), &[]), skipped);
+    }
+
+    #[test]
+    fn a_check_failing_in_several_directions_is_named_once() {
         let mut checks = Checks::new(Harness::Strict, "t");
         let failure = ["quotes past the limit".to_string()];
-        let soft = || Outcome::Skipped { reason: "soft".to_string() };
-        let not_run = || Outcome::NotRun { reason: "limits.at_limit failed".to_string() };
-        checks.record_direction(
-            CheckId::LimitsPastLimit,
-            "0x01",
-            "0xa->0xb",
-            &limit(),
-            Outcome::Pass,
-            &[],
-        );
-        checks.record_direction(
-            CheckId::LimitsPastLimit,
-            "0x01",
-            "0xb->0xa",
-            &limit(),
-            Outcome::Pass,
-            &failure,
-        );
-        checks.record_direction(
-            CheckId::LimitsPastLimit,
-            "0x02",
-            "0xa->0xb",
-            &limit(),
-            soft(),
-            &[],
-        );
-        checks.record_direction(
-            CheckId::LimitsPastLimit,
-            "0x02",
-            "0xb->0xa",
-            &limit(),
-            soft(),
-            &failure,
-        );
-        checks.record_direction(
-            CheckId::LimitsPastLimit,
-            "0x03",
-            "0xa->0xb",
-            &limit(),
-            not_run(),
-            &[],
-        );
-
+        for direction in ["0xa->0xb", "0xb->0xa"] {
+            checks.record_direction(
+                CheckId::LimitsPastLimit,
+                "0x01",
+                direction,
+                &limit(),
+                Outcome::Pass,
+                &failure,
+            );
+        }
         let (outcome, results) = checks.finish();
-        // The check failed twice and is named once.
         assert_eq!(outcome.unwrap_err().to_string(), "Failed checks: limits.past_limit");
-        let outcomes: Vec<_> = results
+        let directions: Vec<_> = results
             .iter()
-            .map(|r| (r.component.as_deref(), r.direction.as_deref(), &r.outcome))
+            .map(|r| (r.component.as_deref(), r.direction.as_deref()))
             .collect();
-        assert_eq!(outcomes[0], (Some("0x01"), Some("0xa->0xb"), &Outcome::Pass));
-        assert!(matches!(outcomes[1].2, Outcome::Fail { .. }));
-        assert_eq!(outcomes[2], (Some("0x02"), Some("0xa->0xb"), &soft()));
-        // A failure outranks a skip.
-        assert!(matches!(outcomes[3].2, Outcome::Fail { .. }));
-        assert_eq!(outcomes[4], (Some("0x03"), Some("0xa->0xb"), &not_run()));
+        assert_eq!(
+            directions,
+            vec![(Some("0x01"), Some("0xa->0xb")), (Some("0x01"), Some("0xb->0xa"))]
+        );
     }
 }

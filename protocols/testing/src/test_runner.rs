@@ -344,7 +344,7 @@ fn check_executions_match(
 }
 
 /// Why the execution of `simulation_id`, one unit past a hard limit, does not show the limit holds:
-/// it settled, or it could not be simulated. `None` when it reverted.
+/// it executed, or it could not be simulated. `None` when it reverted.
 fn missing_revert(
     simulation_id: &str,
     input: &TychoExecutionInput,
@@ -431,13 +431,14 @@ fn missing_execution(
     failure
 }
 
-/// The largest input amount a swap can actually be executed with, given `limit`.
+/// `limit`, capped at `int128::MAX`: the cap the runner applies to every protocol's executions.
 ///
-/// Uniswap V4 settles a swap through a `BalanceDelta` of two `int128`s, and the executor's
-/// `swapExactInputSingle` takes the amount as a `uint128` that v4-core casts to `int128`, so no
-/// amount above `int128::MAX` can be executed however deep the pool is. A limit above that
-/// ceiling is not executable, and the percentages the harness trades at must stay distinct sizes,
-/// so the cap belongs on the limit itself rather than on each amount derived from it.
+/// It comes from Uniswap V4, which settles a swap through a `BalanceDelta` of two `int128`s, and
+/// the executor's `swapExactInputSingle` takes the amount as a `uint128` that v4-core casts to
+/// `int128`, so no amount above `int128::MAX` can be executed however deep the pool is. A limit
+/// above that ceiling is not executable, and the percentages the harness trades at must stay
+/// distinct sizes, so the cap belongs on the limit itself rather than on each amount derived from
+/// it.
 ///
 /// Returns `limit` unchanged when it is at or below the ceiling.
 fn executable_max_input(limit: &BigUint) -> BigUint {
@@ -2072,7 +2073,8 @@ impl TestRunner {
         check_executions_match(&execution_data, &results)
     }
 
-    /// Simulates executing every input at `block` in one batch, keyed like the inputs.
+    /// Simulates executing every input at `block`, keyed like the inputs. tycho-test splits them
+    /// into JSON-RPC batches.
     async fn simulate_executions(
         &self,
         inputs: HashMap<String, TychoExecutionInput>,
@@ -2761,14 +2763,14 @@ mod tests {
             missing_revert("past", &past_limit_input(), &results)
         };
         assert_eq!(judge(Some(revert("ERC4626: deposit more than max"))), None);
-        let settled = judge(Some(TychoExecutionResult::Success {
+        let executed = judge(Some(TychoExecutionResult::Success {
             amount_out: BigUint::from(50u32),
             gas_used: 0,
             state_overwrites: None,
             overwrite_metadata: None,
         }))
         .unwrap();
-        assert!(settled.contains("executes and pays 50 B"), "{settled}");
+        assert!(executed.contains("executes and pays 50 B"), "{executed}");
         let failed =
             judge(Some(TychoExecutionResult::Failed { error_msg: "decode".to_string() })).unwrap();
         assert!(failed.contains("could not be simulated"), "{failed}");
