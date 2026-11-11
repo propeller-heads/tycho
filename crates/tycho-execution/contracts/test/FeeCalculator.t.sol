@@ -1037,19 +1037,45 @@ contract FeeCalculatorConfigTest is Constants {
         vm.stopPrank();
 
         // No override: both defaults
-        (uint32 onOutput, uint32 onClientFee) =
-            feeCalculator.getEffectiveRouterFees(address(0xC1));
+        (uint32 onOutput, uint32 onClientFee) = feeCalculator.getEffectiveRouterFees(
+            address(0xC1), USDC_ADDR, DAI_ADDR
+        );
         assertEq(onOutput, _1_PCT);
         assertEq(onClientFee, _10_PCT);
 
         // Each override replaces only its own fee
-        (onOutput, onClientFee) = feeCalculator.getEffectiveRouterFees(BOB);
+        (onOutput, onClientFee) =
+            feeCalculator.getEffectiveRouterFees(BOB, USDC_ADDR, DAI_ADDR);
         assertEq(onOutput, _HALF_PCT);
         assertEq(onClientFee, _10_PCT);
 
-        (onOutput, onClientFee) = feeCalculator.getEffectiveRouterFees(ALICE);
+        (onOutput, onClientFee) =
+            feeCalculator.getEffectiveRouterFees(ALICE, USDC_ADDR, DAI_ADDR);
         assertEq(onOutput, _1_PCT);
         assertEq(onClientFee, _5_PCT);
+    }
+
+    function testGetEffectiveRouterFeesAppliesTokenPairFee() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _5_PCT);
+        feeCalculator.setCustomRouterFeeOnOutput(BOB, _HALF_PCT);
+        vm.stopPrank();
+
+        // The pair fee replaces the default rate on output
+        (uint32 onOutput,) =
+            feeCalculator.getEffectiveRouterFees(ALICE, DAI_ADDR, USDC_ADDR);
+        assertEq(onOutput, _5_PCT);
+
+        // A custom rate lower than the pair fee wins
+        (onOutput,) =
+            feeCalculator.getEffectiveRouterFees(BOB, USDC_ADDR, DAI_ADDR);
+        assertEq(onOutput, _HALF_PCT);
+
+        // Another pair keeps the default rate
+        (onOutput,) =
+            feeCalculator.getEffectiveRouterFees(ALICE, USDC_ADDR, WETH_ADDR);
+        assertEq(onOutput, _1_PCT);
     }
 
     function testGetEffectiveRouterFeesAfterOverrideRemoved() public {
@@ -1063,7 +1089,7 @@ contract FeeCalculatorConfigTest is Constants {
         vm.stopPrank();
 
         (uint32 onOutput, uint32 onClientFee) =
-            feeCalculator.getEffectiveRouterFees(BOB);
+            feeCalculator.getEffectiveRouterFees(BOB, USDC_ADDR, DAI_ADDR);
         assertEq(onOutput, _1_PCT);
         assertEq(onClientFee, _10_PCT);
     }
@@ -1077,14 +1103,16 @@ contract FeeCalculatorConfigTest is Constants {
 
         // A zero client reads tx.origin's overrides
         vm.prank(address(this), ALICE);
-        (uint32 onOutput, uint32 onClientFee) =
-            feeCalculator.getEffectiveRouterFees(address(0));
+        (uint32 onOutput, uint32 onClientFee) = feeCalculator.getEffectiveRouterFees(
+            address(0), USDC_ADDR, DAI_ADDR
+        );
         assertEq(onOutput, _HALF_PCT);
         assertEq(onClientFee, _5_PCT);
 
         // A named client ignores tx.origin's overrides
         vm.prank(address(this), ALICE);
-        (onOutput, onClientFee) = feeCalculator.getEffectiveRouterFees(BOB);
+        (onOutput, onClientFee) =
+            feeCalculator.getEffectiveRouterFees(BOB, USDC_ADDR, DAI_ADDR);
         assertEq(onOutput, _1_PCT);
         assertEq(onClientFee, 0);
     }

@@ -54,7 +54,7 @@ getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRout
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
 calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client → bool],
 getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)], getEffectiveRouterFees [takes
-client → (routerFeeOnOutputBps, routerFeeOnClientFeeBps)]). Also
+client, tokenIn, tokenOut → (routerFeeOnOutputBps, routerFeeOnClientFeeBps)]). Also
 `IPropAMM` (the pAMM standard), `IUniversalRouter` and `ISubsidyPayer` (`pay`, the `Subsidy` struct, `SkipReason`).
 
 ### Vault (`Vault.sol`)
@@ -110,8 +110,8 @@ later. It is explicit rather than defaulted to `msg.sender` because deployment g
 
 **Per-client overrides**: Both router fees can be overridden per client address via `_customRouterFees`
 mapping (`CustomFees` struct, single storage slot). If set, the custom rate replaces the default for that client. Can be
-removed to revert to defaults. `getEffectiveRouterFees(client)` returns the pair of rates `calculateFee` applies
-to a client, so integrators can model the user's net output without reading every override.
+removed to revert to defaults. `getEffectiveRouterFees(client, tokenIn, tokenOut)` returns the pair of rates `calculateFee`
+applies to a client and token pair, pair fee included, so integrators can model the user's net output without reading every override.
 
 **Token pair fees** (`_tokenPairFees`, set via `setTokenPairFee`, removed via `removeTokenPairFee`, read via
 `getTokenPairFee`): a router fee on output for swaps between two tokens, in both directions. A set pair fee replaces

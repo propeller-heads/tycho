@@ -49,7 +49,7 @@ contract OverchargingFeeCalculator is IFeeCalculator {
         return (new address[](0), new CustomFees[](0));
     }
 
-    function getEffectiveRouterFees(address)
+    function getEffectiveRouterFees(address, address, address)
         external
         pure
         returns (uint32, uint32)
