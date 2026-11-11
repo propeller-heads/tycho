@@ -2217,6 +2217,36 @@ mod tests {
         assert_eq!(out.amount, BigUint::from_str("1825627051870330472").unwrap())
     }
 
+    #[rstest]
+    #[case::down_past_two_ticks(true, -25, vec![-20, 0])]
+    #[case::down_to_a_tick_price(true, -21, vec![-20, 0])]
+    #[case::down_short_of_a_tick(true, -20, vec![0])]
+    #[case::up_onto_a_tick(false, 20, vec![20])]
+    #[case::up_short_of_a_tick(false, 19, vec![])]
+    fn test_crossed_ticks(
+        #[case] zero_for_one: bool,
+        #[case] new_tick: i32,
+        #[case] expected: Vec<i32>,
+    ) {
+        // The pool sits on tick 0, which is initialized.
+        let state = UniswapV4State::new(
+            1,
+            U256::from_str("79228162514264337593543950336").unwrap(),
+            UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 0 },
+            0,
+            10,
+            vec![
+                TickInfo::new(-40, 1).unwrap(),
+                TickInfo::new(-20, 1).unwrap(),
+                TickInfo::new(0, -1).unwrap(),
+                TickInfo::new(20, -1).unwrap(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(state.crossed_ticks(zero_for_one, new_tick), expected);
+    }
+
     /// Hook that only answers `after_swap`, with a configurable address and returned delta.
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct AfterSwapTestHook {
