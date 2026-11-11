@@ -3,7 +3,7 @@
 //! fill against a ladder turns into.
 
 use num_bigint::BigUint;
-use num_traits::{FromPrimitive, ToPrimitive, Zero};
+use num_traits::{CheckedSub, FromPrimitive, ToPrimitive, Zero};
 use tycho_common::{
     models::token::Token,
     simulation::{
@@ -181,6 +181,13 @@ pub fn marginal_price(
     levels
         .marginal_price(to_human(filled, in_decimals))
         .ok_or_else(|| SimulationError::RecoverableError("No liquidity".into()))
+}
+
+/// `amount` less `taken`, or nothing where `taken` is more.
+pub fn saturating_sub(amount: &BigUint, taken: &BigUint) -> BigUint {
+    amount
+        .checked_sub(taken)
+        .unwrap_or_default()
 }
 
 /// Refuses a swap of nothing, which a ladder would otherwise report as an amount fully
