@@ -206,7 +206,8 @@ fn insert_trade(tables: &mut Tables, t: &Trade) -> Result<()> {
             .set("custom_fee_on_output", f.custom_fee_on_output)
             .set("custom_fee_on_client_fee", f.custom_fee_on_client_fee)
             .set("positive_slippage_enabled", f.positive_slippage_enabled)
-            .set("positive_slippage_exempt", f.positive_slippage_exempt)
+            .set("positive_slippage_share_bps", f.positive_slippage_share_bps)
+            .set("client_positive_slippage_share_bps", f.client_positive_slippage_share_bps)
             .set("fee_bps_scale", f.bps_scale);
     }
     if !t.fees_taken.is_empty() {

@@ -21,7 +21,8 @@ BEGIN
     -- database was created before it, and `schema.sql` only creates a table it does not find,
     -- so the column is added here.
     ALTER TABLE trades ADD COLUMN IF NOT EXISTS state_committed BOOLEAN;
-    ALTER TABLE trades ADD COLUMN IF NOT EXISTS positive_slippage_exempt BOOLEAN;
+    ALTER TABLE trades ADD COLUMN IF NOT EXISTS positive_slippage_share_bps BIGINT;
+    ALTER TABLE trades ADD COLUMN IF NOT EXISTS client_positive_slippage_share_bps BIGINT;
     ALTER TABLE router_call_errors ADD COLUMN IF NOT EXISTS state_committed BOOLEAN;
 
     -- Looking up the trades of one transaction by hash, which no other index serves.

@@ -9,6 +9,7 @@ fn main() -> Result<()> {
         ("FeeCalculator", "fee_calculator"),
         ("FeeCalculatorV3_0", "fee_calculator_v3_0"),
         ("FeeCalculatorExemption", "fee_calculator_exemption"),
+        ("FeeCalculatorPositiveSlippageShare", "fee_calculator_positive_slippage_share"),
         ("SubsidyPayer", "subsidy_payer"),
     ] {
         Abigen::new(name, &format!("abi/{name}.json"))?

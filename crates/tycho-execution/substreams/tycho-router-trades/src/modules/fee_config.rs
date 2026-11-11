@@ -13,6 +13,7 @@ use super::{block_timestamp, events, hex_addr, keys};
 use crate::{
     abi::{
         fee_calculator::events as fc, fee_calculator_exemption::events as fc_exempt,
+        fee_calculator_positive_slippage_share::events as fc_share,
         fee_calculator_v3_0::events as fc_v3_0, tycho_router_v3_0::events as router_v3_0,
         tycho_router_v3_1::events as router_v3_1,
     },
@@ -234,6 +235,46 @@ fn decode_fee_calculator_event(log: &Log) -> Option<Decoded> {
             bps_scale: Some(BPS_SCALE_UINT32),
         });
     }
+    // Positive slippage shares are on the newer generation's fee units too.
+    macro_rules! share_event {
+        ($ty:ty, $name:expr) => {
+            if let Some(ev) = <$ty>::match_and_decode(log) {
+                return Some(Decoded {
+                    event: $name,
+                    client: ev.client,
+                    old_value: ev.old_share_bps.to_string(),
+                    new_value: ev.new_share_bps.to_string(),
+                    bps_scale: Some(BPS_SCALE_UINT32),
+                });
+            }
+        };
+    }
+    share_event!(
+        fc_share::CustomPositiveSlippageShareUpdated,
+        events::CUSTOM_POSITIVE_SLIPPAGE_SHARE_UPDATED
+    );
+    share_event!(
+        fc_share::ClientPositiveSlippageShareUpdated,
+        events::CLIENT_POSITIVE_SLIPPAGE_SHARE_UPDATED
+    );
+    if let Some(ev) = fc_share::PositiveSlippageShareUpdated::match_and_decode(log) {
+        return Some(Decoded {
+            event: events::POSITIVE_SLIPPAGE_SHARE_UPDATED,
+            client: Vec::new(),
+            old_value: ev.old_share_bps.to_string(),
+            new_value: ev.new_share_bps.to_string(),
+            bps_scale: Some(BPS_SCALE_UINT32),
+        });
+    }
+    if let Some(ev) = fc_share::CustomPositiveSlippageShareRemoved::match_and_decode(log) {
+        return Some(Decoded {
+            event: events::CUSTOM_POSITIVE_SLIPPAGE_SHARE_REMOVED,
+            client: ev.client,
+            old_value: String::new(),
+            new_value: String::new(),
+            bps_scale: Some(BPS_SCALE_UINT32),
+        });
+    }
     if let Some(ev) = fc::PositiveSlippageToggled::match_and_decode(log) {
         return Some(Decoded {
             event: events::POSITIVE_SLIPPAGE_TOGGLED,
@@ -301,8 +342,25 @@ fn store_action(ev: &FeeConfigEvent) -> StoreAction {
             StoreAction::DeletePrefix(keys::custom_fee_on_client_fee(fc, &ev.client))
         }
         events::POSITIVE_SLIPPAGE_TOGGLED => set(keys::positive_slippage(fc)),
+        events::POSITIVE_SLIPPAGE_SHARE_UPDATED => set(keys::positive_slippage_share(fc)),
+        events::CUSTOM_POSITIVE_SLIPPAGE_SHARE_UPDATED => {
+            set(keys::custom_positive_slippage_share(fc, &ev.client))
+        }
+        events::CUSTOM_POSITIVE_SLIPPAGE_SHARE_REMOVED => {
+            StoreAction::DeletePrefix(keys::custom_positive_slippage_share(fc, &ev.client))
+        }
+        events::CLIENT_POSITIVE_SLIPPAGE_SHARE_UPDATED => {
+            set(keys::client_positive_slippage_share(fc, &ev.client))
+        }
+        // The calculator generation before per-client shares exempted a client instead. An
+        // exemption is a custom share of zero, so both generations resolve the same way.
         events::POSITIVE_SLIPPAGE_EXEMPTION_SET => {
-            set(keys::positive_slippage_exempt(fc, &ev.client))
+            let key = keys::custom_positive_slippage_share(fc, &ev.client);
+            if ev.new_value == "1" {
+                StoreAction::Set { key, value: "0".to_string() }
+            } else {
+                StoreAction::DeletePrefix(key)
+            }
         }
         events::FEE_CALCULATOR_ACTIVATED | events::FEE_CALCULATOR_UPDATED => {
             set(keys::router_fee_calculator(fc))
@@ -345,11 +403,54 @@ mod tests {
     }
 
     #[test]
-    fn plans_positive_slippage_exemption() {
+    fn plans_an_exemption_as_a_zero_custom_share() {
+        let mut ev = event(events::POSITIVE_SLIPPAGE_EXEMPTION_SET);
+        ev.new_value = "1".to_string();
         assert_eq!(
-            store_action(&event(events::POSITIVE_SLIPPAGE_EXEMPTION_SET)),
+            store_action(&ev),
             StoreAction::Set {
-                key: keys::positive_slippage_exempt(&[0xaa; 20], &[0xbb; 20]),
+                key: keys::custom_positive_slippage_share(&[0xaa; 20], &[0xbb; 20]),
+                value: "0".to_string(),
+            }
+        );
+
+        ev.new_value = "0".to_string();
+        assert_eq!(
+            store_action(&ev),
+            StoreAction::DeletePrefix(keys::custom_positive_slippage_share(
+                &[0xaa; 20],
+                &[0xbb; 20]
+            ))
+        );
+    }
+
+    #[test]
+    fn plans_positive_slippage_shares() {
+        assert_eq!(
+            store_action(&event(events::POSITIVE_SLIPPAGE_SHARE_UPDATED)),
+            StoreAction::Set {
+                key: keys::positive_slippage_share(&[0xaa; 20]),
+                value: "42".to_string(),
+            }
+        );
+        assert_eq!(
+            store_action(&event(events::CUSTOM_POSITIVE_SLIPPAGE_SHARE_UPDATED)),
+            StoreAction::Set {
+                key: keys::custom_positive_slippage_share(&[0xaa; 20], &[0xbb; 20]),
+                value: "42".to_string(),
+            }
+        );
+        assert_eq!(
+            store_action(&event(events::CUSTOM_POSITIVE_SLIPPAGE_SHARE_REMOVED)),
+            StoreAction::DeletePrefix(keys::custom_positive_slippage_share(
+                &[0xaa; 20],
+                &[0xbb; 20]
+            ))
+        );
+        assert_eq!(
+            store_action(&event(events::CLIENT_POSITIVE_SLIPPAGE_SHARE_UPDATED)),
+            StoreAction::Set {
+                key: keys::client_positive_slippage_share(&[0xaa; 20], &[0xbb; 20]),
                 value: "42".to_string(),
             }
         );
@@ -460,6 +561,34 @@ mod tests {
     fn decodes_positive_slippage_exemption_removal() {
         let decoded = decode_fee_calculator_event(&exemption_log([0xcc; 20], false));
         assert_eq!(decoded.map(|d| d.new_value), Some("0".to_string()));
+    }
+
+    /// keccak256("CustomPositiveSlippageShareUpdated(address,uint32,uint32)").
+    const CUSTOM_SHARE_TOPIC: &str =
+        "39d9924119bdce924d24e5b80b89db2b1e828205e03a9f695be86d417e87b2cb";
+    /// keccak256("PositiveSlippageShareUpdated(uint32,uint32)").
+    const SHARE_TOPIC: &str = "6e22171223379069dab974ff5c4266a5a65456e6c4710b2e627375bcb99d4178";
+
+    #[test]
+    fn decodes_custom_positive_slippage_share() {
+        let mut log = bps_log(CUSTOM_SHARE_TOPIC, 100_000_000, 0);
+        let mut client_topic = vec![0u8; 12];
+        client_topic.extend_from_slice(&[0xcc; 20]);
+        log.topics.push(client_topic);
+        let decoded = decode_fee_calculator_event(&log).unwrap();
+        assert_eq!(decoded.event, events::CUSTOM_POSITIVE_SLIPPAGE_SHARE_UPDATED);
+        assert_eq!(decoded.client, vec![0xcc; 20]);
+        assert_eq!(decoded.old_value, "100000000");
+        assert_eq!(decoded.new_value, "0");
+        assert_eq!(decoded.bps_scale, Some(BPS_SCALE_UINT32));
+    }
+
+    #[test]
+    fn decodes_global_positive_slippage_share() {
+        let decoded =
+            decode_fee_calculator_event(&bps_log(SHARE_TOPIC, 100_000_000, 50_000_000)).unwrap();
+        assert_eq!(decoded.event, events::POSITIVE_SLIPPAGE_SHARE_UPDATED);
+        assert_eq!(decoded.new_value, "50000000");
     }
 
     #[test]

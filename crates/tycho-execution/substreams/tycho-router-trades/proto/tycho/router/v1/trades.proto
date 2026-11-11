@@ -122,10 +122,15 @@ message RouterFeeConfig {
   bool positive_slippage_enabled = 6;
   // Denominator of the bps values: 10000 for v3_0, 100000000 for v3_1.
   uint64 bps_scale = 7;
-  // Whether this trade's client is exempt from positive slippage capture. The client is the
-  // signed clientFeeReceiver, or tx.origin when that is zero, the same resolution the
-  // FeeCalculator does. Only the calculator generation that has exemptions can set it.
-  bool positive_slippage_exempt = 8;
+  reserved 8;
+  reserved "positive_slippage_exempt";
+  // Router's share of the surplus for this trade's client, in fee units (100000000 = the full
+  // surplus): the client's custom share if set, otherwise the calculator's global share. The
+  // client is the signed clientFeeReceiver, or tx.origin when that is zero, the same resolution
+  // the FeeCalculator does. An exemption on an older calculator reads as a custom share of zero.
+  uint64 positive_slippage_share_bps = 9;
+  // The client's share of the captured surplus, in fee units. The router keeps the rest.
+  uint64 client_positive_slippage_share_bps = 10;
 }
 
 // One recipient of the FeesTaken event.

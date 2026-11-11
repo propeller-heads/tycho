@@ -186,11 +186,15 @@ pub struct RouterFeeConfig {
     /// Denominator of the bps values: 10000 for v3_0, 100000000 for v3_1.
     #[prost(uint64, tag="7")]
     pub bps_scale: u64,
-    /// Whether this trade's client is exempt from positive slippage capture. The client is the
-    /// signed clientFeeReceiver, or tx.origin when that is zero, the same resolution the
-    /// FeeCalculator does. Only the calculator generation that has exemptions can set it.
-    #[prost(bool, tag="8")]
-    pub positive_slippage_exempt: bool,
+    /// Router's share of the surplus for this trade's client, in fee units (100000000 = the full
+    /// surplus): the client's custom share if set, otherwise the calculator's global share. The
+    /// client is the signed clientFeeReceiver, or tx.origin when that is zero, the same resolution
+    /// the FeeCalculator does. An exemption on an older calculator reads as a custom share of zero.
+    #[prost(uint64, tag="9")]
+    pub positive_slippage_share_bps: u64,
+    /// The client's share of the captured surplus, in fee units. The router keeps the rest.
+    #[prost(uint64, tag="10")]
+    pub client_positive_slippage_share_bps: u64,
 }
 /// One recipient of the FeesTaken event.
 #[allow(clippy::derive_partial_eq_without_eq)]

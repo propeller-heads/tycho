@@ -35,8 +35,14 @@ pub(crate) mod keys {
     pub fn fee_bps_scale(fc: &[u8]) -> String {
         format!("fc:{}:scale", hex::encode(fc))
     }
-    pub fn positive_slippage_exempt(fc: &[u8], client: &[u8]) -> String {
-        format!("fc:{}:ps_exempt:{}", hex::encode(fc), hex::encode(client))
+    pub fn positive_slippage_share(fc: &[u8]) -> String {
+        format!("fc:{}:ps_share", hex::encode(fc))
+    }
+    pub fn custom_positive_slippage_share(fc: &[u8], client: &[u8]) -> String {
+        format!("fc:{}:ps_custom_share:{}", hex::encode(fc), hex::encode(client))
+    }
+    pub fn client_positive_slippage_share(fc: &[u8], client: &[u8]) -> String {
+        format!("fc:{}:ps_client_share:{}", hex::encode(fc), hex::encode(client))
     }
 }
 
@@ -51,6 +57,10 @@ pub(crate) mod events {
     pub const ROUTER_FEE_RECEIVER_UPDATED: &str = "RouterFeeReceiverUpdated";
     pub const POSITIVE_SLIPPAGE_TOGGLED: &str = "PositiveSlippageToggled";
     pub const POSITIVE_SLIPPAGE_EXEMPTION_SET: &str = "PositiveSlippageExemptionSet";
+    pub const POSITIVE_SLIPPAGE_SHARE_UPDATED: &str = "PositiveSlippageShareUpdated";
+    pub const CUSTOM_POSITIVE_SLIPPAGE_SHARE_UPDATED: &str = "CustomPositiveSlippageShareUpdated";
+    pub const CUSTOM_POSITIVE_SLIPPAGE_SHARE_REMOVED: &str = "CustomPositiveSlippageShareRemoved";
+    pub const CLIENT_POSITIVE_SLIPPAGE_SHARE_UPDATED: &str = "ClientPositiveSlippageShareUpdated";
     pub const FEE_CALCULATOR_SET: &str = "FeeCalculatorSet";
     pub const FEE_CALCULATOR_ACTIVATED: &str = "FeeCalculatorActivated";
     pub const FEE_CALCULATOR_UPDATED: &str = "FeeCalculatorUpdated";
