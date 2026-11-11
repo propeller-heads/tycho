@@ -1,3 +1,11 @@
+## [0.510.1](https://github.com/propeller-heads/tycho/compare/0.510.0...0.510.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **router-trades:** drop subsidized_trades before trades_settled ([4f50f96](https://github.com/propeller-heads/tycho/commit/4f50f96a73714cfa18f1d5bf82c82c17125a1c96))
+* **router-trades:** drop subsidized_trades before trades_settled ([#1783](https://github.com/propeller-heads/tycho/issues/1783)) ([06660b6](https://github.com/propeller-heads/tycho/commit/06660b67acc2ca2f644f90e64625fce799d5b871))
+
 ## [0.510.0](https://github.com/propeller-heads/tycho/compare/0.509.0...0.510.0) (2026-11-11)
 
 
