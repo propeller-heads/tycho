@@ -75,6 +75,14 @@ contract EkuboExecutorTest is Constants, TestUtils {
         );
     }
 
+    function testSwapRevertsAboveInt128Max() public setUpFork(22722989) {
+        bytes memory data =
+            abi.encodePacked(ETH_ADDRESS, USDC_ADDR, ORACLE_CONFIG);
+
+        vm.expectRevert(SafeCastLib.Overflow.selector);
+        executor.swap(2 ** 127, data, address(executor));
+    }
+
     // Expects input that encodes the same test case as swap_encoder::tests::ekubo::test_encode_swap_multi
     function multiHopSwap(bytes memory data) internal {
         uint256 amountIn = 1 ether;

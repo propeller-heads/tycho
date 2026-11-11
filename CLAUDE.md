@@ -1,9 +1,9 @@
 # Workflow Directives for CLAUDE
 
-When responding to user input, always log this information to the user which knowledge docs you have read. Only say yes
-if you actually read them. Respond like this:
+When responding to user input, always log this information to the user which knowledge docs you have read. List only
+the documents you actually read. Respond like this:
 
-> Knowledge docs: Rust: [yes/no], Python: [yes/no], Solidity: [yes/no], Version-control: [yes/no], GitBook: [yes/no]
+> Knowledge docs: [the `.claude/knowledge/` files read, and which sections if not whole]
 > Files loaded in context: [list of loaded documents]
 
 All commands in this repo assume mise is activated and its tools are installed (`mise install`), so the
@@ -25,17 +25,32 @@ you've exhausted the path of documentation.
 
 | Document        | Trigger                                                                 | Path                                   |
 |-----------------|-------------------------------------------------------------------------|----------------------------------------|
-| Rust            | Writing, reviewing, or debugging Rust code                              | `.claude/knowledge/rust.md`            |
+| Architecture    | Changing code in a protocol layer (Substreams, simulation, off-chain, execution) or a shared type or registry | `.claude/knowledge/architecture.md` |
+| Indexing        | Changing a Substreams package under `protocols/substreams/`             | `.claude/knowledge/indexing.md`        |
+| Simulation      | Changing protocol states in `tycho-simulation` or VM adapters under `protocols/adapter-integration/` | `.claude/knowledge/simulation.md` |
+| Off-chain       | Changing `tycho-simulation`'s `snapshot_feed`, `book`, `rfq`, `pamm` or `price_level_stream` (read Simulation too) | `.claude/knowledge/offchain.md` |
+| Execution       | Changing encoders, executors or the router in `tycho-execution`         | `.claude/knowledge/execution.md`       |
+| Tycho helpers   | Adding a helper, type or loop in a layer: read that layer's section     | `.claude/knowledge/libraries-tycho.md` |
+| Rust            | Building, testing or formatting Rust: the Commands section              | `.claude/knowledge/rust.md`            |
+| Solidity        | Building, testing or formatting Solidity: the Commands, Testing and Project Config sections | `.claude/knowledge/solidity.md` |
 | Version control | git, branch, commit, PR, push, rebase, merge, cherry-pick, tag, release | `.claude/knowledge/version_control.md` |
 | Python          | Python code, tycho-client-py, changes to dto.rs or rpc.rs               | `.claude/knowledge/python.md`          |
-| Solidity        | Solidity contracts, Foundry, forge, executors, tycho-execution          | `.claude/knowledge/solidity.md`        |
 | GitBook         | Writing, editing, or reviewing docs under `docs/`                       | `.claude/knowledge/gitbook.md`         |
 | Router trades   | Adding a chain to, or changing, the router trades substreams or its pricing | `crates/tycho-execution/substreams/README.md` |
+
+The rest of the knowledge base loads on request or for a review, not for every task: the general
+rules (`general.md`), the rules sections of `rust.md` and `solidity.md`, the crate tables
+(`libraries-rust.md`), the integration review (`integration.md`) and the evidence methods
+(`verification.md`). Lints and formatters check what they can; `/tycho-review` on your own changes
+checks them against the rest.
 
 When spawning subagents, pass the relevant knowledge document contents to them.
 
 ## Skills
 
+- `tycho-review`: Review a PR, a stack of PRs as one change, a branch, a range, the working changes or a path against
+  the knowledge base, with verified findings written to `.claude/reviews/`. Posts nothing. Trigger words: "review",
+  "review this PR", "check my changes before a PR".
 - `plan`: Guided feature planning with iterative user input. Gathers requirements, validates assumptions, proposes a
   solution. **Always use this skill** when the user wants to plan, design, or architect a feature before coding. Trigger
   words: "plan", "design", "architect", "think through", "figure out how to".

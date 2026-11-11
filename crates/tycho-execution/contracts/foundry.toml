@@ -81,7 +81,6 @@ exclude_lints = [
     "unwrapped-modifier-logic", # Under via-IR, wrapping grows EkuboExecutor by 115 B and ~340 gas/swap (on c29ab76f7).
     "modifier-used-only-once",  # A modifier puts an access check in the signature, where readers look for it.
     "asm-keccak256",            # abi.encode follows a struct's fields; a hand-listed library hash would not.
-    "unsafe-typecast",          # Off until each cast it reports in src/ is checked against its range.
     "unsafe-cheatcode",         # Tests read fixture files on purpose; fs_permissions limits the paths.
 ]
 
