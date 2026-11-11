@@ -556,6 +556,22 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
+     * @notice Returns the router fee rates `calculateFee` applies for a client
+     * @dev Custom rates override the defaults per fee. A zero client resolves
+     *      to tx.origin, as in `calculateFee`.
+     * @param client The client address to check
+     * @return routerFeeOnOutputBps Router fee on output in fee units
+     * @return routerFeeOnClientFeeBps Router fee on client fee in fee units
+     */
+    function getEffectiveRouterFees(address client)
+        external
+        view
+        returns (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps)
+    {
+        return _getFeeInfo(_resolveClient(client));
+    }
+
+    /**
      * @dev Sets the address that receives router fees
      * @param routerFeeReceiver The address to receive router fees
      */

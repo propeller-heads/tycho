@@ -48,6 +48,14 @@ contract OverchargingFeeCalculator is IFeeCalculator {
     {
         return (new address[](0), new CustomFees[](0));
     }
+
+    function getEffectiveRouterFees(address)
+        external
+        pure
+        returns (uint32, uint32)
+    {
+        return (0, 0);
+    }
 }
 
 contract TychoRouterFeesTest is TychoRouterTestSetup {

@@ -1027,6 +1027,67 @@ contract FeeCalculatorConfigTest is Constants {
         (clients,) = feeCalculator.getAllClientFees(0, 10);
         assertEq(clients.length, 0);
     }
+
+    function testGetEffectiveRouterFees() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setRouterFeeOnClientFee(_10_PCT);
+        feeCalculator.setCustomRouterFeeOnOutput(BOB, _HALF_PCT);
+        feeCalculator.setCustomRouterFeeOnClientFee(ALICE, _5_PCT);
+        vm.stopPrank();
+
+        // No override: both defaults
+        (uint32 onOutput, uint32 onClientFee) =
+            feeCalculator.getEffectiveRouterFees(address(0xC1));
+        assertEq(onOutput, _1_PCT);
+        assertEq(onClientFee, _10_PCT);
+
+        // Each override replaces only its own fee
+        (onOutput, onClientFee) = feeCalculator.getEffectiveRouterFees(BOB);
+        assertEq(onOutput, _HALF_PCT);
+        assertEq(onClientFee, _10_PCT);
+
+        (onOutput, onClientFee) = feeCalculator.getEffectiveRouterFees(ALICE);
+        assertEq(onOutput, _1_PCT);
+        assertEq(onClientFee, _5_PCT);
+    }
+
+    function testGetEffectiveRouterFeesAfterOverrideRemoved() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setRouterFeeOnClientFee(_10_PCT);
+        feeCalculator.setCustomRouterFeeOnOutput(BOB, _HALF_PCT);
+        feeCalculator.setCustomRouterFeeOnClientFee(BOB, _5_PCT);
+        feeCalculator.removeCustomRouterFeeOnOutput(BOB);
+        feeCalculator.removeCustomRouterFeeOnClientFee(BOB);
+        vm.stopPrank();
+
+        (uint32 onOutput, uint32 onClientFee) =
+            feeCalculator.getEffectiveRouterFees(BOB);
+        assertEq(onOutput, _1_PCT);
+        assertEq(onClientFee, _10_PCT);
+    }
+
+    function testGetEffectiveRouterFeesResolvesOrigin() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setCustomRouterFeeOnOutput(ALICE, _HALF_PCT);
+        feeCalculator.setCustomRouterFeeOnClientFee(ALICE, _5_PCT);
+        vm.stopPrank();
+
+        // A zero client reads tx.origin's overrides
+        vm.prank(address(this), ALICE);
+        (uint32 onOutput, uint32 onClientFee) =
+            feeCalculator.getEffectiveRouterFees(address(0));
+        assertEq(onOutput, _HALF_PCT);
+        assertEq(onClientFee, _5_PCT);
+
+        // A named client ignores tx.origin's overrides
+        vm.prank(address(this), ALICE);
+        (onOutput, onClientFee) = feeCalculator.getEffectiveRouterFees(BOB);
+        assertEq(onOutput, _1_PCT);
+        assertEq(onClientFee, 0);
+    }
 }
 
 // Tests for positive slippage surplus distribution

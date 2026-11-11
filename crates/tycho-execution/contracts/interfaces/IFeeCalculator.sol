@@ -64,4 +64,21 @@ interface IFeeCalculator {
         external
         view
         returns (address[] memory clients, CustomFees[] memory fees);
+
+    /**
+     * @notice Returns the router fee rates `calculateFee` applies for a client
+     * @dev A client's custom rate overrides the default for that fee. A zero
+     *      client resolves to the transaction origin, as in `calculateFee`.
+     * @param client The client address to check
+     * @return routerFeeOnOutputBps Router fee on output in fee units
+     *         (100_000_000 = 100%)
+     * @return routerFeeOnClientFeeBps Router fee on client fee in fee units
+     *         (100_000_000 = 100%)
+     */
+    function getEffectiveRouterFees(
+        address client
+    )
+        external
+        view
+        returns (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps);
 }
