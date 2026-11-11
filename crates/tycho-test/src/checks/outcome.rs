@@ -3,7 +3,10 @@
 
 use std::fmt;
 
+use num_bigint::BigUint;
 use serde::Serialize;
+
+use crate::expectations::{DeclaredBy, Limits};
 
 /// A check, named by [`CheckId::as_str`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +29,7 @@ pub enum CheckId {
     ExecLadder,
     /// Every direction quotes and executes at its limit.
     LimitsAtLimit,
-    /// Past a hard limit, the quote errors and the execution reverts.
+    /// Past the limit, the venue behaves as the declared kind claims.
     LimitsPastLimit,
     /// The quote at the limit pays no more than the limit's max output.
     LimitsMaxOutput,
@@ -116,4 +119,55 @@ pub struct CheckResult {
     pub block: Option<u64>,
     #[serde(flatten)]
     pub outcome: Outcome,
+    /// For a `limits.*` result, the declaration it is checked against and the limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<LimitReport>,
+}
+
+/// The declaration a `limits.*` result is checked against, and the limit it tested, whatever the
+/// outcome, so a reader sees which directions pass on a `soft` or `under_cap` claim and how large
+/// a non-hard limit is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LimitReport {
+    /// `hard`, `soft` or `under_cap`.
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// A hard limit's declared rounding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rounding: Option<u64>,
+    /// Which declaration applies: `component`, `component_default`, `package` or
+    /// `package_default`.
+    pub declared_by: String,
+    /// `get_limits`' max input, after the `int128` cap, when the direction was quoted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<String>,
+    /// Whether the `int128` cap replaced a larger limit.
+    pub capped: bool,
+}
+
+impl LimitReport {
+    /// The report of a direction checked against `limits`, declared by `declared_by`. `sizes` is
+    /// `get_limits`' max input and max output, when the direction was quoted.
+    pub fn new(
+        limits: &Limits,
+        declared_by: DeclaredBy,
+        sizes: Option<(&BigUint, &BigUint)>,
+        capped: bool,
+    ) -> Self {
+        Self {
+            kind: limits.kind().to_string(),
+            reason: limits.reason().map(str::to_string),
+            rounding: match limits {
+                Limits::Hard { rounding } => Some(*rounding),
+                Limits::Soft { .. } | Limits::UnderCap { .. } => None,
+            },
+            declared_by: declared_by.as_str().to_string(),
+            max_input: sizes.map(|(max_input, _)| max_input.to_string()),
+            max_output: sizes.map(|(_, max_output)| max_output.to_string()),
+            capped,
+        }
+    }
 }

@@ -47,7 +47,7 @@ use tycho_simulation::{
 use tycho_test::{
     checks::{
         execution::check_executions_match,
-        ladder::{self, executable_max_input, LadderOutput},
+        ladder::{self, executable_max_input, DeclaredLimits, LadderOutput},
         sheet, tvl_only,
     },
     execution::{
@@ -61,8 +61,8 @@ use crate::{
     adapter_builder::AdapterContractBuilder,
     balances::{self, BalanceCheck},
     config::{
-        component_directions, Direction, Harness, IntegrationTest, IntegrationTestsConfig, Limits,
-        ProtocolComponentWithTestConfig, Skip, Tolerance,
+        component_directions, Direction, Harness, IntegrationTest, IntegrationTestsConfig,
+        LimitKind, ProtocolComponentWithTestConfig, Skip, Tolerance,
     },
     execution,
     report::{CheckId, Checks, Report},
@@ -146,20 +146,16 @@ impl balances::Chain for RpcChain<'_> {
 
 /// Strict mode tests each direction's limit as declared, keyed by lowercase component id;
 /// `from_yaml` made sure every direction of every expected component has a declaration.
-fn declared_limits(
-    test: &IntegrationTest,
-    config: &IntegrationTestsConfig,
-) -> HashMap<(String, Direction), Limits> {
+fn declared_limits(test: &IntegrationTest, config: &IntegrationTestsConfig) -> DeclaredLimits {
     test.expected_components
         .iter()
         .flat_map(|component| {
             component_directions(component)
                 .into_iter()
                 .filter_map(move |direction| {
-                    let limits = config
-                        .limits_for(component, &direction)?
-                        .clone();
-                    Some(((component.base.id.to_lowercase(), direction), limits))
+                    let (limits, by) = config.declaration_for(component, &direction)?;
+                    let key = (component.base.id.to_lowercase(), direction);
+                    Some((key, (limits.clone(), by)))
                 })
         })
         .collect()
@@ -734,8 +730,8 @@ impl TestRunner {
                 }
             }
             if let Some(Ok(streamed)) = &mut streamed {
-                let executes_nothing = LadderSkips::of(&test.expected_components).execution;
-                self.execute_streamed(streamed, config, executes_nothing, &mut checks);
+                let execution_skip_reason = LadderSkips::of(&test.expected_components).execution;
+                self.execute_streamed(streamed, config, execution_skip_reason, &mut checks);
             }
             let rpc_server = tycho_runner.start_rpc_server();
             let run = match self
@@ -1061,6 +1057,25 @@ impl TestRunner {
 
         let declared_limits =
             (config.harness == Harness::Strict).then(|| declared_limits(test, config));
+        if let Some(declared) = &declared_limits {
+            // A reviewer sees at a glance how many directions pass on a soft or under_cap claim.
+            let counts = declared
+                .values()
+                .counts_by(|(limits, _)| limits.kind());
+            info!(
+                "[{}] limits: {} hard, {} soft, {} under_cap",
+                test.name,
+                counts
+                    .get(&LimitKind::Hard)
+                    .unwrap_or(&0),
+                counts
+                    .get(&LimitKind::Soft)
+                    .unwrap_or(&0),
+                counts
+                    .get(&LimitKind::UnderCap)
+                    .unwrap_or(&0)
+            );
+        }
 
         if let Some(reason) = ladder_skips.simulation {
             checks.skip(CheckId::SimLadder, reason);
@@ -1092,18 +1107,18 @@ impl TestRunner {
             return Ok(());
         };
 
-        let executes_nothing = ladder_skips.execution;
+        let execution_skip_reason = ladder_skips.execution;
         if declared_limits.is_some() {
             return self.check_strict_executions(
                 &output,
                 Some(Ok(&header)),
                 &config.protocol_system,
                 config.tolerance(),
-                executes_nothing,
+                execution_skip_reason,
                 checks,
             );
         }
-        if let Some(reason) = executes_nothing {
+        if let Some(reason) = execution_skip_reason {
             checks.skip(CheckId::ExecLadder, reason);
             return Ok(());
         }
@@ -1575,7 +1590,7 @@ impl TestRunner {
         protocol_components: &HashMap<String, ProtocolComponentModel>,
         expected_components: &[ProtocolComponentWithTestConfig],
         protocol_system: &str,
-        declared_limits: Option<&HashMap<(String, Direction), Limits>>,
+        declared_limits: Option<&DeclaredLimits>,
     ) -> miette::Result<LadderOutput> {
         ladder::run_ladder(
             self.chain,
@@ -1631,15 +1646,16 @@ impl TestRunner {
         }
 
         let results = self
-            .simulate_executions(&execution_data, block, protocol_system)
+            .simulate_executions(execution_data.clone(), block, protocol_system)
             .await?;
         Ok((execution_data, results))
     }
 
-    /// Simulates executing every input at `block` in one batch, keyed like the inputs.
+    /// Simulates executing every input at `block`, keyed like the inputs. tycho-test splits them
+    /// into JSON-RPC batches.
     async fn simulate_executions(
         &self,
-        inputs: &HashMap<String, TychoExecutionInput>,
+        inputs: HashMap<String, TychoExecutionInput>,
         block: &Block,
         protocol_system: &str,
     ) -> miette::Result<HashMap<String, TychoExecutionResult>> {
@@ -1652,7 +1668,7 @@ impl TestRunner {
 
         info!("Executing {} simulations ...", inputs.len());
 
-        simulate_swap_transaction(&rpc_tools, inputs.clone(), block, router_overwrites_data, None)
+        simulate_swap_transaction(&rpc_tools, inputs, block, router_overwrites_data, None)
             .await
             .map_err(|(error, _, _)| error)
     }
@@ -1660,37 +1676,31 @@ impl TestRunner {
     /// Strict mode's execution checks: the ladder, then per direction the quote at the limit,
     /// the revert one unit past a hard limit, and the max output. Every execution is simulated in
     /// one call to [`Self::simulate_executions`], which splits them into JSON-RPC batches, and each
-    /// limit check is recorded per component and direction. With `executes_nothing`, the reason
-    /// every component skips execution, the ladder is recorded as skipped. With no `block` to
-    /// execute at, nothing is executed or recorded for the ladder, and the limit checks are
-    /// recorded from the simulation alone: a streamed block that only simulates. A `block` that
-    /// could not be read fails the ladder and every limit check that needs an execution, as a
-    /// batch that could not be simulated does.
+    /// limit check is recorded per component and direction. With `execution_skip_reason`, the
+    /// reason every component skips execution, the ladder is recorded as skipped. With no
+    /// `block` to execute at, nothing is executed or recorded for the ladder, and the limit
+    /// checks are recorded from the simulation alone: a streamed block that only simulates. A
+    /// `block` that could not be read fails the ladder and every limit check that needs an
+    /// execution, as a batch that could not be simulated does.
     fn check_strict_executions(
         &self,
         output: &LadderOutput,
         block: Option<miette::Result<&Block>>,
         protocol_system: &str,
         tolerance: Tolerance,
-        executes_nothing: Option<&str>,
+        execution_skip_reason: Option<&str>,
         checks: &mut Checks,
     ) -> miette::Result<()> {
-        let LadderOutput {
-            executions,
-            at_limit,
-            past_limit,
-            limit_directions: _,
-            unchecked_limits: _,
-        } = output;
+        let LadderOutput { executions, limit_executions, limit_directions, unchecked_limits: _ } =
+            output;
 
         let mut inputs = executions.clone();
-        inputs.extend(at_limit.clone());
-        inputs.extend(past_limit.clone());
+        inputs.extend(limit_executions.clone());
         let execute = block.is_some();
         let executed = match block {
             Some(Ok(block)) => self
                 .runtime
-                .block_on(self.simulate_executions(&inputs, block, protocol_system)),
+                .block_on(self.simulate_executions(inputs, block, protocol_system)),
             Some(Err(e)) => Err(e.wrap_err("the block to execute at could not be read")),
             None => Ok(HashMap::new()),
         };
@@ -1699,8 +1709,16 @@ impl TestRunner {
             Ok(results) if !execute => results,
             Ok(results) => {
                 observe_executions(checks, executions, results);
-                observe_executions(checks, at_limit, results);
-                match executes_nothing {
+                // A swap past the limit pays against the quote at the limit, so only the swaps at
+                // the limit measure drift.
+                let at_limit_executions: HashMap<String, TychoExecutionInput> = limit_directions
+                    .iter()
+                    .filter_map(|direction_limits| direction_limits.at_limit_execution())
+                    .filter_map(|id| limit_executions.get_key_value(id))
+                    .map(|(id, input)| (id.clone(), input.clone()))
+                    .collect();
+                observe_executions(checks, &at_limit_executions, results);
+                match execution_skip_reason {
                     Some(reason) => checks.skip(CheckId::ExecLadder, reason),
                     None => {
                         checks.run(CheckId::ExecLadder, || {
@@ -1732,6 +1750,7 @@ impl TestRunner {
                 judged.check,
                 &judged.component,
                 &judged.direction,
+                &judged.limit,
                 judged.unfailed,
                 &judged.failures,
             );
@@ -1783,7 +1802,7 @@ impl TestRunner {
         &self,
         test: &IntegrationTest,
         config: &IntegrationTestsConfig,
-        declared_limits: &HashMap<(String, Direction), Limits>,
+        declared_limits: &DeclaredLimits,
         indexer: &mut StreamingIndexer,
         checks: &mut Checks,
     ) -> miette::Result<Streamed> {
@@ -2071,13 +2090,14 @@ impl TestRunner {
     /// Strict, after a streamed range: executes at the fewest simulated blocks, spread evenly,
     /// that meet the floor, and records the limit checks of every simulated block.
     ///
-    /// With `executes_nothing`, the reason every component skips execution, nothing is executed
-    /// and nothing is recorded for the execution ladder, which the snapshot's checks skip.
+    /// With `execution_skip_reason`, the reason every component skips execution, nothing is
+    /// executed and nothing is recorded for the execution ladder, which the snapshot's checks
+    /// skip.
     fn execute_streamed(
         &self,
         streamed: &mut Streamed,
         config: &IntegrationTestsConfig,
-        executes_nothing: Option<&str>,
+        execution_skip_reason: Option<&str>,
         checks: &mut Checks,
     ) {
         let counts = |output: &LadderOutput| {
@@ -2085,8 +2105,7 @@ impl TestRunner {
                 output
                     .executions
                     .values()
-                    .chain(output.at_limit.values())
-                    .chain(output.past_limit.values())
+                    .chain(output.limit_executions.values())
                     .map(|input| input.component_id.as_str()),
             )
         };
@@ -2095,7 +2114,7 @@ impl TestRunner {
             .iter()
             .map(|(block, output)| stream::Candidate { block: *block, executions: counts(output) })
             .collect();
-        let to_execute = match executes_nothing {
+        let to_execute = match execution_skip_reason {
             Some(_) => Vec::new(),
             None => stream::blocks_to_execute(&candidates, stream::Floor::DEFAULT),
         };
