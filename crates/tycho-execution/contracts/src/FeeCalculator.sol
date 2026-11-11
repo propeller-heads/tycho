@@ -198,7 +198,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
         if (clientFeeBps > 0) return true;
         if (routerFeeOnOutputBps > 0) return true;
-        // The swap tokens are not known here, so any pair fee may apply.
+        // The swap tokens are not known here, so any pair fee might apply.
         if (_tokenPairFeeCount > 0) return true;
 
         return false;
