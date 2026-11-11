@@ -801,7 +801,7 @@ mod tests {
                 ("0.1%".to_string(), BigUint::from(1_000u32)),
                 ("1%".to_string(), BigUint::from(10_000u32)),
                 ("10%".to_string(), BigUint::from(100_000u32)),
-                ("limit".to_string(), limit.clone()),
+                ("limit".to_string(), limit),
             ]
         );
         // A fraction of a tiny limit rounds down to nothing.
