@@ -7,15 +7,38 @@
 
 use std::path::Path;
 
+use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, WrapErr};
 use num_bigint::{BigInt, BigUint};
 use num_rational::BigRational;
 use num_traits::{Signed, ToPrimitive, Zero};
 use serde::Serialize;
 use tracing::error;
-pub use tycho_test::checks::outcome::{CheckId, CheckResult, Outcome};
+pub use tycho_test::checks::outcome::{CheckId, CheckResult, LimitReport, Outcome};
 
-use crate::config::Harness;
+use crate::config::{DeclaredBy, Harness, Limits};
+
+/// The [`LimitReport`] of a direction checked against `limits`, declared by `declared_by`.
+/// `sizes` is `get_limits`' max input and max output, when the direction was quoted.
+pub fn limit_report(
+    limits: &Limits,
+    declared_by: DeclaredBy,
+    sizes: Option<(&BigUint, &BigUint)>,
+    capped: bool,
+) -> LimitReport {
+    LimitReport {
+        kind: limits.kind().to_string(),
+        reason: limits.reason().map(str::to_string),
+        rounding: match limits {
+            Limits::Hard { rounding } => Some(*rounding),
+            Limits::Soft { .. } | Limits::UnderCap { .. } => None,
+        },
+        declared_by: declared_by.as_str().to_string(),
+        max_input: sizes.map(|(max_input, _)| max_input.to_string()),
+        max_output: sizes.map(|(_, max_output)| max_output.to_string()),
+        capped,
+    }
+}
 
 /// The largest difference between a simulated and an executed amount out in one test, whether or
 /// not it was within tolerance. A declared tolerance's `measured` can be checked against it.
@@ -91,7 +114,7 @@ impl Checks {
         } else {
             Outcome::Warn { detail: problems.join("; ") }
         };
-        self.record(id, None, None, outcome);
+        self.record(id, None, None, outcome, None);
     }
 
     /// Notes an execution's output against its simulation, keeping the largest difference.
@@ -159,11 +182,11 @@ impl Checks {
     ) -> miette::Result<Option<T>> {
         match check() {
             Ok(value) => {
-                self.record(id, None, None, Outcome::Pass);
+                self.record(id, None, None, Outcome::Pass, None);
                 Ok(Some(value))
             }
             Err(e) => {
-                self.record(id, None, None, Outcome::Fail { detail: format!("{e:#}") });
+                self.record(id, None, None, Outcome::Fail { detail: format!("{e:#}") }, None);
                 match self.harness {
                     Harness::Legacy => Err(e),
                     Harness::Strict => {
@@ -177,36 +200,48 @@ impl Checks {
 
     /// Records a check the package's configuration turned off.
     pub fn skip(&mut self, id: CheckId, reason: &str) {
-        self.record(id, None, None, Outcome::Skipped { reason: reason.to_string() });
+        self.record(id, None, None, Outcome::Skipped { reason: reason.to_string() }, None);
     }
 
     /// Records a check the package's configuration turned off for one component, by its lowercase
     /// id, as the runner matches components.
     pub fn skip_component(&mut self, id: CheckId, component: &str, reason: &str) {
-        self.record(id, Some(component), None, Outcome::Skipped { reason: reason.to_string() });
+        self.record(
+            id,
+            Some(component),
+            None,
+            Outcome::Skipped { reason: reason.to_string() },
+            None,
+        );
     }
 
     /// Records a check that could not run because `prerequisite` failed.
     pub fn not_run(&mut self, id: CheckId, prerequisite: CheckId) {
-        self.record(id, None, None, Outcome::NotRun { reason: format!("{prerequisite} failed") });
+        self.record(
+            id,
+            None,
+            None,
+            Outcome::NotRun { reason: format!("{prerequisite} failed") },
+            None,
+        );
     }
 
     /// Records a failure that happened outside [`Checks::run`], such as an indexing error.
     pub fn fail(&mut self, id: CheckId, error: &miette::Report) {
-        self.record(id, None, None, Outcome::Fail { detail: format!("{error:#}") });
+        self.record(id, None, None, Outcome::Fail { detail: format!("{error:#}") }, None);
     }
 
     /// Ends the test: an error naming every failed check if any failed, `Ok` otherwise, and the
     /// results either way.
     pub fn finish(self) -> (miette::Result<()>, Vec<CheckResult>) {
         // A check recorded per direction can fail several times; name it once.
-        let mut failed: Vec<String> = Vec::new();
-        for result in &self.results {
-            let name = result.check.to_string();
-            if matches!(result.outcome, Outcome::Fail { .. }) && !failed.contains(&name) {
-                failed.push(name);
-            }
-        }
+        let failed: Vec<&str> = self
+            .results
+            .iter()
+            .filter(|result| matches!(result.outcome, Outcome::Fail { .. }))
+            .map(|result| result.check.as_str())
+            .unique()
+            .collect();
         let outcome = if failed.is_empty() {
             Ok(())
         } else {
@@ -215,24 +250,25 @@ impl Checks {
         (outcome, self.results)
     }
 
-    /// Records the outcome of a check on one direction of one component: a failure listing
-    /// `failures` if there are any, else `unfailed`, which says whether the check passed or why it
-    /// did not run.
+    /// Records the outcome of a limit check on one direction of one component, with the limit and
+    /// its declaration: a failure listing `failures` if there are any, else `unfailed`, which says
+    /// whether the check passed or why it did not run.
     pub fn record_direction(
         &mut self,
         id: CheckId,
         component: &str,
         direction: &str,
+        limit: &LimitReport,
         unfailed: Outcome,
         failures: &[String],
     ) {
-        self.record_scoped(id, component, Some(direction), unfailed, failures);
+        self.record_scoped(id, component, Some(direction), Some(limit), unfailed, failures);
     }
 
     /// Records the outcome of a check on one component: a failure listing `failures` if there
     /// are any, else a pass.
     pub fn record_component(&mut self, id: CheckId, component: &str, failures: &[String]) {
-        self.record_scoped(id, component, None, Outcome::Pass, failures);
+        self.record_scoped(id, component, None, None, Outcome::Pass, failures);
     }
 
     fn record_scoped(
@@ -240,6 +276,7 @@ impl Checks {
         id: CheckId,
         component: &str,
         direction: Option<&str>,
+        limit: Option<&LimitReport>,
         unfailed: Outcome,
         failures: &[String],
     ) {
@@ -252,7 +289,7 @@ impl Checks {
             error!("[{}] {id} failed for {scope}: {detail}", self.test);
             Outcome::Fail { detail }
         };
-        self.record(id, Some(component), direction, outcome);
+        self.record(id, Some(component), direction, outcome, limit);
     }
 
     fn record(
@@ -261,6 +298,7 @@ impl Checks {
         component: Option<&str>,
         direction: Option<&str>,
         outcome: Outcome,
+        limit: Option<&LimitReport>,
     ) {
         self.results.push(CheckResult {
             test: self.test.clone(),
@@ -269,6 +307,7 @@ impl Checks {
             direction: direction.map(str::to_string),
             block: self.block,
             outcome,
+            limit: limit.cloned(),
         });
     }
 }
@@ -299,6 +338,10 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn limit() -> LimitReport {
+        limit_report(&Limits::Hard { rounding: 0 }, DeclaredBy::Component, None, false)
+    }
 
     fn failing() -> miette::Result<()> {
         Err(miette!("boom"))
@@ -370,6 +413,7 @@ mod tests {
                 direction: None,
                 block: None,
                 outcome: Outcome::Skipped { reason: "no fork state".to_string() },
+                limit: None,
             }]
         );
     }
@@ -418,6 +462,7 @@ mod tests {
                     direction: None,
                     block: None,
                     outcome: Outcome::Fail { detail: "boom".to_string() },
+                    limit: None,
                 },
                 CheckResult {
                     test: "t".to_string(),
@@ -426,6 +471,12 @@ mod tests {
                     direction: Some("0x02->0x03".to_string()),
                     block: Some(7),
                     outcome: Outcome::Skipped { reason: "off".to_string() },
+                    limit: Some(limit_report(
+                        &Limits::Soft { reason: "constant product".to_string() },
+                        DeclaredBy::PackageDefault,
+                        Some((&BigUint::from(1000u32), &BigUint::from(2000u32))),
+                        false,
+                    )),
                 },
             ],
         };
@@ -449,39 +500,76 @@ mod tests {
         assert!(json["results"][0]
             .get("block")
             .is_none());
+        assert!(json["results"][0]
+            .get("limit")
+            .is_none());
+        assert_eq!(
+            json["results"][1]["limit"],
+            serde_json::json!({
+                "kind": "soft",
+                "reason": "constant product",
+                "declared_by": "package_default",
+                "max_input": "1000",
+                "max_output": "2000",
+                "capped": false,
+            })
+        );
     }
 
-    #[test]
-    fn a_check_recorded_per_direction_passes_fails_skips_or_is_not_run_per_direction() {
+    /// Records `unfailed` for `limits.past_limit` on `component` and `direction`, failing with
+    /// `failures` if any, and returns the outcome it recorded.
+    fn record_one(unfailed: Outcome, failures: &[String]) -> Outcome {
         let mut checks = Checks::new(Harness::Strict, "t");
-        let failure = ["quotes past the limit".to_string()];
-        let soft = || Outcome::Skipped { reason: "soft".to_string() };
-        let not_run = || Outcome::NotRun { reason: "limits.at_limit failed".to_string() };
-        checks.record_direction(CheckId::LimitsPastLimit, "0x01", "0xa->0xb", Outcome::Pass, &[]);
         checks.record_direction(
             CheckId::LimitsPastLimit,
             "0x01",
-            "0xb->0xa",
-            Outcome::Pass,
-            &failure,
+            "0xa->0xb",
+            &limit(),
+            unfailed,
+            failures,
         );
-        checks.record_direction(CheckId::LimitsPastLimit, "0x02", "0xa->0xb", soft(), &[]);
-        checks.record_direction(CheckId::LimitsPastLimit, "0x02", "0xb->0xa", soft(), &failure);
-        checks.record_direction(CheckId::LimitsPastLimit, "0x03", "0xa->0xb", not_run(), &[]);
+        let (_, results) = checks.finish();
+        results[0].outcome.clone()
+    }
 
+    #[test]
+    fn a_failure_outranks_what_a_direction_would_otherwise_record() {
+        let failure = ["quotes past the limit".to_string()];
+        let skipped = Outcome::Skipped { reason: "capped".to_string() };
+        for unfailed in [Outcome::Pass, skipped.clone()] {
+            assert_eq!(
+                record_one(unfailed, &failure),
+                Outcome::Fail { detail: "quotes past the limit".to_string() }
+            );
+        }
+        assert_eq!(record_one(Outcome::Pass, &[]), Outcome::Pass);
+        assert_eq!(record_one(skipped.clone(), &[]), skipped);
+    }
+
+    #[test]
+    fn a_check_failing_in_several_directions_is_named_once() {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        let failure = ["quotes past the limit".to_string()];
+        for direction in ["0xa->0xb", "0xb->0xa"] {
+            checks.record_direction(
+                CheckId::LimitsPastLimit,
+                "0x01",
+                direction,
+                &limit(),
+                Outcome::Pass,
+                &failure,
+            );
+        }
         let (outcome, results) = checks.finish();
-        // The check failed twice and is named once.
         assert_eq!(outcome.unwrap_err().to_string(), "Failed checks: limits.past_limit");
-        let outcomes: Vec<_> = results
+        let directions: Vec<_> = results
             .iter()
-            .map(|r| (r.component.as_deref(), r.direction.as_deref(), &r.outcome))
+            .map(|r| (r.component.as_deref(), r.direction.as_deref()))
             .collect();
-        assert_eq!(outcomes[0], (Some("0x01"), Some("0xa->0xb"), &Outcome::Pass));
-        assert!(matches!(outcomes[1].2, Outcome::Fail { .. }));
-        assert_eq!(outcomes[2], (Some("0x02"), Some("0xa->0xb"), &soft()));
-        // A failure outranks a skip.
-        assert!(matches!(outcomes[3].2, Outcome::Fail { .. }));
-        assert_eq!(outcomes[4], (Some("0x03"), Some("0xa->0xb"), &not_run()));
+        assert_eq!(
+            directions,
+            vec![(Some("0x01"), Some("0xa->0xb")), (Some("0x01"), Some("0xb->0xa"))]
+        );
     }
 
     #[test]
