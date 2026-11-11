@@ -258,7 +258,7 @@ impl ProtocolComponentExpectation {
 }
 
 /// What kind of bound a direction's `get_limits` reports, which decides how strict mode tests it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LimitKind {
     Hard,
     Soft,
@@ -314,12 +314,26 @@ impl Limits {
     }
 
     /// The declared reason, for the kinds that require one.
-    fn reason(&self) -> Option<&str> {
+    pub fn reason(&self) -> Option<&str> {
         match self {
             Limits::Hard { .. } => None,
             Limits::Soft { reason } | Limits::UnderCap { reason } => Some(reason),
         }
     }
+}
+
+/// Which `limits` declaration a direction's limit comes from, most specific first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclaredBy {
+    /// The component's entry for the direction.
+    Component,
+    /// The component's `default`, or its one declaration for every direction.
+    ComponentDefault,
+    /// The package's entry for the direction.
+    Package,
+    /// The package's `default`, or its one declaration for every direction.
+    PackageDefault,
 }
 
 /// A swap direction, as a `limits` declaration keys it: `"0x<token in>->0x<token out>"`.
@@ -373,13 +387,6 @@ pub struct LimitsDeclaration {
 }
 
 impl LimitsDeclaration {
-    /// The declaration of `direction`: its own, or else the default.
-    fn get(&self, direction: &Direction) -> Option<&Limits> {
-        self.directions
-            .get(direction)
-            .or(self.default.as_ref())
-    }
-
     /// Every declaration with its key, `default` first, then the directions in order.
     fn entries(&self) -> Vec<(String, &Limits)> {
         let mut entries: Vec<(String, &Limits)> = self
@@ -540,15 +547,28 @@ impl IntegrationTestsConfig {
         component: &'a ProtocolComponentWithTestConfig,
         direction: &Direction,
     ) -> Option<&'a Limits> {
-        component
-            .limits
-            .as_ref()
-            .and_then(|declaration| declaration.get(direction))
-            .or_else(|| {
-                self.limits
+        self.declaration_for(component, direction)
+            .map(|(limits, _)| limits)
+    }
+
+    /// [`Self::limits_for`], with which declaration it comes from.
+    pub fn declaration_for<'a>(
+        &'a self,
+        component: &'a ProtocolComponentWithTestConfig,
+        direction: &Direction,
+    ) -> Option<(&'a Limits, DeclaredBy)> {
+        let lookup = |declaration: &'a Option<LimitsDeclaration>, own, default| {
+            let declaration = declaration.as_ref()?;
+            match declaration.directions.get(direction) {
+                Some(limits) => Some((limits, own)),
+                None => declaration
+                    .default
                     .as_ref()
-                    .and_then(|declaration| declaration.get(direction))
-            })
+                    .map(|limits| (limits, default)),
+            }
+        };
+        lookup(&component.limits, DeclaredBy::Component, DeclaredBy::ComponentDefault)
+            .or_else(|| lookup(&self.limits, DeclaredBy::Package, DeclaredBy::PackageDefault))
     }
 
     /// Every check on the `limits` declarations, in both modes:
@@ -1035,6 +1055,29 @@ tests:
             }
         }
         assert!(parse(&yaml("harness: strict", &format!("        limits: {UNDER_CAP}"))).is_ok());
+    }
+
+    #[test]
+    fn a_declaration_names_where_it_comes_from() {
+        let package = format!("limits: {{default: {{kind: hard}}, \"0x02->0x01\": {UNDER_CAP}}}");
+        let by = |component_limits: &str| {
+            let config = parse(&yaml(&package, component_limits)).unwrap();
+            let component = &config.tests[0].expected_components[0];
+            ["0x01->0x02", "0x02->0x01"].map(|key| {
+                config
+                    .declaration_for(component, &direction(key))
+                    .map(|(_, by)| by)
+            })
+        };
+        assert_eq!(by(""), [Some(DeclaredBy::PackageDefault), Some(DeclaredBy::Package)]);
+        assert_eq!(
+            by("        limits: {\"0x01->0x02\": {kind: hard}}"),
+            [Some(DeclaredBy::Component), Some(DeclaredBy::Package)]
+        );
+        assert_eq!(
+            by("        limits: {kind: hard}"),
+            [Some(DeclaredBy::ComponentDefault), Some(DeclaredBy::ComponentDefault)]
+        );
     }
 
     #[test]

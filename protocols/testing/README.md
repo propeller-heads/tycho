@@ -186,7 +186,8 @@ Legacy mode reads the declarations but runs none of these checks.
     { "test": "first", "check": "exec.ladder", "component": "0xabc...", "outcome": "skipped", "reason": "range predates Shanghai; the router needs PUSH0" },
     { "test": "first", "check": "sim.ladder", "outcome": "fail", "detail": "Error calculating amount out ..." },
     { "test": "first", "check": "exec.ladder", "outcome": "not_run", "reason": "sim.ladder failed" },
-    { "test": "second", "check": "limits.past_limit", "component": "0x...", "direction": "0x...->0x...", "outcome": "pass" }
+    { "test": "second", "check": "limits.past_limit", "component": "0x...", "direction": "0x...->0x...", "outcome": "pass",
+      "limit": { "kind": "soft", "reason": "constant product: ...", "declared_by": "package_default", "max_input": "2162000", "max_output": "68309", "capped": false } }
   ]
 }
 ```
@@ -201,8 +202,14 @@ Legacy mode reads the declarations but runs none of these checks.
 | `sim.ladder` | limits, spot prices and quotes at 0.1%, 1% and 10% of the limit, every direction |
 | `exec.ladder` | executing each quote on chain matches the simulation |
 | `limits.at_limit` | strict: every direction quotes and executes at its limit |
-| `limits.past_limit` | strict: past a hard limit, the quote errors and the execution reverts |
+| `limits.past_limit` | strict: past the limit, the venue behaves as the declared kind claims |
 | `limits.max_output` | strict: the quote at the limit pays no more than the limit's max output |
+
+Every `limits.*` result carries its `limit`, whatever the outcome: the declared `kind`, its
+`reason` (and a hard limit's `rounding`), which declaration applies (`declared_by`: `component`,
+`component_default`, `package` or `package_default`), and `get_limits`' `max_input` (after the
+`int128` cap) and `max_output`, with `capped` saying whether the cap applied. The run also logs a
+count per test, such as `limits: 3 hard, 8 soft, 1 under_cap`.
 
 A skipped check is reported with its reason, per component (by lowercase id) for
 `skip_simulation` and `skip_execution`; a legacy `true` reads "no reason given". A test-wide

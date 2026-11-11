@@ -55,11 +55,11 @@ use tycho_test::{
 use crate::{
     adapter_builder::AdapterContractBuilder,
     config::{
-        component_directions, Direction, Harness, IntegrationTest, IntegrationTestsConfig, Limits,
-        ProtocolComponentWithTestConfig, Skip,
+        component_directions, DeclaredBy, Direction, Harness, IntegrationTest,
+        IntegrationTestsConfig, LimitKind, Limits, ProtocolComponentWithTestConfig, Skip,
     },
     execution, limits,
-    report::{CheckId, Checks, Outcome, Report},
+    report::{CheckId, Checks, LimitReport, Outcome, Report},
     rpc::RPCProvider,
     state_registry::register_protocol,
     tycho_rpc::TychoClient,
@@ -145,6 +145,8 @@ struct SimulationOutput {
 struct UncheckedLimit {
     component: String,
     direction: Direction,
+    limits: Limits,
+    declared_by: DeclaredBy,
     /// Why not. A zero limit is a skip; a direction the runner never reached is a failure.
     why: Unchecked,
 }
@@ -162,8 +164,12 @@ struct LimitDirection {
     /// The component's id, as indexed.
     component: String,
     direction: Direction,
-    /// The declaration the direction is checked against.
+    /// The declaration the direction is checked against, and where it comes from.
     limits: Limits,
+    declared_by: DeclaredBy,
+    /// `get_limits`' max input, after the `int128` cap, and its max output.
+    max_input: BigUint,
+    max_output: BigUint,
     /// Whether the limit is at or above `int128::MAX`, the cap the runner applies to every
     /// protocol's executions.
     capped: bool,
@@ -182,6 +188,16 @@ struct LimitDirection {
 }
 
 impl LimitDirection {
+    /// The limit and its declaration, as every `limits.*` result of the direction reports them.
+    fn report(&self) -> LimitReport {
+        LimitReport::new(
+            &self.limits,
+            self.declared_by,
+            Some((&self.max_input, &self.max_output)),
+            self.capped,
+        )
+    }
+
     fn failures_of(&self, check: CheckId) -> Vec<String> {
         self.failures
             .iter()
@@ -1080,7 +1096,7 @@ impl TestRunner {
 
         // Strict mode tests each direction's limit as declared; `from_yaml` made sure every
         // direction of every expected component has a declaration.
-        let declared_limits: Option<HashMap<(String, Direction), Limits>> =
+        let declared_limits: Option<HashMap<(String, Direction), (Limits, DeclaredBy)>> =
             (config.harness == Harness::Strict).then(|| {
                 test.expected_components
                     .iter()
@@ -1088,14 +1104,32 @@ impl TestRunner {
                         component_directions(component)
                             .into_iter()
                             .filter_map(move |direction| {
-                                let limits = config
-                                    .limits_for(component, &direction)?
-                                    .clone();
-                                Some(((component.base.id.to_lowercase(), direction), limits))
+                                let (limits, by) = config.declaration_for(component, &direction)?;
+                                let key = (component.base.id.to_lowercase(), direction);
+                                Some((key, (limits.clone(), by)))
                             })
                     })
                     .collect()
             });
+        if let Some(declared) = &declared_limits {
+            // A reviewer sees at a glance how many directions pass on a soft or under_cap claim.
+            let counts = declared
+                .values()
+                .counts_by(|(limits, _)| limits.kind());
+            info!(
+                "[{}] limits: {} hard, {} soft, {} under_cap",
+                test.name,
+                counts
+                    .get(&LimitKind::Hard)
+                    .unwrap_or(&0),
+                counts
+                    .get(&LimitKind::Soft)
+                    .unwrap_or(&0),
+                counts
+                    .get(&LimitKind::UnderCap)
+                    .unwrap_or(&0)
+            );
+        }
 
         if let Some(reason) = ladder_skips.simulation {
             checks.skip(CheckId::SimLadder, reason);
@@ -1632,7 +1666,7 @@ impl TestRunner {
         protocol_components: &HashMap<String, ProtocolComponentModel>,
         expected_components: &[ProtocolComponentWithTestConfig],
         protocol_system: &str,
-        declared_limits: Option<&HashMap<(String, Direction), Limits>>,
+        declared_limits: Option<&HashMap<(String, Direction), (Limits, DeclaredBy)>>,
     ) -> miette::Result<SimulationOutput> {
         let skip_simulation = skip_reasons(expected_components, |c| &c.skip_simulation);
         let skip_execution = skip_reasons(expected_components, |c| &c.skip_execution);
@@ -1715,14 +1749,16 @@ impl TestRunner {
                         "[{}] Zero limit for {} -> {}, skipping direction",
                         id, token_in.symbol, token_out.symbol
                     );
-                    if declared_limits.is_some_and(|declared| {
-                        declared.contains_key(&(key.clone(), direction.clone()))
-                    }) {
+                    if let Some((limits, declared_by)) = declared_limits
+                        .and_then(|declared| declared.get(&(key.clone(), direction.clone())))
+                    {
                         output
                             .unchecked_limits
                             .push(UncheckedLimit {
                                 component: id.clone(),
                                 direction,
+                                limits: limits.clone(),
+                                declared_by: *declared_by,
                                 why: Unchecked::ZeroLimit,
                             });
                     }
@@ -1810,7 +1846,7 @@ impl TestRunner {
 
                 let declared = declared_limits
                     .and_then(|declared| declared.get(&(key.clone(), direction.clone())));
-                if let Some(declared) = declared {
+                if let Some((declared, declared_by)) = declared {
                     let checked = limits::check_direction(
                         |amount| {
                             state
@@ -1832,6 +1868,9 @@ impl TestRunner {
                         component: id.clone(),
                         direction,
                         limits: declared.clone(),
+                        declared_by: *declared_by,
+                        max_input: max_input.clone(),
+                        max_output: max_output.clone(),
                         capped,
                         quoted_at_limit: checked.at_limit.is_some(),
                         execution_skipped: skip_execution
@@ -1886,13 +1925,18 @@ impl TestRunner {
             // A declared direction the loop above never reached has no limit result. Fail it
             // rather than let it drop out of the report.
             if let Some(declared) = declared_limits {
-                for (declared_id, direction) in declared.keys().sorted() {
+                for ((declared_id, direction), (limits, declared_by)) in declared
+                    .iter()
+                    .sorted_by(|a, b| a.0.cmp(b.0))
+                {
                     if *declared_id == key && !reached.contains(direction) {
                         output
                             .unchecked_limits
                             .push(UncheckedLimit {
                                 component: id.clone(),
                                 direction: direction.clone(),
+                                limits: limits.clone(),
+                                declared_by: *declared_by,
                                 why: Unchecked::NotQuoted,
                             });
                     }
@@ -2073,6 +2117,7 @@ impl TestRunner {
 
         for limits in &limit_directions {
             let direction = limits.direction.to_string();
+            let report = limits.report();
 
             let mut at_limit_failures = limits.failures_of(CheckId::LimitsAtLimit);
             at_limit_failures.extend(execution_failure(&limits.at_limit, &|id, input| {
@@ -2082,6 +2127,7 @@ impl TestRunner {
                 CheckId::LimitsAtLimit,
                 &limits.component,
                 &direction,
+                &report,
                 limits.at_limit_unfailed(),
                 &at_limit_failures,
             );
@@ -2107,6 +2153,7 @@ impl TestRunner {
                 CheckId::LimitsPastLimit,
                 &limits.component,
                 &direction,
+                &report,
                 limits.past_limit_unfailed(at_limit_executed),
                 &past_limit_failures,
             );
@@ -2115,18 +2162,27 @@ impl TestRunner {
                 CheckId::LimitsMaxOutput,
                 &limits.component,
                 &direction,
+                &report,
                 limits.max_output_unfailed(),
                 &limits.failures_of(CheckId::LimitsMaxOutput),
             );
         }
-        for UncheckedLimit { component, direction, why } in &unchecked_limits {
+        for UncheckedLimit { component, direction, limits, declared_by, why } in &unchecked_limits {
             let direction = direction.to_string();
+            let report = match why {
+                Unchecked::ZeroLimit => {
+                    let zero = BigUint::zero();
+                    LimitReport::new(limits, *declared_by, Some((&zero, &zero)), false)
+                }
+                Unchecked::NotQuoted => LimitReport::new(limits, *declared_by, None, false),
+            };
             for check in CheckId::LIMITS {
                 match why {
                     Unchecked::ZeroLimit => checks.record_direction(
                         check,
                         component,
                         &direction,
+                        &report,
                         Outcome::Skipped { reason: "the limit is zero at this block".to_string() },
                         &[],
                     ),
@@ -2134,6 +2190,7 @@ impl TestRunner {
                         check,
                         component,
                         &direction,
+                        &report,
                         Outcome::Pass,
                         &[format!(
                             "{direction} declares a limit, but the runner did not quote it: the \
@@ -2534,6 +2591,9 @@ mod tests {
             component: "0x01".to_string(),
             direction: Direction { token_in: Bytes::from("0x0a"), token_out: Bytes::from("0x0b") },
             limits: Limits::Hard { rounding: 0 },
+            declared_by: DeclaredBy::Component,
+            max_input: BigUint::from(1000u32),
+            max_output: BigUint::from(2000u32),
             capped: false,
             quoted_at_limit,
             execution_skipped: execution_skipped.map(str::to_string),

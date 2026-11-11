@@ -8,10 +8,11 @@
 use std::{fmt, path::Path};
 
 use miette::{miette, IntoDiagnostic, WrapErr};
+use num_bigint::BigUint;
 use serde::Serialize;
 use tracing::error;
 
-use crate::config::Harness;
+use crate::config::{DeclaredBy, Harness, Limits};
 
 /// The checks a test runs, named the way the report and the yaml refer to them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +104,52 @@ pub struct CheckResult {
     pub direction: Option<String>,
     #[serde(flatten)]
     pub outcome: Outcome,
+    /// Strict: for a `limits.*` result, the declaration it is checked against and the limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<LimitReport>,
+}
+
+/// The declaration a `limits.*` result is checked against, and the limit it tested, whatever the
+/// outcome, so a reader sees which directions pass on a `soft` or `under_cap` claim and how large
+/// a non-hard limit is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LimitReport {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rounding: Option<u64>,
+    pub declared_by: DeclaredBy,
+    /// `get_limits`' max input, after the `int128` cap, when the direction was quoted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<String>,
+    /// Whether the `int128` cap replaced a larger limit.
+    pub capped: bool,
+}
+
+impl LimitReport {
+    /// `sizes` is `get_limits`' max input and max output, when the direction was quoted.
+    pub fn new(
+        limits: &Limits,
+        declared_by: DeclaredBy,
+        sizes: Option<(&BigUint, &BigUint)>,
+        capped: bool,
+    ) -> Self {
+        Self {
+            kind: limits.kind().to_string(),
+            reason: limits.reason().map(str::to_string),
+            rounding: match limits {
+                Limits::Hard { rounding } => Some(*rounding),
+                _ => None,
+            },
+            declared_by,
+            max_input: sizes.map(|(max_input, _)| max_input.to_string()),
+            max_output: sizes.map(|(_, max_output)| max_output.to_string()),
+            capped,
+        }
+    }
 }
 
 /// Runs the checks of one test and records how each ended.
@@ -129,11 +176,11 @@ impl Checks {
     ) -> miette::Result<Option<T>> {
         match check() {
             Ok(value) => {
-                self.record(id, None, None, Outcome::Pass);
+                self.record(id, None, None, Outcome::Pass, None);
                 Ok(Some(value))
             }
             Err(e) => {
-                self.record(id, None, None, Outcome::Fail { detail: format!("{e:#}") });
+                self.record(id, None, None, Outcome::Fail { detail: format!("{e:#}") }, None);
                 match self.harness {
                     Harness::Legacy => Err(e),
                     Harness::Strict => {
@@ -147,23 +194,35 @@ impl Checks {
 
     /// Records a check the package's configuration turned off.
     pub fn skip(&mut self, id: CheckId, reason: &str) {
-        self.record(id, None, None, Outcome::Skipped { reason: reason.to_string() });
+        self.record(id, None, None, Outcome::Skipped { reason: reason.to_string() }, None);
     }
 
     /// Records a check the package's configuration turned off for one component, by its lowercase
     /// id, as the runner matches components.
     pub fn skip_component(&mut self, id: CheckId, component: &str, reason: &str) {
-        self.record(id, Some(component), None, Outcome::Skipped { reason: reason.to_string() });
+        self.record(
+            id,
+            Some(component),
+            None,
+            Outcome::Skipped { reason: reason.to_string() },
+            None,
+        );
     }
 
     /// Records a check that could not run because `prerequisite` failed.
     pub fn not_run(&mut self, id: CheckId, prerequisite: CheckId) {
-        self.record(id, None, None, Outcome::NotRun { reason: format!("{prerequisite} failed") });
+        self.record(
+            id,
+            None,
+            None,
+            Outcome::NotRun { reason: format!("{prerequisite} failed") },
+            None,
+        );
     }
 
     /// Records a failure that happened outside [`Checks::run`], such as an indexing error.
     pub fn fail(&mut self, id: CheckId, error: &miette::Report) {
-        self.record(id, None, None, Outcome::Fail { detail: format!("{error:#}") });
+        self.record(id, None, None, Outcome::Fail { detail: format!("{error:#}") }, None);
     }
 
     /// Ends the test: an error naming every failed check if any failed, `Ok` otherwise, and the
@@ -185,14 +244,15 @@ impl Checks {
         (outcome, self.results)
     }
 
-    /// Records the outcome of a check on one direction of one component: a failure listing
-    /// `failures` if there are any, else `unfailed`, which says whether the check passed or why it
-    /// did not run.
+    /// Records the outcome of a limit check on one direction of one component, with the limit and
+    /// its declaration: a failure listing `failures` if there are any, else `unfailed`, which says
+    /// whether the check passed or why it did not run.
     pub fn record_direction(
         &mut self,
         id: CheckId,
         component: &str,
         direction: &str,
+        limit: &LimitReport,
         unfailed: Outcome,
         failures: &[String],
     ) {
@@ -203,7 +263,7 @@ impl Checks {
             error!("[{}] {id} failed for {component} {direction}: {detail}", self.test);
             Outcome::Fail { detail }
         };
-        self.record(id, Some(component), Some(direction), outcome);
+        self.record(id, Some(component), Some(direction), outcome, Some(limit));
     }
 
     fn record(
@@ -212,6 +272,7 @@ impl Checks {
         component: Option<&str>,
         direction: Option<&str>,
         outcome: Outcome,
+        limit: Option<&LimitReport>,
     ) {
         self.results.push(CheckResult {
             test: self.test.clone(),
@@ -219,6 +280,7 @@ impl Checks {
             component: component.map(str::to_lowercase),
             direction: direction.map(str::to_string),
             outcome,
+            limit: limit.cloned(),
         });
     }
 }
@@ -244,6 +306,10 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn limit() -> LimitReport {
+        LimitReport::new(&Limits::Hard { rounding: 0 }, DeclaredBy::Component, None, false)
+    }
 
     fn failing() -> miette::Result<()> {
         Err(miette!("boom"))
@@ -314,6 +380,7 @@ mod tests {
                 component: Some("0xabc".to_string()),
                 direction: None,
                 outcome: Outcome::Skipped { reason: "no fork state".to_string() },
+                limit: None,
             }]
         );
     }
@@ -341,6 +408,7 @@ mod tests {
                     component: None,
                     direction: None,
                     outcome: Outcome::Fail { detail: "boom".to_string() },
+                    limit: None,
                 },
                 CheckResult {
                     test: "t".to_string(),
@@ -348,6 +416,12 @@ mod tests {
                     component: Some("0x01".to_string()),
                     direction: Some("0x02->0x03".to_string()),
                     outcome: Outcome::Skipped { reason: "off".to_string() },
+                    limit: Some(LimitReport::new(
+                        &Limits::Soft { reason: "constant product".to_string() },
+                        DeclaredBy::PackageDefault,
+                        Some((&BigUint::from(1000u32), &BigUint::from(2000u32))),
+                        false,
+                    )),
                 },
             ],
         };
@@ -367,6 +441,20 @@ mod tests {
         assert_eq!(json["results"][1]["direction"], "0x02->0x03");
         assert_eq!(json["results"][1]["outcome"], "skipped");
         assert_eq!(json["results"][1]["reason"], "off");
+        assert!(json["results"][0]
+            .get("limit")
+            .is_none());
+        assert_eq!(
+            json["results"][1]["limit"],
+            serde_json::json!({
+                "kind": "soft",
+                "reason": "constant product",
+                "declared_by": "package_default",
+                "max_input": "1000",
+                "max_output": "2000",
+                "capped": false,
+            })
+        );
     }
 
     #[test]
@@ -375,17 +463,46 @@ mod tests {
         let failure = ["quotes past the limit".to_string()];
         let soft = || Outcome::Skipped { reason: "soft".to_string() };
         let not_run = || Outcome::NotRun { reason: "limits.at_limit failed".to_string() };
-        checks.record_direction(CheckId::LimitsPastLimit, "0x01", "0xa->0xb", Outcome::Pass, &[]);
+        checks.record_direction(
+            CheckId::LimitsPastLimit,
+            "0x01",
+            "0xa->0xb",
+            &limit(),
+            Outcome::Pass,
+            &[],
+        );
         checks.record_direction(
             CheckId::LimitsPastLimit,
             "0x01",
             "0xb->0xa",
+            &limit(),
             Outcome::Pass,
             &failure,
         );
-        checks.record_direction(CheckId::LimitsPastLimit, "0x02", "0xa->0xb", soft(), &[]);
-        checks.record_direction(CheckId::LimitsPastLimit, "0x02", "0xb->0xa", soft(), &failure);
-        checks.record_direction(CheckId::LimitsPastLimit, "0x03", "0xa->0xb", not_run(), &[]);
+        checks.record_direction(
+            CheckId::LimitsPastLimit,
+            "0x02",
+            "0xa->0xb",
+            &limit(),
+            soft(),
+            &[],
+        );
+        checks.record_direction(
+            CheckId::LimitsPastLimit,
+            "0x02",
+            "0xb->0xa",
+            &limit(),
+            soft(),
+            &failure,
+        );
+        checks.record_direction(
+            CheckId::LimitsPastLimit,
+            "0x03",
+            "0xa->0xb",
+            &limit(),
+            not_run(),
+            &[],
+        );
 
         let (outcome, results) = checks.finish();
         // The check failed twice and is named once.
