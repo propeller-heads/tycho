@@ -74,7 +74,12 @@ pub fn execution_mismatch(
 ) -> Option<String> {
     let component = &input.component_id;
     let mismatch = match results.get(simulation_id) {
-        Some(TychoExecutionResult::Success { amount_out, .. }) => {
+        Some(TychoExecutionResult::Success {
+            amount_out,
+            gas_used: _,
+            state_overwrites: _,
+            overwrite_metadata: _,
+        }) => {
             info!(
                 "[{component}] Execution returned: {} {} -> {amount_out} {}",
                 input.solution.amount_in(),
@@ -91,9 +96,11 @@ pub fn execution_mismatch(
                     )
                 })
         }
-        Some(TychoExecutionResult::Revert { reason, .. }) => {
-            Some(format!("[{component}] Execution reverted for {simulation_id}: {reason}"))
-        }
+        Some(TychoExecutionResult::Revert {
+            reason,
+            state_overwrites: _,
+            overwrite_metadata: _,
+        }) => Some(format!("[{component}] Execution reverted for {simulation_id}: {reason}")),
         Some(TychoExecutionResult::Failed { error_msg }) => {
             Some(format!("[{component}] Execution failed for {simulation_id}: {error_msg}"))
         }
@@ -128,7 +135,7 @@ pub fn check_executions_match(
 }
 
 /// Why the execution of `simulation_id`, one unit past a hard limit, does not show the limit holds:
-/// it settled, or it could not be simulated. `None` when it reverted.
+/// it executed, or it could not be simulated. `None` when it reverted.
 pub fn missing_revert(
     simulation_id: &str,
     input: &TychoExecutionInput,
@@ -137,14 +144,23 @@ pub fn missing_revert(
     let component = &input.component_id;
     let amount_in = input.solution.amount_in();
     let failure = match results.get(simulation_id) {
-        Some(TychoExecutionResult::Revert { reason, .. }) => {
+        Some(TychoExecutionResult::Revert {
+            reason,
+            state_overwrites: _,
+            overwrite_metadata: _,
+        }) => {
             info!(
                 "[{component}] {amount_in} {}, one unit past the hard limit, reverts: {reason}",
                 input.token_in
             );
             None
         }
-        Some(TychoExecutionResult::Success { amount_out, .. }) => Some(format!(
+        Some(TychoExecutionResult::Success {
+            amount_out,
+            gas_used: _,
+            state_overwrites: _,
+            overwrite_metadata: _,
+        }) => Some(format!(
             "[{component}] {amount_in} {}, one unit past the declared hard limit, executes and \
              pays {amount_out} {}",
             input.token_in, input.token_out
@@ -152,6 +168,51 @@ pub fn missing_revert(
         Some(TychoExecutionResult::Failed { error_msg }) => Some(format!(
             "[{component}] {simulation_id} could not be simulated, so the revert past the limit \
              is unproven: {error_msg}"
+        )),
+        None => Some(format!("[{component}] No result found for simulation {simulation_id}")),
+    };
+    if let Some(failure) = &failure {
+        error!("{failure}");
+    }
+    failure
+}
+
+/// Why the execution of `simulation_id`, one unit past an under-cap limit, does not show the
+/// venue's bound is above the limit: it reverted, or it could not be simulated. `None` when it
+/// executed.
+pub fn missing_execution(
+    simulation_id: &str,
+    input: &TychoExecutionInput,
+    results: &HashMap<String, TychoExecutionResult>,
+) -> Option<String> {
+    let component = &input.component_id;
+    let amount_in = input.solution.amount_in();
+    let failure = match results.get(simulation_id) {
+        Some(TychoExecutionResult::Success {
+            amount_out,
+            gas_used: _,
+            state_overwrites: _,
+            overwrite_metadata: _,
+        }) => {
+            info!(
+                "[{component}] {amount_in} {}, one unit past the under_cap limit, executes and \
+                 pays {amount_out} {}",
+                input.token_in, input.token_out
+            );
+            None
+        }
+        Some(TychoExecutionResult::Revert {
+            reason,
+            state_overwrites: _,
+            overwrite_metadata: _,
+        }) => Some(format!(
+            "[{component}] {amount_in} {}, one unit past the declared under_cap limit, \
+                 reverts: {reason}. The limit is the venue's bound: declare it hard",
+            input.token_in
+        )),
+        Some(TychoExecutionResult::Failed { error_msg }) => Some(format!(
+            "[{component}] {simulation_id} could not be simulated, so the venue's bound past the \
+             limit is unproven: {error_msg}"
         )),
         None => Some(format!("[{component}] No result found for simulation {simulation_id}")),
     };
@@ -215,14 +276,40 @@ mod tests {
             missing_revert("past", &past_limit_input(), &results)
         };
         assert_eq!(judge(Some(revert("ERC4626: deposit more than max"))), None);
-        let settled = judge(Some(TychoExecutionResult::Success {
+        let executed = judge(Some(TychoExecutionResult::Success {
             amount_out: BigUint::from(50u32),
             gas_used: 0,
             state_overwrites: None,
             overwrite_metadata: None,
         }))
         .unwrap();
-        assert!(settled.contains("executes and pays 50 B"), "{settled}");
+        assert!(executed.contains("executes and pays 50 B"), "{executed}");
+        let failed =
+            judge(Some(TychoExecutionResult::Failed { error_msg: "decode".to_string() })).unwrap();
+        assert!(failed.contains("could not be simulated"), "{failed}");
+        assert!(judge(None)
+            .unwrap()
+            .contains("No result found"));
+    }
+
+    #[test]
+    fn only_an_execution_from_the_chain_proves_an_under_cap_limit() {
+        let judge = |result: Option<TychoExecutionResult>| {
+            let results: HashMap<String, TychoExecutionResult> = result
+                .into_iter()
+                .map(|result| ("past".to_string(), result))
+                .collect();
+            missing_execution("past", &past_limit_input(), &results)
+        };
+        let executed = TychoExecutionResult::Success {
+            amount_out: BigUint::from(50u32),
+            gas_used: 0,
+            state_overwrites: None,
+            overwrite_metadata: None,
+        };
+        assert_eq!(judge(Some(executed)), None);
+        let reverted = judge(Some(revert("ERC4626: deposit more than max"))).unwrap();
+        assert!(reverted.contains("declare it hard"), "{reverted}");
         let failed =
             judge(Some(TychoExecutionResult::Failed { error_msg: "decode".to_string() })).unwrap();
         assert!(failed.contains("could not be simulated"), "{failed}");

@@ -4,19 +4,21 @@ use std::{
 };
 
 use colored::Colorize;
+use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, WrapErr};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
 use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
 use tycho_test::expectations::{check_declaration, execution_tolerance, tolerance_problems};
 pub use tycho_test::expectations::{
-    Direction, ExecutionTolerance, Harness, Limits, LimitsDeclaration, Skip, Tolerance, TvlOnly,
+    DeclaredBy, Direction, ExecutionTolerance, Harness, LimitKind, Limits, LimitsDeclaration, Skip,
+    Tolerance, TvlOnly,
 };
 
 use crate::balances::BalanceCheck;
 
 /// Represents a ProtocolComponent with its main attributes
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ProtocolComponentExpectation {
     pub id: String,
     pub tokens: Vec<Bytes>,
@@ -26,7 +28,7 @@ pub struct ProtocolComponentExpectation {
 }
 
 /// Represents a ProtocolComponent with test configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(from = "ExpectedComponentEntry")]
 pub struct ProtocolComponentWithTestConfig {
     #[serde(flatten)]
@@ -196,7 +198,7 @@ impl ProtocolComponentExpectation {
 }
 
 /// Configuration for an individual test
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct IntegrationTest {
     pub name: String,
     pub start_block: u64,
@@ -208,7 +210,7 @@ pub struct IntegrationTest {
 }
 
 /// Main integration test configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct IntegrationTestsConfig {
     #[serde(default)]
     pub harness: Harness,
@@ -364,12 +366,26 @@ impl IntegrationTestsConfig {
         )
     }
 
+    /// [`Self::limits_for`], with which declaration it comes from.
+    pub fn declaration_for<'a>(
+        &'a self,
+        component: &'a ProtocolComponentWithTestConfig,
+        direction: &Direction,
+    ) -> Option<(&'a Limits, DeclaredBy)> {
+        tycho_test::expectations::declaration_for(
+            component.limits.as_ref(),
+            self.limits.as_ref(),
+            direction,
+        )
+    }
+
     /// Every check on the `limits` declarations, in both modes:
     ///
     /// - each has the fields its kind requires;
     /// - a component's direction is one of its token pairs, and a package's direction is one of
     ///   some expected component's;
-    /// - in strict mode, every direction of every expected component has a declaration.
+    /// - in strict mode, every direction of every expected component that does not skip simulation
+    ///   has a declaration.
     fn check_limits(&self, source: &str) -> miette::Result<()> {
         let mut problems = Vec::new();
         let mut undeclared = Vec::new();
@@ -381,7 +397,7 @@ impl IntegrationTestsConfig {
                 let directions = component_directions(component);
                 if let Some(declaration) = &component.limits {
                     check_declaration(declaration, &location, &mut problems);
-                    for direction in declaration.directions.keys() {
+                    for direction in declaration.directions.keys().sorted() {
                         if !directions.contains(direction) {
                             problems.push(format!(
                                 "{location}: {direction} is not one of its directions"
@@ -389,10 +405,12 @@ impl IntegrationTestsConfig {
                         }
                     }
                 }
+                // A component that skips simulation tests none of its limits.
+                let tested = !component.skip_simulation.is_skipped();
                 for direction in &directions {
-                    if self
-                        .limits_for(component, direction)
-                        .is_none()
+                    if tested &&
+                        self.limits_for(component, direction)
+                            .is_none()
                     {
                         undeclared.push(format!("{location}, {direction}"));
                     }
@@ -402,7 +420,7 @@ impl IntegrationTestsConfig {
         }
         if let Some(declaration) = &self.limits {
             check_declaration(declaration, "package", &mut problems);
-            for direction in declaration.directions.keys() {
+            for direction in declaration.directions.keys().sorted() {
                 if !all_directions.contains(direction) {
                     problems.push(format!(
                         "package: {direction} is not a direction of any expected component"
@@ -887,8 +905,12 @@ tests:
         }
     }
 
+    fn direction(key: &str) -> Direction {
+        key.parse().unwrap()
+    }
+
     fn hard() -> Limits {
-        Limits { kind: LimitKind::Hard, reason: None, lost_capacity: None }
+        Limits::Hard { rounding: 0 }
     }
 
     /// The kind declared for each direction of the one expected component.
@@ -899,13 +921,13 @@ tests:
             .map(|direction| {
                 let kind = config
                     .limits_for(component, &direction)
-                    .map(|limits| limits.kind);
+                    .map(Limits::kind);
                 (direction.to_string(), kind)
             })
             .collect()
     }
 
-    const UNDER_CAP: &str = "{kind: under_cap, reason: \"r\", lost_capacity: \"2%\"}";
+    const UNDER_CAP: &str = "{kind: under_cap, reason: \"r; gives up 2%\"}";
 
     #[test]
     fn strict_mode_requires_a_declaration_for_every_direction() {
@@ -924,6 +946,13 @@ tests:
 
         // Legacy mode tests no limits, so it needs no declaration.
         assert!(parse(&yaml("", "")).is_ok());
+    }
+
+    #[test]
+    fn a_component_that_skips_simulation_needs_no_declaration() {
+        assert!(
+            parse(&yaml("harness: strict", "        skip_simulation: \"no fork state\"")).is_ok()
+        );
     }
 
     #[test]
@@ -962,24 +991,59 @@ tests:
     }
 
     #[test]
-    fn each_kind_requires_its_fields_in_both_modes() {
+    fn a_soft_or_under_cap_limit_requires_a_reason_in_both_modes() {
         for (declaration, problem) in [
-            ("{kind: soft}", "default: missing reason"),
-            ("{kind: soft, reason: \" \"}", "default: missing reason"),
-            ("{kind: under_cap, reason: \"r\"}", "default: missing lost_capacity"),
-            ("{\"0x01->0x02\": {kind: soft}}", "0x01->0x02: missing reason"),
+            ("{kind: soft}", "missing field `reason`"),
+            ("{kind: under_cap}", "missing field `reason`"),
+            ("{kind: soft, reason: \" \"}", "component 0xAbC, default: the reason is empty"),
+            ("{\"0x01->0x02\": {kind: soft}}", "limits `0x01->0x02`: missing field `reason`"),
         ] {
             for harness in ["", "harness: strict"] {
                 let err = parse(&yaml(harness, &format!("        limits: {declaration}")))
                     .unwrap_err()
-                    .to_string();
-                assert!(
-                    err.contains(&format!("component 0xAbC, {problem}")),
-                    "{declaration}: {err}"
-                );
+                    .chain()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(": ");
+                assert!(err.contains(problem), "{declaration}: {err}");
             }
         }
         assert!(parse(&yaml("harness: strict", &format!("        limits: {UNDER_CAP}"))).is_ok());
+    }
+
+    #[test]
+    fn a_declaration_names_where_it_comes_from() {
+        let package = format!("limits: {{default: {{kind: hard}}, \"0x02->0x01\": {UNDER_CAP}}}");
+        let by = |component_limits: &str| {
+            let config = parse(&yaml(&package, component_limits)).unwrap();
+            let component = &config.tests[0].expected_components[0];
+            ["0x01->0x02", "0x02->0x01"].map(|key| {
+                config
+                    .declaration_for(component, &direction(key))
+                    .map(|(_, by)| by)
+            })
+        };
+        assert_eq!(by(""), [Some(DeclaredBy::PackageDefault), Some(DeclaredBy::Package)]);
+        assert_eq!(
+            by("        limits: {\"0x01->0x02\": {kind: hard}}"),
+            [Some(DeclaredBy::Component), Some(DeclaredBy::Package)]
+        );
+        assert_eq!(
+            by("        limits: {kind: hard}"),
+            [Some(DeclaredBy::ComponentDefault), Some(DeclaredBy::ComponentDefault)]
+        );
+    }
+
+    #[test]
+    fn a_hard_limit_can_declare_its_rounding() {
+        let config =
+            parse(&yaml("harness: strict", "        limits: {kind: hard, rounding: 2}")).unwrap();
+        let component = &config.tests[0].expected_components[0];
+        assert_eq!(
+            config.limits_for(component, &direction("0x01->0x02")),
+            Some(&Limits::Hard { rounding: 2 })
+        );
+        assert!(parse(&yaml("", "        limits: {kind: hard, rounding: -1}")).is_err());
     }
 
     #[test]
@@ -1003,10 +1067,8 @@ tests:
         for (declaration, expected) in [
             ("{kind: exact}", "unknown variant `exact`"),
             ("{kind: hard, because: \"x\"}", "unknown field `because`"),
-            (
-                "{kind: under_cap, reason: \"r\", evidence: \"e\", lost_capacity: \"2%\"}",
-                "unknown field `evidence`",
-            ),
+            ("{kind: under_cap, reason: \"r\", evidence: \"e\"}", "unknown field `evidence`"),
+            ("{1: {kind: hard}}", "a `limits` key is not a string"),
             ("{\"0x01-0x02\": {kind: hard}}", "is not a direction"),
             ("{\"0x01->0x01\": {kind: hard}}", "sells and buys the same token"),
             ("{\"0x01->usdc\": {kind: hard}}", "is not an address"),
@@ -1024,19 +1086,19 @@ tests:
     }
 
     #[test]
-    fn a_field_the_kind_does_not_read_is_an_error() {
-        for (declaration, problem) in [
-            ("{kind: hard, reason: \"r\"}", "reason is not read for a hard limit"),
-            ("{kind: hard, lost_capacity: \"2%\"}", "lost_capacity is not read for a hard limit"),
-            (
-                "{kind: soft, reason: \"r\", lost_capacity: \"2%\"}",
-                "lost_capacity is not read for a soft limit",
-            ),
+    fn a_field_the_kind_does_not_have_is_an_error() {
+        for declaration in [
+            "{kind: hard, reason: \"r\"}",
+            "{kind: soft, reason: \"r\", lost_capacity: \"2%\"}",
+            "{kind: under_cap, reason: \"r\", lost_capacity: \"2%\"}",
         ] {
             let err = parse(&yaml("", &format!("        limits: {declaration}")))
                 .unwrap_err()
-                .to_string();
-            assert!(err.contains(&format!("component 0xAbC, default: {problem}")), "{err}");
+                .chain()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(": ");
+            assert!(err.contains("unknown field"), "{declaration}: {err}");
         }
     }
 
