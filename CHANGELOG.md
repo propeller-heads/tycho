@@ -1,3 +1,16 @@
+## [0.512.0](https://github.com/propeller-heads/tycho/compare/0.511.0...0.512.0) (2026-11-11)
+
+
+### Features
+
+* **execution:** give clients a share of positive slippage ([8851a0a](https://github.com/propeller-heads/tycho/commit/8851a0ae7f9181c46e8d24d08cc8d61785a34274))
+* **execution:** give clients a share of positive slippage ([#1780](https://github.com/propeller-heads/tycho/issues/1780)) ([7398fbb](https://github.com/propeller-heads/tycho/commit/7398fbb4202c9eee1f7b8fe1f412ecd021720b81))
+
+
+### Bug Fixes
+
+* **execution:** skip share lookup without surplus, add ShareTooHigh ([4ea4e6e](https://github.com/propeller-heads/tycho/commit/4ea4e6e92aee5ca5e668409d992a8da51cc57373))
+
 ## [0.511.0](https://github.com/propeller-heads/tycho/compare/0.510.1...0.511.0) (2026-11-11)
 
 
