@@ -1,3 +1,11 @@
+## [0.514.0](https://github.com/propeller-heads/tycho/compare/0.513.0...0.514.0) (2026-11-11)
+
+
+### Features
+
+* **execution:** deploy NativeWrapExecutor to Elysium ([25a7041](https://github.com/propeller-heads/tycho/commit/25a7041196736de819a281d4b871b40221723469))
+* **execution:** deploy NativeWrapExecutor to Elysium ([#1785](https://github.com/propeller-heads/tycho/issues/1785)) ([eee235e](https://github.com/propeller-heads/tycho/commit/eee235eb85e772ef922bedeaf8cf13d886441e5b))
+
 ## [0.513.0](https://github.com/propeller-heads/tycho/compare/0.512.0...0.513.0) (2026-11-11)
 
 
