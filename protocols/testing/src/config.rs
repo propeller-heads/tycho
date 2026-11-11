@@ -9,13 +9,13 @@ use colored::Colorize;
 use miette::{miette, IntoDiagnostic, WrapErr};
 use serde::{
     de::{self, Visitor},
-    Deserialize, Deserializer, Serialize, Serializer,
+    Deserialize, Deserializer, Serialize,
 };
 use similar::{ChangeTag, TextDiff};
 use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
 /// Represents a ProtocolComponent with its main attributes
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ProtocolComponentExpectation {
     pub id: String,
     pub tokens: Vec<Bytes>,
@@ -25,7 +25,7 @@ pub struct ProtocolComponentExpectation {
 }
 
 /// Represents a ProtocolComponent with test configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(from = "ExpectedComponentEntry")]
 pub struct ProtocolComponentWithTestConfig {
     #[serde(flatten)]
@@ -163,16 +163,6 @@ impl<'de> Deserialize<'de> for Skip {
     }
 }
 
-impl Serialize for Skip {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Skip::No => serializer.serialize_bool(false),
-            Skip::Bool(skipped) => serializer.serialize_bool(*skipped),
-            Skip::Reason(reason) => serializer.serialize_str(reason),
-        }
-    }
-}
-
 impl ProtocolComponentExpectation {
     pub fn compare(&self, other: &ProtocolComponent, colorize_output: bool) -> Option<String> {
         let mut diffs = Vec::new();
@@ -271,7 +261,7 @@ impl ProtocolComponentExpectation {
 ///
 /// Every kind must be quotable and executable at the limit itself. Only a `hard` limit is also
 /// tested one unit past.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LimitKind {
     /// The venue rejects any input above the limit (a vault cap, a redemption limit, the end of
@@ -294,7 +284,7 @@ pub enum LimitKind {
 /// {kind: soft, reason: "constant product: any input trades, at a worse price"}
 /// {kind: under_cap, reason: "...", lost_capacity: "~2% of the vault cap"}
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     pub kind: LimitKind,
@@ -478,20 +468,8 @@ impl<'de> Deserialize<'de> for LimitsDeclaration {
     }
 }
 
-impl Serialize for LimitsDeclaration {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let entries = self.entries();
-        let mut map = serializer.serialize_map(Some(entries.len()))?;
-        for (key, limits) in entries {
-            map.serialize_entry(&key, limits)?;
-        }
-        map.end()
-    }
-}
-
 /// Configuration for an individual test
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct IntegrationTest {
     pub name: String,
     pub start_block: u64,
@@ -517,7 +495,7 @@ pub enum Harness {
 }
 
 /// Main integration test configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct IntegrationTestsConfig {
     #[serde(default)]
     pub harness: Harness,
