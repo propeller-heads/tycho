@@ -1271,9 +1271,6 @@ contract FeeCalculatorSlippageTest is Constants {
         FeeRecipient[] memory fees =
             feeCalculator.calculateFee(_pairFeeInput(USDC_ADDR, DAI_ADDR));
         assertEq(fees[0].feeAmount, 0);
-        assertFalse(
-            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, DAI_ADDR)
-        );
 
         vm.prank(FEE_SETTER);
         feeCalculator.removeTokenPairFee(USDC_ADDR, DAI_ADDR);
@@ -1298,49 +1295,39 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(customLower[0].feeAmount, 0.01 ether);
     }
 
-    function testMustOutputThroughRouterWithTokenPairFee() public {
+    function testMustOutputThroughRouterWhileAnyTokenPairFeeIsSet() public {
         vm.startPrank(FEE_SETTER);
         feeCalculator.setPositiveSlippageEnabled(false);
-        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _1_PCT);
-        vm.stopPrank();
+        assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
 
-        assertTrue(
-            feeCalculator.mustOutputThroughRouter(0, BOB, DAI_ADDR, USDC_ADDR)
-        );
-        assertTrue(
-            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, DAI_ADDR)
-        );
-        assertFalse(
-            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, WETH_ADDR)
-        );
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, 0);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _1_PCT);
+        feeCalculator.setTokenPairFee(USDC_ADDR, WETH_ADDR, _1_PCT);
+        assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
+
+        feeCalculator.removeTokenPairFee(USDC_ADDR, DAI_ADDR);
+        feeCalculator.removeTokenPairFee(DAI_ADDR, USDC_ADDR);
+        assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
+
+        feeCalculator.removeTokenPairFee(WETH_ADDR, USDC_ADDR);
+        assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
+        vm.stopPrank();
     }
 
     function testMustOutputThroughRouterWithExemption() public {
         // Positive slippage is enabled in setUp, so a non-exempt client
         // must route output through the router
-        assertTrue(
-            feeCalculator.mustOutputThroughRouter(
-                0, BOB, address(0), address(0)
-            )
-        );
+        assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
 
         // An exempt client with no fees may skip the router hop
         vm.prank(FEE_SETTER);
         feeCalculator.setPositiveSlippageExempt(BOB, true);
-        assertFalse(
-            feeCalculator.mustOutputThroughRouter(
-                0, BOB, address(0), address(0)
-            )
-        );
+        assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
 
         // Any fee still forces the router hop for the exempt client
         vm.prank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
-        assertTrue(
-            feeCalculator.mustOutputThroughRouter(
-                0, BOB, address(0), address(0)
-            )
-        );
+        assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
     }
 
     function testClientShareOfPositiveSlippage() public {

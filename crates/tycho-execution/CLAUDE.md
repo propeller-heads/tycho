@@ -114,8 +114,8 @@ removed to revert to defaults.
 **Token pair fees** (`_tokenPairFees`, set via `setTokenPairFee`, removed via `removeTokenPairFee`, read via
 `getTokenPairFee`): a router fee on output for swaps between two tokens, in both directions. A set pair fee replaces
 the default router fee on output, so it can raise or lower it, and zero removes it for the pair. For a client with a
-custom fee on output, the lower of the custom fee and the pair fee applies. `_getFeeInfo` resolves this order, so
-`calculateFee` and `mustOutputThroughRouter` see the same fee.
+custom fee on output, the lower of the custom fee and the pair fee applies. The router does not pass the swap tokens
+to `mustOutputThroughRouter`, so it returns true while any pair fee is set (`_tokenPairFeeCount > 0`).
 
 **Client resolution** (`_resolveClient`): When `client == address(0)` (no EIP-712 signature supplied),
 `calculateFee` and `mustOutputThroughRouter` fall back to `tx.origin` for the custom fee lookup. This lets

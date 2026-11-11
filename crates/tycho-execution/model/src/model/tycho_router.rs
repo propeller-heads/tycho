@@ -328,8 +328,7 @@ fn _split_swap_checked(
         0
     };
 
-    let must_output_through_router =
-        must_output_through_router(params, client_fee_bps, token_in, token_out)?;
+    let must_output_through_router = must_output_through_router(params, client_fee_bps)?;
 
     let final_receiver = if must_output_through_router { Address::Router } else { receiver };
 
@@ -386,8 +385,7 @@ fn _single_swap(
         0
     };
 
-    let must_output_through_router =
-        must_output_through_router(params, client_fee_bps, token_in, token_out)?;
+    let must_output_through_router = must_output_through_router(params, client_fee_bps)?;
 
     let final_receiver = if must_output_through_router { Address::Router } else { receiver };
 
@@ -449,8 +447,7 @@ fn _sequential_swap_checked(
         0
     };
 
-    let must_output_through_router =
-        must_output_through_router(params, client_fee_bps, token_in, token_out)?;
+    let must_output_through_router = must_output_through_router(params, client_fee_bps)?;
 
     let final_receiver = if must_output_through_router { Address::Router } else { receiver };
 

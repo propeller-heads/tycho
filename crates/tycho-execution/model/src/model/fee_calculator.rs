@@ -16,10 +16,11 @@ struct FeeInfo {
     positive_slippage_enabled: bool,
     positive_slippage_exempt: bool,
     client_positive_slippage_share_bps: i64,
+    has_any_token_pair_fee: bool,
 }
 
 fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
-    let (router_fee_on_output_bps, router_fee_on_client_fee_bps) =
+    let (router_fee_on_output_bps, router_fee_on_client_fee_bps, has_any_token_pair_fee) =
         if crate::config::ENABLE_NONZERO_FEE_BPS {
             let has_client_custom_fee_on_input =
                 params.request("has_client_custom_fee_on_input", vec![true, false])?;
@@ -31,6 +32,8 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
                 } else {
                     None
                 };
+            let has_any_token_pair_fee = pair_fee_bps.is_some() ||
+                params.request("has_other_token_pair_fee", vec![true, false])?;
 
             let router_fee_on_output_bps = match (has_client_custom_fee_on_input, pair_fee_bps) {
                 (true, Some(pair_fee_bps)) => params
@@ -49,9 +52,9 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
                 params.request("router_fee_on_client_fee_bps", vec![0, MAX_BPS])?
             };
 
-            (router_fee_on_output_bps, router_fee_on_client_fee_bps)
+            (router_fee_on_output_bps, router_fee_on_client_fee_bps, has_any_token_pair_fee)
         } else {
-            (0, 0)
+            (0, 0, false)
         };
 
     let positive_slippage_enabled = if crate::config::ENABLE_POSITIVE_SLIPPAGE {
@@ -81,6 +84,7 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
         positive_slippage_enabled,
         positive_slippage_exempt,
         client_positive_slippage_share_bps,
+        has_any_token_pair_fee,
     })
 }
 
@@ -126,12 +130,7 @@ pub fn calculate_fee(
 ///
 /// Returns true if funds must pass through the router after the final swap
 /// instead of going directly to the receiver.
-pub fn must_output_through_router(
-    params: &Params,
-    client_fee_bps: i64,
-    _token_in: Address,
-    _token_out: Address,
-) -> Result<bool, Error> {
+pub fn must_output_through_router(params: &Params, client_fee_bps: i64) -> Result<bool, Error> {
     let fee_info = _get_fee_info(params)?;
 
     if fee_info.positive_slippage_enabled && !fee_info.positive_slippage_exempt {
@@ -141,6 +140,9 @@ pub fn must_output_through_router(
         return Ok(true);
     }
     if fee_info.router_fee_on_output_bps > 0 {
+        return Ok(true);
+    }
+    if fee_info.has_any_token_pair_fee {
         return Ok(true);
     }
 
