@@ -1,10 +1,5 @@
 //! <https://github.com/propeller-heads/tycho-execution/blob/main/foundry/src/FeeCalculator.sol>
-use crate::{
-    address::Address,
-    error::Error,
-    math::checked_subtract,
-    params::{ParamKey, Params},
-};
+use crate::{address::Address, error::Error, math::checked_subtract, params::Params};
 
 pub const MAX_BPS: i64 = 100_000_000;
 const MAX_BPS_SQUARED: i64 = 10_000_000_000_000_000;
@@ -23,21 +18,13 @@ struct FeeInfo {
     client_positive_slippage_share_bps: i64,
 }
 
-/// Mirrors `FeeCalculator._getTokenFee` in Solidity.
-///
-/// Returns the pair fee if one is set. Otherwise returns the higher of the two tokens' fees, so a
-/// swap that touches two fee tokens (or the same token twice) pays one token fee.
-fn _get_token_fee(params: &Params, token_in: Address, token_out: Address) -> Result<i64, Error> {
+/// Mirrors `FeeCalculator._getTokenPairFee` in Solidity.
+fn _get_token_pair_fee(params: &Params) -> Result<i64, Error> {
     if !crate::config::ENABLE_NONZERO_FEE_BPS {
         return Ok(0);
     }
     // A model run has one swap, so it has one token pair.
-    if params.request("has_token_pair_fee", vec![true, false])? {
-        return Ok(params.request("token_pair_fee_bps", vec![0, MAX_BPS])?);
-    }
-    let fee_in = params.request(ParamKey::TokenFeeBps { token: token_in }, vec![0, MAX_BPS])?;
-    let fee_out = params.request(ParamKey::TokenFeeBps { token: token_out }, vec![0, MAX_BPS])?;
-    Ok(fee_in.max(fee_out))
+    Ok(params.request("token_pair_fee_bps", vec![0, MAX_BPS])?)
 }
 
 fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
@@ -104,12 +91,12 @@ pub fn calculate_fee(
     actual_amount_out: i64,
     expected_amount_out: i64,
     client_fee_bps: i64,
-    token_in: Address,
-    token_out: Address,
+    _token_in: Address,
+    _token_out: Address,
     _amount_in: i64,
 ) -> Result<Vec<FeeRecipient>, Error> {
     let fee_info = _get_fee_info(params)?;
-    let token_fee_bps = _get_token_fee(params, token_in, token_out)?;
+    let pair_fee_bps = _get_token_pair_fee(params)?;
 
     let positive_slippage =
         _calculate_positive_slippage(actual_amount_out, expected_amount_out, &fee_info);
@@ -121,7 +108,7 @@ pub fn calculate_fee(
     let fee_base = actual_amount_out - positive_slippage;
 
     let (router_fee, client_fee) =
-        _calculate_fee(fee_base, client_fee_bps, token_fee_bps, &fee_info)?;
+        _calculate_fee(fee_base, client_fee_bps, pair_fee_bps, &fee_info)?;
 
     Ok(vec![
         FeeRecipient {
@@ -142,8 +129,8 @@ pub fn calculate_fee(
 pub fn must_output_through_router(
     params: &Params,
     client_fee_bps: i64,
-    token_in: Address,
-    token_out: Address,
+    _token_in: Address,
+    _token_out: Address,
 ) -> Result<bool, Error> {
     let fee_info = _get_fee_info(params)?;
 
@@ -156,7 +143,7 @@ pub fn must_output_through_router(
     if fee_info.router_fee_on_output_bps > 0 {
         return Ok(true);
     }
-    if _get_token_fee(params, token_in, token_out)? > 0 {
+    if _get_token_pair_fee(params)? > 0 {
         return Ok(true);
     }
 
@@ -174,14 +161,14 @@ fn fee_to_i64(amount: i128) -> Result<i64, Error> {
 /// Mirrors `FeeCalculator._calculateFee` in Solidity.
 ///
 /// Returns `(router_fee, client_fee)`: the total router fee (fee on output +
-/// token fee + cut of the client fee) and the client's portion of the client fee.
+/// pair fee + cut of the client fee) and the client's portion of the client fee.
 fn _calculate_fee(
     fee_base: i64,
     client_fee_bps: i64,
-    token_fee_bps: i64,
+    pair_fee_bps: i64,
     fee_info: &FeeInfo,
 ) -> Result<(i64, i64), Error> {
-    let router_fee_on_output_bps = fee_info.router_fee_on_output_bps + token_fee_bps;
+    let router_fee_on_output_bps = fee_info.router_fee_on_output_bps + pair_fee_bps;
 
     if (client_fee_bps + router_fee_on_output_bps > MAX_BPS) ||
         fee_info.router_fee_on_client_fee_bps > MAX_BPS

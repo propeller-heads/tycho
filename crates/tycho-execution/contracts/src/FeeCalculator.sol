@@ -25,11 +25,6 @@ error FeeCalculator__AddressZero();
 contract FeeCalculator is AccessControl, IFeeCalculator {
     using EnumerableSet for EnumerableSet.AddressSet;
 
-    struct TokenPairFee {
-        bool isSet;
-        uint32 feeBps;
-    }
-
     // 100% expressed in 8-decimal fee units (1 unit = 0.0001 BPS = 0.000001%)
     uint32 public constant MAX_BPS = 100_000_000;
     // Combined denominator when both fees use the MAX_BPS scale (MAX_BPS^2)
@@ -58,14 +53,10 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     // keeps the rest, so the default of zero leaves the full surplus to it.
     mapping(address => uint32) private _clientPositiveSlippageShareBps;
 
-    // Router fee on output in fee units for swaps whose input or output is
-    // the token. Zero means no token fee.
-    mapping(address => uint32) private _tokenFeeBps;
-
-    // Router fee on output for swaps between two tokens, in both
-    // directions. Keyed by the lower token address, then the higher one.
-    // A set pair fee replaces the token fees of the pair, so it can be zero.
-    mapping(address => mapping(address => TokenPairFee)) private _tokenPairFees;
+    // Router fee on output in fee units for swaps between two tokens, in
+    // both directions. Keyed by the lower token address, then the higher
+    // one. Zero means no pair fee.
+    mapping(address => mapping(address => uint32)) private _tokenPairFeeBps;
 
     bytes32 public constant ROUTER_FEE_SETTER_ROLE =
         keccak256("ROUTER_FEE_SETTER_ROLE");
@@ -88,13 +79,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     event ClientPositiveSlippageShareUpdated(
         address indexed client, uint32 oldShareBps, uint32 newShareBps
     );
-    event TokenFeeUpdated(
-        address indexed token, uint32 oldFeeBps, uint32 newFeeBps
-    );
     event TokenPairFeeUpdated(
         address indexed token0, address indexed token1, uint32 newFeeBps
     );
-    event TokenPairFeeRemoved(address indexed token0, address indexed token1);
 
     /**
      * @param routerFeeSetter Address granted ROUTER_FEE_SETTER_ROLE
@@ -160,7 +147,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
             feeBase,
             resolvedClient,
             feeInput.clientFeeBps,
-            _getTokenFee(feeInput.tokenIn, feeInput.tokenOut)
+            _getTokenPairFee(feeInput.tokenIn, feeInput.tokenOut)
         );
 
         feeRecipients = new FeeRecipient[](2);
@@ -205,7 +192,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
         if (clientFeeBps > 0) return true;
         if (routerFeeOnOutputBps > 0) return true;
-        if (_getTokenFee(tokenIn, tokenOut) > 0) return true;
+        if (_getTokenPairFee(tokenIn, tokenOut) > 0) return true;
 
         return false;
     }
@@ -213,9 +200,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     /**
      * @dev Calculates fees from the fee base amount (output minus any
      *      extracted surplus).
-     * @param tokenFeeBps Token fee in fee units, charged on top of the
+     * @param pairFeeBps Token pair fee in fee units, charged on top of the
      *        router fee on output
-     * @return routerFee Total router fee (fee on output + token fee + cut of
+     * @return routerFee Total router fee (fee on output + pair fee + cut of
      *         the client fee)
      * @return clientFee Client's portion of the client fee (after the router's cut)
      */
@@ -223,11 +210,11 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         uint256 feeBase,
         address client,
         uint32 clientFeeBps,
-        uint32 tokenFeeBps
+        uint32 pairFeeBps
     ) internal view returns (uint256 routerFee, uint256 clientFee) {
         (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps) =
             _getFeeInfo(client);
-        routerFeeOnOutputBps += tokenFeeBps;
+        routerFeeOnOutputBps += pairFeeBps;
 
         if (
             (clientFeeBps + routerFeeOnOutputBps > MAX_BPS)
@@ -294,23 +281,13 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         positiveSlippage = actualAmountOut - expectedAmountOut;
     }
 
-    /**
-     * @dev Returns the pair fee if one is set. Otherwise returns the higher of
-     *      the two tokens' fees, so a swap that touches two fee tokens (or the
-     *      same token twice) pays one token fee.
-     */
-    function _getTokenFee(address tokenIn, address tokenOut)
+    function _getTokenPairFee(address tokenA, address tokenB)
         internal
         view
         returns (uint32)
     {
-        (address token0, address token1) = _sortTokens(tokenIn, tokenOut);
-        TokenPairFee memory pairFee = _tokenPairFees[token0][token1];
-        if (pairFee.isSet) return pairFee.feeBps;
-
-        uint32 feeIn = _tokenFeeBps[tokenIn];
-        uint32 feeOut = _tokenFeeBps[tokenOut];
-        return feeIn > feeOut ? feeIn : feeOut;
+        (address token0, address token1) = _sortTokens(tokenA, tokenB);
+        return _tokenPairFeeBps[token0][token1];
     }
 
     /**
@@ -470,34 +447,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
-     * @dev Sets the router fee on output for swaps whose input or output
-     *      token is `token`. Applies to every client, on top of the router
-     *      fee on output. A fee of zero removes the token fee.
-     * @param token The token to charge the fee on
-     * @param feeBps Fee in fee units (1 unit = 0.0001 BPS; 100_000_000 = 100%)
-     */
-    function setTokenFee(address token, uint32 feeBps)
-        external
-        onlyRole(ROUTER_FEE_SETTER_ROLE)
-    {
-        if (feeBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
-        uint32 oldFeeBps = _tokenFeeBps[token];
-        _tokenFeeBps[token] = feeBps;
-        emit TokenFeeUpdated(token, oldFeeBps, feeBps);
-    }
-
-    /**
-     * @dev Returns the token fee for `token` in fee units (zero if unset)
-     */
-    function getTokenFee(address token) external view returns (uint32) {
-        return _tokenFeeBps[token];
-    }
-
-    /**
      * @dev Sets the router fee on output for swaps between `tokenA` and
-     *      `tokenB`, in both directions. It replaces the token fees of the
-     *      two tokens, and adds to the router fee on output. A fee of zero
-     *      exempts the pair from the token fees.
+     *      `tokenB`, in both directions. Applies to every client, on top of
+     *      the router fee on output. A fee of zero removes the pair fee.
      * @param feeBps Fee in fee units (1 unit = 0.0001 BPS; 100_000_000 = 100%)
      */
     function setTokenPairFee(address tokenA, address tokenB, uint32 feeBps)
@@ -506,36 +458,20 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     {
         if (feeBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
         (address token0, address token1) = _sortTokens(tokenA, tokenB);
-        _tokenPairFees[token0][token1] =
-            TokenPairFee({isSet: true, feeBps: feeBps});
+        _tokenPairFeeBps[token0][token1] = feeBps;
         emit TokenPairFeeUpdated(token0, token1, feeBps);
     }
 
     /**
-     * @dev Removes the pair fee, so swaps between `tokenA` and `tokenB` pay
-     *      the token fees again.
-     */
-    function removeTokenPairFee(address tokenA, address tokenB)
-        external
-        onlyRole(ROUTER_FEE_SETTER_ROLE)
-    {
-        (address token0, address token1) = _sortTokens(tokenA, tokenB);
-        delete _tokenPairFees[token0][token1];
-        emit TokenPairFeeRemoved(token0, token1);
-    }
-
-    /**
-     * @dev Returns the pair fee for `tokenA` and `tokenB` in fee units.
-     *      `isSet` is false when no pair fee replaces the token fees.
+     * @dev Returns the pair fee for `tokenA` and `tokenB` in fee units (zero
+     *      if unset)
      */
     function getTokenPairFee(address tokenA, address tokenB)
         external
         view
-        returns (bool isSet, uint32 feeBps)
+        returns (uint32)
     {
-        (address token0, address token1) = _sortTokens(tokenA, tokenB);
-        TokenPairFee memory pairFee = _tokenPairFees[token0][token1];
-        return (pairFee.isSet, pairFee.feeBps);
+        return _getTokenPairFee(tokenA, tokenB);
     }
 
     function _sortTokens(address tokenA, address tokenB)
