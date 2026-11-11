@@ -414,6 +414,7 @@
     }
   },
   "elysium": {
+    "aero_basic": { "contract": "AeroBasicExecutor", "args": [] },
     "uniswap_v2": {
       "contract": "UniswapV2Executor",
       "args": [
