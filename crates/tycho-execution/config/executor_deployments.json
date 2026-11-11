@@ -431,6 +431,10 @@
         "0xe2e105d3f7209a9da11f83ccf3e7398a753823f1",
         "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
       ]
+    },
+    "native_wrapper": {
+      "contract": "NativeWrapExecutor",
+      "args": ["0xbA876237B0F021A6c6D852d6c26E107997cC5E81"]
     }
   }
 }
