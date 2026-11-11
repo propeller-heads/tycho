@@ -143,7 +143,7 @@ impl LimitReport {
             reason: limits.reason().map(str::to_string),
             rounding: match limits {
                 Limits::Hard { rounding } => Some(*rounding),
-                _ => None,
+                Limits::Soft { .. } | Limits::UnderCap { .. } => None,
             },
             declared_by,
             max_input: sizes.map(|(max_input, _)| max_input.to_string()),
