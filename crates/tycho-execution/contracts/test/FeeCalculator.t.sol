@@ -1299,6 +1299,107 @@ contract FeeCalculatorSlippageTest is Constants {
         );
     }
 
+    function testSetTokenPairFeeUnauthorized() public {
+        vm.prank(BOB);
+        vm.expectRevert();
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _1_PCT);
+    }
+
+    function testRemoveTokenPairFeeUnauthorized() public {
+        vm.prank(BOB);
+        vm.expectRevert();
+        feeCalculator.removeTokenPairFee(USDC_ADDR, DAI_ADDR);
+    }
+
+    function testSetTokenPairFeeTooHigh() public {
+        vm.prank(FEE_SETTER);
+        vm.expectRevert(FeeCalculator__FeeTooHigh.selector);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _100_PCT + 1);
+    }
+
+    function testSetAndRemoveTokenPairFeeInBothDirections() public {
+        (bool isSet, uint32 feeBps) =
+            feeCalculator.getTokenPairFee(USDC_ADDR, DAI_ADDR);
+        assertFalse(isSet);
+        assertEq(feeBps, 0);
+
+        vm.prank(FEE_SETTER);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _1_PCT);
+        (isSet, feeBps) = feeCalculator.getTokenPairFee(DAI_ADDR, USDC_ADDR);
+        assertTrue(isSet);
+        assertEq(feeBps, _1_PCT);
+
+        vm.prank(FEE_SETTER);
+        feeCalculator.removeTokenPairFee(DAI_ADDR, USDC_ADDR);
+        (isSet, feeBps) = feeCalculator.getTokenPairFee(USDC_ADDR, DAI_ADDR);
+        assertFalse(isSet);
+        assertEq(feeBps, 0);
+    }
+
+    function testTokenPairFeeReplacesTokenFees() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setTokenFee(USDC_ADDR, _5_PCT);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _1_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory forward =
+            feeCalculator.calculateFee(_tokenFeeInput(USDC_ADDR, DAI_ADDR));
+        FeeRecipient[] memory reverse =
+            feeCalculator.calculateFee(_tokenFeeInput(DAI_ADDR, USDC_ADDR));
+        FeeRecipient[] memory otherPair =
+            feeCalculator.calculateFee(_tokenFeeInput(USDC_ADDR, WETH_ADDR));
+
+        assertEq(forward[0].feeAmount, 0.01 ether);
+        assertEq(reverse[0].feeAmount, 0.01 ether);
+        assertEq(otherPair[0].feeAmount, 0.05 ether);
+    }
+
+    function testZeroTokenPairFeeExemptsPairFromTokenFees() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageEnabled(false);
+        feeCalculator.setTokenFee(USDC_ADDR, _5_PCT);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, 0);
+        vm.stopPrank();
+
+        FeeRecipient[] memory fees =
+            feeCalculator.calculateFee(_tokenFeeInput(USDC_ADDR, DAI_ADDR));
+        assertEq(fees[0].feeAmount, 0);
+        assertFalse(
+            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, DAI_ADDR)
+        );
+
+        vm.prank(FEE_SETTER);
+        feeCalculator.removeTokenPairFee(USDC_ADDR, DAI_ADDR);
+        fees = feeCalculator.calculateFee(_tokenFeeInput(USDC_ADDR, DAI_ADDR));
+        assertEq(fees[0].feeAmount, 0.05 ether);
+    }
+
+    function testTokenPairFeeAddsToRouterFeeOnOutput() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _HALF_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory fees =
+            feeCalculator.calculateFee(_tokenFeeInput(DAI_ADDR, USDC_ADDR));
+
+        assertEq(fees[0].feeAmount, 0.015 ether);
+    }
+
+    function testMustOutputThroughRouterWithTokenPairFee() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageEnabled(false);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _1_PCT);
+        vm.stopPrank();
+
+        assertTrue(
+            feeCalculator.mustOutputThroughRouter(0, BOB, DAI_ADDR, USDC_ADDR)
+        );
+        assertFalse(
+            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, WETH_ADDR)
+        );
+    }
+
     function testMustOutputThroughRouterWithExemption() public {
         // Positive slippage is enabled in setUp, so a non-exempt client
         // must route output through the router

@@ -25,11 +25,15 @@ struct FeeInfo {
 
 /// Mirrors `FeeCalculator._getTokenFee` in Solidity.
 ///
-/// Returns the higher of the two tokens' fees, so a swap that touches two fee tokens (or the
-/// same token twice) pays one token fee.
+/// Returns the pair fee if one is set. Otherwise returns the higher of the two tokens' fees, so a
+/// swap that touches two fee tokens (or the same token twice) pays one token fee.
 fn _get_token_fee(params: &Params, token_in: Address, token_out: Address) -> Result<i64, Error> {
     if !crate::config::ENABLE_NONZERO_FEE_BPS {
         return Ok(0);
+    }
+    // A model run has one swap, so it has one token pair.
+    if params.request("has_token_pair_fee", vec![true, false])? {
+        return Ok(params.request("token_pair_fee_bps", vec![0, MAX_BPS])?);
     }
     let fee_in = params.request(ParamKey::TokenFeeBps { token: token_in }, vec![0, MAX_BPS])?;
     let fee_out = params.request(ParamKey::TokenFeeBps { token: token_out }, vec![0, MAX_BPS])?;
