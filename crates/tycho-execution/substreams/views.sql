@@ -37,6 +37,9 @@ BEGIN
     -- `state_committed` separates the two exactly: the chain threw away the state changes of a
     -- probe. A row indexed before that column existed carries NULL and stays out, because
     -- nothing in it says the call was kept; re-indexing the chain settles it either way.
+    --
+    -- subsidized_trades reads this view, so it goes first; it is recreated further down.
+    DROP VIEW IF EXISTS subsidized_trades;
     DROP VIEW IF EXISTS trades_settled;
     CREATE VIEW trades_settled AS
     SELECT t.*
