@@ -9,3 +9,10 @@ patch_file = "src/postgres/schema.patch"
 
 [migrations_directory]
 dir = "migrations"
+
+[print_schema.instance]
+file = "src/postgres/instance/schema.rs"
+schema = "tycho"
+custom_type_derives = ["diesel::query_builder::QueryId"]
+# Leaves (`<table>_i<id>`) and history days (`<table>_p<yyyymmdd>`) are partitions of the parents.
+filter = { except_tables = ["_i[0-9]+$", "_p[0-9]{8}$"] }

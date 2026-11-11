@@ -152,6 +152,7 @@ mod contract;
 pub mod direct;
 mod entry_point;
 mod extraction_state;
+mod instance;
 mod orm;
 mod pool;
 mod protocol;
@@ -159,6 +160,8 @@ mod schema;
 mod snapshot;
 pub mod token_cache;
 mod versioning;
+
+pub use instance::InstanceId;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/");
 
@@ -838,7 +841,7 @@ pub mod testing {
     use diesel::sql_query;
     use diesel_async::{
         pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
-        AsyncPgConnection, RunQueryDsl,
+        AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection,
     };
 
     async fn setup_pool() -> Pool<AsyncPgConnection> {
@@ -849,6 +852,40 @@ pub mod testing {
     }
 
     async fn teardown(conn: &mut AsyncPgConnection) {
+        // Instances first: protocol_system points at them, and their leaves are real tables.
+        conn.batch_execute(
+            "UPDATE protocol_system SET active_instance_id = NULL;
+             DO $$
+             DECLARE
+                 v_leaf text;
+             BEGIN
+                 FOR v_leaf IN
+                     SELECT tablename FROM pg_tables
+                     WHERE schemaname = 'tycho' AND tablename ~ '_i[0-9]+$'
+                 LOOP
+                     EXECUTE format('DROP TABLE IF EXISTS tycho.%I CASCADE', v_leaf);
+                 END LOOP;
+             END;
+             $$;",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("Error dropping instance leaves: {e}"));
+        let instance_tables = [
+            "tycho.protocol_state_history",
+            "tycho.component_balance_history",
+            "tycho.contract_code_history",
+            "tycho.contract_storage_history",
+            "tycho.account_balance_history",
+            "tycho.extraction_state",
+            "tycho.protocol_instance",
+        ];
+        for t in instance_tables {
+            sql_query(format!("DELETE FROM {t};"))
+                .execute(conn)
+                .await
+                .unwrap_or_else(|e| panic!("Error truncating {t} table: {e}"));
+        }
+
         let tables = vec![
             // put block early so most FKs cascade, it would
             // be better to find the correct order tough.
@@ -981,8 +1018,8 @@ pub mod db_fixtures {
         Bytes,
     };
 
-    use super::{schema, MAX_TS};
-    use crate::postgres::orm;
+    use super::{schema, InstanceId, MAX_TS};
+    use crate::postgres::{instance, orm};
 
     // Insert a new chain
     pub async fn insert_chain(conn: &mut AsyncPgConnection, name: &str) -> i64 {
@@ -1315,6 +1352,44 @@ pub mod db_fixtures {
             .get_result(conn)
             .await
             .unwrap()
+    }
+
+    /// Creates an instance of a protocol system with all of its leaves attached, and returns its
+    /// id. The instance is `ready` but not active.
+    pub async fn insert_instance(
+        conn: &mut AsyncPgConnection,
+        protocol_system_id: i64,
+        label: &str,
+    ) -> InstanceId {
+        use instance::{orm::InstanceStatus, schema::tycho::protocol_instance};
+
+        let id: InstanceId = diesel::insert_into(protocol_instance::table)
+            .values(instance::orm::NewProtocolInstance {
+                protocol_system_id,
+                label: label.to_string(),
+                status: InstanceStatus::Loading,
+                base_block_number: None,
+                base_block_hash: None,
+                base_block_ts: None,
+                source: "extractor".to_string(),
+            })
+            .returning(protocol_instance::id)
+            .get_result(conn)
+            .await
+            .expect("inserting the instance failed");
+        for function in ["tycho.create_instance_leaves", "tycho.attach_instance_leaves"] {
+            sql_query(format!("SELECT {function}($1)"))
+                .bind::<diesel::sql_types::Int4, _>(id)
+                .execute(conn)
+                .await
+                .unwrap_or_else(|e| panic!("{function}({id}) failed: {e}"));
+        }
+        diesel::update(protocol_instance::table.find(id))
+            .set(protocol_instance::status.eq(InstanceStatus::Ready))
+            .execute(conn)
+            .await
+            .expect("marking the instance ready failed");
+        id
     }
 
     // Insert a new Protocol Type
