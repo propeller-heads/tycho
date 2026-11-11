@@ -7,6 +7,7 @@
 
 use std::{fmt, path::Path};
 
+use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, WrapErr};
 use num_bigint::BigUint;
 use serde::Serialize;
@@ -229,13 +230,13 @@ impl Checks {
     /// results either way.
     pub fn finish(self) -> (miette::Result<()>, Vec<CheckResult>) {
         // A check recorded per direction can fail several times; name it once.
-        let mut failed: Vec<String> = Vec::new();
-        for result in &self.results {
-            let name = result.check.to_string();
-            if matches!(result.outcome, Outcome::Fail { .. }) && !failed.contains(&name) {
-                failed.push(name);
-            }
-        }
+        let failed: Vec<&str> = self
+            .results
+            .iter()
+            .filter(|result| matches!(result.outcome, Outcome::Fail { .. }))
+            .map(|result| result.check.as_str())
+            .unique()
+            .collect();
         let outcome = if failed.is_empty() {
             Ok(())
         } else {

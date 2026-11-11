@@ -36,10 +36,10 @@ pub struct Limit<'a> {
 /// The limit checks of one direction, before execution.
 pub struct DirectionLimits {
     /// The quote at `max_input`, when it succeeded. It is executed like the ladder's rungs.
-    pub at_limit: Option<Quote>,
+    pub at_limit_quote: Option<Quote>,
     /// The swap past the limit to execute, when the simulation behaved as declared: past a hard
     /// limit's bound, or one unit past an under-cap limit.
-    pub past_limit: Option<PastLimitSwap>,
+    pub past_limit_swap: Option<PastLimitSwap>,
     /// The error the simulation rejected the input past a hard limit with, for the logs.
     pub past_limit_rejection: Option<String>,
     /// Every check that failed, with the reason.
@@ -65,7 +65,7 @@ pub fn check_direction(
     let Limit { max_input, max_output, capped } = *limit;
     let mut failures = Vec::new();
 
-    let at_limit = match quote(max_input.clone()) {
+    let at_limit_quote = match quote(max_input.clone()) {
         Ok(at_limit) => {
             if at_limit.amount > *max_output {
                 failures.push((
@@ -89,7 +89,7 @@ pub fn check_direction(
     };
 
     let mut past_limit_rejection = None;
-    let past_limit = match declared {
+    let past_limit_swap = match declared {
         // The cap is not the venue's bound, so nothing past it says anything about the venue.
         _ if capped => None,
         Limits::Hard { rounding } => {
@@ -152,7 +152,7 @@ pub fn check_direction(
         }
     };
 
-    DirectionLimits { at_limit, past_limit, past_limit_rejection, failures }
+    DirectionLimits { at_limit_quote, past_limit_swap, past_limit_rejection, failures }
 }
 
 #[cfg(test)]
@@ -230,11 +230,11 @@ mod tests {
         let result = check(1000, PastBound::Errors, 1000, 2000, &hard());
         assert!(result.failures.is_empty(), "{:?}", result.failures);
         assert_eq!(
-            result.at_limit,
+            result.at_limit_quote,
             Some(Quote { amount: BigUint::from(2000u32), gas: BigUint::from(100u32) })
         );
         assert_eq!(
-            result.past_limit,
+            result.past_limit_swap,
             Some(PastLimitSwap { amount_in: BigUint::from(1001u32), must_revert: true })
         );
     }
@@ -244,14 +244,14 @@ mod tests {
         // Ten times the venue's bound: the ladder's 10% rung would still quote.
         let result = check(1000, PastBound::Errors, 10_000, 20_000, &hard());
         assert_eq!(failed_checks(&result), vec![CheckId::LimitsAtLimit]);
-        assert!(result.at_limit.is_none());
+        assert!(result.at_limit_quote.is_none());
     }
 
     #[test]
     fn a_hard_limit_that_clamps_past_the_bound_fails_past_the_limit() {
         let result = check(1000, PastBound::Clamps, 1000, 2000, &hard());
         assert_eq!(failed_checks(&result), vec![CheckId::LimitsPastLimit]);
-        assert!(result.past_limit.is_none());
+        assert!(result.past_limit_swap.is_none());
     }
 
     #[test]
@@ -264,9 +264,9 @@ mod tests {
     fn an_under_cap_limit_below_the_bound_is_executed_one_unit_past() {
         let result = check(1000, PastBound::Errors, 900, 1800, &under_cap());
         assert!(result.failures.is_empty(), "{:?}", result.failures);
-        assert!(result.at_limit.is_some());
+        assert!(result.at_limit_quote.is_some());
         assert_eq!(
-            result.past_limit,
+            result.past_limit_swap,
             Some(PastLimitSwap { amount_in: BigUint::from(901u32), must_revert: false })
         );
     }
@@ -275,15 +275,15 @@ mod tests {
     fn an_under_cap_limit_at_the_bound_fails_past_the_limit() {
         let result = check(1000, PastBound::Errors, 1000, 2000, &under_cap());
         assert_eq!(failed_checks(&result), vec![CheckId::LimitsPastLimit]);
-        assert!(result.past_limit.is_none());
+        assert!(result.past_limit_swap.is_none());
     }
 
     #[test]
     fn a_soft_limit_quotes_twice_the_limit_and_executes_nothing_past_it() {
         let result = check(1000, PastBound::Unbounded, 1000, 2000, &soft());
         assert!(result.failures.is_empty(), "{:?}", result.failures);
-        assert!(result.at_limit.is_some());
-        assert!(result.past_limit.is_none());
+        assert!(result.at_limit_quote.is_some());
+        assert!(result.past_limit_swap.is_none());
     }
 
     #[test]
@@ -312,7 +312,7 @@ mod tests {
             &hard(),
         );
         assert!(result.failures.is_empty(), "{:?}", result.failures);
-        assert!(result.past_limit.is_none());
+        assert!(result.past_limit_swap.is_none());
     }
 
     #[test]
@@ -324,7 +324,7 @@ mod tests {
         let rounded = check(1002, PastBound::Errors, 1000, 2000, &Limits::Hard { rounding: 2 });
         assert!(rounded.failures.is_empty(), "{:?}", rounded.failures);
         assert_eq!(
-            rounded.past_limit,
+            rounded.past_limit_swap,
             Some(PastLimitSwap { amount_in: BigUint::from(1003u32), must_revert: true })
         );
     }
