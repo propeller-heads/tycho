@@ -14,7 +14,6 @@ struct FeeInfo {
     router_fee_on_output_bps: i64,
     router_fee_on_client_fee_bps: i64,
     positive_slippage_enabled: bool,
-    positive_slippage_exempt: bool,
     positive_slippage_share_bps: i64,
     client_positive_slippage_share_bps: i64,
 }
@@ -50,22 +49,17 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
         false
     };
 
-    // The exemption only changes behavior while capture is enabled, so the
-    // parameter space stays smaller when capture is off.
-    let positive_slippage_exempt = if positive_slippage_enabled {
-        params.request("positive_slippage_exempt", vec![true, false])?
-    } else {
-        false
-    };
-
-    let positive_slippage_share_bps = if positive_slippage_enabled && !positive_slippage_exempt {
+    // The share only changes behavior while capture is enabled, so the parameter space stays
+    // smaller when capture is off. A model run has one client, so this is that client's share:
+    // its custom share if set, otherwise the global share.
+    let positive_slippage_share_bps = if positive_slippage_enabled {
         params.request("positive_slippage_share_bps", vec![0, MAX_BPS / 2, MAX_BPS])?
     } else {
         MAX_BPS
     };
 
     let client_positive_slippage_share_bps =
-        if positive_slippage_enabled && !positive_slippage_exempt {
+        if positive_slippage_enabled && positive_slippage_share_bps > 0 {
             params.request("client_positive_slippage_share_bps", vec![0, MAX_BPS / 2, MAX_BPS])?
         } else {
             0
@@ -75,7 +69,6 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
         router_fee_on_output_bps,
         router_fee_on_client_fee_bps,
         positive_slippage_enabled,
-        positive_slippage_exempt,
         positive_slippage_share_bps,
         client_positive_slippage_share_bps,
     })
@@ -126,10 +119,7 @@ pub fn calculate_fee(
 pub fn must_output_through_router(params: &Params, client_fee_bps: i64) -> Result<bool, Error> {
     let fee_info = _get_fee_info(params)?;
 
-    if fee_info.positive_slippage_enabled &&
-        fee_info.positive_slippage_share_bps > 0 &&
-        !fee_info.positive_slippage_exempt
-    {
+    if fee_info.positive_slippage_enabled && fee_info.positive_slippage_share_bps > 0 {
         return Ok(true);
     }
     if client_fee_bps > 0 {
@@ -196,16 +186,13 @@ fn _calculate_fee(
 /// Mirrors `FeeCalculator._calculatePositiveSlippage` in Solidity.
 ///
 /// Returns the captured share of the positive slippage surplus;
-/// zero if disabled, the client is exempt, or there is no surplus.
+/// zero if disabled, the client's share is zero, or there is no surplus.
 fn _calculate_positive_slippage(
     actual_amount_out: i64,
     expected_amount_out: i64,
     fee_info: &FeeInfo,
 ) -> Result<i64, Error> {
-    if !fee_info.positive_slippage_enabled ||
-        fee_info.positive_slippage_exempt ||
-        actual_amount_out <= expected_amount_out
-    {
+    if !fee_info.positive_slippage_enabled || actual_amount_out <= expected_amount_out {
         return Ok(0);
     }
 

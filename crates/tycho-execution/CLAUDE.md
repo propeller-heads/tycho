@@ -128,9 +128,10 @@ the output minus that share. The share starts at 100% and changes via `setPositi
 surplus stays in the swap output. A share of zero skips the forced router hop. When disabled, fees compute on
 `actualAmountOut` and the surplus stays in the swap output. The flag
 also forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
-exemptions (`setPositiveSlippageExempt`, `_positiveSlippageExempt` mapping) opt a resolved client out while capture
-stays enabled globally: the surplus stays in the swap output, fees compute on `actualAmountOut`, and an exempt client
-with no fees skips the forced router hop.
+router shares (`setCustomPositiveSlippageShare`, `removeCustomPositiveSlippageShare`, `_customPositiveSlippageShares`
+mapping) replace the global share for a resolved client. A custom share of zero opts the client out while capture stays
+enabled globally: the surplus stays in the swap output, fees compute on `actualAmountOut`, and the client with no fees
+skips the forced router hop.
 Per-client shares (`setClientPositiveSlippageShare`, `_clientPositiveSlippageShareBps` mapping, fee units) give the
 resolved client part of the captured surplus, credited with its client fee; the router keeps the rest, rounded in its
 favour. The default share of zero leaves the full surplus to the router.

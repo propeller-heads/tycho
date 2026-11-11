@@ -741,10 +741,16 @@ contract FeeCalculatorConfigTest is Constants {
         feeCalculator.removeCustomRouterFeeOnClientFee(ALICE);
     }
 
-    function testSetPositiveSlippageExemptUnauthorized() public {
+    function testSetCustomPositiveSlippageShareUnauthorized() public {
         vm.prank(BOB);
         vm.expectRevert();
-        feeCalculator.setPositiveSlippageExempt(BOB, true);
+        feeCalculator.setCustomPositiveSlippageShare(BOB, 0);
+    }
+
+    function testRemoveCustomPositiveSlippageShareUnauthorized() public {
+        vm.prank(BOB);
+        vm.expectRevert();
+        feeCalculator.removeCustomPositiveSlippageShare(BOB);
     }
 
     // FEE RECEIVER TESTS
@@ -1082,8 +1088,56 @@ contract FeeCalculatorSlippageTest is Constants {
 
     function testSetPositiveSlippageShareTooHigh() public {
         vm.prank(FEE_SETTER);
-        vm.expectRevert(FeeCalculator__FeeTooHigh.selector);
+        vm.expectRevert(FeeCalculator__ShareTooHigh.selector);
         feeCalculator.setPositiveSlippageShare(_100_PCT + 1);
+    }
+
+    function testSetCustomPositiveSlippageShareTooHigh() public {
+        vm.prank(FEE_SETTER);
+        vm.expectRevert(FeeCalculator__ShareTooHigh.selector);
+        feeCalculator.setCustomPositiveSlippageShare(BOB, _100_PCT + 1);
+    }
+
+    function testSetAndRemoveCustomPositiveSlippageShare() public {
+        (bool isSet, uint32 shareBps) =
+            feeCalculator.getCustomPositiveSlippageShare(BOB);
+        assertFalse(isSet);
+        assertEq(shareBps, 0);
+
+        vm.prank(FEE_SETTER);
+        vm.expectEmit(true, false, false, true);
+        emit FeeCalculator.CustomPositiveSlippageShareUpdated(
+            BOB, _100_PCT, _50_PCT
+        );
+        feeCalculator.setCustomPositiveSlippageShare(BOB, _50_PCT);
+        (isSet, shareBps) = feeCalculator.getCustomPositiveSlippageShare(BOB);
+        assertTrue(isSet);
+        assertEq(shareBps, _50_PCT);
+
+        vm.prank(FEE_SETTER);
+        vm.expectEmit(true, false, false, false);
+        emit FeeCalculator.CustomPositiveSlippageShareRemoved(BOB);
+        feeCalculator.removeCustomPositiveSlippageShare(BOB);
+        (isSet, shareBps) = feeCalculator.getCustomPositiveSlippageShare(BOB);
+        assertFalse(isSet);
+        assertEq(shareBps, 0);
+    }
+
+    function testCustomShareReplacesGlobalShare() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageShare(_10_PCT);
+        feeCalculator.setCustomPositiveSlippageShare(BOB, _50_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory bobFees =
+            feeCalculator.calculateFee(_surplusInput());
+        FeeInput memory aliceInput = _surplusInput();
+        aliceInput.client = ALICE;
+        FeeRecipient[] memory aliceFees = feeCalculator.calculateFee(aliceInput);
+
+        // surplus = 0.1 ether: BOB's custom 50%, ALICE's global 10%
+        assertEq(bobFees[0].feeAmount, 0.05 ether);
+        assertEq(aliceFees[0].feeAmount, 0.01 ether);
     }
 
     function testSetPositiveSlippageShare() public {
@@ -1175,10 +1229,10 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[1].feeAmount, 0);
     }
 
-    function testExemptClientKeepsPositiveSlippage() public {
+    function testZeroCustomShareKeepsPositiveSlippage() public {
         vm.startPrank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
-        feeCalculator.setPositiveSlippageExempt(BOB, true);
+        feeCalculator.setCustomPositiveSlippageShare(BOB, 0);
         vm.stopPrank();
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
@@ -1200,10 +1254,10 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[1].feeAmount, 0);
     }
 
-    function testExemptionRemovalRestoresCapture() public {
+    function testCustomShareRemovalRestoresGlobalShare() public {
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageExempt(BOB, true);
-        feeCalculator.setPositiveSlippageExempt(BOB, false);
+        feeCalculator.setCustomPositiveSlippageShare(BOB, 0);
+        feeCalculator.removeCustomPositiveSlippageShare(BOB);
         vm.stopPrank();
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
@@ -1218,15 +1272,15 @@ contract FeeCalculatorSlippageTest is Constants {
             })
         );
 
-        // With the exemption removed, the router captures the surplus again
+        // With the custom share removed, the global 100% share applies again
         assertEq(fees[0].feeAmount, 0.1 ether);
     }
 
-    function testExemptionResolvesOrigin() public {
-        // When client == address(0) (no signature), the exemption of
+    function testCustomShareResolvesOrigin() public {
+        // When client == address(0) (no signature), the custom share of
         // tx.origin applies.
         vm.prank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageExempt(ALICE, true);
+        feeCalculator.setCustomPositiveSlippageShare(ALICE, 0);
 
         vm.prank(address(this), ALICE);
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
@@ -1244,17 +1298,17 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[0].feeAmount, 0);
     }
 
-    function testMustOutputThroughRouterWithExemption() public {
-        // Positive slippage is enabled in setUp, so a non-exempt client
-        // must route output through the router
+    function testMustOutputThroughRouterWithZeroCustomShare() public {
+        // Positive slippage is enabled in setUp, so a client with a non-zero
+        // share must route output through the router
         assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
 
-        // An exempt client with no fees may skip the router hop
+        // A client with a zero share and no fees may skip the router hop
         vm.prank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageExempt(BOB, true);
+        feeCalculator.setCustomPositiveSlippageShare(BOB, 0);
         assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
 
-        // Any fee still forces the router hop for the exempt client
+        // Any fee still forces the router hop for that client
         vm.prank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
         assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));

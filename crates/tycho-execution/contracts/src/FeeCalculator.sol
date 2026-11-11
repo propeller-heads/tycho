@@ -25,6 +25,11 @@ error FeeCalculator__AddressZero();
 contract FeeCalculator is AccessControl, IFeeCalculator {
     using EnumerableSet for EnumerableSet.AddressSet;
 
+    struct CustomPositiveSlippageShare {
+        bool isSet;
+        uint32 shareBps;
+    }
+
     // 100% expressed in 8-decimal fee units (1 unit = 0.0001 BPS = 0.000001%)
     uint32 public constant MAX_BPS = 100_000_000;
     // Combined denominator when both fees use the MAX_BPS scale (MAX_BPS^2)
@@ -47,9 +52,10 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     // Router's share of the surplus in fee units (MAX_BPS = the full surplus)
     uint32 private _positiveSlippageShareBps;
 
-    // Clients whose swaps keep the surplus above expectedAmountOut even
-    // while positive slippage capture is enabled
-    mapping(address => bool) private _positiveSlippageExempt;
+    // Per-client router share of the surplus. A set share replaces the
+    // global share for the client, so it can be zero.
+    mapping(address => CustomPositiveSlippageShare) private
+        _customPositiveSlippageShares;
 
     // Each client's share of the captured surplus in fee units. The router
     // keeps the rest, so the default of zero leaves the full surplus to it.
@@ -73,7 +79,10 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     );
     event PositiveSlippageToggled(bool enabled);
     event PositiveSlippageShareUpdated(uint32 oldShareBps, uint32 newShareBps);
-    event PositiveSlippageExemptionSet(address indexed client, bool exempt);
+    event CustomPositiveSlippageShareUpdated(
+        address indexed client, uint32 oldShareBps, uint32 newShareBps
+    );
+    event CustomPositiveSlippageShareRemoved(address indexed client);
     event ClientPositiveSlippageShareUpdated(
         address indexed client, uint32 oldShareBps, uint32 newShareBps
     );
@@ -108,9 +117,10 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @dev Called from TychoRouterV3. Does not perform any accounting.
      *
      *      Deduction order:
-     *      1. When positive slippage capture is enabled and the client is not
-     *         exempt, the router captures its share of the surplus
-     *         (actualAmountOut - expectedAmountOut) first. The client gets
+     *      1. When positive slippage capture is enabled, the router
+     *         captures its share of the surplus
+     *         (actualAmountOut - expectedAmountOut) first: the client's
+     *         custom share if set, otherwise the global share. The client gets
      *         its share of the captured amount and the router keeps the
      *         rest. The uncaptured surplus stays in the swap output.
      *      2. Fees (client fee + router fees) are then calculated on
@@ -171,8 +181,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         // route funds through the router when positive slippage is enabled —
         // unless this client's surplus is never captured anyway.
         if (
-            _positiveSlippageEnabled && _positiveSlippageShareBps > 0
-                && !_positiveSlippageExempt[resolvedClient]
+            _positiveSlippageEnabled
+                && _getPositiveSlippageShare(resolvedClient) > 0
         ) {
             return true;
         }
@@ -248,22 +258,34 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     /**
      * @dev Calculates the captured share of the positive slippage surplus
      * @return positiveSlippage The captured share of the surplus (zero if
-     *         disabled, the client is exempt, or there is no surplus)
+     *         disabled, the client's share is zero, or there is no surplus)
      */
     function _calculatePositiveSlippage(
         uint256 actualAmountOut,
         uint256 expectedAmountOut,
         address client
     ) internal view returns (uint256 positiveSlippage) {
-        if (
-            !_positiveSlippageEnabled || _positiveSlippageExempt[client]
-                || actualAmountOut <= expectedAmountOut
-        ) {
+        if (!_positiveSlippageEnabled || actualAmountOut <= expectedAmountOut) {
             return 0;
         }
 
         positiveSlippage = (actualAmountOut - expectedAmountOut)
-            * _positiveSlippageShareBps / MAX_BPS;
+            * _getPositiveSlippageShare(client) / MAX_BPS;
+    }
+
+    /**
+     * @dev Returns the client's custom router share of the surplus if set,
+     *      otherwise the global share
+     */
+    function _getPositiveSlippageShare(address client)
+        internal
+        view
+        returns (uint32)
+    {
+        CustomPositiveSlippageShare memory customShare =
+            _customPositiveSlippageShares[client];
+        return
+            customShare.isSet ? customShare.shareBps : _positiveSlippageShareBps;
     }
 
     /**
@@ -498,7 +520,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        if (shareBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
+        if (shareBps > MAX_BPS) revert FeeCalculator__ShareTooHigh();
         uint32 oldShareBps = _positiveSlippageShareBps;
         _positiveSlippageShareBps = shareBps;
         emit PositiveSlippageShareUpdated(oldShareBps, shareBps);
@@ -513,29 +535,47 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
-     * @dev Exempts a client from positive slippage capture, or removes the
-     *      exemption. An exempt client's swaps keep the surplus above
-     *      expectedAmountOut even while capture is enabled globally.
+     * @dev Sets a client's router share of the surplus. It replaces the
+     *      global share for the client. Zero leaves the full surplus in the
+     *      client's swap output.
      * @param client The client address to update
-     * @param exempt True to exempt, false to capture again
+     * @param shareBps Share in fee units (100_000_000 = the full surplus)
      */
-    function setPositiveSlippageExempt(address client, bool exempt)
+    function setCustomPositiveSlippageShare(address client, uint32 shareBps)
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        _positiveSlippageExempt[client] = exempt;
-        emit PositiveSlippageExemptionSet(client, exempt);
+        if (shareBps > MAX_BPS) revert FeeCalculator__ShareTooHigh();
+        uint32 oldShareBps = _getPositiveSlippageShare(client);
+        _customPositiveSlippageShares[client] =
+            CustomPositiveSlippageShare({isSet: true, shareBps: shareBps});
+        emit CustomPositiveSlippageShareUpdated(client, oldShareBps, shareBps);
     }
 
     /**
-     * @dev Returns whether a client is exempt from positive slippage capture
+     * @dev Removes a client's router share, so the global share applies to
+     *      the client again
      */
-    function isPositiveSlippageExempt(address client)
+    function removeCustomPositiveSlippageShare(address client)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        delete _customPositiveSlippageShares[client];
+        emit CustomPositiveSlippageShareRemoved(client);
+    }
+
+    /**
+     * @dev Returns a client's router share of the surplus in fee units.
+     *      `isSet` is false when the global share applies to the client.
+     */
+    function getCustomPositiveSlippageShare(address client)
         external
         view
-        returns (bool)
+        returns (bool isSet, uint32 shareBps)
     {
-        return _positiveSlippageExempt[client];
+        CustomPositiveSlippageShare memory customShare =
+            _customPositiveSlippageShares[client];
+        return (customShare.isSet, customShare.shareBps);
     }
 
     /**
