@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "ethereum_bopamm"
-  version: v0.1.1
+  version: v0.1.4
   url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/ethereum-bopamm"
 
 protobuf:
@@ -40,7 +40,7 @@ modules:
   - name: store_components
     kind: store
     initialBlock: 25099176
-    updatePolicy: set_if_not_exists
+    updatePolicy: set
     valueType: proto:tycho.evm.v1.ProtocolComponent
     inputs:
       - map: map_components
