@@ -47,7 +47,7 @@ tokio-stream = { workspace = true }
 tracing = { workspace = true }
 
 # Utility
-dotenv = { workspace = true }
+dotenvy = { workspace = true }
 enum_delegate = "0.2.0"
 itertools = { workspace = true }
 rustc-hash = "2.1.2"

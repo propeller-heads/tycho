@@ -204,6 +204,20 @@ fn test_subsidized_sequential_swap_ending_in_uniswap_v3() {
 }
 
 #[test]
+fn test_subsidized_sequential_swap_on_its_first_hop() {
+    // DAI ──(USV2, subsidized)──> WETH ──(USV3)──> USDC
+    let solution = subsidized_solution(
+        dai(),
+        usdc(),
+        BigUint::from(3_000u32) * one_weth(),
+        vec![usv2(DAI_WETH_USV2, &dai(), &weth()), usv3(USDC_WETH_USV3, 500, &weth(), &usdc())],
+        terms(WETH_SUBSIDY, 0),
+    );
+
+    write_signed_calldata("test_subsidized_sequential_swap_on_its_first_hop", solution, 0);
+}
+
+#[test]
 fn test_subsidized_split_swap_larger_share() {
     //       ┌──[70%, subsidized]── (USV2) ──┐
     // WETH ─┤                               ├─> DAI

@@ -37,7 +37,6 @@ contract EkuboV3RobinhoodExecutor is EkuboV3Executor {
         }
 
         (balanceUpdate,) = abi.decode(
-            // slither-disable-next-line calls-loop
             CORE.forward(VE33_ADDRESS, abi.encode(poolKey, swapParameters)),
             (PoolBalanceUpdate, PoolState)
         );

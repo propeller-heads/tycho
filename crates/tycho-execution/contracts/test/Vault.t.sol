@@ -38,9 +38,7 @@ contract VaultExposed is Vault {
         address inputToken,
         uint256 inputAmount
     ) external {
-        assembly {
-            tstore(_USE_VAULT_SLOT, useVault)
-        }
+        TransientSlot.tstore(_USE_VAULT_SLOT, useVault);
         _setNonZeroDeltaCount(nonZeroCount);
         _setDelta(inputToken, inputDelta);
         _finalizeBalances(user, inputToken, inputAmount);

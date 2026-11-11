@@ -18,8 +18,6 @@ contract AeroClDirectSwapper {
             .swap(
                 address(this),
                 zeroForOne,
-                // Test amounts are far below int256's maximum.
-                // forge-lint: disable-next-line(unsafe-typecast)
                 int256(amountIn),
                 zeroForOne ? MIN_SQRT_PRICE_LIMIT : MAX_SQRT_PRICE_LIMIT,
                 ""
@@ -33,8 +31,6 @@ contract AeroClDirectSwapper {
         bytes calldata
     ) external {
         if (amount0Delta > 0) {
-            // Positive, so the cast is exact.
-            // forge-lint: disable-next-line(unsafe-typecast)
             uint256 amount = uint256(amount0Delta);
             require(
                 IERC20(IUniswapV3Pool(msg.sender).token0())
@@ -42,8 +38,6 @@ contract AeroClDirectSwapper {
             );
         }
         if (amount1Delta > 0) {
-            // Positive, so the cast is exact.
-            // forge-lint: disable-next-line(unsafe-typecast)
             uint256 amount = uint256(amount1Delta);
             require(
                 IERC20(IUniswapV3Pool(msg.sender).token1())

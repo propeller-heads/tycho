@@ -104,6 +104,10 @@ jobs:
       - name: Check formatting
         run: forge fmt --check
 
+      - name: Lint
+        if: matrix.project.path == 'crates/tycho-execution/contracts'
+        run: forge lint --report-unused-suppressions --deny notes
+
       - name: Run tests
         run: forge test -vvv
 
@@ -166,10 +170,8 @@ jobs:
           cache_save: ${{ github.event_name != 'pull_request_target' }}
 
       - name: Slither
-        run: >
-          slither crates/tycho-execution/contracts/
-          --filter-paths crates/tycho-execution/contracts/lib/
-          --exclude unindexed-event-address
+        working-directory: crates/tycho-execution/contracts
+        run: slither .
 
   slither-skip:
     name: Slither static analysis

@@ -29,6 +29,11 @@ pub fn usd_stablecoins_for_chain(chain: Chain) -> Option<HashSet<Bytes>> {
         Chain::Robinhood => HashSet::from([
             Bytes::from(hex!("5fc5360D0400a0Fd4f2af552ADD042D716F1d168")), // USDG
         ]),
+        Chain::Elysium => HashSet::from([
+            // Bridged USDC on Elysium mainnet (6 decimals). Re-verify against the
+            // official contract list when Kinetiq publishes it at launch.
+            Bytes::from(hex!("b47c4C8F73F009CC0C0d3f92B388d13E293F0B65")), // USDC
+        ]),
         Chain::Starknet |
         Chain::ZkSync |
         Chain::Unichain |

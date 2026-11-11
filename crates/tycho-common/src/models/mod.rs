@@ -96,6 +96,7 @@ pub enum Chain {
     Plasma,
     Robinhood,
     Arc,
+    Elysium,
     /// User-defined chain resolved via the [`chain_config`] registry; see the enum docs.
     Custom(CustomChainId),
 }
@@ -164,6 +165,7 @@ impl Chain {
             "plasma" => Some(Chain::Plasma),
             "robinhood" => Some(Chain::Robinhood),
             "arc" => Some(Chain::Arc),
+            "elysium" => Some(Chain::Elysium),
             _ => None,
         }
     }
@@ -204,6 +206,7 @@ impl Display for Chain {
             Chain::Plasma => f.write_str("plasma"),
             Chain::Robinhood => f.write_str("robinhood"),
             Chain::Arc => f.write_str("arc"),
+            Chain::Elysium => f.write_str("elysium"),
             Chain::Custom(name) => f.write_str(name.as_str()),
         }
     }
@@ -223,6 +226,7 @@ impl From<dto::Chain> for Chain {
             dto::Chain::Plasma => Chain::Plasma,
             dto::Chain::Robinhood => Chain::Robinhood,
             dto::Chain::Arc => Chain::Arc,
+            dto::Chain::Elysium => Chain::Elysium,
             dto::Chain::Custom(name) => Chain::custom(name.as_str()).unwrap_or_else(|e| {
                 panic!(
                     "received custom chain '{name}' with no registered config: {e}; install it via \
@@ -299,6 +303,22 @@ fn native_xpl(chain: Chain) -> Token {
 
 fn native_arc_usdc(chain: Chain) -> Token {
     Token::new(&Bytes::from([0u8; 20]), "USDC", 18, 0, &[Some(2300)], chain, 100)
+}
+
+fn native_hype(chain: Chain) -> Token {
+    Token::new(
+        &Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap(),
+        "HYPE",
+        18,
+        0,
+        &[Some(2300)],
+        chain,
+        100,
+    )
+}
+
+fn wrapped_native_hype(chain: Chain, address: &str) -> Token {
+    Token::new(&Bytes::from_str(address).unwrap(), "WHYPE", 18, 0, &[Some(2300)], chain, 100)
 }
 
 /// Looks up a custom chain's config in the registry, returning [`ChainConfigError::UnknownChain`]
@@ -402,6 +422,7 @@ impl Chain {
             Chain::Plasma => 9745,
             Chain::Robinhood => 4663,
             Chain::Arc => 5042,
+            Chain::Elysium => 99901,
             Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.chain_id,
         })
     }
@@ -465,6 +486,10 @@ impl Chain {
             (Chain::Arc, TvlThresholdTier::Low) => 20_000.0,
             (Chain::Arc, TvlThresholdTier::Medium) => 200_000.0,
 
+            // Elysium (HYPE ≈ $80): 250 HYPE ≈ $20K, 2_500 HYPE ≈ $200K.
+            (Chain::Elysium, TvlThresholdTier::Low) => 250.0,
+            (Chain::Elysium, TvlThresholdTier::Medium) => 2_500.0,
+
             (Chain::Custom(id), TvlThresholdTier::Low) => {
                 try_resolve_custom(id, chain_registry())?
                     .default_tvl_thresholds
@@ -501,6 +526,7 @@ impl Chain {
             Chain::Plasma => native_xpl(Chain::Plasma),
             Chain::Robinhood => native_eth(Chain::Robinhood),
             Chain::Arc => native_arc_usdc(Chain::Arc),
+            Chain::Elysium => native_hype(Chain::Elysium),
             Chain::Custom(id) => native_custom(*self, try_resolve_custom(id, chain_registry())?),
         })
     }
@@ -604,6 +630,16 @@ impl Chain {
                 native: native_arc_usdc(Chain::Arc),
                 routable: routable_arc_usdc(Chain::Arc),
             },
+            Chain::Elysium => NativeAsset::Wrapper {
+                native: native_hype(Chain::Elysium),
+                // Canonical WHYPE on Elysium mainnet. Reported by Elysium ecosystem
+                // trackers and cross-checked on 5 Nov 2026; re-verify against the
+                // official contract list when Kinetiq publishes it at launch.
+                wrapper: wrapped_native_hype(
+                    Chain::Elysium,
+                    "0xbA876237B0F021A6c6D852d6c26E107997cC5E81",
+                ),
+            },
             Chain::Custom(id) => {
                 let config = try_resolve_custom(id, chain_registry())?;
                 let native = native_custom(*self, config);
@@ -639,6 +675,8 @@ impl Chain {
             Chain::Robinhood => 1,
             // Arc produces sub-second blocks; integer-second APIs use the one-second ceiling.
             Chain::Arc => 1,
+            // Elysium produces 100 ms blocks; same integer-second ceiling.
+            Chain::Elysium => 1,
             Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.block_time_secs,
         })
     }
@@ -1094,6 +1132,42 @@ mod tests {
                 (Bytes::from_str("0x3600000000000000000000000000000000000000").unwrap(), 6,),
             ]
         );
+    }
+
+    #[test]
+    fn test_elysium_chain_identity_and_native_asset() {
+        assert_eq!(Chain::Elysium.id(), 99901);
+        assert_eq!(Chain::Elysium.to_string(), "elysium");
+        assert_eq!("elysium".parse::<Chain>().unwrap(), Chain::Elysium);
+
+        let dto_chain: dto::Chain = Chain::Elysium.into();
+        assert_eq!(dto_chain, dto::Chain::Elysium);
+        assert_eq!(Chain::from(dto_chain), Chain::Elysium);
+        assert_eq!(serde_json::to_string(&Chain::Elysium).unwrap(), r#""elysium""#);
+        assert_eq!(serde_json::from_str::<Chain>(r#""elysium""#).unwrap(), Chain::Elysium);
+
+        let native = Chain::Elysium.native_token();
+        assert_eq!(native.symbol, "HYPE");
+        assert_eq!(native.decimals, 18);
+        assert_eq!(native.address, Bytes::from([0u8; 20]));
+
+        let wrapper = Chain::Elysium
+            .wrapped_native_token()
+            .expect("Elysium should have a WHYPE wrapper");
+        assert_eq!(wrapper.symbol, "WHYPE");
+        assert_eq!(wrapper.chain, Chain::Elysium);
+        assert_eq!(
+            wrapper.address,
+            Bytes::from_str("0xbA876237B0F021A6c6D852d6c26E107997cC5E81").unwrap()
+        );
+
+        let asset = Chain::Elysium.native_asset();
+        assert!(matches!(asset, NativeAsset::Wrapper { .. }));
+        assert_eq!(asset.representations().count(), 2);
+
+        assert_eq!(Chain::Elysium.block_time_secs(), 1);
+        assert_eq!(Chain::Elysium.default_tvl_threshold(TvlThresholdTier::Low), 250.0);
+        assert_eq!(Chain::Elysium.default_tvl_threshold(TvlThresholdTier::Medium), 2_500.0);
     }
 
     #[test]

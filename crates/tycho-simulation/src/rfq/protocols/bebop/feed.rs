@@ -321,7 +321,7 @@ impl SnapshotFeed for BebopPricesFeed {
 mod tests {
     use std::{collections::HashMap, str::FromStr, time::Duration};
 
-    use dotenv::dotenv;
+    use dotenvy::dotenv;
     use num_bigint::BigUint;
     use tokio::time::timeout;
     use tycho_common::models::{protocol::GetAmountOutParams, Chain};

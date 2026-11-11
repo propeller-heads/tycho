@@ -44,6 +44,7 @@ import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
 import {RingSwapV2Executor} from "../src/executors/RingSwapV2Executor.sol";
 import {NativeExecutor} from "../src/executors/NativeExecutor.sol";
 import {SkyExecutor} from "../src/executors/SkyExecutor.sol";
+import {TransferManager} from "../src/TransferManager.sol";
 // Test utilities and mocks
 import "./Constants.sol";
 import "./TestUtils.sol";
@@ -187,7 +188,7 @@ contract TychoRouterTestSetup is
         uint256 forkBlock = getForkBlock();
         vm.createSelectFork(vm.rpcUrl(chain), forkBlock);
 
-        forkTimestamp = block.timestamp;
+        forkTimestamp = vm.getBlockTimestamp();
         uint256 setupTime = forkTimestamp - _SETUP_TIME_OFFSET_NEW_EXECUTOR;
         vm.warp(setupTime);
 
@@ -206,7 +207,10 @@ contract TychoRouterTestSetup is
         vm.prank(FEE_SETTER);
         tychoRouter.setFeeCalculator(address(feeCalculator));
         // Warp past the timelock and activate
-        vm.warp(block.timestamp + tychoRouter.DELAY_FEE_CALCULATOR_ACTIVATION());
+        vm.warp(
+            vm.getBlockTimestamp()
+                + tychoRouter.DELAY_FEE_CALCULATOR_ACTIVATION()
+        );
         vm.prank(FEE_SETTER);
         tychoRouter.activateFeeCalculator();
         vm.warp(forkTimestamp);

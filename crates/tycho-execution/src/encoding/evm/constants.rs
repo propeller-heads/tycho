@@ -129,8 +129,16 @@ pub const UNISWAP_V2_FORKS: &[&str] =
     &["uniswap_v2", "sushiswap_v2", "pancakeswap_v2", "quickswap_v2"];
 
 /// Uniswap V3 and its forks share `UniswapV3SwapEncoder`; see [`UNISWAP_V2_FORKS`].
-pub const UNISWAP_V3_FORKS: &[&str] =
-    &["uniswap_v3", "pancakeswap_v3", "sushiswap_v3", "robinswap_v3", "gigadex_v3"];
+pub const UNISWAP_V3_FORKS: &[&str] = &[
+    "uniswap_v3",
+    "pancakeswap_v3",
+    "sushiswap_v3",
+    "robinswap_v3",
+    "gigadex_v3",
+    "kleos_v3",
+    "elyspump_v3",
+    "stockiumswap_v3",
+];
 
 /// Slipstream deployments and forks. They share `SlipstreamsSwapEncoder`, which packs
 /// `tick_spacing` where `UniswapV3SwapEncoder` packs the fee. The pool ABI is Uniswap V3's.
