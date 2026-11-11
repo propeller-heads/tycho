@@ -1,3 +1,11 @@
+## [0.513.0](https://github.com/propeller-heads/tycho/compare/0.512.0...0.513.0) (2026-11-11)
+
+
+### Features
+
+* **fee-calculator:** expose the router fee rates applied to a client ([e18ebdd](https://github.com/propeller-heads/tycho/commit/e18ebdde98493d7008b890f41adba3be071448b4))
+* **fee-calculator:** expose the router fee rates applied to a client ([#1786](https://github.com/propeller-heads/tycho/issues/1786)) ([dd80f47](https://github.com/propeller-heads/tycho/commit/dd80f4741967070b9a2c3f9d80ab0d326252d8e7))
+
 ## [0.512.0](https://github.com/propeller-heads/tycho/compare/0.511.0...0.512.0) (2026-11-11)
 
 
