@@ -116,21 +116,22 @@ For each block update, for a random sample of components (up to `--max-simulatio
 A protocol whose package sets `harness: strict` (protocols/testing/README.md, "Strict mode")
 gets limit probes on top of the swap above; every other protocol is tested exactly as before.
 For each direction the swap above tests, the probe swaps one size relative to the limit, in
-turn: 0.1%, 1%, 10%, then the limit (`ProbeSize::ALL`, the ladder's sizes), and at a hard limit
-also one unit past it, in the same batch.
+turn: 0.1%, 1%, 10%, then the limit (`ProbeSize::ALL`, the ladder's sizes), and past the limit
+as its declared kind claims, in the same batch: past a hard limit's bound, or one unit past an
+under-cap limit. A soft limit's claim, that twice the limit quotes, is checked in simulation.
 
 | Check | Passes when |
 |---|---|
 | `exec.ladder` | a fraction executes for its quote, less the router fee, within the package's tolerance (exact without one) |
 | `limits.at_limit` | the limit quotes, and executes as the fractions must |
-| `limits.past_limit` | past a hard limit, the quote errors and, once the limit executed, the swap reverts |
+| `limits.past_limit` | past the limit, the venue behaves as the declared kind claims: past a hard limit's bound the quote errors and, once the limit executed, the swap reverts (fails `executed` otherwise); one unit past an under-cap limit the quote and the swap succeed (fails `reverted` otherwise); twice a soft limit quotes |
 | `limits.max_output` | the quote at the limit pays no more than `get_limits`' max output |
 | `sim.ladder` | a fraction quotes |
 
 The limit comes from the component's `limits` when a test lists it, or else the package's. A
 check that cannot run is reported as `not_run` with a reason: `execution_cap` (above 96 bits or
 `int128::MAX`), `next_block` and `book_venue` (quotes priced for another block),
-`not_executable` (CoWAMM), `no_declaration`, `not_hard`, `zero_limit`, `zero_amount`,
+`not_executable` (CoWAMM), `no_declaration`, `zero_limit`, `zero_amount`,
 `at_limit_failed`, `at_limit_not_executed`, `encoding`, and for a swap the node could not
 execute, which says nothing of the venue, `storage_slot` (the token's balance slot was not found)
 or `rpc` (such as a block the node has not reached). Outcomes go to

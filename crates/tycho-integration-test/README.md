@@ -98,8 +98,8 @@ cargo run --package tycho-integration-test -- \
 
 A protocol whose package sets `harness: strict` in its `integration_test.tycho.yaml` also gets
 limit probes: each tested direction is swapped at 0.1%, 1%, 10% of its limit or the limit itself,
-one size per sample in turn, and past a hard limit, and judged with the package's declared
-limits and execution tolerance. The yamls are embedded at build time. Outcomes are in
+one size per sample in turn, and past the limit as its declared kind claims, and judged with the
+package's declared limits and execution tolerance. The yamls are embedded at build time. Outcomes are in
 `tycho_integration_check_total` and the "Strict checks" row of the Integration test dashboard
 (`grafana/integration-test.json`). See `CLAUDE.md`, "Strict packages".
 

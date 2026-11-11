@@ -2358,7 +2358,7 @@
     {
       "type": "table",
       "title": "Failures by protocol, check and reason",
-      "description": "Failed probe checks over the range. mismatch: paid other than simulated beyond the tolerance; revert / rpc: the swap reverted or could not be simulated; settled: a swap past a hard limit executed; quote: the simulation broke a limit check.",
+      "description": "Failed probe checks over the range. mismatch: paid other than simulated beyond the tolerance; revert / rpc: the swap reverted or could not be simulated; executed: a swap past a hard limit executed; reverted: a swap one unit past an under_cap limit reverted; quote: the simulation broke a limit check.",
       "datasource": {
         "type": "prometheus",
         "uid": "P4169E866C3094E38"
@@ -2642,7 +2642,7 @@
     {
       "type": "table",
       "title": "Not-run reasons by protocol",
-      "description": "Probe checks that did not run over the range, and why: execution_cap, next_block, book_venue, not_executable, no_declaration, not_hard, zero_limit, zero_amount, at_limit_failed, at_limit_not_executed, encoding.",
+      "description": "Probe checks that did not run over the range, and why: execution_cap, next_block, book_venue, not_executable, no_declaration, zero_limit, zero_amount, at_limit_failed, at_limit_not_executed, encoding.",
       "datasource": {
         "type": "prometheus",
         "uid": "P4169E866C3094E38"

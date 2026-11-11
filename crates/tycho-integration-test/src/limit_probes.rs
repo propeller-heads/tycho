@@ -20,16 +20,16 @@ use tycho_common::{
 use tycho_simulation::protocol::models::ProtocolComponent;
 use tycho_test::{
     checks::{
-        execution::{check_execution_slippage, drift, missing_revert},
+        execution::{check_execution_slippage, drift, missing_execution, missing_revert},
         ladder::{at_execution_cap, executable_max_input, ProbeSize},
-        limits::{check_direction, Quote},
+        limits::{check_direction, Limit, Quote},
         outcome::CheckId,
     },
     execution::{
         encoding::encode_swap,
         models::{TychoExecutionInput, TychoExecutionResult},
     },
-    expectations::{Direction, PackageExpectations, Tolerance},
+    expectations::{Direction, Limits, PackageExpectations, Tolerance},
 };
 
 use crate::{fee_fetcher::RouterFeeOnOutput, metrics, packages::StrictPackages};
@@ -83,9 +83,10 @@ pub enum ProbeRole {
     Fraction,
     /// The limit itself: the execution matches the quote at the limit.
     AtLimit,
-    /// One unit past a hard limit: the execution reverts. `at_limit` is the simulation id of the
-    /// swap at the limit in the same batch, without which a revert proves nothing.
-    PastLimit { at_limit: String },
+    /// Past the limit: past a hard limit's bound the execution reverts, and one unit past an
+    /// under-cap limit it executes. `at_limit` is the simulation id of the swap at the limit in
+    /// the same batch, without which what happens past it proves nothing.
+    PastLimit { at_limit: String, must_revert: bool },
 }
 
 /// A probe swap, queued with the block's other executions.
@@ -253,8 +254,12 @@ pub fn probe_direction(
                 return Vec::new();
             }
             let capped = at_execution_cap(max_input);
-            let checked =
-                check_direction(quote, &label, &executable, max_output, capped, limits.kind);
+            let checked = check_direction(
+                quote,
+                &label,
+                &Limit { max_input: &executable, max_output, capped },
+                limits,
+            );
             for (check, detail) in &checked.failures {
                 record(&context, *check, Outcome::Fail { reason: "quote", detail: detail.clone() });
             }
@@ -264,7 +269,7 @@ pub fn probe_direction(
                     .iter()
                     .any(|(failed, _)| *failed == check)
             };
-            match &checked.at_limit {
+            match &checked.at_limit_quote {
                 Some(_) if !failed(CheckId::LimitsMaxOutput) => {
                     record(&context, CheckId::LimitsMaxOutput, Outcome::Pass)
                 }
@@ -275,22 +280,26 @@ pub fn probe_direction(
                     Outcome::NotRun { reason: "at_limit_failed" },
                 ),
             }
-            let past_limit_skipped = if limits
-                .past_limit_skip_reason()
-                .is_some()
-            {
-                Some("not_hard")
-            } else if capped {
-                Some("execution_cap")
+            // A soft limit's claim, that twice the limit quotes, is checked in simulation alone; a
+            // hard or under-cap limit's needs the swap past it executed.
+            let past_limit_decided = if capped {
+                record(
+                    &context,
+                    CheckId::LimitsPastLimit,
+                    Outcome::NotRun { reason: "execution_cap" },
+                );
+                true
+            } else if let Limits::Soft { .. } = limits {
+                if !failed(CheckId::LimitsPastLimit) {
+                    record(&context, CheckId::LimitsPastLimit, Outcome::Pass);
+                }
+                true
             } else {
-                None
+                false
             };
-            if let Some(reason) = past_limit_skipped {
-                record(&context, CheckId::LimitsPastLimit, Outcome::NotRun { reason });
-            }
 
-            let Some(at_quote) = &checked.at_limit else {
-                if past_limit_skipped.is_none() && !failed(CheckId::LimitsPastLimit) {
+            let Some(at_quote) = &checked.at_limit_quote else {
+                if !past_limit_decided && !failed(CheckId::LimitsPastLimit) {
                     record(
                         &context,
                         CheckId::LimitsPastLimit,
@@ -310,16 +319,20 @@ pub fn probe_direction(
                 return Vec::new();
             };
             let mut swaps = vec![at_limit];
-            if let Some(past) = checked.past_limit {
+            if let Some(past) = checked.past_limit_swap {
+                let role = ProbeRole::PastLimit {
+                    at_limit: swaps[0].0.clone(),
+                    must_revert: past.must_revert,
+                };
                 if let Some(past_limit) = encoded(
                     target,
                     &context,
                     "past_limit",
-                    past,
-                    // The minimum output is the quote at the limit, so a venue that accepts the
-                    // extra unit settles, and only a revert passes.
+                    past.amount_in,
+                    // The minimum output is the quote at the limit, so past a hard limit a venue
+                    // that accepts the input executes the swap, and only a revert passes.
                     at_quote,
-                    probe(ProbeRole::PastLimit { at_limit: swaps[0].0.clone() }),
+                    probe(role),
                 ) {
                     swaps.push(past_limit);
                 }
@@ -449,18 +462,27 @@ fn judged<'a>(
             probe.tolerance,
             router_fee,
         ),
-        ProbeRole::PastLimit { at_limit } => match results.get(at_limit) {
+        ProbeRole::PastLimit { at_limit, must_revert } => match results.get(at_limit) {
             Some(TychoExecutionResult::Success { .. }) => {
-                match missing_revert(simulation_id, input, results) {
+                let missing = if *must_revert {
+                    missing_revert(simulation_id, input, results)
+                } else {
+                    missing_execution(simulation_id, input, results)
+                };
+                match missing {
                     None => Outcome::Pass,
                     Some(detail) => match results.get(simulation_id) {
+                        // Past a hard limit the swap executed; past an under-cap one it reverted.
                         Some(TychoExecutionResult::Success { .. }) => {
-                            Outcome::Fail { reason: "settled", detail }
+                            Outcome::Fail { reason: "executed", detail }
+                        }
+                        Some(TychoExecutionResult::Revert { .. }) => {
+                            Outcome::Fail { reason: "reverted", detail }
                         }
                         Some(TychoExecutionResult::Failed { error_msg }) => {
                             not_executed(context, error_msg)
                         }
-                        _ => Outcome::NotRun { reason: "no_result" },
+                        None => Outcome::NotRun { reason: "no_result" },
                     },
                 }
             }
@@ -755,8 +777,10 @@ mod tests {
     fn a_swap_past_the_limit_must_revert_once_the_limit_executed() {
         let swaps = probe(&strict(None), 1);
         let (_, input, fraction) = &swaps[0];
-        let past =
-            Probe { role: ProbeRole::PastLimit { at_limit: "at".to_string() }, ..fraction.clone() };
+        let past = Probe {
+            role: ProbeRole::PastLimit { at_limit: "at".to_string(), must_revert: true },
+            ..fraction.clone()
+        };
         let judge = |at: Option<TychoExecutionResult>, past_result: TychoExecutionResult| {
             let mut results = HashMap::from([("past".to_string(), past_result)]);
             results.extend(at.map(|at| ("at".to_string(), at)));
@@ -766,7 +790,7 @@ mod tests {
         assert_eq!(judge(executed(), revert()), ("pass", String::new()));
         assert_eq!(
             judge(executed(), success(BigUint::from(1u32))),
-            ("fail", "settled".to_string())
+            ("fail", "executed".to_string())
         );
         assert_eq!(
             judge(Some(revert()), revert()),
@@ -776,5 +800,36 @@ mod tests {
             judge(executed(), failed("block 0x1929fcc not found")),
             ("not_run", "rpc".to_string())
         );
+    }
+
+    #[test]
+    fn a_swap_past_an_under_cap_limit_must_execute_once_the_limit_executed() {
+        let swaps = probe(&strict(None), 1);
+        let (_, input, fraction) = &swaps[0];
+        let past = Probe {
+            role: ProbeRole::PastLimit { at_limit: "at".to_string(), must_revert: false },
+            ..fraction.clone()
+        };
+        let judge = |past_result: TychoExecutionResult| {
+            let results = HashMap::from([
+                ("past".to_string(), past_result),
+                ("at".to_string(), success(BigUint::from(1u32))),
+            ]);
+            judge_one(&past, input, "past", &results)
+        };
+        assert_eq!(judge(success(BigUint::from(1u32))), ("pass", String::new()));
+        assert_eq!(judge(revert()), ("fail", "reverted".to_string()));
+    }
+
+    #[test]
+    fn an_under_cap_limit_is_swapped_at_and_one_unit_past_the_limit() {
+        let swaps = probe(&strict(Some("{kind: under_cap, reason: \"r; gives up 1%\"}")), 4);
+        let roles: Vec<&ProbeRole> = swaps
+            .iter()
+            .map(|(_, _, probe)| &probe.role)
+            .collect();
+        assert_eq!(roles.len(), 2);
+        assert_eq!(roles[0], &ProbeRole::AtLimit);
+        assert!(matches!(roles[1], ProbeRole::PastLimit { must_revert: false, .. }));
     }
 }
