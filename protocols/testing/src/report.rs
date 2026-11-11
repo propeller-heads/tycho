@@ -32,7 +32,7 @@ pub enum CheckId {
     ExecLadder,
     /// Strict: every direction quotes and executes at its limit.
     LimitsAtLimit,
-    /// Strict: past a hard limit, the quote errors and the execution reverts.
+    /// Strict: past the limit, the venue behaves as the declared kind claims.
     LimitsPastLimit,
     /// Strict: the quote at the limit pays no more than the limit's max output.
     LimitsMaxOutput,

@@ -127,30 +127,39 @@ component's).
 
 | Kind | Meaning | Required | Tested |
 |---|---|---|---|
-| `hard` | the venue rejects any input above its bound, and the limit is that bound | optional `rounding` | at the limit, and past the bound |
-| `soft` | the venue has no bound on the input; the limit is a recommended size, as the `ProtocolSim::get_limits` documentation allows | `reason` | at the limit |
-| `under_cap` | the venue has a bound, and the limit stays below it because the exact bound cannot be derived | `reason`: why, such as a command and its output, and the capacity given up | at the limit |
+| `hard` | the venue rejects any input above its bound, and the limit is that bound | optional `rounding` | at the limit; past the bound, the quote errors and the swap reverts |
+| `soft` | the venue has no bound on the input; the limit is a recommended size, as the `ProtocolSim::get_limits` documentation allows | `reason`, naming the code that shows it | at the limit; twice the limit still quotes |
+| `under_cap` | the venue has a bound, and the limit stays below it because the exact bound cannot be derived | `reason`: why, such as a command and its output, and the capacity given up | at the limit; one unit past it, the quote and the swap succeed |
 
 - **At the limit** (`limits.at_limit`): `get_amount_out(max_input)` succeeds, and executing it
   does not revert and matches the simulation.
 - **Max output** (`limits.max_output`): the quote at `max_input` pays no more than `max_output`.
-- **Past a hard limit** (`limits.past_limit`): `get_amount_out(max_input + rounding + 1)` errors,
-  and executing it reverts. `rounding` is 0 unless declared: where `get_limits` derives the input
-  from an output-side bound with a rounding division, the bound can exceed the limit by a few
-  units, and `{kind: hard, rounding: 2}` probes past them. The swap's minimum output is set from the quote at the limit, so a
-  venue that accepts the extra unit executes the swap and fails the check. The check accepts any
-  revert from the chain, but not a node error on the call, which proves nothing. When the limit is
-  at or above the `int128` cap, the cap is not the venue's bound, and nothing is probed past it.
+- **Past the limit** (`limits.past_limit`): the venue behaves as the kind claims, so a wrong
+  declaration fails.
+  - `hard`: `get_amount_out(max_input + rounding + 1)` errors, and executing it reverts.
+    `rounding` is 0 unless declared: where `get_limits` derives the input from an output-side
+    bound with a rounding division, the bound can exceed the limit by a few units, and
+    `{kind: hard, rounding: 2}` probes past them. The swap's minimum output is set from the quote
+    at the limit, so a venue that accepts the input executes the swap and fails the check. The
+    check accepts any revert from the chain, but not a node error on the call, which proves
+    nothing.
+  - `under_cap`: `get_amount_out(max_input + 1)` succeeds, and executing it does not revert, so
+    the bound is above the limit.
+  - `soft`: `get_amount_out(2 × max_input)` succeeds, so the venue has no bound near the limit.
+    Nothing past it is executed.
+
+  When the limit is at or above the `int128` cap, the cap is not the venue's bound, and nothing is
+  probed past it.
 
 Each of the three checks is reported per component and direction, with `component` and
 `direction` keys in the report. A check passes only once everything it tests ran. Unless the
 simulation already failed it:
 
-- `limits.past_limit` is skipped for a soft or under-cap limit, with the declared reason, and for
-  one at the cap.
-- When the quote at the limit fails, `limits.past_limit` and `limits.max_output` are `not_run`.
-  When the swap at the limit does not execute, `limits.past_limit` is `not_run` too: a revert
-  past a limit that does not execute either proves nothing.
+- `limits.past_limit` is skipped for a limit at the cap.
+- When the quote at the limit fails, `limits.max_output` is `not_run`, and so is
+  `limits.past_limit` for a hard or under-cap limit. When the swap at the limit does not execute,
+  `limits.past_limit` is `not_run` too: what happens past a limit that does not execute either
+  proves nothing.
 - A component with `skip_execution` runs the checks in simulation only: `limits.at_limit` and
   `limits.past_limit` are skipped with its reason.
 - A component with `skip_simulation` has all three skipped.

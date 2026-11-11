@@ -296,9 +296,11 @@ pub enum Limits {
     },
     /// The venue has no bound on the input, so the limit is a recommended size, as the
     /// `ProtocolSim::get_limits` documentation allows. The reason names the code that shows it.
+    /// Twice the limit must still quote.
     Soft { reason: String },
     /// The venue has a bound, and the limit stays below it on purpose because the exact bound
-    /// cannot be derived. The reason shows why, and what capacity the limit gives up.
+    /// cannot be derived. The reason shows why, and what capacity the limit gives up. One unit
+    /// past the limit must still quote and execute.
     UnderCap { reason: String },
 }
 
@@ -317,13 +319,6 @@ impl Limits {
             Limits::Hard { .. } => None,
             Limits::Soft { reason } | Limits::UnderCap { reason } => Some(reason),
         }
-    }
-
-    /// Why `limits.past_limit` does not apply to this limit, if it does not: a soft or under-cap
-    /// limit is not the venue's bound. The reason names what the declaration gives.
-    pub fn past_limit_skip_reason(&self) -> Option<String> {
-        self.reason()
-            .map(|reason| format!("the limit is declared {}: {reason}", self.kind()))
     }
 }
 

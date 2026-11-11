@@ -4,10 +4,14 @@
 //! (`max_output`). The ladder trades at most 10% of `max_input`, so on its own it passes a limit
 //! ten times too high. These checks test the limit itself:
 //!
-//! - `limits.at_limit`: `max_input` must quote, and its quote goes to execution, which must settle;
+//! - `limits.at_limit`: `max_input` must quote, and its quote goes to execution, which must
+//!   succeed;
 //! - `limits.max_output`: the quote at `max_input` must not pay more than `max_output`;
-//! - `limits.past_limit`: for a [`Limits::Hard`] limit, the first input past the bound (`max_input
-//!   + rounding + 1`) must not quote, and its execution must revert.
+//! - `limits.past_limit`: past the limit, the venue behaves as the declaration claims. Past a
+//!   [`Limits::Hard`] bound (`max_input + rounding + 1`) the quote errors and the execution
+//!   reverts. One unit past a [`Limits::UnderCap`] limit, below the venue's bound, the quote and
+//!   the execution succeed. Twice a [`Limits::Soft`] limit, which the venue does not bound, still
+//!   quotes.
 
 use num_bigint::BigUint;
 
@@ -33,13 +37,21 @@ pub struct Limit<'a> {
 pub struct DirectionLimits {
     /// The quote at `max_input`, when it succeeded. It is executed like the ladder's rungs.
     pub at_limit: Option<Quote>,
-    /// The first input past a hard limit's bound, when the simulation rejected it as it must. Its
-    /// execution must revert.
-    pub past_limit: Option<BigUint>,
-    /// The error the simulation rejected that input with, for the logs.
+    /// The swap past the limit to execute, when the simulation behaved as declared: past a hard
+    /// limit's bound, or one unit past an under-cap limit.
+    pub past_limit: Option<PastLimitSwap>,
+    /// The error the simulation rejected the input past a hard limit with, for the logs.
     pub past_limit_rejection: Option<String>,
     /// Every check that failed, with the reason.
     pub failures: Vec<(CheckId, String)>,
+}
+
+/// An input past the limit, and what its execution must do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PastLimitSwap {
+    pub amount_in: BigUint,
+    /// Revert, past a hard limit's bound, or execute, one unit past an under-cap limit.
+    pub must_revert: bool,
 }
 
 /// Checks one direction's limit against what the component declares. `quote` is the direction's
@@ -78,37 +90,66 @@ pub fn check_direction(
 
     let mut past_limit_rejection = None;
     let past_limit = match declared {
-        Limits::Hard { rounding } if !capped => Some(*rounding),
-        _ => None,
-    };
-    let past_limit = if let Some(rounding) = past_limit {
-        // A bound derived with a rounding division can exceed the limit by up to `rounding`.
-        let past = max_input + rounding + 1u32;
-        match quote(past.clone()) {
-            Ok(past_quote) => {
-                let first_past = if rounding == 0 {
-                    "one unit past it".to_string()
-                } else {
-                    format!("past it and its declared rounding of {rounding}")
-                };
+        // The cap is not the venue's bound, so nothing past it says anything about the venue.
+        _ if capped => None,
+        Limits::Hard { rounding } => {
+            // A bound derived with a rounding division can exceed the limit by up to `rounding`.
+            let past = max_input + *rounding + 1u32;
+            match quote(past.clone()) {
+                Ok(past_quote) => {
+                    let first_past = if *rounding == 0 {
+                        "one unit past it".to_string()
+                    } else {
+                        format!("past it and its declared rounding of {rounding}")
+                    };
+                    failures.push((
+                        CheckId::LimitsPastLimit,
+                        format!(
+                            "{direction}: the limit is declared hard, but {past}, {first_past}, \
+                             quotes {}. Either the limit is below the venue's bound (declare it \
+                             `under_cap`, or the rounding) or get_amount_out does not enforce it",
+                            past_quote.amount
+                        ),
+                    ));
+                    None
+                }
+                Err(e) => {
+                    past_limit_rejection = Some(e);
+                    Some(PastLimitSwap { amount_in: past, must_revert: true })
+                }
+            }
+        }
+        Limits::UnderCap { .. } => {
+            let past = max_input + 1u32;
+            match quote(past.clone()) {
+                Ok(_) => Some(PastLimitSwap { amount_in: past, must_revert: false }),
+                Err(e) => {
+                    failures.push((
+                        CheckId::LimitsPastLimit,
+                        format!(
+                            "{direction}: the limit is declared under_cap, but {past}, one unit \
+                             past it, does not quote: {e}. The limit is the venue's bound: declare \
+                             it hard"
+                        ),
+                    ));
+                    None
+                }
+            }
+        }
+        Limits::Soft { .. } => {
+            let twice = max_input * 2u32;
+            if let Err(e) = quote(twice.clone()) {
                 failures.push((
                     CheckId::LimitsPastLimit,
                     format!(
-                        "{direction}: the limit is declared hard, but {past}, {first_past}, \
-                         quotes {}. Either the limit is below the venue's bound (declare it \
-                         `under_cap`, or the rounding) or get_amount_out does not enforce it",
-                        past_quote.amount
+                        "{direction}: the limit is declared soft, but {twice}, twice the limit, \
+                         does not quote: {e}. The venue has a bound: declare the limit hard or \
+                         under_cap"
                     ),
                 ));
-                None
             }
-            Err(e) => {
-                past_limit_rejection = Some(e);
-                Some(past)
-            }
+            None
         }
-    } else {
-        None
     };
 
     DirectionLimits { at_limit, past_limit, past_limit_rejection, failures }
@@ -192,7 +233,10 @@ mod tests {
             result.at_limit,
             Some(Quote { amount: BigUint::from(2000u32), gas: BigUint::from(100u32) })
         );
-        assert_eq!(result.past_limit, Some(BigUint::from(1001u32)));
+        assert_eq!(
+            result.past_limit,
+            Some(PastLimitSwap { amount_in: BigUint::from(1001u32), must_revert: true })
+        );
     }
 
     #[test]
@@ -211,22 +255,41 @@ mod tests {
     }
 
     #[test]
-    fn a_limit_below_the_bound_fails_past_the_limit_unless_declared_under_cap() {
-        let hard = check(1000, PastBound::Errors, 900, 1800, &hard());
-        assert_eq!(failed_checks(&hard), vec![CheckId::LimitsPastLimit]);
-
-        let under_cap = check(1000, PastBound::Errors, 900, 1800, &under_cap());
-        assert!(under_cap.failures.is_empty(), "{:?}", under_cap.failures);
-        assert!(under_cap.at_limit.is_some());
-        assert!(under_cap.past_limit.is_none());
+    fn a_hard_limit_below_the_bound_fails_past_the_limit() {
+        let result = check(1000, PastBound::Errors, 900, 1800, &hard());
+        assert_eq!(failed_checks(&result), vec![CheckId::LimitsPastLimit]);
     }
 
     #[test]
-    fn a_soft_limit_is_tested_at_the_limit_only() {
+    fn an_under_cap_limit_below_the_bound_is_executed_one_unit_past() {
+        let result = check(1000, PastBound::Errors, 900, 1800, &under_cap());
+        assert!(result.failures.is_empty(), "{:?}", result.failures);
+        assert!(result.at_limit.is_some());
+        assert_eq!(
+            result.past_limit,
+            Some(PastLimitSwap { amount_in: BigUint::from(901u32), must_revert: false })
+        );
+    }
+
+    #[test]
+    fn an_under_cap_limit_at_the_bound_fails_past_the_limit() {
+        let result = check(1000, PastBound::Errors, 1000, 2000, &under_cap());
+        assert_eq!(failed_checks(&result), vec![CheckId::LimitsPastLimit]);
+        assert!(result.past_limit.is_none());
+    }
+
+    #[test]
+    fn a_soft_limit_quotes_twice_the_limit_and_executes_nothing_past_it() {
         let result = check(1000, PastBound::Unbounded, 1000, 2000, &soft());
         assert!(result.failures.is_empty(), "{:?}", result.failures);
         assert!(result.at_limit.is_some());
         assert!(result.past_limit.is_none());
+    }
+
+    #[test]
+    fn a_soft_limit_on_a_bounded_venue_fails_past_the_limit() {
+        let result = check(1000, PastBound::Errors, 1000, 2000, &soft());
+        assert_eq!(failed_checks(&result), vec![CheckId::LimitsPastLimit]);
     }
 
     #[test]
@@ -260,6 +323,9 @@ mod tests {
 
         let rounded = check(1002, PastBound::Errors, 1000, 2000, &Limits::Hard { rounding: 2 });
         assert!(rounded.failures.is_empty(), "{:?}", rounded.failures);
-        assert_eq!(rounded.past_limit, Some(BigUint::from(1003u32)));
+        assert_eq!(
+            rounded.past_limit,
+            Some(PastLimitSwap { amount_in: BigUint::from(1003u32), must_revert: true })
+        );
     }
 }

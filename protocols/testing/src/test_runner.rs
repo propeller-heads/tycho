@@ -132,7 +132,8 @@ struct SimulationOutput {
     executions: HashMap<String, TychoExecutionInput>,
     /// Strict: the quote at each direction's limit, executed like the ladder's.
     at_limit: HashMap<String, TychoExecutionInput>,
-    /// Strict: one unit past each hard limit; each execution must revert.
+    /// Strict: past each hard limit's bound, each execution must revert; one unit past each
+    /// under-cap limit, each must execute.
     past_limit: HashMap<String, TychoExecutionInput>,
     /// Strict: every direction whose limit was checked.
     limit_directions: Vec<LimitDirection>,
@@ -204,22 +205,23 @@ impl LimitDirection {
 
     /// What `limits.past_limit` records when nothing failed.
     ///
-    /// - Skipped when the check does not apply: a soft or under-cap limit, with the declared
-    ///   reason, or a limit at the `int128` cap.
-    /// - Not run when the swap at the limit did not quote or did not execute: the past-limit swap
-    ///   takes its minimum output from that quote, and a revert past a limit that does not execute
-    ///   either proves nothing.
+    /// - Skipped for a limit at the `int128` cap, which is not the venue's bound.
+    /// - A pass for a soft limit, whose claim is checked in simulation alone: twice the limit
+    ///   quoted.
+    /// - Not run when the swap at the limit did not quote or did not execute: the swap past the
+    ///   limit takes its minimum output from that quote, and what happens past a limit that does
+    ///   not execute either proves nothing.
     /// - Skipped when the component skips execution.
-    /// - A pass once the swap past the limit was executed, and reverted.
+    /// - A pass once the swap past the limit was executed, and did what the declaration claims.
     fn past_limit_unfailed(&self, at_limit_executed: bool) -> Outcome {
-        if let Some(reason) = self.limits.past_limit_skip_reason() {
-            return Outcome::Skipped { reason };
-        }
         if self.capped {
             return Outcome::Skipped {
                 reason: "the limit is at the int128::MAX cap, which is not the venue's bound"
                     .to_string(),
             };
+        }
+        if let Limits::Soft { .. } = self.limits {
+            return Outcome::Pass;
         }
         let not_run = || Outcome::NotRun { reason: format!("{} failed", CheckId::LimitsAtLimit) };
         match (&self.past_limit, self.quoted_at_limit, &self.execution_skipped) {
@@ -228,7 +230,8 @@ impl LimitDirection {
             (None, true, Some(reason)) => Outcome::Skipped {
                 reason: format!("the swap past the limit is not executed: {reason}"),
             },
-            // Only a quote past the limit leads here, and that is recorded as a failure first.
+            // Only a quote past the limit that contradicts the declaration leads here, and that is
+            // recorded as a failure first.
             (None, true, None) => {
                 Outcome::NotRun { reason: "the swap past the limit was not queued".to_string() }
             }
@@ -329,6 +332,51 @@ fn missing_revert(
         Some(TychoExecutionResult::Failed { error_msg }) => Some(format!(
             "[{component}] {simulation_id} could not be simulated, so the revert past the limit \
              is unproven: {error_msg}"
+        )),
+        None => Some(format!("[{component}] No result found for simulation {simulation_id}")),
+    };
+    if let Some(failure) = &failure {
+        error!("{failure}");
+    }
+    failure
+}
+
+/// Why the execution of `simulation_id`, one unit past an under-cap limit, does not show the
+/// venue's bound is above the limit: it reverted, or it could not be simulated. `None` when it
+/// executed.
+fn missing_execution(
+    simulation_id: &str,
+    input: &TychoExecutionInput,
+    results: &HashMap<String, TychoExecutionResult>,
+) -> Option<String> {
+    let component = &input.component_id;
+    let amount_in = input.solution.amount_in();
+    let failure = match results.get(simulation_id) {
+        Some(TychoExecutionResult::Success {
+            amount_out,
+            gas_used: _,
+            state_overwrites: _,
+            overwrite_metadata: _,
+        }) => {
+            info!(
+                "[{component}] {amount_in} {}, one unit past the under_cap limit, executes and \
+                 pays {amount_out} {}",
+                input.token_in, input.token_out
+            );
+            None
+        }
+        Some(TychoExecutionResult::Revert {
+            reason,
+            state_overwrites: _,
+            overwrite_metadata: _,
+        }) => Some(format!(
+            "[{component}] {amount_in} {}, one unit past the declared under_cap limit, \
+                 reverts: {reason}. The limit is the venue's bound: declare it hard",
+            input.token_in
+        )),
+        Some(TychoExecutionResult::Failed { error_msg }) => Some(format!(
+            "[{component}] {simulation_id} could not be simulated, so the venue's bound past the \
+             limit is unproven: {error_msg}"
         )),
         None => Some(format!("[{component}] No result found for simulation {simulation_id}")),
     };
@@ -1809,8 +1857,9 @@ impl TestRunner {
                             )?,
                         );
                         direction_limits.at_limit = Some(simulation_id);
-                        // The swap's minimum output is set from the quote at the limit, so a venue
-                        // that accepts the extra unit settles, and only a revert passes.
+                        // The swap's minimum output is set from the quote at the limit, so past a
+                        // hard limit a venue that accepts the input executes the swap, and only a
+                        // revert passes.
                         if let Some(past) = checked.past_limit {
                             let simulation_id =
                                 format!("past_limit_{id}_{}", direction_limits.direction);
@@ -1820,7 +1869,7 @@ impl TestRunner {
                                     component,
                                     token_in,
                                     token_out,
-                                    past,
+                                    past.amount_in,
                                     quote,
                                     protocol_system,
                                 )?,
@@ -2048,7 +2097,10 @@ impl TestRunner {
             let mut past_limit_failures = limits.failures_of(CheckId::LimitsPastLimit);
             if at_limit_executed {
                 past_limit_failures.extend(execution_failure(&limits.past_limit, &|id, input| {
-                    missing_revert(id, input, results)
+                    match limits.limits {
+                        Limits::UnderCap { .. } => missing_execution(id, input, results),
+                        _ => missing_revert(id, input, results),
+                    }
                 }));
             }
             checks.record_direction(
@@ -2549,25 +2601,23 @@ mod tests {
     }
 
     #[test]
-    fn a_soft_or_under_cap_limit_skips_the_past_limit_check_with_its_declared_reason() {
+    fn a_soft_limit_passes_past_the_limit_on_its_simulation_alone() {
         let soft = LimitDirection {
             limits: Limits::Soft { reason: "constant product".to_string() },
+            past_limit: None,
             ..hard_limit(true, None)
         };
-        assert_eq!(
-            soft.past_limit_unfailed(true),
-            Outcome::Skipped { reason: "the limit is declared soft: constant product".to_string() }
-        );
+        assert_eq!(soft.past_limit_unfailed(false), Outcome::Pass);
+    }
+
+    #[test]
+    fn an_under_cap_limit_passes_past_the_limit_once_executed() {
         let under_cap = LimitDirection {
             limits: Limits::UnderCap { reason: "keeper-set rate; gives up 2%".to_string() },
             ..hard_limit(true, None)
         };
-        assert_eq!(
-            under_cap.past_limit_unfailed(true),
-            Outcome::Skipped {
-                reason: "the limit is declared under_cap: keeper-set rate; gives up 2%".to_string()
-            }
-        );
+        assert_eq!(under_cap.past_limit_unfailed(true), Outcome::Pass);
+        assert_eq!(under_cap.past_limit_unfailed(false), at_limit_failed());
     }
 
     fn past_limit_input() -> TychoExecutionInput {
@@ -2624,6 +2674,32 @@ mod tests {
         }))
         .unwrap();
         assert!(settled.contains("executes and pays 50 B"), "{settled}");
+        let failed =
+            judge(Some(TychoExecutionResult::Failed { error_msg: "decode".to_string() })).unwrap();
+        assert!(failed.contains("could not be simulated"), "{failed}");
+        assert!(judge(None)
+            .unwrap()
+            .contains("No result found"));
+    }
+
+    #[test]
+    fn only_an_execution_from_the_chain_proves_an_under_cap_limit() {
+        let judge = |result: Option<TychoExecutionResult>| {
+            let results: HashMap<String, TychoExecutionResult> = result
+                .into_iter()
+                .map(|result| ("past".to_string(), result))
+                .collect();
+            missing_execution("past", &past_limit_input(), &results)
+        };
+        let executed = TychoExecutionResult::Success {
+            amount_out: BigUint::from(50u32),
+            gas_used: 0,
+            state_overwrites: None,
+            overwrite_metadata: None,
+        };
+        assert_eq!(judge(Some(executed)), None);
+        let reverted = judge(Some(revert("ERC4626: deposit more than max"))).unwrap();
+        assert!(reverted.contains("declare it hard"), "{reverted}");
         let failed =
             judge(Some(TychoExecutionResult::Failed { error_msg: "decode".to_string() })).unwrap();
         assert!(failed.contains("could not be simulated"), "{failed}");
