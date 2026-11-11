@@ -9,6 +9,7 @@ import {FeeRecipient, FeeInput} from "../lib/FeeStructs.sol";
 import {IFeeCalculator, CustomFees} from "@interfaces/IFeeCalculator.sol";
 
 error FeeCalculator__FeeTooHigh();
+error FeeCalculator__ShareTooHigh();
 error FeeCalculator__AddressZero();
 
 /**
@@ -124,8 +125,10 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         uint256 positiveSlippage = _calculatePositiveSlippage(
             feeInput.actualAmountOut, feeInput.expectedAmountOut, resolvedClient
         );
-        uint256 clientPositiveSlippage = positiveSlippage
-            * _clientPositiveSlippageShareBps[resolvedClient] / MAX_BPS;
+        uint256 clientPositiveSlippage = positiveSlippage == 0
+            ? 0
+            : positiveSlippage * _clientPositiveSlippageShareBps[resolvedClient]
+                / MAX_BPS;
 
         // Fee base = actual output minus any extracted surplus.
         // When surplus is taken: feeBase = expectedAmountOut.
@@ -516,7 +519,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        if (shareBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
+        if (shareBps > MAX_BPS) revert FeeCalculator__ShareTooHigh();
         uint32 oldShareBps = _clientPositiveSlippageShareBps[client];
         _clientPositiveSlippageShareBps[client] = shareBps;
         emit ClientPositiveSlippageShareUpdated(client, oldShareBps, shareBps);

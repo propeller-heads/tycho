@@ -123,7 +123,7 @@ queryable via RPC:
 
 **Positive slippage** (`_positiveSlippageEnabled`, enabled from the constructor — which emits
 `PositiveSlippageToggled(true)` — and toggled afterwards via `setPositiveSlippageEnabled`): when enabled, the router
-takes the entire surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees compute on
+captures the surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees compute on
 `expectedAmountOut`. When disabled, fees compute on `actualAmountOut` and the surplus stays in the swap output. The flag
 also forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
 exemptions (`setPositiveSlippageExempt`, `_positiveSlippageExempt` mapping) opt a resolved client out while capture

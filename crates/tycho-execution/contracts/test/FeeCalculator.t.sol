@@ -1249,7 +1249,7 @@ contract FeeCalculatorSlippageTest is Constants {
 
     function testSetClientPositiveSlippageShareTooHighReverts() public {
         vm.prank(FEE_SETTER);
-        vm.expectRevert(FeeCalculator__FeeTooHigh.selector);
+        vm.expectRevert(FeeCalculator__ShareTooHigh.selector);
         feeCalculator.setClientPositiveSlippageShare(BOB, 100_000_001);
     }
 

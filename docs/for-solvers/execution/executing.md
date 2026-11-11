@@ -23,7 +23,7 @@ All fee rates — yours and the router's — use 8-decimal fee units where `100_
 
 Fees apply to the output your swap actually produced, never to your quote. When the router captures positive slippage, it subtracts that surplus first and charges fees on what remains. If the fees would exceed the output altogether, the swap reverts with `TychoRouter__FeesExceedOutput`.
 
-Positive slippage capture is a single on-chain switch on the FeeCalculator, and Propeller Heads can exempt individual client addresses from it. An exempt client's swaps keep the whole surplus above `expectedAmountOut`. The router resolves which client applies the same way it resolves fee rates: from `clientFeeReceiver` when you pass a signed one, otherwise from `tx.origin`.
+Positive slippage capture is a single on-chain switch on the FeeCalculator, and Propeller Heads can exempt individual client addresses from it. An exempt client's swaps keep the whole surplus above `expectedAmountOut`. Propeller Heads can also give a client a share of the captured surplus. The router credits that share to the client's vault together with the client fee, and keeps the rest. The router resolves which client applies the same way it resolves fee rates: from `clientFeeReceiver` when you pass a signed one, otherwise from `tx.origin`.
 
 #### Custom router fee rates
 
