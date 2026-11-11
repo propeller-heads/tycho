@@ -1,3 +1,63 @@
+## [0.509.0](https://github.com/propeller-heads/tycho/compare/0.508.0...0.509.0) (2026-11-11)
+
+
+### Features
+
+* **integration-test:** stream the Elysium Uniswap V3 forks ([b278551](https://github.com/propeller-heads/tycho/commit/b278551c118559f7f36223504e959271c5c1ee1e))
+* **integration-test:** stream the Elysium Uniswap V3 forks ([#1781](https://github.com/propeller-heads/tycho/issues/1781)) ([c44402e](https://github.com/propeller-heads/tycho/commit/c44402e08bf1ab79437fa474cd41697fbc24f46e))
+
+## [0.508.0](https://github.com/propeller-heads/tycho/compare/0.507.1...0.508.0) (2026-11-11)
+
+
+### Features
+
+* **execution:** deploy TychoRouterV3 to Elysium ([460fc8f](https://github.com/propeller-heads/tycho/commit/460fc8f3950205502f7618a5fb591a15fde3d341))
+* **execution:** encode PancakeSwap Infinity Bin swaps ([ef76d67](https://github.com/propeller-heads/tycho/commit/ef76d67a1baa1c31b6787896036eb4017631b116))
+* **execution:** register Elysium executors for V3 forks and AERO ([#1769](https://github.com/propeller-heads/tycho/issues/1769)) ([ea19bd2](https://github.com/propeller-heads/tycho/commit/ea19bd2c09c34f3abcb8afbd79d41d6421d572d7))
+* **execution:** route the Elysium V3 forks and aero_cl through UniswapV3Executor ([29642aa](https://github.com/propeller-heads/tycho/commit/29642aa7f75787ce865333ff546b0a0011ada506))
+* index, simulate and execute PancakeSwap Infinity Bin pools ([#1523](https://github.com/propeller-heads/tycho/issues/1523)) ([229e334](https://github.com/propeller-heads/tycho/commit/229e334ac00ab80dfd3774cee18870e174788815))
+* **simulation:** read Bin reserves from reserve_x and reserve_y ([c101aaa](https://github.com/propeller-heads/tycho/commit/c101aaa77ccec859a7a9d68bac85301f393eb470))
+* **simulation:** register PancakeSwap Infinity Bin for consumers ([aab8520](https://github.com/propeller-heads/tycho/commit/aab852072e7715cef3da6a86c40e2fa46df32abb))
+* **simulation:** simulate PancakeSwap Infinity Bin pools natively ([a3c03e2](https://github.com/propeller-heads/tycho/commit/a3c03e2fe8356fd90d3b7d8bb993a6f6a3fab21a))
+* **substreams:** emit Bin reserves as reserve_x and reserve_y ([d7db3fd](https://github.com/propeller-heads/tycho/commit/d7db3fd9965704818883898d3ea0eeb76c22a2b9))
+* **substreams:** index PancakeSwap Infinity Bin pools on Base and BNB ([263bf8c](https://github.com/propeller-heads/tycho/commit/263bf8c5f80334861d2849ca7c8070eefc5167b8))
+
+
+### Bug Fixes
+
+* **execution:** refuse a Bin entry on chains without a BinPoolManager ([2b016af](https://github.com/propeller-heads/tycho/commit/2b016afd43ef0e1472075f878cfbaf3708ff7d18))
+* **execution:** resolve the Bin alias only on chains with a BinPoolManager ([62b41e8](https://github.com/propeller-heads/tycho/commit/62b41e814639ca2f1912337a01f489058643db34))
+* **simulation:** Bin gas via router, assert fit ([4c341fd](https://github.com/propeller-heads/tycho/commit/4c341fdac10d2f956e229f6534472256876b2fbb))
+* **simulation:** drop an active dust bin once a swap moves off it ([6d8b733](https://github.com/propeller-heads/tycho/commit/6d8b73391e34557eae1f220399fed837f92281be))
+* **simulation:** quoter test compile after [#1706](https://github.com/propeller-heads/tycho/issues/1706) ([a27ce49](https://github.com/propeller-heads/tycho/commit/a27ce497b322dcd1a3806e92ebc0b06de27c8e9e))
+* **simulation:** read the Bin LP fee from key_lp_fee only ([bbc713b](https://github.com/propeller-heads/tycho/commit/bbc713b5568646cc8ef8d54fdfa91f3cd6880e90))
+* **simulation:** satisfy the workspace clippy lints in the Bin module ([5e279cc](https://github.com/propeller-heads/tycho/commit/5e279cc41c1eae430b7e1887c47afdd6fc11cbc3))
+* **simulation:** set the Bin swap gas from executor measurements ([56154e6](https://github.com/propeller-heads/tycho/commit/56154e6ac9d35213ef429890d957fac528f54eaf))
+* **simulation:** stop Bin limits before a bin the liquidity cap blocks ([3b6df52](https://github.com/propeller-heads/tycho/commit/3b6df52415fba132471c22f9419fdeaf76546415))
+* **substreams:** active_in_tree at pool creation + every swap ([c4604fc](https://github.com/propeller-heads/tycho/commit/c4604fca83ef87991653f6d5747f57764bf987a3))
+* **substreams:** fail on malformed Bin manifest addresses and reserve words ([db53b49](https://github.com/propeller-heads/tycho/commit/db53b49c1432e0048a48ab9e301a0a2f6c2a08c8))
+
+
+### Performance Improvements
+
+* **substreams:** index only the Bin storage writes an event can read ([87b6f4b](https://github.com/propeller-heads/tycho/commit/87b6f4b5e0dd95b912b32e845dc148a962e9d602))
+
+## [0.507.1](https://github.com/propeller-heads/tycho/compare/0.507.0...0.507.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **uniswap_v4:** pass hooks the full price range as the swap limit ([ab9bd81](https://github.com/propeller-heads/tycho/commit/ab9bd810d3be56f126b68c133fcadca0852f70d3))
+* **uniswap_v4:** pass hooks the full price range as the swap limit ([#1770](https://github.com/propeller-heads/tycho/issues/1770)) ([f83dc90](https://github.com/propeller-heads/tycho/commit/f83dc909a9df2e752330eed1201f512a51eb36c1))
+
+## [0.507.0](https://github.com/propeller-heads/tycho/compare/0.506.0...0.507.0) (2026-11-10)
+
+
+### Features
+
+* **execution:** deploy TychoRouterV3 to Elysium ([bbc65cb](https://github.com/propeller-heads/tycho/commit/bbc65cba54218ac6db36ba86ee1134b082f2489e))
+* **execution:** deploy TychoRouterV3 to Elysium ([#1762](https://github.com/propeller-heads/tycho/issues/1762)) ([9a955ba](https://github.com/propeller-heads/tycho/commit/9a955bae82309f0327c5bc0569f99581e9b63186))
+
 ## [0.506.0](https://github.com/propeller-heads/tycho/compare/0.505.0...0.506.0) (2026-11-10)
 
 
