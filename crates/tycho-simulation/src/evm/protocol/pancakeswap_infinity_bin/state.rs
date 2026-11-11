@@ -42,12 +42,12 @@ use crate::{
 
 // Measured through the TychoRouter on a Base fork (`PancakeswapInfinityBinGas.t.sol`, which
 // pins them): `singleSwap` paid by `transferFrom` on the USDC/USDT pool in both directions,
-// crossing 0 to 21 bins, fit by least squares to 209.2k + 12.1k per bin crossed, residuals within
+// crossing 0 to 21 bins, fit by least squares to 204.5k + 12.1k per bin crossed, residuals within
 // 6k. The router's work and the user's transfer are in scope on purpose: the executor is a
 // callback protocol, so the gas estimator adds nothing for the transfer and the quote has to carry
 // it. A quote's gas becomes `Swap::estimated_gas`, which the encoder sums into
 // `EncodedSolution::estimated_gas`, so these size the solution's gas as well as ranking routes.
-const SWAP_BASE_GAS: u64 = 209_000;
+const SWAP_BASE_GAS: u64 = 205_000;
 const GAS_PER_BIN_CROSSED: u64 = 12_100;
 
 /// The pool takes the input and returns the output as `int128`, so an amount past this reverts.
@@ -973,7 +973,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.amount, BigUint::from(999_900u64));
-        assert_eq!(result.gas, BigUint::from(209_000u64));
+        assert_eq!(result.gas, BigUint::from(205_000u64));
     }
 
     /// On chain the amount is an `int128`, so anything above that is rejected, not truncated.
@@ -1032,7 +1032,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.amount, BigUint::from(1_997u64));
-        assert_eq!(result.gas, BigUint::from(221_100u64), "base plus one crossing");
+        assert_eq!(result.gas, BigUint::from(217_100u64), "base plus one crossing");
     }
 
     /// Priced at bin `2^23 + 100` rather than 1.0, so an inverted ratio is visible, and against an
