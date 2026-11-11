@@ -1,3 +1,20 @@
+## [0.510.0](https://github.com/propeller-heads/tycho/compare/0.509.0...0.510.0) (2026-11-11)
+
+
+### Features
+
+* **ekubo-v3:** index MEVCapture v2.1 pools ([d77d66c](https://github.com/propeller-heads/tycho/commit/d77d66c4a03b85eb18bceb8546090867231410ea))
+* **ekubo-v3:** support MEVCapture v2.1 pools ([#1671](https://github.com/propeller-heads/tycho/issues/1671)) ([b903c91](https://github.com/propeller-heads/tycho/commit/b903c911da8664aabb355758ee5f0e6527361f6b))
+* **execution:** swap MEVCapture v2.1 pools through Core.forward ([1b18e5c](https://github.com/propeller-heads/tycho/commit/1b18e5cd18d43ee256207462416ffe230326075a))
+* **simulation:** quote ekubo_v3 MEVCapture v2.1 pools ([6c2c95e](https://github.com/propeller-heads/tycho/commit/6c2c95e54e24a8f439e2ca84241a6f6e2c3eeaea))
+
+
+### Bug Fixes
+
+* **ekubo-v3:** bound the work of MEVCapture v2.1 quotes ([191fb0f](https://github.com/propeller-heads/tycho/commit/191fb0f41c90d0d1702e1684476e81a34aac17bb))
+* **ekubo-v3:** fit MEVCapture v2.1 gas to measured twin-pool swaps ([068f626](https://github.com/propeller-heads/tycho/commit/068f626885b85dd68818570936ab28d71199c6cf))
+* **ekubo-v3:** keep anchor_state to MEVCapture v2.1 pools ([ac04362](https://github.com/propeller-heads/tycho/commit/ac0436216899523d0373e7f4e64c04ac29b28093))
+
 ## [0.509.0](https://github.com/propeller-heads/tycho/compare/0.508.0...0.509.0) (2026-11-11)
 
 
