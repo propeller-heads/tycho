@@ -45,3 +45,16 @@ simulates at up to 50 changed blocks, executes at as few as meet the coverage fl
 the streamed state to quote as the stop-block snapshot (`stream.matches_snapshot`);
 `stream.coverage` reports the floor as a warning for now.
 `range --report <path>` writes each check's outcome as JSON. See `README.md`, "Strict mode".
+
+### Declaring limits
+
+Agents write these yamls, and a `soft` declaration passes with one line of text, so:
+
+- Choose the kind from the venue's contract, not from test results. Declare `soft` only when the
+  contract rejects no input by its amount, with the reason naming that code.
+- Never change a kind, or drop a declaration, to make a failing limit check pass. Fix
+  `get_limits` or `get_amount_out`, or declare `under_cap` with its evidence and the capacity it
+  gives up, or a hard limit's `rounding` with the division that causes it.
+- Declare no package-level `soft` when a component has a cap: declare that component's limits on
+  the component.
+- A PR that changes an existing kind says so in its description.
