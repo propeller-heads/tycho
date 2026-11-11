@@ -639,6 +639,7 @@ mod tests {
                     .unwrap(),
             ),
             hook_data: Bytes::new(),
+            pool_state: None,
         };
 
         let result = hook_handler.after_swap(after_swap_params, None, None);
@@ -729,6 +730,7 @@ mod tests {
                     .unwrap(),
             ),
             hook_data: Bytes::new(),
+            pool_state: None,
         };
 
         transient_storage.extend(result.result.transient_storage);
