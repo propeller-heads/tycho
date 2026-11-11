@@ -1,3 +1,11 @@
+## [0.511.0](https://github.com/propeller-heads/tycho/compare/0.510.1...0.511.0) (2026-11-11)
+
+
+### Features
+
+* **execution:** expose the per-leg gas overhead to solvers ([7c746f3](https://github.com/propeller-heads/tycho/commit/7c746f3dca074f6c8893cd95a778c78aeb17a7f2))
+* **execution:** expose the per-leg gas overhead to solvers ([#1779](https://github.com/propeller-heads/tycho/issues/1779)) ([836f21d](https://github.com/propeller-heads/tycho/commit/836f21d82c3ef3669f3c3528b34753143d2285fe))
+
 ## [0.510.1](https://github.com/propeller-heads/tycho/compare/0.510.0...0.510.1) (2026-11-11)
 
 
