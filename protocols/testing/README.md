@@ -127,15 +127,17 @@ component's).
 
 | Kind | Meaning | Required | Tested |
 |---|---|---|---|
-| `hard` | the venue rejects any input above the limit, and the limit is that bound | | at the limit, and one unit past it |
+| `hard` | the venue rejects any input above its bound, and the limit is that bound | optional `rounding` | at the limit, and past the bound |
 | `soft` | the venue has no bound on the input; the limit is a recommended size, as the `ProtocolSim::get_limits` documentation allows | `reason` | at the limit |
 | `under_cap` | the venue has a bound, and the limit stays below it because the exact bound cannot be derived | `reason`: why, such as a command and its output, and the capacity given up | at the limit |
 
 - **At the limit** (`limits.at_limit`): `get_amount_out(max_input)` succeeds, and executing it
   does not revert and matches the simulation.
 - **Max output** (`limits.max_output`): the quote at `max_input` pays no more than `max_output`.
-- **One unit past a hard limit** (`limits.past_limit`): `get_amount_out(max_input + 1)` errors,
-  and executing it reverts. The swap's minimum output is set from the quote at the limit, so a
+- **Past a hard limit** (`limits.past_limit`): `get_amount_out(max_input + rounding + 1)` errors,
+  and executing it reverts. `rounding` is 0 unless declared: where `get_limits` derives the input
+  from an output-side bound with a rounding division, the bound can exceed the limit by a few
+  units, and `{kind: hard, rounding: 2}` probes past them. The swap's minimum output is set from the quote at the limit, so a
   venue that accepts the extra unit executes the swap and fails the check. The check accepts any
   revert from the chain, but not a node error on the call, which proves nothing. When the limit is
   at or above the `int128` cap, the cap is not the venue's bound, and nothing is probed past it.

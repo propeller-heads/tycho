@@ -1771,10 +1771,8 @@ impl TestRunner {
                                 .map_err(|e| e.to_string())
                         },
                         &format!("{} -> {}", token_in.symbol, token_out.symbol),
-                        &max_input,
-                        &max_output,
-                        capped,
-                        declared.kind(),
+                        &limits::Limit { max_input: &max_input, max_output: &max_output, capped },
+                        declared,
                     );
                     if let Some(rejection) = &checked.past_limit_rejection {
                         info!(
@@ -2483,7 +2481,7 @@ mod tests {
         LimitDirection {
             component: "0x01".to_string(),
             direction: Direction { token_in: Bytes::from("0x0a"), token_out: Bytes::from("0x0b") },
-            limits: Limits::Hard {},
+            limits: Limits::Hard { rounding: 0 },
             capped: false,
             quoted_at_limit,
             execution_skipped: execution_skipped.map(str::to_string),

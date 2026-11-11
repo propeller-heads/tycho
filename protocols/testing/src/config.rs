@@ -279,16 +279,21 @@ impl fmt::Display for LimitKind {
 ///
 /// ```yaml
 /// {kind: hard}
+/// {kind: hard, rounding: 1}
 /// {kind: soft, reason: "constant product: any input trades, at a worse price"}
 /// {kind: under_cap, reason: "the bound depends on a keeper-set rate we do not index; gives up up to 2% of the vault's capacity"}
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Limits {
-    /// The venue rejects any input above the limit (a vault cap, a redemption limit, the end of
-    /// the liquidity range), and the limit is exactly that bound.
-    // A struct variant, so serde rejects a field `hard` does not have; a unit variant ignores it.
-    Hard {},
+    /// The venue rejects any input above its bound (a vault cap, a redemption limit, the end of
+    /// the liquidity range), and the limit is that bound, or below it by at most `rounding` units
+    /// where `get_limits` derives it with a rounding division, such as an input from an
+    /// output-side bound. Past the bound, `get_amount_out` must error and execution must revert.
+    Hard {
+        #[serde(default)]
+        rounding: u64,
+    },
     /// The venue has no bound on the input, so the limit is a recommended size, as the
     /// `ProtocolSim::get_limits` documentation allows. The reason names the code that shows it.
     Soft { reason: String },
@@ -300,7 +305,7 @@ pub enum Limits {
 impl Limits {
     pub fn kind(&self) -> LimitKind {
         match self {
-            Limits::Hard {} => LimitKind::Hard,
+            Limits::Hard { .. } => LimitKind::Hard,
             Limits::Soft { .. } => LimitKind::Soft,
             Limits::UnderCap { .. } => LimitKind::UnderCap,
         }
@@ -309,7 +314,7 @@ impl Limits {
     /// The declared reason, for the kinds that require one.
     fn reason(&self) -> Option<&str> {
         match self {
-            Limits::Hard {} => None,
+            Limits::Hard { .. } => None,
             Limits::Soft { reason } | Limits::UnderCap { reason } => Some(reason),
         }
     }
@@ -939,7 +944,7 @@ tests:
     }
 
     fn hard() -> Limits {
-        Limits::Hard {}
+        Limits::Hard { rounding: 0 }
     }
 
     fn direction(key: &str) -> Direction {
@@ -1035,6 +1040,18 @@ tests:
             }
         }
         assert!(parse(&yaml("harness: strict", &format!("        limits: {UNDER_CAP}"))).is_ok());
+    }
+
+    #[test]
+    fn a_hard_limit_can_declare_its_rounding() {
+        let config =
+            parse(&yaml("harness: strict", "        limits: {kind: hard, rounding: 2}")).unwrap();
+        let component = &config.tests[0].expected_components[0];
+        assert_eq!(
+            config.limits_for(component, &direction("0x01->0x02")),
+            Some(&Limits::Hard { rounding: 2 })
+        );
+        assert!(parse(&yaml("", "        limits: {kind: hard, rounding: -1}")).is_err());
     }
 
     #[test]

@@ -6,12 +6,12 @@
 //!
 //! - `limits.at_limit`: `max_input` must quote, and its quote goes to execution, which must settle;
 //! - `limits.max_output`: the quote at `max_input` must not pay more than `max_output`;
-//! - `limits.past_limit`: for a [`LimitKind::Hard`] limit, `max_input + 1` must not quote, and its
-//!   execution must revert.
+//! - `limits.past_limit`: for a [`Limits::Hard`] limit, the first input past the bound (`max_input
+//!   + rounding + 1`) must not quote, and its execution must revert.
 
 use num_bigint::BigUint;
 
-use crate::{config::LimitKind, report::CheckId};
+use crate::{config::Limits, report::CheckId};
 
 /// A quote: what `get_amount_out` returns, without the new state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,11 +20,20 @@ pub struct Quote {
     pub gas: BigUint,
 }
 
+/// A direction's limit as `get_limits` reports it, after the `int128` execution cap.
+pub struct Limit<'a> {
+    pub max_input: &'a BigUint,
+    pub max_output: &'a BigUint,
+    /// Whether the cap applied: a capped limit is not the venue's bound, so nothing is probed past
+    /// it.
+    pub capped: bool,
+}
+
 /// The limit checks of one direction, before execution.
 pub struct DirectionLimits {
     /// The quote at `max_input`, when it succeeded. It is executed like the ladder's rungs.
     pub at_limit: Option<Quote>,
-    /// The input one unit past a hard limit, when the simulation rejected it as it must. Its
+    /// The first input past a hard limit's bound, when the simulation rejected it as it must. Its
     /// execution must revert.
     pub past_limit: Option<BigUint>,
     /// The error the simulation rejected that input with, for the logs.
@@ -33,19 +42,15 @@ pub struct DirectionLimits {
     pub failures: Vec<(CheckId, String)>,
 }
 
-/// Checks one direction's limits against what the component declares.
-///
-/// `quote` is the direction's `get_amount_out`. `max_input` is the limit after the `int128`
-/// execution cap, and `capped` says whether the cap applied: a capped limit is not the venue's
-/// bound, so nothing is probed past it.
+/// Checks one direction's limit against what the component declares. `quote` is the direction's
+/// `get_amount_out`.
 pub fn check_direction(
     quote: impl Fn(BigUint) -> Result<Quote, String>,
     direction: &str,
-    max_input: &BigUint,
-    max_output: &BigUint,
-    capped: bool,
-    kind: LimitKind,
+    limit: &Limit<'_>,
+    declared: &Limits,
 ) -> DirectionLimits {
+    let Limit { max_input, max_output, capped } = *limit;
     let mut failures = Vec::new();
 
     let at_limit = match quote(max_input.clone()) {
@@ -72,16 +77,26 @@ pub fn check_direction(
     };
 
     let mut past_limit_rejection = None;
-    let past_limit = if kind == LimitKind::Hard && !capped {
-        let past = max_input + 1u32;
+    let past_limit = match declared {
+        Limits::Hard { rounding } if !capped => Some(*rounding),
+        _ => None,
+    };
+    let past_limit = if let Some(rounding) = past_limit {
+        // A bound derived with a rounding division can exceed the limit by up to `rounding`.
+        let past = max_input + rounding + 1u32;
         match quote(past.clone()) {
             Ok(past_quote) => {
+                let first_past = if rounding == 0 {
+                    "one unit past it".to_string()
+                } else {
+                    format!("past it and its declared rounding of {rounding}")
+                };
                 failures.push((
                     CheckId::LimitsPastLimit,
                     format!(
-                        "{direction}: the limit is declared hard, but {past}, one unit past it, \
+                        "{direction}: the limit is declared hard, but {past}, {first_past}, \
                          quotes {}. Either the limit is below the venue's bound (declare it \
-                         `under_cap`) or get_amount_out does not enforce it",
+                         `under_cap`, or the rounding) or get_amount_out does not enforce it",
                         past_quote.amount
                     ),
                 ));
@@ -131,22 +146,33 @@ mod tests {
         }
     }
 
+    fn hard() -> Limits {
+        Limits::Hard { rounding: 0 }
+    }
+
+    fn soft() -> Limits {
+        Limits::Soft { reason: "r".to_string() }
+    }
+
+    fn under_cap() -> Limits {
+        Limits::UnderCap { reason: "r".to_string() }
+    }
+
     /// Checks a venue with `bound` and `past_bound` whose get_limits reports `max_input` and
-    /// `max_output`, declared as `kind`.
+    /// `max_output`, declared as `declared`.
     fn check(
         bound: u64,
         past_bound: PastBound,
         max_input: u64,
         max_output: u64,
-        kind: LimitKind,
+        declared: &Limits,
     ) -> DirectionLimits {
+        let (max_input, max_output) = (BigUint::from(max_input), BigUint::from(max_output));
         check_direction(
             venue(bound, past_bound),
             "A -> B",
-            &BigUint::from(max_input),
-            &BigUint::from(max_output),
-            false,
-            kind,
+            &Limit { max_input: &max_input, max_output: &max_output, capped: false },
+            declared,
         )
     }
 
@@ -160,7 +186,7 @@ mod tests {
 
     #[test]
     fn an_exact_hard_limit_passes_and_is_probed_on_chain() {
-        let result = check(1000, PastBound::Errors, 1000, 2000, LimitKind::Hard);
+        let result = check(1000, PastBound::Errors, 1000, 2000, &hard());
         assert!(result.failures.is_empty(), "{:?}", result.failures);
         assert_eq!(
             result.at_limit,
@@ -172,24 +198,24 @@ mod tests {
     #[test]
     fn a_limit_above_the_bound_fails_at_the_limit() {
         // Ten times the venue's bound: the ladder's 10% rung would still quote.
-        let result = check(1000, PastBound::Errors, 10_000, 20_000, LimitKind::Hard);
+        let result = check(1000, PastBound::Errors, 10_000, 20_000, &hard());
         assert_eq!(failed_checks(&result), vec![CheckId::LimitsAtLimit]);
         assert!(result.at_limit.is_none());
     }
 
     #[test]
     fn a_hard_limit_that_clamps_past_the_bound_fails_past_the_limit() {
-        let result = check(1000, PastBound::Clamps, 1000, 2000, LimitKind::Hard);
+        let result = check(1000, PastBound::Clamps, 1000, 2000, &hard());
         assert_eq!(failed_checks(&result), vec![CheckId::LimitsPastLimit]);
         assert!(result.past_limit.is_none());
     }
 
     #[test]
     fn a_limit_below_the_bound_fails_past_the_limit_unless_declared_under_cap() {
-        let hard = check(1000, PastBound::Errors, 900, 1800, LimitKind::Hard);
+        let hard = check(1000, PastBound::Errors, 900, 1800, &hard());
         assert_eq!(failed_checks(&hard), vec![CheckId::LimitsPastLimit]);
 
-        let under_cap = check(1000, PastBound::Errors, 900, 1800, LimitKind::UnderCap);
+        let under_cap = check(1000, PastBound::Errors, 900, 1800, &under_cap());
         assert!(under_cap.failures.is_empty(), "{:?}", under_cap.failures);
         assert!(under_cap.at_limit.is_some());
         assert!(under_cap.past_limit.is_none());
@@ -197,7 +223,7 @@ mod tests {
 
     #[test]
     fn a_soft_limit_is_tested_at_the_limit_only() {
-        let result = check(1000, PastBound::Unbounded, 1000, 2000, LimitKind::Soft);
+        let result = check(1000, PastBound::Unbounded, 1000, 2000, &soft());
         assert!(result.failures.is_empty(), "{:?}", result.failures);
         assert!(result.at_limit.is_some());
         assert!(result.past_limit.is_none());
@@ -205,25 +231,35 @@ mod tests {
 
     #[test]
     fn the_quote_at_the_limit_must_not_pay_more_than_max_output() {
-        let understated = check(1000, PastBound::Errors, 1000, 1999, LimitKind::Hard);
+        let understated = check(1000, PastBound::Errors, 1000, 1999, &hard());
         assert_eq!(failed_checks(&understated), vec![CheckId::LimitsMaxOutput]);
 
         // A max output above what the limit pays, such as a rounded-up price estimate, passes.
-        let overstated = check(1000, PastBound::Errors, 1000, 2001, LimitKind::Hard);
+        let overstated = check(1000, PastBound::Errors, 1000, 2001, &hard());
         assert!(overstated.failures.is_empty(), "{:?}", overstated.failures);
     }
 
     #[test]
     fn a_capped_limit_is_not_probed_past() {
+        let (max_input, max_output) = (BigUint::from(1000u32), BigUint::from(u64::MAX));
         let result = check_direction(
             venue(1000, PastBound::Unbounded),
             "A -> B",
-            &BigUint::from(1000u32),
-            &BigUint::from(u64::MAX),
-            true,
-            LimitKind::Hard,
+            &Limit { max_input: &max_input, max_output: &max_output, capped: true },
+            &hard(),
         );
         assert!(result.failures.is_empty(), "{:?}", result.failures);
         assert!(result.past_limit.is_none());
+    }
+
+    #[test]
+    fn a_hard_limit_with_a_declared_rounding_is_probed_past_the_rounding() {
+        // The venue's bound is 1002 and get_limits rounds it down to 1000.
+        let exact = check(1002, PastBound::Errors, 1000, 2000, &hard());
+        assert_eq!(failed_checks(&exact), vec![CheckId::LimitsPastLimit]);
+
+        let rounded = check(1002, PastBound::Errors, 1000, 2000, &Limits::Hard { rounding: 2 });
+        assert!(rounded.failures.is_empty(), "{:?}", rounded.failures);
+        assert_eq!(rounded.past_limit, Some(BigUint::from(1003u32)));
     }
 }
