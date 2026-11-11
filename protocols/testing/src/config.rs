@@ -257,41 +257,12 @@ impl ProtocolComponentExpectation {
     }
 }
 
-/// What kind of bound a component's `get_limits` reports, which decides how strict mode tests it.
-///
-/// Every kind must be quotable and executable at the limit itself. Only a `hard` limit is also
-/// tested one unit past.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// What kind of bound a direction's `get_limits` reports, which decides how strict mode tests it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitKind {
-    /// The venue rejects any input above the limit (a vault cap, a redemption limit, the end of
-    /// the liquidity range), and the limit is exactly that bound. Past it, `get_amount_out`
-    /// must error and execution must revert.
     Hard,
-    /// The venue has no bound on the input, so the limit is a recommended size, as the
-    /// `ProtocolSim::get_limits` documentation allows. Requires a `reason`.
     Soft,
-    /// The venue has a bound, and the limit stays below it on purpose because the exact bound
-    /// cannot be derived. Requires a `reason`, which shows why no exact bound can be derived, and
-    /// the `lost_capacity` it gives up.
     UnderCap,
-}
-
-/// What one direction's limit is:
-///
-/// ```yaml
-/// {kind: hard}
-/// {kind: soft, reason: "constant product: any input trades, at a worse price"}
-/// {kind: under_cap, reason: "...", lost_capacity: "~2% of the vault cap"}
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Limits {
-    pub kind: LimitKind,
-    #[serde(default)]
-    pub reason: Option<String>,
-    #[serde(default)]
-    pub lost_capacity: Option<String>,
 }
 
 impl fmt::Display for LimitKind {
@@ -304,51 +275,50 @@ impl fmt::Display for LimitKind {
     }
 }
 
+/// What one direction's limit is. Every kind must be quotable and executable at the limit itself.
+///
+/// ```yaml
+/// {kind: hard}
+/// {kind: soft, reason: "constant product: any input trades, at a worse price"}
+/// {kind: under_cap, reason: "the bound depends on a keeper-set rate we do not index; gives up up to 2% of the vault's capacity"}
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Limits {
+    /// The venue rejects any input above the limit (a vault cap, a redemption limit, the end of
+    /// the liquidity range), and the limit is exactly that bound.
+    // A struct variant, so serde rejects a field `hard` does not have; a unit variant ignores it.
+    Hard {},
+    /// The venue has no bound on the input, so the limit is a recommended size, as the
+    /// `ProtocolSim::get_limits` documentation allows. The reason names the code that shows it.
+    Soft { reason: String },
+    /// The venue has a bound, and the limit stays below it on purpose because the exact bound
+    /// cannot be derived. The reason shows why, and what capacity the limit gives up.
+    UnderCap { reason: String },
+}
+
 impl Limits {
-    /// What is wrong with the declaration's fields: each one its kind requires that is missing or
-    /// empty, and each one its kind does not read that is written.
-    fn field_problems(&self) -> Vec<String> {
-        let reason = ("reason", &self.reason);
-        let lost_capacity = ("lost_capacity", &self.lost_capacity);
-        let (required, unread) = match self.kind {
-            LimitKind::Hard => (vec![], vec![reason, lost_capacity]),
-            LimitKind::Soft => (vec![reason], vec![lost_capacity]),
-            LimitKind::UnderCap => (vec![reason, lost_capacity], vec![]),
-        };
-        let mut problems = Vec::new();
-        for (name, value) in required {
-            if value
-                .as_deref()
-                .is_none_or(|value| value.trim().is_empty())
-            {
-                problems.push(format!("missing {name}"));
-            }
+    pub fn kind(&self) -> LimitKind {
+        match self {
+            Limits::Hard {} => LimitKind::Hard,
+            Limits::Soft { .. } => LimitKind::Soft,
+            Limits::UnderCap { .. } => LimitKind::UnderCap,
         }
-        for (name, value) in unread {
-            if value.is_some() {
-                problems.push(format!("{name} is not read for a {} limit", self.kind));
-            }
+    }
+
+    /// The declared reason, for the kinds that require one.
+    fn reason(&self) -> Option<&str> {
+        match self {
+            Limits::Hard {} => None,
+            Limits::Soft { reason } | Limits::UnderCap { reason } => Some(reason),
         }
-        problems
     }
 
     /// Why `limits.past_limit` does not apply to this limit, if it does not: a soft or under-cap
     /// limit is not the venue's bound. The reason names what the declaration gives.
     pub fn past_limit_skip_reason(&self) -> Option<String> {
-        let reason = self
-            .reason
-            .as_deref()
-            .unwrap_or_default();
-        match self.kind {
-            LimitKind::Hard => None,
-            LimitKind::Soft => Some(format!("the limit is declared soft: {reason}")),
-            LimitKind::UnderCap => Some(format!(
-                "the limit is declared under_cap: {reason}; it gives up {}",
-                self.lost_capacity
-                    .as_deref()
-                    .unwrap_or_default()
-            )),
-        }
+        self.reason()
+            .map(|reason| format!("the limit is declared {}: {reason}", self.kind()))
     }
 }
 
@@ -398,13 +368,13 @@ impl fmt::Display for Direction {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LimitsDeclaration {
     /// The limit of every direction without its own entry.
-    pub default: Option<Limits>,
-    pub directions: HashMap<Direction, Limits>,
+    default: Option<Limits>,
+    directions: HashMap<Direction, Limits>,
 }
 
 impl LimitsDeclaration {
     /// The declaration of `direction`: its own, or else the default.
-    pub fn get(&self, direction: &Direction) -> Option<&Limits> {
+    fn get(&self, direction: &Direction) -> Option<&Limits> {
         self.directions
             .get(direction)
             .or(self.default.as_ref())
@@ -430,34 +400,33 @@ impl LimitsDeclaration {
 
 impl<'de> Deserialize<'de> for LimitsDeclaration {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_yaml::Value::deserialize(deserializer)?;
-        let parse = |key: &str, value: serde_yaml::Value| {
-            serde_yaml::from_value::<Limits>(value).map_err(|e| match key {
-                "" => de::Error::custom(format!("limits: {e}")),
-                key => de::Error::custom(format!("limits `{key}`: {e}")),
-            })
+        let parse = |key: &str, value| {
+            serde_yaml::from_value::<Limits>(value)
+                .map_err(|e| de::Error::custom(format!("limits `{key}`: {e}")))
         };
-        let Some(map) = value.as_mapping() else {
+        let serde_yaml::Value::Mapping(map) = serde_yaml::Value::deserialize(deserializer)? else {
             return Err(de::Error::custom(
                 "`limits` is `{kind: ...}` or a map of `default` and directions to `{kind: ...}`",
             ));
         };
         if map.contains_key("kind") {
-            return Ok(Self { default: Some(parse("", value)?), directions: HashMap::new() });
+            return serde_yaml::from_value(serde_yaml::Value::Mapping(map))
+                .map(|limits| Self { default: Some(limits), directions: HashMap::new() })
+                .map_err(|e| de::Error::custom(format!("limits: {e}")));
         }
         let mut declaration = Self::default();
         for (key, limits) in map {
-            let key = key
-                .as_str()
-                .ok_or_else(|| de::Error::custom("a `limits` key is not a string"))?;
+            let serde_yaml::Value::String(key) = key else {
+                return Err(de::Error::custom("a `limits` key is not a string"));
+            };
             if key == "default" {
-                declaration.default = Some(parse(key, limits.clone())?);
+                declaration.default = Some(parse(&key, limits)?);
             } else {
-                let direction = Direction::from_str(key).map_err(de::Error::custom)?;
+                let direction = Direction::from_str(&key).map_err(de::Error::custom)?;
                 // Keys that differ only in case or spacing are one direction.
                 if declaration
                     .directions
-                    .insert(direction.clone(), parse(key, limits.clone())?)
+                    .insert(direction.clone(), parse(&key, limits)?)
                     .is_some()
                 {
                     return Err(de::Error::custom(format!("limits: {direction} is declared twice")));
@@ -712,11 +681,15 @@ pub fn component_directions(component: &ProtocolComponentWithTestConfig) -> Vec<
     directions
 }
 
-/// Records each entry of `declaration` that lacks a field its kind requires.
+/// Records each entry of `declaration` whose reason is blank. serde already rejects a missing
+/// reason and a field the kind does not have.
 fn check_declaration(declaration: &LimitsDeclaration, location: &str, problems: &mut Vec<String>) {
     for (key, limits) in declaration.entries() {
-        for problem in limits.field_problems() {
-            problems.push(format!("{location}, {key}: {problem}"));
+        if limits
+            .reason()
+            .is_some_and(|reason| reason.trim().is_empty())
+        {
+            problems.push(format!("{location}, {key}: the reason is empty"));
         }
     }
 }
@@ -966,7 +939,7 @@ tests:
     }
 
     fn hard() -> Limits {
-        Limits { kind: LimitKind::Hard, reason: None, lost_capacity: None }
+        Limits::Hard {}
     }
 
     fn direction(key: &str) -> Direction {
@@ -981,13 +954,13 @@ tests:
             .map(|direction| {
                 let kind = config
                     .limits_for(component, &direction)
-                    .map(|limits| limits.kind);
+                    .map(Limits::kind);
                 (direction.to_string(), kind)
             })
             .collect()
     }
 
-    const UNDER_CAP: &str = "{kind: under_cap, reason: \"r\", lost_capacity: \"2%\"}";
+    const UNDER_CAP: &str = "{kind: under_cap, reason: \"r; gives up 2%\"}";
 
     #[test]
     fn strict_mode_requires_a_declaration_for_every_direction() {
@@ -1044,21 +1017,21 @@ tests:
     }
 
     #[test]
-    fn each_kind_requires_its_fields_in_both_modes() {
+    fn a_soft_or_under_cap_limit_requires_a_reason_in_both_modes() {
         for (declaration, problem) in [
-            ("{kind: soft}", "default: missing reason"),
-            ("{kind: soft, reason: \" \"}", "default: missing reason"),
-            ("{kind: under_cap, reason: \"r\"}", "default: missing lost_capacity"),
-            ("{\"0x01->0x02\": {kind: soft}}", "0x01->0x02: missing reason"),
+            ("{kind: soft}", "missing field `reason`"),
+            ("{kind: under_cap}", "missing field `reason`"),
+            ("{kind: soft, reason: \" \"}", "component 0xAbC, default: the reason is empty"),
+            ("{\"0x01->0x02\": {kind: soft}}", "limits `0x01->0x02`: missing field `reason`"),
         ] {
             for harness in ["", "harness: strict"] {
                 let err = parse(&yaml(harness, &format!("        limits: {declaration}")))
                     .unwrap_err()
-                    .to_string();
-                assert!(
-                    err.contains(&format!("component 0xAbC, {problem}")),
-                    "{declaration}: {err}"
-                );
+                    .chain()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(": ");
+                assert!(err.contains(problem), "{declaration}: {err}");
             }
         }
         assert!(parse(&yaml("harness: strict", &format!("        limits: {UNDER_CAP}"))).is_ok());
@@ -1085,10 +1058,8 @@ tests:
         for (declaration, expected) in [
             ("{kind: exact}", "unknown variant `exact`"),
             ("{kind: hard, because: \"x\"}", "unknown field `because`"),
-            (
-                "{kind: under_cap, reason: \"r\", evidence: \"e\", lost_capacity: \"2%\"}",
-                "unknown field `evidence`",
-            ),
+            ("{kind: under_cap, reason: \"r\", evidence: \"e\"}", "unknown field `evidence`"),
+            ("{1: {kind: hard}}", "a `limits` key is not a string"),
             ("{\"0x01-0x02\": {kind: hard}}", "is not a direction"),
             ("{\"0x01->0x01\": {kind: hard}}", "sells and buys the same token"),
             ("{\"0x01->usdc\": {kind: hard}}", "is not an address"),
@@ -1106,19 +1077,19 @@ tests:
     }
 
     #[test]
-    fn a_field_the_kind_does_not_read_is_an_error() {
-        for (declaration, problem) in [
-            ("{kind: hard, reason: \"r\"}", "reason is not read for a hard limit"),
-            ("{kind: hard, lost_capacity: \"2%\"}", "lost_capacity is not read for a hard limit"),
-            (
-                "{kind: soft, reason: \"r\", lost_capacity: \"2%\"}",
-                "lost_capacity is not read for a soft limit",
-            ),
+    fn a_field_the_kind_does_not_have_is_an_error() {
+        for declaration in [
+            "{kind: hard, reason: \"r\"}",
+            "{kind: soft, reason: \"r\", lost_capacity: \"2%\"}",
+            "{kind: under_cap, reason: \"r\", lost_capacity: \"2%\"}",
         ] {
             let err = parse(&yaml("", &format!("        limits: {declaration}")))
                 .unwrap_err()
-                .to_string();
-            assert!(err.contains(&format!("component 0xAbC, default: {problem}")), "{err}");
+                .chain()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(": ");
+            assert!(err.contains("unknown field"), "{declaration}: {err}");
         }
     }
 

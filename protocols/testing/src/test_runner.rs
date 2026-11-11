@@ -1774,7 +1774,7 @@ impl TestRunner {
                         &max_input,
                         &max_output,
                         capped,
-                        declared.kind,
+                        declared.kind(),
                     );
                     if let Some(rejection) = &checked.past_limit_rejection {
                         info!(
@@ -2292,7 +2292,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        config::{Harness, LimitKind, ProtocolComponentExpectation},
+        config::{Harness, ProtocolComponentExpectation},
         report::{CheckResult, Outcome},
     };
 
@@ -2476,14 +2476,6 @@ mod tests {
         assert!(at_execution_cap(&(&ceiling + 1u32)));
     }
 
-    fn declared(kind: LimitKind, reason: Option<&str>, lost_capacity: Option<&str>) -> Limits {
-        Limits {
-            kind,
-            reason: reason.map(str::to_string),
-            lost_capacity: lost_capacity.map(str::to_string),
-        }
-    }
-
     /// A hard limit's direction, with every check passing in simulation unless `quoted_at_limit`
     /// is false, and its swaps queued unless `execution_skipped` gives a reason.
     fn hard_limit(quoted_at_limit: bool, execution_skipped: Option<&str>) -> LimitDirection {
@@ -2491,7 +2483,7 @@ mod tests {
         LimitDirection {
             component: "0x01".to_string(),
             direction: Direction { token_in: Bytes::from("0x0a"), token_out: Bytes::from("0x0b") },
-            limits: declared(LimitKind::Hard, None, None),
+            limits: Limits::Hard {},
             capped: false,
             quoted_at_limit,
             execution_skipped: execution_skipped.map(str::to_string),
@@ -2561,7 +2553,7 @@ mod tests {
     #[test]
     fn a_soft_or_under_cap_limit_skips_the_past_limit_check_with_its_declared_reason() {
         let soft = LimitDirection {
-            limits: declared(LimitKind::Soft, Some("constant product"), None),
+            limits: Limits::Soft { reason: "constant product".to_string() },
             ..hard_limit(true, None)
         };
         assert_eq!(
@@ -2569,14 +2561,13 @@ mod tests {
             Outcome::Skipped { reason: "the limit is declared soft: constant product".to_string() }
         );
         let under_cap = LimitDirection {
-            limits: declared(LimitKind::UnderCap, Some("keeper-set rate"), Some("2%")),
+            limits: Limits::UnderCap { reason: "keeper-set rate; gives up 2%".to_string() },
             ..hard_limit(true, None)
         };
         assert_eq!(
             under_cap.past_limit_unfailed(true),
             Outcome::Skipped {
-                reason: "the limit is declared under_cap: keeper-set rate; it gives up 2%"
-                    .to_string()
+                reason: "the limit is declared under_cap: keeper-set rate; gives up 2%".to_string()
             }
         );
     }
