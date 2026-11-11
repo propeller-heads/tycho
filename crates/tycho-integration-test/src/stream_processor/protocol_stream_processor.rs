@@ -409,6 +409,16 @@ impl ProtocolStreamProcessor {
             "gigadex_v3" => {
                 stream = stream.exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None);
             }
+            "kleos_v3" => {
+                stream = stream.exchange::<UniswapV3State>("kleos_v3", tvl_filter.clone(), None);
+            }
+            "elyspump_v3" => {
+                stream = stream.exchange::<UniswapV3State>("elyspump_v3", tvl_filter.clone(), None);
+            }
+            "stockiumswap_v3" => {
+                stream =
+                    stream.exchange::<UniswapV3State>("stockiumswap_v3", tvl_filter.clone(), None);
+            }
             "pancakeswap_v3" => {
                 stream =
                     stream.exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None);
