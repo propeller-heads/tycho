@@ -93,8 +93,6 @@ pub struct Finished {
 pub struct Checks {
     harness: Harness,
     test: String,
-    /// The block the checks recorded now run at, while the runner checks a streamed block.
-    block: Option<u64>,
     results: Vec<CheckResult>,
     drift: Option<Observed>,
     /// The largest `executed - simulated` in magnitude, with its token out.
@@ -106,28 +104,10 @@ impl Checks {
         Self {
             harness,
             test: test.to_string(),
-            block: None,
             results: Vec::new(),
             drift: None,
             largest_difference: None,
         }
-    }
-
-    /// Records the checks that follow as run at `block` of the stream, or at the snapshot for
-    /// `None`.
-    pub fn at_block(&mut self, block: Option<u64>) {
-        self.block = block;
-    }
-
-    /// Records a check that only reports for now: a pass, or a warning listing `problems` that
-    /// does not fail the test.
-    pub fn warn(&mut self, id: CheckId, problems: &[String]) {
-        let outcome = if problems.is_empty() {
-            Outcome::Pass
-        } else {
-            Outcome::Warn { detail: problems.join("; ") }
-        };
-        self.record(id, None, None, outcome, None);
     }
 
     /// Notes an execution's output against its simulation, keeping the largest difference.
@@ -317,7 +297,6 @@ impl Checks {
             check,
             component: component.map(str::to_lowercase),
             direction: direction.map(str::to_string),
-            block: self.block,
             outcome,
             limit: limit.cloned(),
         });
@@ -333,9 +312,6 @@ pub struct Report {
     pub results: Vec<CheckResult>,
     /// The largest drift of each test that executed anything.
     pub drift: Vec<Drift>,
-    /// Strict, streamed: what each test's range exercised.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub coverage: Vec<crate::stream::Coverage>,
 }
 
 impl Report {
@@ -433,29 +409,10 @@ mod tests {
                 check: CheckId::ExecLadder,
                 component: Some("0xabc".to_string()),
                 direction: None,
-                block: None,
                 outcome: Outcome::Skipped { reason: "no fork state".to_string() },
                 limit: None,
             }]
         );
-    }
-
-    #[test]
-    fn streamed_checks_carry_their_block_and_a_warning_does_not_fail_the_test() {
-        let mut checks = Checks::new(Harness::Strict, "t");
-        checks.at_block(Some(21_000_005));
-        checks
-            .run(CheckId::SimLadder, || Ok(()))
-            .unwrap();
-        checks.at_block(None);
-        checks.warn(CheckId::StreamCoverage, &["3 blocks changed".to_string()]);
-        checks.warn(CheckId::StreamMatchesSnapshot, &[]);
-        let Finished { outcome, results, .. } = checks.finish();
-        assert!(outcome.is_ok());
-        assert_eq!(results[0].block, Some(21_000_005));
-        assert_eq!(results[1].block, None);
-        assert_eq!(results[1].outcome, Outcome::Warn { detail: "3 blocks changed".to_string() });
-        assert_eq!(results[2].outcome, Outcome::Pass);
     }
 
     #[test]
@@ -475,14 +432,12 @@ mod tests {
             chain: "ethereum".to_string(),
             harness: Harness::Strict,
             drift: vec![],
-            coverage: vec![],
             results: vec![
                 CheckResult {
                     test: "t".to_string(),
                     check: CheckId::SimLadder,
                     component: None,
                     direction: None,
-                    block: None,
                     outcome: Outcome::Fail { detail: "boom".to_string() },
                     limit: None,
                 },
@@ -491,7 +446,6 @@ mod tests {
                     check: CheckId::LimitsPastLimit,
                     component: Some("0x01".to_string()),
                     direction: Some("0x02->0x03".to_string()),
-                    block: Some(7),
                     outcome: Outcome::Skipped { reason: "off".to_string() },
                     limit: Some(limit_report(
                         &Limits::Soft { reason: "constant product".to_string() },
@@ -518,10 +472,6 @@ mod tests {
         assert_eq!(json["results"][1]["direction"], "0x02->0x03");
         assert_eq!(json["results"][1]["outcome"], "skipped");
         assert_eq!(json["results"][1]["reason"], "off");
-        assert_eq!(json["results"][1]["block"], 7);
-        assert!(json["results"][0]
-            .get("block")
-            .is_none());
         assert!(json["results"][0]
             .get("limit")
             .is_none());

@@ -6,7 +6,6 @@ mod limits;
 mod report;
 mod rpc;
 mod state_registry;
-mod stream;
 mod test_runner;
 mod tycho_rpc;
 mod tycho_runner;
@@ -72,20 +71,12 @@ pub struct RangeTestCommand {
     /// Write every check's outcome, per test, to this file as JSON
     #[arg(long)]
     report: Option<PathBuf>,
-
-    /// In strict mode, index the range without streaming it: check only the snapshot at the
-    /// stop block, as legacy mode does
-    #[arg(long)]
-    no_stream: bool,
 }
 
 impl RangeTestCommand {
     fn run(self) -> miette::Result<()> {
-        let test_type = TestType::Range(TestTypeRange {
-            match_test: self.match_test,
-            report: self.report,
-            stream: !self.no_stream,
-        });
+        let test_type =
+            TestType::Range(TestTypeRange { match_test: self.match_test, report: self.report });
         TestRunner::new(
             self.common_args
                 .into_config(test_type)?,
