@@ -133,6 +133,12 @@ message RouterFeeConfig {
   uint64 router_positive_slippage_bps = 9;
   // The client's share of the captured surplus, in fee units. The router keeps the rest.
   uint64 client_positive_slippage_share_bps = 10;
+  // Most surplus the router captures from this trade, as a part of the swaps' output before fees,
+  // in fee units. 100000000 when the client has no cap, the same value the FeeCalculator reports.
+  uint64 positive_slippage_cap_bps = 11;
+  // Whether the calculator has a pair fee for this trade's token pair. fee_on_output_bps already
+  // applies it: it replaces the default fee, and against a custom fee the lower of the two applies.
+  bool token_pair_fee = 12;
 }
 
 // One recipient of the FeesTaken event.
@@ -171,6 +177,9 @@ message FeeConfigEvent {
   // 0 otherwise. The two FeeCalculator generations widened the bps arguments from uint16 to
   // uint32, so an event that carries one has a different topic in each.
   uint64 bps_scale = 12;
+  // The token pair of TokenPair* events, lower address first; empty otherwise.
+  bytes token0 = 13;
+  bytes token1 = 14;
 }
 
 // Every ERC-6909 Transfer a router emitted in one block.

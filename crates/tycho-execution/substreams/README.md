@@ -163,14 +163,18 @@ produced above it. Who keeps that surplus takes three columns:
    no switch and always reports true.
 2. Otherwise the router captures `router_positive_slippage_bps` of it, and the receiver keeps the
    rest.
-3. The client gets `client_positive_slippage_share_bps` of the captured amount, and the router
+3. The client's cap limits the captured amount to `positive_slippage_cap_bps` of
+   `gross_amount_out`, the swaps' output before fees. The receiver keeps the surplus above it.
+4. The client gets `client_positive_slippage_share_bps` of the captured amount, and the router
    keeps the remainder, rounded in its favour.
 
 Both values are in fee units (100000000 = all of it). The router positive slippage bps is the client's custom
 value (`CustomRouterPositiveSlippageBpsUpdated`, `CustomRouterPositiveSlippageBpsRemoved`) when
 one is set, otherwise the calculator's global value (`RouterPositiveSlippageBpsUpdated`). A
 calculator that never emitted a router positive slippage event captures the full surplus. The client share comes from
-`ClientPositiveSlippageShareUpdated` and defaults to zero.
+`ClientPositiveSlippageShareUpdated` and defaults to zero. The cap comes from
+`PositiveSlippageCapUpdated`. A client without one reads as 100000000, which captures as much as
+no cap does, the same value the FeeCalculator reports.
 
 The calculator generation before per-client router positive slippage bps exempted a client instead, with
 `PositiveSlippageExemptionSet(address indexed client, bool exempt)`. `store_fee_config` stores an
@@ -183,6 +187,15 @@ The client is the one the FeeCalculator resolves: the signed `client_fee_receive
 
 `positive_slippage` is what the swaps produced, not what was taken. Read `router_fee_amount`,
 which comes from the `FeesTaken` event, for what the router actually collected.
+
+### Token pair fees
+
+`TokenPairFeeUpdated` sets a router fee on output for swaps between two tokens, in both
+directions, and `TokenPairFeeRemoved` drops it. The calculator names the pair lower address first,
+and `fee_config_events` stores it in `token0` and `token1`. `router_fee_on_output_bps` applies the
+pair fee the way `FeeCalculator._applyTokenPairFee` does: it replaces the default fee, and against
+a client's custom fee the lower of the two applies. `token_pair_fee` says whether the trade's pair
+has one.
 
 ### Router generations
 
@@ -539,7 +552,9 @@ hand. ABIs come from the verified sources on Sourcify
 `0xea290cE3…`, `FeeCalculator` = `0xA236E1F0…`). Two ABI files hold events that deployment does not have:
 `FeeCalculatorV3_0.json` the `uint16` event signatures of the earlier FeeCalculator, and
 `FeeCalculatorExemption.json` the `PositiveSlippageExemptionSet` of the later one, and
-`FeeCalculatorRouterPositiveSlippage.json` the router positive slippage events of the one after it.
+`FeeCalculatorRouterPositiveSlippage.json` the router positive slippage events of the one after it,
+and `FeeCalculatorCapAndPairFee.json` the positive slippage cap and token pair fee events of the
+one after that.
 Each is events-only, and the decoders try them in turn. `SubsidyPayer.json` holds the two events of
 `contracts/interfaces/ISubsidyPayer.sol`, events-only as well.
 
