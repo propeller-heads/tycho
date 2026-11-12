@@ -49,6 +49,7 @@ use crate::{
         rpc::v2::{BlockScopedData, BlockUndoSignal, ModulesProgress},
         v1::Clock,
     },
+    substreams::clock_timestamp_ms,
 };
 
 pub struct Inner {
@@ -1063,6 +1064,13 @@ where
                 msg
             };
 
+            if inp.partial_index.is_none() {
+                msg.block.timestamp_ms = inp
+                    .clock
+                    .as_ref()
+                    .and_then(clock_timestamp_ms);
+            }
+
             if let Some(last_processed_block) = self.get_last_processed_block().await {
                 if msg.block.ts.and_utc().timestamp() ==
                     last_processed_block
@@ -1149,7 +1157,7 @@ where
         final_block_height: u64,
         clock: Option<Clock>,
     ) -> Result<Option<ExtractorMsg>, ExtractionError> {
-        let msg = self
+        let mut msg = self
             .partial_block_buffer
             .lock()
             .await
@@ -1160,6 +1168,9 @@ where
                     "Could not fetch full block data: partial block buffer is empty at block {block_num}"
                 ))
             })?;
+        msg.block.timestamp_ms = clock
+            .as_ref()
+            .and_then(clock_timestamp_ms);
         self.process_full_block_message(msg, cursor, final_block_height)
             .await
             .map(|opt| {
@@ -3208,6 +3219,125 @@ mod test {
 
         assert_eq!(msg.component_tvl.len(), 1);
         assert_float_eq!(*res, exp_tvl, rmax <= 0.000_001);
+    }
+
+    fn clock_at(seconds: u64, nanos: i32) -> Clock {
+        Clock {
+            timestamp: Some(prost_types::Timestamp {
+                seconds: i64::try_from(seconds).unwrap(),
+                nanos,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn empty_full_block(block: tycho_pb::Block, clock: Option<Clock>) -> BlockScopedData {
+        let cursor = format!("cursor@{}", block.number);
+        let mut bsd = pb_fixtures::pb_block_scoped_data(
+            &tycho_pb::BlockChanges { block: Some(block), ..Default::default() },
+            Some(&cursor),
+            Some(1),
+        );
+        bsd.clock = clock;
+        bsd
+    }
+
+    #[tokio::test]
+    async fn test_full_block_carries_clock_millis() {
+        let extractor = create_extractor_with_batch_size(no_lookup_gateway(), 1).await;
+        let block_1 = pb_fixtures::pb_blocks(1);
+        let block_2 = pb_fixtures::pb_blocks(2);
+        let (ts_1, ts_2) = (block_1.ts, block_2.ts);
+
+        let msg_1 = extractor
+            .handle_tick_scoped_data(empty_full_block(block_1, Some(clock_at(ts_1, 400_000_000))))
+            .await
+            .unwrap()
+            .unwrap();
+        let msg_2 = extractor
+            .handle_tick_scoped_data(empty_full_block(block_2, Some(clock_at(ts_2, 0))))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(msg_1.block.timestamp_ms, Some(ts_1 * 1000 + 400));
+        assert_eq!(msg_2.block.timestamp_ms, Some(ts_2 * 1000));
+    }
+
+    #[tokio::test]
+    async fn test_full_block_without_clock_has_no_millis() {
+        let extractor = create_extractor_with_batch_size(no_lookup_gateway(), 1).await;
+
+        let msg = extractor
+            .handle_tick_scoped_data(empty_full_block(pb_fixtures::pb_blocks(1), None))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(msg.block.timestamp_ms, None);
+    }
+
+    #[tokio::test]
+    async fn test_same_second_block_keeps_its_clock_millis() {
+        let extractor = create_extractor_with_batch_size(no_lookup_gateway(), 1).await;
+        let block_1 = pb_fixtures::pb_blocks(1);
+        let mut block_2 = pb_fixtures::pb_blocks(2);
+        block_2.ts = block_1.ts;
+        let ts = block_1.ts;
+
+        extractor
+            .handle_tick_scoped_data(empty_full_block(block_1, Some(clock_at(ts, 200_000_000))))
+            .await
+            .unwrap()
+            .unwrap();
+        let msg_2 = extractor
+            .handle_tick_scoped_data(empty_full_block(block_2, Some(clock_at(ts, 400_000_000))))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            msg_2
+                .block
+                .ts
+                .and_utc()
+                .timestamp_subsec_micros(),
+            1
+        );
+        assert_eq!(msg_2.block.timestamp_ms, Some(ts * 1000 + 400));
+    }
+
+    #[tokio::test]
+    async fn test_partials_carry_no_millis_and_the_full_block_takes_the_final_clock() {
+        let mut gw = no_lookup_gateway();
+        gw.expect_advance()
+            .times(0)
+            .returning(|_, _, _| Ok(()));
+        let extractor = create_extractor(gw).await;
+        let ts = pb_fixtures::pb_blocks(1).ts;
+
+        for (partial_index, nanos) in [(0, 200_000_000), (1, 400_000_000)] {
+            let mut bsd = make_partial_block_with_data(1, partial_index);
+            bsd.clock = Some(clock_at(ts, nanos));
+            let msg = extractor
+                .handle_tick_scoped_data(bsd)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(msg.block.timestamp_ms, None);
+        }
+
+        let full = extractor
+            .collect_and_process_full_block(
+                "cursor@1".to_string(),
+                1,
+                Some(clock_at(ts, 600_000_000)),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(full.block.timestamp_ms, Some(ts * 1000 + 600));
     }
 
     // ── Partial block handling tests ──────────────────────────────────────
@@ -5526,6 +5656,7 @@ mod test_serial_db {
                     .unwrap(),
                     parent_hash: Bytes::default(),
                     ts: db_fixtures::yesterday_half_past_midnight(),
+                    ..Default::default()
                 }])
                 .await
                 .expect("block insertion succeeded");
@@ -5968,13 +6099,17 @@ mod test_serial_db {
             let block_entity_changes_result = BlockAggregatedChanges {
                 extractor: "native_name".to_string(),
                 chain: Chain::Ethereum,
-                block: Block::new(
-                    3,
-                    Chain::Ethereum,
-                    Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000003").unwrap(),
-                    Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000002").unwrap(),
-                    chrono::DateTime::from_timestamp(base_ts + 3000, 0).unwrap().naive_utc(),
-                ),
+                block: Block {
+                    // The fixture clock is at 1000 s.
+                    timestamp_ms: Some(1_000_000),
+                    ..Block::new(
+                        3,
+                        Chain::Ethereum,
+                        Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000003").unwrap(),
+                        Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000002").unwrap(),
+                        chrono::DateTime::from_timestamp(base_ts + 3000, 0).unwrap().naive_utc(),
+                    )
+                },
                 db_committed_block_height: None,
                 finalized_block_height: 3,
                 revert: true,
@@ -6162,13 +6297,17 @@ mod test_serial_db {
             let block_account_expected = BlockAggregatedChanges {
                 extractor: "vm_name".to_string(),
                 chain: Chain::Ethereum,
-                block: Block::new(
-                    3,
-                    Chain::Ethereum,
-                    Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000003").unwrap(),
-                    Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000002").unwrap(),
-                    chrono::DateTime::from_timestamp(base_ts + 3000, 0).unwrap().naive_utc(),
-                ),
+                block: Block {
+                    // The fixture clock is at 1000 s.
+                    timestamp_ms: Some(1_000_000),
+                    ..Block::new(
+                        3,
+                        Chain::Ethereum,
+                        Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000003").unwrap(),
+                        Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000002").unwrap(),
+                        chrono::DateTime::from_timestamp(base_ts + 3000, 0).unwrap().naive_utc(),
+                    )
+                },
                 db_committed_block_height: None,
                 finalized_block_height: 3,
                 revert: true,

@@ -287,6 +287,9 @@ pub struct Block {
     pub parent_hash: Bytes,
     pub chain: Chain,
     pub ts: NaiveDateTime,
+    /// Block time in milliseconds, when the server has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, ToSchema, Eq, Hash, DeepSizeOf)]
@@ -523,6 +526,7 @@ impl From<models::blockchain::Block> for Block {
             parent_hash: value.parent_hash,
             chain: value.chain.into(),
             ts: value.ts,
+            timestamp_ms: value.timestamp_ms,
         }
     }
 }
@@ -2134,6 +2138,31 @@ mod test {
     use rstest::rstest;
 
     use super::*;
+
+    #[test]
+    fn test_block_without_timestamp_ms_deserializes() {
+        let json = r#"{"number":1,"hash":"0x01","parent_hash":"0x00","chain":"base","ts":"2026-11-11T12:00:01"}"#;
+        let block: Block = serde_json::from_str(json).unwrap();
+        assert_eq!(block.timestamp_ms, None);
+    }
+
+    #[test]
+    fn test_block_skips_absent_timestamp_ms() {
+        let value = serde_json::to_value(Block::default()).unwrap();
+        assert!(value.get("timestamp_ms").is_none());
+    }
+
+    #[test]
+    fn test_block_timestamp_ms_roundtrips_through_the_wire() {
+        let model = models::blockchain::Block {
+            timestamp_ms: Some(1_793_901_601_600),
+            ..Default::default()
+        };
+        let wire = serde_json::to_string(&Block::from(model.clone())).unwrap();
+        let back: Block = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back.timestamp_ms, Some(1_793_901_601_600));
+        assert_eq!(models::blockchain::Block::from(back), model);
+    }
 
     /// Test backward compatibility for Command::Subscribe compression field.
     /// Should default to false when not specified.

@@ -1247,6 +1247,7 @@ mod tests {
             ts: chrono::DateTime::from_timestamp(1_700_000_000, 0)
                 .expect("valid timestamp")
                 .naive_utc(),
+            ..Default::default()
         };
 
         let header = BlockHeader::from(&block);

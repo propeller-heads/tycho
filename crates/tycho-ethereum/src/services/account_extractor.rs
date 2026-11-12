@@ -58,6 +58,7 @@ impl EVMAccountExtractor {
                     RPCError::RequestError(RequestError::Other("Invalid timestamp in block".into()))
                 })?
                 .naive_utc(),
+            timestamp_ms: None,
         })
     }
 }

@@ -3,6 +3,7 @@ import json
 from hexbytes import HexBytes
 
 from tycho_indexer_client.dto import (
+    Block,
     Chain,
     ContractId,
     ContractStateParams,
@@ -89,3 +90,15 @@ def test_decode_contract_state_params_backward_compatibility():
         contract_ids = ['0xba12222222228d8ba445958a75a0704d566bf2c8', '0xe96a45f66bdda121b24f0a861372a72e8889523d'])
     assert msg_old == ContractStateParams(
         contract_ids = ['0xba12222222228d8ba445958a75a0704d566bf2c8', '0xe96a45f66bdda121b24f0a861372a72e8889523d'])
+
+
+def test_decode_block_timestamp_ms():
+    base = {
+        "number": 1,
+        "hash": "0x01",
+        "parent_hash": "0x00",
+        "chain": "base",
+        "ts": "2026-11-11T12:00:01",
+    }
+    assert Block(**base).timestamp_ms is None
+    assert Block(**base, timestamp_ms=1_793_901_601_600).timestamp_ms == 1_793_901_601_600

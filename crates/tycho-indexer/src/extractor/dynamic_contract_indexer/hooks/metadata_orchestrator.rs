@@ -446,6 +446,7 @@ mod tests {
             ts: DateTime::from_timestamp(1234567890, 0)
                 .unwrap()
                 .naive_utc(),
+            ..Default::default()
         }
     }
 

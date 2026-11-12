@@ -480,6 +480,7 @@ mod tests {
                 "0x274607019d5d34329809c455db8230c3ef2cf038c15ddacc79e36beb645da02d",
             ),
             ts: NaiveDateTime::parse_from_str("2025-07-15T07:49:59", "%Y-%m-%dT%H:%M:%S").unwrap(),
+            ..Default::default()
         };
 
         let requests = generator
@@ -628,6 +629,7 @@ mod tests {
                 "0x274607019d5d34329809c455db8230c3ef2cf038c15ddacc79e36beb645da02d",
             ),
             ts: NaiveDateTime::parse_from_str("2025-07-15T07:49:59", "%Y-%m-%dT%H:%M:%S").unwrap(),
+            ..Default::default()
         };
 
         let requests = generator
@@ -777,6 +779,7 @@ mod tests {
                 "0x0000000000000000000000000000000000000000000000000000000000000000",
             ),
             ts: NaiveDateTime::parse_from_str("2025-01-01T00:00:00", "%Y-%m-%dT%H:%M:%S").unwrap(),
+            ..Default::default()
         };
 
         let requests = generator
@@ -879,6 +882,7 @@ mod tests {
                 "0x0000000000000000000000000000000000000000000000000000000000000000",
             ),
             ts: NaiveDateTime::parse_from_str("2025-01-01T00:00:00", "%Y-%m-%dT%H:%M:%S").unwrap(),
+            ..Default::default()
         };
 
         // Mock response data for limits call (doesn't matter for this test, just needs to be valid

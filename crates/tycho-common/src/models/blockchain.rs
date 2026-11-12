@@ -24,6 +24,10 @@ pub struct Block {
     pub hash: Bytes,
     pub parent_hash: Bytes,
     pub ts: NaiveDateTime,
+    /// Block time in milliseconds from the Substreams clock. `ts` stays the EVM timestamp plus
+    /// ordering offsets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<u64>,
 }
 
 impl Block {
@@ -34,7 +38,7 @@ impl Block {
         parent_hash: Bytes,
         ts: NaiveDateTime,
     ) -> Self {
-        Block { hash, parent_hash, number, chain, ts }
+        Block { hash, parent_hash, number, chain, ts, timestamp_ms: None }
     }
 }
 
@@ -400,6 +404,7 @@ impl From<dto::Block> for Block {
             hash: value.hash,
             parent_hash: value.parent_hash,
             ts: value.ts,
+            timestamp_ms: value.timestamp_ms,
         }
     }
 }

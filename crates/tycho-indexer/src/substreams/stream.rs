@@ -22,7 +22,7 @@ use crate::{
         },
         v1::Package,
     },
-    substreams::SubstreamsEndpoint,
+    substreams::{clock_timestamp_ms, SubstreamsEndpoint},
 };
 
 #[expect(
@@ -190,6 +190,9 @@ fn stream_blocks(
                                     // This means .is_last_partial will be unset for the last partial. We'd need to update this logic when that happens
                                     // to monitor for the first partial of the next block as the indicator that the previous block is complete.
                                     if !block_scoped_data.is_partial || block_scoped_data.is_last_partial.is_some_and(|last_partial| last_partial) {
+                                        if let Some(clock_ms) = clock_timestamp_ms(&block) {
+                                            gauge!("substreams_clock_subsec_millis", "extractor" => extractor_id.clone()).set((clock_ms % 1000) as f64);
+                                        }
                                         if let Some(block_ts) = block.timestamp {
                                             let now = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards!?").as_millis();
                                             let block_millis = u128::try_from(block_ts.seconds * 1000)
