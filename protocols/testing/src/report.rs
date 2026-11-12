@@ -61,12 +61,12 @@ pub struct Finished {
 pub struct Checks {
     harness: Harness,
     test: String,
-    /// The block the checks recorded now run at, while the runner checks a streamed block.
-    block: Option<u64>,
     results: Vec<CheckResult>,
     drift: Option<Observed>,
     /// The largest `executed - simulated` in magnitude, with its token out.
     largest_difference: Option<(BigInt, String)>,
+    /// The block the checks recorded now run at, while `full` checks an update.
+    block: Option<u64>,
 }
 
 impl Checks {
@@ -74,28 +74,16 @@ impl Checks {
         Self {
             harness,
             test: test.to_string(),
-            block: None,
             results: Vec::new(),
             drift: None,
             largest_difference: None,
+            block: None,
         }
     }
 
-    /// Records the checks that follow as run at `block` of the stream, or at the snapshot for
-    /// `None`.
+    /// Records the checks that follow as run at `block`, or at the snapshot for `None`.
     pub fn at_block(&mut self, block: Option<u64>) {
         self.block = block;
-    }
-
-    /// Records a check that only reports for now: a pass, or a warning listing `problems` that
-    /// does not fail the test.
-    pub fn warn(&mut self, id: CheckId, problems: &[String]) {
-        let outcome = if problems.is_empty() {
-            Outcome::Pass
-        } else {
-            Outcome::Warn { detail: problems.join("; ") }
-        };
-        self.record(id, None, None, outcome, None);
     }
 
     /// Notes an execution's output against its simulation, keeping the largest difference.
@@ -301,9 +289,6 @@ pub struct Report {
     pub results: Vec<CheckResult>,
     /// The largest drift of each test that executed anything.
     pub drift: Vec<Drift>,
-    /// Strict, streamed: what each test's range exercised.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub coverage: Vec<crate::stream::Coverage>,
 }
 
 impl Report {
@@ -410,21 +395,15 @@ mod tests {
     }
 
     #[test]
-    fn streamed_checks_carry_their_block_and_a_warning_does_not_fail_the_test() {
+    fn checks_carry_the_block_they_ran_at() {
         let mut checks = Checks::new(Harness::Strict, "t");
         checks.at_block(Some(21_000_005));
-        checks
-            .run(CheckId::SimLadder, || Ok(()))
-            .unwrap();
+        checks.skip(CheckId::ExecLadder, "off");
         checks.at_block(None);
-        checks.warn(CheckId::StreamCoverage, &["3 blocks changed".to_string()]);
-        checks.warn(CheckId::StreamMatchesSnapshot, &[]);
-        let Finished { outcome, results, .. } = checks.finish();
-        assert!(outcome.is_ok());
+        checks.skip(CheckId::Balances, "off");
+        let results = checks.finish().results;
         assert_eq!(results[0].block, Some(21_000_005));
         assert_eq!(results[1].block, None);
-        assert_eq!(results[1].outcome, Outcome::Warn { detail: "3 blocks changed".to_string() });
-        assert_eq!(results[2].outcome, Outcome::Pass);
     }
 
     #[test]
@@ -444,7 +423,6 @@ mod tests {
             chain: "ethereum".to_string(),
             harness: Harness::Strict,
             drift: vec![],
-            coverage: vec![],
             results: vec![
                 CheckResult {
                     test: "t".to_string(),
