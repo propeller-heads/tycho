@@ -29,6 +29,12 @@ pub struct TickDelta {
     pub ordinal: u64,
     #[prost(message, optional, tag="5")]
     pub transaction: ::core::option::Option<Transaction>,
+    /// Change of the liquidity referencing the tick (Core's tick liquidityNet),
+    /// which is non-zero exactly while the tick is initialized.
+    ///
+    /// int128
+    #[prost(bytes="vec", tag="6")]
+    pub liquidity_gross_delta: ::prost::alloc::vec::Vec<u8>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -118,6 +124,9 @@ pub struct PoolDetails {
     pub token1: ::prost::alloc::vec::Vec<u8>,
     #[prost(bool, tag="3")]
     pub is_stableswap: bool,
+    /// Initialized ticks with a zero net liquidity delta are indexed.
+    #[prost(bool, tag="4")]
+    pub is_mev_capture_v21: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -148,7 +157,7 @@ pub mod block_transaction_events {
             /// bytes32
             #[prost(bytes="vec", tag="2")]
             pub pool_id: ::prost::alloc::vec::Vec<u8>,
-            #[prost(oneof="pool_log::Event", tags="3, 4, 5, 6, 7, 8")]
+            #[prost(oneof="pool_log::Event", tags="3, 4, 5, 6, 7, 8, 9")]
             pub event: ::core::option::Option<pool_log::Event>,
         }
         /// Nested message and enum types in `PoolLog`.
@@ -211,6 +220,8 @@ pub mod block_transaction_events {
                 pub sqrt_ratio: ::prost::alloc::vec::Vec<u8>,
                 #[prost(bool, tag="6")]
                 pub has_time_rate_deltas: bool,
+                #[prost(bool, tag="7")]
+                pub is_mev_capture_v21: bool,
             }
             #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -245,6 +256,14 @@ pub mod block_transaction_events {
                 #[prost(bytes="vec", tag="1")]
                 pub swap_fee: ::prost::alloc::vec::Vec<u8>,
             }
+            /// The extension's per-pool storage word, written without an event.
+            #[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct ExtensionStateUpdated {
+                /// bytes32
+                #[prost(bytes="vec", tag="1")]
+                pub state: ::prost::alloc::vec::Vec<u8>,
+            }
             #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Oneof)]
             pub enum Event {
@@ -260,6 +279,8 @@ pub mod block_transaction_events {
                 RateUpdated(RateUpdated),
                 #[prost(message, tag="8")]
                 SwapFeeUpdated(SwapFeeUpdated),
+                #[prost(message, tag="9")]
+                ExtensionStateUpdated(ExtensionStateUpdated),
             }
         }
     }

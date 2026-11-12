@@ -552,7 +552,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use dotenv::dotenv;
+    use dotenvy::dotenv;
 
     use super::*;
     use crate::utils::hexstring_to_vec;

@@ -9,6 +9,7 @@ import {FeeRecipient, FeeInput} from "../lib/FeeStructs.sol";
 import {IFeeCalculator, CustomFees} from "@interfaces/IFeeCalculator.sol";
 
 error FeeCalculator__FeeTooHigh();
+error FeeCalculator__ShareTooHigh();
 error FeeCalculator__AddressZero();
 
 /**
@@ -23,6 +24,11 @@ error FeeCalculator__AddressZero();
  */
 contract FeeCalculator is AccessControl, IFeeCalculator {
     using EnumerableSet for EnumerableSet.AddressSet;
+
+    struct TokenPairFee {
+        bool isSet;
+        uint32 feeBps;
+    }
 
     // 100% expressed in 8-decimal fee units (1 unit = 0.0001 BPS = 0.000001%)
     uint32 public constant MAX_BPS = 100_000_000;
@@ -48,6 +54,17 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     // while positive slippage capture is enabled
     mapping(address => bool) private _positiveSlippageExempt;
 
+    // Each client's share of the captured surplus in fee units. The router
+    // keeps the rest, so the default of zero leaves the full surplus to it.
+    mapping(address => uint32) private _clientPositiveSlippageShareBps;
+
+    // Router fee on output for swaps between two tokens, in both
+    // directions. Keyed by the lower token address, then the higher one.
+    // A set pair fee replaces the default router fee on output, so it can
+    // be zero.
+    mapping(address => mapping(address => TokenPairFee)) private _tokenPairFees;
+    uint256 private _tokenPairFeeCount;
+
     bytes32 public constant ROUTER_FEE_SETTER_ROLE =
         keccak256("ROUTER_FEE_SETTER_ROLE");
 
@@ -66,6 +83,13 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     );
     event PositiveSlippageToggled(bool enabled);
     event PositiveSlippageExemptionSet(address indexed client, bool exempt);
+    event ClientPositiveSlippageShareUpdated(
+        address indexed client, uint32 oldShareBps, uint32 newShareBps
+    );
+    event TokenPairFeeUpdated(
+        address indexed token0, address indexed token1, uint32 newFeeBps
+    );
+    event TokenPairFeeRemoved(address indexed token0, address indexed token1);
 
     /**
      * @param routerFeeSetter Address granted ROUTER_FEE_SETTER_ROLE
@@ -96,7 +120,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      *      Deduction order:
      *      1. When positive slippage capture is enabled and the client is not
      *         exempt, the surplus (actualAmountOut - expectedAmountOut) is
-     *         taken by the router first.
+     *         taken first. The client gets its share of the surplus and
+     *         the router keeps the rest.
      *      2. Fees (client fee + router fees) are then calculated on
      *         the amount *after* surplus extraction (expectedAmountOut when
      *         surplus was taken, actualAmountOut otherwise).
@@ -116,22 +141,33 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         uint256 positiveSlippage = _calculatePositiveSlippage(
             feeInput.actualAmountOut, feeInput.expectedAmountOut, resolvedClient
         );
+        uint256 clientPositiveSlippage = positiveSlippage == 0
+            ? 0
+            : positiveSlippage * _clientPositiveSlippageShareBps[resolvedClient]
+                / MAX_BPS;
 
         // Fee base = actual output minus any extracted surplus.
         // When surplus is taken: feeBase = expectedAmountOut.
         // When no surplus (disabled or actual <= expected): it is zero.
         uint256 feeBase = feeInput.actualAmountOut - positiveSlippage;
 
-        (uint256 routerFee, uint256 clientFee) =
-            _calculateFee(feeBase, resolvedClient, feeInput.clientFeeBps);
+        (uint256 routerFee, uint256 clientFee) = _calculateFee(
+            feeBase,
+            resolvedClient,
+            feeInput.clientFeeBps,
+            feeInput.tokenIn,
+            feeInput.tokenOut
+        );
 
         feeRecipients = new FeeRecipient[](2);
         feeRecipients[0] = FeeRecipient({
             recipient: _routerFeeReceiver,
-            feeAmount: routerFee + positiveSlippage
+            feeAmount: routerFee + positiveSlippage - clientPositiveSlippage
         });
-        feeRecipients[1] =
-            FeeRecipient({recipient: resolvedClient, feeAmount: clientFee});
+        feeRecipients[1] = FeeRecipient({
+            recipient: resolvedClient,
+            feeAmount: clientFee + clientPositiveSlippage
+        });
     }
 
     /**
@@ -162,6 +198,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
         if (clientFeeBps > 0) return true;
         if (routerFeeOnOutputBps > 0) return true;
+        // The swap tokens are not known here, so any pair fee might apply.
+        if (_tokenPairFeeCount > 0) return true;
 
         return false;
     }
@@ -169,16 +207,21 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     /**
      * @dev Calculates fees from the fee base amount (output minus any
      *      extracted surplus).
-     * @return routerFee Total router fee (fee on output + cut of the client fee)
+     * @return routerFee Total router fee (fee on output + cut of the client
+     *         fee)
      * @return clientFee Client's portion of the client fee (after the router's cut)
      */
-    function _calculateFee(uint256 feeBase, address client, uint32 clientFeeBps)
-        internal
-        view
-        returns (uint256 routerFee, uint256 clientFee)
-    {
+    function _calculateFee(
+        uint256 feeBase,
+        address client,
+        uint32 clientFeeBps,
+        address tokenIn,
+        address tokenOut
+    ) internal view returns (uint256 routerFee, uint256 clientFee) {
         (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps) =
             _getFeeInfo(client);
+        routerFeeOnOutputBps =
+            _applyTokenPairFee(routerFeeOnOutputBps, client, tokenIn, tokenOut);
 
         if (
             (clientFeeBps + routerFeeOnOutputBps > MAX_BPS)
@@ -226,7 +269,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
-     * @dev Calculates the positive slippage surplus, all of which goes to the router
+     * @dev Calculates the positive slippage surplus that the router captures
      * @return positiveSlippage The surplus (zero if disabled, the client is
      *         exempt, or there is no surplus)
      */
@@ -243,6 +286,15 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         }
 
         positiveSlippage = actualAmountOut - expectedAmountOut;
+    }
+
+    function _getTokenPairFee(address tokenA, address tokenB)
+        internal
+        view
+        returns (TokenPairFee memory)
+    {
+        (address token0, address token1) = _sortTokens(tokenA, tokenB);
+        return _tokenPairFees[token0][token1];
     }
 
     /**
@@ -266,6 +318,27 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         routerFeeOnClientFeeBps = customFees.hasCustomFeeOnClientFee
             ? customFees.feeBpsOnClientFee
             : _routerFeeOnClientFeeBps;
+    }
+
+    /**
+     * @dev Applies the pair fee to the client's router fee on output. A set
+     *      pair fee replaces the default fee. For a client with a custom fee
+     *      on output, the lower of the custom fee and the pair fee applies.
+     */
+    function _applyTokenPairFee(
+        uint32 routerFeeOnOutputBps,
+        address client,
+        address tokenIn,
+        address tokenOut
+    ) internal view returns (uint32) {
+        TokenPairFee memory pairFee = _getTokenPairFee(tokenIn, tokenOut);
+        if (!pairFee.isSet) return routerFeeOnOutputBps;
+        if (!_customRouterFees[client].hasCustomFeeOnOutput) {
+            return pairFee.feeBps;
+        }
+        return pairFee.feeBps < routerFeeOnOutputBps
+            ? pairFee.feeBps
+            : routerFeeOnOutputBps;
     }
 
     /**
@@ -402,6 +475,62 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
+     * @dev Sets the router fee on output for swaps between `tokenA` and
+     *      `tokenB`, in both directions. It replaces the default router fee
+     *      on output. For a client with a custom fee on output, the lower of
+     *      the two applies. A fee of zero makes the pair free of the router
+     *      fee on output.
+     * @param feeBps Fee in fee units (1 unit = 0.0001 BPS; 100_000_000 = 100%)
+     */
+    function setTokenPairFee(address tokenA, address tokenB, uint32 feeBps)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        if (feeBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
+        (address token0, address token1) = _sortTokens(tokenA, tokenB);
+        if (!_tokenPairFees[token0][token1].isSet) ++_tokenPairFeeCount;
+        _tokenPairFees[token0][token1] =
+            TokenPairFee({isSet: true, feeBps: feeBps});
+        emit TokenPairFeeUpdated(token0, token1, feeBps);
+    }
+
+    /**
+     * @dev Removes the pair fee, so swaps between `tokenA` and `tokenB` pay
+     *      the default or custom router fee on output again.
+     */
+    function removeTokenPairFee(address tokenA, address tokenB)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        (address token0, address token1) = _sortTokens(tokenA, tokenB);
+        if (!_tokenPairFees[token0][token1].isSet) return;
+        --_tokenPairFeeCount;
+        delete _tokenPairFees[token0][token1];
+        emit TokenPairFeeRemoved(token0, token1);
+    }
+
+    /**
+     * @dev Returns the pair fee for `tokenA` and `tokenB` in fee units.
+     *      `isSet` is false when no pair fee is set.
+     */
+    function getTokenPairFee(address tokenA, address tokenB)
+        external
+        view
+        returns (bool isSet, uint32 feeBps)
+    {
+        TokenPairFee memory pairFee = _getTokenPairFee(tokenA, tokenB);
+        return (pairFee.isSet, pairFee.feeBps);
+    }
+
+    function _sortTokens(address tokenA, address tokenB)
+        internal
+        pure
+        returns (address token0, address token1)
+    {
+        return tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+    }
+
+    /**
      * @notice Returns a page of clients with custom fee overrides and their current settings
      * @param start Index to start reading from (0-indexed)
      * @param count Maximum number of entries to return
@@ -424,6 +553,35 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
             clients[i] = client;
             fees[i] = _customRouterFees[client];
         }
+    }
+
+    /**
+     * @notice Returns the router fee rates `calculateFee` applies for a client
+     *         and a token pair
+     * @dev Custom rates override the defaults per fee, and a pair fee applies
+     *      as in `calculateFee`. A zero client resolves to tx.origin, as in
+     *      `calculateFee`.
+     * @param client The client address to check
+     * @param tokenIn The swap's input token
+     * @param tokenOut The swap's output token
+     * @return routerFeeOnOutputBps Router fee on output in fee units
+     * @return routerFeeOnClientFeeBps Router fee on client fee in fee units
+     */
+    function getEffectiveRouterFees(
+        address client,
+        address tokenIn,
+        address tokenOut
+    )
+        external
+        view
+        returns (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps)
+    {
+        address resolvedClient = _resolveClient(client);
+        (routerFeeOnOutputBps, routerFeeOnClientFeeBps) =
+            _getFeeInfo(resolvedClient);
+        routerFeeOnOutputBps = _applyTokenPairFee(
+            routerFeeOnOutputBps, resolvedClient, tokenIn, tokenOut
+        );
     }
 
     /**
@@ -492,5 +650,32 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         returns (bool)
     {
         return _positiveSlippageExempt[client];
+    }
+
+    /**
+     * @dev Sets a client's share of the captured surplus. The router keeps
+     *      the rest. Zero gives the full surplus to the router.
+     * @param client The client address to update
+     * @param shareBps Share in fee units (100_000_000 = the full surplus)
+     */
+    function setClientPositiveSlippageShare(address client, uint32 shareBps)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        if (shareBps > MAX_BPS) revert FeeCalculator__ShareTooHigh();
+        uint32 oldShareBps = _clientPositiveSlippageShareBps[client];
+        _clientPositiveSlippageShareBps[client] = shareBps;
+        emit ClientPositiveSlippageShareUpdated(client, oldShareBps, shareBps);
+    }
+
+    /**
+     * @dev Returns a client's share of the captured surplus in fee units
+     */
+    function getClientPositiveSlippageShare(address client)
+        external
+        view
+        returns (uint32)
+    {
+        return _clientPositiveSlippageShareBps[client];
     }
 }

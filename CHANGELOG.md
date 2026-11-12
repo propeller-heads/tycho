@@ -1,3 +1,228 @@
+## [0.515.0](https://github.com/propeller-heads/tycho/compare/0.514.0...0.515.0) (2026-11-12)
+
+
+### Features
+
+* **execution:** charge a router fee per input or output token ([af76dde](https://github.com/propeller-heads/tycho/commit/af76ddea0be56109637c64bb14cd50de009227c9))
+* **execution:** charge a router fee per token pair ([ad8f100](https://github.com/propeller-heads/tycho/commit/ad8f100d928e1bd0748046e1a817c9a0bccb17fa))
+* **execution:** charge a router fee per token pair ([#1546](https://github.com/propeller-heads/tycho/issues/1546)) ([b30286f](https://github.com/propeller-heads/tycho/commit/b30286f0c0084ce5d026a0c5a3bb9ca2635ae729))
+* **execution:** charge router fees per token pair only ([a8f07dc](https://github.com/propeller-heads/tycho/commit/a8f07dc54bdec165e10fe5864ed3800dc8344e47))
+* **execution:** include the pair fee in the effective router fees ([462174c](https://github.com/propeller-heads/tycho/commit/462174c6ec62898d40bd4bed0e4778c9bfc504f9))
+* **execution:** make the pair fee replace the router fee on output ([092b13d](https://github.com/propeller-heads/tycho/commit/092b13d22d73e09494909852652d08ee637101d8))
+
+
+### Bug Fixes
+
+* **execution:** keep the router's fee calculator calls unchanged ([303fe32](https://github.com/propeller-heads/tycho/commit/303fe32218481eb12fa27f36dcc52d7efc3b111a))
+* **simulation:** refit the PancakeSwap Infinity Bin base gas ([1c18d8d](https://github.com/propeller-heads/tycho/commit/1c18d8da91a838e7e9112c3b242375cf62476630))
+
+## [0.514.0](https://github.com/propeller-heads/tycho/compare/0.513.0...0.514.0) (2026-11-11)
+
+
+### Features
+
+* **execution:** deploy NativeWrapExecutor to Elysium ([25a7041](https://github.com/propeller-heads/tycho/commit/25a7041196736de819a281d4b871b40221723469))
+* **execution:** deploy NativeWrapExecutor to Elysium ([#1785](https://github.com/propeller-heads/tycho/issues/1785)) ([eee235e](https://github.com/propeller-heads/tycho/commit/eee235eb85e772ef922bedeaf8cf13d886441e5b))
+
+## [0.513.0](https://github.com/propeller-heads/tycho/compare/0.512.0...0.513.0) (2026-11-11)
+
+
+### Features
+
+* **fee-calculator:** expose the router fee rates applied to a client ([e18ebdd](https://github.com/propeller-heads/tycho/commit/e18ebdde98493d7008b890f41adba3be071448b4))
+* **fee-calculator:** expose the router fee rates applied to a client ([#1786](https://github.com/propeller-heads/tycho/issues/1786)) ([dd80f47](https://github.com/propeller-heads/tycho/commit/dd80f4741967070b9a2c3f9d80ab0d326252d8e7))
+
+## [0.512.0](https://github.com/propeller-heads/tycho/compare/0.511.0...0.512.0) (2026-11-11)
+
+
+### Features
+
+* **execution:** give clients a share of positive slippage ([8851a0a](https://github.com/propeller-heads/tycho/commit/8851a0ae7f9181c46e8d24d08cc8d61785a34274))
+* **execution:** give clients a share of positive slippage ([#1780](https://github.com/propeller-heads/tycho/issues/1780)) ([7398fbb](https://github.com/propeller-heads/tycho/commit/7398fbb4202c9eee1f7b8fe1f412ecd021720b81))
+
+
+### Bug Fixes
+
+* **execution:** skip share lookup without surplus, add ShareTooHigh ([4ea4e6e](https://github.com/propeller-heads/tycho/commit/4ea4e6e92aee5ca5e668409d992a8da51cc57373))
+
+## [0.511.0](https://github.com/propeller-heads/tycho/compare/0.510.1...0.511.0) (2026-11-11)
+
+
+### Features
+
+* **execution:** expose the per-leg gas overhead to solvers ([7c746f3](https://github.com/propeller-heads/tycho/commit/7c746f3dca074f6c8893cd95a778c78aeb17a7f2))
+* **execution:** expose the per-leg gas overhead to solvers ([#1779](https://github.com/propeller-heads/tycho/issues/1779)) ([836f21d](https://github.com/propeller-heads/tycho/commit/836f21d82c3ef3669f3c3528b34753143d2285fe))
+
+## [0.510.1](https://github.com/propeller-heads/tycho/compare/0.510.0...0.510.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **router-trades:** drop subsidized_trades before trades_settled ([4f50f96](https://github.com/propeller-heads/tycho/commit/4f50f96a73714cfa18f1d5bf82c82c17125a1c96))
+* **router-trades:** drop subsidized_trades before trades_settled ([#1783](https://github.com/propeller-heads/tycho/issues/1783)) ([06660b6](https://github.com/propeller-heads/tycho/commit/06660b67acc2ca2f644f90e64625fce799d5b871))
+
+## [0.510.0](https://github.com/propeller-heads/tycho/compare/0.509.0...0.510.0) (2026-11-11)
+
+
+### Features
+
+* **ekubo-v3:** index MEVCapture v2.1 pools ([d77d66c](https://github.com/propeller-heads/tycho/commit/d77d66c4a03b85eb18bceb8546090867231410ea))
+* **ekubo-v3:** support MEVCapture v2.1 pools ([#1671](https://github.com/propeller-heads/tycho/issues/1671)) ([b903c91](https://github.com/propeller-heads/tycho/commit/b903c911da8664aabb355758ee5f0e6527361f6b))
+* **execution:** swap MEVCapture v2.1 pools through Core.forward ([1b18e5c](https://github.com/propeller-heads/tycho/commit/1b18e5cd18d43ee256207462416ffe230326075a))
+* **simulation:** quote ekubo_v3 MEVCapture v2.1 pools ([6c2c95e](https://github.com/propeller-heads/tycho/commit/6c2c95e54e24a8f439e2ca84241a6f6e2c3eeaea))
+
+
+### Bug Fixes
+
+* **ekubo-v3:** bound the work of MEVCapture v2.1 quotes ([191fb0f](https://github.com/propeller-heads/tycho/commit/191fb0f41c90d0d1702e1684476e81a34aac17bb))
+* **ekubo-v3:** fit MEVCapture v2.1 gas to measured twin-pool swaps ([068f626](https://github.com/propeller-heads/tycho/commit/068f626885b85dd68818570936ab28d71199c6cf))
+* **ekubo-v3:** keep anchor_state to MEVCapture v2.1 pools ([ac04362](https://github.com/propeller-heads/tycho/commit/ac0436216899523d0373e7f4e64c04ac29b28093))
+
+## [0.509.0](https://github.com/propeller-heads/tycho/compare/0.508.0...0.509.0) (2026-11-11)
+
+
+### Features
+
+* **integration-test:** stream the Elysium Uniswap V3 forks ([b278551](https://github.com/propeller-heads/tycho/commit/b278551c118559f7f36223504e959271c5c1ee1e))
+* **integration-test:** stream the Elysium Uniswap V3 forks ([#1781](https://github.com/propeller-heads/tycho/issues/1781)) ([c44402e](https://github.com/propeller-heads/tycho/commit/c44402e08bf1ab79437fa474cd41697fbc24f46e))
+
+## [0.508.0](https://github.com/propeller-heads/tycho/compare/0.507.1...0.508.0) (2026-11-11)
+
+
+### Features
+
+* **execution:** deploy TychoRouterV3 to Elysium ([460fc8f](https://github.com/propeller-heads/tycho/commit/460fc8f3950205502f7618a5fb591a15fde3d341))
+* **execution:** encode PancakeSwap Infinity Bin swaps ([ef76d67](https://github.com/propeller-heads/tycho/commit/ef76d67a1baa1c31b6787896036eb4017631b116))
+* **execution:** register Elysium executors for V3 forks and AERO ([#1769](https://github.com/propeller-heads/tycho/issues/1769)) ([ea19bd2](https://github.com/propeller-heads/tycho/commit/ea19bd2c09c34f3abcb8afbd79d41d6421d572d7))
+* **execution:** route the Elysium V3 forks and aero_cl through UniswapV3Executor ([29642aa](https://github.com/propeller-heads/tycho/commit/29642aa7f75787ce865333ff546b0a0011ada506))
+* index, simulate and execute PancakeSwap Infinity Bin pools ([#1523](https://github.com/propeller-heads/tycho/issues/1523)) ([229e334](https://github.com/propeller-heads/tycho/commit/229e334ac00ab80dfd3774cee18870e174788815))
+* **simulation:** read Bin reserves from reserve_x and reserve_y ([c101aaa](https://github.com/propeller-heads/tycho/commit/c101aaa77ccec859a7a9d68bac85301f393eb470))
+* **simulation:** register PancakeSwap Infinity Bin for consumers ([aab8520](https://github.com/propeller-heads/tycho/commit/aab852072e7715cef3da6a86c40e2fa46df32abb))
+* **simulation:** simulate PancakeSwap Infinity Bin pools natively ([a3c03e2](https://github.com/propeller-heads/tycho/commit/a3c03e2fe8356fd90d3b7d8bb993a6f6a3fab21a))
+* **substreams:** emit Bin reserves as reserve_x and reserve_y ([d7db3fd](https://github.com/propeller-heads/tycho/commit/d7db3fd9965704818883898d3ea0eeb76c22a2b9))
+* **substreams:** index PancakeSwap Infinity Bin pools on Base and BNB ([263bf8c](https://github.com/propeller-heads/tycho/commit/263bf8c5f80334861d2849ca7c8070eefc5167b8))
+
+
+### Bug Fixes
+
+* **execution:** refuse a Bin entry on chains without a BinPoolManager ([2b016af](https://github.com/propeller-heads/tycho/commit/2b016afd43ef0e1472075f878cfbaf3708ff7d18))
+* **execution:** resolve the Bin alias only on chains with a BinPoolManager ([62b41e8](https://github.com/propeller-heads/tycho/commit/62b41e814639ca2f1912337a01f489058643db34))
+* **simulation:** Bin gas via router, assert fit ([4c341fd](https://github.com/propeller-heads/tycho/commit/4c341fdac10d2f956e229f6534472256876b2fbb))
+* **simulation:** drop an active dust bin once a swap moves off it ([6d8b733](https://github.com/propeller-heads/tycho/commit/6d8b73391e34557eae1f220399fed837f92281be))
+* **simulation:** quoter test compile after [#1706](https://github.com/propeller-heads/tycho/issues/1706) ([a27ce49](https://github.com/propeller-heads/tycho/commit/a27ce497b322dcd1a3806e92ebc0b06de27c8e9e))
+* **simulation:** read the Bin LP fee from key_lp_fee only ([bbc713b](https://github.com/propeller-heads/tycho/commit/bbc713b5568646cc8ef8d54fdfa91f3cd6880e90))
+* **simulation:** satisfy the workspace clippy lints in the Bin module ([5e279cc](https://github.com/propeller-heads/tycho/commit/5e279cc41c1eae430b7e1887c47afdd6fc11cbc3))
+* **simulation:** set the Bin swap gas from executor measurements ([56154e6](https://github.com/propeller-heads/tycho/commit/56154e6ac9d35213ef429890d957fac528f54eaf))
+* **simulation:** stop Bin limits before a bin the liquidity cap blocks ([3b6df52](https://github.com/propeller-heads/tycho/commit/3b6df52415fba132471c22f9419fdeaf76546415))
+* **substreams:** active_in_tree at pool creation + every swap ([c4604fc](https://github.com/propeller-heads/tycho/commit/c4604fca83ef87991653f6d5747f57764bf987a3))
+* **substreams:** fail on malformed Bin manifest addresses and reserve words ([db53b49](https://github.com/propeller-heads/tycho/commit/db53b49c1432e0048a48ab9e301a0a2f6c2a08c8))
+
+
+### Performance Improvements
+
+* **substreams:** index only the Bin storage writes an event can read ([87b6f4b](https://github.com/propeller-heads/tycho/commit/87b6f4b5e0dd95b912b32e845dc148a962e9d602))
+
+## [0.507.1](https://github.com/propeller-heads/tycho/compare/0.507.0...0.507.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **uniswap_v4:** pass hooks the full price range as the swap limit ([ab9bd81](https://github.com/propeller-heads/tycho/commit/ab9bd810d3be56f126b68c133fcadca0852f70d3))
+* **uniswap_v4:** pass hooks the full price range as the swap limit ([#1770](https://github.com/propeller-heads/tycho/issues/1770)) ([f83dc90](https://github.com/propeller-heads/tycho/commit/f83dc909a9df2e752330eed1201f512a51eb36c1))
+
+## [0.507.0](https://github.com/propeller-heads/tycho/compare/0.506.0...0.507.0) (2026-11-10)
+
+
+### Features
+
+* **execution:** deploy TychoRouterV3 to Elysium ([bbc65cb](https://github.com/propeller-heads/tycho/commit/bbc65cba54218ac6db36ba86ee1134b082f2489e))
+* **execution:** deploy TychoRouterV3 to Elysium ([#1762](https://github.com/propeller-heads/tycho/issues/1762)) ([9a955ba](https://github.com/propeller-heads/tycho/commit/9a955bae82309f0327c5bc0569f99581e9b63186))
+
+## [0.506.0](https://github.com/propeller-heads/tycho/compare/0.505.0...0.506.0) (2026-11-10)
+
+
+### Features
+
+* **router-trades:** store what the SubsidyPayer did with each subsidy ([2f0c28e](https://github.com/propeller-heads/tycho/commit/2f0c28ee4a5821fd2afde37b59d235cf98a114c6))
+* **router-trades:** store what the SubsidyPayer did with each subsidy ([#1752](https://github.com/propeller-heads/tycho/issues/1752)) ([45aa44d](https://github.com/propeller-heads/tycho/commit/45aa44de7eb5caff9deb3b98fc5b548ae0046d7a))
+
+
+### Bug Fixes
+
+* **claude:** count padded nextest failures in tycho-review's checks ([f9a7608](https://github.com/propeller-heads/tycho/commit/f9a7608e83cb4e294e2f7623f0b5e353527ebccb))
+* **claude:** quote referenced records in tycho-review checklists ([b2b575f](https://github.com/propeller-heads/tycho/commit/b2b575f84c30c005d6193edf9f488e1595d407f7))
+* **execution:** revert an Ekubo swap whose amountIn exceeds int128 ([897ef0a](https://github.com/propeller-heads/tycho/commit/897ef0ae14a86d8f7ac9912c868e7fec8360fc9d))
+
+## [0.505.0](https://github.com/propeller-heads/tycho/compare/0.504.3...0.505.0) (2026-11-10)
+
+
+### Features
+
+* index Kleos, ElysPump and StockiumSwap V3 on Elysium ([#1759](https://github.com/propeller-heads/tycho/issues/1759)) ([4532a44](https://github.com/propeller-heads/tycho/commit/4532a44cda4184ae64109d0bc25f6fa99a64f50d))
+* **substreams:** index AERO v1.1 basic and CL pools on Elysium ([fb06b2d](https://github.com/propeller-heads/tycho/commit/fb06b2d499e7586afa45d5bd4116c7fb884720ca))
+* **substreams:** index AERO v1.1 basic and CL pools on Elysium ([#1766](https://github.com/propeller-heads/tycho/issues/1766)) ([0190788](https://github.com/propeller-heads/tycho/commit/0190788195c00ae9cea7b198b4d14e554e6fdc0e))
+* **substreams:** index Kleos, ElysPump and StockiumSwap V3 on Elysium ([42687c8](https://github.com/propeller-heads/tycho/commit/42687c8e4025d1475e67a81532765b1d9125862f))
+* **testing:** run elysium-* packages against an Elysium archive RPC ([dae5e6d](https://github.com/propeller-heads/tycho/commit/dae5e6d1ed4c1ff77efecc0a776ad43dfe2c342a))
+
+
+### Bug Fixes
+
+* **testing:** connect RPC tools on chains alloy-chains does not name ([875d7ba](https://github.com/propeller-heads/tycho/commit/875d7ba3a7624e33cac6371192b8e324a033bc67))
+
+## [0.504.3](https://github.com/propeller-heads/tycho/compare/0.504.2...0.504.3) (2026-11-09)
+
+
+### Bug Fixes
+
+* **deps:** bump openssl to 0.10.81 for RUSTSEC-2026-0463 ([dc2eaad](https://github.com/propeller-heads/tycho/commit/dc2eaad05aef529eae004b398a45bdbb15ab686a))
+* **deps:** bump openssl to 0.10.81 for RUSTSEC-2026-0463 ([#1763](https://github.com/propeller-heads/tycho/issues/1763)) ([729c860](https://github.com/propeller-heads/tycho/commit/729c860a0675a9b6bd92d5e42c5a5b359fa74d31))
+* **simulation:** link pending account overrides to the extractor's own pools ([54abe7f](https://github.com/propeller-heads/tycho/commit/54abe7fc70b2deaf0d44b1bbde0b052d76709ff9))
+* **simulation:** link pending account overrides to the extractor's own pools ([#1750](https://github.com/propeller-heads/tycho/issues/1750)) ([e4fe71c](https://github.com/propeller-heads/tycho/commit/e4fe71c3cc7bf5adb476af6cd171bf5ea8550b9e))
+
+## [0.504.2](https://github.com/propeller-heads/tycho/compare/0.504.1...0.504.2) (2026-11-09)
+
+
+### Bug Fixes
+
+* unblock Fluid pools that have swaps unpaused again ([0b69dbd](https://github.com/propeller-heads/tycho/commit/0b69dbd3a7449b2db3720dda2030ad618383046d)), closes [#1709](https://github.com/propeller-heads/tycho/issues/1709) [#1709](https://github.com/propeller-heads/tycho/issues/1709)
+* unblock Fluid pools that have swaps unpaused again ([#1757](https://github.com/propeller-heads/tycho/issues/1757)) ([53cb909](https://github.com/propeller-heads/tycho/commit/53cb909f1c04f3cd31d2258c413c20dde0459462))
+
+## [0.504.1](https://github.com/propeller-heads/tycho/compare/0.504.0...0.504.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **deps:** enable the actix-web ws feature for tycho-indexer ([9571532](https://github.com/propeller-heads/tycho/commit/9571532b65a372a9c87f78f7ccb5303b3f2de87e))
+* **deps:** enable the actix-web ws feature for tycho-indexer ([#1758](https://github.com/propeller-heads/tycho/issues/1758)) ([337e112](https://github.com/propeller-heads/tycho/commit/337e112a78aa7d26965ff52627db1d8d0d940b3c))
+
+## [0.504.0](https://github.com/propeller-heads/tycho/compare/0.503.0...0.504.0) (2026-11-09)
+
+
+### Features
+
+* add Ramses V3 Arbitrum support ([ebfb793](https://github.com/propeller-heads/tycho/commit/ebfb79375f09afd36d33759a0dfb9b6ff36265ca))
+* add Ramses V3 Arbitrum support ([#1235](https://github.com/propeller-heads/tycho/issues/1235)) ([38b87de](https://github.com/propeller-heads/tycho/commit/38b87de63a8b8e700891d079d14c471b260224a5))
+
+
+### Bug Fixes
+
+* address review findings on the Ramses V3 Arbitrum integration ([c947ea4](https://github.com/propeller-heads/tycho/commit/c947ea415afb456355fc83b2f6b99b108db75a43))
+* keep ramses_v3 out of the Arbitrum examples until it is synced in prod ([3239f8b](https://github.com/propeller-heads/tycho/commit/3239f8b93bcddbcc7c070929b4e061c808e6929e))
+
+## [0.503.0](https://github.com/propeller-heads/tycho/compare/0.502.3...0.503.0) (2026-11-09)
+
+
+### Features
+
+* **elysium:** add chain model and Uniswap V2/V3/V4 manifests ([814afb2](https://github.com/propeller-heads/tycho/commit/814afb2d9ea5f3c06d061f4ec6d9f6e1d9bf20f5))
+* **elysium:** add chain model and Uniswap V2/V3/V4 manifests ([#1751](https://github.com/propeller-heads/tycho/issues/1751)) ([7835cc6](https://github.com/propeller-heads/tycho/commit/7835cc60ff110f9b1f046069d785bbd75e73b18b))
+
+
+### Bug Fixes
+
+* **deps:** bump actix-http to 3.20.3 for RUSTSEC-2026-0446 ([cf91abf](https://github.com/propeller-heads/tycho/commit/cf91abfd1066bcd5cd9d06c7ab55f989fa0c85c6))
+* **deps:** bump actix-web to 4.18.2 for RUSTSEC-2026-0447 ([9c67f2c](https://github.com/propeller-heads/tycho/commit/9c67f2c63830deabd3bb0bba982b98f915f2efbc))
+
 ## [0.502.3](https://github.com/propeller-heads/tycho/compare/0.502.2...0.502.3) (2026-11-05)
 
 ## [0.502.2](https://github.com/propeller-heads/tycho/compare/0.502.1...0.502.2) (2026-11-05)

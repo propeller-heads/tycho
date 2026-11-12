@@ -89,6 +89,7 @@ contract LiquoriceExecutor is IExecutor {
         amountIn =
             _clampAmount(amountIn, originalBaseTokenAmount, minBaseTokenAmount);
 
+        // forge-lint: disable-next-line(unsafe-typecast) Reads the selector; shorter calldata pads with zeros, which the check below rejects.
         bytes4 selector = bytes4(liquoriceCalldata);
         if (
             selector != LIQUORICE_SETTLE_SINGLE_SELECTOR

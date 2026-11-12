@@ -1,0 +1,42 @@
+substreams_yaml_path: ./elysium-aero-cl.yaml
+protocol_system: "aero_cl"
+protocol_type_names:
+  - "aero_cl_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # Starts at the factory deployment: its constructor enables the tick spacings and sets the
+  # default swap hook, and the hook's constructor writes its settings, which pool creation reads.
+  #
+  # Simulation and execution are skipped because a range that reaches them is too long: the pools
+  # gain liquidity at blocks 3468354 and 3488685, 1.5M blocks after their creation, which takes
+  # the harness about 12 hours to index. The Elysium contracts are byte-identical to Robinhood's
+  # (factory, pool implementation, DynamicSwapFeeHook), apart from compiler metadata hashes and the
+  # CLFactory address the hook stores.
+  - name: test_first_pools
+    start_block: 1947859
+    stop_block: 1952400
+    expected_components:
+      - id: "0x5ecb73050f35d8bd67231512c3bef91ad0b3dcc7"
+        tokens:
+          - "0xba876237b0f021a6c6d852d6c26e107997cc5e81" # WHYPE
+          - "0xe45a355d9e9cad2ad85f2d03e3ee3102a036acf0" # KNTQ
+        static_attributes:
+          default_fee: "0x4e20"
+          tick_spacing: "0x00c8"
+          pool_address: "0x5ecb73050f35d8bd67231512c3bef91ad0b3dcc7"
+        creation_tx: "0x177fc73d7d86291af98d91e741432f44d26cdd6ac63c3b21bb9336ce145e85db"
+        skip_simulation: true
+        skip_execution: true
+      - id: "0x97796d80b6a1db78632f7451196b04f307329eb6"
+        tokens:
+          - "0xb47c4c8f73f009cc0c0d3f92b388d13e293f0b65" # USDC
+          - "0xba876237b0f021a6c6d852d6c26e107997cc5e81" # WHYPE
+        static_attributes:
+          default_fee: "0x2710"
+          tick_spacing: "0x64"
+          pool_address: "0x97796d80b6a1db78632f7451196b04f307329eb6"
+        creation_tx: "0x42f2b2f3707fb9acccb7bfa2d5e190e4ca422604f5600cefb521dc8fd409439a"
+        skip_simulation: true
+        skip_execution: true

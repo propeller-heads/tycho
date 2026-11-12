@@ -8,7 +8,7 @@ license-file.workspace = true
 actix-web = "4.11.0"
 alloy = { workspace = true, features = ["rpc-types-eth", "sol-types"] }
 clap = { version = "4.5.48", features = ["derive"] }
-dotenv = { workspace = true }
+dotenvy = { workspace = true }
 futures = { workspace = true }
 itertools = { workspace = true }
 metrics = "0.24.2"

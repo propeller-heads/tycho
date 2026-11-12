@@ -1,0 +1,59 @@
+substreams_yaml_path: ./base-pancakeswap-infinity-bin.yaml
+protocol_system: "pancakeswap_infinity_bin"
+protocol_type_names:
+  - "pancakeswap_infinity_bin_pool"
+module_name: "map_protocol_changes"
+# Singleton design: every pool's funds sit in the Vault, and component ids are bytes32 pool ids
+# the balance check cannot resolve to an address.
+skip_balance_check: true
+# Native simulation reads no contract storage, so no account has to be snapshotted. This also keeps
+# the suite off debug_storageRangeAt, which not every archive RPC serves.
+initialized_accounts:
+tests:
+  # Three hookless static-fee pools, each minted into in its creation transaction, so bin reserves
+  # are non-zero from the first block and simulation can quote immediately. The Mints exercise the
+  # branch in map_bin_changes where a missing storage slot is a hard error rather than a skip.
+  #
+  # ETH/USDC first swaps at 32980443, 289 blocks after it is created, and then 103 more times in
+  # both directions (54 up, 46 down, 3 within a bin), so the tree walk and active-id update are
+  # checked over many swaps. Its second Mint at 33026212 lands on 26 bins that already hold
+  # reserves and 25 new ones.
+  #
+  # CAKE/USDbC is created at 33017954 and ends the window. Its Burn at 33026736 takes all 46 of
+  # an LP's bins out of the tree with dust left in each, including the active bin 8361978, which
+  # keeps (1, 1) and stays active. A swap starts in the active bin whatever the tree says, so the
+  # quote and the execution at the stop block both go through that dust bin first.
+  - name: test_usdc_usdt_eth_usdc_and_cake_usdbc_pools
+    start_block: 32979792
+    stop_block: 33026740
+    expected_components:
+      - id: "0x34e19068fd32b59dc649757324d827675a736f2be33ec2bef4647bf876c0f6e7"
+        tokens:
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" # USDC
+          - "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2" # USDT
+        static_attributes:
+          key_lp_fee: "0x07"
+          bin_step: "0x000a"
+        creation_tx: "0x3839d52a9c8e8b22f6eead472c2aacd889635079b3bf55fc9461f3dda441c6a6"
+        skip_simulation: false
+        skip_execution: false
+      - id: "0x8589b03e78dc15f046d27bc2d34e867613a67696a409e07c29313a15895838a9"
+        tokens:
+          - "0x0000000000000000000000000000000000000000" # ETH
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" # USDC
+        static_attributes:
+          key_lp_fee: "0x00c9"
+          bin_step: "0x000a"
+        creation_tx: "0xc9bcfb1f57003e839c489d9fae3ec93d46a85924e1020a14a4fd8d7d07f7d3f4"
+        skip_simulation: false
+        skip_execution: false
+      - id: "0x07115d6b37e3dc7f45918b0e596a3d1646292c061627da1dc366d7044636c93f"
+        tokens:
+          - "0x3055913c90fcc1a6ce9a358911721eeb942013a1" # CAKE
+          - "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca" # USDbC
+        static_attributes:
+          key_lp_fee: "0x014f"
+          bin_step: "0x000a"
+        creation_tx: "0x11f17f187af90e60e3356bbc8471a021d37a4d9b58acf80200a3a3eeb5aa89d7"
+        skip_simulation: false
+        skip_execution: false

@@ -24,9 +24,10 @@ for any protocol indexed by Tycho.
     `aero_basic/`, `aerodrome_v1/`, `aerodrome_slipstreams/`, `velodrome_slipstreams/`,
     `pancakeswap_v2/`,
     `ramses_v3/`, `ring_swap_v2/`, `lunarbase/`, `native_wrapper/`, `sky/`, `etherfi/`,
-    `erc4626/`, `rocketpool/`): Pure Rust math, no EVM execution. `aerodrome_slipstreams/` also
-    serves Robinhood `up_v3` and AERO v1.1 `aero_cl` pools; for `aero_cl` the fee comes from the
-    pool's swap hook (`utils/slipstreams/aero_hook_fee.rs`) instead of a dynamic fee module.
+    `erc4626/`, `rocketpool/`, `pancakeswap_infinity_bin/`): Pure Rust math, no EVM execution.
+    `aerodrome_slipstreams/` also serves Robinhood `up_v3` and AERO v1.1 `aero_cl` pools; for
+    `aero_cl` the fee comes from the pool's swap hook (`utils/slipstreams/aero_hook_fee.rs`)
+    instead of a dynamic fee module.
     `cpmm.rs` / `clmm.rs` / `safe_math.rs` / `u256_num.rs` / `utils.rs` are shared math helpers,
     not protocols. Uniswap V4 hook handlers register per `(Chain, hook address)` in
     `uniswap_v4/hooks/hook_handler_creator.rs`; the generic VM fallback covers only Ethereum and
@@ -252,19 +253,20 @@ fallback for protocols too complex to port, not a default.
 1. **Native** — pure Rust math; fastest. Use whenever the protocol logic can be expressed in Rust.
 2. **Hybrid** — native Rust math for swap calculation, but reads/updates pool state via the local
    VM (`SimulationDB`). Use when the swap logic can be ported but state is complex to track
-   independently. Examples: Fluid V1, Balancer V3, Curve. Note that a hybrid protocol keeps its
-   VM-shaped indexing — component keys stay `vm:*` and the indexer still tracks full contract
-   storage; only the quote path changes.
+   independently. Examples: Fluid V1, Balancer V3, Curve. A hybrid keeps VM-shaped indexing (the
+   indexer tracks full contract storage); only the quote path changes. The `vm:` prefix of a
+   `protocol_system` tells users that quotes run through the VM, so a new hybrid that quotes
+   natively takes a key without it. An existing `vm:` protocol whose quotes move to native keeps
+   its key until a deliberate rename, which ships as a deployment-breaking change of its own.
 3. **VM** — Solidity adapter in `revm`; works for any EVM protocol but is slower and requires an
    adapter contract in `protocols/adapter-integration/`. Use only when native is not feasible.
 4. **RFQ** — off-chain quotes via API; for protocols that cannot be simulated on-chain at all.
 
 ## Pending-block state for hybrid/VM protocols
 
-`apply_deltas_ephemeral` applies only `state_deltas`; nothing on the pending path writes to the
-VM database, so `apply_deltas_ephemeral` can't read the pending state from there. A protocol
-whose `delta_transition` re-reads the VM would therefore quote a pending block against confirmed
-state. Fluid and Curve close that gap the same way:
+Nothing on the pending path writes to the VM database, so a protocol whose `delta_transition`
+re-reads the VM quotes a pending block against confirmed state. Fluid and Curve close that gap
+the same way:
 
 1. A `TxDeltaIndexer` implementation — which lives in the consuming repo, not here — builds
    `evm::simulation::PendingOverrides` (storage, native balances and block environment) from the
@@ -277,6 +279,14 @@ state. Fluid and Curve close that gap the same way:
 
 Reading under the pending block's own number and timestamp matters: anything with on-chain time
 math (Fluid's expanding limits, Curve's ramping `A()`) is wrong under the parent block's clock.
+
+`apply_deltas_ephemeral` also sets each extractor's account deltas as `PendingOverrides` on the
+pools linked to a written account through `contracts_map`. Only Uniswap V4 states read them: a
+hooked pool prices from its hook's storage. It sets them only on pools whose protocol system is
+the extractor's key in `pending_deltas`, so the extractor's indexer must emit the writes to every
+account those pools read. Without this rule, a write to a token contract linked to Curve, V4 hooks
+and Fluid pools would make the decoder rebuild every Fluid pool from confirmed state, one EVM call
+per pool. Another extractor's override set would also replace a V4 pool's own.
 
 ## Features
 

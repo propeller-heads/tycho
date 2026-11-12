@@ -1121,7 +1121,7 @@ mod tests {
             clippy::unused_result_ok,
             reason = "a missing .env file is fine; the variables may come from the environment"
         )]
-        dotenv::dotenv().ok();
+        dotenvy::dotenv().ok();
         let api_key = std::env::var("NATIVE_API_KEY").expect("NATIVE_API_KEY not set");
         let client = NativeClient::new(
             None,

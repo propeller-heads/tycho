@@ -76,10 +76,6 @@ const TOKENS: &[TokenConfig] = &[
     },
 ];
 
-#[expect(
-    clippy::unwrap_in_result,
-    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
-)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rpc_url = std::env::var("RPC_URL").expect("RPC_URL must be set");

@@ -21,3 +21,17 @@ GitBook only auto-generates anchors for `##` and `###` headings. For `####`, add
 
 - **Table column widths**: `<th width="N">` in the HTML header.
 - **SUMMARY.md**: controls the sidebar. Adding or removing a page requires a matching SUMMARY.md change.
+
+## Rules
+
+Each rule is a record: its id, which review findings cite; the rule; why it matters; how to spot a
+violation in a diff (Spot); the kinds of files it applies to; and the tools that check it, in part
+or in full (`.claude/skills/tycho-review/SKILL.md` lists the file kinds). The style rules above are
+the source of `fold-stub-doc-pages`; the general doc rules are in `general.md`.
+
+<!-- pieces -->
+
+### fold-stub-doc-pages
+Source: `.claude/knowledge/gitbook.md` § Style Rules
+Spot: A docs diff that leaves a page with only a few sentences, or removes most of a page's content without merging what is left.
+Applies: docs

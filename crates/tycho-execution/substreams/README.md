@@ -21,8 +21,9 @@ gas used.
 
 Related tables: `trade_hops` (one row per executor hop), `fees_taken` (one row per fee
 recipient), `fee_config_events` (FeeCalculator admin events and fee-calculator rotations),
-`vault_transfers` (ERC-6909 balance movements inside a router), and `router_call_errors`
-(selector-matched calls that could not be decoded safely).
+`vault_transfers` (ERC-6909 balance movements inside a router), `subsidies` (what the
+SubsidyPayer did with each signed subsidy), and `router_call_errors` (selector-matched calls
+that could not be decoded safely).
 
 ### Discarded calls
 
@@ -351,6 +352,8 @@ in practice, all of them.
    DELETE FROM fees_taken         WHERE chain = '<chain>';
    DELETE FROM fee_config_events  WHERE chain = '<chain>';
    DELETE FROM router_call_errors WHERE chain = '<chain>';
+   DELETE FROM vault_transfers    WHERE chain = '<chain>';
+   DELETE FROM subsidies          WHERE chain = '<chain>';
    ```
 
 4. The container recovers on its next backoff restart. Confirm the new range in its log:
@@ -420,8 +423,10 @@ Six places, and the deployment fails quietly if any of the last three is missed.
    The chain must serve Extended (Firehose) blocks. Trades are recovered from call traces, so a
    chain without them yields nothing at all rather than an error.
 
-   Put the same routers in the `blockFilter` of `map_trades`, and `fee_cfg` in the one of
-   `map_fee_config_events`. Run `make check-manifests` to confirm.
+   Put the same routers in the `blockFilter` of `map_trades`, `fee_cfg` in the one of
+   `map_fee_config_events`, and `subsidy` in the one of `map_subsidy_events`. Give every
+   module the same params. Run
+   `make check-manifests` to confirm.
 
 4. **Pin the pricing tokens** in `pricing/preferred_tokens.sql`: the native sentinel row for the
    chain with its native symbol and price band, at least one stablecoin, and the majors. Without a
@@ -448,18 +453,20 @@ Nothing has to be cleared in the database: a chain with no cursor row starts at 
 
 ```
 index_router_activity ─┬─▶ map_fee_config_events ─▶ store_fee_config ─▶ map_trades
-                       └─▶ map_vault_transfers
+                       ├─▶ map_vault_transfers
+                       └─▶ map_subsidy_events
 
-db_out ◀── map_trades, map_fee_config_events, map_vault_transfers
+db_out ◀── map_trades, map_fee_config_events, map_vault_transfers, map_subsidy_events
 ```
 
 ### Block index
 
-`index_router_activity` writes two kinds of key per block: `addr:0x<address>` for every call
-frame, and `fee_cfg` for a block that carries a log the fee-config decoders recognise.
-`map_trades` and `map_fee_config_events` carry a `blockFilter` over them, so the server skips a
-block that has neither, which is more than 999 blocks in 1000. Everything downstream of a
-filtered module, `store_fee_config` included, only sees the blocks that pass.
+`index_router_activity` writes three kinds of key per block: `addr:0x<address>` for every call
+frame, `fee_cfg` for a block that carries a log the fee-config decoders recognise, and
+`subsidy` for one that carries a SubsidyPayer event. Every map module carries a `blockFilter`
+over them, so the server skips a block that has none, which is more than 999 blocks in 1000.
+Everything downstream of a filtered module, `store_fee_config` included, only sees the blocks
+that pass.
 
 `map_trades` and `map_vault_transfers` filter on the routers of their params, which are the
 same params. A filter has to name the same addresses, because one that is too narrow drops rows
@@ -472,6 +479,9 @@ and `map_vault_transfers` needs nothing new from the index.
 emitter, and a list of addresses would not hold: nearly half of the fee-config events stored so
 far come from an emitter no manifest configures. The index sets the key with the same two
 decoders the module uses, so the two cannot drift.
+
+`map_subsidy_events` filters on `subsidy` too, set by its own decoders. It configures no payer:
+an event counts only inside a router swap call, which keeps other emitters out.
 
 The index takes no params and knows no router, so a new router changes the filter of the
 consumer and leaves the index alone. An index that is already built stays valid.
@@ -521,7 +531,8 @@ hand. ABIs come from the verified sources on Sourcify
 `0xea290cE3…`, `FeeCalculator` = `0xA236E1F0…`). Two ABI files hold events that deployment does not have:
 `FeeCalculatorV3_0.json` the `uint16` event signatures of the earlier FeeCalculator, and
 `FeeCalculatorExemption.json` the `PositiveSlippageExemptionSet` of the later one. Each is
-events-only, and the decoders try them in turn.
+events-only, and the decoders try them in turn. `SubsidyPayer.json` holds the two events of
+`contracts/interfaces/ISubsidyPayer.sol`, events-only as well.
 
 Regenerate protobuf bindings after editing `proto/` with `make protogen`. The abigen output under
 `src/abi/` is not committed; `build.rs` regenerates it from the minified JSON ABIs on every build.
