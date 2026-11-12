@@ -13,6 +13,7 @@ use tycho_common::{
     Bytes,
 };
 
+use super::fill::{exact_fill_inside_bin, Bin, BookSide};
 use crate::{
     book::{component::PairState, sim},
     pamm::protocols::metric::models::{MetricBidAskResponse, MetricDepthBin, MetricMetadata},
@@ -77,7 +78,12 @@ impl MetricState {
         let Some(price) = price else {
             return Ok(None);
         };
-        Ok(Some(TradableSide { price, bins, last_bin }))
+        let side = match direction {
+            MetricDirection::ZeroForOne => BookSide::Bids,
+            MetricDirection::OneForZero => BookSide::Asks,
+        };
+        let decimals = (self.base_token.decimals, self.quote_token.decimals);
+        Ok(Some(TradableSide { price, bins, last_bin, side, decimals }))
     }
 }
 
@@ -90,6 +96,9 @@ struct TradableSide<'a> {
     bins: &'a [MetricDepthBin],
     /// The deepest bin, which carries the side's cumulative totals.
     last_bin: &'a MetricDepthBin,
+    /// Which side of the book an order walks, and the token0 and token1 decimals.
+    side: BookSide,
+    decimals: (u32, u32),
 }
 
 impl TradableSide<'_> {
@@ -104,7 +113,13 @@ impl TradableSide<'_> {
             .cumulative_volume
             .clone()
             .min(max_output.clone());
-        let depth_fill = depth_output_for_input(self.bins, amount_in, &effective_max_output)?;
+        let depth_fill = depth_output_for_input(
+            self.bins,
+            self.side,
+            self.decimals,
+            amount_in,
+            &effective_max_output,
+        )?;
         Ok(DepthQuote {
             amount_out: depth_fill.output,
             max_output: effective_max_output,
@@ -327,12 +342,12 @@ impl ProtocolSim for MetricState {
 /// units using Metric's own per-bin accounting.
 ///
 /// Full bins cost exactly their `cumulativeInputVolume` difference — Metric's authoritative,
-/// fee-adjusted accounting. Partial fills are priced pro-rata at the bin's average cost: under
-/// the documented linear intra-bin model this is exact at bin boundaries and conservative inside
-/// the bin (off by at most half the bin's price width, understating the output; the division
-/// also rounds down).
+/// fee-adjusted accounting. The bin an order ends in is priced along its own straight-line curve
+/// (see `fill::exact_fill_inside_bin`). A bin the inventory cap cuts short is charged pro-rata.
 fn depth_output_for_input(
     bins: &[MetricDepthBin],
+    side: BookSide,
+    decimals: (u32, u32),
     amount_in: &BigUint,
     max_output: &BigUint,
 ) -> Result<DepthFill, SimulationError> {
@@ -378,25 +393,32 @@ fn depth_output_for_input(
             break;
         }
 
-        // The aggregate inventory cap can cut the bin short; charge the fillable slice pro-rata,
-        // rounding the input up so the quote never undercharges.
-        let (fillable_volume, fillable_input) = if volume_in_bin <= output_capacity {
-            (volume_in_bin, input_in_bin)
-        } else {
+        if volume_in_bin > output_capacity {
+            // The aggregate inventory cap cuts the bin short: charge the fillable slice pro-rata,
+            // rounding the input up so the quote never undercharges.
             let fillable_input = (&input_in_bin * &output_capacity + &volume_in_bin -
                 BigUint::from(1u8)) /
                 &volume_in_bin;
-            (output_capacity, fillable_input)
-        };
+            if remaining_input >= fillable_input {
+                output += &output_capacity;
+                remaining_input -= &fillable_input;
+                continue;
+            }
+            output += &output_capacity * &remaining_input / &fillable_input;
+            remaining_input = BigUint::ZERO;
+            break;
+        }
 
-        if remaining_input >= fillable_input {
-            output += &fillable_volume;
-            remaining_input -= &fillable_input;
+        if remaining_input >= input_in_bin {
+            output += &volume_in_bin;
+            remaining_input -= &input_in_bin;
             continue;
         }
 
-        // The input runs out inside this bin: pro-rata output, rounding down.
-        output += &fillable_volume * &remaining_input / &fillable_input;
+        // The input runs out inside this bin: the exact fill along the bin's own curve.
+        let bin_curve = Bin { input: &input_in_bin, output: &volume_in_bin, price: &bin.price };
+        output += exact_fill_inside_bin(bin_curve, side, &remaining_input, decimals)
+            .unwrap_or_else(|| &volume_in_bin * &remaining_input / &input_in_bin);
         remaining_input = BigUint::ZERO;
         break;
     }
@@ -484,11 +506,19 @@ mod tests {
             total_token1_available: Some(big("30000000000")),
             server_ts: 100,
             price_provider_status: Some("healthy".to_string()),
-            // One bin per side at the quoted prices: the bid buys 10 WETH for 30000 USDC (3000),
-            // the ask sells 10 WETH for 30100 USDC (3010).
+            // One flat bin per side at the quoted prices: the bid buys 10 WETH for 30000 USDC
+            // (3000), the ask sells 10 WETH for 30100 USDC (3010). Closing at the
+            // quoted price keeps each bin flat, so the walk takes the proportional
+            // share.
             depth: MetricDepth {
-                bids: vec![depth_bin("30000000000", "10000000000000000000")],
-                asks: vec![depth_bin("10000000000000000000", "30100000000")],
+                bids: vec![MetricDepthBin {
+                    price: big("55340232221128654848000"),
+                    ..depth_bin("30000000000", "10000000000000000000")
+                }],
+                asks: vec![MetricDepthBin {
+                    price: big("55524699661865750400000"),
+                    ..depth_bin("10000000000000000000", "30100000000")
+                }],
             },
         };
         MetricState { base_token: weth, quote_token: usdc, metadata, bid_ask }
@@ -859,6 +889,8 @@ mod tests {
 
         let fill = depth_output_for_input(
             &bins,
+            BookSide::Bids,
+            (18, 6),
             &BigUint::from(1_000_000_000_000_000_000u128),
             &BigUint::from(3_000_000_000u64),
         )
@@ -876,6 +908,8 @@ mod tests {
 
         let fill = depth_output_for_input(
             &bins,
+            BookSide::Asks,
+            (18, 6),
             &BigUint::from(3_000_000_000u64),
             &BigUint::from(1_000_000_000_000_000_000u128),
         )
@@ -895,6 +929,8 @@ mod tests {
 
         let fill = depth_output_for_input(
             &bins,
+            BookSide::Bids,
+            (18, 6),
             &BigUint::from(2_000_000_000_000_000_000u128),
             &BigUint::from(3_000_000_000u64),
         )
@@ -914,6 +950,8 @@ mod tests {
 
         let fill = depth_output_for_input(
             &bins,
+            BookSide::Bids,
+            (18, 6),
             // 1.55 WETH: consumes bin 1 fully, then half of bin 2's 1.1 WETH.
             &BigUint::from(1_550_000_000_000_000_000u128),
             &BigUint::from(6_000_000_000u64),
@@ -933,6 +971,8 @@ mod tests {
         // pro-rata 0.5 WETH, so 1 WETH exhausts it.
         let fill = depth_output_for_input(
             &bins,
+            BookSide::Bids,
+            (18, 6),
             &BigUint::from(1_000_000_000_000_000_000u128),
             &BigUint::from(1_500_000_000u64),
         )
@@ -949,6 +989,8 @@ mod tests {
 
         let err = depth_output_for_input(
             &bins,
+            BookSide::Bids,
+            (18, 6),
             &BigUint::from(1_000_000_000_000_000_000u128),
             &BigUint::from(3_000_000_000u64),
         )
@@ -967,6 +1009,8 @@ mod tests {
 
         let err = depth_output_for_input(
             &bins,
+            BookSide::Bids,
+            (18, 6),
             &BigUint::from(2_000_000_000_000_000_000u128),
             &BigUint::from(3_000_000_000u64),
         )
@@ -1053,5 +1097,33 @@ mod tests {
         let result = state.get_amount_out(BigUint::ZERO, &weth(), &usdc());
 
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))), "{result:?}");
+    }
+
+    /// The WETH/USDC example of Metric's "Estimate a fill from depth" page: 5 WETH sold into two
+    /// bid bins. The second bin is only partly filled, and the page's exact fill inside it gives
+    /// 13535754492 raw USDC in total.
+    #[test]
+    fn get_amount_out_fills_the_bin_on_the_pool_curve() {
+        let mut state = state();
+        state.bid_ask.depth.bids = vec![
+            MetricDepthBin {
+                bin_idx: -1,
+                price: big("49937913286041055521250"),
+                cumulative_volume: big("7430706558"),
+                cumulative_input_volume: big("2744786401520641763"),
+            },
+            MetricDepthBin {
+                bin_idx: -2,
+                price: big("49932918995283375647711"),
+                cumulative_volume: big("21731301391"),
+                cumulative_input_volume: big("8027598362225637937"),
+            },
+        ];
+
+        let result = state
+            .get_amount_out(big("5000000000000000000"), &state.base_token, &state.quote_token)
+            .unwrap();
+
+        assert_eq!(result.amount, big("13535754492"));
     }
 }
