@@ -272,7 +272,7 @@ pub fn decode_biconomy_snapshot(
         venue: static_address(attrs::PAMM_ADDRESS)?,
         executor: static_address(attrs::EXECUTOR)?,
         // As of the header; the stream decoder moves it to the execution block via
-        // `apply_block`, with the chain's block time and its flashblock handling.
+        // `apply_block`, with the chain's block time and its partial-block handling.
         block: BlockEnvState { number: header.number, timestamp: header.timestamp },
         ..Default::default()
     };
