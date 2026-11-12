@@ -16,6 +16,8 @@ struct FeeInfo {
     positive_slippage_enabled: bool,
     positive_slippage_exempt: bool,
     client_positive_slippage_share_bps: i64,
+    /// The client's cap on captured surplus; `None` when it has none.
+    positive_slippage_cap_bps: Option<i64>,
     has_any_token_pair_fee: bool,
 }
 
@@ -71,12 +73,22 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
         false
     };
 
-    let client_positive_slippage_share_bps =
-        if positive_slippage_enabled && !positive_slippage_exempt {
-            params.request("client_positive_slippage_share_bps", vec![0, MAX_BPS / 2, MAX_BPS])?
-        } else {
-            0
-        };
+    let captures_positive_slippage = positive_slippage_enabled && !positive_slippage_exempt;
+
+    let client_positive_slippage_share_bps = if captures_positive_slippage {
+        params.request("client_positive_slippage_share_bps", vec![0, MAX_BPS / 2, MAX_BPS])?
+    } else {
+        0
+    };
+
+    // The cap only changes behavior while the surplus is captured.
+    let positive_slippage_cap_bps = if captures_positive_slippage &&
+        params.request("has_positive_slippage_cap", vec![true, false])?
+    {
+        Some(params.request("positive_slippage_cap_bps", vec![0, MAX_BPS / 100, MAX_BPS])?)
+    } else {
+        None
+    };
 
     Ok(FeeInfo {
         router_fee_on_output_bps,
@@ -84,6 +96,7 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
         positive_slippage_enabled,
         positive_slippage_exempt,
         client_positive_slippage_share_bps,
+        positive_slippage_cap_bps,
         has_any_token_pair_fee,
     })
 }
@@ -104,7 +117,7 @@ pub fn calculate_fee(
     let fee_info = _get_fee_info(params)?;
 
     let positive_slippage =
-        _calculate_positive_slippage(actual_amount_out, expected_amount_out, &fee_info);
+        _calculate_positive_slippage(actual_amount_out, expected_amount_out, &fee_info)?;
     let client_positive_slippage = fee_to_i64(
         positive_slippage as i128 * fee_info.client_positive_slippage_share_bps as i128 /
             MAX_BPS as i128,
@@ -202,19 +215,27 @@ fn _calculate_fee(
 
 /// Mirrors `FeeCalculator._calculatePositiveSlippage` in Solidity.
 ///
-/// Returns the positive slippage surplus that the router captures;
-/// zero if disabled, the client is exempt, or there is no surplus.
+/// Returns the positive slippage surplus that the router captures, at most
+/// the client's cap fraction of the actual output; zero if disabled, the
+/// client is exempt, or there is no surplus.
 fn _calculate_positive_slippage(
     actual_amount_out: i64,
     expected_amount_out: i64,
     fee_info: &FeeInfo,
-) -> i64 {
+) -> Result<i64, Error> {
     if !fee_info.positive_slippage_enabled ||
         fee_info.positive_slippage_exempt ||
         actual_amount_out <= expected_amount_out
     {
-        return 0;
+        return Ok(0);
     }
 
-    actual_amount_out - expected_amount_out
+    let positive_slippage = actual_amount_out - expected_amount_out;
+
+    let Some(cap_bps) = fee_info.positive_slippage_cap_bps else {
+        return Ok(positive_slippage);
+    };
+    let max_positive_slippage =
+        fee_to_i64(actual_amount_out as i128 * cap_bps as i128 / MAX_BPS as i128)?;
+    Ok(positive_slippage.min(max_positive_slippage))
 }
