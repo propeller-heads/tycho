@@ -1,5 +1,5 @@
 pub mod slipstreams;
-pub(super) mod solidity_math;
+pub(crate) mod solidity_math;
 pub mod uniswap;
 
 use alloy::primitives::Address;

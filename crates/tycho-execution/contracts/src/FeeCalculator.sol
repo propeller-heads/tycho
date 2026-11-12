@@ -10,6 +10,7 @@ import {IFeeCalculator, CustomFees} from "@interfaces/IFeeCalculator.sol";
 
 error FeeCalculator__FeeTooHigh();
 error FeeCalculator__ShareTooHigh();
+error FeeCalculator__RouterPositiveSlippageBpsTooHigh();
 error FeeCalculator__CapTooHigh();
 error FeeCalculator__AddressZero();
 
@@ -25,6 +26,11 @@ error FeeCalculator__AddressZero();
  */
 contract FeeCalculator is AccessControl, IFeeCalculator {
     using EnumerableSet for EnumerableSet.AddressSet;
+
+    struct CustomRouterPositiveSlippageBps {
+        bool isSet;
+        uint32 slippageBps;
+    }
 
     struct TokenPairFee {
         bool isSet;
@@ -44,6 +50,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     uint32 private _routerFeeOnOutputBps; // Router fee on output amount in fee units
     uint32 private _routerFeeOnClientFeeBps; // Router fee on client fee in fee units
     address private _routerFeeReceiver; // Address whose vault balance receives router fees
+    // Part of the surplus the router captures, in fee units (MAX_BPS = all).
+    // It shares the slot above, which every fee calculation reads anyway.
+    uint32 private _routerPositiveSlippageBps;
 
     // Per-client custom router fees (both output and client fees)
     // If set, custom values will override the default router fees for the client
@@ -53,12 +62,10 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     // Tracks all clients that currently have at least one custom fee override
     EnumerableSet.AddressSet private _customFeeClients;
 
-    // Positive slippage configuration
-    bool private _positiveSlippageEnabled;
-
-    // Clients whose swaps keep the surplus above expectedAmountOut even
-    // while positive slippage capture is enabled
-    mapping(address => bool) private _positiveSlippageExempt;
+    // Per-client router positive slippage bps. A set value replaces the global router positive slippage bps
+    // for the client, so it can be zero.
+    mapping(address => CustomRouterPositiveSlippageBps) private
+        _customRouterPositiveSlippageBps;
 
     // Each client's share of the captured surplus in fee units. The router
     // keeps the rest, so the default of zero leaves the full surplus to it.
@@ -91,8 +98,13 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     event RouterFeeReceiverUpdated(
         address indexed oldReceiver, address indexed newReceiver
     );
-    event PositiveSlippageToggled(bool enabled);
-    event PositiveSlippageExemptionSet(address indexed client, bool exempt);
+    event RouterPositiveSlippageBpsUpdated(
+        uint32 oldSlippageBps, uint32 newSlippageBps
+    );
+    event CustomRouterPositiveSlippageBpsUpdated(
+        address indexed client, uint32 oldSlippageBps, uint32 newSlippageBps
+    );
+    event CustomRouterPositiveSlippageBpsRemoved(address indexed client);
     event ClientPositiveSlippageShareUpdated(
         address indexed client, uint32 oldShareBps, uint32 newShareBps
     );
@@ -110,20 +122,20 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @dev The receiver is explicit rather than defaulted to `msg.sender`: when
      *      the calculator is deployed through a CREATE2 factory, the factory is
      *      the sender, and fees credited to it can never be withdrawn.
-     *      Positive slippage capture starts enabled, since that is how every
-     *      deployment is operated; `setPositiveSlippageEnabled` turns it off.
+     *      The router captures 100% of the surplus to start, since that is
+     *      how every deployment is operated.
      */
     constructor(address routerFeeSetter, address routerFeeReceiver) {
         if (routerFeeReceiver == address(0)) {
             revert FeeCalculator__AddressZero();
         }
         _routerFeeReceiver = routerFeeReceiver;
-        _positiveSlippageEnabled = true;
+        _routerPositiveSlippageBps = MAX_BPS;
         // Make the role its own admin so role holders can manage their own role
         _setRoleAdmin(ROUTER_FEE_SETTER_ROLE, ROUTER_FEE_SETTER_ROLE);
         _grantRole(ROUTER_FEE_SETTER_ROLE, routerFeeSetter);
         emit RouterFeeReceiverUpdated(address(0), routerFeeReceiver);
-        emit PositiveSlippageToggled(true);
+        emit RouterPositiveSlippageBpsUpdated(0, MAX_BPS);
     }
 
     /**
@@ -131,15 +143,14 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @dev Called from TychoRouterV3. Does not perform any accounting.
      *
      *      Deduction order:
-     *      1. When positive slippage capture is enabled and the client is not
-     *         exempt, the surplus (actualAmountOut - expectedAmountOut) is
-     *         taken first, up to the client's cap (a fraction of
-     *         actualAmountOut). The client gets its share of the captured
-     *         surplus and the router keeps the rest.
+     *      1. The router captures part of the surplus
+     *         (actualAmountOut - expectedAmountOut) first: the client's
+     *         custom router positive slippage bps if set, otherwise the global one,
+     *         up to the client's cap (a fraction of actualAmountOut). The client gets
+     *         its share of the captured amount and the router keeps the
+     *         rest. The uncaptured surplus stays in the swap output.
      *      2. Fees (client fee + router fees) are then calculated on
-     *         the amount *after* surplus extraction: expectedAmountOut when
-     *         the whole surplus was taken, more when the cap bound it, and
-     *         actualAmountOut when nothing was taken.
+     *         the amount *after* surplus extraction.
      *
      *      Router fee parameters are retrieved from contract storage based on the client address.
      *      Client fee parameters are passed as function arguments.
@@ -161,10 +172,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
             : positiveSlippage * _clientPositiveSlippageShareBps[resolvedClient]
                 / MAX_BPS;
 
-        // Fee base = actual output minus any extracted surplus.
-        // When the whole surplus is taken: feeBase = expectedAmountOut.
-        // When the cap binds, feeBase keeps the surplus above the cap.
-        // When no surplus (disabled or actual <= expected): it is zero.
+        // Fee base = actual output minus the captured surplus.
         uint256 feeBase = feeInput.actualAmountOut - positiveSlippage;
 
         (uint256 routerFee, uint256 clientFee) = _calculateFee(
@@ -201,13 +209,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         address resolvedClient = _resolveClient(client);
 
         // Slippage direction is unknown before the swap, so we always
-        // route funds through the router when positive slippage is enabled —
-        // unless this client's surplus is never captured anyway.
-        if (
-            _positiveSlippageEnabled && !_positiveSlippageExempt[resolvedClient]
-        ) {
-            return true;
-        }
+        // route funds through the router when the client's surplus can be
+        // captured.
+        if (_getRouterPositiveSlippageBps(resolvedClient) > 0) return true;
 
         (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps) =
             _getFeeInfo(resolvedClient);
@@ -285,24 +289,22 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
-     * @dev Calculates the positive slippage surplus that the router captures
-     * @return positiveSlippage The surplus, at most the client's cap
-     *         fraction of actualAmountOut (zero if disabled, the client is
-     *         exempt, or there is no surplus)
+     * @dev Calculates the captured part of the positive slippage surplus
+     * @return positiveSlippage The captured part of the surplus, at most the
+     *         client's cap fraction of actualAmountOut (zero if the client's
+     *         router positive slippage bps is zero or there is no surplus)
      */
     function _calculatePositiveSlippage(
         uint256 actualAmountOut,
         uint256 expectedAmountOut,
         address client
     ) internal view returns (uint256 positiveSlippage) {
-        if (
-            !_positiveSlippageEnabled || _positiveSlippageExempt[client]
-                || actualAmountOut <= expectedAmountOut
-        ) {
+        if (actualAmountOut <= expectedAmountOut) {
             return 0;
         }
 
-        positiveSlippage = actualAmountOut - expectedAmountOut;
+        positiveSlippage = (actualAmountOut - expectedAmountOut)
+            * _getRouterPositiveSlippageBps(client) / MAX_BPS;
 
         PositiveSlippageCap memory cap = _positiveSlippageCaps[client];
         if (!cap.isSet) return positiveSlippage;
@@ -310,6 +312,22 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         if (positiveSlippage > maxPositiveSlippage) {
             positiveSlippage = maxPositiveSlippage;
         }
+    }
+
+    /**
+     * @dev Returns the client's custom router positive slippage bps if set, otherwise the
+     *      global router positive slippage bps
+     */
+    function _getRouterPositiveSlippageBps(address client)
+        internal
+        view
+        returns (uint32)
+    {
+        CustomRouterPositiveSlippageBps memory customSlippage =
+            _customRouterPositiveSlippageBps[client];
+        return customSlippage.isSet
+            ? customSlippage.slippageBps
+            : _routerPositiveSlippageBps;
     }
 
     function _getTokenPairFee(address tokenA, address tokenB)
@@ -632,48 +650,77 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
-     * @dev Enables or disables positive slippage capture
-     * @param enabled True to enable, false to disable
+     * @dev Sets the part of the positive slippage surplus the router
+     *      captures. The rest of the surplus stays in the swap output.
+     * @param slippageBps Router positive slippage in fee units (100_000_000 = the full surplus)
      */
-    function setPositiveSlippageEnabled(bool enabled)
+    function setRouterPositiveSlippageBps(uint32 slippageBps)
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        _positiveSlippageEnabled = enabled;
-        emit PositiveSlippageToggled(enabled);
+        if (slippageBps > MAX_BPS) {
+            revert FeeCalculator__RouterPositiveSlippageBpsTooHigh();
+        }
+        uint32 oldSlippageBps = _routerPositiveSlippageBps;
+        _routerPositiveSlippageBps = slippageBps;
+        emit RouterPositiveSlippageBpsUpdated(oldSlippageBps, slippageBps);
     }
 
     /**
-     * @dev Returns whether positive slippage capture is enabled
+     * @dev Returns the global router positive slippage bps in fee units
      */
-    function getPositiveSlippageEnabled() external view returns (bool) {
-        return _positiveSlippageEnabled;
+    function getRouterPositiveSlippageBps() external view returns (uint32) {
+        return _routerPositiveSlippageBps;
     }
 
     /**
-     * @dev Exempts a client from positive slippage capture, or removes the
-     *      exemption. An exempt client's swaps keep the surplus above
-     *      expectedAmountOut even while capture is enabled globally.
+     * @dev Sets a client's router positive slippage bps. It replaces the global capture
+     *      bps for the client. Zero leaves the full surplus in the
+     *      client's swap output.
      * @param client The client address to update
-     * @param exempt True to exempt, false to capture again
+     * @param slippageBps Router positive slippage in fee units (100_000_000 = the full surplus)
      */
-    function setPositiveSlippageExempt(address client, bool exempt)
-        external
-        onlyRole(ROUTER_FEE_SETTER_ROLE)
-    {
-        _positiveSlippageExempt[client] = exempt;
-        emit PositiveSlippageExemptionSet(client, exempt);
+    function setCustomRouterPositiveSlippageBps(
+        address client,
+        uint32 slippageBps
+    ) external onlyRole(ROUTER_FEE_SETTER_ROLE) {
+        if (slippageBps > MAX_BPS) {
+            revert FeeCalculator__RouterPositiveSlippageBpsTooHigh();
+        }
+        uint32 oldSlippageBps = _getRouterPositiveSlippageBps(client);
+        _customRouterPositiveSlippageBps[client] =
+            CustomRouterPositiveSlippageBps({
+                isSet: true, slippageBps: slippageBps
+            });
+        emit CustomRouterPositiveSlippageBpsUpdated(
+            client, oldSlippageBps, slippageBps
+        );
     }
 
     /**
-     * @dev Returns whether a client is exempt from positive slippage capture
+     * @dev Removes a client's router positive slippage bps, so the global router positive slippage bps
+     *      applies to the client again
      */
-    function isPositiveSlippageExempt(address client)
+    function removeCustomRouterPositiveSlippageBps(address client)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        delete _customRouterPositiveSlippageBps[client];
+        emit CustomRouterPositiveSlippageBpsRemoved(client);
+    }
+
+    /**
+     * @dev Returns a client's router positive slippage bps in fee units. `isSet` is false
+     *      when the global router positive slippage bps applies to the client.
+     */
+    function getCustomRouterPositiveSlippageBps(address client)
         external
         view
-        returns (bool)
+        returns (bool isSet, uint32 slippageBps)
     {
-        return _positiveSlippageExempt[client];
+        CustomRouterPositiveSlippageBps memory customSlippage =
+            _customRouterPositiveSlippageBps[client];
+        return (customSlippage.isSet, customSlippage.slippageBps);
     }
 
     /**

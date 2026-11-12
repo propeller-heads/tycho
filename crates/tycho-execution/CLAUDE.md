@@ -129,20 +129,22 @@ queryable via RPC:
 - `MAX_BPS_SQUARED = 10_000_000_000_000_000` — `MAX_BPS²`; the combined denominator when both fees use the
   sub-BPS scale
 
-**Positive slippage** (`_positiveSlippageEnabled`, enabled from the constructor — which emits
-`PositiveSlippageToggled(true)` — and toggled afterwards via `setPositiveSlippageEnabled`): when enabled, the router
-captures the surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees compute on
-`expectedAmountOut`. When disabled, fees compute on `actualAmountOut` and the surplus stays in the swap output. The flag
-also forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
-exemptions (`setPositiveSlippageExempt`, `_positiveSlippageExempt` mapping) opt a resolved client out while capture
-stays enabled globally: the surplus stays in the swap output, fees compute on `actualAmountOut`, and an exempt client
-with no fees skips the forced router hop.
+**Positive slippage** (`_routerPositiveSlippageBps`, 100% from the constructor — which emits
+`RouterPositiveSlippageBpsUpdated(0, MAX_BPS)` — and changed afterwards via `setRouterPositiveSlippageBps`): the
+router captures that part of the surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees
+compute on the output minus the captured amount. The rest of the surplus stays in the swap output. A router positive slippage bps above
+zero forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
+router positive slippage bps (`setCustomRouterPositiveSlippageBps`, `removeCustomRouterPositiveSlippageBps`,
+`_customRouterPositiveSlippageBps` mapping) replace the global router positive slippage bps for a resolved client. There is no switch
+that stops capture for every client: a global router positive slippage bps of zero leaves each custom router positive slippage bps in effect. A capture
+bps of zero leaves the surplus in the swap output, fees compute on `actualAmountOut`, and a client with no fees skips
+the forced router hop.
 Per-client shares (`setClientPositiveSlippageShare`, `_clientPositiveSlippageShareBps` mapping, fee units) give the
 resolved client part of the captured surplus, credited with its client fee; the router keeps the rest, rounded in its
 favour. The default share of zero leaves the full surplus to the router.
 Per-client caps (`setPositiveSlippageCap`, `_positiveSlippageCaps` mapping of `{isSet, capBps}`, fee units of
-`actualAmountOut`) limit the surplus captured from the resolved client's swaps to `actualAmountOut * capBps / MAX_BPS`.
-The surplus above the cap stays in the swap output and fees compute on it. A client without a cap is uncapped, and
+`actualAmountOut`) limit the captured surplus of the resolved client's swaps, after the router positive slippage bps,
+to `actualAmountOut * capBps / MAX_BPS`. The surplus above the cap stays in the swap output and fees compute on it. A client without a cap is uncapped, and
 `getPositiveSlippageCap` reports `MAX_BPS` for it; setting `MAX_BPS` uncaps a client again.
 
 **Deduction order**: client fee calculated first, then router's cut of client fee subtracted from it, then router fee on
@@ -160,11 +162,12 @@ simple: they just call the protocol. All balance tracking, output verification, 
 Dispatcher/TransferManager.
 
 Supported: UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3,
-Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Bebop (RFQ),
-Hashflow (RFQ), Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other
-native wrappers), PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface;
-the pAMM address travels in the swap data), Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
-fallback"), and TychoSubsidizing (runs one hop through an inner executor and pays a signed subsidy -- see "Subsidies").
+Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, BaiBai, RingSwapV2, Sky,
+Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH
+and other native wrappers), PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM`
+interface; the pAMM address travels in the swap data), Fallback (runs one leg through `TychoFallbackRouter` -- see
+"Protocol fallback"), and TychoSubsidizing (runs one hop through an inner executor and pays a signed subsidy -- see
+"Subsidies").
 
 ### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/*FallbackRouter.sol`, `executors/*FallbackExecutor.sol`)
 
@@ -401,7 +404,7 @@ is the exception: `TychoFallbackRouter` transfers to the protocol itself, outsid
 
 | Category                   | Executors                                                                                                                                       | `outputToRouter` | Behavior                                                                                         |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|------------------|--------------------------------------------------------------------------------------------------|
-| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Metric, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
+| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, BaiBai, RingSwapV2, Sky, Metric, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
 | **Output-lands-at-router** | Curve, NativeWrap, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice                                                                              | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
 
 **Two input categories**:
