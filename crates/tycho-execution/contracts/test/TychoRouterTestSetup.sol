@@ -407,7 +407,7 @@ contract TychoRouterTestSetup is
         // output and assert the receiver gets that whole output, so the capture
         // bps is set to zero here and the capture tests set it back.
         vm.prank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageCaptureBps(0);
+        feeCalculator.setRouterPositiveSlippageBps(0);
     }
 
     function pleEncode(bytes[] memory data)

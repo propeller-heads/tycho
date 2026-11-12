@@ -741,16 +741,16 @@ contract FeeCalculatorConfigTest is Constants {
         feeCalculator.removeCustomRouterFeeOnClientFee(ALICE);
     }
 
-    function testSetCustomPositiveSlippageCaptureBpsUnauthorized() public {
+    function testSetCustomRouterPositiveSlippageBpsUnauthorized() public {
         vm.prank(BOB);
         vm.expectRevert();
-        feeCalculator.setCustomPositiveSlippageCaptureBps(BOB, 0);
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, 0);
     }
 
-    function testRemoveCustomPositiveSlippageCaptureBpsUnauthorized() public {
+    function testRemoveCustomRouterPositiveSlippageBpsUnauthorized() public {
         vm.prank(BOB);
         vm.expectRevert();
-        feeCalculator.removeCustomPositiveSlippageCaptureBps(BOB);
+        feeCalculator.removeCustomRouterPositiveSlippageBps(BOB);
     }
 
     // FEE RECEIVER TESTS
@@ -857,7 +857,7 @@ contract FeeCalculatorConfigTest is Constants {
         // The fee receiver is whatever the constructor was given
         assertEq(feeCalculator.getRouterFeeReceiver(), _ROUTER_FEE_RECEIVER);
         // The router captures the full surplus to start
-        assertEq(feeCalculator.getPositiveSlippageCaptureBps(), _100_PCT);
+        assertEq(feeCalculator.getRouterPositiveSlippageBps(), _100_PCT);
     }
 
     function testMaximumFee() public {
@@ -1169,55 +1169,59 @@ contract FeeCalculatorSlippageTest is Constants {
         });
     }
 
-    function testSetPositiveSlippageCaptureBpsUnauthorized() public {
+    function testSetRouterPositiveSlippageBpsUnauthorized() public {
         vm.prank(BOB);
         vm.expectRevert();
-        feeCalculator.setPositiveSlippageCaptureBps(_50_PCT);
+        feeCalculator.setRouterPositiveSlippageBps(_50_PCT);
     }
 
-    function testSetPositiveSlippageCaptureBpsTooHigh() public {
+    function testSetRouterPositiveSlippageBpsTooHigh() public {
         vm.prank(FEE_SETTER);
-        vm.expectRevert(FeeCalculator__CaptureBpsTooHigh.selector);
-        feeCalculator.setPositiveSlippageCaptureBps(_100_PCT + 1);
+        vm.expectRevert(
+            FeeCalculator__RouterPositiveSlippageBpsTooHigh.selector
+        );
+        feeCalculator.setRouterPositiveSlippageBps(_100_PCT + 1);
     }
 
-    function testSetCustomPositiveSlippageCaptureBpsTooHigh() public {
+    function testSetCustomRouterPositiveSlippageBpsTooHigh() public {
         vm.prank(FEE_SETTER);
-        vm.expectRevert(FeeCalculator__CaptureBpsTooHigh.selector);
-        feeCalculator.setCustomPositiveSlippageCaptureBps(BOB, _100_PCT + 1);
+        vm.expectRevert(
+            FeeCalculator__RouterPositiveSlippageBpsTooHigh.selector
+        );
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, _100_PCT + 1);
     }
 
-    function testSetAndRemoveCustomPositiveSlippageCaptureBps() public {
-        (bool isSet, uint32 captureBps) =
-            feeCalculator.getCustomPositiveSlippageCaptureBps(BOB);
+    function testSetAndRemoveCustomRouterPositiveSlippageBps() public {
+        (bool isSet, uint32 slippageBps) =
+            feeCalculator.getCustomRouterPositiveSlippageBps(BOB);
         assertFalse(isSet);
-        assertEq(captureBps, 0);
+        assertEq(slippageBps, 0);
 
         vm.prank(FEE_SETTER);
         vm.expectEmit(true, false, false, true);
-        emit FeeCalculator.CustomPositiveSlippageCaptureBpsUpdated(
+        emit FeeCalculator.CustomRouterPositiveSlippageBpsUpdated(
             BOB, _100_PCT, _50_PCT
         );
-        feeCalculator.setCustomPositiveSlippageCaptureBps(BOB, _50_PCT);
-        (isSet, captureBps) =
-            feeCalculator.getCustomPositiveSlippageCaptureBps(BOB);
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, _50_PCT);
+        (isSet, slippageBps) =
+            feeCalculator.getCustomRouterPositiveSlippageBps(BOB);
         assertTrue(isSet);
-        assertEq(captureBps, _50_PCT);
+        assertEq(slippageBps, _50_PCT);
 
         vm.prank(FEE_SETTER);
         vm.expectEmit(true, false, false, false);
-        emit FeeCalculator.CustomPositiveSlippageCaptureBpsRemoved(BOB);
-        feeCalculator.removeCustomPositiveSlippageCaptureBps(BOB);
-        (isSet, captureBps) =
-            feeCalculator.getCustomPositiveSlippageCaptureBps(BOB);
+        emit FeeCalculator.CustomRouterPositiveSlippageBpsRemoved(BOB);
+        feeCalculator.removeCustomRouterPositiveSlippageBps(BOB);
+        (isSet, slippageBps) =
+            feeCalculator.getCustomRouterPositiveSlippageBps(BOB);
         assertFalse(isSet);
-        assertEq(captureBps, 0);
+        assertEq(slippageBps, 0);
     }
 
-    function testCustomCaptureBpsReplacesGlobal() public {
+    function testCustomRouterPositiveSlippageBpsReplacesGlobal() public {
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageCaptureBps(_10_PCT);
-        feeCalculator.setCustomPositiveSlippageCaptureBps(BOB, _50_PCT);
+        feeCalculator.setRouterPositiveSlippageBps(_10_PCT);
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, _50_PCT);
         vm.stopPrank();
 
         FeeRecipient[] memory bobFees =
@@ -1231,19 +1235,19 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(aliceFees[0].feeAmount, 0.01 ether);
     }
 
-    function testSetPositiveSlippageCaptureBps() public {
-        assertEq(feeCalculator.getPositiveSlippageCaptureBps(), _100_PCT);
+    function testSetRouterPositiveSlippageBps() public {
+        assertEq(feeCalculator.getRouterPositiveSlippageBps(), _100_PCT);
 
         vm.prank(FEE_SETTER);
         vm.expectEmit(false, false, false, true);
-        emit FeeCalculator.PositiveSlippageCaptureBpsUpdated(_100_PCT, _50_PCT);
-        feeCalculator.setPositiveSlippageCaptureBps(_50_PCT);
-        assertEq(feeCalculator.getPositiveSlippageCaptureBps(), _50_PCT);
+        emit FeeCalculator.RouterPositiveSlippageBpsUpdated(_100_PCT, _50_PCT);
+        feeCalculator.setRouterPositiveSlippageBps(_50_PCT);
+        assertEq(feeCalculator.getRouterPositiveSlippageBps(), _50_PCT);
     }
 
     function testRouterCapturesPartOfPositiveSlippage() public {
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageCaptureBps(_10_PCT);
+        feeCalculator.setRouterPositiveSlippageBps(_10_PCT);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
         vm.stopPrank();
 
@@ -1256,9 +1260,9 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[1].feeAmount, 0);
     }
 
-    function testZeroCaptureBpsSkipsRouterHop() public {
+    function testZeroRouterPositiveSlippageBpsSkipsRouterHop() public {
         vm.prank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageCaptureBps(0);
+        feeCalculator.setRouterPositiveSlippageBps(0);
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(_surplusInput());
 
@@ -1320,10 +1324,12 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[1].feeAmount, 0);
     }
 
-    function testZeroCustomCaptureBpsKeepsPositiveSlippage() public {
+    function testZeroCustomRouterPositiveSlippageBpsKeepsPositiveSlippage()
+        public
+    {
         vm.startPrank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
-        feeCalculator.setCustomPositiveSlippageCaptureBps(BOB, 0);
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, 0);
         vm.stopPrank();
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
@@ -1345,10 +1351,10 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[1].feeAmount, 0);
     }
 
-    function testCustomCaptureBpsRemovalRestoresGlobal() public {
+    function testCustomRouterPositiveSlippageBpsRemovalRestoresGlobal() public {
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setCustomPositiveSlippageCaptureBps(BOB, 0);
-        feeCalculator.removeCustomPositiveSlippageCaptureBps(BOB);
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, 0);
+        feeCalculator.removeCustomRouterPositiveSlippageBps(BOB);
         vm.stopPrank();
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
@@ -1363,15 +1369,15 @@ contract FeeCalculatorSlippageTest is Constants {
             })
         );
 
-        // With the custom capture bps removed, the global 100% applies again
+        // With the custom router positive slippage bps removed, the global 100% applies again
         assertEq(fees[0].feeAmount, 0.1 ether);
     }
 
-    function testCustomCaptureBpsResolvesOrigin() public {
-        // When client == address(0) (no signature), the custom capture bps of
+    function testCustomRouterPositiveSlippageBpsResolvesOrigin() public {
+        // When client == address(0) (no signature), the custom router positive slippage bps of
         // tx.origin applies.
         vm.prank(FEE_SETTER);
-        feeCalculator.setCustomPositiveSlippageCaptureBps(ALICE, 0);
+        feeCalculator.setCustomRouterPositiveSlippageBps(ALICE, 0);
 
         vm.prank(address(this), ALICE);
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
@@ -1467,7 +1473,7 @@ contract FeeCalculatorSlippageTest is Constants {
 
     function testZeroTokenPairFeeRemovesRouterFee() public {
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageCaptureBps(0);
+        feeCalculator.setRouterPositiveSlippageBps(0);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
         feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, 0);
         vm.stopPrank();
@@ -1501,7 +1507,7 @@ contract FeeCalculatorSlippageTest is Constants {
 
     function testMustOutputThroughRouterWhileAnyTokenPairFeeIsSet() public {
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageCaptureBps(0);
+        feeCalculator.setRouterPositiveSlippageBps(0);
         assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
 
         feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, 0);
@@ -1518,14 +1524,16 @@ contract FeeCalculatorSlippageTest is Constants {
         vm.stopPrank();
     }
 
-    function testMustOutputThroughRouterWithZeroCustomCaptureBps() public {
+    function testMustOutputThroughRouterWithZeroCustomRouterPositiveSlippageBps()
+        public
+    {
         // Positive slippage is enabled in setUp, so a client with a non-zero
-        // capture bps must route output through the router
+        // router positive slippage bps must route output through the router
         assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
 
-        // A client with a zero capture bps and no fees may skip the router hop
+        // A client with a zero router positive slippage bps and no fees may skip the router hop
         vm.prank(FEE_SETTER);
-        feeCalculator.setCustomPositiveSlippageCaptureBps(BOB, 0);
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, 0);
         assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
 
         // Any fee still forces the router hop for that client
@@ -1562,7 +1570,7 @@ contract FeeCalculatorSlippageTest is Constants {
 
     function testClientShareAppliesToCapturedSurplus() public {
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageCaptureBps(_10_PCT);
+        feeCalculator.setRouterPositiveSlippageBps(_10_PCT);
         feeCalculator.setClientPositiveSlippageShare(BOB, _50_PCT);
         vm.stopPrank();
 

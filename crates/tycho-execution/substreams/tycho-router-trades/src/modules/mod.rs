@@ -35,11 +35,11 @@ pub(crate) mod keys {
     pub fn fee_bps_scale(fc: &[u8]) -> String {
         format!("fc:{}:scale", hex::encode(fc))
     }
-    pub fn positive_slippage_capture(fc: &[u8]) -> String {
-        format!("fc:{}:ps_capture", hex::encode(fc))
+    pub fn router_positive_slippage(fc: &[u8]) -> String {
+        format!("fc:{}:ps_router", hex::encode(fc))
     }
-    pub fn custom_positive_slippage_capture(fc: &[u8], client: &[u8]) -> String {
-        format!("fc:{}:ps_custom_capture:{}", hex::encode(fc), hex::encode(client))
+    pub fn custom_router_positive_slippage(fc: &[u8], client: &[u8]) -> String {
+        format!("fc:{}:ps_custom_router:{}", hex::encode(fc), hex::encode(client))
     }
     pub fn client_positive_slippage_share(fc: &[u8], client: &[u8]) -> String {
         format!("fc:{}:ps_client_share:{}", hex::encode(fc), hex::encode(client))
@@ -57,11 +57,11 @@ pub(crate) mod events {
     pub const ROUTER_FEE_RECEIVER_UPDATED: &str = "RouterFeeReceiverUpdated";
     pub const POSITIVE_SLIPPAGE_TOGGLED: &str = "PositiveSlippageToggled";
     pub const POSITIVE_SLIPPAGE_EXEMPTION_SET: &str = "PositiveSlippageExemptionSet";
-    pub const POSITIVE_SLIPPAGE_CAPTURE_BPS_UPDATED: &str = "PositiveSlippageCaptureBpsUpdated";
-    pub const CUSTOM_POSITIVE_SLIPPAGE_CAPTURE_BPS_UPDATED: &str =
-        "CustomPositiveSlippageCaptureBpsUpdated";
-    pub const CUSTOM_POSITIVE_SLIPPAGE_CAPTURE_BPS_REMOVED: &str =
-        "CustomPositiveSlippageCaptureBpsRemoved";
+    pub const ROUTER_POSITIVE_SLIPPAGE_BPS_UPDATED: &str = "RouterPositiveSlippageBpsUpdated";
+    pub const CUSTOM_ROUTER_POSITIVE_SLIPPAGE_BPS_UPDATED: &str =
+        "CustomRouterPositiveSlippageBpsUpdated";
+    pub const CUSTOM_ROUTER_POSITIVE_SLIPPAGE_BPS_REMOVED: &str =
+        "CustomRouterPositiveSlippageBpsRemoved";
     pub const CLIENT_POSITIVE_SLIPPAGE_SHARE_UPDATED: &str = "ClientPositiveSlippageShareUpdated";
     pub const FEE_CALCULATOR_SET: &str = "FeeCalculatorSet";
     pub const FEE_CALCULATOR_ACTIVATED: &str = "FeeCalculatorActivated";

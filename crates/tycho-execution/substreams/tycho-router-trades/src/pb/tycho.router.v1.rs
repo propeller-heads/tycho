@@ -182,7 +182,7 @@ pub struct RouterFeeConfig {
     #[prost(bool, tag="5")]
     pub custom_fee_on_client_fee: bool,
     /// False only when an older calculator turned capture off with PositiveSlippageToggled. A
-    /// calculator with a capture bps has no switch and reports true.
+    /// calculator with a router positive slippage bps has no switch and reports true.
     #[prost(bool, tag="6")]
     pub positive_slippage_enabled: bool,
     /// Denominator of the bps values: 10000 for v3_0, 100000000 for v3_1.
@@ -193,7 +193,7 @@ pub struct RouterFeeConfig {
     /// The client is the signed clientFeeReceiver, or tx.origin when that is zero, the same
     /// resolution the FeeCalculator does. An exemption on an older calculator reads as zero.
     #[prost(uint64, tag="9")]
-    pub positive_slippage_capture_bps: u64,
+    pub router_positive_slippage_bps: u64,
     /// The client's share of the captured surplus, in fee units. The router keeps the rest.
     #[prost(uint64, tag="10")]
     pub client_positive_slippage_share_bps: u64,

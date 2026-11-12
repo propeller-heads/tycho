@@ -120,7 +120,7 @@ message RouterFeeConfig {
   bool custom_fee_on_output = 4;
   bool custom_fee_on_client_fee = 5;
   // False only when an older calculator turned capture off with PositiveSlippageToggled. A
-  // calculator with a capture bps has no switch and reports true.
+  // calculator with a router positive slippage bps has no switch and reports true.
   bool positive_slippage_enabled = 6;
   // Denominator of the bps values: 10000 for v3_0, 100000000 for v3_1.
   uint64 bps_scale = 7;
@@ -130,7 +130,7 @@ message RouterFeeConfig {
   // the full surplus): the client's custom value if set, otherwise the calculator's global one.
   // The client is the signed clientFeeReceiver, or tx.origin when that is zero, the same
   // resolution the FeeCalculator does. An exemption on an older calculator reads as zero.
-  uint64 positive_slippage_capture_bps = 9;
+  uint64 router_positive_slippage_bps = 9;
   // The client's share of the captured surplus, in fee units. The router keeps the rest.
   uint64 client_positive_slippage_share_bps = 10;
 }

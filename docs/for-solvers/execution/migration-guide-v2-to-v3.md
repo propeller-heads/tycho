@@ -414,8 +414,8 @@ beyond the typehash above.
 
 Fees are now charged on the swap output minus any positive slippage the router captured, rather than on
 the full output. To check how much of the surplus the router captures, call
-`getCustomPositiveSlippageCaptureBps(client)` on the FeeCalculator. When `isSet` is false, call
-`getPositiveSlippageCaptureBps()` for the global value.
+`getCustomRouterPositiveSlippageBps(client)` on the FeeCalculator. When `isSet` is false, call
+`getRouterPositiveSlippageBps()` for the global value.
 
 The FeeCalculator interface changes:
 
@@ -427,8 +427,8 @@ The FeeCalculator interface changes:
 | `getEffectiveRouterFeeOnClientFee(client)`                                  | Removed                                                                  |
 | `MAX_FEE_BPS`, `MAX_FEE_BPS_SQUARED`                                        | `MAX_BPS`, `MAX_BPS_SQUARED` — same values                               |
 | —                                                                           | `mustOutputThroughRouter(clientFeeBps, client)` → `bool`                 |
-| —                                                                           | `getPositiveSlippageCaptureBps()` → `uint32`                             |
-| —                                                                           | `getCustomPositiveSlippageCaptureBps(client)` → `(bool isSet, uint32)`   |
+| —                                                                           | `getRouterPositiveSlippageBps()` → `uint32`                             |
+| —                                                                           | `getCustomRouterPositiveSlippageBps(client)` → `(bool isSet, uint32)`   |
 
 `calculateFee` no longer returns the post-fee amount — subtract the recipients' amounts yourself. It
 takes a struct instead of loose arguments:

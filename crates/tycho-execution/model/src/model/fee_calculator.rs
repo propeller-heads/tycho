@@ -13,7 +13,7 @@ pub struct FeeRecipient {
 struct FeeInfo {
     router_fee_on_output_bps: i64,
     router_fee_on_client_fee_bps: i64,
-    positive_slippage_capture_bps: i64,
+    router_positive_slippage_bps: i64,
     client_positive_slippage_share_bps: i64,
     has_any_token_pair_fee: bool,
 }
@@ -56,15 +56,15 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
             (0, 0, false)
         };
 
-    // A model run has one client, so this is that client's capture bps: its custom value if set,
-    // otherwise the global one.
-    let positive_slippage_capture_bps = if crate::config::ENABLE_POSITIVE_SLIPPAGE {
-        params.request("positive_slippage_capture_bps", vec![0, MAX_BPS / 2, MAX_BPS])?
+    // A model run has one client, so this is that client's router positive slippage bps: its custom
+    // value if set, otherwise the global one.
+    let router_positive_slippage_bps = if crate::config::ENABLE_POSITIVE_SLIPPAGE {
+        params.request("router_positive_slippage_bps", vec![0, MAX_BPS / 2, MAX_BPS])?
     } else {
         0
     };
 
-    let client_positive_slippage_share_bps = if positive_slippage_capture_bps > 0 {
+    let client_positive_slippage_share_bps = if router_positive_slippage_bps > 0 {
         params.request("client_positive_slippage_share_bps", vec![0, MAX_BPS / 2, MAX_BPS])?
     } else {
         0
@@ -73,7 +73,7 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
     Ok(FeeInfo {
         router_fee_on_output_bps,
         router_fee_on_client_fee_bps,
-        positive_slippage_capture_bps,
+        router_positive_slippage_bps,
         client_positive_slippage_share_bps,
         has_any_token_pair_fee,
     })
@@ -124,7 +124,7 @@ pub fn calculate_fee(
 pub fn must_output_through_router(params: &Params, client_fee_bps: i64) -> Result<bool, Error> {
     let fee_info = _get_fee_info(params)?;
 
-    if fee_info.positive_slippage_capture_bps > 0 {
+    if fee_info.router_positive_slippage_bps > 0 {
         return Ok(true);
     }
     if client_fee_bps > 0 {
@@ -194,7 +194,7 @@ fn _calculate_fee(
 /// Mirrors `FeeCalculator._calculatePositiveSlippage` in Solidity.
 ///
 /// Returns the captured part of the positive slippage surplus;
-/// zero if the client's capture bps is zero or there is no surplus.
+/// zero if the client's router positive slippage bps is zero or there is no surplus.
 fn _calculate_positive_slippage(
     actual_amount_out: i64,
     expected_amount_out: i64,
@@ -206,7 +206,7 @@ fn _calculate_positive_slippage(
 
     fee_to_i64(
         (actual_amount_out - expected_amount_out) as i128 *
-            fee_info.positive_slippage_capture_bps as i128 /
+            fee_info.router_positive_slippage_bps as i128 /
             MAX_BPS as i128,
     )
 }

@@ -129,14 +129,14 @@ queryable via RPC:
 - `MAX_BPS_SQUARED = 10_000_000_000_000_000` — `MAX_BPS²`; the combined denominator when both fees use the
   sub-BPS scale
 
-**Positive slippage** (`_positiveSlippageCaptureBps`, 100% from the constructor — which emits
-`PositiveSlippageCaptureBpsUpdated(0, MAX_BPS)` — and changed afterwards via `setPositiveSlippageCaptureBps`): the
+**Positive slippage** (`_routerPositiveSlippageBps`, 100% from the constructor — which emits
+`RouterPositiveSlippageBpsUpdated(0, MAX_BPS)` — and changed afterwards via `setRouterPositiveSlippageBps`): the
 router captures that part of the surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees
-compute on the output minus the captured amount. The rest of the surplus stays in the swap output. A capture bps above
+compute on the output minus the captured amount. The rest of the surplus stays in the swap output. A router positive slippage bps above
 zero forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
-capture bps (`setCustomPositiveSlippageCaptureBps`, `removeCustomPositiveSlippageCaptureBps`,
-`_customPositiveSlippageCaptureBps` mapping) replace the global capture bps for a resolved client. There is no switch
-that stops capture for every client: a global capture bps of zero leaves each custom capture bps in effect. A capture
+router positive slippage bps (`setCustomRouterPositiveSlippageBps`, `removeCustomRouterPositiveSlippageBps`,
+`_customRouterPositiveSlippageBps` mapping) replace the global router positive slippage bps for a resolved client. There is no switch
+that stops capture for every client: a global router positive slippage bps of zero leaves each custom router positive slippage bps in effect. A capture
 bps of zero leaves the surplus in the swap output, fees compute on `actualAmountOut`, and a client with no fees skips
 the forced router hop.
 Per-client shares (`setClientPositiveSlippageShare`, `_clientPositiveSlippageShareBps` mapping, fee units) give the

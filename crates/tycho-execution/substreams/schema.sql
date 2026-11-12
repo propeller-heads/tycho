@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS trades (
     -- amount_out + total fees taken, i.e. what the swaps produced before fee deduction.
     gross_amount_out           NUMERIC(78, 0),
     -- gross_amount_out - expected_amount_out, floored at zero: the surplus the swaps produced.
-    -- When positive_slippage_enabled, the router captured positive_slippage_capture_bps of it and
+    -- When positive_slippage_enabled, the router captured router_positive_slippage_bps of it and
     -- the receiver kept the rest; otherwise the receiver kept all of it. The client got
     -- client_positive_slippage_share_bps of the captured amount. Read router_fee_amount for what
     -- was actually taken.
@@ -56,13 +56,13 @@ CREATE TABLE IF NOT EXISTS trades (
     custom_fee_on_output       BOOLEAN,
     custom_fee_on_client_fee   BOOLEAN,
     -- False only when an older calculator turned capture off with PositiveSlippageToggled. A
-    -- calculator with a capture bps has no switch and reports true.
+    -- calculator with a router positive slippage bps has no switch and reports true.
     positive_slippage_enabled  BOOLEAN,
     -- Part of the surplus the router captures for this trade's client, in fee units (100000000 =
     -- all of it): the client's custom value if set, otherwise the calculator's global one. The client
     -- is the signed client_fee_receiver, or eoa (tx.origin) when that is zero. An exemption on an
     -- older calculator reads as 0. NULL on a row indexed before this column existed.
-    positive_slippage_capture_bps BIGINT,
+    router_positive_slippage_bps BIGINT,
     -- The client's share of the captured surplus, in fee units. The router keeps the rest.
     client_positive_slippage_share_bps BIGINT,
     fee_bps_scale              BIGINT,

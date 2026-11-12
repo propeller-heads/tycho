@@ -13,7 +13,7 @@ use super::{block_timestamp, events, hex_addr, keys};
 use crate::{
     abi::{
         fee_calculator::events as fc, fee_calculator_exemption::events as fc_exempt,
-        fee_calculator_positive_slippage_capture::events as fc_capture,
+        fee_calculator_router_positive_slippage::events as fc_router_ps,
         fee_calculator_v3_0::events as fc_v3_0, tycho_router_v3_0::events as router_v3_0,
         tycho_router_v3_1::events as router_v3_1,
     },
@@ -250,29 +250,29 @@ fn decode_fee_calculator_event(log: &Log) -> Option<Decoded> {
         };
     }
     bps_event!(
-        fc_capture::CustomPositiveSlippageCaptureBpsUpdated,
-        events::CUSTOM_POSITIVE_SLIPPAGE_CAPTURE_BPS_UPDATED,
-        old_capture_bps,
-        new_capture_bps
+        fc_router_ps::CustomRouterPositiveSlippageBpsUpdated,
+        events::CUSTOM_ROUTER_POSITIVE_SLIPPAGE_BPS_UPDATED,
+        old_slippage_bps,
+        new_slippage_bps
     );
     bps_event!(
-        fc_capture::ClientPositiveSlippageShareUpdated,
+        fc_router_ps::ClientPositiveSlippageShareUpdated,
         events::CLIENT_POSITIVE_SLIPPAGE_SHARE_UPDATED,
         old_share_bps,
         new_share_bps
     );
-    if let Some(ev) = fc_capture::PositiveSlippageCaptureBpsUpdated::match_and_decode(log) {
+    if let Some(ev) = fc_router_ps::RouterPositiveSlippageBpsUpdated::match_and_decode(log) {
         return Some(Decoded {
-            event: events::POSITIVE_SLIPPAGE_CAPTURE_BPS_UPDATED,
+            event: events::ROUTER_POSITIVE_SLIPPAGE_BPS_UPDATED,
             client: Vec::new(),
-            old_value: ev.old_capture_bps.to_string(),
-            new_value: ev.new_capture_bps.to_string(),
+            old_value: ev.old_slippage_bps.to_string(),
+            new_value: ev.new_slippage_bps.to_string(),
             bps_scale: Some(BPS_SCALE_UINT32),
         });
     }
-    if let Some(ev) = fc_capture::CustomPositiveSlippageCaptureBpsRemoved::match_and_decode(log) {
+    if let Some(ev) = fc_router_ps::CustomRouterPositiveSlippageBpsRemoved::match_and_decode(log) {
         return Some(Decoded {
-            event: events::CUSTOM_POSITIVE_SLIPPAGE_CAPTURE_BPS_REMOVED,
+            event: events::CUSTOM_ROUTER_POSITIVE_SLIPPAGE_BPS_REMOVED,
             client: ev.client,
             old_value: String::new(),
             new_value: String::new(),
@@ -346,20 +346,21 @@ fn store_action(ev: &FeeConfigEvent) -> StoreAction {
             StoreAction::DeletePrefix(keys::custom_fee_on_client_fee(fc, &ev.client))
         }
         events::POSITIVE_SLIPPAGE_TOGGLED => set(keys::positive_slippage(fc)),
-        events::POSITIVE_SLIPPAGE_CAPTURE_BPS_UPDATED => set(keys::positive_slippage_capture(fc)),
-        events::CUSTOM_POSITIVE_SLIPPAGE_CAPTURE_BPS_UPDATED => {
-            set(keys::custom_positive_slippage_capture(fc, &ev.client))
+        events::ROUTER_POSITIVE_SLIPPAGE_BPS_UPDATED => set(keys::router_positive_slippage(fc)),
+        events::CUSTOM_ROUTER_POSITIVE_SLIPPAGE_BPS_UPDATED => {
+            set(keys::custom_router_positive_slippage(fc, &ev.client))
         }
-        events::CUSTOM_POSITIVE_SLIPPAGE_CAPTURE_BPS_REMOVED => {
-            StoreAction::DeletePrefix(keys::custom_positive_slippage_capture(fc, &ev.client))
+        events::CUSTOM_ROUTER_POSITIVE_SLIPPAGE_BPS_REMOVED => {
+            StoreAction::DeletePrefix(keys::custom_router_positive_slippage(fc, &ev.client))
         }
         events::CLIENT_POSITIVE_SLIPPAGE_SHARE_UPDATED => {
             set(keys::client_positive_slippage_share(fc, &ev.client))
         }
-        // The calculator generation before per-client capture bps exempted a client instead. An
-        // exemption is a custom capture bps of zero, so both generations resolve the same way.
+        // The calculator generation before per-client router positive slippage bps exempted a
+        // client instead. An exemption is a custom router positive slippage bps of zero, so
+        // both generations resolve the same way.
         events::POSITIVE_SLIPPAGE_EXEMPTION_SET => {
-            let key = keys::custom_positive_slippage_capture(fc, &ev.client);
+            let key = keys::custom_router_positive_slippage(fc, &ev.client);
             if ev.new_value == "1" {
                 StoreAction::Set { key, value: "0".to_string() }
             } else {
@@ -407,13 +408,13 @@ mod tests {
     }
 
     #[test]
-    fn plans_an_exemption_as_a_zero_custom_capture_bps() {
+    fn plans_an_exemption_as_a_zero_custom_router_bps() {
         let mut ev = event(events::POSITIVE_SLIPPAGE_EXEMPTION_SET);
         ev.new_value = "1".to_string();
         assert_eq!(
             store_action(&ev),
             StoreAction::Set {
-                key: keys::custom_positive_slippage_capture(&[0xaa; 20], &[0xbb; 20]),
+                key: keys::custom_router_positive_slippage(&[0xaa; 20], &[0xbb; 20]),
                 value: "0".to_string(),
             }
         );
@@ -421,7 +422,7 @@ mod tests {
         ev.new_value = "0".to_string();
         assert_eq!(
             store_action(&ev),
-            StoreAction::DeletePrefix(keys::custom_positive_slippage_capture(
+            StoreAction::DeletePrefix(keys::custom_router_positive_slippage(
                 &[0xaa; 20],
                 &[0xbb; 20]
             ))
@@ -429,24 +430,24 @@ mod tests {
     }
 
     #[test]
-    fn plans_positive_slippage_captures() {
+    fn plans_router_positive_slippage_bps() {
         assert_eq!(
-            store_action(&event(events::POSITIVE_SLIPPAGE_CAPTURE_BPS_UPDATED)),
+            store_action(&event(events::ROUTER_POSITIVE_SLIPPAGE_BPS_UPDATED)),
             StoreAction::Set {
-                key: keys::positive_slippage_capture(&[0xaa; 20]),
+                key: keys::router_positive_slippage(&[0xaa; 20]),
                 value: "42".to_string(),
             }
         );
         assert_eq!(
-            store_action(&event(events::CUSTOM_POSITIVE_SLIPPAGE_CAPTURE_BPS_UPDATED)),
+            store_action(&event(events::CUSTOM_ROUTER_POSITIVE_SLIPPAGE_BPS_UPDATED)),
             StoreAction::Set {
-                key: keys::custom_positive_slippage_capture(&[0xaa; 20], &[0xbb; 20]),
+                key: keys::custom_router_positive_slippage(&[0xaa; 20], &[0xbb; 20]),
                 value: "42".to_string(),
             }
         );
         assert_eq!(
-            store_action(&event(events::CUSTOM_POSITIVE_SLIPPAGE_CAPTURE_BPS_REMOVED)),
-            StoreAction::DeletePrefix(keys::custom_positive_slippage_capture(
+            store_action(&event(events::CUSTOM_ROUTER_POSITIVE_SLIPPAGE_BPS_REMOVED)),
+            StoreAction::DeletePrefix(keys::custom_router_positive_slippage(
                 &[0xaa; 20],
                 &[0xbb; 20]
             ))
@@ -567,20 +568,20 @@ mod tests {
         assert_eq!(decoded.map(|d| d.new_value), Some("0".to_string()));
     }
 
-    /// keccak256("CustomPositiveSlippageCaptureBpsUpdated(address,uint32,uint32)").
-    const CUSTOM_CAPTURE_TOPIC: &str =
-        "c4eb73923b99217c8c2ef54d1846b2c2941e43bda154a6596be3f7d21e9e1975";
-    /// keccak256("PositiveSlippageCaptureBpsUpdated(uint32,uint32)").
-    const CAPTURE_TOPIC: &str = "567562bbd4111b24e5ac2e2c1257388d253b34e186fe6d0ae5e53d63bd35ee9f";
+    /// keccak256("CustomRouterPositiveSlippageBpsUpdated(address,uint32,uint32)").
+    const CUSTOM_ROUTER_TOPIC: &str =
+        "3cceccd3a7e93f4254456ecd9f8738cbd9b5b95c2760b1a348066118c6908a78";
+    /// keccak256("RouterPositiveSlippageBpsUpdated(uint32,uint32)").
+    const ROUTER_TOPIC: &str = "92445a90bb0e8039b2574876f2789c62b20894a05c44f687e9815f7aebdd5037";
 
     #[test]
-    fn decodes_custom_positive_slippage_capture() {
-        let mut log = bps_log(CUSTOM_CAPTURE_TOPIC, 100_000_000, 0);
+    fn decodes_custom_router_positive_slippage() {
+        let mut log = bps_log(CUSTOM_ROUTER_TOPIC, 100_000_000, 0);
         let mut client_topic = vec![0u8; 12];
         client_topic.extend_from_slice(&[0xcc; 20]);
         log.topics.push(client_topic);
         let decoded = decode_fee_calculator_event(&log).unwrap();
-        assert_eq!(decoded.event, events::CUSTOM_POSITIVE_SLIPPAGE_CAPTURE_BPS_UPDATED);
+        assert_eq!(decoded.event, events::CUSTOM_ROUTER_POSITIVE_SLIPPAGE_BPS_UPDATED);
         assert_eq!(decoded.client, vec![0xcc; 20]);
         assert_eq!(decoded.old_value, "100000000");
         assert_eq!(decoded.new_value, "0");
@@ -588,10 +589,10 @@ mod tests {
     }
 
     #[test]
-    fn decodes_global_positive_slippage_capture() {
+    fn decodes_global_router_positive_slippage() {
         let decoded =
-            decode_fee_calculator_event(&bps_log(CAPTURE_TOPIC, 100_000_000, 50_000_000)).unwrap();
-        assert_eq!(decoded.event, events::POSITIVE_SLIPPAGE_CAPTURE_BPS_UPDATED);
+            decode_fee_calculator_event(&bps_log(ROUTER_TOPIC, 100_000_000, 50_000_000)).unwrap();
+        assert_eq!(decoded.event, events::ROUTER_POSITIVE_SLIPPAGE_BPS_UPDATED);
         assert_eq!(decoded.new_value, "50000000");
     }
 
