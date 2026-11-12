@@ -199,43 +199,22 @@ impl BaibaiReader {
         let [entry_book, entry_custodian, entry_quote, book_quote] = wiring else {
             return Err(too_few());
         };
-        let served = to_u64(setting::<getChainIdCall>(chain_id, "chain id")?)?;
+        let served = to_u64(setting::<getChainIdCall>(chain_id, "chain id")?, "chain id")?;
         if served != chain.id() {
             return Err(FeedError::Fatal(format!(
                 "BaiBai: the RPC node serves chain {served}, not the deployment's chain {}",
                 chain.id()
             )));
         }
-        let wiring = [
-            (
-                "entrypoint's curveBook",
-                setting::<curveBookCall>(entry_book, "entrypoint's curveBook")?,
-                curve_book,
-            ),
-            (
-                "entrypoint's custodian",
-                setting::<custodianCall>(entry_custodian, "entrypoint's custodian")?,
-                custodian,
-            ),
-            (
-                "entrypoint's quoteToken",
-                setting::<quoteTokenCall>(entry_quote, "entrypoint's quoteToken")?,
-                quote,
-            ),
-            (
-                "curve book's quoteToken",
-                setting::<quoteTokenCall>(book_quote, "curve book's quoteToken")?,
-                quote,
-            ),
-        ];
-        for (what, found, expected) in wiring {
-            if found != expected {
-                return Err(deployment_changed(format!("the {what} is {found}, not {expected}")));
-            }
-        }
+        wired::<curveBookCall>(entry_book, "entrypoint's curveBook", curve_book)?;
+        wired::<custodianCall>(entry_custodian, "entrypoint's custodian", custodian)?;
+        wired::<quoteTokenCall>(entry_quote, "entrypoint's quoteToken", quote)?;
+        wired::<quoteTokenCall>(book_quote, "curve book's quoteToken", quote)?;
+        let block_number = setting::<getBlockNumberCall>(block_number, "block number")?;
+        let timestamp = setting::<getCurrentBlockTimestampCall>(timestamp, "timestamp")?;
         Ok(BookRead {
-            block_number: to_u64(setting::<getBlockNumberCall>(block_number, "block number")?)?,
-            timestamp: to_u64(setting::<getCurrentBlockTimestampCall>(timestamp, "timestamp")?)?,
+            block_number: to_u64(block_number, "block number")?,
+            timestamp: to_u64(timestamp, "timestamp")?,
             ttl: setting::<ttlCall>(ttl, "curve book's ttl")?,
             c_unit: setting::<cUnitCall>(c_unit, "curve book's cUnit")?,
             available_quote: setting::<availableLiquidityCall>(
@@ -468,6 +447,19 @@ fn setting<C: SolCall>(answer: &Call3Result, what: &str) -> Result<C::Return, Fe
     decode::<C>(answer, what)
 }
 
+/// One wiring getter's answer, checked against the address this integration was built for.
+fn wired<C: SolCall<Return = Address>>(
+    answer: &Call3Result,
+    what: &str,
+    expected: Address,
+) -> Result<(), FeedError> {
+    let found = setting::<C>(answer, what)?;
+    if found != expected {
+        return Err(deployment_changed(format!("the {what} is {found}, not {expected}")));
+    }
+    Ok(())
+}
+
 /// The fatal error for a deployment that no longer answers the way this integration was built for.
 fn deployment_changed(what: impl std::fmt::Display) -> FeedError {
     FeedError::Fatal(format!(
@@ -475,10 +467,10 @@ fn deployment_changed(what: impl std::fmt::Display) -> FeedError {
     ))
 }
 
-fn to_u64(value: U256) -> Result<u64, FeedError> {
+fn to_u64(value: U256, what: &str) -> Result<u64, FeedError> {
     value
         .try_into()
-        .map_err(|e| FeedError::Parsing(format!("BaiBai block value {value}: {e}")))
+        .map_err(|e| FeedError::Parsing(format!("BaiBai {what} {value}: {e}")))
 }
 
 fn decode<C: SolCall>(answer: &Call3Result, what: &str) -> Result<C::Return, FeedError> {
