@@ -28,8 +28,10 @@ def test_decode_snapshot(asset_dir):
             hash="0xc30593d774626d6175394d7d33c74bd40e7ddd2d2891eab0cc54032eafe15b98",
             parent_hash="0x954db41ab1ef9c32457b52c170d83f71f82a065ba0b4eeda8efb2da4b9e18162",
             revert=False,
+            timestamp=1722600000,
         ),
     )
+    assert msg.state_msgs["uniswap_v2"].header.timestamp == 1722600000
 
 
 def test_decode_deltas(asset_dir):
@@ -45,8 +47,59 @@ def test_decode_deltas(asset_dir):
             hash="0x00d378b96546bc5ec4c64e225d2bb716867fd837d309bc79c5db321ecb1357ae",
             parent_hash="0x05d53b6b3b127ae642c409aeda425de3e5e3e444109d26cc54ca740be9a60316",
             revert=False,
+            timestamp=1722603288,
         ),
     )
+    assert msg.state_msgs["uniswap_v2"].header.timestamp == 1722603288
+
+
+# Shaped as the Rust `SynchronizerState` serialises a header state: the status tag plus every
+# `BlockHeader` field, flat. `test_synchronizer_state_wire_shape` in tycho-client pins it.
+READY_STATE_JSON = {
+    "status": "ready",
+    "hash": "0x01",
+    "number": 7,
+    "parent_hash": "0x00",
+    "revert": False,
+    "timestamp": 1700000000,
+}
+
+
+def test_sync_state_ready_keeps_header():
+    state = SynchronizerState(**READY_STATE_JSON)
+
+    assert state.header == Header(
+        number=7, hash="0x01", parent_hash="0x00", revert=False, timestamp=1700000000
+    )
+
+
+def test_sync_state_partial_header():
+    state = SynchronizerState(**READY_STATE_JSON, partial_block_index=2)
+
+    assert state.header.partial_block_index == 2
+
+
+def test_sync_state_old_shape_without_timestamp():
+    data = {k: v for k, v in READY_STATE_JSON.items() if k != "timestamp"}
+
+    state = SynchronizerState(**data)
+
+    assert state.header is not None
+    assert state.header.timestamp is None
+
+
+def test_sync_state_started_has_no_header():
+    state = SynchronizerState(status="started")
+
+    assert state.header is None
+
+
+def test_sync_state_explicit_header():
+    header = Header(number=7, hash="0x01", parent_hash="0x00", revert=False)
+
+    state = SynchronizerState(status="delayed", header=header)
+
+    assert state.header == header
 
 
 # JSON shaped exactly as Tycho serialises `Chain::Custom("name")`: externally tagged with the chain

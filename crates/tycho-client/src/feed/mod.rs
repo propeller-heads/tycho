@@ -1259,6 +1259,41 @@ mod tests {
         assert_eq!(header.partial_block_index, None);
     }
 
+    // Python `dto.SynchronizerState` decodes this shape; change both together.
+    #[test]
+    fn test_synchronizer_state_wire_shape() {
+        let header = BlockHeader {
+            hash: Bytes::from(vec![1u8]),
+            number: 7,
+            parent_hash: Bytes::from(vec![0u8]),
+            revert: false,
+            timestamp: 1_700_000_000,
+            partial_block_index: None,
+        };
+        let full = serde_json::json!({
+            "status": "ready",
+            "hash": "0x01",
+            "number": 7,
+            "parent_hash": "0x00",
+            "revert": false,
+            "timestamp": 1700000000
+        });
+        assert_eq!(serde_json::to_value(SynchronizerState::Ready(header.clone())).unwrap(), full);
+
+        let partial = BlockHeader { partial_block_index: Some(2), ..header };
+        let mut expected = full;
+        expected["partial_block_index"] = serde_json::json!(2);
+        assert_eq!(serde_json::to_value(SynchronizerState::Ready(partial)).unwrap(), expected);
+
+        assert_eq!(
+            serde_json::to_value(SynchronizerState::Started).unwrap(),
+            serde_json::json!({"status": "started"})
+        );
+
+        // Serde cannot put the `status` tag into a string. A fix changes the wire format.
+        assert!(serde_json::to_value(SynchronizerState::Ended("x".into())).is_err());
+    }
+
     #[derive(Clone, Debug)]
     enum MockBehavior {
         Normal,          // Exit successfully when receiving close signal

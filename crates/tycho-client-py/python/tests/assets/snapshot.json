@@ -5,7 +5,8 @@
         "hash": "0xc30593d774626d6175394d7d33c74bd40e7ddd2d2891eab0cc54032eafe15b98",
         "number": 20440688,
         "parent_hash": "0x954db41ab1ef9c32457b52c170d83f71f82a065ba0b4eeda8efb2da4b9e18162",
-        "revert": false
+        "revert": false,
+        "timestamp": 1722600000
       },
       "snapshots": {
         "states": {
@@ -21866,7 +21867,8 @@
       "hash": "0xc30593d774626d6175394d7d33c74bd40e7ddd2d2891eab0cc54032eafe15b98",
       "number": 20440688,
       "parent_hash": "0x954db41ab1ef9c32457b52c170d83f71f82a065ba0b4eeda8efb2da4b9e18162",
-      "revert": false
+      "revert": false,
+      "timestamp": 1722600000
     }
   }
 }
