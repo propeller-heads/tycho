@@ -211,7 +211,12 @@ tries the `LeaderLock` once:
   process exits, and a follower stops retrying the lock, so a process that shuts down never becomes
   the leader. A commit still running then fails on the writer fence. Last, it stops the server and
   the write executor. Each supervisor logs `ExtractorStopped` and `Shutdown::run` logs
-  `ExtractorsStopped`, both with the time since the stop. The main thread exits after the first
+  `ExtractorsStopped`, both with the time since the stop. The runner and the supervisor do not
+  wait to free their state: freeing the chain-wide protocol cache takes seconds (about 7 s for 10M
+  entries on base) and would hold the lock that long. The runner closes its substreams stream and
+  ends, and the supervisor closes its control channel, so `stopped` resolves. Each then frees its
+  state on the blocking thread pool (`drop_in_background`, logs `ExtractorStateFreed`). The
+  process still waits for those frees before it exits. The main thread exits after the first
   error, or after the services end. When the extractors end cleanly first, it waits up to 40 s
   (`SERVICES_STOP_TIMEOUT`) for the services, so the shutdown releases the lock and stops the
   server before the process exits.

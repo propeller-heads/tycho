@@ -15,8 +15,8 @@ pub use crate::extractor::factory::{DCIType, ExtractorConfig, ProtocolTypeConfig
 use crate::extractor::{
     factory::ExtractorFactory,
     runner::{
-        slow_client_removals, ControlMessage, Delivery, ExtractorHandle, StreamState, Subscriber,
-        SubscriberKind, SubscriptionsMap,
+        drop_in_background, slow_client_removals, ControlMessage, Delivery, ExtractorHandle,
+        StreamState, Subscriber, SubscriberKind, SubscriptionsMap,
     },
     writer_status::WriterStatus,
     DeltaCommand, ExtractionError,
@@ -280,7 +280,20 @@ impl ExtractorSupervisor {
     /// slate, and it avoids indefinitely serving the dead extractor's stale pending deltas
     /// over RPC. A future improvement could instead retry transient build failures in place
     /// and reserve `Err` for deterministic configuration errors.
+    ///
+    /// Once supervision ends, [`ExtractorHandle::stopped`] resolves at once. The supervisor's
+    /// state, which can hold the chain-wide protocol cache, is freed afterwards on the blocking
+    /// thread pool.
     pub async fn run(mut self) -> Result<(), ExtractionError> {
+        let result = self.supervise().await;
+        // A shutdown waits for `stopped` before it releases the leader lock. Freeing a large
+        // protocol cache takes seconds, and no write is left to wait for at this point.
+        self.control_rx.close();
+        drop_in_background(self.id.clone(), "supervisor", self);
+        result
+    }
+
+    async fn supervise(&mut self) -> Result<(), ExtractionError> {
         let mut restart_count: u32 = 0;
         let mut backoff_strategy = restart_backoff();
         let restarts = restart_counter(&self.id);
@@ -743,6 +756,18 @@ mod tests {
             "only the subscription after the stream opened reaches the supervisor"
         );
         assert!(control_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_stopped_resolves_once_the_control_channel_is_closed() {
+        let (handle, mut control_rx, _state) = handle_with_state(StreamState::Open);
+
+        control_rx.close();
+
+        tokio::time::timeout(Duration::from_secs(1), handle.stopped())
+            .await
+            .expect("stopped waits for the receiver to be dropped");
+        drop(control_rx);
     }
 
     #[tokio::test]
