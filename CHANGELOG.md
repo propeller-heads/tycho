@@ -1,3 +1,12 @@
+## [0.517.0](https://github.com/propeller-heads/tycho/compare/0.516.0...0.517.0) (2026-11-12)
+
+
+### Features
+
+* **execution:** mirror the positive slippage cap in the router model ([1b3225f](https://github.com/propeller-heads/tycho/commit/1b3225f41860fce93762aa8b851bfde262014dd4))
+* **fee-calculator:** cap captured positive slippage per client ([c071f2c](https://github.com/propeller-heads/tycho/commit/c071f2c6f3e38e746acbcd37ccb7c359049a651b))
+* **fee-calculator:** cap captured positive slippage per client ([#1794](https://github.com/propeller-heads/tycho/issues/1794)) ([c814b1c](https://github.com/propeller-heads/tycho/commit/c814b1c0f468d5b8d5c353fb1869fde7d4582f6b))
+
 ## [0.516.0](https://github.com/propeller-heads/tycho/compare/0.515.0...0.516.0) (2026-11-12)
 
 
