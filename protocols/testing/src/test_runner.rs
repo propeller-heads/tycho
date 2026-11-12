@@ -66,7 +66,7 @@ use crate::{
         LimitKind, ProtocolComponentWithTestConfig, Skip, Tolerance,
     },
     execution,
-    report::{CheckId, Checks, Report},
+    report::{CheckId, Checks, Finished, Report},
     rpc::RPCProvider,
     state_registry::{register_protocol, register_protocol_with_filter},
     stream,
@@ -327,6 +327,7 @@ fn observe_executions(
             checks.observe_execution(
                 simulation_id,
                 &input.component_id,
+                &input.token_out,
                 &input.expected_amount_out,
                 amount_out,
             );
@@ -856,8 +857,7 @@ impl TestRunner {
                 record_strict_executions(&output, executed, config.tolerance(), None, &mut checks)?;
             }
         }
-        let drift = checks.take_drift();
-        let (outcome, results) = checks.finish();
+        let Finished { outcome, results, drift } = checks.finish();
         if outcome.is_err() {
             if let Some(path) = report {
                 Report {
@@ -961,9 +961,9 @@ impl TestRunner {
                         });
                 if let Err(e) = indexed {
                     checks.fail(CheckId::Index, &e);
-                    report.results.extend(checks.finish().1);
+                    let result = report.add_test(checks.finish(), Err(e));
                     Self::write_report(test_type, &report)?;
-                    return Err(e);
+                    return result;
                 }
             }
             if let Some(Ok(streamed)) = &mut streamed {
@@ -1030,10 +1030,7 @@ impl TestRunner {
                 }
                 None => {}
             }
-            report.drift.extend(checks.take_drift());
-            let (outcome, results) = checks.finish();
-            report.results.extend(results);
-            let result = run.and(outcome);
+            let result = report.add_test(checks.finish(), run);
             match result {
                 Ok(_) => {
                     info!("✅ {} passed\n", test.name);
@@ -1212,11 +1209,6 @@ impl TestRunner {
         // below must come last for the ladders to run on it.
         let scaled = (!tvl_only_ids.is_empty()).then(|| {
             let mut scaled = snapshot.clone();
-            scaled.states.retain(|id, _| {
-                tvl_only_ids
-                    .iter()
-                    .any(|declared| declared.eq_ignore_ascii_case(id))
-            });
             let changed = tvl_only::scale_balances(&mut scaled, &tvl_only_ids);
             let decoded = adapter_contract_path().and_then(|path| {
                 self.decode_snapshot(
@@ -2687,7 +2679,7 @@ mod tests {
     ) -> (Vec<(CheckId, Option<String>, String)>, LadderSkips) {
         let mut checks = Checks::new(Harness::Strict, "t");
         let skips = record_ladder_skips(components, &mut checks);
-        let (_, results) = checks.finish();
+        let results = checks.finish().results;
         let recorded = results
             .into_iter()
             .map(|CheckResult { check, component, outcome, .. }| {
@@ -2943,13 +2935,16 @@ tests:
         let mut checks = Checks::new(Harness::Strict, "t");
         observe_executions(&mut checks, &ladder, &results);
         observe_executions(&mut checks, &at_limit, &results);
-        let drift = checks.take_drift().unwrap();
+        let drift = checks.finish().drift.unwrap();
         // The at-limit execution is 30 bps off, the ladder's 10.
         assert_eq!(
             (drift.test.as_str(), drift.simulation.as_str(), drift.component.as_str()),
             ("t", "at_limit_b", "0x02")
         );
-        assert_eq!(drift.largest_difference, "3");
+        assert_eq!(
+            (drift.largest_difference.as_str(), drift.largest_difference_token.as_str()),
+            ("3", "B")
+        );
     }
 
     #[test]
@@ -2963,7 +2958,14 @@ tests:
             .collect();
         let mut checks = Checks::new(Harness::Strict, "t");
         observe_executions(&mut checks, &inputs, &results);
-        assert_eq!(checks.take_drift().unwrap().simulation, "test_00");
+        assert_eq!(
+            checks
+                .finish()
+                .drift
+                .unwrap()
+                .simulation,
+            "test_00"
+        );
     }
 
     /// Every integration test yaml under `protocols/substreams/`, clone, nested and template
