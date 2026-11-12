@@ -165,9 +165,9 @@ Supported: UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, Bal
 Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, BaiBai, RingSwapV2, Sky,
 Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH
 and other native wrappers), PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM`
-interface; the pAMM address travels in the swap data), Fallback (runs one leg through `TychoFallbackRouter` -- see
-"Protocol fallback"), and TychoSubsidizing (runs one hop through an inner executor and pays a signed subsidy -- see
-"Subsidies").
+interface, and by Efficient pools, which take the same swap call; the pAMM address travels in the swap data), Fallback
+(runs one leg through `TychoFallbackRouter` -- see "Protocol fallback"), and TychoSubsidizing (runs one hop through an
+inner executor and pays a signed subsidy -- see "Subsidies").
 
 ### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/*FallbackRouter.sol`, `executors/*FallbackExecutor.sol`)
 
@@ -515,7 +515,13 @@ e.g. `uniswap_v2`, `fluid_v1`), and `pricelevelstream:` (Titan pAMM price level 
 with the protocol name or, for auto-detected pAMMs, the protocol address). Price-level-stream protocols
 resolve generically: a single `pricelevelstream` config entry serves the whole family via a
 `get_encoder` fallback (shared generic `PropAMMSwapEncoder`/`PropAMMExecutor`), with exact
-`pricelevelstream:{protocol}` entries overriding per protocol.
+`pricelevelstream:{protocol}` entries overriding per protocol. `flamm` (Efficient pools, a book
+feed) uses `PropAMMSwapEncoder` and `PropAMMExecutor` too: its components carry the pool as
+`pamm_address`, and each pool finds the input the router sends it, filling it whole or reverting.
+The pools take `IPropAMM`'s `swap` call and implement nothing else of it: `quote`, `isActive` and
+`getPairs` revert, and `swap` returns `amountInUsed` then `amountOut`, which the executor ignores.
+So the `fallback:` family below doesn't apply to them: a failed `quote` counts as zero, and the
+fallback protocol would fill the whole swap.
 
 `fallback:{protocol}` is the same liquidity executed through `PropAMMFallbackRouter` (see "protocol
 fallback" above): any pAMM qualifies, and the solver picks the fallback protocol per swap. It
