@@ -158,7 +158,10 @@ impl<'de> Deserialize<'de> for Skip {
 
             fn visit_str<E: de::Error>(self, v: &str) -> Result<Skip, E> {
                 if v.trim().is_empty() {
-                    return Err(E::custom("the reason for a skip is empty"));
+                    return Err(E::custom(
+                        "the reason for a skip is empty: leave the key out to run the check, or \
+                         write why it is skipped",
+                    ));
                 }
                 // serde_yaml reads only `true` and `false` as booleans, so `no` or a quoted
                 // `"false"` arrives as a string, and would otherwise turn the check off.
@@ -168,8 +171,8 @@ impl<'de> Deserialize<'de> for Skip {
                     .any(|word| v.trim().eq_ignore_ascii_case(word))
                 {
                     return Err(E::custom(format!(
-                        "`{v}` reads as yes or no, not as a reason: write why the check is \
-                         skipped, or leave the key out to run it"
+                        "`{v}` reads as yes or no, not as a reason: leave the key out to run the \
+                         check, or write why it is skipped"
                     )));
                 }
                 Ok(Skip::Reason(v.to_string()))
@@ -644,8 +647,9 @@ impl IntegrationTestsConfig {
     /// Parses a test configuration from yaml.
     ///
     /// Errors when the yaml does not parse, or a skip is an empty string or reads as yes or no. In
-    /// strict mode it also errors, listing every problem at once, on keys the runner does not read
-    /// and on skips written as `true` or `false` or that can have no effect. In legacy mode
+    /// strict mode it also errors, listing every problem at once, on keys the runner does not read,
+    /// on skips written as `true` or `false` or that can have no effect, on a package-level
+    /// `skip_balance_check` of any value, and on a test with no expected components. In legacy mode
     /// unknown keys are a warning, and the package keeps running as before. In both modes a
     /// `limits` declaration must have the fields its kind requires, and in strict mode every
     /// direction of every expected component needs one.
@@ -1133,6 +1137,7 @@ tests:
                 "{err}"
             );
             assert!(!err.contains("skips written as"), "{value}: {err}");
+            assert!(err.contains("{tokens: {0x<token>"), "{value}: {err}");
         }
     }
 
@@ -1149,21 +1154,11 @@ tests:
     }
 
     #[test]
-    fn strict_mode_rejects_a_balance_skip_even_with_a_reason() {
-        let skipped = |harness: &str| {
-            yaml(&format!("{harness}\nskip_balance_check: \"held by the vault\""), "")
-        };
-        let err = parse(&skipped(STRICT_WITH_LIMITS))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("`skip_balance_check`, which strict mode does not accept"), "{err}");
-        assert!(err.contains("{tokens: {0x<token>"), "{err}");
-
-        assert!(parse(&skipped(""))
+    fn legacy_mode_accepts_a_balance_skip_and_no_key_runs_the_check() {
+        assert!(parse(&yaml("skip_balance_check: \"held by the vault\"", ""))
             .unwrap()
             .skip_balance_check
             .is_skipped());
-
         // Without the key, the check runs, so a strict package need not write `false`.
         assert!(!parse(&yaml(STRICT_WITH_LIMITS, ""))
             .unwrap()
