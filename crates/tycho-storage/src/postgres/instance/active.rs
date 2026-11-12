@@ -47,29 +47,10 @@ pub fn active_instance_ids() -> _ {
 
 #[cfg(test)]
 mod tests {
-    use diesel_async::AsyncConnection;
-
     use super::*;
-    use crate::postgres::{db_fixtures, instance::schema::tycho::protocol_instance};
-
-    async fn setup_db() -> AsyncPgConnection {
-        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests");
-        let mut conn = AsyncPgConnection::establish(&db_url)
-            .await
-            .expect("connecting to the test database failed");
-        conn.begin_test_transaction()
-            .await
-            .expect("starting the test transaction failed");
-        conn
-    }
-
-    // A test that creates instances inserts "vm:curve" first, as `instance/tests.rs` does, so
-    // concurrent tests wait on its unique name before they create leaves. Otherwise one test holds
-    // a name another wants while it waits for a leaf name in `pg_class`, and Postgres aborts one
-    // of them as a deadlock.
-    async fn insert_curve(conn: &mut AsyncPgConnection) -> i64 {
-        db_fixtures::insert_protocol_system(conn, "vm:curve".to_string()).await
-    }
+    use crate::postgres::{
+        db_fixtures, instance::schema::tycho::protocol_instance, testing::instance_test_connection,
+    };
 
     struct Setup {
         curve_system_id: i64,
@@ -81,7 +62,8 @@ mod tests {
     /// "vm:curve" and "uniswap_v4" each point to an instance. "vm:curve" has a second instance it
     /// does not point to, and "vm:old" has an instance but no pointer.
     async fn setup_protocols(conn: &mut AsyncPgConnection) -> Setup {
-        let curve_system_id = insert_curve(conn).await;
+        let curve_system_id =
+            db_fixtures::insert_protocol_system(conn, "vm:curve".to_string()).await;
         let uniswap_v4_system_id =
             db_fixtures::insert_protocol_system(conn, "uniswap_v4".to_string()).await;
         let old_system_id = db_fixtures::insert_protocol_system(conn, "vm:old".to_string()).await;
@@ -98,8 +80,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_active_instance_returns_the_pointer() {
-        let mut conn = setup_db().await;
-        let protocol_system_id = insert_curve(&mut conn).await;
+        let mut conn = instance_test_connection().await;
+        let protocol_system_id =
+            db_fixtures::insert_protocol_system(&mut conn, "vm:curve".to_string()).await;
         let id = db_fixtures::insert_instance(&mut conn, protocol_system_id, "0.0.1").await;
         db_fixtures::set_active_instance(&mut conn, protocol_system_id, Some(id)).await;
 
@@ -113,8 +96,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_active_instance_is_none_without_pointer() {
-        let mut conn = setup_db().await;
-        let protocol_system_id = insert_curve(&mut conn).await;
+        let mut conn = instance_test_connection().await;
+        let protocol_system_id =
+            db_fixtures::insert_protocol_system(&mut conn, "vm:curve".to_string()).await;
         db_fixtures::insert_instance(&mut conn, protocol_system_id, "0.0.1").await;
 
         assert_eq!(
@@ -127,7 +111,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_active_instance_is_none_for_unknown_protocol() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
 
         assert_eq!(
             active_instance(&mut conn, "not-a-protocol")
@@ -139,7 +123,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_active_instance_ids_lists_only_pointed_instances() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
 
         let mut ids: Vec<InstanceId> = active_instance_ids()
@@ -155,7 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_active_instance_filters_compose_on_instance_tables() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
 
         let active: i64 = protocol_instance::table

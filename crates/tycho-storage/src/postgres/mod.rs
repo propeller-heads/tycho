@@ -838,11 +838,13 @@ pub mod testing {
     //! # Reusable components to write tests against the DB.
     use std::future::Future;
 
-    use diesel::sql_query;
+    use diesel::{sql_query, sql_types::BigInt};
     use diesel_async::{
         pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
-        AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection,
+        AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection,
     };
+
+    const INSTANCE_TESTS_LOCK: i64 = 0x1a57_a9ce;
 
     async fn setup_pool() -> Pool<AsyncPgConnection> {
         let database_url =
@@ -914,6 +916,25 @@ pub mod testing {
                 .unwrap_or_else(|e| panic!("Error truncating {t} table: {e}"));
         }
         dbg!("Teardown completed");
+    }
+
+    /// A connection in a test transaction that holds the instance-test lock. Tests that create
+    /// instances wait for each other: `ATTACH PARTITION` takes a lock on each parent that
+    /// conflicts with itself, and in a different order two tests deadlock.
+    pub async fn instance_test_connection() -> AsyncPgConnection {
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests");
+        let mut conn = AsyncPgConnection::establish(&db_url)
+            .await
+            .expect("connecting to the test database failed");
+        conn.begin_test_transaction()
+            .await
+            .expect("starting the test transaction failed");
+        sql_query("SELECT pg_advisory_xact_lock($1)")
+            .bind::<BigInt, _>(INSTANCE_TESTS_LOCK)
+            .execute(&mut conn)
+            .await
+            .expect("taking the instance-test lock failed");
+        conn
     }
 
     /// Run tests that require committing data to the db.

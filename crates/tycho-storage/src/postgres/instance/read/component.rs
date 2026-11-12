@@ -379,7 +379,7 @@ mod tests {
         sql_query,
         sql_types::{BigInt, Int4},
     };
-    use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+    use diesel_async::{AsyncPgConnection, RunQueryDsl};
     use tycho_common::{
         models::{protocol::ProtocolComponent, Chain, ChangeType, PaginationParams},
         storage::StorageError,
@@ -389,18 +389,8 @@ mod tests {
     use crate::postgres::{
         db_fixtures,
         instance::{gateway::PostgresGatewayNew, orm as iorm, schema::tycho, InstanceId},
+        testing::instance_test_connection,
     };
-
-    async fn setup_db() -> AsyncPgConnection {
-        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests");
-        let mut conn = AsyncPgConnection::establish(&db_url)
-            .await
-            .expect("connecting to the test database failed");
-        conn.begin_test_transaction()
-            .await
-            .expect("starting the test transaction failed");
-        conn
-    }
 
     struct Setup {
         gateway: PostgresGatewayNew,
@@ -409,9 +399,7 @@ mod tests {
         uniswap_v4: InstanceId,
     }
 
-    /// "vm:curve" and "uniswap_v4" on ethereum, each pointing to an instance. "vm:curve" is the
-    /// first protocol system, as in `instance/active.rs`, so that concurrent tests do not deadlock
-    /// on leaf names.
+    /// "vm:curve" and "uniswap_v4" on ethereum, each pointing to an instance.
     async fn setup(conn: &mut AsyncPgConnection) -> Setup {
         db_fixtures::insert_chain(conn, "ethereum").await;
         let curve_system_id =
@@ -507,7 +495,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_components_of_a_protocol() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         let a = db_fixtures::insert_instance_component(
             &mut conn,
@@ -571,7 +559,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_components_skip_instances_that_are_not_active() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
         let ready = db_fixtures::insert_instance(&mut conn, s.curve_system_id, "0.0.2").await;
@@ -587,7 +575,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_component_links_come_from_its_own_instance() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         let component_id =
             db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
@@ -670,7 +658,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_components_min_tvl_and_paging() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         // In insert (id) order, the matches are c, e, d: neither external id nor TVL order.
         for (external_id, tvl) in [("c", 4.0), ("a", 1.0), ("e", 3.0), ("b", 2.0), ("d", 5.0)] {
@@ -703,7 +691,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_components_with_ids_and_protocol() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
         db_fixtures::insert_instance_component(&mut conn, s.curve, "b", &[b("0x01")]).await;
@@ -725,7 +713,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_components_of_unknown_protocol_fail() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
 
         let result = components(&s.gateway, &mut conn, Some("unknown"), None, None, None).await;
@@ -735,7 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_components_of_protocol_without_active_instance_are_empty() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
         db_fixtures::set_active_instance(&mut conn, s.curve_system_id, None).await;
@@ -750,7 +738,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_deleted_components_are_returned() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         let id =
             db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
@@ -772,7 +760,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_components_without_filters_read_active_instances_only() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
         db_fixtures::insert_instance_component(&mut conn, s.uniswap_v4, "u", &[b("0x02")]).await;
@@ -796,7 +784,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_components_with_same_pool_id_stay_apart() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         db_fixtures::insert_instance_component(&mut conn, s.curve, "0xpool", &[b("0x01")]).await;
         db_fixtures::insert_instance_component(&mut conn, s.uniswap_v4, "0xpool", &[b("0x02")])
@@ -820,7 +808,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tvls_of_a_protocol() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         for (instance, external_id, tvl) in
             [(s.curve, "a", 1.0), (s.curve, "b", 2.0), (s.uniswap_v4, "u", 3.0)]
@@ -845,7 +833,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tvls_with_same_pool_id_stay_apart() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         for (instance, tvl) in [(s.curve, 1.0), (s.uniswap_v4, 2.0)] {
             let id =
@@ -867,7 +855,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tvls_need_a_protocol() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
 
         let result = tvls(&s.gateway, &mut conn, None, None).await;
@@ -877,7 +865,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tvls_skip_instances_that_are_not_active() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         let id =
             db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
@@ -897,7 +885,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tvls_of_protocol_without_active_instance_are_empty() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         let id =
             db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
@@ -914,7 +902,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_components_without_filters_page_by_instance_then_id() {
-        let mut conn = setup_db().await;
+        let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         assert!(s.curve < s.uniswap_v4);
         // Ids interleave across the instances, and external ids sort differently, so only
