@@ -624,9 +624,80 @@ mod tests {
             .is_err());
     }
 
+    /// The base the bid buys before it stops paying, derived from the side's parameters rather
+    /// than [`Curve::capacity`]: up to its depth, and short of the first segment past its cursor
+    /// whose extra cost takes all the spread-adjusted mid pays for it.
+    fn bid_paying_depth(state: &BaibaiState) -> U256 {
+        let side = &state.bid;
+        let wad = U256::from(10u64).pow(U256::from(18));
+        let bps = U256::from(10_000u64);
+        let scale = U256::from(u64::try_from(10_000 + i64::from(side.spread_bps)).unwrap());
+        let price = state.mid * scale / bps;
+        let last_q = side
+            .knots
+            .last()
+            .map_or(U256::ZERO, |knot| U256::from(knot.q) * state.q_unit);
+        let depth = last_q * U256::from(side.depth_bps) / bps;
+        let mut reach = side.filled;
+        let (mut prev_q, mut prev_c) = (U256::ZERO, U256::ZERO);
+        for knot in &side.knots {
+            let q = U256::from(knot.q) * state.q_unit;
+            let c = U256::from(knot.extra) * state.c_unit;
+            if q > side.filled && reach < depth {
+                if price * (q - prev_q) <= (c - prev_c) * wad {
+                    break;
+                }
+                reach = q.min(depth);
+            }
+            (prev_q, prev_c) = (q, c);
+        }
+        reach.saturating_sub(side.filled)
+    }
+
+    /// Checks that `state`'s limits in `direction` are a swap it fills at their stated output and
+    /// that one atom more is refused with `refusal`, or, when `flat_allowed`, pays no more than
+    /// the limit. Returns the limits.
+    fn assert_tight_limits(
+        state: &BaibaiState,
+        direction: SwapDirection,
+        refusal: &str,
+        flat_allowed: bool,
+        context: &str,
+    ) -> (BigUint, BigUint) {
+        let (token_in, token_out) = match direction {
+            SwapDirection::BaseToQuote => (state.base_token.clone(), quote()),
+            SwapDirection::QuoteToBase => (quote(), state.base_token.clone()),
+        };
+        let (max_in, max_out) = state
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .unwrap();
+        if max_in == BigUint::ZERO {
+            return (max_in, max_out);
+        }
+        let at_limit = state
+            .get_amount_out(max_in.clone(), &token_in, &token_out)
+            .unwrap_or_else(|e| panic!("{context}: the limit {max_in} is refused: {e}"));
+        assert_eq!(at_limit.amount, max_out, "{context}");
+        match state.get_amount_out(max_in.clone() + 1u32, &token_in, &token_out) {
+            Err(error) => assert!(error.to_string().contains(refusal), "{context}: {error}"),
+            Ok(past) => assert!(
+                flat_allowed && past.amount == max_out,
+                "{context}: one atom past the limit {max_in} pays {}",
+                past.amount
+            ),
+        }
+        (max_in, max_out)
+    }
+
     /// The limits hold beyond a trivial state: on every recorded pair, including partly filled
-    /// sides, as recorded and with a fee, a spread or half the depth, the limit fills at its
-    /// stated output, and where the curve binds rather than custody, one atom more is refused.
+    /// sides, as recorded and with a fee, a spread or half the depth, in both directions.
+    /// - With the custody as recorded, the curve binds: the bid's limit is the depth that still
+    ///   pays, derived without [`Curve::capacity`], and one atom past either limit is refused as
+    ///   beyond the curve.
+    /// - With half the curve's output in custody, custody binds: the limit's output fits it, and
+    ///   one atom more is refused as exceeding it or pays no more. The second happens on WETH's
+    ///   bid, where many wei buy the same USDC atom and [`Curve::output_bound`], one atom above the
+    ///   exact output there, stops the search short of the last such wei.
     #[rstest]
     #[case::as_recorded(|_: &mut BaibaiState| {})]
     #[case::with_a_fee(|s: &mut BaibaiState| s.fee_pips = 1_000)]
@@ -639,65 +710,45 @@ mod tests {
         s.bid.depth_bps = 5_000;
     })]
     fn the_limits_hold_on_every_recording(#[case] vary: fn(&mut BaibaiState)) {
-        let mut curve_bound = 0;
+        let (mut curve_bound, mut custody_bound) = (0, 0);
         for fixture in fixtures() {
             for pair in &fixture.pairs {
                 let mut state = state(&fixture, pair);
                 vary(&mut state);
                 let state = state.validated().unwrap();
-                for direction in [SwapDirection::BaseToQuote, SwapDirection::QuoteToBase] {
-                    let (token_in, token_out) = match direction {
-                        SwapDirection::BaseToQuote => (state.base_token.clone(), quote()),
-                        SwapDirection::QuoteToBase => (quote(), state.base_token.clone()),
-                    };
-                    let (max_in, max_out) = state
-                        .get_limits(token_in.address.clone(), token_out.address.clone())
-                        .unwrap();
-                    if max_in == BigUint::ZERO {
+                for (direction, beyond_curve) in [
+                    (SwapDirection::BaseToQuote, "beyond the bid's paying depth"),
+                    (SwapDirection::QuoteToBase, "beyond ask depth"),
+                ] {
+                    let context = format!("{direction:?} at block {}", fixture.block);
+                    let (max_in, max_out) =
+                        assert_tight_limits(&state, direction, beyond_curve, false, &context);
+                    if direction == SwapDirection::BaseToQuote {
+                        assert_eq!(biguint_to_u256(&max_in), bid_paying_depth(&state), "{context}");
+                    }
+                    if max_out < BigUint::from(2u32) {
                         continue;
                     }
-                    let at_limit = state
-                        .get_amount_out(max_in.clone(), &token_in, &token_out)
-                        .unwrap();
-                    assert_eq!(
-                        at_limit.amount, max_out,
-                        "{direction:?} at block {}",
-                        fixture.block
+                    curve_bound += 1;
+
+                    let mut short = state.clone();
+                    let available = biguint_to_u256(&max_out) / U256::from(2);
+                    short.available[BaibaiState::custody(direction).1] = available;
+                    let (short_in, short_out) = assert_tight_limits(
+                        &short,
+                        direction,
+                        "exceeds the custodian's",
+                        true,
+                        &context,
                     );
-                    let capacity = state
-                        .curve(direction)
-                        .unwrap()
-                        .capacity()
-                        .unwrap();
-                    if biguint_to_u256(&max_in) == capacity {
-                        curve_bound += 1;
-                        assert!(state
-                            .get_amount_out(max_in + 1u32, &token_in, &token_out)
-                            .is_err());
-                    }
+                    assert!(short_out <= u256_to_biguint(available), "{context}");
+                    assert!(short_in < max_in, "{context}");
+                    custody_bound += 1;
                 }
             }
         }
         assert!(curve_bound > 0, "no limit was bound by the curve");
-    }
-
-    #[test]
-    fn custody_binds_the_limits_when_it_runs_out_first() {
-        let mut state = weth_state();
-        state.available[1] = U256::from(500_000_000u64);
-        let weth = state.base_token.clone();
-
-        let (max_in, max_out) = state
-            .get_limits(weth.address.clone(), quote().address)
-            .unwrap();
-
-        assert!(max_out <= BigUint::from(500_000_000u64));
-        assert!(state
-            .get_amount_out(max_in.clone(), &weth, &quote())
-            .is_ok());
-        assert!(state
-            .get_amount_out(max_in + 10u64.pow(12), &weth, &quote())
-            .is_err());
+        assert!(custody_bound > 0, "no limit was bound by custody");
     }
 
     #[test]
