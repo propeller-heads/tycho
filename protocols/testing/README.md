@@ -298,9 +298,10 @@ Legacy mode reads the declarations but runs none of these checks.
 
 ### Execution tolerance
 
-An execution matches its simulation when the executed amount out is within the tolerance, in basis
-points of the executed amount. Legacy mode allows 0.5% for every package. Strict mode, in `range`
-and in `full`, requires an exact match: a simulation that ports the venue's math, or runs its bytecode, should not differ by
+An execution matches its simulation when the executed amount out is within the tolerance: a number
+of basis points of the executed amount, a number of base units of the token out, or either. Legacy
+mode allows 0.5% for every package. Strict mode, in `range` and in `full`, requires an exact match:
+a simulation that ports the venue's math, or runs its bytecode, should not differ by
 a wei, and 0.5% hides rounding and fee bugs. Where exact is out of reach, the package declares a
 tolerance, with why and what a run measured:
 
@@ -322,6 +323,10 @@ execution_tolerance:
   cause: "stETH transfers move shares, rounding the amount down by up to 2 wei"
   measured: "1 wei at most, blocks 25603204-25603404 (range --report)"
 ```
+
+For a known artifact, declare its documented bound, and give the run in `measured` as support: a
+short range can show less than the bound, as this one shows 1 wei, and a tolerance cut to the run
+fails at random.
 
 With both declared, a difference within either passes. A mismatch says whether the simulation
 over- or underquotes, since those are different defects. At least one of `bps` (1 to 9999) and
@@ -420,7 +425,7 @@ or executions it cannot simulate, are logged and the update is passed over.
     { "test": "second", "check": "stream.coverage", "outcome": "warn", "detail": "4 blocks changed an expected component, under the floor of 20; ..." }
   ],
   "drift": [
-    { "test": "second", "simulation": "test_0x..._USDC_WETH_1000000", "component": "0x...", "simulated": "1003", "executed": "1000", "bps": -30.0, "largest_difference": "-3" }
+    { "test": "second", "simulation": "test_0x..._USDC_WETH_1000000", "component": "0x...", "simulated": "1003", "executed": "1000", "bps": -30.0, "largest_difference": "-3", "largest_difference_token": "WETH" }
   ],
   "coverage": [
     {
@@ -469,8 +474,8 @@ unless an earlier check failed, in which case it is `not_run`. In legacy mode th
 the first failed check of a test. `drift` has one entry per test with at least one execution that
 paid a nonzero amount: of those, the largest `(executed - simulated) / executed` in magnitude, in
 bps, kept with its sign (negative when the simulation overquotes), and the largest
-`executed - simulated` in magnitude, in base units of the token out, which may come from another
-execution.
+`executed - simulated` in magnitude, in base units of the token out named by
+`largest_difference_token`, which may come from another execution.
 
 ## How to Run with Docker
 

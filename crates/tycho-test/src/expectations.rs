@@ -92,7 +92,10 @@ impl<'de> Deserialize<'de> for Skip {
 
             fn visit_str<E: de::Error>(self, v: &str) -> Result<Skip, E> {
                 if v.trim().is_empty() {
-                    return Err(E::custom("the reason for a skip is empty"));
+                    return Err(E::custom(
+                        "the reason for a skip is empty: leave the key out to run the check, or \
+                         write why it is skipped",
+                    ));
                 }
                 // serde_yaml reads only `true` and `false` as booleans, so `no` or a quoted
                 // `"false"` arrives as a string, and would otherwise turn the check off.
@@ -102,8 +105,8 @@ impl<'de> Deserialize<'de> for Skip {
                     .any(|word| v.trim().eq_ignore_ascii_case(word))
                 {
                     return Err(E::custom(format!(
-                        "`{v}` reads as yes or no, not as a reason: write why the check is \
-                         skipped, or leave the key out to run it"
+                        "`{v}` reads as yes or no, not as a reason: leave the key out to run the \
+                         check, or write why it is skipped"
                     )));
                 }
                 Ok(Skip::Reason(v.to_string()))
