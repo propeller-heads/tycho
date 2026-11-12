@@ -157,7 +157,8 @@ impl GatewayBuilder {
 
     pub async fn build_direct_gw(self) -> Result<DirectGateway, StorageError> {
         let chain = self.single_chain()?;
-        let pool = postgres::connect(&self.database_url).await?;
+        let pool = postgres::new_rpc_pool(&self.database_url)?;
+        postgres::run_migrations(&self.database_url);
         let mut conn = pool
             .get()
             .await
@@ -258,6 +259,21 @@ mod test_serial_db {
                 held.push(connect(rpc_pool).await);
             }
             held.push(connect(extraction_gw.pool()).await);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_direct_gw_forces_custom_plans_serial_db() {
+        run_against_db(|_| async move {
+            let db_url = std::env::var("DATABASE_URL").expect("Database URL must be set");
+            let direct_gw = GatewayBuilder::new(&db_url)
+                .set_chains(&[Chain::Ethereum])
+                .build_direct_gw()
+                .await
+                .expect("gateway should build");
+
+            assert_eq!(plan_cache_mode(direct_gw.pool()).await, "force_custom_plan");
         })
         .await;
     }
