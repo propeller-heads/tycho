@@ -65,9 +65,9 @@ const LOOP_GAS_COST: u64 = 12_500;
 // Warm ticks (previously crossed, non-zero SSTORE slots) cost ~22k; cold ticks ~76k.
 // We bias toward the cold end to prefer overestimation: 70k.
 const TICK_CROSSING_GAS_COST: u64 = 70_000;
-// When dfc.scaling_factor != 0, fee() does a TWAP binary search on the observation ring
-// buffer (~77k–91k gas) instead of a simple slot read (~18k–27k gas). This extra cost is
-// added once per swap on top of the base.
+// When the module reads the oracle (`observed_twap`, whatever the scaling factor), fee() does a
+// TWAP binary search on the observation ring buffer (~77k–91k gas) instead of a simple slot read
+// (~18k–27k gas). This extra cost is added once per swap on top of the base.
 const TWAP_FEE_OVERHEAD: u64 = 65_000;
 // Pre/post loop overhead: fee(), slot0 reads, end-of-swap writes.
 const SWAP_BASE_GAS: u64 = 125_000;
@@ -984,6 +984,8 @@ mod tests {
     /// index must match the chain (213 -> 214: exactly one observation written).
     #[test]
     fn replays_base_block_50166683_swap_pair_wei_exact() {
+        // The fixture carries only the newest slot: at a zero scaling factor the module's fee does
+        // not depend on the oracle, and the swap's `write` reads only the current slot.
         let mut observations = vec![Observation::default(); 213];
         observations.push(Observation {
             block_timestamp: 1_787_122_711, // == parent block ts: the pool traded in that block
@@ -994,12 +996,6 @@ mod tests {
             .unwrap(),
             initialized: true,
         });
-        // The fixture carries only the newest slot. Slot 0, where the oracle falls back while the
-        // next slot is unwritten, is set inside the 600 s window, so `observe` reverts `OLD` and
-        // the module charges no dynamic fee, which is all this replay needs with a zero
-        // scaling factor. Unwritten history at timestamp 0 would be a ring no pool has.
-        observations[0] =
-            Observation { block_timestamp: 1_787_122_690, initialized: true, ..Default::default() };
 
         let mut pool = AerodromeSlipstreamsState::new(
             "0xdFe5F275020def30993f042174Fc2D335678b626".to_string(),

@@ -155,6 +155,35 @@ fn missing_current_observation_fails_the_quote() {
     assert!(result.is_err(), "got {result:?}");
 }
 
+#[rstest]
+#[case::dynamic_fee(1_000_000, None)]
+#[case::zero_scaling(
+    0,
+    Some(HookFee { fee: 300, block_fee_to_store: Some(300), observed_twap: true })
+)]
+fn ring_missing_the_slots_around_the_target(
+    #[case] scaling_factor: u64,
+    #[case] expected: Option<HookFee>,
+) {
+    // Slot 1 is current and slot 2 the oldest, 700 s back, but slots 3-7, which bracket the
+    // target (1,000), are missing: the binary search cannot answer. Only a zero scaling factor,
+    // which makes the fee independent of the oracle, still quotes.
+    let observations = Observations::new(vec![
+        observation(1_100, -3),
+        observation(1_600, -7),
+        observation(900, 0),
+    ]);
+    let pool = PoolOracle { observation_cardinality: 8, ..oracle(&observations, 10) };
+
+    let result =
+        configured(300, 5_000, scaling_factor).resolve(&pool, TICK_SPACING_FEE, execution(10));
+
+    match expected {
+        Some(fee) => assert_eq!(result.expect("quotes"), fee),
+        None => assert!(result.is_err(), "got {result:?}"),
+    }
+}
+
 #[test]
 fn later_swaps_in_a_traded_block_pay_its_cached_fee() {
     let mut hook = configured(300, 5_000, 1_000_000);

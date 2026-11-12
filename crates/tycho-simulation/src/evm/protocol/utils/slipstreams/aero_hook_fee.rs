@@ -269,6 +269,12 @@ impl AeroHookFee {
         if self.seconds_ago == 0 || self.seconds_ago > available {
             return Ok((0, false));
         }
+        // The hook runs `observe` for any scaling factor, so the observe gas is paid. A zero
+        // factor multiplies the deviation away, so the fee does not depend on what the oracle
+        // answers, and a ring this copy cannot read does not fail the quote.
+        if scaling_factor == 0 {
+            return Ok((0, true));
+        }
         // The hook catches a reverting `observe` and adds no dynamic fee. The oracle reverts with
         // `OLD`; any other failure is missing or inconsistent data in this copy of it, so the
         // quote fails rather than drop a fee the pool charges.

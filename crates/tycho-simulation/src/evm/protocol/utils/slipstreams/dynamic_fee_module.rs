@@ -570,22 +570,28 @@ mod tests {
         assert!(result.is_err(), "got {result:?}");
     }
 
-    #[test]
-    fn zero_scaling_quotes_the_base_fee_when_oracle_data_is_missing() {
-        // No supported module: base fee 0, scaling 0, 600 s. Cardinality 300 passes the guard and
-        // the current slot (5) is not in the ring, but a zero factor makes the fee independent of
-        // the oracle, so the quote stands.
-        let dfc = DynamicFeeConfig::default();
-        let observations = Observations::new(vec![Observation {
-            block_timestamp: 999_000,
-            initialized: true,
-            ..Default::default()
-        }]);
+    #[rstest]
+    #[case::dynamic_fee(DynamicFeeConfig::new(0, 10_000, 1_000_000, false, 0), None)]
+    #[case::zero_scaling(
+        DynamicFeeConfig::default(),
+        Some(ResolvedFee { fee: 3000, observed_twap: true })
+    )]
+    fn ring_missing_the_slots_around_the_target(
+        #[case] dfc: DynamicFeeConfig,
+        #[case] expected: Option<ResolvedFee>,
+    ) {
+        // Cardinality 300 passes the 600 s guard. The current slot (5) and the oldest (6) are
+        // here, so a swap can still write the next observation, but the slots that bracket the
+        // target (999,400) are missing: the binary search cannot answer. Only a zero scaling
+        // factor, which makes the fee independent of the oracle, still quotes.
+        let observations = ring(300, &[(5, 999_990, 0, "0"), (6, 999_000, 0, "0")]);
 
-        let fee = get_dynamic_fee(&dfc, 3000, 7, 1, 5, 300, &observations, 1_000_000, false)
-            .expect("scaling 0: the oracle cannot change the fee");
+        let result = get_dynamic_fee(&dfc, 3000, 7, 1, 5, 300, &observations, 1_000_000, false);
 
-        assert_eq!(fee, ResolvedFee { fee: 3000, observed_twap: true });
+        match expected {
+            Some(fee) => assert_eq!(result.expect("quotes"), fee),
+            None => assert!(result.is_err(), "got {result:?}"),
+        }
     }
 
     #[test]
@@ -746,8 +752,9 @@ mod tests {
 
     #[test]
     fn zero_scaling_still_pays_for_the_observe() {
-        // A zero scaling factor only multiplies the deviation away; the oracle is still read, so
-        // the observe gas is still paid. Only the cardinality guard skips the oracle.
+        // On chain the module runs `observe` at a zero scaling factor too, so the observe gas is
+        // paid, and the factor multiplies the deviation away. Only the cardinality guard skips
+        // the oracle.
         let dfc = DynamicFeeConfig::new(2700, 0, 0, false, 0);
         let observations = Observations::new(vec![
             Observation { block_timestamp: 999_000, initialized: true, ..Default::default() },
