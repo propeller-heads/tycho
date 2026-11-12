@@ -33,9 +33,10 @@ interface IFeeCalculator {
      *         are zero when there is nothing to capture (no fees, no
      *         surplus, or capture disabled).
      */
-    function calculateFee(
-        FeeInput memory feeInput
-    ) external view returns (FeeRecipient[] memory feeRecipients);
+    function calculateFee(FeeInput memory feeInput)
+        external
+        view
+        returns (FeeRecipient[] memory feeRecipients);
 
     /**
      * @notice Whether the router must receive swap output before forwarding
@@ -45,10 +46,10 @@ interface IFeeCalculator {
      * @return True if funds must pass through the router after the
      *         final swap instead of going directly to the receiver
      */
-    function mustOutputThroughRouter(
-        uint32 clientFeeBps,
-        address client
-    ) external view returns (bool);
+    function mustOutputThroughRouter(uint32 clientFeeBps, address client)
+        external
+        view
+        returns (bool);
 
     /**
      * @notice Returns a page of clients with custom fee overrides and their current settings
@@ -57,26 +58,30 @@ interface IFeeCalculator {
      * @return clients Addresses of clients with at least one custom fee
      * @return fees Custom fee configuration for each client (parallel array)
      */
-    function getAllClientFees(
-        uint256 start,
-        uint256 count
-    )
+    function getAllClientFees(uint256 start, uint256 count)
         external
         view
         returns (address[] memory clients, CustomFees[] memory fees);
 
     /**
      * @notice Returns the router fee rates `calculateFee` applies for a client
-     * @dev A client's custom rate overrides the default for that fee. A zero
-     *      client resolves to the transaction origin, as in `calculateFee`.
+     *         and a token pair
+     * @dev A client's custom rate overrides the default for that fee. A pair
+     *      fee replaces the default rate on output, and the lower of it and a
+     *      client's custom rate on output applies. A zero client resolves to
+     *      the transaction origin, as in `calculateFee`.
      * @param client The client address to check
+     * @param tokenIn The swap's input token
+     * @param tokenOut The swap's output token
      * @return routerFeeOnOutputBps Router fee on output in fee units
      *         (100_000_000 = 100%)
      * @return routerFeeOnClientFeeBps Router fee on client fee in fee units
      *         (100_000_000 = 100%)
      */
     function getEffectiveRouterFees(
-        address client
+        address client,
+        address tokenIn,
+        address tokenOut
     )
         external
         view
