@@ -44,15 +44,15 @@ const BID_ASK_BATCH_SIZE: usize = 100;
 
 /// Deadline for one batch bid/ask request. The pools of a batch that misses it are left out of
 /// the current book; the poll as a whole still succeeds with the other batches. It is shorter
-/// than the feed's whole-poll `request_timeout`, so a hung batch fails here, after the metadata
-/// fetch, rather than taking the whole poll with it.
+/// than the feed's whole-poll `request_timeout`, so a hung batch fails here rather than taking
+/// the whole poll with it.
 const BID_ASK_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How many batch bid/ask requests are in flight at once unless the builder says otherwise.
 ///
-/// A poll's worst case is the metadata fetch plus
-/// `ceil(pools / (BID_ASK_BATCH_SIZE * this)) * BID_ASK_TIMEOUT`, and it has to stay inside the
-/// feed loop's whole-poll `request_timeout`. At the default the batches of up to
+/// A poll's worst case is `ceil(pools / (BID_ASK_BATCH_SIZE * this)) * BID_ASK_TIMEOUT`, after
+/// the metadata refresh on the polls that make one, and it has to stay inside the feed loop's
+/// whole-poll `request_timeout`. At the default the batches of up to
 /// `BID_ASK_BATCH_SIZE * 16` pools run in one round; Metric lists a few hundred pools on a chain
 /// with no TVL floor and under a hundred at its default floor of 10 USD.
 pub const DEFAULT_BID_ASK_CONCURRENCY: NonZeroUsize = NonZeroUsize::new(16).unwrap();
@@ -267,7 +267,7 @@ mod tests {
         )
     }
 
-    /// The metadata endpoint is paged by `offset`; the poll follows `nextOffset` and must stop
+    /// The metadata endpoint is paged by `offset`; the client follows `nextOffset` and must stop
     /// on the last page, on an empty page, and on an offset that does not advance (the API
     /// would otherwise be polled forever).
     #[rstest]

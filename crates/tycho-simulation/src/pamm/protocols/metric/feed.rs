@@ -22,9 +22,9 @@ use crate::{
     },
 };
 
-/// Metric's book feed: polls the metadata and batch bid/ask endpoints and publishes every poll
-/// as a complete [`BookSnapshot`]. Built through [`MetricFeedBuilder`]. `Debug` output omits the
-/// API key.
+/// Metric's book feed: polls the batch bid/ask endpoint for the pools the metadata endpoint
+/// lists, refreshing that list every 15 s, and publishes every poll as a complete
+/// [`BookSnapshot`]. Built through [`MetricFeedBuilder`]. `Debug` output omits the API key.
 #[derive(Debug, Clone)]
 pub struct MetricFeed {
     feed_config: HttpFeedConfig,
@@ -85,12 +85,12 @@ impl MetricFeedBuilder {
 
     /// The feed tuning a new builder starts from.
     ///
-    /// Measured live, Metric's quotes change about every 2 s, and a poll — a page of pool
-    /// metadata, then a batch of bid/asks — answers in 0.6-1.5 s, so it is polled every 2 s:
-    /// once per quote change, and longer than a slow poll, which a shorter interval would follow
-    /// with the next poll straight away. A poll that hangs gives up after 5 s, and a book is
-    /// withdrawn once 15 s pass without a refresh: longer than one hung poll and its retry, so a
-    /// single slow poll does not blank the book.
+    /// Measured live, Metric's quotes change about every 2 s, and a poll — a batch of bid/asks,
+    /// after a page of pool metadata on the polls that refresh it — answers in 0.6-1.5 s, so it
+    /// is polled every 2 s: once per quote change, and longer than a slow poll, which a shorter
+    /// interval would follow with the next poll straight away. A poll that hangs gives up after
+    /// 5 s, and a book is withdrawn once 15 s pass without a refresh: longer than one hung poll
+    /// and its retry, so a single slow poll does not blank the book.
     ///
     /// Spread from it to change one field:
     ///
@@ -205,14 +205,16 @@ fn check_base_url(base_url: &str) -> Result<(), FeedError> {
         .map_err(|error| FeedError::InvalidInput(format!("Metric base URL {base_url}: {error}")))
 }
 
-/// Polls Metric's metadata and batch bid/ask endpoints and publishes every poll as
-/// [`MetricPrices`]: each unpaused pool that answered its quote request. Requires only the chain
-/// and trading key. It lists the pools Metric lists by default, those with a USD TVL of at least
-/// 10, so books assembled from it with a lower floor lack the pools under 10.
-/// [`MetricBookAssembler`] applies the token list, TVL floor and quote-usability checks.
+/// Polls Metric's batch bid/ask endpoint for the pools its metadata endpoint lists, refreshing that
+/// list every 15 s, and publishes every poll as [`MetricPrices`]: each unpaused pool that answered
+/// its quote request. Requires only the chain and trading key. It lists the pools Metric lists by
+/// default, those with a USD TVL of at least 10, so books assembled from it with a lower floor
+/// lack the pools under 10. [`MetricBookAssembler`] applies the token list, TVL floor and
+/// quote-usability checks.
 ///
 /// A poll succeeds while any pool answers; a pool that fails is left out, so a reader loses only
-/// that pool's pairs. `Debug` output omits the API key.
+/// that pool's pairs. A list that fails to refresh is retried 15 s later, and the polls go on
+/// quoting the pools it named until it is 90 s old. `Debug` output omits the API key.
 #[derive(Debug, Clone)]
 pub struct MetricPricesFeed {
     feed_config: HttpFeedConfig,
