@@ -133,8 +133,8 @@ use std::{collections::HashMap, hash::Hash, ops::Deref, str::FromStr, sync::Arc,
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel_async::{
-    pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
-    AsyncPgConnection, RunQueryDsl,
+    pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager, ManagerConfig},
+    AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection,
 };
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use tracing::{debug, info};
@@ -694,6 +694,29 @@ async fn connect(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> 
 fn new_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
     let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(db_url);
     Pool::builder(config)
+        .build()
+        .map_err(|err| StorageError::Unexpected(err.to_string()))
+}
+
+/// Creates a connection pool whose connections always plan a prepared statement for its actual
+/// values (`plan_cache_mode = force_custom_plan`).
+///
+/// A generic plan locks every partition of an instance table before it skips the ones it does
+/// not read. Under concurrent reads, those locks queue in Postgres' shared lock table.
+fn new_rpc_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
+    let mut config = ManagerConfig::<AsyncPgConnection>::default();
+    config.custom_setup = Box::new(|url| {
+        Box::pin(async move {
+            let mut conn = AsyncPgConnection::establish(url).await?;
+            conn.batch_execute("SET plan_cache_mode = force_custom_plan")
+                .await
+                .map_err(diesel::ConnectionError::CouldntSetupConfiguration)?;
+            Ok(conn)
+        })
+    });
+    let manager =
+        AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(db_url, config);
+    Pool::builder(manager)
         .build()
         .map_err(|err| StorageError::Unexpected(err.to_string()))
 }
@@ -2037,5 +2060,42 @@ mod tests_partition_retention {
                 .expect("no-work run should succeed");
         })
         .await;
+    }
+}
+
+#[cfg(test)]
+mod tests_rpc_pool {
+    use diesel::{sql_query, sql_types::Text, QueryableByName};
+    use diesel_async::RunQueryDsl;
+
+    use super::{new_pool, new_rpc_pool};
+
+    #[derive(QueryableByName)]
+    struct PlanCacheMode {
+        #[diesel(sql_type = Text)]
+        plan_cache_mode: String,
+    }
+
+    async fn plan_cache_mode(pool: super::Pool<super::AsyncPgConnection>) -> String {
+        let mut conn = pool.get().await.unwrap();
+        sql_query("SHOW plan_cache_mode")
+            .get_result::<PlanCacheMode>(&mut conn)
+            .await
+            .unwrap()
+            .plan_cache_mode
+    }
+
+    #[tokio::test]
+    async fn test_rpc_pool_forces_custom_plans() {
+        let db_url = std::env::var("DATABASE_URL").unwrap();
+        let mode = plan_cache_mode(new_rpc_pool(&db_url).unwrap()).await;
+        assert_eq!(mode, "force_custom_plan");
+    }
+
+    #[tokio::test]
+    async fn test_default_pool_keeps_auto_plans() {
+        let db_url = std::env::var("DATABASE_URL").unwrap();
+        let mode = plan_cache_mode(new_pool(&db_url).unwrap()).await;
+        assert_eq!(mode, "auto");
     }
 }

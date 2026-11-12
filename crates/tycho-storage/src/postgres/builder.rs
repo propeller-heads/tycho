@@ -128,7 +128,7 @@ impl GatewayBuilder {
     pub async fn build_with_rpc_gateway(
         self,
     ) -> Result<(CachedGateway, CachedGateway, JoinHandle<()>), StorageError> {
-        let rpc_pool = postgres::new_pool(&self.database_url)?;
+        let rpc_pool = postgres::new_rpc_pool(&self.database_url)?;
         let (extraction_gw, writer) = self.build().await?;
         spawn_status_gauges(rpc_pool.clone(), RPC_POOL, POOL_STATUS_PERIOD);
         let rpc_gw = extraction_gw.with_pool(rpc_pool, RPC_POOL);

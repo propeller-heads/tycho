@@ -91,7 +91,9 @@ reload corrects.
 
 Every gateway checkout and the DB writer checkout go through `pool::checkout`. It opens a
 `db_pool_checkout` span and records the wait in `db_pool_checkout_duration_seconds{pool}`. The
-`pool` label is `extraction`, `rpc` or `direct`. A 1 s sampler sets
+`pool` label is `extraction`, `rpc` or `direct`. The `rpc` pool sets
+`plan_cache_mode = force_custom_plan` on each connection: a generic plan locks every
+instance-table partition. The other pools keep `auto`. A 1 s sampler sets
 `db_pool_connections{pool,state}`, `db_pool_waiting{pool}` and `db_pool_max_size{pool}`. Traced
 entry point reads load rows with a connection (`load_traced_entry_point_rows`) and return the
 connection before they decode the JSON (`decode_traced_entry_points`). Do not hold a connection
