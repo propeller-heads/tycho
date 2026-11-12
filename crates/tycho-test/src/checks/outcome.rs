@@ -6,7 +6,7 @@ use std::fmt;
 use num_bigint::BigUint;
 use serde::Serialize;
 
-use crate::expectations::{DeclaredBy, Limits};
+use crate::expectations::{DeclaredBy, DeclaredTolerance, Limits};
 
 /// A check, named by [`CheckId::as_str`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +112,10 @@ pub struct CheckResult {
     /// For a `limits.*` result, the declaration it is checked against and the limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<LimitReport>,
+    /// For a `balances` or `balances.tvl_only` result of a component declared `tvl_only`, that
+    /// declaration: the tolerance its balances are checked within, and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tvl_only: Option<DeclaredTolerance>,
 }
 
 /// The declaration a `limits.*` result is checked against, and the limit it tested, whatever the

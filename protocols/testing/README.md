@@ -348,7 +348,8 @@ or executions it cannot simulate, are logged and the update is passed over.
   "harness": "strict",
   "results": [
     { "test": "first", "check": "state.components", "outcome": "pass" },
-    { "test": "first", "check": "balances", "outcome": "pass" },
+    { "test": "first", "check": "balances", "component": "0x...", "outcome": "pass",
+      "tvl_only": { "bps": "10", "reason": "the indexed reserves exclude the protocol fee bucket ..." } },
     { "test": "first", "check": "exec.ladder", "component": "0xabc...", "outcome": "skipped", "reason": "range predates Shanghai; the router needs PUSH0" },
     { "test": "first", "check": "sim.ladder", "outcome": "fail", "detail": "Error calculating amount out ..." },
     { "test": "first", "check": "exec.ladder", "outcome": "not_run", "reason": "sim.ladder failed" },
@@ -380,6 +381,10 @@ Every `limits.*` result carries its `limit`, whatever the outcome: the declared 
 `component_default`, `package` or `package_default`), and `get_limits`' `max_input` (after the
 `int128` cap) and `max_output`, with `capped` saying whether the cap applied. The run also logs a
 count per test, such as `limits: 3 hard, 8 soft, 1 under_cap`.
+
+Likewise, the `balances` and `balances.tvl_only` results of a component declared `tvl_only`
+carry that declaration, as written in the yaml, so a pass within a tolerance shows which one and
+why.
 
 A skipped check is reported with its reason, per component (by lowercase id) for
 `skip_simulation` and `skip_execution`; a legacy `true` reads "no reason given". A test-wide

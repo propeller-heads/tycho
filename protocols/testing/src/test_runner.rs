@@ -1017,7 +1017,12 @@ impl TestRunner {
                     Some(Err(e)) => vec![format!("the balance lens could not be built: {e:#}")],
                     None => vec!["no `balance_lens` is declared".to_string()],
                 };
-                checks.record_component(CheckId::Balances, id, &failures);
+                checks.record_balances(
+                    CheckId::Balances,
+                    id,
+                    component.tvl_only.as_ref(),
+                    &failures,
+                );
             }
         } else if let Some(reason) = config.skip_balance_check.reason() {
             info!("Skipping balance check: {reason}");
@@ -1115,7 +1120,17 @@ impl TestRunner {
                         "decoding the snapshot with scaled-down balances failed: {e:#}"
                     )],
                 };
-                checks.record_component(CheckId::BalancesTvlOnly, id, &failures);
+                let declared = test
+                    .expected_components
+                    .iter()
+                    .find(|component| {
+                        component
+                            .base
+                            .id
+                            .eq_ignore_ascii_case(id)
+                    })
+                    .and_then(|component| component.tvl_only.as_ref());
+                checks.record_balances(CheckId::BalancesTvlOnly, id, declared, &failures);
             }
         }
 

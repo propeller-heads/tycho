@@ -15,6 +15,7 @@ use std::{
     str::FromStr,
 };
 
+use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, WrapErr};
 use num_bigint::BigUint;
 use serde::{
@@ -204,12 +205,12 @@ impl Limits {
 ///
 /// A tolerance can hide a fee or rounding bug as well as a known artifact, so its reason says
 /// why exact is out of reach, and how far the run that measured it saw the amounts drift.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeclaredTolerance {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bps: Option<Bps>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wei: Option<Wei>,
     pub reason: String,
 }
@@ -254,6 +255,25 @@ impl Bps {
     /// The tolerance in hundredths of a basis point.
     pub fn centi(&self) -> u32 {
         self.0.get()
+    }
+}
+
+impl fmt::Display for Bps {
+    /// As the yaml writes it: `3`, `0.5` or `0.02`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (whole, hundredths) = (self.centi() / 100, self.centi() % 100);
+        match hundredths {
+            0 => write!(f, "{whole}"),
+            h if h % 10 == 0 => write!(f, "{whole}.{}", h / 10),
+            h => write!(f, "{whole}.{h:02}"),
+        }
+    }
+}
+
+impl Serialize for Bps {
+    /// As a string, so no decimal is lost to a float.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
     }
 }
 
@@ -333,6 +353,30 @@ impl Wei {
                 .get(token)
                 .or(default.as_ref())
                 .map_or(0, |wei| wei.get()),
+        }
+    }
+}
+
+impl Serialize for Wei {
+    /// As the yaml writes it: one amount, or a map of `default` and token addresses.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            Wei::All(wei) => serializer.serialize_u64(wei.get()),
+            Wei::PerToken { default, tokens } => {
+                let mut map = serializer.serialize_map(None)?;
+                if let Some(default) = default {
+                    map.serialize_entry("default", &default.get())?;
+                }
+                // Sorted, so the report is the same on every run.
+                for (token, wei) in tokens
+                    .iter()
+                    .sorted_by(|a, b| a.0.cmp(b.0))
+                {
+                    map.serialize_entry(&token.to_string(), &wei.get())?;
+                }
+                map.end()
+            }
         }
     }
 }
@@ -1308,6 +1352,31 @@ tests:
             ExecutionTolerances::new(Harness::Legacy, Some(&package), [("0xAA", &component)])
                 .get("0xaa", &token),
             Tolerance::LEGACY
+        );
+    }
+
+    #[test]
+    fn a_declaration_serializes_as_the_yaml_writes_it() {
+        let tolerance = declared(
+            "{bps: 0.5, wei: {default: 2, \"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48\": 1}, \
+             reason: r}",
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&tolerance).unwrap(),
+            serde_json::json!({
+                "bps": "0.5",
+                "wei": {"default": 2, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": 1},
+                "reason": "r",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(declared("{bps: 0.02, reason: r}").unwrap()).unwrap(),
+            serde_json::json!({"bps": "0.02", "reason": "r"})
+        );
+        assert_eq!(
+            serde_json::to_value(declared("{wei: 3, reason: r}").unwrap()).unwrap(),
+            serde_json::json!({"wei": 3, "reason": "r"})
         );
     }
 

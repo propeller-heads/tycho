@@ -18,7 +18,7 @@ pub use tycho_test::checks::{
     outcome::{CheckId, CheckResult, LimitReport, Outcome},
 };
 
-use crate::config::Harness;
+use crate::config::{DeclaredTolerance, Harness};
 
 /// The largest difference between a simulated and an executed amount out in one test, whether or
 /// not it was within tolerance. A declared tolerance's `measured` can be checked against it.
@@ -233,10 +233,20 @@ impl Checks {
         self.record_scoped(id, component, Some(direction), Some(limit), unfailed, failures);
     }
 
-    /// Records the outcome of a check on one component: a failure listing `failures` if there
-    /// are any, else a pass.
-    pub fn record_component(&mut self, id: CheckId, component: &str, failures: &[String]) {
+    /// Records the outcome of a balance check on one component: a failure listing `failures` if
+    /// there are any, else a pass, with the component's `tvl_only` declaration when it has one, so
+    /// the report shows the tolerance a pass was within.
+    pub fn record_balances(
+        &mut self,
+        id: CheckId,
+        component: &str,
+        tvl_only: Option<&DeclaredTolerance>,
+        failures: &[String],
+    ) {
         self.record_scoped(id, component, None, None, Outcome::Pass, failures);
+        if let Some(result) = self.results.last_mut() {
+            result.tvl_only = tvl_only.cloned();
+        }
     }
 
     fn record_scoped(
@@ -276,6 +286,7 @@ impl Checks {
             block: self.block,
             outcome,
             limit: limit.cloned(),
+            tvl_only: None,
         });
     }
 }
@@ -390,8 +401,34 @@ mod tests {
                 block: None,
                 outcome: Outcome::Skipped { reason: "no fork state".to_string() },
                 limit: None,
+                tvl_only: None,
             }]
         );
+    }
+
+    #[test]
+    fn a_balance_result_carries_the_tvl_only_declaration() {
+        let declared: DeclaredTolerance =
+            serde_yaml::from_str("{bps: 10, reason: \"a fee bucket the contract also holds\"}")
+                .unwrap();
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.record_balances(CheckId::Balances, "0xAbC", Some(&declared), &[]);
+        checks.record_balances(
+            CheckId::BalancesTvlOnly,
+            "0xAbC",
+            Some(&declared),
+            &["moved".to_string()],
+        );
+        checks.record_balances(CheckId::Balances, "0xDef", None, &[]);
+        let results = checks.finish().results;
+        assert_eq!(results[0].tvl_only.as_ref(), Some(&declared));
+        assert_eq!(results[1].outcome, Outcome::Fail { detail: "moved".to_string() });
+        assert_eq!(results[1].tvl_only.as_ref(), Some(&declared));
+        assert_eq!(results[2].tvl_only, None);
+        let json = serde_json::to_value(&results).unwrap();
+        assert_eq!(json[0]["tvl_only"]["bps"], "10");
+        assert_eq!(json[0]["tvl_only"]["reason"], "a fee bucket the contract also holds");
+        assert!(json[2].get("tvl_only").is_none());
     }
 
     #[test]
@@ -432,6 +469,7 @@ mod tests {
                     block: None,
                     outcome: Outcome::Fail { detail: "boom".to_string() },
                     limit: None,
+                    tvl_only: None,
                 },
                 CheckResult {
                     test: "t".to_string(),
@@ -446,6 +484,7 @@ mod tests {
                         Some((&BigUint::from(1000u32), &BigUint::from(2000u32))),
                         false,
                     )),
+                    tvl_only: None,
                 },
             ],
         };
@@ -544,8 +583,8 @@ mod tests {
     #[test]
     fn a_check_recorded_per_component_has_no_direction() {
         let mut checks = Checks::new(Harness::Strict, "t");
-        checks.record_component(CheckId::Balances, "0x01", &[]);
-        checks.record_component(CheckId::Balances, "0x02", &["A: indexed 1".to_string()]);
+        checks.record_balances(CheckId::Balances, "0x01", None, &[]);
+        checks.record_balances(CheckId::Balances, "0x02", None, &["A: indexed 1".to_string()]);
 
         let Finished { outcome, results, .. } = checks.finish();
         assert_eq!(outcome.unwrap_err().to_string(), "Failed checks: balances");
