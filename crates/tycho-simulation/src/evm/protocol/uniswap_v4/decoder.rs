@@ -369,6 +369,7 @@ pub mod pons_fixture {
             revert: false,
             timestamp: BLOCK_TIMESTAMP,
             partial_block_index: None,
+            ..Default::default()
         }
     }
 

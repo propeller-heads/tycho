@@ -3070,6 +3070,7 @@ mod test {
             revert: false,
             timestamp: 123456789,
             partial_block_index: None,
+            ..Default::default()
         });
 
         // Create a channel for state_sync to send messages to
@@ -3448,6 +3449,7 @@ mod test {
             revert: false,
             timestamp: 123456789,
             partial_block_index: None,
+            ..Default::default()
         };
         assert!(
             !state_sync.is_next_expected(&incoming_header),
@@ -3464,6 +3466,7 @@ mod test {
             revert: false,
             timestamp: 123456788,
             partial_block_index: None,
+            ..Default::default()
         };
         state_sync.last_synced_block = Some(previous_header);
 
@@ -3482,6 +3485,7 @@ mod test {
             revert: false,
             timestamp: 123456789,
             partial_block_index: None,
+            ..Default::default()
         };
         assert!(
             !state_sync.is_next_expected(&non_matching_header),
@@ -3580,6 +3584,7 @@ mod test {
             revert: false,
             timestamp: 123456789,
             partial_block_index: None,
+            ..Default::default()
         });
 
         let (block_tx, mut block_rx) = channel(10);
@@ -3800,6 +3805,7 @@ mod test {
             revert: false,
             timestamp: 1234567892,
             partial_block_index: None,
+            ..Default::default()
         });
 
         let (block_tx, mut block_rx) = channel(10);
@@ -4324,6 +4330,7 @@ mod test {
             revert: false,
             timestamp: 0,
             partial_block_index: None,
+            ..Default::default()
         });
         // This test checks block selection, not the restart delay.
         state_sync.snapshot_jitter = Duration::ZERO;

@@ -252,7 +252,7 @@ fn snapshot_to_block_changes(
         hash: header.hash.clone(),
         parent_hash: header.parent_hash.clone(),
         ts,
-        timestamp_ms: None,
+        timestamp_ms: header.timestamp_ms,
     };
 
     let mut new_protocol_components: HashMap<String, ProtocolComponent> = HashMap::new();
@@ -378,6 +378,22 @@ mod tests {
             Chain::Ethereum,
             rx,
         )
+    }
+
+    #[test]
+    fn test_snapshot_block_keeps_header_millis() {
+        let header = BlockHeader {
+            number: 7,
+            timestamp: 1_000,
+            timestamp_ms: Some(1_000_400),
+            ..Default::default()
+        };
+
+        let changes =
+            snapshot_to_block_changes("vm:curve", &Snapshot::default(), &header, Chain::Ethereum)
+                .unwrap();
+
+        assert_eq!(changes.block.timestamp_ms, Some(1_000_400));
     }
 
     #[test]

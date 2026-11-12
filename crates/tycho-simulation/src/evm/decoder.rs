@@ -1546,6 +1546,7 @@ mod tests {
             revert: false,
             timestamp,
             partial_block_index: partial,
+            ..Default::default()
         }
     }
 

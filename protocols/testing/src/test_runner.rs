@@ -1144,6 +1144,7 @@ impl TestRunner {
                     parent_hash: Bytes::default(),
                     revert: false,
                     timestamp: block.header.timestamp,
+                    timestamp_ms: None,
                     partial_block_index: None,
                 },
                 snapshots: snapshot,
