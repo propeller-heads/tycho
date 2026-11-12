@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use itertools::Itertools;
@@ -13,6 +14,40 @@ use tycho_common::{
 use super::{
     convert_int, orm, schema, storage_error_from_diesel, PostgresError, PostgresGateway, MAX_TS,
 };
+
+/// Fails when a block of `blocks` that was not inserted is stored with another timestamp.
+///
+/// `inserted` holds the hashes of the blocks the insert stored; the others were already there.
+async fn check_stored_timestamps(
+    blocks: &[orm::NewBlock],
+    inserted: &[BlockHash],
+    conn: &mut AsyncPgConnection,
+) -> Result<(), StorageError> {
+    let inserted: HashSet<&BlockHash> = inserted.iter().collect();
+    let existing: Vec<&orm::NewBlock> = blocks
+        .iter()
+        .filter(|new| !inserted.contains(&new.hash))
+        .collect();
+    let stored: HashMap<BlockHash, NaiveDateTime> = schema::block::table
+        .filter(schema::block::hash.eq_any(existing.iter().map(|new| &new.hash)))
+        .select((schema::block::hash, schema::block::ts))
+        .get_results(conn)
+        .await
+        .map_err(|err| storage_error_from_diesel(err, "Block", "stored timestamps", None))?
+        .into_iter()
+        .collect();
+    for new in existing {
+        if let Some(stored_ts) = stored.get(&new.hash) {
+            if *stored_ts != new.ts {
+                return Err(StorageError::Unexpected(format!(
+                    "Block {} is stored with timestamp {stored_ts}, not {}",
+                    new.hash, new.ts
+                )));
+            }
+        }
+    }
+    Ok(())
+}
 
 impl PostgresGateway {
     #[instrument(skip_all)]
@@ -41,15 +76,17 @@ impl PostgresGateway {
             })
             .collect::<Result<Vec<_>, StorageError>>()?;
 
-        // Insert in batches to avoid exceeding PostgreSQL parameter limit
-        // assumes that block with the same hash will not appear with different values
+        // Insert in batches to avoid exceeding PostgreSQL parameter limit. A block that is already
+        // stored must have the same timestamp: versions refer to blocks by timestamp.
         let block_count = new_blocks.len();
         async {
             for chunk in new_blocks.chunks(orm::NewBlock::MAX_BATCH_SIZE) {
-                diesel::insert_into(block)
+                let inserted: Vec<BlockHash> = diesel::insert_into(block)
                     .values(chunk)
-                    .on_conflict_do_nothing()
-                    .execute(conn)
+                    .on_conflict(hash)
+                    .do_nothing()
+                    .returning(hash)
+                    .get_results(conn)
                     .await
                     .map_err(|err| {
                         storage_error_from_diesel(
@@ -59,6 +96,9 @@ impl PostgresGateway {
                             None,
                         )
                     })?;
+                if inserted.len() < chunk.len() {
+                    check_stored_timestamps(chunk, &inserted, conn).await?;
+                }
             }
             Ok::<(), StorageError>(())
         }
