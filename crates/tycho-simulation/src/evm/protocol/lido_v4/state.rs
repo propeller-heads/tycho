@@ -1554,6 +1554,7 @@ mod tests {
                 parent_hash: Bytes::new(),
                 revert: false,
                 partial_block_index: None,
+                ..Default::default()
             },
             &HashMap::new(),
             &HashMap::new(),

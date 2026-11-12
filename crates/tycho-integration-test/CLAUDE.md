@@ -56,7 +56,7 @@ shows up as a failure.
     `ProtocolSim` instances, runs `get_amount_out` simulations, validates via RPC execution.
     Swaps are executed on the update block's state, in that block's context. The protocols in
     `NEXT_BLOCK_PROTOCOLS` (`main.rs`) are the exception: the decoder prices them for the next
-    block through `ProtocolSim::apply_block` (number + 1, timestamp + `block_time_secs`), and
+    block through `ProtocolSim::apply_block` (number + 1, the decoder's projected timestamp), and
     their quotes move with time, so a full block's swaps execute in that next block's context
     (`simulate_swap_transaction_next_block`). Add a protocol there when its state implements
     `apply_block`

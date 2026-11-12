@@ -107,9 +107,12 @@ where
     /// Live override providers keyed by `protocol_system`. A pool of that protocol subscribes to
     /// its provider at creation time and reads fresh overrides on every simulation.
     override_providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
-    /// Seconds between blocks, used to project a confirmed block header onto the next block when
-    /// deriving the execution block for block-sensitive states.
+    /// Seconds between blocks, used to project a confirmed block header without milliseconds onto
+    /// the next block when deriving the execution block for block-sensitive states.
     block_time_secs: u64,
+    /// Milliseconds between blocks, used to project a confirmed block header with milliseconds
+    /// onto the next block.
+    block_time_ms: u64,
     /// Chain every component this decoder handles lives on. Stamped into each registered
     /// [`DecoderContext`] so chain-specific decoders cannot be pointed at the wrong chain.
     chain: Chain,
@@ -143,6 +146,7 @@ where
             protocols_skip_unknown_tokens: HashSet::new(),
             override_providers: HashMap::new(),
             block_time_secs: chain.block_time_secs(),
+            block_time_ms: chain.block_time_ms(),
             chain,
         }
     }
@@ -150,13 +154,18 @@ where
     /// The block a quote produced from `header` is expected to execute in.
     ///
     /// A partial (flashblock) header describes a block that is still open, so a quote can still
-    /// land in it. A confirmed header describes a closed block, so the quote targets the next one.
+    /// land in it. A confirmed header describes a closed block, so the quote targets the next one,
+    /// at `⌊(timestamp_ms + block_time_ms) / 1000⌋` when the header has milliseconds and at
+    /// `timestamp + block_time_secs` when it does not.
     fn execution_block(&self, header: &BlockHeader) -> BlockContext {
         if header.partial_block_index.is_some() {
-            BlockContext::new(header.number, header.timestamp)
-        } else {
-            BlockContext::new(header.number + 1, header.timestamp + self.block_time_secs)
+            return BlockContext::new(header.number, header.timestamp);
         }
+        let timestamp = match header.timestamp_ms {
+            Some(ms) => (ms + self.block_time_ms) / 1000,
+            None => header.timestamp + self.block_time_secs,
+        };
+        BlockContext::new(header.number + 1, timestamp)
     }
 
     /// Advances every state to `execution_block` via [`ProtocolSim::apply_block`].
@@ -1058,15 +1067,17 @@ where
                 .contains(id)
         });
 
-        if let Some(header) = current_block.as_ref() {
-            let execution_block = self.execution_block(header);
+        let execution_block = current_block
+            .as_ref()
+            .map(|header| self.execution_block(header));
+        if let Some(execution_block) = &execution_block {
             let decoder_state = &mut *state_guard;
             Self::refresh_execution_block(
                 &mut updated_states,
                 &mut decoder_state.states,
                 &decoder_state.failed_components,
                 &removed_pairs,
-                &execution_block,
+                execution_block,
             );
         }
 
@@ -1100,7 +1111,12 @@ where
         Ok(Update::new(block_number, updated_states, new_pairs)
             .set_is_partial(is_partial)
             .set_removed_pairs(removed_pairs)
-            .set_sync_states(msg.sync_states.clone()))
+            .set_sync_states(msg.sync_states.clone())
+            .set_execution_timestamp(
+                execution_block
+                    .as_ref()
+                    .map(BlockContext::timestamp),
+            ))
     }
 
     /// Applies pending deltas from one or more `TxDeltaIndexer`s against the current confirmed
@@ -1546,6 +1562,7 @@ mod tests {
             revert: false,
             timestamp,
             partial_block_index: partial,
+            ..Default::default()
         }
     }
 
@@ -1599,6 +1616,56 @@ mod tests {
 
         assert_eq!(execution_block.number(), 100);
         assert_eq!(execution_block.timestamp(), 1_000);
+    }
+
+    fn header_with_ms(number: u64, timestamp_ms: u64) -> BlockHeader {
+        BlockHeader {
+            timestamp_ms: Some(timestamp_ms),
+            ..header_at(number, timestamp_ms / 1000, None)
+        }
+    }
+
+    #[rstest]
+    #[case::base_mid_second(Chain::Base, 1_000_600, 1_000)]
+    #[case::base_last_slot(Chain::Base, 1_000_800, 1_001)]
+    #[case::sub_second_chain_without_ms(Chain::Arbitrum, 1_000_000, 1_000)]
+    #[case::twelve_second_chain(Chain::Ethereum, 1_000_000, 1_012)]
+    #[case::polygon(Chain::Polygon, 1_000_000, 1_001)]
+    fn confirmed_header_with_ms_projects_from_ms(
+        #[case] chain: Chain,
+        #[case] ms: u64,
+        #[case] expected: u64,
+    ) {
+        let block =
+            TychoStreamDecoder::<BlockHeader>::new(chain).execution_block(&header_with_ms(100, ms));
+
+        assert_eq!(block.number(), 101);
+        assert_eq!(block.timestamp(), expected);
+    }
+
+    #[test]
+    fn partial_header_with_ms_keeps_its_own_block() {
+        let header = BlockHeader { partial_block_index: Some(3), ..header_with_ms(100, 1_000_600) };
+
+        let block = TychoStreamDecoder::<BlockHeader>::new(Chain::Base).execution_block(&header);
+
+        assert_eq!((block.number(), block.timestamp()), (100, 1_000));
+    }
+
+    #[test]
+    fn second_swap_in_the_same_second_takes_the_dynamic_fee() {
+        // The pool of `block_sensitive_state` last traded at 500.
+        let decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Base);
+        let same_second = decoder.execution_block(&header_with_ms(100, 500_600));
+        let next_second = decoder.execution_block(&header_with_ms(100, 500_800));
+        let mut same = block_sensitive_state();
+        same.apply_block(&same_second);
+        let mut next = block_sensitive_state();
+        next.apply_block(&next_second);
+
+        assert_eq!(same_second.timestamp(), 500);
+        assert_ne!(same.fee(), 750.0 / 1_000_000.0);
+        assert_eq!(next.fee(), 750.0 / 1_000_000.0);
     }
 
     #[test]
@@ -1770,6 +1837,27 @@ mod tests {
         assert_eq!(res2.states.len(), 1);
         assert_eq!(res1.sync_states.len(), 1);
         assert_eq!(res2.sync_states.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_decode_reports_the_execution_timestamp() {
+        let decoder = setup_decoder(true).await;
+        decoder
+            .decode(&load_test_msg("uniswap_v2_snapshot"))
+            .await
+            .expect("decode failure");
+        let mut msg = load_test_msg("uniswap_v2_delta");
+        for state_msg in msg.state_msgs.values_mut() {
+            state_msg.header.timestamp = 1_000;
+            state_msg.header.timestamp_ms = Some(1_000_000);
+        }
+
+        let update = decoder
+            .decode(&msg)
+            .await
+            .expect("decode failure");
+
+        assert_eq!(update.execution_timestamp, Some(1_012));
     }
 
     #[tokio::test]

@@ -61,6 +61,9 @@ pub struct BlockHeader {
     /// targets a partial block, so do not look for a revert target among partials.
     pub revert: bool,
     pub timestamp: u64,
+    /// Block time in milliseconds, when the server sends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<u64>,
     /// Index of a partial block update within a block. None for full blocks.
     ///
     /// On a revert header this is not a position in the named block: it is the index of the
@@ -106,6 +109,7 @@ impl From<&Block> for BlockHeader {
             number: block.number,
             parent_hash: block.parent_hash.clone(),
             timestamp: block.ts.and_utc().timestamp() as u64,
+            timestamp_ms: block.timestamp_ms,
             ..Default::default()
         }
     }
@@ -1247,7 +1251,7 @@ mod tests {
             ts: chrono::DateTime::from_timestamp(1_700_000_000, 0)
                 .expect("valid timestamp")
                 .naive_utc(),
-            ..Default::default()
+            timestamp_ms: Some(1_700_000_000_400),
         };
 
         let header = BlockHeader::from(&block);
@@ -1258,6 +1262,17 @@ mod tests {
         assert_eq!(header.timestamp, 1_700_000_000);
         assert!(!header.revert);
         assert_eq!(header.partial_block_index, None);
+        assert_eq!(header.timestamp_ms, Some(1_700_000_000_400));
+    }
+
+    #[test]
+    fn block_header_without_timestamp_ms_deserializes() {
+        let json =
+            r#"{"hash":"0x00","number":1,"parent_hash":"0x00","revert":false,"timestamp":1}"#;
+        let header: BlockHeader = serde_json::from_str(json).unwrap();
+        assert_eq!(header.timestamp_ms, None);
+        let value = serde_json::to_value(BlockHeader::default()).unwrap();
+        assert!(value.get("timestamp_ms").is_none());
     }
 
     #[derive(Clone, Debug)]
@@ -1398,6 +1413,7 @@ mod tests {
                 revert: false,
                 timestamp: 1000,
                 partial_block_index: None,
+                ..Default::default()
             },
             ..Default::default()
         }
@@ -1418,6 +1434,7 @@ mod tests {
                 revert: false,
                 timestamp: 1000,
                 partial_block_index: Some(partial_idx),
+                ..Default::default()
             },
             ..Default::default()
         }
@@ -1432,6 +1449,7 @@ mod tests {
                 revert: true,
                 timestamp: 1000,
                 partial_block_index: None,
+                ..Default::default()
             },
             ..Default::default()
         }
@@ -1447,6 +1465,7 @@ mod tests {
             revert: false,
             timestamp: 1000,
             partial_block_index: None,
+            ..Default::default()
         }
     }
 
@@ -1463,6 +1482,7 @@ mod tests {
             revert: false,
             timestamp: 1000,
             partial_block_index: Some(partial_idx),
+            ..Default::default()
         }
     }
 
@@ -1476,6 +1496,7 @@ mod tests {
             revert: false,
             timestamp: 1000,
             partial_block_index: Some(partial_idx),
+            ..Default::default()
         }
     }
 
@@ -1682,6 +1703,7 @@ mod tests {
             revert: true,
             timestamp: 1000,
             partial_block_index: None,
+            ..Default::default()
         };
         new_history
             .push(revert)
@@ -1808,6 +1830,7 @@ mod tests {
             revert: true,
             timestamp: 1000,
             partial_block_index: None,
+            ..Default::default()
         };
         new_history
             .push(revert)

@@ -104,18 +104,17 @@ pub async fn simulate_swap_transaction_before_block(
 }
 
 /// [`simulate_swap_transaction`], but in the context of the block after `block`: the next number,
-/// and a timestamp `block_time_secs` later. A swap quoted on `block`'s state executes there at the
-/// earliest, and the tycho-simulation decoder prices states that implement
-/// `ProtocolSim::apply_block` for that block, so their time-dependent quotes are compared against
-/// the execution they predict. A pending block, whose hash is zero, simulates on the pending state
-/// as [`simulate_swap_transaction`] does.
+/// at `timestamp`. A swap quoted on `block`'s state executes there at the earliest, and the
+/// tycho-simulation decoder prices states that implement `ProtocolSim::apply_block` for that
+/// block, so their time-dependent quotes are compared against the execution they predict. A pending
+/// block, whose hash is zero, simulates on the pending state as [`simulate_swap_transaction`] does.
 pub async fn simulate_swap_transaction_next_block(
     rpc_tools: &RPCTools,
     execution_info: HashMap<String, TychoExecutionInput>,
     block: &Block,
     router_overwrites_data: RouterOverwritesData,
     oracle_overwrites: Option<AddressHashMap<B256HashMap<B256>>>,
-    block_time_secs: u64,
+    timestamp: u64,
 ) -> SwapSimulationResult {
     simulate_swap_transaction_on(
         rpc_tools,
@@ -123,7 +122,7 @@ pub async fn simulate_swap_transaction_next_block(
         block,
         router_overwrites_data,
         oracle_overwrites,
-        SimulationBase::NextBlock { block_time_secs },
+        SimulationBase::NextBlock { timestamp },
     )
     .await
 }
@@ -902,14 +901,14 @@ mod tests {
     }
 
     /// In the block after a mined block, a simulation reads the mined block's state with the next
-    /// number and a timestamp one block time later.
+    /// number and the projected timestamp.
     #[tokio::test]
-    async fn in_the_next_block_the_simulation_reads_the_state_one_block_time_later() {
-        let call = traced_call(SimulationBase::NextBlock { block_time_secs: 2 }, true).await;
+    async fn in_the_next_block_the_simulation_runs_at_the_projected_timestamp() {
+        let call = traced_call(SimulationBase::NextBlock { timestamp: TIMESTAMP }, true).await;
 
         let next_block = BlockOverrides {
             number: Some(U256::from(NUMBER + 1)),
-            time: Some(TIMESTAMP + 2),
+            time: Some(TIMESTAMP),
             ..Default::default()
         };
         assert_eq!(call, (BlockId::from(NUMBER), Some(next_block)));
@@ -920,7 +919,7 @@ mod tests {
     async fn a_pending_block_reads_the_pending_state_whatever_the_base() {
         let after = traced_call(SimulationBase::AfterBlock, false).await;
         let before = traced_call(SimulationBase::BeforeBlock, false).await;
-        let next = traced_call(SimulationBase::NextBlock { block_time_secs: 2 }, false).await;
+        let next = traced_call(SimulationBase::NextBlock { timestamp: TIMESTAMP }, false).await;
 
         let pending = (BlockId::from(BlockNumberOrTag::Pending), None);
         assert_eq!(after, pending);

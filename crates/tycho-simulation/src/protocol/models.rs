@@ -255,6 +255,10 @@ pub struct Update {
     pub new_pairs: HashMap<String, ProtocolComponent>,
     /// The pairs that were removed in this block
     pub removed_pairs: HashMap<String, ProtocolComponent>,
+    /// The timestamp the decoder priced block-sensitive states for. None when the message had no
+    /// block header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_timestamp: Option<u64>,
 }
 
 impl Update {
@@ -270,6 +274,7 @@ impl Update {
             states,
             new_pairs,
             removed_pairs: HashMap::new(),
+            execution_timestamp: None,
         }
     }
 
@@ -285,6 +290,11 @@ impl Update {
 
     pub fn set_sync_states(mut self, sync_states: HashMap<String, SynchronizerState>) -> Self {
         self.sync_states = sync_states;
+        self
+    }
+
+    pub fn set_execution_timestamp(mut self, execution_timestamp: Option<u64>) -> Self {
+        self.execution_timestamp = execution_timestamp;
         self
     }
 
