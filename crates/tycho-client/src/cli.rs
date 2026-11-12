@@ -107,9 +107,8 @@ struct CliArgs {
     #[clap(long)]
     disable_compression: bool,
 
-    /// If set, enables receiving partial block updates (flashblocks).
-    /// This allows the client to receive incremental updates within a block, allowing for
-    /// lower latency.
+    /// If set, enables receiving partial block updates on chains that have them.
+    /// The client then receives incremental updates within a block, for lower latency.
     #[clap(long)]
     partial_blocks: bool,
 
