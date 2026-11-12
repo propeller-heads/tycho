@@ -33,10 +33,6 @@ pub enum CheckId {
     LimitsPastLimit,
     /// The quote at the limit pays no more than the limit's max output.
     LimitsMaxOutput,
-    /// The state streamed through a range quotes exactly as the snapshot at its stop block.
-    StreamMatchesSnapshot,
-    /// The streamed range exercised as much as a floor asks.
-    StreamCoverage,
 }
 
 impl CheckId {
@@ -58,8 +54,6 @@ impl CheckId {
             CheckId::LimitsAtLimit => "limits.at_limit",
             CheckId::LimitsPastLimit => "limits.past_limit",
             CheckId::LimitsMaxOutput => "limits.max_output",
-            CheckId::StreamMatchesSnapshot => "stream.matches_snapshot",
-            CheckId::StreamCoverage => "stream.coverage",
         }
     }
 }
@@ -94,11 +88,6 @@ pub enum Outcome {
     NotRun {
         reason: String,
     },
-    /// The check found a problem that does not fail the test.
-    Warn {
-        /// What the problem is.
-        detail: String,
-    },
 }
 
 /// One check of one test.
@@ -114,9 +103,6 @@ pub struct CheckResult {
     /// only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direction: Option<String>,
-    /// The block a streamed check ran at; none for the checks at the snapshot.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub block: Option<u64>,
     #[serde(flatten)]
     pub outcome: Outcome,
     /// For a `limits.*` result, the declaration it is checked against and the limit.
