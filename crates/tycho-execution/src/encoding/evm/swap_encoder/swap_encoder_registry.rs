@@ -310,8 +310,9 @@ impl SwapEncoderRegistry {
                 Ok(Box::new(PropAMMSwapEncoder::new(executor_address, self.chain, config)?))
             }
             // The Biconomy venue on Base implements the same IPropAMM interface, indexed natively
-            // instead of through the price level stream.
-            "biconomy" => {
+            // instead of through the price level stream. Efficient pools (`flamm`) take the same
+            // route: each pool finds the input the router sends it.
+            "biconomy" | "flamm" => {
                 Ok(Box::new(PropAMMSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "lido_v4" => {

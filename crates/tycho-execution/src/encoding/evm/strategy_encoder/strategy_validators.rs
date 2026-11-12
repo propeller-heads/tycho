@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use tycho_common::Bytes;
+use tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
-use crate::encoding::{errors::EncodingError, models::Swap};
+use crate::encoding::{
+    errors::EncodingError, evm::swap_encoder::PAMM_ADDRESS_ATTRIBUTE, models::Swap,
+};
 
 pub trait SwapValidator {
     /// Raises an error if swaps do not represent a valid path from the given token to the checked
@@ -162,8 +164,25 @@ impl SplitSwapValidator {
 }
 
 /// Protocols whose venue is the next hop's `fundsExpectedAddress` and rejects itself as a swap
-/// recipient, so a sequential route through the same component twice in a row always reverts.
-const SELF_RECIPIENT_REJECTING_PROTOCOLS: &[&str] = &["biconomy"];
+/// recipient, so a sequential route through the same venue twice in a row always reverts.
+const SELF_RECIPIENT_REJECTING_PROTOCOLS: &[&str] = &["biconomy", "flamm"];
+
+/// Whether two components trade on one venue. Components of one venue differ by pair (a `flamm`
+/// pool has one id per pair), so their `pamm_address` decides; a component without that attribute
+/// is its own venue.
+fn same_venue(first: &ProtocolComponent, second: &ProtocolComponent) -> bool {
+    match (
+        first
+            .static_attributes
+            .get(PAMM_ADDRESS_ATTRIBUTE),
+        second
+            .static_attributes
+            .get(PAMM_ADDRESS_ATTRIBUTE),
+    ) {
+        (Some(first), Some(second)) => first == second,
+        _ => first.id == second.id,
+    }
+}
 
 /// Validates whether a sequence of sequential swaps represents a valid solution.
 #[derive(Clone)]
@@ -172,14 +191,14 @@ pub struct SequentialSwapValidator;
 impl SwapValidator for SequentialSwapValidator {}
 
 impl SequentialSwapValidator {
-    /// Raises an error if two consecutive swaps run on the same component of a protocol whose
-    /// venue rejects itself as recipient: the router would pay the first hop's output to the
-    /// venue (the second hop's `fundsExpectedAddress`) and the venue would revert.
+    /// Raises an error if two consecutive swaps run on the same venue of a protocol whose venue
+    /// rejects itself as recipient: the router would pay the first hop's output to the venue (the
+    /// second hop's `fundsExpectedAddress`) and the venue would revert.
     pub fn validate_no_back_to_back_venue_hops(swaps: &[Swap]) -> Result<(), EncodingError> {
         for pair in swaps.windows(2) {
             let (first, second) = (pair[0].component(), pair[1].component());
-            if first.id == second.id &&
-                SELF_RECIPIENT_REJECTING_PROTOCOLS.contains(&first.protocol_system.as_str())
+            if SELF_RECIPIENT_REJECTING_PROTOCOLS.contains(&first.protocol_system.as_str()) &&
+                same_venue(first, second)
             {
                 return Err(EncodingError::InvalidInput(format!(
                     "Consecutive swaps on {} component {} always revert: the venue cannot \
@@ -573,6 +592,55 @@ mod tests {
         ];
         assert!(
             SequentialSwapValidator::validate_no_back_to_back_venue_hops(&via_other_pool).is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_back_to_back_flamm_hops_compares_the_pool_address() {
+        let usdc = Bytes::from_str("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913").unwrap();
+        let cbbtc = Bytes::from_str("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf").unwrap();
+        let weth = Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap();
+        let pool_a = Bytes::from_str("0x7ee950c5f81045b96cca9c5e680dd69bb4e484a9").unwrap();
+        let pool_b = Bytes::from_str("0xdd5f677672f5deb3d7a4173bb0c9441e64cbb3f9").unwrap();
+        let hop = |pool: &Bytes, id: &str, token_in: &Bytes, token_out: &Bytes| {
+            Swap::new(
+                ProtocolComponent {
+                    id: id.to_string(),
+                    protocol_system: "flamm".to_string(),
+                    static_attributes: HashMap::from([("pamm_address".to_string(), pool.clone())]),
+                    ..Default::default()
+                },
+                default_token(token_in.clone()),
+                default_token(token_out.clone()),
+                BigUint::ZERO,
+            )
+        };
+
+        // Two pairs of one pool: the ids differ, the venue doesn't.
+        let one_pool = [
+            hop(&pool_a, "pool_a:cbbtc:usdc", &usdc, &cbbtc),
+            hop(&pool_a, "pool_a:cbbtc:weth", &cbbtc, &weth),
+        ];
+        assert!(matches!(
+            SequentialSwapValidator::validate_no_back_to_back_venue_hops(&one_pool),
+            Err(EncodingError::InvalidInput(_))
+        ));
+
+        // Pool A pays pool B.
+        let two_pools = [
+            hop(&pool_a, "pool_a:cbbtc:usdc", &usdc, &cbbtc),
+            hop(&pool_b, "pool_b:cbbtc:usdc", &cbbtc, &usdc),
+        ];
+        assert!(SequentialSwapValidator::validate_no_back_to_back_venue_hops(&two_pools).is_ok());
+
+        // Another venue between two hops of one pool.
+        let via_other_venue = [
+            hop(&pool_a, "pool_a:cbbtc:usdc", &usdc, &cbbtc),
+            hop(&pool_b, "pool_b:cbbtc:weth", &cbbtc, &weth),
+            hop(&pool_a, "pool_a:usdc:weth", &weth, &usdc),
+        ];
+        assert!(
+            SequentialSwapValidator::validate_no_back_to_back_venue_hops(&via_other_venue).is_ok()
         );
     }
 }

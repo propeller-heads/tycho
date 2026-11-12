@@ -11,10 +11,12 @@ use crate::encoding::{
 };
 
 /// Static attribute under which pAMM components carry their venue address.
-const PAMM_ADDRESS_ATTRIBUTE: &str = "pamm_address";
+pub const PAMM_ADDRESS_ATTRIBUTE: &str = "pamm_address";
 
 /// Encodes a swap on any pAMM implementing the standard `IPropAMM` interface pushed by Titan,
 /// whether its components come from the price level stream or are indexed natively (`biconomy`).
+/// Efficient pools (`flamm`, a book feed) take the same `swap` call and implement nothing else of
+/// `IPropAMM`.
 ///
 /// A single generic executor serves all such venues, so the pAMM address travels in the swap data
 /// (packed `pamm ++ token_in ++ token_out`), taken from the component's `pamm_address` static

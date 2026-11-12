@@ -8,6 +8,7 @@ use tycho_common::{
     Bytes,
 };
 use tycho_execution::encoding::{
+    errors::EncodingError,
     evm::{
         testing_utils::MockRFQState,
         utils::{biguint_to_u256, write_calldata_to_file},
@@ -3722,6 +3723,149 @@ fn test_single_encoding_strategy_metric() {
 
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_single_encoding_strategy_metric", hex_calldata.as_str());
+}
+
+fn flamm_hop(pool: &Bytes, token_in: &Bytes, token_out: &Bytes) -> Swap {
+    let mut static_attributes = HashMap::new();
+    static_attributes.insert("pamm_address".to_string(), pool.clone());
+    let (lower, higher) =
+        if token_in < token_out { (token_in, token_out) } else { (token_out, token_in) };
+    Swap::new(
+        ProtocolComponent {
+            // The feed's id for a pool's pair: the pool and its two tokens, the lower address
+            // first.
+            id: format!("{pool}{}{}", hex::encode(lower), hex::encode(higher)),
+            protocol_system: String::from("flamm"),
+            static_attributes,
+            ..Default::default()
+        },
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    )
+}
+
+#[test]
+fn test_single_encoding_strategy_flamm() {
+    // Generates calldata for TychoRouterForFLAMMTest Solidity integration test: ALICE sells
+    // 15000 sats of cbBTC for USDC on an Efficient pool (Base), the mock the Solidity test
+    // places at the component's `pamm_address`, which pays 750 USDC base units per sat.
+    let pool = Bytes::from_str("0xF1a3300000000000000000000000000000000001").unwrap();
+    let cbbtc_base = Bytes::from_str("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf").unwrap();
+    let usdc_base = Bytes::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913").unwrap();
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        cbbtc_base.clone(),
+        usdc_base.clone(),
+        BigUint::from_str("15000").unwrap(),
+        BigUint::from_str("11250000").unwrap(),
+        BigUint::from_str("11250000").unwrap(),
+        vec![flamm_hop(&pool, &cbbtc_base, &usdc_base)],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        &encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_flamm", hex_calldata.as_str());
+}
+
+#[test]
+fn test_sequential_encoding_strategy_flamm_two_pools() {
+    // Generates calldata for TychoRouterForFLAMMTest Solidity integration test: ALICE sells 15000
+    // sats of cbBTC on one Efficient pool, which pays the second pool directly, and that pool
+    // buys WETH with the USDC it found. Both are the mocks the Solidity test places.
+    let pool_a = Bytes::from_str("0xF1a3300000000000000000000000000000000001").unwrap();
+    let pool_b = Bytes::from_str("0xF1a3300000000000000000000000000000000002").unwrap();
+    let cbbtc_base = Bytes::from_str("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf").unwrap();
+    let usdc_base = Bytes::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913").unwrap();
+    let weth_base = Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap();
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        cbbtc_base.clone(),
+        weth_base.clone(),
+        BigUint::from_str("15000").unwrap(),
+        BigUint::from_str("5625000000000000").unwrap(),
+        BigUint::from_str("5625000000000000").unwrap(),
+        vec![
+            flamm_hop(&pool_a, &cbbtc_base, &usdc_base),
+            flamm_hop(&pool_b, &usdc_base, &weth_base),
+        ],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        &encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_sequential_encoding_strategy_flamm_two_pools",
+        hex_calldata.as_str(),
+    );
+}
+
+#[test]
+fn test_sequential_encoding_strategy_refuses_two_flamm_hops_on_one_pool() {
+    // The pair ids differ, the pool doesn't: its first hop would pay itself, and it refuses that.
+    let pool = Bytes::from_str("0xF1a3300000000000000000000000000000000001").unwrap();
+    let cbbtc_base = Bytes::from_str("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf").unwrap();
+    let usdc_base = Bytes::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913").unwrap();
+    let weth_base = Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap();
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        cbbtc_base.clone(),
+        weth_base.clone(),
+        BigUint::from_str("15000").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        vec![flamm_hop(&pool, &cbbtc_base, &usdc_base), flamm_hop(&pool, &usdc_base, &weth_base)],
+    );
+
+    assert!(matches!(
+        encoder.encode_solutions(vec![solution]),
+        Err(EncodingError::InvalidInput(message)) if message.contains("Consecutive swaps")
+    ));
 }
 
 #[test]

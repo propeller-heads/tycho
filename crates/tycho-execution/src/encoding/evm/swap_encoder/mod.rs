@@ -30,6 +30,7 @@ mod native_fallback;
 mod native_wrap;
 mod pancakeswap_infinity;
 mod propamm;
+pub(crate) use propamm::PAMM_ADDRESS_ATTRIBUTE;
 mod ring_swap_v2;
 mod rocketpool;
 mod sky;
