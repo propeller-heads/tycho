@@ -106,20 +106,33 @@ pub fn check(
 /// every direction between `tokens`: limits, spot price, and a quote at 0.1%, 1% and 10% of the
 /// original max input after `sizing`, which caps it as the ladder does. Returns every difference.
 ///
-/// A question both states fail to answer with the same error is no difference. When the original
-/// state answers no question at all, nothing was compared, and that is returned as a difference
-/// too: the scaling would otherwise verify nothing.
+/// A token is named by its symbol, followed by its address when another of `tokens` has the same
+/// symbol. A question both states fail to answer with the same error is no difference. When the
+/// original state answers no question at all, nothing was compared, and that is returned as a
+/// difference too: the scaling would otherwise verify nothing.
 pub fn compare<Q: Quoter + ?Sized>(
     original: &Q,
     scaled: &Q,
     tokens: &[Token],
     sizing: impl Fn(&BigUint) -> BigUint,
 ) -> Vec<String> {
+    let name = |token: &Token| {
+        let shared = tokens
+            .iter()
+            .filter(|other| other.symbol == token.symbol)
+            .count() >
+            1;
+        if shared {
+            format!("{} ({})", token.symbol, token.address)
+        } else {
+            token.symbol.clone()
+        }
+    };
     let mut changes = Vec::new();
     let mut answered = 0usize;
     for pair in tokens.iter().permutations(2) {
         let (token_in, token_out) = (pair[0], pair[1]);
-        let direction = format!("{} -> {}", token_in.symbol, token_out.symbol);
+        let direction = format!("{} -> {}", name(token_in), name(token_out));
         let limits = original.limits(token_in, token_out);
         answered += usize::from(limits.is_ok());
         if let Some(change) =
@@ -154,7 +167,7 @@ pub fn compare<Q: Quoter + ?Sized>(
             ) {
                 changes.push(format!(
                     "{direction}: the quote for {amount_in} {} {change}",
-                    token_in.symbol
+                    name(token_in)
                 ));
             }
         }
@@ -287,6 +300,28 @@ mod tests {
         assert_eq!(
             changes[3],
             "A -> B: the quote for 1000 A is 1980, but 1307 with the balances scaled down"
+        );
+    }
+
+    #[test]
+    fn tokens_that_share_a_symbol_are_named_by_their_address_too() {
+        let (original, scaled) = pair(true);
+        let tokens = [
+            token("0x00000000000000000000000000000000000000a1", "A"),
+            token("0x00000000000000000000000000000000000000a2", "A"),
+        ];
+        let changes = compare(&original, &scaled, &tokens, BigUint::clone);
+        assert!(
+            changes[0].starts_with(
+                "A (0x00000000000000000000000000000000000000a1) -> A \
+                 (0x00000000000000000000000000000000000000a2): limits"
+            ),
+            "{changes:#?}"
+        );
+        assert!(
+            changes[3]
+                .contains("the quote for 1000 A (0x00000000000000000000000000000000000000a1)"),
+            "{changes:#?}"
         );
     }
 
