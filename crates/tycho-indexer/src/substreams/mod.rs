@@ -15,10 +15,26 @@ use tonic::{
     transport::{Channel, ClientTlsConfig},
 };
 
-use crate::pb::sf::substreams::rpc::{
-    v2::Response,
-    v3::{stream_client::StreamClient, Request},
+use crate::pb::sf::substreams::{
+    rpc::{
+        v2::Response,
+        v3::{stream_client::StreamClient, Request},
+    },
+    v1::Clock,
 };
+
+/// Returns the block time in milliseconds from a Substreams clock. Returns `None` when the clock
+/// has no timestamp or the timestamp is out of range.
+pub(crate) fn clock_timestamp_ms(clock: &Clock) -> Option<u64> {
+    let timestamp = clock.timestamp.as_ref()?;
+    let seconds = u64::try_from(timestamp.seconds).ok()?;
+    let nanos = u32::try_from(timestamp.nanos)
+        .ok()
+        .filter(|nanos| *nanos < 1_000_000_000)?;
+    seconds
+        .checked_mul(1000)?
+        .checked_add(u64::from(nanos / 1_000_000))
+}
 
 #[derive(Clone, Debug)]
 pub struct SubstreamsEndpoint {
@@ -94,5 +110,36 @@ impl SubstreamsEndpoint {
         let block_stream = response_stream.into_inner();
 
         Ok(block_stream)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case::base_slot(1_793_901_601, 600_000_000, Some(1_793_901_601_600))]
+    #[case::whole_second(1_793_901_601, 0, Some(1_793_901_601_000))]
+    #[case::sub_millisecond_floors(1_793_901_601, 999_999, Some(1_793_901_601_000))]
+    #[case::negative_seconds(-1, 0, None)]
+    #[case::negative_nanos(1_793_901_601, -1, None)]
+    #[case::nanos_out_of_range(1_793_901_601, 1_000_000_000, None)]
+    fn clock_timestamp_ms_reads_seconds_and_nanos(
+        #[case] seconds: i64,
+        #[case] nanos: i32,
+        #[case] expected: Option<u64>,
+    ) {
+        let clock = Clock {
+            timestamp: Some(prost_types::Timestamp { seconds, nanos }),
+            ..Default::default()
+        };
+        assert_eq!(clock_timestamp_ms(&clock), expected);
+    }
+
+    #[test]
+    fn clock_without_timestamp_has_no_ms() {
+        assert_eq!(clock_timestamp_ms(&Clock::default()), None);
     }
 }
