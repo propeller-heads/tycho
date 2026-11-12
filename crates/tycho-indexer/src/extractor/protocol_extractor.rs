@@ -287,8 +287,10 @@ where
         time_passed: i64,
     ) {
         let current_block = self.chain_state.current_block().await;
-        let distance_to_current = current_block - block.number;
-        let blocks_processed = block.number - last_report_block_number;
+        let distance_to_current = current_block.saturating_sub(block.number);
+        let blocks_processed = block
+            .number
+            .saturating_sub(last_report_block_number);
         let blocks_per_minute = blocks_processed as f64 * 60.0 / time_passed as f64;
 
         let extractor_id = self.get_id();
@@ -2357,6 +2359,87 @@ mod test {
         let res = extractor.get_cursor().await;
 
         assert_eq!(res, "cursor");
+    }
+
+    struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs() -> (tracing::subscriber::DefaultGuard, Arc<std::sync::Mutex<Vec<u8>>>) {
+        let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || LogBuffer(writer.clone()))
+            .with_ansi(false)
+            .finish();
+        (tracing::subscriber::set_default(subscriber), logs)
+    }
+
+    async fn extractor_with_estimate(
+        estimate: u64,
+    ) -> ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>
+    {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        let mut extractor = create_extractor(gw).await;
+        extractor.chain_state = ChainState::new(chrono::Local::now().naive_utc(), estimate, 1);
+        extractor
+    }
+
+    async fn sync_progress_logs(block_number: u64, last_report_block_number: u64) -> String {
+        let extractor = extractor_with_estimate(100).await;
+        let (_guard, logs) = capture_logs();
+        let block = Block { number: block_number, ..Default::default() };
+
+        extractor
+            .report_sync_progress(&block, last_report_block_number, 60)
+            .await;
+
+        let logs = logs.lock().unwrap().clone();
+        String::from_utf8(logs).unwrap()
+    }
+
+    #[tokio::test]
+    async fn sync_progress_above_the_estimate_does_not_wrap() {
+        let logs = sync_progress_logs(200, 150).await;
+
+        assert!(!logs.contains("Failed to convert"), "{logs}");
+        assert!(logs.contains("00h00m"), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn sync_progress_at_the_estimate_logs_zero_remaining() {
+        let logs = sync_progress_logs(100, 50).await;
+
+        assert!(!logs.contains("Failed to convert"), "{logs}");
+        assert!(logs.contains("00h00m"), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn sync_progress_below_the_last_report_does_not_wrap() {
+        let logs = sync_progress_logs(90, 95).await;
+
+        assert!(logs.contains("blocks_processed=0"), "{logs}");
     }
 
     #[tokio::test]
