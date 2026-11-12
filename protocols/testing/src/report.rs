@@ -187,6 +187,8 @@ pub struct Drift {
     /// `executed - simulated` of the execution furthest off in absolute terms, in base units of
     /// its token out, which may not be the one above. A `wei` tolerance can be checked against it.
     pub largest_difference: String,
+    /// The token out `largest_difference` is in.
+    pub largest_difference_token: String,
 }
 
 /// `executed - simulated`, and that difference in basis points of `executed`. `None` for a zero
@@ -195,8 +197,9 @@ pub fn drift(simulated: &BigUint, executed: &BigUint) -> Option<(BigInt, f64)> {
     if executed.is_zero() {
         return None;
     }
-    let difference = BigInt::from(executed.clone()) - BigInt::from(simulated.clone());
-    let bps = BigRational::new(&difference * 10_000, BigInt::from(executed.clone())).to_f64()?;
+    let executed = BigInt::from(executed.clone());
+    let difference = &executed - BigInt::from(simulated.clone());
+    let bps = BigRational::new(&difference * 10_000, executed).to_f64()?;
     Some((difference, bps))
 }
 
@@ -209,6 +212,15 @@ struct Observed {
     bps: f64,
 }
 
+/// How a test ended, from [`Checks::finish`].
+pub struct Finished {
+    /// An error naming every failed check if any failed.
+    pub outcome: miette::Result<()>,
+    pub results: Vec<CheckResult>,
+    /// The largest drift, if any execution was noted.
+    pub drift: Option<Drift>,
+}
+
 /// Runs the checks of one test and records how each ended.
 pub struct Checks {
     harness: Harness,
@@ -217,7 +229,8 @@ pub struct Checks {
     block: Option<u64>,
     results: Vec<CheckResult>,
     drift: Option<Observed>,
-    largest_difference: Option<BigInt>,
+    /// The largest `executed - simulated` in magnitude, with its token out.
+    largest_difference: Option<(BigInt, String)>,
 }
 
 impl Checks {
@@ -255,6 +268,7 @@ impl Checks {
         &mut self,
         simulation: &str,
         component: &str,
+        token_out: &str,
         simulated: &BigUint,
         executed: &BigUint,
     ) {
@@ -264,9 +278,9 @@ impl Checks {
         if self
             .largest_difference
             .as_ref()
-            .is_none_or(|largest| difference.abs() > largest.abs())
+            .is_none_or(|(largest, _)| difference.abs() > largest.abs())
         {
-            self.largest_difference = Some(difference);
+            self.largest_difference = Some((difference, token_out.to_string()));
         }
         if self
             .drift
@@ -282,24 +296,6 @@ impl Checks {
             executed: executed.to_string(),
             bps,
         });
-    }
-
-    /// The largest drift noted so far, if any execution was noted.
-    pub fn take_drift(&mut self) -> Option<Drift> {
-        let (observed, largest_difference) = self
-            .drift
-            .take()
-            .zip(self.largest_difference.take())?;
-        let Observed { simulation, component, simulated, executed, bps } = observed;
-        Some(Drift {
-            test: self.test.clone(),
-            simulation,
-            component,
-            simulated,
-            executed,
-            bps,
-            largest_difference: largest_difference.to_string(),
-        })
     }
 
     /// Runs `check` and records its outcome.
@@ -363,9 +359,9 @@ impl Checks {
         self.record(id, None, None, Outcome::Fail { detail: format!("{error:#}") }, None);
     }
 
-    /// Ends the test: an error naming every failed check if any failed, `Ok` otherwise, and the
-    /// results either way.
-    pub fn finish(self) -> (miette::Result<()>, Vec<CheckResult>) {
+    /// Ends the test: an error naming every failed check if any failed, `Ok` otherwise, with the
+    /// results and the largest drift either way.
+    pub fn finish(self) -> Finished {
         // A check recorded per direction can fail several times; name it once.
         let failed: Vec<&str> = self
             .results
@@ -379,7 +375,23 @@ impl Checks {
         } else {
             Err(miette!("Failed checks: {}", failed.join(", ")))
         };
-        (outcome, self.results)
+        let drift = self
+            .drift
+            .zip(self.largest_difference)
+            .map(|(observed, (largest_difference, token))| {
+                let Observed { simulation, component, simulated, executed, bps } = observed;
+                Drift {
+                    test: self.test,
+                    simulation,
+                    component,
+                    simulated,
+                    executed,
+                    bps,
+                    largest_difference: largest_difference.to_string(),
+                    largest_difference_token: token,
+                }
+            });
+        Finished { outcome, results: self.results, drift }
     }
 
     /// Records the outcome of a limit check on one direction of one component, with the limit and
@@ -459,6 +471,16 @@ pub struct Report {
 }
 
 impl Report {
+    /// Adds a finished test's results and drift. Returns `run`, the test's own result, if it
+    /// failed, and else the checks' outcome.
+    pub fn add_test(&mut self, finished: Finished, run: miette::Result<()>) -> miette::Result<()> {
+        self.results.extend(finished.results);
+        self.drift.extend(finished.drift);
+        run.and(finished.outcome)
+    }
+}
+
+impl Report {
     pub fn write(&self, path: &Path) -> miette::Result<()> {
         let json = serde_json::to_string_pretty(self).into_diagnostic()?;
         std::fs::write(path, json)
@@ -485,7 +507,7 @@ mod tests {
         assert!(checks
             .run(CheckId::StateComponents, failing)
             .is_err());
-        let (outcome, results) = checks.finish();
+        let Finished { outcome, results, .. } = checks.finish();
         assert!(outcome.is_err());
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].check, CheckId::StateComponents);
@@ -514,7 +536,7 @@ mod tests {
         );
         checks.not_run(CheckId::SimLadder, CheckId::Decode);
 
-        let (outcome, results) = checks.finish();
+        let Finished { outcome, results, .. } = checks.finish();
         let message = outcome.unwrap_err().to_string();
         assert!(message.contains("state.components") && message.contains("decode"), "{message}");
         assert!(!message.contains("balances"), "{message}");
@@ -534,7 +556,7 @@ mod tests {
     fn a_skipped_component_is_reported_by_its_lowercase_id() {
         let mut checks = Checks::new(Harness::Strict, "t");
         checks.skip_component(CheckId::ExecLadder, "0xAbC", "no fork state");
-        let (outcome, results) = checks.finish();
+        let Finished { outcome, results, .. } = checks.finish();
         assert!(outcome.is_ok());
         assert_eq!(
             results,
@@ -560,7 +582,7 @@ mod tests {
         checks.at_block(None);
         checks.warn(CheckId::StreamCoverage, &["3 blocks changed".to_string()]);
         checks.warn(CheckId::StreamMatchesSnapshot, &[]);
-        let (outcome, results) = checks.finish();
+        let Finished { outcome, results, .. } = checks.finish();
         assert!(outcome.is_ok());
         assert_eq!(results[0].block, Some(21_000_005));
         assert_eq!(results[1].block, None);
@@ -575,7 +597,7 @@ mod tests {
             .run(CheckId::StateComponents, || Ok(()))
             .unwrap();
         checks.skip(CheckId::Balances, "no address holds the pooled ether");
-        assert!(checks.finish().0.is_ok());
+        assert!(checks.finish().outcome.is_ok());
     }
 
     #[test]
@@ -660,7 +682,7 @@ mod tests {
             unfailed,
             failures,
         );
-        let (_, results) = checks.finish();
+        let results = checks.finish().results;
         results[0].outcome.clone()
     }
 
@@ -692,7 +714,7 @@ mod tests {
                 &failure,
             );
         }
-        let (outcome, results) = checks.finish();
+        let Finished { outcome, results, .. } = checks.finish();
         assert_eq!(outcome.unwrap_err().to_string(), "Failed checks: limits.past_limit");
         let directions: Vec<_> = results
             .iter()
@@ -710,7 +732,7 @@ mod tests {
         checks.record_component(CheckId::Balances, "0x01", &[]);
         checks.record_component(CheckId::Balances, "0x02", &["A: indexed 1".to_string()]);
 
-        let (outcome, results) = checks.finish();
+        let Finished { outcome, results, .. } = checks.finish();
         assert_eq!(outcome.unwrap_err().to_string(), "Failed checks: balances");
         assert_eq!(
             (results[0].component.as_deref(), results[0].direction.as_deref(), &results[0].outcome),
@@ -721,27 +743,37 @@ mod tests {
 
     #[test]
     fn the_largest_drift_of_a_test_is_kept_with_its_sign() {
-        let mut checks = Checks::new(Harness::Strict, "t");
-        assert!(checks.take_drift().is_none());
+        assert!(Checks::new(Harness::Strict, "t")
+            .finish()
+            .drift
+            .is_none());
 
         let amount = |n: u32| BigUint::from(n);
-        checks.observe_execution("a", "0x01", &amount(1000), &amount(1000));
-        checks.observe_execution("b", "0x01", &amount(1003), &amount(1000)); // overquote, 30 bps
-        checks.observe_execution("c", "0x02", &amount(999), &amount(1000)); // underquote, 10 bps
-                                                                            // No output: not noted.
-        checks.observe_execution("d", "0x02", &amount(1000), &amount(0));
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.observe_execution("a", "0x01", "USDC", &amount(1000), &amount(1000));
+        // An overquote of 30 bps.
+        checks.observe_execution("b", "0x01", "USDC", &amount(1003), &amount(1000));
+        // An underquote of 10 bps.
+        checks.observe_execution("c", "0x02", "WETH", &amount(999), &amount(1000));
+        // No output: not noted.
+        checks.observe_execution("d", "0x02", "WETH", &amount(1000), &amount(0));
         // Overquotes by 20 wei, more than "b" in wei but only 2 bps.
-        checks.observe_execution("e", "0x02", &amount(100_020), &amount(100_000));
+        checks.observe_execution("e", "0x02", "WETH", &amount(100_020), &amount(100_000));
 
-        let drift = checks.take_drift().unwrap();
+        let drift = checks.finish().drift.unwrap();
+        assert_eq!(drift.test, "t");
         assert_eq!(drift.simulation, "b");
         assert_eq!(drift.component, "0x01");
         assert_eq!((drift.simulated.as_str(), drift.executed.as_str()), ("1003", "1000"));
         assert!((drift.bps + 30.0).abs() < 1e-9, "{}", drift.bps);
-        assert_eq!(drift.largest_difference, "-20");
+        assert_eq!(
+            (drift.largest_difference.as_str(), drift.largest_difference_token.as_str()),
+            ("-20", "WETH")
+        );
 
-        checks.observe_execution("f", "0x01", &amount(1000), &amount(1001));
-        let drift = checks.take_drift().unwrap();
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.observe_execution("f", "0x01", "USDC", &amount(1000), &amount(1001));
+        let drift = checks.finish().drift.unwrap();
         assert!((drift.bps - 10_000.0 / 1001.0).abs() < 1e-9, "{}", drift.bps);
         assert_eq!(drift.largest_difference, "1");
     }
