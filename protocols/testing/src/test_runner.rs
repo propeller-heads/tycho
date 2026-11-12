@@ -62,8 +62,8 @@ use crate::{
     adapter_builder::AdapterContractBuilder,
     balances::{self, BalanceCheck},
     config::{
-        component_directions, Direction, Harness, IntegrationTest, IntegrationTestsConfig,
-        LimitKind, ProtocolComponentWithTestConfig, Skip, Tolerance,
+        component_directions, Direction, ExecutionTolerances, Harness, IntegrationTest,
+        IntegrationTestsConfig, LimitKind, ProtocolComponentWithTestConfig, Skip,
     },
     execution,
     report::{CheckId, Checks, Finished, Report},
@@ -256,7 +256,7 @@ fn strict_inputs(output: &LadderOutput) -> HashMap<String, TychoExecutionInput> 
 fn record_strict_executions(
     output: &LadderOutput,
     executed: Option<miette::Result<HashMap<String, TychoExecutionResult>>>,
-    tolerance: Tolerance,
+    tolerances: &ExecutionTolerances,
     execution_skip_reason: Option<&str>,
     checks: &mut Checks,
 ) -> miette::Result<()> {
@@ -282,7 +282,7 @@ fn record_strict_executions(
                 Some(reason) => checks.skip(CheckId::ExecLadder, reason),
                 None => {
                     checks.run(CheckId::ExecLadder, || {
-                        check_executions_match(&output.executions, &results, tolerance)
+                        check_executions_match(&output.executions, &results, tolerances)
                     })?;
                 }
             }
@@ -299,7 +299,7 @@ fn record_strict_executions(
             .as_ref()
             .map_err(String::as_str)
     });
-    for judged in ladder::judge_limits(output, executed, tolerance) {
+    for judged in ladder::judge_limits(output, executed, tolerances) {
         checks.record_direction(
             judged.check,
             &judged.component,
@@ -854,7 +854,13 @@ impl TestRunner {
                         }
                     }
                 };
-                record_strict_executions(&output, executed, config.tolerance(), None, &mut checks)?;
+                record_strict_executions(
+                    &output,
+                    executed,
+                    &config.tolerances(),
+                    None,
+                    &mut checks,
+                )?;
             }
         }
         let Finished { outcome, results, drift } = checks.finish();
@@ -1155,13 +1161,8 @@ impl TestRunner {
         if config.harness == Harness::Strict {
             // `from_yaml` rejected a package-level skip.
             for component in &test.expected_components {
-                let tolerance = component
-                    .tvl_only
-                    .as_ref()
-                    .map_or(Tolerance::EXACT, |tvl_only| tvl_only.tolerance());
                 let failures = self.check_component_balances(
                     component,
-                    tolerance,
                     &protocol_components,
                     &response_protocol_states_by_id,
                     &all_tokens,
@@ -1342,7 +1343,7 @@ impl TestRunner {
                 &output,
                 Some(Ok(&header)),
                 &config.protocol_system,
-                config.tolerance(),
+                &config.tolerances(),
                 execution_skip_reason,
                 checks,
             );
@@ -1361,7 +1362,7 @@ impl TestRunner {
         }
         checks.run(CheckId::ExecLadder, || {
             let (inputs, results) = executed?;
-            check_executions_match(&inputs, &results, config.tolerance())
+            check_executions_match(&inputs, &results, &config.tolerances())
         })?;
 
         Ok(())
@@ -1857,7 +1858,7 @@ impl TestRunner {
         let (inputs, results) = self
             .execute_inputs(execution_data, block, protocol_system)
             .await?;
-        check_executions_match(&inputs, &results, Tolerance::LEGACY)
+        check_executions_match(&inputs, &results, &ExecutionTolerances::legacy())
     }
 
     /// Simulates executing every input, returning the inputs and their results.
@@ -1915,7 +1916,7 @@ impl TestRunner {
         output: &LadderOutput,
         block: Option<miette::Result<&Block>>,
         protocol_system: &str,
-        tolerance: Tolerance,
+        tolerances: &ExecutionTolerances,
         execution_skip_reason: Option<&str>,
         checks: &mut Checks,
     ) -> miette::Result<()> {
@@ -1925,7 +1926,7 @@ impl TestRunner {
                 .block_on(self.simulate_executions(strict_inputs(output), block, protocol_system)),
             Err(e) => Err(e.wrap_err("the block to execute at could not be read")),
         });
-        record_strict_executions(output, executed, tolerance, execution_skip_reason, checks)
+        record_strict_executions(output, executed, tolerances, execution_skip_reason, checks)
     }
 
     /// Strict: indexes the test's range while streaming it. The indexer runs in the background,
@@ -2318,7 +2319,7 @@ impl TestRunner {
                         .map_err(|e| miette!("{e:#}"))
                 }),
                 &config.protocol_system,
-                config.tolerance(),
+                &config.tolerances(),
                 None,
                 checks,
             ) {
@@ -2371,11 +2372,11 @@ impl TestRunner {
     }
 
     /// Strict: checks an expected component's indexed balances against the source it declares,
-    /// at `block`, within `tolerance`. Returns every failure, empty when all its balances match.
+    /// at `block`, exactly or within its `tvl_only`. Returns every failure, empty when all its
+    /// balances match.
     fn check_component_balances(
         &self,
         expected: &ProtocolComponentWithTestConfig,
-        tolerance: Tolerance,
         indexed_components: &[ProtocolComponent],
         states: &HashMap<String, ProtocolComponentState>,
         all_tokens: &HashMap<Bytes, Token>,
@@ -2413,7 +2414,7 @@ impl TestRunner {
                 .balance_check
                 .as_ref()
                 .unwrap_or(&BalanceCheck::Default),
-            tolerance,
+            expected.tvl_only.as_ref(),
             &RpcChain { runner: self, block },
         )
     }
@@ -2664,6 +2665,7 @@ mod tests {
             skip_execution,
             limits: None,
             balance_check: None,
+            execution_tolerance: None,
             tvl_only: None,
         }
     }
@@ -2930,7 +2932,7 @@ tests:
             ("test_a".to_string(), success(999)),
             ("at_limit_b".to_string(), success(1000)),
         ]);
-        assert!(check_executions_match(&ladder, &results, Tolerance::EXACT).is_err());
+        assert!(check_executions_match(&ladder, &results, &ExecutionTolerances::exact()).is_err());
 
         let mut checks = Checks::new(Harness::Strict, "t");
         observe_executions(&mut checks, &ladder, &results);
@@ -3024,7 +3026,7 @@ tests:
                 &path,
             )
             .unwrap();
-            assert_eq!(package.tolerance(), config.tolerance(), "{path}");
+            assert_eq!(package.tolerances(), config.tolerances(), "{path}");
             for component in config
                 .tests
                 .iter()

@@ -199,7 +199,9 @@ pub fn probe_direction(
         not_run("zero_limit");
         return Vec::new();
     }
-    let tolerance = package.tolerance();
+    let tolerance = package
+        .tolerances()
+        .get(&component_id, &token_out.address);
     let probe = |role| Probe {
         protocol: component.protocol_system.clone(),
         component: component_id.clone(),

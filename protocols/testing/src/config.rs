@@ -9,10 +9,10 @@ use miette::{miette, IntoDiagnostic, WrapErr};
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
 use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
-use tycho_test::expectations::{check_declaration, execution_tolerance, tolerance_problems};
+use tycho_test::expectations::check_declaration;
 pub use tycho_test::expectations::{
-    DeclaredBy, Direction, ExecutionTolerance, Harness, LimitKind, Limits, LimitsDeclaration, Skip,
-    Tolerance, TvlOnly,
+    DeclaredBy, DeclaredTolerance, Direction, ExecutionTolerances, Harness, LimitKind, Limits,
+    LimitsDeclaration, Skip, Tolerance,
 };
 
 use crate::balances::BalanceCheck;
@@ -41,9 +41,12 @@ pub struct ProtocolComponentWithTestConfig {
     /// Where strict mode reads the component's balances on chain; `balanceOf(component id)`
     /// without it.
     pub balance_check: Option<BalanceCheck>,
+    /// Strict: how far the component's executions may differ from simulation, overriding the
+    /// package's [`IntegrationTestsConfig::execution_tolerance`].
+    pub execution_tolerance: Option<DeclaredTolerance>,
     /// Strict: the component's balances feed only TVL, so they are checked within a tolerance.
     /// The runner verifies that simulation ignores them.
-    pub tvl_only: Option<TvlOnly>,
+    pub tvl_only: Option<DeclaredTolerance>,
 }
 
 /// An `expected_components` entry as written in the yaml, with every key at one level.
@@ -66,7 +69,9 @@ struct ExpectedComponentEntry {
     #[serde(default)]
     balance_check: Option<BalanceCheck>,
     #[serde(default)]
-    tvl_only: Option<TvlOnly>,
+    execution_tolerance: Option<DeclaredTolerance>,
+    #[serde(default)]
+    tvl_only: Option<DeclaredTolerance>,
 }
 
 impl ProtocolComponentWithTestConfig {
@@ -90,6 +95,7 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
             skip_execution,
             limits,
             balance_check,
+            execution_tolerance,
             tvl_only,
         } = entry;
         Self {
@@ -98,6 +104,7 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
             skip_execution,
             limits,
             balance_check,
+            execution_tolerance,
             tvl_only,
         }
     }
@@ -226,10 +233,10 @@ pub struct IntegrationTestsConfig {
     /// a declaration for every direction of every expected component, here or on the component.
     #[serde(default)]
     pub limits: Option<LimitsDeclaration>,
-    /// How far executions may differ from simulation, in strict mode. Without it, strict mode
-    /// requires an exact match.
+    /// How far executions may differ from simulation, in strict mode, unless a component declares
+    /// its own. Without either, strict mode requires an exact match.
     #[serde(default)]
-    pub execution_tolerance: Option<ExecutionTolerance>,
+    pub execution_tolerance: Option<DeclaredTolerance>,
     pub protocol_type_names: Vec<String>,
     pub protocol_system: String,
     pub module_name: Option<String>,
@@ -245,9 +252,10 @@ impl IntegrationTestsConfig {
     /// `skip_balance_check` of any value, and on a test with no expected components. In legacy mode
     /// unknown keys are a warning, and the package keeps running as before. In both modes a
     /// `limits` declaration must have the fields its kind requires, and in strict mode every
-    /// direction of every expected component needs one. In both modes a `tvl_only` must have the
-    /// fields a tolerance needs and be the same in every test that lists its component; in strict
-    /// mode a component with `tvl_only` must not skip simulation.
+    /// direction of every expected component needs one. In both modes a declared tolerance
+    /// (`execution_tolerance`, `tvl_only`) must declare `bps` or `wei` and a reason, and a
+    /// component's must be the same in every test that lists it; in strict mode a component with
+    /// `tvl_only` must not skip simulation.
     pub fn from_yaml(reader: impl Read, source: &str) -> miette::Result<Self> {
         let mut unknown_keys = Vec::new();
         let config: Self =
@@ -289,87 +297,91 @@ impl IntegrationTestsConfig {
         tycho_test::expectations::package_chain(&config.substreams_yaml_path)
             .map_err(|e| miette!("{source}: {e}"))?;
         config.check_limits(source)?;
-        config.check_tolerance(source)?;
-        config.check_tvl_only(source)?;
+        config.check_tolerances(source)?;
         Ok(config)
     }
 
-    /// The tolerance executions are checked with: in strict mode, the declared one, or exact
-    /// without a declaration; in legacy mode, [`Tolerance::LEGACY`] whatever is declared.
-    pub fn tolerance(&self) -> Tolerance {
-        execution_tolerance(self.harness, self.execution_tolerance.as_ref())
+    /// The tolerances executions are checked with: in strict mode, a component's declaration,
+    /// else the package's, else exact; in legacy mode, [`Tolerance::LEGACY`] whatever is declared.
+    pub fn tolerances(&self) -> ExecutionTolerances {
+        ExecutionTolerances::new(
+            self.harness,
+            self.execution_tolerance.as_ref(),
+            self.tests
+                .iter()
+                .flat_map(|test| &test.expected_components)
+                .filter_map(|component| {
+                    component
+                        .execution_tolerance
+                        .as_ref()
+                        .map(|declared| (component.base.id.as_str(), declared))
+                }),
+        )
     }
 
-    /// A declared tolerance has a nonzero `bps` below 100%, a nonzero `wei`, or both, and states
-    /// its cause and measurement, in both modes.
-    fn check_tolerance(&self, source: &str) -> miette::Result<()> {
-        let Some(tolerance) = &self.execution_tolerance else {
-            return Ok(());
-        };
-        let problems =
-            tolerance_problems(tolerance.bps, tolerance.wei, &tolerance.cause, &tolerance.measured);
-        if problems.is_empty() {
-            return Ok(());
-        }
-        Err(miette!("{source} has an invalid `execution_tolerance`: {}", problems.join("; ")))
-    }
-
-    /// A component's `tvl_only` has the fields a tolerance needs, in both modes, and is the same
-    /// in every test that lists the component, since it describes the component's simulation,
-    /// whatever the block. In strict mode the component must also be simulated, since the runner
-    /// verifies the declaration by quoting.
-    fn check_tvl_only(&self, source: &str) -> miette::Result<()> {
+    /// Every declared tolerance declares `bps` or `wei` and a reason, in both modes. A component's
+    /// `execution_tolerance` and `tvl_only` describe its simulation whatever the block, so each is
+    /// the same in every test that lists the component. In strict mode a component with
+    /// `tvl_only` must also be simulated, since the runner verifies the declaration by quoting.
+    fn check_tolerances(&self, source: &str) -> miette::Result<()> {
         let mut invalid = Vec::new();
-        let mut first_declared: HashMap<String, (&Option<TvlOnly>, &str)> = HashMap::new();
+        if let Some(declared) = &self.execution_tolerance {
+            let problems = declared.problems();
+            if !problems.is_empty() {
+                invalid.push(format!("`execution_tolerance`: {}", problems.join("; ")));
+            }
+        }
+        type FirstDeclared<'a> =
+            HashMap<(String, &'static str), (&'a Option<DeclaredTolerance>, &'a str)>;
+        let mut first_declared: FirstDeclared<'_> = HashMap::new();
         for test in &self.tests {
             for component in &test.expected_components {
                 let id = &component.base.id;
-                match first_declared.entry(id.to_lowercase()) {
-                    Entry::Vacant(entry) => {
-                        entry.insert((&component.tvl_only, &test.name));
-                    }
-                    Entry::Occupied(entry) => {
-                        let (declared, first_test) = entry.get();
-                        if **declared != component.tvl_only {
-                            invalid.push(format!(
-                                "{id} declares a different `tvl_only` in test {} than in test \
-                                 {first_test}",
-                                test.name
-                            ));
+                for (key, declared) in [
+                    ("execution_tolerance", &component.execution_tolerance),
+                    ("tvl_only", &component.tvl_only),
+                ] {
+                    match first_declared.entry((id.to_lowercase(), key)) {
+                        Entry::Vacant(entry) => {
+                            entry.insert((declared, &test.name));
+                        }
+                        Entry::Occupied(entry) => {
+                            let (first, first_test) = entry.get();
+                            if *first != declared {
+                                invalid.push(format!(
+                                    "{id} declares a different `{key}` in test {} than in test \
+                                     {first_test}",
+                                    test.name
+                                ));
+                            }
                         }
                     }
-                }
-                let Some(tvl_only) = &component.tvl_only else {
-                    continue;
-                };
-                let mut problems = tolerance_problems(
-                    tvl_only.bps,
-                    tvl_only.wei,
-                    &tvl_only.cause,
-                    &tvl_only.measured,
-                );
-                if let (Harness::Strict, Some(reason)) =
-                    (self.harness, component.skip_simulation.reason())
-                {
-                    problems.push(format!(
-                        "the runner verifies `tvl_only` by quoting the component, but it sets \
-                         `skip_simulation` ({reason})"
-                    ));
-                }
-                if !problems.is_empty() {
-                    invalid.push(format!(
-                        "{} in test {}: {}",
-                        component.base.id,
-                        test.name,
-                        problems.join("; ")
-                    ));
+                    let Some(declared) = declared else {
+                        continue;
+                    };
+                    let mut problems = declared.problems();
+                    if let ("tvl_only", Harness::Strict, Some(reason)) =
+                        (key, self.harness, component.skip_simulation.reason())
+                    {
+                        problems.push(format!(
+                            "the runner verifies `tvl_only` by quoting the component, but it sets \
+                             `skip_simulation` ({reason})"
+                        ));
+                    }
+                    if !problems.is_empty() {
+                        invalid.push(format!(
+                            "{id}'s `{key}` in test {}: {}",
+                            test.name,
+                            problems.join("; ")
+                        ));
+                    }
                 }
             }
         }
         if invalid.is_empty() {
             return Ok(());
         }
-        Err(miette!("{source} has an invalid `tvl_only`: {}", invalid.join(". ")))
+        Err(miette!("{source} has invalid tolerances: {}", invalid.join(". ")))
     }
 
     /// The limit declared for `direction` of `component`, from the most specific declaration:
@@ -628,9 +640,9 @@ tests:
             yaml(STRICT_WITH_LIMITS, ""),
             yaml(
                 "harness: strict\nlimits: {kind: soft, reason: \"r\"}\nexecution_tolerance: {bps: \
-                 3, cause: \"c\", measured: \"m\"}",
+                 3, reason: \"r\"}",
                 "        limits: {\"0x01->0x02\": {kind: hard}}\n        tvl_only: {bps: 5, \
-                 cause: \"c\", measured: \"m\"}",
+                 reason: \"r\"}\n        execution_tolerance: {wei: 2, reason: \"r\"}",
             ),
         ];
         for fixture in fixtures {
@@ -640,7 +652,7 @@ tests:
                 "test.yaml",
             )
             .unwrap();
-            assert_eq!(package.tolerance(), config.tolerance(), "{fixture}");
+            assert_eq!(package.tolerances(), config.tolerances(), "{fixture}");
             let component = &config.tests[0].expected_components[0];
             for direction in component_directions(component) {
                 assert_eq!(
@@ -1115,83 +1127,90 @@ tests:
     }
 
     const TOLERANCE: &str =
-        "execution_tolerance: {bps: 3, cause: \"vault rounding\", measured: \"2.1 bps over 100 blocks\"}";
+        "execution_tolerance: {bps: 3, reason: \"vault rounding; 2.1 bps over 100 blocks\"}";
+
+    /// The tolerance `config` checks an execution of the fixture's component with.
+    fn tolerance_of(config: &IntegrationTestsConfig) -> Tolerance {
+        config
+            .tolerances()
+            .get("0xabc", &Bytes::from("0x02"))
+    }
 
     #[test]
     fn strict_mode_is_exact_unless_a_tolerance_is_declared() {
-        assert_eq!(
-            parse(&yaml(STRICT_WITH_LIMITS, ""))
-                .unwrap()
-                .tolerance(),
-            Tolerance::EXACT
-        );
+        assert_eq!(tolerance_of(&parse(&yaml(STRICT_WITH_LIMITS, "")).unwrap()), Tolerance::EXACT);
         let declared = parse(&yaml(&format!("{STRICT_WITH_LIMITS}\n{TOLERANCE}"), "")).unwrap();
-        assert_eq!(declared.tolerance(), Tolerance { bps: 3, wei: 0 });
+        assert_eq!(tolerance_of(&declared), Tolerance { centi_bps: 300, wei: 0 });
         for (declaration, expected) in [
-            ("{wei: 2, cause: \"c\", measured: \"m\"}", Tolerance { bps: 0, wei: 2 }),
-            ("{bps: 1, wei: 2, cause: \"c\", measured: \"m\"}", Tolerance { bps: 1, wei: 2 }),
+            ("{wei: 2, reason: r}", Tolerance { centi_bps: 0, wei: 2 }),
+            ("{bps: 0.25, wei: 2, reason: r}", Tolerance { centi_bps: 25, wei: 2 }),
         ] {
             let config = parse(&yaml(
                 &format!("{STRICT_WITH_LIMITS}\nexecution_tolerance: {declaration}"),
                 "",
             ))
             .unwrap();
-            assert_eq!(config.tolerance(), expected, "{declaration}");
+            assert_eq!(tolerance_of(&config), expected, "{declaration}");
         }
+    }
+
+    #[test]
+    fn a_component_tolerance_overrides_the_package_one() {
+        let config = parse(&yaml(
+            &format!("{STRICT_WITH_LIMITS}\n{TOLERANCE}"),
+            "        execution_tolerance: {wei: 2, reason: \"stETH rounding\"}",
+        ))
+        .unwrap();
+        assert_eq!(tolerance_of(&config), Tolerance { centi_bps: 0, wei: 2 });
+        assert_eq!(
+            config
+                .tolerances()
+                .get("0xdef", &Bytes::from("0x02")),
+            Tolerance { centi_bps: 300, wei: 0 }
+        );
     }
 
     #[test]
     fn legacy_mode_keeps_half_a_percent_whatever_is_declared() {
-        assert_eq!(
-            parse(&yaml("", ""))
-                .unwrap()
-                .tolerance(),
-            Tolerance::LEGACY
-        );
-        assert_eq!(
-            parse(&yaml(TOLERANCE, ""))
-                .unwrap()
-                .tolerance(),
-            Tolerance::LEGACY
-        );
+        assert_eq!(tolerance_of(&parse(&yaml("", "")).unwrap()), Tolerance::LEGACY);
+        let declared =
+            parse(&yaml(TOLERANCE, "        execution_tolerance: {wei: 2, reason: r}")).unwrap();
+        assert_eq!(tolerance_of(&declared), Tolerance::LEGACY);
     }
 
     #[test]
-    fn a_tolerance_needs_a_cause_a_measurement_and_a_sensible_size() {
+    fn a_tolerance_needs_a_reason_and_a_sensible_size() {
         for (declaration, problem) in [
-            ("{bps: 0, cause: \"c\", measured: \"m\"}", "`bps: 0` allows nothing"),
-            ("{wei: 0, cause: \"c\", measured: \"m\"}", "`wei: 0` allows nothing"),
-            ("{bps: 2, wei: 0, cause: \"c\", measured: \"m\"}", "`wei: 0` allows nothing"),
-            ("{cause: \"c\", measured: \"m\"}", "neither `bps` nor `wei`"),
-            ("{bps: 10000, cause: \"c\", measured: \"m\"}", "`bps` must be 1 to 9999"),
-            ("{bps: 10000, wei: 0, cause: \"c\", measured: \"m\"}", "`bps` must be 1 to 9999"),
-            ("{bps: 3, cause: \" \", measured: \"m\"}", "`cause` is empty"),
-            ("{bps: 3, cause: \"c\", measured: \"\"}", "`measured` is empty"),
+            ("{bps: 0, reason: r}", "from 0.01 to 9999.99"),
+            ("{bps: 0.001, reason: r}", "from 0.01 to 9999.99"),
+            ("{bps: 10000, reason: r}", "from 0.01 to 9999.99"),
+            ("{wei: 0, reason: r}", "nonzero"),
+            ("{bps: 2, wei: 0, reason: r}", "nonzero"),
+            ("{reason: r}", "neither `bps` nor `wei`"),
+            ("{bps: 3, reason: \" \"}", "the reason is empty"),
+            ("{bps: 3}", "missing field `reason`"),
+            ("{bps: 3, reason: r, cause: c}", "unknown field `cause`"),
         ] {
             for harness in ["", STRICT_WITH_LIMITS] {
-                let err =
-                    parse(&yaml(&format!("{harness}\nexecution_tolerance: {declaration}"), ""))
+                for (package, component) in [
+                    (format!("{harness}\nexecution_tolerance: {declaration}"), String::new()),
+                    (harness.to_string(), format!("        execution_tolerance: {declaration}")),
+                    (harness.to_string(), format!("        tvl_only: {declaration}")),
+                ] {
+                    let err = parse(&yaml(&package, &component))
                         .unwrap_err()
-                        .to_string();
-                assert!(err.contains(problem), "{declaration}: {err}");
+                        .chain()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(": ");
+                    assert!(err.contains(problem), "{package} {component}: {err}");
+                }
             }
-        }
-        for (declaration, expected) in [
-            ("{bps: 3, cause: \"c\"}", "missing field `measured`"),
-            ("{bps: 3, cause: \"c\", measured: \"m\", why: \"x\"}", "unknown field `why`"),
-        ] {
-            let err = parse(&yaml(&format!("execution_tolerance: {declaration}"), ""))
-                .unwrap_err()
-                .chain()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(": ");
-            assert!(err.contains(expected), "{declaration}: {err}");
         }
     }
 
     const TVL_ONLY: &str =
-        "        tvl_only: {bps: 10, cause: \"fee bucket\", measured: \"6 bps over 40 components\"}";
+        "        tvl_only: {bps: 10, reason: \"fee bucket; 6 bps over 40 components\"}";
 
     #[test]
     fn tvl_only_parses_in_both_modes_into_a_tolerance() {
@@ -1201,7 +1220,10 @@ tests:
                 .tvl_only
                 .as_ref()
                 .unwrap();
-            assert_eq!(tvl_only.tolerance(), Tolerance { bps: 10, wei: 0 });
+            assert_eq!(
+                tvl_only.tolerance(&Bytes::from("0x01")),
+                Tolerance { centi_bps: 1000, wei: 0 }
+            );
         }
         let config = parse(&yaml("", "")).unwrap();
         assert!(config.tests[0].expected_components[0]
@@ -1210,48 +1232,28 @@ tests:
     }
 
     #[test]
-    fn tvl_only_needs_a_cause_a_measurement_and_a_sensible_size() {
-        for (declaration, problem) in [
-            ("{cause: \"c\", measured: \"m\"}", "neither `bps` nor `wei`"),
-            ("{bps: 0, cause: \"c\", measured: \"m\"}", "`bps: 0` allows nothing"),
-            ("{bps: 10000, cause: \"c\", measured: \"m\"}", "`bps` must be 1 to 9999"),
-            ("{wei: 5, cause: \"\", measured: \"m\"}", "`cause` is empty"),
-            ("{bps: 5, cause: \"c\"}", "missing field `measured`"),
-            ("{bps: 5, cause: \"c\", measured: \"m\", reason: \"r\"}", "unknown field `reason`"),
-        ] {
+    fn a_component_declares_one_tolerance_of_each_kind_in_every_test() {
+        for key in ["tvl_only", "execution_tolerance"] {
+            let declared = format!("        {key}: {{bps: 10, reason: \"fee bucket\"}}");
             for harness in ["", STRICT_WITH_LIMITS] {
-                let err = parse(&yaml(harness, &format!("        tvl_only: {declaration}")))
-                    .unwrap_err()
-                    .chain()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(": ");
-                assert!(err.contains(problem), "{declaration}: {err}");
+                let config = yaml(harness, &declared);
+                let tests = &config[config.find("tests:").unwrap() + "tests:\n".len()..];
+                let differs = format!(
+                    "{config}{}",
+                    tests
+                        .replace("test_foo", "test_bar")
+                        .replace("bps: 10", "bps: 20")
+                );
+                let err = parse(&differs).unwrap_err().to_string();
+                assert!(
+                    err.contains(&format!(
+                        "declares a different `{key}` in test test_bar than in test test_foo"
+                    )),
+                    "{err}"
+                );
+                let same = format!("{config}{}", tests.replace("test_foo", "test_bar"));
+                assert!(parse(&same).is_ok(), "{same}");
             }
-        }
-    }
-
-    #[test]
-    fn a_component_declares_one_tvl_only_in_every_test() {
-        let tvl_only = "        tvl_only: {bps: 10, cause: \"fee bucket\", measured: \"6 bps\"}";
-        for harness in ["", STRICT_WITH_LIMITS] {
-            let config = yaml(harness, tvl_only);
-            let tests = &config[config.find("tests:").unwrap() + "tests:\n".len()..];
-            let differs = format!(
-                "{config}{}",
-                tests
-                    .replace("test_foo", "test_bar")
-                    .replace("bps: 10", "bps: 20")
-            );
-            let err = parse(&differs).unwrap_err().to_string();
-            assert!(
-                err.contains(
-                    "declares a different `tvl_only` in test test_bar than in test test_foo"
-                ),
-                "{err}"
-            );
-            let same = format!("{config}{}", tests.replace("test_foo", "test_bar"));
-            assert!(parse(&same).is_ok(), "{same}");
         }
     }
 
@@ -1261,7 +1263,7 @@ tests:
         let err = parse(&yaml(STRICT_WITH_LIMITS, &skipped))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("0xAbC in test test_foo"), "{err}");
+        assert!(err.contains("0xAbC's `tvl_only` in test test_foo"), "{err}");
         assert!(err.contains("sets `skip_simulation` (no adapter)"), "{err}");
         let skipped = format!("{TVL_ONLY}\n        skip_simulation: true");
         assert!(parse(&yaml("", &skipped)).is_ok());

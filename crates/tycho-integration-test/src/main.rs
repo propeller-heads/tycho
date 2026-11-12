@@ -466,12 +466,17 @@ async fn run(cli: Cli) -> miette::Result<()> {
     // probes on top of the realistic swap.
     let strict = Arc::new(StrictChecks::new(StrictPackages::load(chain)?));
     for protocol in strict.protocols() {
-        let tolerance = strict
+        let tolerances = strict
             .package(protocol)
             .expect("listed by protocols()")
-            .tolerance();
-        info!(protocol, %tolerance, "Strict package: probing its limits");
-        metrics::record_strict_protocol(protocol, tolerance.bps);
+            .tolerances();
+        // The package's own `bps`, which applies to its components that declare none.
+        let bps = tolerances
+            .package()
+            .and_then(|declared| declared.bps)
+            .map_or(0.0, |bps| f64::from(bps.centi()) / 100.0);
+        info!(protocol, bps, "Strict package: probing its limits");
+        metrics::record_strict_protocol(protocol, bps);
     }
 
     // Load tokens from Tycho

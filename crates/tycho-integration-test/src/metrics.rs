@@ -107,7 +107,7 @@ pub fn initialize_metrics() {
     describe_gauge!(
         "tycho_integration_strict_tolerance_bps",
         "The execution tolerance a strict protocol's package declares, in bps; 0 when it declares \
-         none or only a wei tolerance"
+         none or only a wei tolerance. A component's own declaration overrides it"
     );
     describe_histogram!(
         "tycho_integration_probe_drift_bps",
@@ -225,8 +225,9 @@ pub fn record_check(protocol: &str, check: &str, outcome: &str, reason: &str, si
 }
 
 /// Mark `protocol` as strict, so dashboards can list the protocols that get limit probes, and
-/// record the bps tolerance its probes are judged with.
-pub fn record_strict_protocol(protocol: &str, tolerance_bps: u32) {
+/// record the bps tolerance its package declares, which judges the probes of every component
+/// that declares none.
+pub fn record_strict_protocol(protocol: &str, tolerance_bps: f64) {
     gauge!(
         "tycho_integration_strict_protocol",
         "protocol" => protocol.to_string(),
@@ -236,7 +237,7 @@ pub fn record_strict_protocol(protocol: &str, tolerance_bps: u32) {
         "tycho_integration_strict_tolerance_bps",
         "protocol" => protocol.to_string(),
     )
-    .set(f64::from(tolerance_bps));
+    .set(tolerance_bps);
 }
 
 /// Record the drift of a probe that executed, in bps of the executed amount.

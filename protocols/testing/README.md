@@ -199,13 +199,13 @@ balances, being slightly off only moves TVL, and the component can declare a tol
   - id: "0x..."
     tvl_only:
       bps: 10        # of the on-chain amount; or `wei`, or both
-      cause: "the indexed reserves exclude the protocol fee bucket the contract also holds"
-      measured: "6.2 bps at most over 40 components, blocks 21000000-21000100 (range --report)"
+      reason: "the indexed reserves exclude the protocol fee bucket the contract also holds; 6.2 bps at most over 40 components, blocks 21000000-21000100 (range --report)"
 ```
 
-- The tolerance takes the same fields as `execution_tolerance`, checked the same way in both modes.
-  It applies to every source but `unindexed`, `default` and unlisted tokens included. An
-  `unindexed` token must still have no balance.
+- The tolerance takes the same fields as `execution_tolerance` (below), checked the same way in
+  both modes, with `wei` in base units of each token. A component listed in several tests
+  declares the same `tvl_only` in each. It applies to every source but `unindexed`, `default` and
+  unlisted tokens included. An `unindexed` token must still have no balance.
 - **The runner verifies the declaration** (`balances.tvl_only`). It decodes the snapshot again
   with the component's balances scaled down, each token's by a different factor (1/2, 1/3, ...,
   in token address order) so their ratios change too, and every limit, spot price and quote at
@@ -303,36 +303,40 @@ of basis points of the executed amount, a number of base units of the token out,
 mode allows 0.5% for every package. Strict mode, in `range` and in `full`, requires an exact match:
 a simulation that ports the venue's math, or runs its bytecode, should not differ by
 a wei, and 0.5% hides rounding and fee bugs. Where exact is out of reach, the package declares a
-tolerance, with why and what a run measured:
+tolerance, with a reason that says why and what a run measured:
 
 ```yaml
 harness: strict
 execution_tolerance:
-  bps: 3
-  cause: "the vault rounds shares down on deposit; the simulation rounds once at the end"
-  measured: "2.1 bps at most, blocks 21000000-21000100 (range --report)"
+  bps: 0.02
+  reason: "the vault prices from a share price rounded to 6 significant digits; 0.011 bps at most, blocks 21000000-21000100 (range --report)"
 ```
 
-`bps` is relative to the executed amount. Where the loss is a fixed amount whatever the trade's
-size, such as stETH's 1-2 wei per transfer, declare `wei` instead, in base units of the token out;
-a bps loose enough for a small trade allows ether on a large one:
+`bps` is relative to the executed amount, with up to two decimals, from 0.01 to 9999.99. Where
+the loss is a fixed amount whatever the trade's size, such as stETH's 1-2 wei per transfer,
+declare `wei` instead, in base units of the token out; a bps loose enough for a small trade allows
+ether on a large one. `wei` is one amount for every token, or an amount per token address with an
+optional `default`, since one raw amount means different things for tokens of different decimals:
 
 ```yaml
 execution_tolerance:
-  wei: 2
-  cause: "stETH transfers move shares, rounding the amount down by up to 2 wei"
-  measured: "1 wei at most, blocks 25603204-25603404 (range --report)"
+  wei: {default: 2, "0xA0b86991c6218b36c1d19d4a2e9eB0cE3606eB48": 1}
+  reason: "stETH transfers move shares, rounding the amount down by up to 2 wei; 1 wei at most, blocks 25603204-25603404 (range --report)"
 ```
 
-For a known artifact, declare its documented bound, and give the run in `measured` as support: a
+For a known artifact, declare its documented bound, and give the run in the reason as support: a
 short range can show less than the bound, as this one shows 1 wei, and a tolerance cut to the run
 fails at random.
 
-With both declared, a difference within either passes. A mismatch says whether the simulation
-over- or underquotes, since those are different defects. At least one of `bps` (1 to 9999) and
-`wei` (1 or more) is required, as are `cause` and `measured`, in both modes; legacy mode keeps
-0.5% whatever is declared. The report's `drift` gives the largest difference of each test, within
-tolerance or not, so `measured` can be checked against a run.
+A component can declare its own `execution_tolerance`, which overrides the package's for its
+executions, so a pool with a known artifact does not loosen every other pool of the package. A
+component listed in several tests declares the same one in each.
+
+With both `bps` and `wei` declared, a difference within either passes. A mismatch says whether the
+simulation over- or underquotes, since those are different defects. At least one of `bps` and
+`wei` is required, and a reason, in both modes; legacy mode keeps 0.5% whatever is declared. The
+report's `drift` gives the largest difference of each test, within tolerance or not, so the
+number a reason gives can be checked against a run.
 
 ### Streamed range
 

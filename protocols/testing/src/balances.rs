@@ -34,7 +34,7 @@ use num_traits::Zero;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use tycho_simulation::tycho_common::Bytes;
 
-use crate::config::Tolerance;
+use crate::config::{DeclaredTolerance, Tolerance};
 
 /// Where a token balance is read on chain: `balanceOf(holder)`, or the native balance for the
 /// zero address.
@@ -742,8 +742,8 @@ pub struct Component<'a> {
     pub state_attributes: &'a HashMap<String, Bytes>,
 }
 
-/// Checks a component's indexed balance of every token against the declared source, within
-/// `tolerance`: exact, unless the component is declared `tvl_only`. Returns every mismatch, or the
+/// Checks a component's indexed balance of every token against the declared source: exactly,
+/// or within the component's `tvl_only` tolerance for that token. Returns every mismatch, or the
 /// reason a balance could not be read. A token declared unindexed must have no balance, whatever
 /// the tolerance.
 ///
@@ -751,13 +751,9 @@ pub struct Component<'a> {
 pub fn check_component(
     component: &Component<'_>,
     check: &BalanceCheck,
-    tolerance: Tolerance,
+    tvl_only: Option<&DeclaredTolerance>,
     chain: &impl Chain,
 ) -> Vec<String> {
-    let outside = match tolerance {
-        Tolerance::EXACT => String::new(),
-        tolerance => format!(", outside the `tvl_only` tolerance of {tolerance}"),
-    };
     let mut failures = Vec::new();
     if let BalanceCheck::Tokens(sources) = check {
         // Sorted, so the failure lists the tokens in the same order on every run.
@@ -775,6 +771,11 @@ pub fn check_component(
         }
     }
     for (token, symbol) in component.tokens {
+        let tolerance = tvl_only.map_or(Tolerance::EXACT, |declared| declared.tolerance(token));
+        let outside = match tolerance {
+            Tolerance::EXACT => String::new(),
+            tolerance => format!(", outside the `tvl_only` tolerance of {tolerance}"),
+        };
         let indexed = component
             .balances
             .get(token)
@@ -851,12 +852,10 @@ pub fn check_component(
     failures
 }
 
-/// Whether `indexed` is within `tolerance` of `on_chain`: up to `bps` basis points of the
-/// on-chain amount, or up to `wei` base units.
+/// Whether `indexed` is within `tolerance` of `on_chain`, the reference amount.
 fn within(indexed: &BigUint, on_chain: &BigUint, tolerance: Tolerance) -> bool {
     let difference = if indexed > on_chain { indexed - on_chain } else { on_chain - indexed };
-    difference <= BigUint::from(tolerance.wei) ||
-        &difference * 10_000u32 <= on_chain * tolerance.bps
+    tolerance.allows(&difference, on_chain)
 }
 
 /// The address a holder names, for this component.
@@ -1005,13 +1004,13 @@ mod tests {
         }
 
         fn check(&self, check: &BalanceCheck, chain: &Scripted) -> Vec<String> {
-            self.check_within(check, Tolerance::EXACT, chain)
+            self.check_within(check, None, chain)
         }
 
         fn check_within(
             &self,
             check: &BalanceCheck,
-            tolerance: Tolerance,
+            tvl_only: Option<&DeclaredTolerance>,
             chain: &Scripted,
         ) -> Vec<String> {
             let component = Component {
@@ -1021,7 +1020,7 @@ mod tests {
                 static_attributes: &self.static_attributes,
                 state_attributes: &self.state_attributes,
             };
-            check_component(&component, check, tolerance, chain)
+            check_component(&component, check, tvl_only, chain)
         }
     }
 
@@ -1503,28 +1502,43 @@ mod tests {
         assert!(failures[0].contains("do not decode"), "{failures:?}");
     }
 
+    fn tvl_only(declared: &str) -> DeclaredTolerance {
+        serde_yaml::from_str(declared).unwrap()
+    }
+
     #[test]
     fn a_tvl_only_tolerance_allows_its_bps_or_wei_of_the_on_chain_amount() {
         // Indexed 100 A and 200 B, against 101 A and 199 B on chain: 99 and 50 bps off.
         let fixture = Fixture::new();
         let on_chain = chain(&[(TOKEN_A, POOL, 101), (TOKEN_B, POOL, 199)]);
-        let check = |tolerance| fixture.check_within(&BalanceCheck::Default, tolerance, &on_chain);
-        assert!(check(Tolerance { bps: 100, wei: 0 }).is_empty());
-        assert!(check(Tolerance { bps: 0, wei: 1 }).is_empty());
-        let failures = check(Tolerance { bps: 60, wei: 0 });
+        let check = |declared: &str| {
+            fixture.check_within(&BalanceCheck::Default, Some(&tvl_only(declared)), &on_chain)
+        };
+        assert!(check("{bps: 100, reason: r}").is_empty());
+        assert!(check("{wei: 1, reason: r}").is_empty());
+        let failures = check("{bps: 60, reason: r}");
         assert_eq!(
             failures,
             vec!["A: indexed 100, but self holds 101 on chain, outside the `tvl_only` tolerance \
                   of 60 bps"
                 .to_string()]
         );
-        assert_eq!(check(Tolerance::EXACT).len(), 2);
+        assert_eq!(
+            fixture
+                .check_within(&BalanceCheck::Default, None, &on_chain)
+                .len(),
+            2
+        );
+        // `wei` per token: 1 for A, nothing for B.
+        let failures = check(&format!("{{wei: {{\"{TOKEN_A}\": 1}}, reason: r}}"));
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].starts_with("B: "), "{failures:?}");
 
         // The bps are of the on-chain amount: 1 off 199 is 50.3 bps, 1 off 200 would be 50.
         let at_the_base = chain(&[(TOKEN_A, POOL, 100), (TOKEN_B, POOL, 199)]);
         let failures = fixture.check_within(
             &BalanceCheck::Default,
-            Tolerance { bps: 50, wei: 0 },
+            Some(&tvl_only("{bps: 50, reason: r}")),
             &at_the_base,
         );
         assert_eq!(failures.len(), 1, "{failures:?}");
@@ -1547,7 +1561,8 @@ mod tests {
             Bytes::from(alloy::primitives::keccak256("reserve()")[..4].to_vec()),
             &BigUint::from(101u32),
         );
-        let failures = fixture.check_within(&check, Tolerance { bps: 100, wei: 0 }, &on_chain);
+        let failures =
+            fixture.check_within(&check, Some(&tvl_only("{bps: 100, reason: r}")), &on_chain);
         assert_eq!(failures, vec!["B: declared unindexed, but the indexer reports 3".to_string()]);
     }
 

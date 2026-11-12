@@ -31,7 +31,7 @@ use crate::{
         encoding::{encode_swap, EXECUTOR_ADDRESS},
         models::{TychoExecutionInput, TychoExecutionResult},
     },
-    expectations::{DeclaredBy, Direction, Limits, Tolerance},
+    expectations::{DeclaredBy, Direction, ExecutionTolerances, Limits},
 };
 
 /// The limit each direction of each expected component declares, keyed by lowercase component id
@@ -689,7 +689,7 @@ pub struct LimitJudgement {
 pub fn judge_limits(
     output: &LadderOutput,
     executed: Option<Result<&HashMap<String, TychoExecutionResult>, &str>>,
-    tolerance: Tolerance,
+    tolerances: &ExecutionTolerances,
 ) -> Vec<LimitJudgement> {
     let execution_failure = |id: Option<&String>, judge: &Judge<'_>| {
         let executed = executed?;
@@ -720,7 +720,7 @@ pub fn judge_limits(
         let mut at_limit_failures = direction_limits.failures_of(CheckId::LimitsAtLimit);
         at_limit_failures.extend(execution_failure(
             direction_limits.at_limit_execution(),
-            &|id, input, results| execution_mismatch(id, input, results, tolerance),
+            &|id, input, results| execution_mismatch(id, input, results, tolerances),
         ));
         let at_limit_unfailed = match (executed, direction_limits.at_limit_execution()) {
             (None, Some(_)) => not_executed_here(),
@@ -929,7 +929,7 @@ mod tests {
     fn a_limit_that_executes_at_and_reverts_past_passes_both() {
         let results =
             HashMap::from([("at".to_string(), success(50)), ("past".to_string(), revert())]);
-        let judged = judge_limits(&output(), Some(Ok(&results)), Tolerance::EXACT);
+        let judged = judge_limits(&output(), Some(Ok(&results)), &ExecutionTolerances::exact());
         assert_eq!(
             failures(&judged),
             vec![
@@ -945,7 +945,7 @@ mod tests {
     fn a_settled_swap_past_a_hard_limit_and_a_mismatch_at_it_fail() {
         let results =
             HashMap::from([("at".to_string(), success(49)), ("past".to_string(), success(50))]);
-        let judged = judge_limits(&output(), Some(Ok(&results)), Tolerance::EXACT);
+        let judged = judge_limits(&output(), Some(Ok(&results)), &ExecutionTolerances::exact());
         assert_eq!(
             failures(&judged)[..2],
             [(CheckId::LimitsAtLimit, 1), (CheckId::LimitsPastLimit, 1)]
@@ -954,7 +954,8 @@ mod tests {
 
     #[test]
     fn a_failed_batch_fails_every_execution_a_check_needs() {
-        let judged = judge_limits(&output(), Some(Err("the node is down")), Tolerance::EXACT);
+        let judged =
+            judge_limits(&output(), Some(Err("the node is down")), &ExecutionTolerances::exact());
         assert_eq!(judged[0].failures, vec!["the node is down".to_string()]);
         assert_eq!(judged[1].failures, vec!["the node is down".to_string()]);
         // The max output needs no execution, and keeps only its simulation failure.
@@ -963,7 +964,7 @@ mod tests {
 
     #[test]
     fn at_a_block_that_only_simulates_queued_swaps_are_skipped() {
-        let simulated_only = judge_limits(&output(), None, Tolerance::EXACT);
+        let simulated_only = judge_limits(&output(), None, &ExecutionTolerances::exact());
         let not_executed =
             Outcome::Skipped { reason: "the swap is not executed at this block".to_string() };
         assert_eq!(
@@ -986,7 +987,7 @@ mod tests {
     #[test]
     fn a_revert_past_the_limit_proves_nothing_when_the_limit_reverts_too() {
         let results = HashMap::from([("at".to_string(), revert()), ("past".to_string(), revert())]);
-        let judged = judge_limits(&output(), Some(Ok(&results)), Tolerance::EXACT);
+        let judged = judge_limits(&output(), Some(Ok(&results)), &ExecutionTolerances::exact());
         assert_eq!(judged[0].failures.len(), 1);
         assert!(judged[1].failures.is_empty(), "{:?}", judged[1].failures);
         assert_eq!(
@@ -999,7 +1000,7 @@ mod tests {
     fn a_judgement_names_the_component_and_direction() {
         let results =
             HashMap::from([("at".to_string(), success(50)), ("past".to_string(), revert())]);
-        let judged = judge_limits(&output(), Some(Ok(&results)), Tolerance::EXACT);
+        let judged = judge_limits(&output(), Some(Ok(&results)), &ExecutionTolerances::exact());
         assert!(judged
             .iter()
             .all(|j| j.component == "0xaa" && j.direction == "0x01->0x02"));
@@ -1026,7 +1027,7 @@ mod tests {
                 why: Unchecked::NotQuoted,
             },
         ];
-        let judged = judge_limits(&output, None, Tolerance::EXACT);
+        let judged = judge_limits(&output, None, &ExecutionTolerances::exact());
         assert_eq!(judged.len(), 6);
         assert!(judged[..3]
             .iter()
@@ -1048,13 +1049,13 @@ mod tests {
         soft.limit_directions[0].limits = Limits::Soft { reason: "constant product".to_string() };
         soft.limit_directions[0].at_limit = AtLimit::Queued { id: "at".to_string(), past: None };
         assert_eq!(
-            judge_limits(&soft, Some(Ok(&results)), Tolerance::EXACT)[1].unfailed,
+            judge_limits(&soft, Some(Ok(&results)), &ExecutionTolerances::exact())[1].unfailed,
             Outcome::Pass
         );
         let mut capped = output();
         capped.limit_directions[0].capped = true;
         assert!(matches!(
-            &judge_limits(&capped, Some(Ok(&results)), Tolerance::EXACT)[1].unfailed,
+            &judge_limits(&capped, Some(Ok(&results)), &ExecutionTolerances::exact())[1].unfailed,
             Outcome::Skipped { reason } if reason.contains("int128::MAX")
         ));
     }
@@ -1066,12 +1067,12 @@ mod tests {
             Limits::UnderCap { reason: "keeper-set rate; gives up 2%".to_string() };
         let executed =
             HashMap::from([("at".to_string(), success(50)), ("past".to_string(), success(50))]);
-        assert!(judge_limits(&under_cap, Some(Ok(&executed)), Tolerance::EXACT)[1]
+        assert!(judge_limits(&under_cap, Some(Ok(&executed)), &ExecutionTolerances::exact())[1]
             .failures
             .is_empty());
         let reverted =
             HashMap::from([("at".to_string(), success(50)), ("past".to_string(), revert())]);
-        let judged = judge_limits(&under_cap, Some(Ok(&reverted)), Tolerance::EXACT);
+        let judged = judge_limits(&under_cap, Some(Ok(&reverted)), &ExecutionTolerances::exact());
         assert!(judged[1].failures[0].contains("declare it hard"), "{:?}", judged[1].failures);
     }
 
@@ -1079,7 +1080,7 @@ mod tests {
     fn a_judgement_reports_the_limit_and_its_declaration() {
         let results =
             HashMap::from([("at".to_string(), success(50)), ("past".to_string(), revert())]);
-        let judged = judge_limits(&output(), Some(Ok(&results)), Tolerance::EXACT);
+        let judged = judge_limits(&output(), Some(Ok(&results)), &ExecutionTolerances::exact());
         assert!(judged.iter().all(|j| j.limit ==
             LimitReport {
                 kind: "hard".to_string(),
@@ -1209,8 +1210,11 @@ mod tests {
     fn limit_checks_pass_only_once_executed() {
         let results =
             HashMap::from([("at".to_string(), success(50)), ("past".to_string(), revert())]);
-        let judged =
-            judge_limits(&with_queued_swaps(true, None), Some(Ok(&results)), Tolerance::EXACT);
+        let judged = judge_limits(
+            &with_queued_swaps(true, None),
+            Some(Ok(&results)),
+            &ExecutionTolerances::exact(),
+        );
         assert_eq!(
             unfailed(&judged),
             vec![
@@ -1224,7 +1228,8 @@ mod tests {
     #[test]
     fn limit_checks_of_a_component_that_skips_execution_are_skipped() {
         let output = with_queued_swaps(true, Some("no fork state"));
-        let judged = judge_limits(&output, Some(Ok(&HashMap::new())), Tolerance::EXACT);
+        let judged =
+            judge_limits(&output, Some(Ok(&HashMap::new())), &ExecutionTolerances::exact());
         let skipped = |reason: &str| Outcome::Skipped { reason: reason.to_string() };
         assert_eq!(
             unfailed(&judged),
@@ -1245,7 +1250,8 @@ mod tests {
 
     #[test]
     fn checks_that_need_the_quote_at_the_limit_are_not_run_without_it() {
-        let judged = judge_limits(&with_queued_swaps(false, None), None, Tolerance::EXACT);
+        let judged =
+            judge_limits(&with_queued_swaps(false, None), None, &ExecutionTolerances::exact());
         let not_run = Outcome::NotRun { reason: "limits.at_limit failed".to_string() };
         assert_eq!(judged[1].unfailed, not_run);
         assert_eq!(judged[2].unfailed, not_run);

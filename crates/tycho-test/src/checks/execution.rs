@@ -11,7 +11,7 @@ use tracing::{error, info};
 
 use crate::{
     execution::models::{TychoExecutionInput, TychoExecutionResult},
-    expectations::Tolerance,
+    expectations::{ExecutionTolerances, Tolerance},
 };
 
 /// `executed - simulated`, and that difference in basis points of `executed`. `None` for a zero
@@ -41,7 +41,7 @@ pub fn check_execution_slippage(
         return Err("execution returned no output".to_string());
     };
     let gap = difference.magnitude();
-    if gap <= &BigUint::from(tolerance.wei) || gap * 10_000u32 <= amount_out * tolerance.bps {
+    if tolerance.allows(gap, amount_out) {
         return Ok(());
     }
 
@@ -62,12 +62,13 @@ pub fn check_execution_slippage(
     ))
 }
 
-/// Why the execution of `simulation_id` does not match its simulation, if it does not.
+/// Why the execution of `simulation_id` does not match its simulation within its component's
+/// tolerance for its token out, if it does not.
 pub fn execution_mismatch(
     simulation_id: &str,
     input: &TychoExecutionInput,
     results: &HashMap<String, TychoExecutionResult>,
-    tolerance: Tolerance,
+    tolerances: &ExecutionTolerances,
 ) -> Option<String> {
     let component = &input.component_id;
     let mismatch = match results.get(simulation_id) {
@@ -83,6 +84,7 @@ pub fn execution_mismatch(
                 input.token_in,
                 input.token_out
             );
+            let tolerance = tolerances.get(component, input.solution.token_out());
             check_execution_slippage(&input.expected_amount_out, amount_out, tolerance)
                 .err()
                 .map(|reason| {
@@ -113,13 +115,13 @@ pub fn execution_mismatch(
 pub fn check_executions_match(
     inputs: &HashMap<String, TychoExecutionInput>,
     results: &HashMap<String, TychoExecutionResult>,
-    tolerance: Tolerance,
+    tolerances: &ExecutionTolerances,
 ) -> miette::Result<()> {
     let failure_count = inputs
         .iter()
         .sorted_by(|a, b| a.0.cmp(b.0))
         .filter_map(|(simulation_id, input)| {
-            execution_mismatch(simulation_id, input, results, tolerance)
+            execution_mismatch(simulation_id, input, results, tolerances)
         })
         .count();
     let success_count = inputs.len() - failure_count;
@@ -348,7 +350,7 @@ mod tests {
             check_execution_slippage(
                 &BigUint::from(simulated),
                 &executed,
-                Tolerance { bps: 3, wei: 0 },
+                Tolerance { centi_bps: 300, wei: 0 },
             )
         };
         assert!(check(10_003).is_ok());
@@ -363,7 +365,7 @@ mod tests {
         // without allowing ether.
         let executed = BigUint::from(150_000u32) * BigUint::from(10u32).pow(18);
         let simulated = &executed + 1u32;
-        let one_wei = Tolerance { bps: 0, wei: 1 };
+        let one_wei = Tolerance { centi_bps: 0, wei: 1 };
         assert!(check_execution_slippage(&simulated, &executed, one_wei).is_ok());
         assert!(check_execution_slippage(&(&executed - 1u32), &executed, one_wei).is_ok());
         let reason = check_execution_slippage(&(&executed + 2u32), &executed, one_wei)
@@ -371,7 +373,7 @@ mod tests {
         assert!(reason.contains("tolerance (1 wei)"), "{reason}");
 
         // With both declared, a difference within either passes.
-        let both = Tolerance { bps: 1, wei: 5 };
+        let both = Tolerance { centi_bps: 100, wei: 5 };
         let small = BigUint::from(10_000u32);
         assert!(check_execution_slippage(&(&small + 5u32), &small, both).is_ok());
         let large = BigUint::from(1_000_000u32);
@@ -386,7 +388,7 @@ mod tests {
         let reason = check_execution_slippage(
             &BigUint::from(1_000_300_001u32),
             &executed,
-            Tolerance { bps: 3, wei: 0 },
+            Tolerance { centi_bps: 300, wei: 0 },
         )
         .unwrap_err();
         assert!(
@@ -423,7 +425,7 @@ mod tests {
 
     #[test]
     fn zero_output_execution_does_not_match() {
-        for tolerance in [Tolerance::EXACT, Tolerance { bps: 0, wei: 5 }, Tolerance::LEGACY] {
+        for tolerance in [Tolerance::EXACT, Tolerance { centi_bps: 0, wei: 5 }, Tolerance::LEGACY] {
             let reason =
                 check_execution_slippage(&BigUint::from(1000u32), &BigUint::zero(), tolerance)
                     .expect_err("a zero output must never match");

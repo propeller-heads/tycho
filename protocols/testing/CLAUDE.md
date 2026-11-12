@@ -35,8 +35,11 @@ Strict mode checks every expected component's balances against its declared `bal
 (README, "Balances"), exactly unless the component declares `tvl_only`, which the runner verifies
 (`balances.tvl_only`), and rejects `skip_balance_check`.
 Strict mode also tests each direction's declared limit (README, "Limits").
-Strict mode also requires executions to match simulation exactly unless the package declares
-`execution_tolerance: {bps and/or wei, cause, measured}`; legacy mode allows 0.5%.
+Strict mode also requires executions to match simulation exactly unless the package, or a
+component, declares `execution_tolerance: {bps and/or wei, reason}` (README, "Execution
+tolerance"); legacy mode allows 0.5%. A tolerance is the documented bound of a known artifact,
+named in the reason with the run that measured it; never widen one to make a check pass, and
+declare it on the component that needs it rather than the package.
 Strict `full` runs the ladder, the limit checks and the tolerance on every update, for every pool
 (unlisted pools get the package's `limits`), and stops on the first failed check (README, "Full
 mode").
