@@ -10,7 +10,7 @@ use tycho_common::{
 
 use crate::postgres::{
     instance::{
-        active::{active_instance_ids, active_instance_of},
+        active::{active_instance, active_instance_ids},
         gateway::PostgresGatewayNew,
         orm as iorm,
         schema::tycho::{
@@ -94,6 +94,9 @@ impl PostgresGatewayNew {
             ));
         };
         self.get_protocol_system_id(&system)?;
+        let Some(instance) = active_instance(conn, &system).await? else {
+            return Ok(WithTotal { entity: HashMap::new(), total: Some(0) });
+        };
 
         let filtered = || {
             let mut query = component_tvl::table
@@ -102,11 +105,7 @@ impl PostgresGatewayNew {
                         .eq(component_tvl::instance_id)
                         .and(protocol_component::id.eq(component_tvl::protocol_component_id))),
                 )
-                .filter(
-                    component_tvl::instance_id
-                        .nullable()
-                        .eq(active_instance_of(&system)),
-                )
+                .filter(component_tvl::instance_id.eq(instance))
                 .into_boxed::<Pg>();
             if let Some(ids) = component_ids {
                 query = query.filter(protocol_component::external_id.eq_any(ids));
@@ -255,6 +254,9 @@ async fn load_components_of(
     pagination_params: Option<&PaginationParams>,
     conn: &mut AsyncPgConnection,
 ) -> Result<(Vec<(iorm::ProtocolComponent, String)>, i64), StorageError> {
+    let Some(instance) = active_instance(conn, system).await? else {
+        return Ok((Vec::new(), 0));
+    };
     let filtered = || {
         let mut query = protocol_component::table
             .left_join(
@@ -262,11 +264,7 @@ async fn load_components_of(
                     .eq(protocol_component::instance_id)
                     .and(component_tvl::protocol_component_id.eq(protocol_component::id))),
             )
-            .filter(
-                protocol_component::instance_id
-                    .nullable()
-                    .eq(active_instance_of(system)),
-            )
+            .filter(protocol_component::instance_id.eq(instance))
             .into_boxed::<Pg>();
         if let Some(ids) = ids {
             query = query.filter(protocol_component::external_id.eq_any(ids));
@@ -892,6 +890,23 @@ mod tests {
 
         assert_eq!(found, HashMap::from([("a".to_string(), 1.0)]));
         assert_eq!(total, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_tvls_of_protocol_without_active_instance_are_empty() {
+        let mut conn = setup_db().await;
+        let s = setup(&mut conn).await;
+        let id =
+            db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        db_fixtures::insert_instance_tvl(&mut conn, s.curve, id, 1.0).await;
+        db_fixtures::set_active_instance(&mut conn, s.curve_system_id, None).await;
+
+        let (found, total) = tvls(&s.gateway, &mut conn, Some("vm:curve"), None)
+            .await
+            .expect("reading the TVLs failed");
+
+        assert!(found.is_empty());
+        assert_eq!(total, Some(0));
     }
 
     #[tokio::test]

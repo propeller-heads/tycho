@@ -1,13 +1,14 @@
 //! # Active-instance filters
 //!
-//! SQL subselects on `public.protocol_system.active_instance_id`, the pointer to the instance
-//! readers see. Filter an instance table's `instance_id` with them:
+//! Readers see the instance that `public.protocol_system.active_instance_id` points to.
 //!
-//! - one protocol: `instance_id.nullable().eq(active_instance_of(name))`
-//! - all protocols: `instance_id.eq_any(active_instance_ids())`
+//! - one protocol: look up the instance once per read with [`active_instance`] and filter
+//!   `instance_id.eq(id)`. Postgres prunes a subselect only during execution, so with one it would
+//!   plan and lock every leaf of each table.
+//! - all protocols: `instance_id.eq_any(active_instance_ids())`.
 //!
-//! Postgres reads the pointer on every query. A protocol with no active instance yields no rows,
-//! and so does an unknown protocol name: check the name first where it must exist.
+//! A protocol with no active instance yields no rows, and so does an unknown protocol name:
+//! check the name first where it must exist.
 
 use diesel::prelude::*;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
@@ -31,18 +32,6 @@ pub async fn active_instance(
         .optional()
         .map_err(PostgresError::from)?;
     Ok(id.flatten())
-}
-
-/// The active instance of the protocol system `name`, as a scalar subselect.
-///
-/// NULL if the protocol system has no active instance, or if no protocol system has that name.
-/// Loads as `Option<InstanceId>`.
-#[diesel::dsl::auto_type]
-pub fn active_instance_of<'a>(name: &'a str) -> _ {
-    protocol_system::table
-        .filter(protocol_system::name.eq(name))
-        .select(protocol_system::active_instance_id.assume_not_null())
-        .single_value()
 }
 
 /// The active instance of every protocol system that has one, as a subselect.
@@ -82,13 +71,6 @@ mod tests {
         db_fixtures::insert_protocol_system(conn, "vm:curve".to_string()).await
     }
 
-    async fn active_of(conn: &mut AsyncPgConnection, protocol_system: &str) -> Option<InstanceId> {
-        diesel::select(active_instance_of(protocol_system))
-            .get_result(conn)
-            .await
-            .expect("selecting the active instance failed")
-    }
-
     struct Setup {
         curve_system_id: i64,
         uniswap_v4_system_id: i64,
@@ -112,32 +94,6 @@ mod tests {
         db_fixtures::set_active_instance(conn, curve_system_id, Some(curve)).await;
         db_fixtures::set_active_instance(conn, uniswap_v4_system_id, Some(uniswap_v4)).await;
         Setup { curve_system_id, uniswap_v4_system_id, curve, uniswap_v4 }
-    }
-
-    #[tokio::test]
-    async fn test_active_instance_of_returns_the_pointer() {
-        let mut conn = setup_db().await;
-        let protocol_system_id = insert_curve(&mut conn).await;
-        let id = db_fixtures::insert_instance(&mut conn, protocol_system_id, "0.0.1").await;
-        db_fixtures::set_active_instance(&mut conn, protocol_system_id, Some(id)).await;
-
-        assert_eq!(active_of(&mut conn, "vm:curve").await, Some(id));
-    }
-
-    #[tokio::test]
-    async fn test_active_instance_of_is_null_without_pointer() {
-        let mut conn = setup_db().await;
-        let protocol_system_id = insert_curve(&mut conn).await;
-        db_fixtures::insert_instance(&mut conn, protocol_system_id, "0.0.1").await;
-
-        assert_eq!(active_of(&mut conn, "vm:curve").await, None);
-    }
-
-    #[tokio::test]
-    async fn test_active_instance_of_is_null_for_unknown_protocol() {
-        let mut conn = setup_db().await;
-
-        assert_eq!(active_of(&mut conn, "not-a-protocol").await, None);
     }
 
     #[tokio::test]
@@ -209,18 +165,6 @@ mod tests {
             .await
             .expect("counting the active instances failed");
         assert_eq!(active, 2);
-
-        let curve: i64 = protocol_instance::table
-            .filter(
-                protocol_instance::id
-                    .nullable()
-                    .eq(active_instance_of("vm:curve")),
-            )
-            .count()
-            .get_result(&mut conn)
-            .await
-            .expect("counting the active vm:curve instance failed");
-        assert_eq!(curve, 1);
 
         db_fixtures::set_active_instance(&mut conn, setup.curve_system_id, None).await;
         db_fixtures::set_active_instance(&mut conn, setup.uniswap_v4_system_id, None).await;
