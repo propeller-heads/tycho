@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap, HashSet},
     fmt,
     io::Read,
     str::FromStr,
@@ -652,7 +652,9 @@ impl IntegrationTestsConfig {
     /// `skip_balance_check` of any value, and on a test with no expected components. In legacy mode
     /// unknown keys are a warning, and the package keeps running as before. In both modes a
     /// `limits` declaration must have the fields its kind requires, and in strict mode every
-    /// direction of every expected component needs one.
+    /// direction of every expected component needs one. In both modes a `tvl_only` must have the
+    /// fields a tolerance needs and be the same in every test that lists its component; in strict
+    /// mode a component with `tvl_only` must not skip simulation.
     pub fn from_yaml(reader: impl Read, source: &str) -> miette::Result<Self> {
         let mut unknown_keys = Vec::new();
         let config: Self =
@@ -721,13 +723,31 @@ impl IntegrationTestsConfig {
         Err(miette!("{source} has an invalid `execution_tolerance`: {}", problems.join("; ")))
     }
 
-    /// A component's `tvl_only` has the fields a tolerance needs, in both modes. In strict mode
-    /// the component must also be simulated, since the runner verifies the declaration by
-    /// quoting.
+    /// A component's `tvl_only` has the fields a tolerance needs, in both modes, and is the same
+    /// in every test that lists the component, since it describes the component's simulation,
+    /// whatever the block. In strict mode the component must also be simulated, since the runner
+    /// verifies the declaration by quoting.
     fn check_tvl_only(&self, source: &str) -> miette::Result<()> {
         let mut invalid = Vec::new();
+        let mut first_declared: HashMap<String, (&Option<TvlOnly>, &str)> = HashMap::new();
         for test in &self.tests {
             for component in &test.expected_components {
+                let id = &component.base.id;
+                match first_declared.entry(id.to_lowercase()) {
+                    Entry::Vacant(entry) => {
+                        entry.insert((&component.tvl_only, &test.name));
+                    }
+                    Entry::Occupied(entry) => {
+                        let (declared, first_test) = entry.get();
+                        if **declared != component.tvl_only {
+                            invalid.push(format!(
+                                "{id} declares a different `tvl_only` in test {} than in test \
+                                 {first_test}",
+                                test.name
+                            ));
+                        }
+                    }
+                }
                 let Some(tvl_only) = &component.tvl_only else {
                     continue;
                 };
@@ -1592,6 +1612,30 @@ tests:
                     .join(": ");
                 assert!(err.contains(problem), "{declaration}: {err}");
             }
+        }
+    }
+
+    #[test]
+    fn a_component_declares_one_tvl_only_in_every_test() {
+        let tvl_only = "        tvl_only: {bps: 10, cause: \"fee bucket\", measured: \"6 bps\"}";
+        for harness in ["", STRICT_WITH_LIMITS] {
+            let config = yaml(harness, tvl_only);
+            let tests = &config[config.find("tests:").unwrap() + "tests:\n".len()..];
+            let differs = format!(
+                "{config}{}",
+                tests
+                    .replace("test_foo", "test_bar")
+                    .replace("bps: 10", "bps: 20")
+            );
+            let err = parse(&differs).unwrap_err().to_string();
+            assert!(
+                err.contains(
+                    "declares a different `tvl_only` in test test_bar than in test test_foo"
+                ),
+                "{err}"
+            );
+            let same = format!("{config}{}", tests.replace("test_foo", "test_bar"));
+            assert!(parse(&same).is_ok(), "{same}");
         }
     }
 

@@ -54,12 +54,17 @@ impl Quoter for dyn ProtocolSim {
     }
 }
 
-/// Scales down every indexed balance of the components `ids` in `snapshot`, keeping each value's
-/// byte length: in token address order, the first token's balance to 1/2, the second's to 1/3,
-/// and so on, so a simulation that prices from the ratio of the balances quotes differently too.
-/// Returns how many balances changed, per declared id: only a zero balance stays the same, and a
-/// component with nothing to scale verifies nothing.
+/// Keeps only the components `ids` in `snapshot`, matched case-insensitively, and scales down
+/// every indexed balance of theirs, keeping each value's byte length: in token address order, the
+/// first token's balance to 1/2, the second's to 1/3, and so on, so a simulation that prices from
+/// the ratio of the balances quotes differently too. Returns how many balances changed, per
+/// declared id found in the snapshot: only a zero balance stays the same, and a component with
+/// nothing to scale verifies nothing.
 pub fn scale_balances(snapshot: &mut Snapshot, ids: &[String]) -> HashMap<String, usize> {
+    snapshot.states.retain(|id, _| {
+        ids.iter()
+            .any(|declared| declared.eq_ignore_ascii_case(id))
+    });
     let mut changed = HashMap::new();
     for (id, component) in &mut snapshot.states {
         let Some(declared) = ids
@@ -82,15 +87,7 @@ pub fn scale_balances(snapshot: &mut Snapshot, ids: &[String]) -> HashMap<String
             if scaled == value {
                 continue;
             }
-            let scaled = scaled.to_bytes_be();
-            let mut bytes = vec![
-                0u8;
-                balance
-                    .len()
-                    .saturating_sub(scaled.len())
-            ];
-            bytes.extend(scaled);
-            *balance = Bytes::from(bytes);
+            *balance = Bytes::from(scaled.to_bytes_be()).lpad(balance.len(), 0);
             *count += 1;
         }
     }
@@ -108,13 +105,16 @@ pub fn check(
     changed: &HashMap<String, usize>,
     sizing: impl Fn(&BigUint) -> BigUint,
 ) -> Vec<String> {
-    if changed
-        .get(id)
-        .is_none_or(|count| *count == 0)
-    {
-        return vec!["the component has no nonzero indexed balance, so scaling its balances \
-                     verifies nothing; it needs no `tvl_only`"
-            .to_string()];
+    match changed.get(id) {
+        None => {
+            return vec!["the component is not in the snapshot, so it was not scaled".to_string()]
+        }
+        Some(0) => {
+            return vec!["the component has no nonzero indexed balance, so scaling its balances \
+                         verifies nothing; it needs no `tvl_only`"
+                .to_string()]
+        }
+        Some(_) => {}
     }
     fn find<'a>(update: &'a Update, id: &str) -> Option<(&'a String, &'a dyn ProtocolSim)> {
         update
@@ -494,7 +494,13 @@ mod tests {
     fn check_fails_when_it_cannot_compare() {
         let decoded = update(POOL, Some(1_000_000));
         let changed = HashMap::from([(POOL.to_string(), 2)]);
-        let nothing_scaled = check(POOL, &decoded, &decoded, &HashMap::new(), BigUint::clone);
+        let not_in_snapshot = check(POOL, &decoded, &decoded, &HashMap::new(), BigUint::clone);
+        assert_eq!(
+            not_in_snapshot,
+            vec!["the component is not in the snapshot, so it was not scaled".to_string()]
+        );
+        let zero = HashMap::from([(POOL.to_string(), 0)]);
+        let nothing_scaled = check(POOL, &decoded, &decoded, &zero, BigUint::clone);
         assert!(nothing_scaled[0].contains("no nonzero indexed balance"), "{nothing_scaled:?}");
         let undecoded = check(POOL, &decoded, &update(POOL, None), &changed, BigUint::clone);
         assert_eq!(
@@ -544,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn scaling_touches_only_the_declared_components_and_keeps_the_byte_length() {
+    fn scaling_keeps_only_the_declared_components_and_keeps_the_byte_length() {
         let mut snapshot = snapshot(&[
             ("0xaa", &[(1, vec![0, 0, 0x03, 0xe8]), (2, vec![0x09])]),
             ("0xbb", &[(1, vec![0x64])]),
@@ -555,9 +561,6 @@ mod tests {
         // The first token by address to 1/2, the second to 1/3.
         assert_eq!(balances[&Bytes::from(vec![1])], Bytes::from(vec![0, 0, 0x01, 0xf4]));
         assert_eq!(balances[&Bytes::from(vec![2])], Bytes::from(vec![0x03]));
-        assert_eq!(
-            snapshot.states["0xbb"].state.balances[&Bytes::from(vec![1])],
-            Bytes::from(vec![0x64])
-        );
+        assert!(!snapshot.states.contains_key("0xbb"));
     }
 }

@@ -1201,11 +1201,6 @@ impl TestRunner {
         // below must come last for the ladders to run on it.
         let scaled = (!tvl_only_ids.is_empty()).then(|| {
             let mut scaled = snapshot.clone();
-            scaled.states.retain(|id, _| {
-                tvl_only_ids
-                    .iter()
-                    .any(|declared| declared.eq_ignore_ascii_case(id))
-            });
             let changed = tvl_only::scale_balances(&mut scaled, &tvl_only_ids);
             let decoded = adapter_contract_path().and_then(|path| {
                 self.decode_snapshot(
