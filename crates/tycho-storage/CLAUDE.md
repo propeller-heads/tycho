@@ -81,6 +81,9 @@ during a decode.
 4. `InsertEntryPoints` → `InsertEntryPointTracingParams` → `UpsertTracedEntryPoints`
 5. `SaveExtractionState`
 
+`UpsertBlock` skips a block whose hash is already stored, but fails the batch when the stored
+block has another timestamp: versions refer to their block by timestamp.
+
 ## Temporal Model
 
 Every mutable entity carries `valid_from` / `valid_to` timestamps enabling time-travel
