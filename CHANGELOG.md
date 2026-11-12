@@ -1,3 +1,37 @@
+## [0.516.0](https://github.com/propeller-heads/tycho/compare/0.515.0...0.516.0) (2026-11-12)
+
+
+### Features
+
+* **execution:** add the BaiBai executor and encoder on Base ([48d3507](https://github.com/propeller-heads/tycho/commit/48d3507245341fb3ee1e97c5a9ce4dab2cd046d6))
+* **execution:** drop the positive slippage on/off switch ([4eacc33](https://github.com/propeller-heads/tycho/commit/4eacc335d59aff249e5aba1cb3d1a2b887a0e302))
+* **execution:** set the positive slippage share per client ([9aff2c8](https://github.com/propeller-heads/tycho/commit/9aff2c80f54620346bacca1a80edd766e996ff3d))
+* **execution:** take a configurable part of positive slippage ([#1547](https://github.com/propeller-heads/tycho/issues/1547)) ([fc91a54](https://github.com/propeller-heads/tycho/commit/fc91a54bec8b1b8d2533b71cab0384407aebe624))
+* **execution:** take a configurable share of positive slippage ([f1b8cc3](https://github.com/propeller-heads/tycho/commit/f1b8cc3255c08efd408e6fd3cf16ac3f6701b6bc))
+* integrate BaiBai on Base as a pAMM book feed ([#1705](https://github.com/propeller-heads/tycho/issues/1705)) ([4a71168](https://github.com/propeller-heads/tycho/commit/4a71168aa555d6de83d5bd6ed21cbc2f1e639004))
+* **integration-test:** run the BaiBai feed on Base ([67821e2](https://github.com/propeller-heads/tycho/commit/67821e286f6d9748a8dd390ca7bcf9452fa22c3a))
+* **integration-test:** select BaiBai with --pamm baibai ([fa84390](https://github.com/propeller-heads/tycho/commit/fa84390832e415815581a02a3bdeda4308cc0e75))
+* **router-trades:** index positive slippage shares ([505550a](https://github.com/propeller-heads/tycho/commit/505550a33702836c6bcf1215dfdc23124e460dcb))
+* **simulation:** add the BaiBai pAMM book feed on Base ([72b20a6](https://github.com/propeller-heads/tycho/commit/72b20a64b7fe51ea5a30077bf9d9daa0f6faeaac))
+* **simulation:** let the BaiBai feed price for a configurable taker ([b632391](https://github.com/propeller-heads/tycho/commit/b632391a7533c7fad17d96b2e26c5b30b7ae2c7d))
+* **simulation:** pin BaiBai's proxy implementations ([4888427](https://github.com/propeller-heads/tycho/commit/48884272e2a494cc71715ca16d784af9073f9db9))
+
+
+### Bug Fixes
+
+* **simulation:** count cbBTC's transfer gas in BaiBai swaps ([32e05f4](https://github.com/propeller-heads/tycho/commit/32e05f4b2af46c573ab045c377f71ab20c754222))
+* **simulation:** drop BaiBai's router fee to zero after the whitelist ([5fa2ede](https://github.com/propeller-heads/tycho/commit/5fa2edeb1610de2605b1f965876c7c1dae36659c))
+* **simulation:** end the BaiBai feed when a pair getter reverts ([5aaaa87](https://github.com/propeller-heads/tycho/commit/5aaaa87cdddc66ee6166e3d3b0193ff86f356453))
+* **simulation:** import Chain only where BaiBai's feed tests use it ([5fc1f89](https://github.com/propeller-heads/tycho/commit/5fc1f8927c472ebf21d3b140194a53fa952f2e61))
+* **simulation:** read BaiBai's router fee live and harden its feed ([8d6665a](https://github.com/propeller-heads/tycho/commit/8d6665a3f3bf8fe997eb95e3ba4fadfb9e3d7f97))
+* **simulation:** treat a whole-output BaiBai fee the same everywhere ([5f59e3e](https://github.com/propeller-heads/tycho/commit/5f59e3e01fcf7725bdd20513a9ceb0aa65d36659))
+
+
+### Performance Improvements
+
+* **execution:** keep the router's slippage bps in the router fee slot ([32e60cd](https://github.com/propeller-heads/tycho/commit/32e60cd8b04bb028d5bd09cd4cc8a8fbf992e830))
+* **simulation:** read BaiBai's pairs and knots in one multicall ([be9cff5](https://github.com/propeller-heads/tycho/commit/be9cff5a0632e5f791a6322f715f64a6555ba39e))
+
 ## [0.515.0](https://github.com/propeller-heads/tycho/compare/0.514.0...0.515.0) (2026-11-12)
 
 
