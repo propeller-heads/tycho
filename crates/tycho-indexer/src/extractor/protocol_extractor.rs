@@ -5526,6 +5526,7 @@ mod test_serial_db {
                     .unwrap(),
                     parent_hash: Bytes::default(),
                     ts: db_fixtures::yesterday_half_past_midnight(),
+                    ..Default::default()
                 }])
                 .await
                 .expect("block insertion succeeded");

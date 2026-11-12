@@ -252,6 +252,7 @@ fn snapshot_to_block_changes(
         hash: header.hash.clone(),
         parent_hash: header.parent_hash.clone(),
         ts,
+        timestamp_ms: None,
     };
 
     let mut new_protocol_components: HashMap<String, ProtocolComponent> = HashMap::new();
@@ -363,6 +364,7 @@ mod tests {
             ts: chrono::DateTime::from_timestamp(timestamp, 0)
                 .unwrap()
                 .naive_utc(),
+            ..Default::default()
         }
     }
 

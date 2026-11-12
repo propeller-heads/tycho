@@ -2327,6 +2327,7 @@ mod test {
                     parent_hash: Bytes::from("0x00"),
                     chain: Chain::Ethereum,
                     ts: Default::default(),
+                    ..Default::default()
                 },
                 revert: false,
                 dci_update: DCIUpdate {
@@ -2375,6 +2376,7 @@ mod test {
                     parent_hash: Bytes::from("0x01"),
                     chain: Chain::Ethereum,
                     ts: Default::default(),
+                    ..Default::default()
                 },
                 revert: false,
                 component_tvl: [
@@ -2397,6 +2399,7 @@ mod test {
                     parent_hash: Bytes::from("0x02"),
                     chain: Chain::Ethereum,
                     ts: Default::default(),
+                    ..Default::default()
                 },
                 revert: false,
                 ..Default::default()
@@ -2514,6 +2517,7 @@ mod test {
                     parent_hash: Bytes::from("0x01"),
                     chain: Chain::Ethereum,
                     ts: Default::default(),
+                    ..Default::default()
                 },
                 revert: false,
                 component_tvl: [
@@ -2738,6 +2742,7 @@ mod test {
                     parent_hash: Bytes::from("0x00"),
                     chain: Chain::Ethereum,
                     ts: Default::default(),
+                    ..Default::default()
                 },
                 revert: false,
                 ..Default::default()
@@ -2751,6 +2756,7 @@ mod test {
                     parent_hash: Bytes::from("0x01"),
                     chain: Chain::Ethereum,
                     ts: Default::default(),
+                    ..Default::default()
                 },
                 revert: false,
                 component_tvl: [
@@ -2772,6 +2778,7 @@ mod test {
                     parent_hash: Bytes::from("0x02"),
                     chain: Chain::Ethereum,
                     ts: Default::default(),
+                    ..Default::default()
                 },
                 revert: false,
                 ..Default::default()
@@ -2846,6 +2853,7 @@ mod test {
                     parent_hash: Bytes::from("0x01"),
                     chain: Chain::Ethereum,
                     ts: Default::default(),
+                    ..Default::default()
                 },
                 revert: false,
                 component_tvl: [
@@ -3002,6 +3010,7 @@ mod test {
                         ts: chrono::DateTime::from_timestamp(1234567890, 0)
                             .unwrap()
                             .naive_utc(),
+                        ..Default::default()
                     },
                     revert: false,
                     // Add a new component to trigger snapshot request
@@ -3192,6 +3201,7 @@ mod test {
                         ts: chrono::DateTime::from_timestamp(1234567890, 0)
                             .unwrap()
                             .naive_utc(),
+                        ..Default::default()
                     },
                     revert: false,
                     ..Default::default()
@@ -3519,6 +3529,7 @@ mod test {
                         ts: chrono::DateTime::from_timestamp(1234567890, 0)
                             .unwrap()
                             .naive_utc(),
+                        ..Default::default()
                     },
                     revert: false,
                     ..Default::default()
@@ -3695,6 +3706,7 @@ mod test {
                             parent_hash: Bytes::from("0x0000000000000000000000000000000000000000000000000000000000000002"),
                             chain: Chain::Ethereum,
                             ts: chrono::DateTime::from_timestamp(1234567890, 0).unwrap().naive_utc(),
+                            ..Default::default()
                         },
                         revert: false,
                         ..Default::default()
@@ -3708,6 +3720,7 @@ mod test {
                             parent_hash: Bytes::from("0x0000000000000000000000000000000000000000000000000000000000000003"),
                             chain: Chain::Ethereum,
                             ts: chrono::DateTime::from_timestamp(1234567891, 0).unwrap().naive_utc(),
+                            ..Default::default()
                         },
                         revert: false,
                         ..Default::default()
@@ -3721,6 +3734,7 @@ mod test {
                             parent_hash: Bytes::from("0x0000000000000000000000000000000000000000000000000000000000000004"),
                             chain: Chain::Ethereum,
                             ts: chrono::DateTime::from_timestamp(1234567892, 0).unwrap().naive_utc(),
+                            ..Default::default()
                         },
                         revert: false,
                         ..Default::default()
@@ -3735,6 +3749,7 @@ mod test {
                             parent_hash: Bytes::from("0x0000000000000000000000000000000000000000000000000000000000000005"),
                             chain: Chain::Ethereum,
                             ts: chrono::DateTime::from_timestamp(1234567893, 0).unwrap().naive_utc(),
+                            ..Default::default()
                         },
                         revert: false,
                         ..Default::default()
@@ -4193,6 +4208,7 @@ mod test {
                 parent_hash,
                 chain: Chain::Ethereum,
                 ts: Default::default(),
+                ..Default::default()
             },
             revert: false,
             partial_block_index: partial_idx,

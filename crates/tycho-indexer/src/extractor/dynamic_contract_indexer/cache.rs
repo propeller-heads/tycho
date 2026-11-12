@@ -847,6 +847,7 @@ mod tests {
                 .unwrap()
                 .naive_utc(),
             chain: Chain::Ethereum,
+            ..Default::default()
         }
     }
 

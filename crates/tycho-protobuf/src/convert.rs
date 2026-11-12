@@ -94,6 +94,7 @@ impl TryFromMessage for Block {
                     ))
                 })?
                 .naive_utc(),
+            timestamp_ms: None,
         })
     }
 }

@@ -1183,6 +1183,7 @@ mod tests {
                 ts: DateTime::from_timestamp(1640995200, 0)
                     .unwrap()
                     .naive_utc(),
+                ..Default::default()
             },
         }
     }
