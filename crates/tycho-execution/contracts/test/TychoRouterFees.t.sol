@@ -218,7 +218,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
     /// keeps everything the pool produced above the quote.
     function testSingleSwapCapturesPositiveSlippage() public {
         vm.prank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageEnabled(true);
+        feeCalculator.setRouterPositiveSlippageBps(100_000_000);
 
         uint256 amountIn = 1 ether;
         // 1 WETH buys 2018.8 DAI on the USV2 pool, quoted at a round 2000
@@ -258,7 +258,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
     function testSingleSwapSplitsPositiveSlippageWithClient() public {
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageEnabled(true);
+        feeCalculator.setRouterPositiveSlippageBps(100_000_000);
         feeCalculator.setClientPositiveSlippageShare(
             clientFeeReceiver, 50_000_000
         );

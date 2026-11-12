@@ -261,6 +261,10 @@ fn build_trade(
     })
 }
 
+/// A router positive slippage of 100% in fee units. Router positive slippage bps exist only on the
+/// `uint32` calculator generation, so they are always on its denominator.
+const FULL_ROUTER_POSITIVE_SLIPPAGE_BPS: u64 = 100_000_000;
+
 /// The denominator the fee bps of a calculator are on.
 ///
 /// The scale belongs to the calculator, not to the router that resolves to it: a router rotated
@@ -308,17 +312,22 @@ fn resolve_fee_config(
     let fee_on_client_fee_bps = custom_client
         .or_else(|| get_u64(keys::fee_on_client_fee(&fee_calculator)))
         .unwrap_or_default();
+    let global_router_bps = get_u64(keys::router_positive_slippage(&fee_calculator));
+    // Older calculators turn capture on and off with `PositiveSlippageToggled`. A calculator with
+    // a router positive slippage bps has no switch, so its router positive slippage bps alone
+    // decides what the router captures.
     let positive_slippage_enabled = router.version == RouterVersion::V3_1 &&
-        store
-            .get_at(ordinal, keys::positive_slippage(&fee_calculator))
-            .map(|v| v == "1")
-            .unwrap_or(false);
-    // Only the calculator generation that has the exemption emits the event that sets this, so a
-    // trade on an older calculator resolves to false.
-    let positive_slippage_exempt = store
-        .get_at(ordinal, keys::positive_slippage_exempt(&fee_calculator, client))
-        .map(|v| v == "1")
-        .unwrap_or(false);
+        (global_router_bps.is_some() ||
+            store
+                .get_at(ordinal, keys::positive_slippage(&fee_calculator))
+                .is_some_and(|v| v == "1"));
+    // A calculator that never emitted a router positive slippage event captures the full surplus.
+    let router_positive_slippage_bps =
+        get_u64(keys::custom_router_positive_slippage(&fee_calculator, client))
+            .or(global_router_bps)
+            .unwrap_or(FULL_ROUTER_POSITIVE_SLIPPAGE_BPS);
+    let client_positive_slippage_share_bps =
+        get_u64(keys::client_positive_slippage_share(&fee_calculator, client)).unwrap_or_default();
     Some(RouterFeeConfig {
         fee_calculator,
         fee_on_output_bps,
@@ -326,7 +335,8 @@ fn resolve_fee_config(
         custom_fee_on_output: custom_output.is_some(),
         custom_fee_on_client_fee: custom_client.is_some(),
         positive_slippage_enabled,
-        positive_slippage_exempt,
+        router_positive_slippage_bps,
+        client_positive_slippage_share_bps,
         bps_scale,
     })
 }
