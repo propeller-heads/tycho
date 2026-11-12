@@ -103,91 +103,71 @@ fixture added first.
 
 Legacy mode checks every component in the snapshot against `balanceOf(component id)`, or skips the
 check for the whole package. Strict mode checks each expected component, and reports each
-separately, against the source it declares:
+separately, against the amounts the package's balance lens reads on chain:
 
 ```yaml
-expected_components:
-  - id: "0x..."
-    balance_check: default                               # balanceOf(component id), the default
-  - id: "0x..."
-    balance_check: {holder: "attribute:vault"}           # the address in an attribute
-  - id: "0x..."
-    balance_check: {holder: "0xBA12222222228d8Ba445958a75a0704d566BF2C8"}   # a fixed address
-  - id: "0x..."
-    balance_check: {min_of: [self, "attribute:vault"]}   # the smallest of several holders
+harness: strict
+balance_lens: ComponentIdBalances
 ```
 
-Where the tokens are held in different places, each token gets its own source, and a token not
-listed is read from the component itself. `token` reads another token's balance, for a component
-whose inventory mirrors an underlying. Sky's USDS/USDC wrapper holds nothing itself: its USDC
-sits in the PSM's pocket, and the USDS it can pay out is the PSM's DAI:
+A lens is a Solidity contract implementing `IBalanceLens`
+(`protocols/adapter-integration/evm/src/balance-lenses/IBalanceLens.sol`). It takes a component's
+id, its tokens and its attributes, and returns, for each token, the amount the indexed balance
+must equal. The runner builds it with forge, as it builds an adapter, and calls it once per
+expected component with an `eth_call` at the snapshot block, placing the lens's code by a state
+override, so nothing is deployed and any RPC that serves overrides works.
 
-```yaml
-  - id: "0xa188eec8f81263234da3622a406892f3d630f98c"   # Sky USDS/USDC wrapper
-    balance_check:
-      tokens:
-        # USDC: held by the PSM's pocket
-        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {holder: "0x37305b1cd40574e4c5ce33f8e8306be057fd7341"}
-        # USDS: the PSM's DAI balance
-        "0xdc035d45d973e3ec169d2276ddab16f1e407384f":
-          holder: "0xf6e72db5454dd049d0788e411b06cfaf16853042"
-          token: "0x6b175474e89094c44da98b954eedeac495271d0f"
+Two stock lenses cover the common cases:
+
+| Lens | Reads |
+|---|---|
+| `ComponentIdBalances` | each token's `balanceOf(component id)`, for a component that holds its own tokens |
+| `BalanceOwnerBalances` | each token's `balanceOf` of the address in the `balance_owner` attribute, for a component whose tokens sit at an address that holds only its own |
+
+A package whose amounts sit elsewhere writes its own lens, next to its adapter under
+`protocols/adapter-integration/evm/src/`, inheriting `BalanceLens` for its helpers (the native
+balance, an attribute by name, an attribute as an address or a uint). A singleton vault's per-pool
+view, protocol accounting kept as a number, or a token held as another token's balance are read
+there, with the protocol's constants in the contract, and components read differently are
+branches of one lens. A token the protocol does not account per component reads 0, and the
+indexer must then report no balance for it:
+
+```solidity
+/// Lido: the pooled ether is protocol accounting; stETH and wstETH are traded, but no balance
+/// is tracked for them.
+contract LidoBalances is BalanceLens {
+    function balances(bytes calldata, address[] calldata tokens, Attribute[] calldata)
+        external
+        view
+        returns (uint256[] memory amounts)
+    {
+        amounts = new uint256[](tokens.length);
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (tokens[i] == address(0)) {
+                amounts[i] = ILido(STETH).getTotalPooledEther();
+            }
+        }
+    }
+}
 ```
 
-Where a balance is protocol accounting rather than a token balance, or a singleton vault keeps
-every pool's funds, a view call returning a `uint` gives the amount, per token or for every token:
-
-```yaml
-  - id: "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"   # Lido
-    balance_check:
-      tokens:
-        # ETH: the protocol's pooled ether
-        "0x0000000000000000000000000000000000000000": {call: {to: self, fn: "getTotalPooledEther()"}}
-        # stETH, wstETH: traded, but the indexer tracks no balance for them
-        "0xae7ab96520de3a18e5e111b5eaab095312d7fe84": {unindexed: "only the pooled ether is tracked"}
-        "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0": {unindexed: "only the pooled ether is tracked"}
-  - id: "0x3225737a9bbb6473cb4a45b7244aca2befdb276a"   # Sky DAI/USDS converter
-    balance_check:
-      tokens:
-        # DAI: the DAI join's escrow in the vat, kept in rad (1e45) for an 18-decimal token
-        "0x6b175474e89094c44da98b954eedeac495271d0f":
-          call:
-            to: "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"   # vat
-            fn: "dai(address)"
-            args: ["0x9759a6ac90977b93b58547b4a71c78317f391a28"]   # DAI join
-            divide_by: "1e27"
-  - id: "0xe96a45f66bdda121b24f0a861372a72e8889523d00020000000000000000069b"   # Balancer V2
-    # every token: the pool's cash in the vault, the first of the four values it returns
-    balance_check: {call: {to: "0xBA12222222228d8Ba445958a75a0704d566BF2C8", fn: "getPoolTokenInfo(bytes32,address) returns (uint256,uint256,uint256,address)", args: [self, token]}}
-```
-
-- `fn` is the signature, `name(type,...)`. A function that returns anything but a single
-  `uint256` declares its outputs, `name(type,...) returns (type,...)`; the amount is the first, or
-  the one `output` gives by index. That output must be a `uint`: an `int` or a dynamic type is
-  rejected at load. Without declared outputs, a call that returns more than one word fails.
-- `to` is `self`, `attribute:NAME` or a `0x` address, as for a holder.
-- `args` has one entry per parameter: `self` (the component id), `token` (the token being
-  checked), `attribute:NAME`, or a literal of the parameter's type. An `attribute:` argument to an
-  `address` parameter takes 20 bytes or a 32-byte word; other types take its raw hex. A call for
-  the whole component serves every token, so it must take `token`.
-- `divide_by` (an integer or `1eN`, quoted or not) divides the result, rounding down.
-- `unindexed` passes only while the indexer reports no balance (or zero) for the token.
-
-- An `attribute:NAME` holder is read from the component's static attributes, then from its state
-  attributes at the snapshot block; a 32-byte ABI-encoded address is accepted.
-- `min_of` compares the indexed balance with the smallest of the holders' balances, for an amount
-  bounded by each of them. It needs at least two holders.
+- The lens gets the id's bytes when it is hex, else its UTF-8 bytes, and the static attributes
+  followed by the state attributes at the snapshot block, so the last entry of a name is current.
 - The comparison is exact, unless the component is `tvl_only` (below), and a token without an
   indexed balance counts as zero.
-- A `tokens` entry for a token the component does not have fails the component, and two entries
-  for one token (keys that differ only in case) are an error.
+- A lens that reverts, or returns a different number of amounts than the component has tokens,
+  fails the component, naming the lens.
+- A component the lens cannot read, such as a singleton that keeps liquidity rather than
+  per-pool amounts, sets `skip_balance_check` with the reason; its `balances` is reported
+  `skipped`, and every other check of it still runs. A lens is required unless every expected
+  component skips the check. Write a lens rather than a skip wherever the chain has the amount: a
+  skip never makes a failing balance check pass.
 - A test in strict mode must list its expected components: an empty list, which elsewhere means
   every component of the protocol, would leave the balances unchecked.
-- A component whose id is not an address needs a holder.
-- The package-level `skip_balance_check` is an error in strict mode, whatever its value; leave
-  it out, as the check runs by default.
+- The package-level `skip_balance_check` is an error in strict mode, whatever its value.
 
-`balance_check` is read in legacy mode, where it is ignored.
+`balance_lens` and a component's `skip_balance_check` are read in legacy mode, where they are
+ignored.
 
 #### Balances that feed only TVL
 
@@ -204,8 +184,8 @@ balances, being slightly off only moves TVL, and the component can declare a tol
 
 - The tolerance takes the same fields as `execution_tolerance` (below), checked the same way in
   both modes, with `wei` in base units of each token. A component listed in several tests
-  declares the same `tvl_only` in each. It applies to every source but `unindexed`, `default` and
-  unlisted tokens included. An `unindexed` token must still have no balance.
+  declares the same `tvl_only` in each. It applies to every token, those the lens reads as 0
+  included: their indexed balance may then be up to the tolerance's `wei`.
 - **The runner verifies the declaration** (`balances.tvl_only`). It decodes the snapshot again
   with the component's balances scaled down, each token's by a different factor (1/2, 1/3, ...,
   in token address order) so their ratios change too, and every limit, spot price and quote at
@@ -453,7 +433,7 @@ or executions it cannot simulate, are logged and the update is passed over.
 | `index` | the range indexes, and the snapshot can be read at the stop block |
 | `state.components` | every expected component is indexed, with its tokens and static attributes |
 | `state.excluded` | no excluded component is indexed |
-| `balances` | indexed balances match `balanceOf` on chain; strict: per component, against its declared source |
+| `balances` | indexed balances match `balanceOf` on chain; strict: per component, against the amounts the package's `balance_lens` reads, or `skipped` with a component's `skip_balance_check` |
 | `balances.tvl_only` | strict: a `tvl_only` component quotes the same with its balances scaled down |
 | `decode` | the snapshot decodes, and so does every expected component |
 | `sim.ladder` | limits, spot prices and quotes at 0.1%, 1% and 10% of the limit, every direction |

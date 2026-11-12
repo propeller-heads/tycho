@@ -4,7 +4,10 @@ use alloy::{
     eips::{eip1898::BlockId, BlockNumberOrTag},
     primitives::{address, Address, Bytes, U256},
     providers::{Provider, ProviderBuilder},
-    rpc::types::{Block, TransactionRequest},
+    rpc::types::{
+        state::{AccountOverride, StateOverride},
+        Block, TransactionRequest,
+    },
     transports::http::reqwest::Url,
 };
 use miette::{IntoDiagnostic, WrapErr};
@@ -71,13 +74,21 @@ impl RPCProvider {
         }
     }
 
-    /// The return data of an `eth_call` to `to` with `calldata`, at `block_number`.
-    pub async fn call(
+    /// The return data of an `eth_call` of `calldata`, at `block_number`, to an address whose
+    /// code a state override sets to `code`, so a contract runs against the chain's state without
+    /// being deployed.
+    pub async fn call_code(
         &self,
-        to: Address,
+        code: Bytes,
         calldata: Bytes,
         block_number: u64,
     ) -> miette::Result<Bytes> {
+        // An address no contract occupies; the override gives it `code`.
+        let to = address!("0x00000000000000000000000000000000ba1a4ce5");
+        let overrides: StateOverride =
+            [(to, AccountOverride { code: Some(code), ..AccountOverride::default() })]
+                .into_iter()
+                .collect();
         let provider = ProviderBuilder::new().connect_http(self.url.clone());
         provider
             .call(
@@ -85,10 +96,11 @@ impl RPCProvider {
                     .to(to)
                     .input(calldata.into()),
             )
+            .overrides(overrides)
             .block(BlockId::from(block_number))
             .await
             .into_diagnostic()
-            .wrap_err_with(|| format!("eth_call to {to} failed"))
+            .wrap_err("eth_call with the code override failed")
     }
 
     pub async fn get_block_header(&self, block_number: u64) -> miette::Result<Block> {
@@ -127,6 +139,19 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn call_code_runs_the_given_code_against_the_chain() {
+        let eth_rpc_url = env::var("RPC_URL").expect("Missing RPC_URL in environment");
+        let rpc_provider = RPCProvider::new(&eth_rpc_url);
+        // CHAINID PUSH1 0 MSTORE PUSH1 32 PUSH1 0 RETURN: returns the chain id as one word.
+        let code = Bytes::from_str("0x4660005260206000f3").unwrap();
+        let returned = rpc_provider
+            .call_code(code, Bytes::new(), 21998530)
+            .await
+            .unwrap();
+        assert_eq!(U256::from_be_slice(&returned), U256::from(1));
+    }
 
     #[tokio::test]
     async fn get_token_balance_native_token() {

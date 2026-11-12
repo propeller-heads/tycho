@@ -8,8 +8,8 @@ adapter_build_signature: "constructor(address)"
 adapter_build_args: "0x0000000000000000000000000000000000000000"
 # To skip checking the balances of the protocol components, set this to the reason, e.g.
 # skip_balance_check: "the component id does not hold the balances; a vault does"
-# The runner rejects it in a test file with `harness: strict`: declare each component's `balance_check`
-# instead (see protocols/testing/README.md).
+# The runner rejects it in a test file with `harness: strict`: name the package's `balance_lens`
+# instead (see protocols/testing/README.md, "Balances").
 # Accounts that will be automatically initialized at test start
 # IMPORTANT: These are TEST FIXTURES ONLY. Your actual code must still properly
 # initialize these accounts. This configuration only eliminates the need to include

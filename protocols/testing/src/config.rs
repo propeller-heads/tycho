@@ -15,8 +15,6 @@ pub use tycho_test::expectations::{
     LimitsDeclaration, Skip, Tolerance,
 };
 
-use crate::balances::BalanceCheck;
-
 /// Represents a ProtocolComponent with its main attributes
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProtocolComponentExpectation {
@@ -38,9 +36,9 @@ pub struct ProtocolComponentWithTestConfig {
     /// What the component's limits are, overriding the package's
     /// [`IntegrationTestsConfig::limits`].
     pub limits: Option<LimitsDeclaration>,
-    /// Where strict mode reads the component's balances on chain; `balanceOf(component id)`
-    /// without it.
-    pub balance_check: Option<BalanceCheck>,
+    /// Strict: why the package's balance lens cannot read this component's balances, such as a
+    /// singleton that keeps no per-pool amount. Its `balances` is then reported skipped.
+    pub skip_balance_check: Skip,
     /// Strict: how far the component's executions may differ from simulation, overriding the
     /// package's [`IntegrationTestsConfig::execution_tolerance`].
     pub execution_tolerance: Option<DeclaredTolerance>,
@@ -67,7 +65,7 @@ struct ExpectedComponentEntry {
     #[serde(default)]
     limits: Option<LimitsDeclaration>,
     #[serde(default)]
-    balance_check: Option<BalanceCheck>,
+    skip_balance_check: Skip,
     #[serde(default)]
     execution_tolerance: Option<DeclaredTolerance>,
     #[serde(default)]
@@ -94,7 +92,7 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
             skip_simulation,
             skip_execution,
             limits,
-            balance_check,
+            skip_balance_check,
             execution_tolerance,
             tvl_only,
         } = entry;
@@ -103,7 +101,7 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
             skip_simulation,
             skip_execution,
             limits,
-            balance_check,
+            skip_balance_check,
             execution_tolerance,
             tvl_only,
         }
@@ -226,9 +224,15 @@ pub struct IntegrationTestsConfig {
     pub adapter_build_signature: Option<String>,
     pub adapter_build_args: Option<String>,
     pub initialized_accounts: Option<Vec<String>>,
-    /// Off by default. Strict mode rejects it: each component declares its `balance_check`.
+    /// Off by default. Strict mode rejects it: the package declares its `balance_lens`, and a
+    /// component its lens cannot read sets its own `skip_balance_check`.
     #[serde(default)]
     pub skip_balance_check: Skip,
+    /// Strict: the Solidity contract that reads each expected component's balances on chain, by
+    /// name, from `protocols/adapter-integration/evm/src/` (`IBalanceLens`). Required unless every
+    /// expected component skips the balance check.
+    #[serde(default)]
+    pub balance_lens: Option<String>,
     /// What the components' limits are, unless a component declares its own. Strict mode requires
     /// a declaration for every direction of every expected component, here or on the component.
     #[serde(default)]
@@ -269,6 +273,7 @@ impl IntegrationTestsConfig {
             Harness::Strict => {
                 let mut problems = config.skip_problems();
                 problems.extend(config.balance_skip_problem());
+                problems.extend(config.balance_lens_problem());
                 problems.extend(config.empty_tests_problem());
                 if !unknown_keys.is_empty() {
                     problems.push(format!(
@@ -493,12 +498,14 @@ impl IntegrationTestsConfig {
             Skip::Bool(false) => redundant.push(format!("{flag} ({location})")),
             Skip::No | Skip::Reason(_) => {}
         };
-        // `skip_balance_check` is rejected whatever its value, by `balance_skip_problem`.
+        // The package's `skip_balance_check` is rejected whatever its value, by
+        // `balance_skip_problem`.
         for test in &self.tests {
             for component in &test.expected_components {
                 let location = format!("test `{}`, component {}", test.name, component.base.id);
                 note("skip_simulation", &location, &component.skip_simulation);
                 note("skip_execution", &location, &component.skip_execution);
+                note("skip_balance_check", &location, &component.skip_balance_check);
                 if component.skip_simulation.is_skipped() && component.skip_execution.is_skipped() {
                     unread.push(location);
                 }
@@ -530,18 +537,46 @@ impl IntegrationTestsConfig {
     }
 
     /// Strict mode's problem with the package-level `skip_balance_check`, whatever its value:
-    /// strict mode checks every expected component's balances against the source it declares.
+    /// strict mode checks every expected component's balances with the package's lens.
     fn balance_skip_problem(&self) -> Option<String> {
         if self.skip_balance_check == Skip::No {
             return None;
         }
-        Some(format!(
-            "`skip_balance_check`, which strict mode does not accept, since it checks every \
-             expected component against the source it declares. Remove it, and declare where a \
-             component's balances are held where that is not the component's own address, with \
-             `balance_check`: {}",
-            crate::balances::SHAPE
-        ))
+        Some(
+            "`skip_balance_check` on the package, which strict mode does not accept, since it \
+             checks every expected component's balances. Remove it, name the contract that reads \
+             them with `balance_lens` (README, \"Balances\"), and give a component the lens \
+             cannot read its own `skip_balance_check` with the reason"
+                .to_string(),
+        )
+    }
+
+    /// Strict mode's problem with a missing `balance_lens`, when some expected component does not
+    /// skip the balance check.
+    fn balance_lens_problem(&self) -> Option<String> {
+        if self.balance_lens.is_some() {
+            return None;
+        }
+        let checked: Vec<&str> = self
+            .tests
+            .iter()
+            .flat_map(|test| &test.expected_components)
+            .filter(|component| {
+                !component
+                    .skip_balance_check
+                    .is_skipped()
+            })
+            .map(|component| component.base.id.as_str())
+            .unique()
+            .collect();
+        (!checked.is_empty()).then(|| {
+            format!(
+                "no `balance_lens` to read the balances of {}: name the contract that reads them \
+                 (README, \"Balances\"), such as `ComponentIdBalances` for a component that holds \
+                 its own tokens",
+                checked.join(", ")
+            )
+        })
     }
 
     /// Strict mode's problem with tests that list no expected component: strict mode checks each
@@ -605,8 +640,12 @@ tests:
         )
     }
 
+    /// Strict mode with a balance lens, for tests about something else.
+    const STRICT: &str = "harness: strict\nbalance_lens: ComponentIdBalances";
+
     /// Strict mode with every direction's limit declared, for tests about something else.
-    const STRICT_WITH_LIMITS: &str = "harness: strict\nlimits: {kind: hard}";
+    const STRICT_WITH_LIMITS: &str =
+        "harness: strict\nlimits: {kind: hard}\nbalance_lens: ComponentIdBalances";
 
     fn parse(yaml: &str) -> miette::Result<IntegrationTestsConfig> {
         IntegrationTestsConfig::from_yaml(yaml.as_bytes(), "test.yaml")
@@ -639,7 +678,7 @@ tests:
         let fixtures = [
             yaml(STRICT_WITH_LIMITS, ""),
             yaml(
-                "harness: strict\nlimits: {kind: soft, reason: \"r\"}\nexecution_tolerance: {bps: \
+                "harness: strict\nbalance_lens: ComponentIdBalances\nlimits: {kind: soft, reason: \"r\"}\nexecution_tolerance: {bps: \
                  3, reason: \"r\"}",
                 "        limits: {\"0x01->0x02\": {kind: hard}}\n        tvl_only: {bps: 5, \
                  reason: \"r\"}\n        execution_tolerance: {wei: 2, reason: \"r\"}",
@@ -681,7 +720,7 @@ tests:
     #[test]
     fn component_keys_reach_the_component() {
         let config = parse(&yaml(
-            "harness: strict",
+            STRICT,
             "        static_attributes: {fee: \"0x0bb8\"}\n        skip_execution: \"r\"\n        limits: {kind: hard}",
         ))
         .unwrap();
@@ -699,7 +738,7 @@ tests:
     #[test]
     fn strict_mode_rejects_unknown_keys_and_names_each() {
         let err = parse(&yaml(
-            "harness: strict\nskip_balance_checks: true",
+            "harness: strict\nbalance_lens: ComponentIdBalances\nskip_balance_checks: true",
             "        skip_simulaton: true",
         ))
         .unwrap_err()
@@ -711,7 +750,7 @@ tests:
 
     #[test]
     fn strict_mode_rejects_unknown_keys_in_a_test() {
-        let config = yaml("harness: strict", "")
+        let config = yaml(STRICT, "")
             .replace("    stop_block: 200\n", "    stop_block: 200\n    expected_state: {}\n");
         let err = parse(&config).unwrap_err().to_string();
         assert!(err.contains("expected_state"), "{err}");
@@ -769,7 +808,7 @@ tests:
 
     #[test]
     fn strict_mode_rejects_true_and_names_each_flag_and_component() {
-        let err = parse(&yaml("harness: strict", "        skip_simulation: true"))
+        let err = parse(&yaml(STRICT, "        skip_simulation: true"))
             .unwrap_err()
             .to_string();
         assert!(
@@ -784,15 +823,17 @@ tests:
     #[test]
     fn strict_mode_gives_a_balance_skip_one_error_whatever_its_value() {
         for value in ["true", "false", "\"held by the vault\""] {
-            let err = parse(&yaml(&format!("harness: strict\nskip_balance_check: {value}"), ""))
+            let err = parse(&yaml(&format!("harness: strict\nbalance_lens: ComponentIdBalances\nskip_balance_check: {value}"), ""))
                 .unwrap_err()
                 .to_string();
             assert!(
-                err.contains("`skip_balance_check`, which strict mode does not accept"),
+                err.contains(
+                    "`skip_balance_check` on the package, which strict mode does not accept"
+                ),
                 "{err}"
             );
             assert!(!err.contains("skips written as"), "{value}: {err}");
-            assert!(err.contains("{tokens: {0x<token>"), "{value}: {err}");
+            assert!(err.contains("its own `skip_balance_check` with the reason"), "{value}: {err}");
         }
     }
 
@@ -822,29 +863,41 @@ tests:
     }
 
     #[test]
-    fn a_component_declares_its_balance_source_in_either_mode() {
-        let declared = "        balance_check: {min_of: [self, \"attribute:vault\"]}";
-        for harness in ["", STRICT_WITH_LIMITS] {
-            let config = parse(&yaml(harness, declared)).unwrap();
-            assert_eq!(
-                config.tests[0].expected_components[0].balance_check,
-                Some(BalanceCheck::MinOf(vec![
-                    crate::balances::Holder::Component,
-                    crate::balances::Holder::Attribute("vault".to_string()),
-                ]))
-            );
-            assert_eq!(
-                parse(&yaml(harness, "")).unwrap().tests[0].expected_components[0].balance_check,
-                None
-            );
-            let err = parse(&yaml(harness, "        balance_check: {holder: vault}")).unwrap_err();
-            assert!(format!("{err:?}").contains("not a holder"), "{err:?}");
-        }
+    fn strict_mode_needs_a_balance_lens_unless_every_component_skips_the_check() {
+        let strict = "harness: strict\nlimits: {kind: hard}";
+        let err = parse(&yaml(strict, ""))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no `balance_lens` to read the balances of 0xAbC"), "{err}");
+        assert_eq!(
+            parse(&yaml(&format!("{strict}\nbalance_lens: ComponentIdBalances"), ""))
+                .unwrap()
+                .balance_lens
+                .as_deref(),
+            Some("ComponentIdBalances")
+        );
+        let skipped = parse(&yaml(strict, "        skip_balance_check: \"a singleton\"")).unwrap();
+        assert_eq!(
+            skipped.tests[0].expected_components[0]
+                .skip_balance_check
+                .reason(),
+            Some("a singleton")
+        );
+        // Legacy mode needs no lens.
+        assert!(parse(&yaml("", "")).is_ok());
+    }
+
+    #[test]
+    fn strict_mode_needs_a_reason_for_a_component_balance_skip() {
+        let err = parse(&yaml(STRICT_WITH_LIMITS, "        skip_balance_check: true"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("skip_balance_check (test `test_foo`, component 0xAbC)"), "{err}");
     }
 
     #[test]
     fn strict_mode_rejects_false_and_names_each_flag_and_component() {
-        let err = parse(&yaml("harness: strict", "        skip_execution: false"))
+        let err = parse(&yaml(STRICT, "        skip_execution: false"))
             .unwrap_err()
             .to_string();
         assert!(
@@ -859,7 +912,7 @@ tests:
     #[test]
     fn strict_mode_rejects_a_skip_execution_next_to_a_skip_simulation() {
         let both = "        skip_simulation: \"no adapter\"\n        skip_execution: \"no fork\"";
-        let err = parse(&yaml("harness: strict", both))
+        let err = parse(&yaml(STRICT, both))
             .unwrap_err()
             .to_string();
         assert!(
@@ -875,7 +928,7 @@ tests:
     #[test]
     fn strict_mode_reports_skip_problems_and_unknown_keys_together() {
         let err = parse(&yaml(
-            "harness: strict\nskip_balance_checks: x",
+            "harness: strict\nbalance_lens: ComponentIdBalances\nskip_balance_checks: x",
             "        skip_execution: false",
         ))
         .unwrap_err()
@@ -887,7 +940,7 @@ tests:
     #[test]
     fn a_skip_that_reads_as_yes_or_no_is_an_error_in_both_modes() {
         for word in ["no", "\"false\"", "off", "Yes", "\"TRUE\"", "n"] {
-            for harness in ["", "harness: strict"] {
+            for harness in ["", STRICT] {
                 let err = parse(&yaml(harness, &format!("        skip_execution: {word}")))
                     .unwrap_err()
                     .chain()
@@ -922,7 +975,7 @@ tests:
             ("        skip_execution: {reason: \"r\"}", "the reason for the skip, as a string"),
             ("        skip_execution: 3", "the reason for the skip, as a string"),
         ] {
-            for harness in ["", "harness: strict"] {
+            for harness in ["", STRICT] {
                 let err = format!("{:?}", parse(&yaml(harness, component_extra)).unwrap_err());
                 assert!(err.contains(expected), "{component_extra} ({harness}): {err}");
             }
@@ -955,14 +1008,14 @@ tests:
 
     #[test]
     fn strict_mode_requires_a_declaration_for_every_direction() {
-        let err = parse(&yaml("harness: strict", ""))
+        let err = parse(&yaml(STRICT, ""))
             .unwrap_err()
             .to_string();
         assert!(err.contains("component 0xAbC, 0x01->0x02"), "{err}");
         assert!(err.contains("component 0xAbC, 0x02->0x01"), "{err}");
 
         let one_direction = "        limits: {\"0x01->0x02\": {kind: hard}}";
-        let err = parse(&yaml("harness: strict", one_direction))
+        let err = parse(&yaml(STRICT, one_direction))
             .unwrap_err()
             .to_string();
         assert!(!err.contains("0x01->0x02"), "{err}");
@@ -974,9 +1027,7 @@ tests:
 
     #[test]
     fn a_component_that_skips_simulation_needs_no_declaration() {
-        assert!(
-            parse(&yaml("harness: strict", "        skip_simulation: \"no fork state\"")).is_ok()
-        );
+        assert!(parse(&yaml(STRICT, "        skip_simulation: \"no fork state\"")).is_ok());
     }
 
     #[test]
@@ -984,7 +1035,7 @@ tests:
         let soft = "{kind: soft, reason: \"constant product\"}";
         // The package's default, and its entry for one direction.
         let package =
-            format!("harness: strict\nlimits: {{default: {soft}, \"0x02->0x01\": {UNDER_CAP}}}");
+            format!("harness: strict\nbalance_lens: ComponentIdBalances\nlimits: {{default: {soft}, \"0x02->0x01\": {UNDER_CAP}}}");
         assert_eq!(
             kinds(&parse(&yaml(&package, "")).unwrap()),
             vec![
@@ -1022,7 +1073,7 @@ tests:
             ("{kind: soft, reason: \" \"}", "component 0xAbC, default: the reason is empty"),
             ("{\"0x01->0x02\": {kind: soft}}", "limits `0x01->0x02`: missing field `reason`"),
         ] {
-            for harness in ["", "harness: strict"] {
+            for harness in ["", STRICT] {
                 let err = parse(&yaml(harness, &format!("        limits: {declaration}")))
                     .unwrap_err()
                     .chain()
@@ -1032,7 +1083,7 @@ tests:
                 assert!(err.contains(problem), "{declaration}: {err}");
             }
         }
-        assert!(parse(&yaml("harness: strict", &format!("        limits: {UNDER_CAP}"))).is_ok());
+        assert!(parse(&yaml(STRICT, &format!("        limits: {UNDER_CAP}"))).is_ok());
     }
 
     #[test]
@@ -1060,8 +1111,7 @@ tests:
 
     #[test]
     fn a_hard_limit_can_declare_its_rounding() {
-        let config =
-            parse(&yaml("harness: strict", "        limits: {kind: hard, rounding: 2}")).unwrap();
+        let config = parse(&yaml(STRICT, "        limits: {kind: hard, rounding: 2}")).unwrap();
         let component = &config.tests[0].expected_components[0];
         assert_eq!(
             config.limits_for(component, &direction("0x01->0x02")),

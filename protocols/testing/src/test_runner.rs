@@ -14,7 +14,6 @@ use alloy::{
 use futures::StreamExt;
 use itertools::Itertools;
 use miette::{ensure, miette, IntoDiagnostic, WrapErr};
-use num_bigint::BigUint;
 use num_traits::Zero;
 use postgres::NoTls;
 use tokio::runtime::Runtime;
@@ -60,7 +59,7 @@ use tycho_test::{
 
 use crate::{
     adapter_builder::AdapterContractBuilder,
-    balances::{self, BalanceCheck},
+    balances,
     config::{
         component_directions, Direction, ExecutionTolerances, Harness, IntegrationTest,
         IntegrationTestsConfig, LimitKind, ProtocolComponentWithTestConfig, Skip,
@@ -115,31 +114,15 @@ struct RpcChain<'a> {
 }
 
 impl balances::Chain for RpcChain<'_> {
-    fn balance_of(&self, token: &Bytes, holder: &Bytes) -> Result<BigUint, String> {
-        let token = bytes_to_address(token).map_err(|e| e.to_string())?;
-        let holder = bytes_to_address(holder).map_err(|e| e.to_string())?;
-        let balance = self
-            .runner
-            .runtime
-            .block_on(
-                self.runner
-                    .rpc_provider
-                    .get_token_balance(token, holder, self.block),
-            )
-            .map_err(|e| format!("{e:#}"))?;
-        Ok(BigUint::from_bytes_be(&balance.to_be_bytes::<32>()))
-    }
-
-    fn call(&self, to: &Bytes, calldata: &Bytes) -> Result<Bytes, String> {
-        let to = bytes_to_address(to).map_err(|e| e.to_string())?;
+    fn call_code(&self, code: &Bytes, calldata: &Bytes) -> Result<Bytes, String> {
         let returned = self
             .runner
             .runtime
-            .block_on(
-                self.runner
-                    .rpc_provider
-                    .call(to, calldata.to_vec().into(), self.block),
-            )
+            .block_on(self.runner.rpc_provider.call_code(
+                code.to_vec().into(),
+                calldata.to_vec().into(),
+                self.block,
+            ))
             .map_err(|e| format!("{e:#}"))?;
         Ok(Bytes::from(returned.to_vec()))
     }
@@ -1159,16 +1142,32 @@ impl TestRunner {
         })?;
 
         if config.harness == Harness::Strict {
-            // `from_yaml` rejected a package-level skip.
+            // `from_yaml` rejected a package-level skip, and a missing lens unless every
+            // component skips the check.
+            let lens = config
+                .balance_lens
+                .as_deref()
+                .map(|name| self.build_balance_lens(name));
             for component in &test.expected_components {
-                let failures = self.check_component_balances(
-                    component,
-                    &protocol_components,
-                    &response_protocol_states_by_id,
-                    &all_tokens,
-                    block,
-                );
-                checks.record_component(CheckId::Balances, &component.base.id, &failures);
+                let id = &component.base.id;
+                if let Some(reason) = component.skip_balance_check.reason() {
+                    info!("[{id}] Skipping the balance check: {reason}");
+                    checks.skip_component(CheckId::Balances, id, reason);
+                    continue;
+                }
+                let failures = match &lens {
+                    Some(Ok(lens)) => self.check_component_balances(
+                        component,
+                        lens,
+                        &protocol_components,
+                        &response_protocol_states_by_id,
+                        &all_tokens,
+                        block,
+                    ),
+                    Some(Err(e)) => vec![format!("the balance lens could not be built: {e:#}")],
+                    None => vec!["no `balance_lens` is declared".to_string()],
+                };
+                checks.record_component(CheckId::Balances, id, &failures);
             }
         } else if let Some(reason) = config.skip_balance_check.reason() {
             info!("Skipping balance check: {reason}");
@@ -2377,6 +2376,7 @@ impl TestRunner {
     fn check_component_balances(
         &self,
         expected: &ProtocolComponentWithTestConfig,
+        lens: &balances::Lens,
         indexed_components: &[ProtocolComponent],
         states: &HashMap<String, ProtocolComponentState>,
         all_tokens: &HashMap<Bytes, Token>,
@@ -2410,10 +2410,7 @@ impl TestRunner {
         };
         balances::check_component(
             &component,
-            expected
-                .balance_check
-                .as_ref()
-                .unwrap_or(&BalanceCheck::Default),
+            lens,
             expected.tvl_only.as_ref(),
             &RpcChain { runner: self, block },
         )
@@ -2472,6 +2469,20 @@ impl TestRunner {
     }
 
     /// Gets the adapter contract path if needed, building it if not found
+    /// Builds the balance lens `name` from `protocols/adapter-integration/evm/src/` and reads its
+    /// runtime bytecode. It is built every time, so a changed lens is never read stale; forge
+    /// recompiles only what changed.
+    fn build_balance_lens(&self, name: &str) -> miette::Result<balances::Lens> {
+        let path = self
+            .adapter_contract_builder
+            .build_target(name, None, None)
+            .wrap_err_with(|| format!("Failed to build the balance lens {name}"))?;
+        let code = std::fs::read(&path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("Failed to read {}", path.display()))?;
+        Ok(balances::Lens { name: name.to_string(), code: Bytes::from(code) })
+    }
+
     fn get_adapter_contract_path(
         &self,
         adapter_contract: Option<&str>,
@@ -2636,6 +2647,7 @@ mod tests {
     use std::{collections::HashMap, env, str::FromStr};
 
     use dotenv::dotenv;
+    use num_bigint::BigUint;
     use tycho_execution::encoding::models::Solution;
     use tycho_simulation::tycho_common::{models::protocol::ProtocolComponentState, Bytes};
     use tycho_test::{
@@ -2664,7 +2676,7 @@ mod tests {
             skip_simulation,
             skip_execution,
             limits: None,
-            balance_check: None,
+            skip_balance_check: Skip::No,
             execution_tolerance: None,
             tvl_only: None,
         }
