@@ -312,15 +312,18 @@ fn resolve_fee_config(
     let fee_on_client_fee_bps = custom_client
         .or_else(|| get_u64(keys::fee_on_client_fee(&fee_calculator)))
         .unwrap_or_default();
+    let global_capture_bps = get_u64(keys::positive_slippage_capture(&fee_calculator));
+    // Older calculators turn capture on and off with `PositiveSlippageToggled`. A calculator with
+    // a capture bps has no switch, so its capture bps alone decides what the router captures.
     let positive_slippage_enabled = router.version == RouterVersion::V3_1 &&
-        store
-            .get_at(ordinal, keys::positive_slippage(&fee_calculator))
-            .map(|v| v == "1")
-            .unwrap_or(false);
+        (global_capture_bps.is_some() ||
+            store
+                .get_at(ordinal, keys::positive_slippage(&fee_calculator))
+                .is_some_and(|v| v == "1"));
     // A calculator that never emitted a capture event captures the full surplus.
     let positive_slippage_capture_bps =
         get_u64(keys::custom_positive_slippage_capture(&fee_calculator, client))
-            .or_else(|| get_u64(keys::positive_slippage_capture(&fee_calculator)))
+            .or(global_capture_bps)
             .unwrap_or(FULL_POSITIVE_SLIPPAGE_CAPTURE_BPS);
     let client_positive_slippage_share_bps =
         get_u64(keys::client_positive_slippage_share(&fee_calculator, client)).unwrap_or_default();

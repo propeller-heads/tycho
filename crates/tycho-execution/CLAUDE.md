@@ -129,18 +129,16 @@ queryable via RPC:
 - `MAX_BPS_SQUARED = 10_000_000_000_000_000` — `MAX_BPS²`; the combined denominator when both fees use the
   sub-BPS scale
 
-**Positive slippage** (`_positiveSlippageEnabled`, enabled from the constructor — which emits
-`PositiveSlippageToggled(true)` — and toggled afterwards via `setPositiveSlippageEnabled`): when enabled, the router
-captures part of the surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees compute on
-the output minus the captured amount. The capture bps starts at 100% and changes via `setPositiveSlippageCaptureBps`;
-the rest of the surplus stays in the swap output. A capture bps of zero skips the forced router hop. When disabled, fees compute on
-`actualAmountOut` and the surplus stays in the swap output. The flag
-also forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
+**Positive slippage** (`_positiveSlippageCaptureBps`, 100% from the constructor — which emits
+`PositiveSlippageCaptureBpsUpdated(0, MAX_BPS)` — and changed afterwards via `setPositiveSlippageCaptureBps`): the
+router captures that part of the surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees
+compute on the output minus the captured amount. The rest of the surplus stays in the swap output. A capture bps above
+zero forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
 capture bps (`setCustomPositiveSlippageCaptureBps`, `removeCustomPositiveSlippageCaptureBps`,
-`_customPositiveSlippageCaptureBps` mapping) replace the global capture bps for a resolved client. A custom capture bps
-of zero opts the client out while capture stays
-enabled globally: the surplus stays in the swap output, fees compute on `actualAmountOut`, and the client with no fees
-skips the forced router hop.
+`_customPositiveSlippageCaptureBps` mapping) replace the global capture bps for a resolved client. There is no switch
+that stops capture for every client: a global capture bps of zero leaves each custom capture bps in effect. A capture
+bps of zero leaves the surplus in the swap output, fees compute on `actualAmountOut`, and a client with no fees skips
+the forced router hop.
 Per-client shares (`setClientPositiveSlippageShare`, `_clientPositiveSlippageShareBps` mapping, fee units) give the
 resolved client part of the captured surplus, credited with its client fee; the router keeps the rest, rounded in its
 favour. The default share of zero leaves the full surplus to the router.

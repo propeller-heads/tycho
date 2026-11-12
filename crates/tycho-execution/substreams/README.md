@@ -158,7 +158,9 @@ WHERE protocol_systems = ARRAY[]::TEXT[] GROUP BY 1, 2 ORDER BY 3 DESC;
 A v3_1 trade carries `expected_amount_out`, so `positive_slippage` is the surplus the swaps
 produced above it. Who keeps that surplus takes three columns:
 
-1. When `positive_slippage_enabled` is false, the receiver keeps all of it.
+1. When `positive_slippage_enabled` is false, the receiver keeps all of it. Only a calculator
+   that emits `PositiveSlippageToggled` can turn capture off. A calculator with a capture bps has
+   no switch and always reports true.
 2. Otherwise the router captures `positive_slippage_capture_bps` of it, and the receiver keeps the
    rest.
 3. The client gets `client_positive_slippage_share_bps` of the captured amount, and the router

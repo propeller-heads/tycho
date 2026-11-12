@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS trades (
     router_fee_on_client_fee_bps BIGINT,
     custom_fee_on_output       BOOLEAN,
     custom_fee_on_client_fee   BOOLEAN,
+    -- False only when an older calculator turned capture off with PositiveSlippageToggled. A
+    -- calculator with a capture bps has no switch and reports true.
     positive_slippage_enabled  BOOLEAN,
     -- Part of the surplus the router captures for this trade's client, in fee units (100000000 =
     -- all of it): the client's custom value if set, otherwise the calculator's global one. The client

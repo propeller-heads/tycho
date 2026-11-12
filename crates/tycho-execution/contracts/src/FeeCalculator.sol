@@ -53,8 +53,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     // Tracks all clients that currently have at least one custom fee override
     EnumerableSet.AddressSet private _customFeeClients;
 
-    // Positive slippage configuration
-    bool private _positiveSlippageEnabled;
     // Part of the surplus the router captures, in fee units (MAX_BPS = all)
     uint32 private _positiveSlippageCaptureBps;
 
@@ -90,7 +88,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     event RouterFeeReceiverUpdated(
         address indexed oldReceiver, address indexed newReceiver
     );
-    event PositiveSlippageToggled(bool enabled);
     event PositiveSlippageCaptureBpsUpdated(
         uint32 oldCaptureBps, uint32 newCaptureBps
     );
@@ -112,22 +109,19 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @dev The receiver is explicit rather than defaulted to `msg.sender`: when
      *      the calculator is deployed through a CREATE2 factory, the factory is
      *      the sender, and fees credited to it can never be withdrawn.
-     *      Positive slippage capture starts enabled, since that is how every
-     *      deployment is operated; `setPositiveSlippageEnabled` turns it off.
-     *      The router captures 100% of the surplus to start.
+     *      The router captures 100% of the surplus to start, since that is
+     *      how every deployment is operated.
      */
     constructor(address routerFeeSetter, address routerFeeReceiver) {
         if (routerFeeReceiver == address(0)) {
             revert FeeCalculator__AddressZero();
         }
         _routerFeeReceiver = routerFeeReceiver;
-        _positiveSlippageEnabled = true;
         _positiveSlippageCaptureBps = MAX_BPS;
         // Make the role its own admin so role holders can manage their own role
         _setRoleAdmin(ROUTER_FEE_SETTER_ROLE, ROUTER_FEE_SETTER_ROLE);
         _grantRole(ROUTER_FEE_SETTER_ROLE, routerFeeSetter);
         emit RouterFeeReceiverUpdated(address(0), routerFeeReceiver);
-        emit PositiveSlippageToggled(true);
         emit PositiveSlippageCaptureBpsUpdated(0, MAX_BPS);
     }
 
@@ -136,8 +130,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @dev Called from TychoRouterV3. Does not perform any accounting.
      *
      *      Deduction order:
-     *      1. When positive slippage capture is enabled, the router
-     *         captures part of the surplus
+     *      1. The router captures part of the surplus
      *         (actualAmountOut - expectedAmountOut) first: the client's
      *         custom capture bps if set, otherwise the global one. The client gets
      *         its share of the captured amount and the router keeps the
@@ -202,14 +195,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         address resolvedClient = _resolveClient(client);
 
         // Slippage direction is unknown before the swap, so we always
-        // route funds through the router when positive slippage is enabled —
-        // unless this client's surplus is never captured anyway.
-        if (
-            _positiveSlippageEnabled
-                && _getPositiveSlippageCaptureBps(resolvedClient) > 0
-        ) {
-            return true;
-        }
+        // route funds through the router when the client's surplus can be
+        // captured.
+        if (_getPositiveSlippageCaptureBps(resolvedClient) > 0) return true;
 
         (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps) =
             _getFeeInfo(resolvedClient);
@@ -289,15 +277,14 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     /**
      * @dev Calculates the captured part of the positive slippage surplus
      * @return positiveSlippage The captured part of the surplus (zero if
-     *         disabled, the client's capture bps is zero, or there is no
-     *         surplus)
+     *         the client's capture bps is zero or there is no surplus)
      */
     function _calculatePositiveSlippage(
         uint256 actualAmountOut,
         uint256 expectedAmountOut,
         address client
     ) internal view returns (uint256 positiveSlippage) {
-        if (!_positiveSlippageEnabled || actualAmountOut <= expectedAmountOut) {
+        if (actualAmountOut <= expectedAmountOut) {
             return 0;
         }
 
@@ -638,25 +625,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      */
     function getRouterFeeReceiver() external view returns (address) {
         return _routerFeeReceiver;
-    }
-
-    /**
-     * @dev Enables or disables positive slippage capture
-     * @param enabled True to enable, false to disable
-     */
-    function setPositiveSlippageEnabled(bool enabled)
-        external
-        onlyRole(ROUTER_FEE_SETTER_ROLE)
-    {
-        _positiveSlippageEnabled = enabled;
-        emit PositiveSlippageToggled(enabled);
-    }
-
-    /**
-     * @dev Returns whether positive slippage capture is enabled
-     */
-    function getPositiveSlippageEnabled() external view returns (bool) {
-        return _positiveSlippageEnabled;
     }
 
     /**

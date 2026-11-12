@@ -717,7 +717,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
         );
 
         vm.prank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageEnabled(true);
+        feeCalculator.setPositiveSlippageCaptureBps(100_000_000);
         uint256 expectedAmountOut = baseline + DAI_SUBSIDY;
         ClientFeeParams memory clientFee = makeClientFeeParams(
             clientFeeBps,
@@ -766,7 +766,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
         );
 
         vm.prank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageEnabled(true);
+        feeCalculator.setPositiveSlippageCaptureBps(100_000_000);
         uint256 amountOut = _singleSwapExpecting(
             WETH_ADDR,
             DAI_ADDR,

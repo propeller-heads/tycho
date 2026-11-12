@@ -402,12 +402,12 @@ contract TychoRouterTestSetup is
         // clientFeeReceiver is the address corresponding to CLIENT_FEE_RECEIVER_PK
         clientFeeReceiver = vm.addr(CLIENT_FEE_RECEIVER_PK);
         feeCalculator = new FeeCalculator(FEE_SETTER, routerFeeReceiver);
-        // The calculator enables positive slippage capture in its constructor.
+        // The calculator captures the full surplus from its constructor.
         // The swap tests quote a round `expectedAmountOut` below the real pool
-        // output and assert the receiver gets that whole output, so capture is
-        // switched off here and exercised by the tests that opt back in.
+        // output and assert the receiver gets that whole output, so the capture
+        // bps is set to zero here and the capture tests set it back.
         vm.prank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageEnabled(false);
+        feeCalculator.setPositiveSlippageCaptureBps(0);
     }
 
     function pleEncode(bytes[] memory data)

@@ -181,6 +181,8 @@ pub struct RouterFeeConfig {
     pub custom_fee_on_output: bool,
     #[prost(bool, tag="5")]
     pub custom_fee_on_client_fee: bool,
+    /// False only when an older calculator turned capture off with PositiveSlippageToggled. A
+    /// calculator with a capture bps has no switch and reports true.
     #[prost(bool, tag="6")]
     pub positive_slippage_enabled: bool,
     /// Denominator of the bps values: 10000 for v3_0, 100000000 for v3_1.

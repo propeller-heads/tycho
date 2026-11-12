@@ -856,8 +856,8 @@ contract FeeCalculatorConfigTest is Constants {
         assertEq(feeCalculator.getRouterFeeOnClientFee(), 0);
         // The fee receiver is whatever the constructor was given
         assertEq(feeCalculator.getRouterFeeReceiver(), _ROUTER_FEE_RECEIVER);
-        // Positive slippage capture starts enabled
-        assertTrue(feeCalculator.getPositiveSlippageEnabled());
+        // The router captures the full surplus to start
+        assertEq(feeCalculator.getPositiveSlippageCaptureBps(), _100_PCT);
     }
 
     function testMaximumFee() public {
@@ -1467,7 +1467,7 @@ contract FeeCalculatorSlippageTest is Constants {
 
     function testZeroTokenPairFeeRemovesRouterFee() public {
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageEnabled(false);
+        feeCalculator.setPositiveSlippageCaptureBps(0);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
         feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, 0);
         vm.stopPrank();
@@ -1501,7 +1501,7 @@ contract FeeCalculatorSlippageTest is Constants {
 
     function testMustOutputThroughRouterWhileAnyTokenPairFeeIsSet() public {
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageEnabled(false);
+        feeCalculator.setPositiveSlippageCaptureBps(0);
         assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
 
         feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, 0);
