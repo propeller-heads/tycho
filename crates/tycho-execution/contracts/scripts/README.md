@@ -29,7 +29,7 @@ from being stored in the shell history.
 
 On Robinhood Chain (`robinhood`), Arc (`arc`) and Elysium (`elysium`), leave
 `BLOCKCHAIN_EXPLORER_API_KEY` unset.
-Arc verifies through Sourcify, which is where [arc-scan.org](https://arc-scan.org) reads verification from.
+Arc verifies through Sourcify. Its explorer is [arc.etherscan.io](https://arc.etherscan.io).
 The deploy scripts do not verify on Elysium. Submit each contract's standard JSON input to the
 Etherscan-compatible API of [Elysium's Blockscout](https://elysium.kinetiq.xyz) at
 `https://elysium.kinetiq.xyz/api/verify` (no API key). hardhat-verify cannot reach it, because a

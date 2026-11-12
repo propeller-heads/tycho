@@ -44,6 +44,13 @@ pub(crate) mod keys {
     pub fn client_positive_slippage_share(fc: &[u8], client: &[u8]) -> String {
         format!("fc:{}:ps_client_share:{}", hex::encode(fc), hex::encode(client))
     }
+    pub fn positive_slippage_cap(fc: &[u8], client: &[u8]) -> String {
+        format!("fc:{}:ps_cap:{}", hex::encode(fc), hex::encode(client))
+    }
+    /// `token0` and `token1` in the calculator's order: the lower address first.
+    pub fn token_pair_fee(fc: &[u8], token0: &[u8], token1: &[u8]) -> String {
+        format!("fc:{}:pair:{}:{}", hex::encode(fc), hex::encode(token0), hex::encode(token1))
+    }
 }
 
 /// Event names emitted in `FeeConfigEvent.event`.
@@ -63,6 +70,9 @@ pub(crate) mod events {
     pub const CUSTOM_ROUTER_POSITIVE_SLIPPAGE_BPS_REMOVED: &str =
         "CustomRouterPositiveSlippageBpsRemoved";
     pub const CLIENT_POSITIVE_SLIPPAGE_SHARE_UPDATED: &str = "ClientPositiveSlippageShareUpdated";
+    pub const POSITIVE_SLIPPAGE_CAP_UPDATED: &str = "PositiveSlippageCapUpdated";
+    pub const TOKEN_PAIR_FEE_UPDATED: &str = "TokenPairFeeUpdated";
+    pub const TOKEN_PAIR_FEE_REMOVED: &str = "TokenPairFeeRemoved";
     pub const FEE_CALCULATOR_SET: &str = "FeeCalculatorSet";
     pub const FEE_CALCULATOR_ACTIVATED: &str = "FeeCalculatorActivated";
     pub const FEE_CALCULATOR_UPDATED: &str = "FeeCalculatorUpdated";

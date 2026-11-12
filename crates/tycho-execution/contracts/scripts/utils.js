@@ -27,7 +27,7 @@ const BLOCKSCOUT_NETWORKS = {
 const SOURCIFY_NETWORKS = {
     arc: {
         chainId: 5042,
-        browserUrl: "https://arc-scan.org/",
+        browserUrl: "https://arc.etherscan.io/",
     },
 };
 
