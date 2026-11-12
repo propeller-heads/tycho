@@ -86,6 +86,19 @@ extension `E`. It is the single point that turns raw Substreams messages into ty
 7. Aggregate all tx-level deltas → `BlockAggregatedChanges`; compute TVL.
 8. Broadcast `Arc<BlockAggregatedChanges>` to subscribers.
 
+### Block timestamps
+
+Several blocks of a fast chain share one second. The extractor stamps such a block one
+microsecond after the block before it, so every extractor gives a block the same timestamp. An
+extractor with no stored block has no block before its first one. The factory reads the earlier
+blocks of that second from the node (`earlier_blocks_in_second`), stamps the block before from
+them (`stamped_block_before`) and sets it as the last processed block. It never reads the stamp
+from the database, so the stamp depends only on the chain. Account initialisation stores its
+block outside an extractor, so it reads that block with `stamped_block`, which gives the same
+stamp. Both then run `check_stored_block`: when the block is already stored with another
+timestamp, they stop with a setup error. The blocks after the first one are stamped from it, so
+this one check at start is enough, and the write path has no check.
+
 ### Partial-block path
 
 Some chains (e.g. Base) emit multiple partial messages per block. While
