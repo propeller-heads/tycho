@@ -131,13 +131,14 @@ queryable via RPC:
 
 **Positive slippage** (`_positiveSlippageEnabled`, enabled from the constructor — which emits
 `PositiveSlippageToggled(true)` — and toggled afterwards via `setPositiveSlippageEnabled`): when enabled, the router
-takes its share of the surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees compute on
-the output minus that share. The share starts at 100% and changes via `setPositiveSlippageShare`; the rest of the
-surplus stays in the swap output. A share of zero skips the forced router hop. When disabled, fees compute on
+captures part of the surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees compute on
+the output minus the captured amount. The capture bps starts at 100% and changes via `setPositiveSlippageCaptureBps`;
+the rest of the surplus stays in the swap output. A capture bps of zero skips the forced router hop. When disabled, fees compute on
 `actualAmountOut` and the surplus stays in the swap output. The flag
 also forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
-router shares (`setCustomPositiveSlippageShare`, `removeCustomPositiveSlippageShare`, `_customPositiveSlippageShares`
-mapping) replace the global share for a resolved client. A custom share of zero opts the client out while capture stays
+capture bps (`setCustomPositiveSlippageCaptureBps`, `removeCustomPositiveSlippageCaptureBps`,
+`_customPositiveSlippageCaptureBps` mapping) replace the global capture bps for a resolved client. A custom capture bps
+of zero opts the client out while capture stays
 enabled globally: the surplus stays in the swap output, fees compute on `actualAmountOut`, and the client with no fees
 skips the forced router hop.
 Per-client shares (`setClientPositiveSlippageShare`, `_clientPositiveSlippageShareBps` mapping, fee units) give the

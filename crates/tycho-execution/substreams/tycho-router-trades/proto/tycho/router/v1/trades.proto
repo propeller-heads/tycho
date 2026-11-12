@@ -124,11 +124,11 @@ message RouterFeeConfig {
   uint64 bps_scale = 7;
   reserved 8;
   reserved "positive_slippage_exempt";
-  // Router's share of the surplus for this trade's client, in fee units (100000000 = the full
-  // surplus): the client's custom share if set, otherwise the calculator's global share. The
-  // client is the signed clientFeeReceiver, or tx.origin when that is zero, the same resolution
-  // the FeeCalculator does. An exemption on an older calculator reads as a custom share of zero.
-  uint64 positive_slippage_share_bps = 9;
+  // Part of the surplus the router captures for this trade's client, in fee units (100000000 =
+  // the full surplus): the client's custom value if set, otherwise the calculator's global one.
+  // The client is the signed clientFeeReceiver, or tx.origin when that is zero, the same
+  // resolution the FeeCalculator does. An exemption on an older calculator reads as zero.
+  uint64 positive_slippage_capture_bps = 9;
   // The client's share of the captured surplus, in fee units. The router keeps the rest.
   uint64 client_positive_slippage_share_bps = 10;
 }

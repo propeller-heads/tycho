@@ -261,9 +261,9 @@ fn build_trade(
     })
 }
 
-/// A positive slippage share of 100% in fee units. Shares exist only on the `uint32` calculator
-/// generation, so they are always on its denominator.
-const FULL_POSITIVE_SLIPPAGE_SHARE_BPS: u64 = 100_000_000;
+/// A positive slippage capture of 100% in fee units. Capture bps exist only on the `uint32`
+/// calculator generation, so they are always on its denominator.
+const FULL_POSITIVE_SLIPPAGE_CAPTURE_BPS: u64 = 100_000_000;
 
 /// The denominator the fee bps of a calculator are on.
 ///
@@ -317,11 +317,11 @@ fn resolve_fee_config(
             .get_at(ordinal, keys::positive_slippage(&fee_calculator))
             .map(|v| v == "1")
             .unwrap_or(false);
-    // A calculator that never emitted a share event captures the full surplus.
-    let positive_slippage_share_bps =
-        get_u64(keys::custom_positive_slippage_share(&fee_calculator, client))
-            .or_else(|| get_u64(keys::positive_slippage_share(&fee_calculator)))
-            .unwrap_or(FULL_POSITIVE_SLIPPAGE_SHARE_BPS);
+    // A calculator that never emitted a capture event captures the full surplus.
+    let positive_slippage_capture_bps =
+        get_u64(keys::custom_positive_slippage_capture(&fee_calculator, client))
+            .or_else(|| get_u64(keys::positive_slippage_capture(&fee_calculator)))
+            .unwrap_or(FULL_POSITIVE_SLIPPAGE_CAPTURE_BPS);
     let client_positive_slippage_share_bps =
         get_u64(keys::client_positive_slippage_share(&fee_calculator, client)).unwrap_or_default();
     Some(RouterFeeConfig {
@@ -331,7 +331,7 @@ fn resolve_fee_config(
         custom_fee_on_output: custom_output.is_some(),
         custom_fee_on_client_fee: custom_client.is_some(),
         positive_slippage_enabled,
-        positive_slippage_share_bps,
+        positive_slippage_capture_bps,
         client_positive_slippage_share_bps,
         bps_scale,
     })
