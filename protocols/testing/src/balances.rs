@@ -109,8 +109,9 @@ impl Component<'_> {
 
 /// Checks a component's indexed balance of every token against the amount `lens` reads on
 /// chain: exactly, or within the component's `tvl_only` tolerance for that token. A token
-/// without an indexed balance counts as zero. Returns every mismatch, or why the lens could not
-/// read the amounts.
+/// without an indexed balance counts as zero. Returns every mismatch, or why there are no amounts
+/// to compare: the lens failed, returned data that does not decode, or returned a different
+/// number of amounts than the component has tokens.
 pub fn check_component(
     component: &Component<'_>,
     lens: &Lens,
