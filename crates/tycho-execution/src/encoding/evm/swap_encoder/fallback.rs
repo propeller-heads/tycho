@@ -101,6 +101,14 @@ static SUPPORTED_PROTOCOLS: LazyLock<HashMap<Chain, &'static [FallbackProtocol]>
                     FallbackProtocol::UniswapV4,
                 ][..],
             ),
+            (
+                Chain::Elysium,
+                &[
+                    FallbackProtocol::UniswapV2,
+                    FallbackProtocol::UniswapV3,
+                    FallbackProtocol::UniswapV4,
+                ][..],
+            ),
         ])
     });
 
