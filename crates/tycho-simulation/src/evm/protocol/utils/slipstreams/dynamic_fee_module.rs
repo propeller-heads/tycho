@@ -383,7 +383,6 @@ mod tests {
         let observations = Observations::new(vec![Observation {
             block_timestamp: 99,
             initialized: true,
-            index: 0,
             ..Default::default()
         }]);
 
@@ -399,7 +398,6 @@ mod tests {
         let observations = Observations::new(vec![Observation {
             block_timestamp: 100,
             initialized: true,
-            index: 0,
             ..Default::default()
         }]);
 
@@ -416,7 +414,6 @@ mod tests {
         let observations = Observations::new(vec![Observation {
             block_timestamp: 99,
             initialized: true,
-            index: 0,
             ..Default::default()
         }]);
 
@@ -431,7 +428,7 @@ mod tests {
     fn test_get_dynamic_fee() {
         let dfc = DynamicFeeConfig::new(350, 550, 3000000, false, 0);
 
-        let items: &[(i32, [u8; 32])] = &[
+        let items: &[(u16, [u8; 32])] = &[
             (534, hex!("01000006a0000001485073e3b9c1b1ba599e933717fff778eb3ff056690b05a1")),
             (535, hex!("01000006a0000001485072f3c785d8212da7414577fff77952e1b5ec690ae2d7")),
             (2039, hex!("01000006a00000014850737217b73678a71c3a98fdfff7791d60d77e690af4cd")),
@@ -516,7 +513,6 @@ mod tests {
         let observations = Observations::new(vec![Observation {
             block_timestamp: 100,
             initialized: true,
-            index: 0,
             ..Default::default()
         }]);
 
@@ -540,7 +536,6 @@ mod tests {
                 )
                 .expect("decimal cumulative"),
                 initialized: true,
-                index: i32::try_from(index).expect("slot index fits i32"),
             };
         }
         Observations::new(slots)
@@ -567,7 +562,6 @@ mod tests {
         let observations = Observations::new(vec![Observation {
             block_timestamp: 999_000,
             initialized: true,
-            index: 0,
             ..Default::default()
         }]);
 
@@ -585,7 +579,6 @@ mod tests {
         let observations = Observations::new(vec![Observation {
             block_timestamp: 999_000,
             initialized: true,
-            index: 0,
             ..Default::default()
         }]);
 
@@ -757,18 +750,8 @@ mod tests {
         // the observe gas is still paid. Only the cardinality guard skips the oracle.
         let dfc = DynamicFeeConfig::new(2700, 0, 0, false, 0);
         let observations = Observations::new(vec![
-            Observation {
-                block_timestamp: 999_000,
-                initialized: true,
-                index: 0,
-                ..Default::default()
-            },
-            Observation {
-                block_timestamp: 999_500,
-                initialized: true,
-                index: 1,
-                ..Default::default()
-            },
+            Observation { block_timestamp: 999_000, initialized: true, ..Default::default() },
+            Observation { block_timestamp: 999_500, initialized: true, ..Default::default() },
         ]);
 
         let fee = get_dynamic_fee(&dfc, 500, 0, 1, 1, 300, &observations, 1_000_000, true)

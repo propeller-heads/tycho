@@ -12,8 +12,9 @@ use super::state::AerodromeSlipstreamsState;
 use crate::{
     evm::protocol::utils::{
         slipstreams::{
-            aero_hook_fee::AeroHookFee, dynamic_fee_module::DynamicFeeConfig,
-            observations::Observations,
+            aero_hook_fee::AeroHookFee,
+            dynamic_fee_module::DynamicFeeConfig,
+            observations::{observation_slot, Observations},
         },
         uniswap::{i24_be_bytes_to_i32, tick_list::TickInfo},
     },
@@ -194,12 +195,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
         // each observation goes to its own index.
         let mut words = Vec::new();
         for (key, value) in &snapshot.state.attributes {
-            let Some(slot) = key.strip_prefix("observations/") else {
+            let Some(slot) = observation_slot(key) else {
                 continue;
             };
-            let slot = slot
-                .parse::<u16>()
-                .map_err(|err| InvalidSnapshotError::ValueError(format!("{key}: {err}")))?;
+            let slot = slot.map_err(InvalidSnapshotError::ValueError)?;
             words.push((slot, value.as_ref()));
         }
         let observations = Observations::from_words(words)
@@ -301,7 +300,7 @@ mod tests {
             dfc,
             0,
             1,
-            vec![Observation { initialized: true, index: 0, ..Default::default() }],
+            vec![Observation { initialized: true, ..Default::default() }],
         )
     }
 
@@ -354,14 +353,9 @@ mod tests {
                 2,
                 3,
                 vec![
-                    Observation { initialized: true, index: 0, ..Default::default() },
+                    Observation { initialized: true, ..Default::default() },
                     Observation::default(),
-                    Observation {
-                        block_timestamp: 5,
-                        initialized: true,
-                        index: 2,
-                        ..Default::default()
-                    },
+                    Observation { block_timestamp: 5, initialized: true, ..Default::default() },
                 ],
             )
         );
@@ -369,11 +363,11 @@ mod tests {
 
     #[tokio::test]
     async fn observation_slot_past_the_ring_fails_to_decode() {
-        // The ring holds at most 65,536 slots, so a larger index is malformed rather than a slot
+        // The pool's ring is `Observation[65535]`, so slot 65,535 is malformed rather than a slot
         // to grow the ring to.
         let mut snapshot = snapshot(None);
         snapshot.state.attributes.insert(
-            "observations/65536".to_string(),
+            "observations/65535".to_string(),
             Bytes::from((U256::from(1) << 248_u32).to_be_bytes::<32>()),
         );
 
@@ -382,7 +376,7 @@ mod tests {
         let Err(InvalidSnapshotError::ValueError(message)) = result else {
             panic!("expected a ValueError, got {result:?}");
         };
-        assert!(message.starts_with("observations/65536"), "{message}");
+        assert!(message.starts_with("observations/65535"), "{message}");
     }
 
     #[rstest]

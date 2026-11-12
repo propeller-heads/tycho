@@ -29,7 +29,7 @@ use crate::{
                 slipstreams::{
                     aero_hook_fee::{AeroHookFee, Execution, HookFee, PoolOracle},
                     dynamic_fee_module::{get_dynamic_fee, DynamicFeeConfig, ResolvedFee},
-                    observations::{Observation, Observations},
+                    observations::{observation_slot, Observation, Observations},
                     oracle_timestamp, raw_target_price,
                 },
                 uniswap::{
@@ -773,13 +773,10 @@ impl ProtocolSim for AerodromeSlipstreamsState {
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
             }
 
-            // observations keys are in the format "observations/{observation_index}"
-            if let Some(idx_str) = key.strip_prefix("observations/") {
-                let idx = idx_str
-                    .parse::<i32>()
-                    .map_err(|err| TransitionError::DecodeError(format!("{key}: {err}")))?;
+            if let Some(slot) = observation_slot(key) {
+                let slot = slot.map_err(TransitionError::DecodeError)?;
                 self.observations
-                    .upsert_observation(idx, value)
+                    .upsert_observation(slot, value)
                     .map_err(|err| TransitionError::DecodeError(format!("{key}: {err}")))?;
             }
         }
@@ -798,13 +795,10 @@ impl ProtocolSim for AerodromeSlipstreamsState {
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
             }
 
-            // observations keys are in the format "observations/{observation_index}"
-            if let Some(idx_str) = key.strip_prefix("observations/") {
-                let idx = idx_str
-                    .parse::<i32>()
-                    .map_err(|err| TransitionError::DecodeError(format!("{key}: {err}")))?;
+            if let Some(slot) = observation_slot(key) {
+                let slot = slot.map_err(TransitionError::DecodeError)?;
                 self.observations
-                    .upsert_observation(idx, &[])
+                    .upsert_observation(slot, &[])
                     .map_err(|err| TransitionError::DecodeError(format!("{key}: {err}")))?;
             }
         }
@@ -971,7 +965,6 @@ mod tests {
         pool.observations = Observations::new(vec![Observation {
             block_timestamp: last_observation_ts,
             initialized: true,
-            index: 0,
             ..Default::default()
         }]);
         pool
@@ -991,9 +984,7 @@ mod tests {
     /// index must match the chain (213 -> 214: exactly one observation written).
     #[test]
     fn replays_base_block_50166683_swap_pair_wei_exact() {
-        let mut observations: Vec<Observation> = (0..213)
-            .map(|index| Observation { index, ..Default::default() })
-            .collect();
+        let mut observations = vec![Observation::default(); 213];
         observations.push(Observation {
             block_timestamp: 1_787_122_711, // == parent block ts: the pool traded in that block
             tick_cumulative: -18_995_710_863_218,
@@ -1002,18 +993,13 @@ mod tests {
             )
             .unwrap(),
             initialized: true,
-            index: 213,
         });
         // The fixture carries only the newest slot. Slot 0, where the oracle falls back while the
         // next slot is unwritten, is set inside the 600 s window, so `observe` reverts `OLD` and
         // the module charges no dynamic fee, which is all this replay needs with a zero
         // scaling factor. Unwritten history at timestamp 0 would be a ring no pool has.
-        observations[0] = Observation {
-            block_timestamp: 1_787_122_690,
-            initialized: true,
-            index: 0,
-            ..Default::default()
-        };
+        observations[0] =
+            Observation { block_timestamp: 1_787_122_690, initialized: true, ..Default::default() };
 
         let mut pool = AerodromeSlipstreamsState::new(
             "0xdFe5F275020def30993f042174Fc2D335678b626".to_string(),
@@ -1327,7 +1313,6 @@ mod tests {
         let ring = Observations::new(vec![Observation {
             block_timestamp: 999_990,
             initialized: true,
-            index: 0,
             ..Default::default()
         }]);
         pool.observations = ring.clone();
@@ -1347,7 +1332,7 @@ mod tests {
 
     #[rstest]
     #[case::not_a_number("observations/next")]
-    #[case::past_the_ring("observations/65536")]
+    #[case::past_the_ring("observations/65535")]
     fn malformed_observation_key_fails_the_transition(#[case] key: &str) {
         let mut pool = create_basic_test_pool();
         let delta = ProtocolStateDelta {

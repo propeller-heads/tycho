@@ -10,14 +10,13 @@ pub struct Observation {
     pub(crate) tick_cumulative: i64,
     pub(crate) seconds_per_liquidity_cumulative_x128: U256,
     pub(crate) initialized: bool,
-    pub(crate) index: i32,
 }
 
 impl Observation {
-    /// Decodes the storage word of slot `index`. The word arrives as a big-endian integer without
+    /// Decodes an observation storage word. The word arrives as a big-endian integer without
     /// its leading zero bytes, so a slot whose `initialized` byte is clear, such as one that
     /// `increaseObservationCardinalityNext` prefilled with timestamp 1, is shorter than 32 bytes.
-    pub fn from_attribute(index: i32, bytes: &[u8]) -> Result<Self, SimulationError> {
+    pub fn from_attribute(bytes: &[u8]) -> Result<Self, SimulationError> {
         if bytes.len() > 32 {
             return Err(SimulationError::FatalError(format!(
                 "Invalid observation length: expected at most 32 bytes, got {}",
@@ -60,9 +59,23 @@ impl Observation {
             tick_cumulative,
             seconds_per_liquidity_cumulative_x128,
             initialized,
-            index,
         })
     }
+}
+
+/// Slots in the pool's oracle, `Observation[65535]`: `Oracle.grow` only writes below its `uint16`
+/// `next`, so the last slot is 65,534.
+const RING_SLOTS: u16 = u16::MAX;
+
+/// The ring slot of an `observations/<slot>` attribute key, or `None` for any other key. Errs,
+/// naming the key, when the slot is not a number or lies past the ring.
+pub fn observation_slot(key: &str) -> Option<Result<u16, String>> {
+    let slot = key.strip_prefix("observations/")?;
+    Some(match slot.parse::<u16>() {
+        Ok(slot) if slot < RING_SLOTS => Ok(slot),
+        Ok(slot) => Err(format!("{key}: slot {slot} is past the {RING_SLOTS}-slot ring")),
+        Err(err) => Err(format!("{key}: {err}")),
+    })
 }
 
 /// Why [`Observations::observe`] returned no value.
@@ -113,10 +126,9 @@ impl Observations {
     ) -> Result<Self, SimulationError> {
         let mut ring = Self::new(Vec::new());
         for (slot, word) in words {
-            let observation =
-                Observation::from_attribute(i32::from(slot), word).map_err(|err| {
-                    SimulationError::FatalError(format!("Observation slot {slot}: {err}"))
-                })?;
+            let observation = Observation::from_attribute(word).map_err(|err| {
+                SimulationError::FatalError(format!("Observation slot {slot}: {err}"))
+            })?;
             if observation.initialized {
                 ring.place(usize::from(slot), observation);
             }
@@ -129,20 +141,19 @@ impl Observations {
         self.observations
     }
 
-    pub fn upsert_observation(&mut self, index: i32, bytes: &[u8]) -> Result<(), SimulationError> {
-        // The pool's ring holds at most `type(uint16).max + 1` slots.
-        let slot = u16::try_from(index).map_err(|e| {
-            SimulationError::FatalError(format!("Invalid observation index {index}: {e}"))
-        })?;
+    /// Writes the storage word of ring slot `slot`, as parsed by [`observation_slot`].
+    pub fn upsert_observation(&mut self, slot: u16, bytes: &[u8]) -> Result<(), SimulationError> {
         // A deleted attribute is a zeroed storage word, which decodes as an uninitialized slot.
         // Removing the slot instead would shift every later slot off its ring index.
-        self.place(usize::from(slot), Observation::from_attribute(index, bytes)?);
+        self.place(usize::from(slot), Observation::from_attribute(bytes)?);
         Ok(())
     }
 
-    /// Stores `observation` at ring slot `idx`. Lookups read a slot past the end as uninitialized,
-    /// so an uninitialized observation there is not stored.
+    /// Stores `observation` at ring slot `idx`. Lookups only read initialized slots, so every
+    /// uninitialized one is stored as the default, and one past the end is not stored at all.
     fn place(&mut self, idx: usize, observation: Observation) {
+        let observation =
+            if observation.initialized { observation } else { Observation::default() };
         if idx >= self.observations.len() {
             if !observation.initialized {
                 return;
@@ -180,8 +191,7 @@ impl Observations {
         }
 
         let next_index = (index + 1) % cardinality;
-        let mut observation = transform(&last, timestamp, tick, liquidity)?;
-        observation.index = next_index as i32;
+        let observation = transform(&last, timestamp, tick, liquidity)?;
 
         let next_idx = next_index as usize;
         while self.observations.len() <= next_idx {
@@ -437,7 +447,6 @@ fn transform(
         tick_cumulative,
         seconds_per_liquidity_cumulative_x128,
         initialized: true,
-        index: before.index,
     })
 }
 
@@ -446,6 +455,7 @@ mod tests {
     use std::str::FromStr;
 
     use hex_literal::hex;
+    use rstest::rstest;
 
     use super::*;
 
@@ -454,7 +464,6 @@ mod tests {
             block_timestamp: timestamp,
             tick_cumulative: 100,
             initialized: true,
-            index: 0,
             ..Default::default()
         }])
     }
@@ -485,14 +494,13 @@ mod tests {
         // 100 + pre-swap tick 50 * 10 seconds
         assert_eq!(written.tick_cumulative, 600);
         assert!(written.initialized);
-        assert_eq!(written.index, 1);
     }
 
     #[test]
     fn write_wraps_at_cardinality() {
         let mut observations = Observations::new(vec![
-            Observation { block_timestamp: 900, initialized: true, index: 0, ..Default::default() },
-            Observation { block_timestamp: 950, initialized: true, index: 1, ..Default::default() },
+            Observation { block_timestamp: 900, initialized: true, ..Default::default() },
+            Observation { block_timestamp: 950, initialized: true, ..Default::default() },
         ]);
 
         let index = observations
@@ -541,7 +549,6 @@ mod tests {
             tick_cumulative: 10,
             seconds_per_liquidity_cumulative_x128: U256::from(0),
             initialized: true,
-            index: 0,
         };
 
         let tick = 5;
@@ -553,7 +560,6 @@ mod tests {
         assert_eq!(result.tick_cumulative, 60);
         assert_eq!(result.block_timestamp, target);
         assert!(result.initialized);
-        assert_eq!(result.index, before.index);
 
         assert!(
             result.seconds_per_liquidity_cumulative_x128 >
@@ -568,7 +574,6 @@ mod tests {
             tick_cumulative: 10,
             seconds_per_liquidity_cumulative_x128: U256::from(1234),
             initialized: true,
-            index: 0,
         };
 
         let tick = 3;
@@ -588,7 +593,6 @@ mod tests {
             tick_cumulative: 0,
             seconds_per_liquidity_cumulative_x128: U256::from(0),
             initialized: true,
-            index: 1,
         };
         let result = transform(&before, 100_000, 1, 1000).unwrap();
         assert_eq!(result.tick_cumulative, 100_000);
@@ -622,31 +626,27 @@ mod tests {
     fn from_attribute_reads_a_word_without_its_leading_zero_bytes() {
         // A slot `increaseObservationCardinalityNext` prefilled holds timestamp 1 and nothing
         // else, so the indexer sends the word as the single byte 0x01.
-        let observation = Observation::from_attribute(592, &[0x01]).expect("short word");
+        let observation = Observation::from_attribute(&[0x01]).expect("short word");
 
-        assert_eq!(
-            observation,
-            Observation { block_timestamp: 1, index: 592, ..Default::default() }
-        );
+        assert_eq!(observation, Observation { block_timestamp: 1, ..Default::default() });
         let word = encode_observation_bytes(7, -5, U256::from(9), false);
         assert_eq!(word[0], 0, "an uninitialized word starts with a zero byte");
         assert_eq!(
-            Observation::from_attribute(3, &word[1..]).expect("leading zero dropped"),
-            Observation::from_attribute(3, &word).expect("full word")
+            Observation::from_attribute(&word[1..]).expect("leading zero dropped"),
+            Observation::from_attribute(&word).expect("full word")
         );
     }
 
     #[test]
     fn from_attribute_rejects_a_word_longer_than_32_bytes() {
-        assert!(Observation::from_attribute(0, &[0; 33]).is_err());
+        assert!(Observation::from_attribute(&[0; 33]).is_err());
     }
 
     #[test]
     fn test_from_attribute_and_upsert() {
         let bytes = encode_observation_bytes(100, 10, U256::from(123456), true);
 
-        let obs = Observation::from_attribute(5, &bytes).unwrap();
-        assert_eq!(obs.index, 5);
+        let obs = Observation::from_attribute(&bytes).unwrap();
         assert_eq!(obs.block_timestamp, 100);
 
         // Upsert basic insert
@@ -672,11 +672,10 @@ mod tests {
 
     #[test]
     fn deleting_a_slot_keeps_later_slots_at_their_index() {
-        let newest =
-            Observation { block_timestamp: 30, initialized: true, index: 2, ..Default::default() };
+        let newest = Observation { block_timestamp: 30, initialized: true, ..Default::default() };
         let mut observations = Observations::new(vec![
-            Observation { block_timestamp: 10, initialized: true, index: 0, ..Default::default() },
-            Observation { block_timestamp: 20, initialized: true, index: 1, ..Default::default() },
+            Observation { block_timestamp: 10, initialized: true, ..Default::default() },
+            Observation { block_timestamp: 20, initialized: true, ..Default::default() },
             newest,
         ]);
 
@@ -693,7 +692,6 @@ mod tests {
         let mut observations = Observations::new(vec![Observation {
             block_timestamp: 10,
             initialized: true,
-            index: 0,
             ..Default::default()
         }]);
 
@@ -708,15 +706,35 @@ mod tests {
         assert!(!observations.slot(500).initialized);
     }
 
+    #[rstest]
+    #[case::first_slot("observations/0", Some(Ok(0)))]
+    #[case::last_slot("observations/65534", Some(Ok(65_534)))]
+    #[case::past_the_ring(
+        "observations/65535",
+        Some(Err("observations/65535: slot 65535 is past the 65535-slot ring".to_string()))
+    )]
+    #[case::past_u16("observations/65536", Some(Err("observations/65536: number too large to fit in target type".to_string())))]
+    #[case::not_a_number("observations/next", Some(Err("observations/next: invalid digit found in string".to_string())))]
+    #[case::other_attribute("tick", None)]
+    fn observation_slot_accepts_only_the_rings_slots(
+        #[case] key: &str,
+        #[case] expected: Option<Result<u16, String>>,
+    ) {
+        assert_eq!(observation_slot(key), expected);
+    }
+
     #[test]
-    fn slot_past_the_ring_is_rejected() {
-        let mut observations = Observations::new(Vec::new());
-        let word = encode_observation_bytes(10, 0, U256::ZERO, true);
+    fn prefilled_word_inside_the_ring_is_stored_like_an_unwritten_slot() {
+        let written = encode_observation_bytes(10, 0, U256::ZERO, true);
+        let mut observations =
+            Observations::from_words([(0, written.as_slice()), (2, &written)]).expect("ring");
+        let snapshot = observations.clone();
 
-        let result = observations.upsert_observation(65_536, &word);
+        observations
+            .upsert_observation(1, &[0x01])
+            .expect("prefilled slot");
 
-        assert!(result.is_err(), "got {result:?}");
-        assert_eq!(observations, Observations::new(Vec::new()));
+        assert_eq!(observations, snapshot);
     }
 
     #[test]
@@ -769,7 +787,6 @@ mod tests {
         let observations = Observations::new(vec![Observation {
             block_timestamp: 50,
             initialized: true,
-            index: 0,
             ..Default::default()
         }]);
 
@@ -806,7 +823,7 @@ mod tests {
     #[test]
     fn test_observe_multiple() {
         // Pool: 0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59
-        let items: &[(i32, [u8; 32])] = &[
+        let items: &[(u16, [u8; 32])] = &[
             (534, hex!("01000006a0000001485073e3b9c1b1ba599e933717fff778eb3ff056690b05a1")),
             (535, hex!("01000006a0000001485072f3c785d8212da7414577fff77952e1b5ec690ae2d7")),
             (2039, hex!("01000006a00000014850737217b73678a71c3a98fdfff7791d60d77e690af4cd")),

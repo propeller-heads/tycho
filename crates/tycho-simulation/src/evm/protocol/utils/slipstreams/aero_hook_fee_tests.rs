@@ -7,20 +7,19 @@ use crate::evm::protocol::utils::slipstreams::observations::Observation;
 const TICK_SPACING_FEE: u32 = 500;
 const OTHER_HOOK: [u8; 20] = [0x77; 20];
 
-fn observation(index: i32, block_timestamp: u32, tick_cumulative: i64) -> Observation {
+fn observation(block_timestamp: u32, tick_cumulative: i64) -> Observation {
     Observation {
         block_timestamp,
         tick_cumulative,
         seconds_per_liquidity_cumulative_x128: U256::ZERO,
         initialized: true,
-        index,
     }
 }
 
 /// Two observations 600s apart whose tick cumulative fell by 7: a TWAP tick of -7/600, which
 /// floors to -1 (truncation would give 0).
 fn observations() -> Observations {
-    Observations::new(vec![observation(0, 1_000, 0), observation(1, 1_600, -7)])
+    Observations::new(vec![observation(1_000, 0), observation(1_600, -7)])
 }
 
 fn oracle(observations: &Observations, tick: i32) -> PoolOracle<'_> {
@@ -129,7 +128,7 @@ fn oracle_younger_than_the_window_adds_no_dynamic_fee() {
 
 #[test]
 fn uninitialized_next_slot_reads_the_oldest_observation_at_index_zero() {
-    let observations = Observations::new(vec![observation(0, 1_000, 0), observation(1, 1_600, -7)]);
+    let observations = Observations::new(vec![observation(1_000, 0), observation(1_600, -7)]);
     // Cardinality 3: slot 2 was never written, so the oldest observation is slot 0.
     let pool = PoolOracle { observation_cardinality: 3, ..oracle(&observations, 10) };
 
