@@ -10,8 +10,28 @@
 //! and so does an unknown protocol name: check the name first where it must exist.
 
 use diesel::prelude::*;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 
-use crate::postgres::schema::protocol_system;
+use crate::postgres::{instance::InstanceId, schema::protocol_system, PostgresError, StorageError};
+
+/// The active instance of the protocol system `name`.
+///
+/// `None` if the protocol system has no active instance, or if no protocol system has that name.
+/// Filter with the returned id as a bound value: Postgres then plans and locks only that
+/// instance's leaves.
+pub async fn active_instance(
+    conn: &mut AsyncPgConnection,
+    name: &str,
+) -> Result<Option<InstanceId>, StorageError> {
+    let id = protocol_system::table
+        .filter(protocol_system::name.eq(name))
+        .select(protocol_system::active_instance_id)
+        .first::<Option<InstanceId>>(conn)
+        .await
+        .optional()
+        .map_err(PostgresError::from)?;
+    Ok(id.flatten())
+}
 
 /// The active instance of the protocol system `name`, as a scalar subselect.
 ///
@@ -38,13 +58,10 @@ pub fn active_instance_ids() -> _ {
 
 #[cfg(test)]
 mod tests {
-    use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+    use diesel_async::AsyncConnection;
 
     use super::*;
-    use crate::postgres::{
-        db_fixtures,
-        instance::{schema::tycho::protocol_instance, InstanceId},
-    };
+    use crate::postgres::{db_fixtures, instance::schema::tycho::protocol_instance};
 
     async fn setup_db() -> AsyncPgConnection {
         let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests");
@@ -121,6 +138,47 @@ mod tests {
         let mut conn = setup_db().await;
 
         assert_eq!(active_of(&mut conn, "not-a-protocol").await, None);
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_returns_the_pointer() {
+        let mut conn = setup_db().await;
+        let protocol_system_id = insert_curve(&mut conn).await;
+        let id = db_fixtures::insert_instance(&mut conn, protocol_system_id, "0.0.1").await;
+        db_fixtures::set_active_instance(&mut conn, protocol_system_id, Some(id)).await;
+
+        assert_eq!(
+            active_instance(&mut conn, "vm:curve")
+                .await
+                .unwrap(),
+            Some(id)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_is_none_without_pointer() {
+        let mut conn = setup_db().await;
+        let protocol_system_id = insert_curve(&mut conn).await;
+        db_fixtures::insert_instance(&mut conn, protocol_system_id, "0.0.1").await;
+
+        assert_eq!(
+            active_instance(&mut conn, "vm:curve")
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_is_none_for_unknown_protocol() {
+        let mut conn = setup_db().await;
+
+        assert_eq!(
+            active_instance(&mut conn, "not-a-protocol")
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
