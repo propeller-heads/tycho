@@ -28,7 +28,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `TYCHO_URL`     | Tycho indexer endpoint     | `tycho-dev.propellerheads.xyz`             |
 | `RPC_URL`       | Blockchain RPC endpoint    | `https://eth-mainnet.alchemyapi.io/v2/...` |
 | `TYCHO_API_KEY` | API key for Tycho services | `your-api-key`                             |
-| `BEBOP_KEY`, `HASHFLOW_USER` + `HASHFLOW_KEY`, `LIQUORICE_USER` + `LIQUORICE_KEY`, `NATIVE_API_KEY` | RFQ venue credentials; a venue without them is skipped | |
+| `BEBOP_KEY`, `HASHFLOW_USER` + `HASHFLOW_KEY`, `LIQUORICE_USER` + `LIQUORICE_KEY`, `NATIVE_API_KEY` | RFQ venue credentials; a venue without them is skipped. Euclid needs none and runs on Ethereum | |
 | `METRIC_API_KEY` | Metric (pAMM) credentials; required when `--pamm` lists `metric` | |
 
 ### Command Line Arguments

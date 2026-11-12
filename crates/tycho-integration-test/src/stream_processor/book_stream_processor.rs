@@ -19,6 +19,7 @@ use tycho_simulation::{
     pamm::protocols::metric::{self, feed::MetricFeedBuilder},
     rfq::protocols::{
         bebop::{self, feed::BebopFeedBuilder},
+        euclid::{self, feed::EuclidFeedBuilder},
         hashflow::{self, feed::HashflowFeedBuilder},
         liquorice::{self, feed::LiquoriceFeedBuilder},
         native::{self, feed::NativeFeedBuilder},
@@ -33,6 +34,7 @@ use crate::stream_processor::{StreamUpdate, StreamUpdatePayload};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RfqVenue {
     Bebop,
+    Euclid,
     Hashflow,
     Liquorice,
     Native,
@@ -42,6 +44,7 @@ impl Display for RfqVenue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RfqVenue::Bebop => write!(f, "{}", bebop::PROTOCOL_SYSTEM),
+            RfqVenue::Euclid => write!(f, "{}", euclid::PROTOCOL_SYSTEM),
             RfqVenue::Hashflow => write!(f, "{}", hashflow::PROTOCOL_SYSTEM),
             RfqVenue::Liquorice => write!(f, "{}", liquorice::PROTOCOL_SYSTEM),
             RfqVenue::Native => write!(f, "{}", native::PROTOCOL_SYSTEM),
@@ -93,10 +96,13 @@ impl std::fmt::Debug for RfqSelection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RfqSelection::Disabled => write!(f, "Disabled"),
-            RfqSelection::Credentials(credentials) => f
-                .debug_tuple("Credentials")
-                .field(&credentials.keys().collect::<Vec<_>>())
-                .finish(),
+            RfqSelection::Credentials(credentials) => {
+                let mut venues: Vec<_> = credentials.keys().collect();
+                venues.sort_by_key(ToString::to_string);
+                f.debug_tuple("Credentials")
+                    .field(&venues)
+                    .finish()
+            }
         }
     }
 }
@@ -141,6 +147,9 @@ impl RfqSelection {
                 "Native RFQ credentials not found. Expected environment variable: NATIVE_API_KEY"
             );
         }
+        // Euclid's gateway is public, so the venue runs wherever it serves the chain.
+        info!("Euclid RFQ needs no credentials");
+        credentials.insert(RfqVenue::Euclid, (String::new(), String::new()));
         RfqSelection::Credentials(credentials)
     }
 
@@ -342,6 +351,28 @@ impl BookStreamProcessor {
                     feeds
                         .add(liquorice::PROTOCOL_SYSTEM, liquorice_feed)
                         .expect("each provider is added once");
+                }
+                RfqVenue::Euclid => {
+                    // Euclid serves Ethereum; on any other chain the feed is skipped rather
+                    // than failing the whole processor.
+                    let mut builder =
+                        EuclidFeedBuilder::new(book_config.clone(), Arc::clone(usd_quote_tokens));
+                    if self.all_pairs {
+                        builder = builder.all_pairs();
+                    }
+                    match builder.build() {
+                        Ok(euclid_feed) => {
+                            feeds
+                                .add(euclid::PROTOCOL_SYSTEM, euclid_feed)
+                                .expect("each provider is added once");
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Euclid RFQ not supported on chain {:?}, skipping: {e}",
+                                self.chain
+                            )
+                        }
+                    }
                 }
                 RfqVenue::Native => {
                     // Native serves a fixed set of chains; on any other chain the feed is
@@ -671,7 +702,8 @@ mod tests {
 
         let printed = format!("{selection:?}");
 
-        assert_eq!(printed, "Credentials([Hashflow])");
+        // Euclid needs no credentials, so it is always among the venues.
+        assert_eq!(printed, "Credentials([Euclid, Hashflow])");
     }
 
     #[test]
@@ -680,9 +712,13 @@ mod tests {
             RfqSelection::from_cli(true, secrets(&[("BEBOP_KEY", "key")])),
             RfqSelection::Disabled
         );
+        // Euclid's gateway is public, so it is selected without any credentials.
         assert_eq!(
             RfqSelection::from_cli(false, secrets(&[])),
-            RfqSelection::Credentials(HashMap::new())
+            RfqSelection::Credentials(HashMap::from([(
+                RfqVenue::Euclid,
+                (String::new(), String::new())
+            )]))
         );
         let selection = RfqSelection::from_cli(
             false,
@@ -701,7 +737,10 @@ mod tests {
             .collect();
         venues.sort();
         // Hashflow needs both its user and its key.
-        assert_eq!(venues, [bebop::PROTOCOL_SYSTEM, native::PROTOCOL_SYSTEM]);
+        assert_eq!(
+            venues,
+            [bebop::PROTOCOL_SYSTEM, euclid::PROTOCOL_SYSTEM, native::PROTOCOL_SYSTEM]
+        );
     }
 
     /// Runs the processor in the current-thread test runtime, which polls none of the spawned
