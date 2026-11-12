@@ -44,6 +44,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     uint32 private _routerFeeOnOutputBps; // Router fee on output amount in fee units
     uint32 private _routerFeeOnClientFeeBps; // Router fee on client fee in fee units
     address private _routerFeeReceiver; // Address whose vault balance receives router fees
+    // Part of the surplus the router captures, in fee units (MAX_BPS = all).
+    // It shares the slot above, which every fee calculation reads anyway.
+    uint32 private _routerPositiveSlippageBps;
 
     // Per-client custom router fees (both output and client fees)
     // If set, custom values will override the default router fees for the client
@@ -52,9 +55,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
     // Tracks all clients that currently have at least one custom fee override
     EnumerableSet.AddressSet private _customFeeClients;
-
-    // Part of the surplus the router captures, in fee units (MAX_BPS = all)
-    uint32 private _routerPositiveSlippageBps;
 
     // Per-client router positive slippage bps. A set value replaces the global router positive slippage bps
     // for the client, so it can be zero.
