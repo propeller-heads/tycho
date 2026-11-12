@@ -147,6 +147,10 @@ evm = [
 book-feeds = [
     # `bytes_to_address` and the providers' `alloy` address types.
     "evm",
+    # The Efficient pools feed reads the chain over JSON-RPC.
+    "alloy/provider-http",
+    "alloy/reqwest",
+    "alloy/rpc-types",
     "dep:async-stream",
     "dep:bytes",
     "dep:reqwest",

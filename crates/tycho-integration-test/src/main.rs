@@ -111,11 +111,13 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_pamm: bool,
 
-    /// pAMM book feeds to run, comma-separated (e.g. metric,baibai). Replaces the default list
-    /// (metric). BaiBai runs on Base only and reads its books over --rpc-url. A listed venue
-    /// missing its credentials, or whose feed fails to build, fails the run; a default venue
-    /// is skipped instead. A feed that builds but fails once it runs, for example on a chain
-    /// its venue does not serve, ends with a warning like any other feed.
+    /// pAMM book feeds to run, comma-separated (e.g. metric,baibai,flamm). Replaces the default
+    /// list (metric). BaiBai runs on Base only and reads its books over --rpc-url. Efficient pools
+    /// (flamm) run on Base, Ethereum and BSC, read their books over --rpc-url and serve what the
+    /// FLAMM_* variables name. A listed venue missing its credentials, or whose feed fails to
+    /// build, fails the run; a default venue is skipped instead. A feed that builds but fails
+    /// once it runs, for example on a chain its venue does not serve, ends with a warning like
+    /// any other feed.
     #[arg(long, value_delimiter = ',', conflicts_with = "disable_pamm")]
     pamm: Option<Vec<PammVenue>>,
 
@@ -2526,8 +2528,8 @@ mod tests {
 
     #[test]
     fn pamm_parses_comma_separated_venues() {
-        let cli = parse(&["--pamm", "metric,metric"]).unwrap();
-        assert_eq!(cli.pamm, Some(vec![PammVenue::Metric, PammVenue::Metric]));
+        let cli = parse(&["--pamm", "metric,flamm"]).unwrap();
+        assert_eq!(cli.pamm, Some(vec![PammVenue::Metric, PammVenue::Flamm]));
     }
 
     #[test]

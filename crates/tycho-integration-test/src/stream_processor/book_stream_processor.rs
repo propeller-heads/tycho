@@ -1,5 +1,6 @@
 use std::{collections::HashMap, env, fmt::Display, str::FromStr, sync::Arc, time::Duration};
 
+use alloy::primitives::B256;
 use clap::ValueEnum;
 use futures::StreamExt as _;
 use miette::{miette, IntoDiagnostic, WrapErr};
@@ -18,6 +19,7 @@ use tycho_simulation::{
     },
     pamm::protocols::{
         baibai::{self, BaibaiFeedBuilder},
+        flamm::{self, FlammFeed, FlammFeedBuilder},
         metric::{self, feed::MetricFeedBuilder},
     },
     rfq::protocols::{
@@ -58,6 +60,9 @@ pub enum PammVenue {
     Metric,
     /// Base only. Reads its books from the chain over `--rpc-url`, so it needs no credentials.
     Baibai,
+    /// Efficient pools, on Base, Ethereum and BSC. Reads its books from the chain over
+    /// `--rpc-url` and needs no credentials, but serves only what the `FLAMM_*` variables name.
+    Flamm,
 }
 
 impl PammVenue {
@@ -80,6 +85,7 @@ impl Display for PammVenue {
         match self {
             PammVenue::Metric => write!(f, "{}", metric::PROTOCOL_SYSTEM),
             PammVenue::Baibai => write!(f, "{}", baibai::PROTOCOL_SYSTEM),
+            PammVenue::Flamm => write!(f, "{}", flamm::PROTOCOL_SYSTEM),
         }
     }
 }
@@ -551,6 +557,14 @@ fn add_pamm_feeds(
                         .add(venue.to_string(), feed)
                         .is_ok()
                 }),
+            // no default venue, so a feed that will not build always fails the run
+            PammVenue::Flamm => flamm_feed(book_config, rpc_url, &secret)
+                .map_err(|e| Unavailable::BuildFailed(e.to_string()))
+                .map(|feed| {
+                    feeds
+                        .add(venue.to_string(), feed)
+                        .is_ok()
+                }),
         };
         match added {
             Ok(true) => info!("Added {venue} feed"),
@@ -559,6 +573,58 @@ fn add_pamm_feeds(
         }
     }
     Ok(())
+}
+
+/// The Efficient pools feed the environment configures. Its factories differ by chain and what it
+/// may serve is the run's to say, so nothing defaults: `FLAMM_FACTORIES`, then `FLAMM_POOLS` to
+/// name pools, or `FLAMM_HOOK_CLASSES` with `FLAMM_PRICE_FEEDS` or `FLAMM_PRICE_FEED_CODE_HASHES`
+/// to admit them by what they run. Every listed class is an Efficient pools hook, of the one shape
+/// there is.
+///
+/// # Errors
+/// Returns an error when a variable does not parse or the feed refuses what they add up to.
+fn flamm_feed(
+    book_config: &BookFeedConfig,
+    rpc_url: &str,
+    secret: impl Fn(&str) -> Option<String>,
+) -> miette::Result<FlammFeed> {
+    let mut builder = FlammFeedBuilder::new(book_config.clone(), rpc_url.to_string())
+        .factories(listed::<Bytes>("FLAMM_FACTORIES", &secret)?)
+        .hook_classes(
+            listed::<B256>("FLAMM_HOOK_CLASSES", &secret)?
+                .into_iter()
+                .map(|class| (class, flamm::HookShape::Everlong))
+                .collect(),
+        )
+        .price_feeds(listed::<Bytes>("FLAMM_PRICE_FEEDS", &secret)?)
+        .price_feed_code_hashes(listed::<B256>("FLAMM_PRICE_FEED_CODE_HASHES", &secret)?);
+    let pools = listed::<Bytes>("FLAMM_POOLS", &secret)?;
+    if !pools.is_empty() {
+        builder = builder.pools(pools);
+    }
+    builder.build().into_diagnostic()
+}
+
+/// The comma-separated values of the variable `name`, none where it is not set.
+///
+/// # Errors
+/// Returns an error naming the variable and the value that does not parse.
+fn listed<T>(name: &str, secret: &impl Fn(&str) -> Option<String>) -> miette::Result<Vec<T>>
+where
+    T: FromStr,
+    T::Err: Display,
+{
+    secret(name)
+        .iter()
+        .flat_map(|values| values.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|e| miette!("{name} holds {value}, which does not parse: {e}"))
+        })
+        .collect()
 }
 
 /// What a pAMM venue that cannot run does to the run.
@@ -616,30 +682,48 @@ async fn forward(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
-    /// The labels of the feeds `selection` adds on Base when `METRIC_API_KEY` holds `key`.
-    fn added(selection: &PammSelection, key: Option<&str>) -> miette::Result<Vec<String>> {
-        added_on(Chain::Base, selection, key)
-    }
+    /// The variables an Efficient pools feed needs to admit pools by what they run.
+    const FLAMM_LISTS: [(&str, &str); 3] = [
+        ("FLAMM_FACTORIES", "0x1111111111111111111111111111111111111111"),
+        (
+            "FLAMM_HOOK_CLASSES",
+            "0x2222222222222222222222222222222222222222222222222222222222222222",
+        ),
+        ("FLAMM_PRICE_FEEDS", "0x3333333333333333333333333333333333333333"),
+    ];
 
-    /// The labels of the feeds `selection` adds on `chain` when `METRIC_API_KEY` holds `key`.
+    /// The labels of the feeds `selection` adds on `chain` with `variables` set.
     fn added_on(
         chain: Chain,
         selection: &PammSelection,
-        key: Option<&str>,
+        variables: &[(&str, &str)],
     ) -> miette::Result<Vec<String>> {
         let book_config =
             BookFeedConfig { chain, tokens: Arc::new(HashMap::new()), min_tvl_usd: 0.0 };
         let mut feeds = BookFeedStreams::new();
         add_pamm_feeds(selection, &book_config, "http://127.0.0.1:8545", &mut feeds, |name| {
-            key.filter(|_| name == "METRIC_API_KEY")
-                .map(str::to_string)
+            variables
+                .iter()
+                .find(|(variable, _)| *variable == name)
+                .map(|(_, value)| (*value).to_string())
         })?;
         Ok(feeds
             .labels()
             .map(str::to_string)
             .collect())
+    }
+
+    /// The labels of the feeds `selection` adds on Base when `METRIC_API_KEY` holds `key`.
+    fn added(selection: &PammSelection, key: Option<&str>) -> miette::Result<Vec<String>> {
+        let variables: Vec<(&str, &str)> = key
+            .into_iter()
+            .map(|key| ("METRIC_API_KEY", key))
+            .collect();
+        added_on(Chain::Base, selection, &variables)
     }
 
     #[test]
@@ -658,6 +742,8 @@ mod tests {
         assert_eq!(PammVenue::Metric.to_string(), metric::PROTOCOL_SYSTEM);
         assert_eq!(PammVenue::Baibai.cli_name(), "baibai");
         assert_eq!(PammVenue::Baibai.to_string(), baibai::PROTOCOL_SYSTEM);
+        assert_eq!(PammVenue::Flamm.cli_name(), "flamm");
+        assert_eq!(PammVenue::Flamm.to_string(), flamm::PROTOCOL_SYSTEM);
     }
 
     #[tokio::test]
@@ -705,6 +791,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_listed_flamm_feed_is_added_when_its_lists_are_set() {
+        let listed = PammSelection::Listed(vec![PammVenue::Flamm]);
+        assert_eq!(added_on(Chain::Base, &listed, &FLAMM_LISTS).unwrap(), [flamm::PROTOCOL_SYSTEM]);
+    }
+
+    #[tokio::test]
+    async fn the_flamm_feed_takes_named_pools_in_place_of_its_lists() {
+        let listed = PammSelection::Listed(vec![PammVenue::Flamm]);
+        let variables = [
+            FLAMM_LISTS[0],
+            (
+                "FLAMM_POOLS",
+                "0x4444444444444444444444444444444444444444, \
+                 0x5555555555555555555555555555555555555555",
+            ),
+        ];
+        assert_eq!(added_on(Chain::Base, &listed, &variables).unwrap(), [flamm::PROTOCOL_SYSTEM]);
+    }
+
+    #[tokio::test]
     async fn the_listed_venues_are_added_together() {
         let listed = PammSelection::Listed(vec![PammVenue::Metric, PammVenue::Baibai]);
         let mut labels = added(&listed, Some("key")).unwrap();
@@ -715,11 +821,59 @@ mod tests {
     #[tokio::test]
     async fn a_listed_venue_off_its_chain_fails_the_run() {
         let listed = PammSelection::Listed(vec![PammVenue::Baibai]);
-        let message = added_on(Chain::Ethereum, &listed, None)
+        let message = added_on(Chain::Ethereum, &listed, &[])
             .unwrap_err()
             .to_string();
         assert!(message.contains("--pamm"), "{message}");
         assert!(message.contains(baibai::PROTOCOL_SYSTEM), "{message}");
+    }
+
+    #[tokio::test]
+    async fn metric_and_the_flamm_feed_are_added_together() {
+        let listed = PammSelection::Listed(vec![PammVenue::Metric, PammVenue::Flamm]);
+        let mut variables = FLAMM_LISTS.to_vec();
+        variables.push(("METRIC_API_KEY", "key"));
+        let mut labels = added_on(Chain::Base, &listed, &variables).unwrap();
+        labels.sort();
+        assert_eq!(labels, [flamm::PROTOCOL_SYSTEM, metric::PROTOCOL_SYSTEM]);
+    }
+
+    #[tokio::test]
+    async fn the_flamm_feed_is_no_default_venue() {
+        let labels = added_on(Chain::Base, &PammSelection::Defaults, &FLAMM_LISTS).unwrap();
+        assert!(labels.is_empty(), "{labels:?}");
+    }
+
+    #[rstest]
+    #[case::no_factory(&FLAMM_LISTS[1..], "factory")]
+    #[case::no_hook_class(&[FLAMM_LISTS[0], FLAMM_LISTS[2]], "nothing admits a pool")]
+    #[case::no_price_feed(&FLAMM_LISTS[..2], "nothing admits a pool")]
+    #[case::a_value_that_does_not_parse(
+        &[("FLAMM_FACTORIES", "not hex")],
+        "FLAMM_FACTORIES holds not hex"
+    )]
+    #[case::a_hash_of_the_wrong_length(
+        &[FLAMM_LISTS[0], ("FLAMM_HOOK_CLASSES", "0x22"), FLAMM_LISTS[2]],
+        "FLAMM_HOOK_CLASSES holds 0x22"
+    )]
+    #[tokio::test]
+    async fn a_listed_flamm_feed_that_cannot_build_fails_the_run(
+        #[case] variables: &[(&str, &str)],
+        #[case] reason: &str,
+    ) {
+        let listed = PammSelection::Listed(vec![PammVenue::Flamm]);
+        let error = added_on(Chain::Base, &listed, variables).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("--pamm lists"), "{message}");
+        assert!(message.contains(reason), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_listed_flamm_feed_off_its_chains_fails_the_run() {
+        let listed = PammSelection::Listed(vec![PammVenue::Flamm]);
+        let error = added_on(Chain::Arbitrum, &listed, &FLAMM_LISTS).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Ethereum, Base and BSC"), "{message}");
     }
 
     #[tokio::test]
