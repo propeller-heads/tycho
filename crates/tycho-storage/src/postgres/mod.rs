@@ -2087,14 +2087,14 @@ mod tests_rpc_pool {
 
     #[tokio::test]
     async fn test_rpc_pool_forces_custom_plans() {
-        let db_url = std::env::var("DATABASE_URL").unwrap();
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests");
         let mode = plan_cache_mode(new_rpc_pool(&db_url).unwrap()).await;
         assert_eq!(mode, "force_custom_plan");
     }
 
     #[tokio::test]
     async fn test_default_pool_keeps_auto_plans() {
-        let db_url = std::env::var("DATABASE_URL").unwrap();
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests");
         let mode = plan_cache_mode(new_pool(&db_url).unwrap()).await;
         assert_eq!(mode, "auto");
     }

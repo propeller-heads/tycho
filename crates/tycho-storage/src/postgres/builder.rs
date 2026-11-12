@@ -204,10 +204,26 @@ fn spawn_refresh_tasks(
 mod test_serial_db {
     use std::time::Duration;
 
-    use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
+    use diesel::{sql_query, sql_types::Text, QueryableByName};
+    use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection, RunQueryDsl};
 
     use super::*;
     use crate::postgres::testing::run_against_db;
+
+    #[derive(QueryableByName)]
+    struct PlanCacheMode {
+        #[diesel(sql_type = Text)]
+        plan_cache_mode: String,
+    }
+
+    async fn plan_cache_mode(pool: &Pool<AsyncPgConnection>) -> String {
+        let mut conn = pool.get().await.unwrap();
+        sql_query("SHOW plan_cache_mode")
+            .get_result::<PlanCacheMode>(&mut conn)
+            .await
+            .unwrap()
+            .plan_cache_mode
+    }
 
     #[tokio::test]
     async fn build_with_rpc_gateway_keeps_request_connections_apart_serial_db() {
@@ -219,6 +235,9 @@ mod test_serial_db {
                 .await
                 .expect("gateways should build");
             let rpc_pool = rpc_gw.pool();
+
+            assert_eq!(plan_cache_mode(rpc_pool).await, "force_custom_plan");
+            assert_eq!(plan_cache_mode(extraction_gw.pool()).await, "auto");
 
             // Requests hold every request connection; extraction still connects at once.
             let connect = |pool: &Pool<AsyncPgConnection>| {
