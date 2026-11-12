@@ -685,12 +685,13 @@ mod tests {
     pub struct MyMessageSender {
         extractor_id: ExtractorIdentity,
         block_template: BlockAggregatedChanges,
+        partial_blocks: bool,
     }
 
     impl MyMessageSender {
         pub fn new(extractor_id: ExtractorIdentity) -> Self {
             let block_template = Self::default_block(&extractor_id.name);
-            Self { extractor_id, block_template }
+            Self { extractor_id, block_template, partial_blocks: false }
         }
 
         /// Creates a default `BlockAggregatedChanges` for testing purposes.
@@ -753,6 +754,10 @@ mod tests {
             });
 
             Ok(rx)
+        }
+
+        fn partial_blocks(&self) -> bool {
+            self.partial_blocks
         }
     }
 
@@ -1225,6 +1230,10 @@ mod tests {
 
             Ok(rx)
         }
+
+        fn partial_blocks(&self) -> bool {
+            false
+        }
     }
 
     #[actix_rt::test]
@@ -1550,6 +1559,10 @@ mod tests {
             // Always return an error to simulate subscription failure
             Err(SendError(ControlMessage::Stop))
         }
+
+        fn partial_blocks(&self) -> bool {
+            false
+        }
     }
 
     /// Test for partial_blocks subscription filter.
@@ -1753,6 +1766,10 @@ mod tests {
             // _tx is dropped here, closing the channel immediately.
             Ok(rx)
         }
+
+        fn partial_blocks(&self) -> bool {
+            false
+        }
     }
 
     /// Verifies that when an extractor's channel closes the client receives `SubscriptionEnded`
@@ -1887,6 +1904,10 @@ mod tests {
                 tokio::time::sleep(Duration::from_secs(10)).await;
             });
             Ok(rx)
+        }
+
+        fn partial_blocks(&self) -> bool {
+            false
         }
     }
 
