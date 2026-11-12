@@ -116,6 +116,7 @@ class Block(BaseModel):
     parent_hash: HexBytes
     chain: Union[Chain, CustomChain]
     ts: datetime
+    timestamp_ms: Optional[int] = None
 
 
 class BlockParam(BaseModel):
