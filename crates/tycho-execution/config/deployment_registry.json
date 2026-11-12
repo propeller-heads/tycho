@@ -37,7 +37,7 @@
         "protocol_specific_addresses_path": "crates/tycho-execution/config/protocol_specific_addresses.json"
       },
       "router": { "address": "0x1644D2477f809cc2C71bCCFd6Dc9497E3F83210d" },
-      "fee_calculator": { "address": "0x2930cB02F8293A684981EF7fB63C160329C410f1" },
+      "fee_calculator": { "address": "0x9F014dE1937FDF4929D803C66F89cd0F61c80EBA" },
       "executors": {
         "uniswap_v2": "0x0017c84f2B3414514B67Bfc9a63830c8E0E690d0",
         "sushiswap_v2": "0x0017c84f2B3414514B67Bfc9a63830c8E0E690d0",
@@ -101,7 +101,7 @@
         "protocol_specific_addresses_path": "crates/tycho-execution/config/protocol_specific_addresses.json"
       },
       "router": { "address": "0xAbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67" },
-      "fee_calculator": { "address": "0x4C95D7678Be1668FCa8205f0d076B5E872B715e1" },
+      "fee_calculator": { "address": "0x2337e60ddC3De05C3ca27a227DE13987dcd5a262" },
       "executors": {
         "uniswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",
         "sushiswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",
@@ -150,7 +150,7 @@
         "protocol_specific_addresses_path": "crates/tycho-execution/config/protocol_specific_addresses.json"
       },
       "router": { "address": "0xCba5574597Ad00EA250Fd106DAB4Fc7461949635" },
-      "fee_calculator": { "address": "0x3A20AdED2BAcfAB637DfDA86543Eb8E832402417" },
+      "fee_calculator": { "address": "0x83f4CE885A5d76B7637dD53Bbc4808bEd8741dc4" },
       "executors": {
         "uniswap_v2": "0x55345739FCB5c5393f9BE32864439754649A204A",
         "uniswap_v3": "0x0847Ec6467499a6F31FDd06B7dEB766649B2739B",
@@ -184,7 +184,7 @@
         "protocol_specific_addresses_path": "crates/tycho-execution/config/protocol_specific_addresses.json"
       },
       "router": { "address": "0x924F147c50eA59f5180a26031A8b65B2aA1e81Cd" },
-      "fee_calculator": { "address": "0x9ca59BD78aAB97Db9692E43684b12072e910F0b7" },
+      "fee_calculator": { "address": "0x991981345DE4b4e4854caF012D2D2753C4F35375" },
       "executors": {
         "uniswap_v2": "0xd0a1f74d4d77834feca0efa01ca6e0161dbf1f57",
         "uniswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
@@ -224,7 +224,7 @@
         "protocol_specific_addresses_path": "crates/tycho-execution/config/protocol_specific_addresses.json"
       },
       "router": { "address": "0x7f3D12BBaFb8955E51B3ab9588b34c8ad95BDA4e" },
-      "fee_calculator": { "address": "0x6C62645e52d40A700F8219f18CD92CE8a668C8Ea" },
+      "fee_calculator": { "address": "0x6bCAB83A19c97Ad3F143EC8f7ff07ec6E5cE2c6B" },
       "executors": {
         "uniswap_v2": "0x450B4a643553912C9aF98dc8b9dB2eF989Fb1444",
         "pancakeswap_v2": "0x0ECbE4a09eff3F4d054723720f60b55EE52bD99E",
@@ -265,7 +265,7 @@
         "protocol_specific_addresses_path": "crates/tycho-execution/config/protocol_specific_addresses.json"
       },
       "router": { "address": "0xbd4e6011F03355C2A377Fd9Af939322A7d0A1bC1" },
-      "fee_calculator": { "address": "0x3970230EAAC99d1C1880C04fcEc069E61dA823dC" },
+      "fee_calculator": { "address": "0xE928709B0FAAa5A4b450c7bAF9F8901Dd15d5E08" },
       "executors": {
         "uniswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
         "quickswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
@@ -301,7 +301,7 @@
         "protocol_specific_addresses_path": "crates/tycho-execution/config/protocol_specific_addresses.json"
       },
       "router": { "address": "0x0953c7E23B44259e5e5630e9b97C31D7278C4c85" },
-      "fee_calculator": { "address": "0x8b9918adcb59234fb9f3e7594cf972e3edbb93f1" },
+      "fee_calculator": { "address": "0x1169635F180c44aaCc4DBF5CA509bFCa7baD5CC3" },
       "executors": {
         "uniswap_v3": "0xA6D43EFEc7870ac6e27c81232C2B5E11b17d40d4",
         "fluid_v1": "0x5020a5012cDC3545d2E98B6fb3EA4b9dc90552a6",
@@ -333,7 +333,7 @@
         "protocol_specific_addresses_path": "crates/tycho-execution/config/protocol_specific_addresses.json"
       },
       "router": { "address": "0x09215a470bD585E59EB3F4B612fBD2678131fF9e" },
-      "fee_calculator": { "address": "0x0Dd35E98aa40B4b75A8Aa4950Fd761B23De12854" },
+      "fee_calculator": { "address": "0x2CC4Da16379a3ca6e0266808F49ecd433FdD14b6" },
       "executors": {
         "uniswap_v2": "0x81aFB56E21AB0744330ACf400E2A65e6B64D495E",
         "uniswap_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
@@ -381,7 +381,7 @@
         "address": "0x72C452506a551C7fe069f1F66Beb671AC58909E9"
       },
       "fee_calculator": {
-        "address": "0x865CC7A956159467b800e9d51D73Fa57182dFD0C"
+        "address": "0x47F115171FDEEaBD1a043261473daB0FCBd4F6d6"
       },
       "executors": {
         "uniswap_v2": "0x048eEE15C2Ec3b3114a6731f615088e79288Ef1c",
@@ -409,7 +409,7 @@
         "address": "0xf7d2Ec960Cb9714C97897Db395Ff7f0a11de1060"
       },
       "fee_calculator": {
-        "address": "0x4609Ed897E905F95C15159cb9cBC1A08486f5Fcf"
+        "address": "0x3c37FdEf87c79CCf177e8db9A5123B87581EF06E"
       },
       "executors": {
         "uniswap_v2": "0x6B8DFbbef1f5EF947427985F7C27D1c50CD025ea",
