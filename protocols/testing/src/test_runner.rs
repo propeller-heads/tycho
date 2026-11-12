@@ -13,7 +13,6 @@ use alloy::{
 use futures::StreamExt;
 use itertools::Itertools;
 use miette::{ensure, miette, IntoDiagnostic, WrapErr};
-use num_bigint::BigUint;
 use postgres::NoTls;
 use tokio::runtime::Runtime;
 use tracing::{debug, error, info, warn};
@@ -56,10 +55,10 @@ use tycho_test::{
 
 use crate::{
     adapter_builder::AdapterContractBuilder,
-    balances::{self, BalanceCheck},
+    balances,
     config::{
-        component_directions, Direction, Harness, IntegrationTest, IntegrationTestsConfig,
-        LimitKind, ProtocolComponentWithTestConfig, Skip, Tolerance,
+        component_directions, Direction, ExecutionTolerances, Harness, IntegrationTest,
+        IntegrationTestsConfig, LimitKind, ProtocolComponentWithTestConfig, Skip,
     },
     execution,
     report::{CheckId, Checks, Finished, Report},
@@ -105,31 +104,15 @@ struct RpcChain<'a> {
 }
 
 impl balances::Chain for RpcChain<'_> {
-    fn balance_of(&self, token: &Bytes, holder: &Bytes) -> Result<BigUint, String> {
-        let token = bytes_to_address(token).map_err(|e| e.to_string())?;
-        let holder = bytes_to_address(holder).map_err(|e| e.to_string())?;
-        let balance = self
-            .runner
-            .runtime
-            .block_on(
-                self.runner
-                    .rpc_provider
-                    .get_token_balance(token, holder, self.block),
-            )
-            .map_err(|e| format!("{e:#}"))?;
-        Ok(BigUint::from_bytes_be(&balance.to_be_bytes::<32>()))
-    }
-
-    fn call(&self, to: &Bytes, calldata: &Bytes) -> Result<Bytes, String> {
-        let to = bytes_to_address(to).map_err(|e| e.to_string())?;
+    fn call_code(&self, code: &Bytes, calldata: &Bytes) -> Result<Bytes, String> {
         let returned = self
             .runner
             .runtime
-            .block_on(
-                self.runner
-                    .rpc_provider
-                    .call(to, calldata.to_vec().into(), self.block),
-            )
+            .block_on(self.runner.rpc_provider.call_code(
+                code.to_vec().into(),
+                calldata.to_vec().into(),
+                self.block,
+            ))
             .map_err(|e| format!("{e:#}"))?;
         Ok(Bytes::from(returned.to_vec()))
     }
@@ -179,7 +162,7 @@ fn strict_inputs(output: &LadderOutput) -> HashMap<String, TychoExecutionInput> 
 fn record_strict_executions(
     output: &LadderOutput,
     executed: Option<miette::Result<HashMap<String, TychoExecutionResult>>>,
-    tolerance: Tolerance,
+    tolerances: &ExecutionTolerances,
     execution_skip_reason: Option<&str>,
     checks: &mut Checks,
 ) -> miette::Result<()> {
@@ -205,7 +188,7 @@ fn record_strict_executions(
                 Some(reason) => checks.skip(CheckId::ExecLadder, reason),
                 None => {
                     checks.run(CheckId::ExecLadder, || {
-                        check_executions_match(&output.executions, &results, tolerance)
+                        check_executions_match(&output.executions, &results, tolerances)
                     })?;
                 }
             }
@@ -222,7 +205,7 @@ fn record_strict_executions(
             .as_ref()
             .map_err(String::as_str)
     });
-    for judged in ladder::judge_limits(output, executed, tolerance) {
+    for judged in ladder::judge_limits(output, executed, tolerances) {
         checks.record_direction(
             judged.check,
             &judged.component,
@@ -775,7 +758,13 @@ impl TestRunner {
                         }
                     }
                 };
-                record_strict_executions(&output, executed, config.tolerance(), None, &mut checks)?;
+                record_strict_executions(
+                    &output,
+                    executed,
+                    &config.tolerances(),
+                    None,
+                    &mut checks,
+                )?;
             }
         }
         let Finished { outcome, results, drift } = checks.finish();
@@ -1003,21 +992,32 @@ impl TestRunner {
         })?;
 
         if config.harness == Harness::Strict {
-            // `from_yaml` rejected a package-level skip.
+            // `from_yaml` rejected a package-level skip, and a missing lens unless every
+            // component skips the check.
+            let lens = config
+                .balance_lens
+                .as_deref()
+                .map(|name| self.build_balance_lens(name));
             for component in &test.expected_components {
-                let tolerance = component
-                    .tvl_only
-                    .as_ref()
-                    .map_or(Tolerance::EXACT, |tvl_only| tvl_only.tolerance());
-                let failures = self.check_component_balances(
-                    component,
-                    tolerance,
-                    &protocol_components,
-                    &response_protocol_states_by_id,
-                    &all_tokens,
-                    block,
-                );
-                checks.record_component(CheckId::Balances, &component.base.id, &failures);
+                let id = &component.base.id;
+                if let Some(reason) = component.skip_balance_check.reason() {
+                    info!("[{id}] Skipping the balance check: {reason}");
+                    checks.skip_component(CheckId::Balances, id, reason);
+                    continue;
+                }
+                let failures = match &lens {
+                    Some(Ok(lens)) => self.check_component_balances(
+                        component,
+                        lens,
+                        &protocol_components,
+                        &response_protocol_states_by_id,
+                        &all_tokens,
+                        block,
+                    ),
+                    Some(Err(e)) => vec![format!("the balance lens could not be built: {e:#}")],
+                    None => vec!["no `balance_lens` is declared".to_string()],
+                };
+                checks.record_component(CheckId::Balances, id, &failures);
             }
         } else if let Some(reason) = config.skip_balance_check.reason() {
             info!("Skipping balance check: {reason}");
@@ -1195,7 +1195,7 @@ impl TestRunner {
                 &output,
                 &header,
                 &config.protocol_system,
-                config.tolerance(),
+                &config.tolerances(),
                 execution_skip_reason,
                 checks,
             );
@@ -1214,7 +1214,7 @@ impl TestRunner {
         }
         checks.run(CheckId::ExecLadder, || {
             let (inputs, results) = executed?;
-            check_executions_match(&inputs, &results, config.tolerance())
+            check_executions_match(&inputs, &results, &config.tolerances())
         })?;
 
         Ok(())
@@ -1710,7 +1710,7 @@ impl TestRunner {
         let (inputs, results) = self
             .execute_inputs(execution_data, block, protocol_system)
             .await?;
-        check_executions_match(&inputs, &results, Tolerance::LEGACY)
+        check_executions_match(&inputs, &results, &ExecutionTolerances::legacy())
     }
 
     /// Simulates executing every input, returning the inputs and their results.
@@ -1764,22 +1764,23 @@ impl TestRunner {
         output: &LadderOutput,
         block: &Block,
         protocol_system: &str,
-        tolerance: Tolerance,
+        tolerances: &ExecutionTolerances,
         execution_skip_reason: Option<&str>,
         checks: &mut Checks,
     ) -> miette::Result<()> {
         let executed = self
             .runtime
             .block_on(self.simulate_executions(strict_inputs(output), block, protocol_system));
-        record_strict_executions(output, Some(executed), tolerance, execution_skip_reason, checks)
+        record_strict_executions(output, Some(executed), tolerances, execution_skip_reason, checks)
     }
 
     /// Strict: checks an expected component's indexed balances against the source it declares,
-    /// at `block`, within `tolerance`. Returns every failure, empty when all its balances match.
+    /// at `block`, exactly or within its `tvl_only`. Returns every failure, empty when all its
+    /// balances match.
     fn check_component_balances(
         &self,
         expected: &ProtocolComponentWithTestConfig,
-        tolerance: Tolerance,
+        lens: &balances::Lens,
         indexed_components: &[ProtocolComponent],
         states: &HashMap<String, ProtocolComponentState>,
         all_tokens: &HashMap<Bytes, Token>,
@@ -1813,11 +1814,8 @@ impl TestRunner {
         };
         balances::check_component(
             &component,
-            expected
-                .balance_check
-                .as_ref()
-                .unwrap_or(&BalanceCheck::Default),
-            tolerance,
+            lens,
+            expected.tvl_only.as_ref(),
             &RpcChain { runner: self, block },
         )
     }
@@ -1875,6 +1873,20 @@ impl TestRunner {
     }
 
     /// Gets the adapter contract path if needed, building it if not found
+    /// Builds the balance lens `name` from `protocols/adapter-integration/evm/src/` and reads its
+    /// runtime bytecode. It is built every time, so a changed lens is never read stale; forge
+    /// recompiles only what changed.
+    fn build_balance_lens(&self, name: &str) -> miette::Result<balances::Lens> {
+        let path = self
+            .adapter_contract_builder
+            .build_target(name, None, None)
+            .wrap_err_with(|| format!("Failed to build the balance lens {name}"))?;
+        let code = std::fs::read(&path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("Failed to read {}", path.display()))?;
+        Ok(balances::Lens { name: name.to_string(), code: Bytes::from(code) })
+    }
+
     fn get_adapter_contract_path(
         &self,
         adapter_contract: Option<&str>,
@@ -2011,6 +2023,7 @@ mod tests {
     use std::{collections::HashMap, env, str::FromStr};
 
     use dotenv::dotenv;
+    use num_bigint::BigUint;
     use num_traits::Zero;
     use tycho_execution::encoding::models::Solution;
     use tycho_simulation::tycho_common::{
@@ -2042,7 +2055,8 @@ mod tests {
             skip_simulation,
             skip_execution,
             limits: None,
-            balance_check: None,
+            skip_balance_check: Skip::No,
+            execution_tolerance: None,
             tvl_only: None,
         }
     }
@@ -2309,7 +2323,7 @@ tests:
             ("test_a".to_string(), success(999)),
             ("at_limit_b".to_string(), success(1000)),
         ]);
-        assert!(check_executions_match(&ladder, &results, Tolerance::EXACT).is_err());
+        assert!(check_executions_match(&ladder, &results, &ExecutionTolerances::exact()).is_err());
 
         let mut checks = Checks::new(Harness::Strict, "t");
         observe_executions(&mut checks, &ladder, &results);
@@ -2403,7 +2417,7 @@ tests:
                 &path,
             )
             .unwrap();
-            assert_eq!(package.tolerance(), config.tolerance(), "{path}");
+            assert_eq!(package.tolerances(), config.tolerances(), "{path}");
             for component in config
                 .tests
                 .iter()

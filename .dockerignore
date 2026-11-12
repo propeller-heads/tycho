@@ -9,6 +9,8 @@ target/
 
 # Substreams workspace builds (separate toolchain, not needed for main images)
 protocols/substreams/
+# ...except the packages' integration test yamls, which tycho-integration-test embeds
+!protocols/substreams/**/integration_test*.tycho.yaml
 
 # Local dev files
 .env
