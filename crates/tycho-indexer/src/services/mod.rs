@@ -25,7 +25,6 @@ use crate::{
         deltas_buffer::PendingDeltas,
         middleware::{
             close_connection_on_shutdown, compression_middleware, rpc_metrics_middleware,
-            ShutdownSignal,
         },
         state::{
             service::StateService,
@@ -331,17 +330,13 @@ where
 
     /// Helper to spawn the main server task, optionally enabling WebSocket services.
     fn start_server(
-        mut self,
+        self,
         ws_data: Option<web::Data<ws::WsData>>,
         openapi: utoipa::openapi::OpenApi,
         pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
         state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
         let tracer = EVMEntrypointService::new(&self.rpc);
-        let shutdown_signal = self
-            .shutdown
-            .take()
-            .map(|shutdown| web::Data::new(ShutdownSignal(shutdown)));
 
         if !self.disabled_rpc_caches.is_empty() {
             info!(disabled = ?self.disabled_rpc_caches, "RPC response caches turned off");
@@ -358,6 +353,7 @@ where
             )
             .with_disabled_caches(&self.disabled_rpc_caches)
             .with_ready_head_tolerance(self.ready_head_tolerance)
+            .with_shutdown_signal(self.shutdown.clone())
             .with_state_service(state_service),
         );
 
@@ -384,7 +380,9 @@ where
                 // Enable zstd compression while being backwards compatible with clients that do not
                 .wrap(compression_middleware())
                 .wrap(RequestTracing::new())
-                .wrap(actix_middleware::from_fn(close_connection_on_shutdown))
+                .wrap(actix_middleware::from_fn(
+                    close_connection_on_shutdown::<G, EVMEntrypointService, _>,
+                ))
                 .app_data(rpc_data.clone())
                 .service(
                     web::resource(format!("/{}/contract_state", self.prefix))
@@ -439,10 +437,6 @@ where
                         .wrap(access_control::AccessControl::new(&self.api_key))
                         .route(web::get().to(debug::heap_profile)),
                 );
-            }
-
-            if let Some(shutdown_signal) = shutdown_signal.clone() {
-                app = app.app_data(shutdown_signal);
             }
 
             if let Some(ws_data) = ws_data.clone() {

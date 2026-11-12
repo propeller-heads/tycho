@@ -11,4 +11,4 @@ pub use plan_restrictions::PlansConfig;
 #[cfg(test)]
 pub(super) use plan_restrictions::{NumericRestriction, Operator};
 pub(super) use plan_restrictions::{PlanRestrictions, ValidateRestrictions};
-pub(super) use shutdown::{close_connection_on_shutdown, ShutdownSignal};
+pub(super) use shutdown::close_connection_on_shutdown;

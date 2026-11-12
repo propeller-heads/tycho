@@ -9,6 +9,7 @@ use anyhow::Error;
 use chrono::{Duration, Utc};
 use diesel_async::pooled_connection::deadpool;
 use thiserror::Error;
+use tokio::sync::watch;
 use tracing::{debug, error, info, instrument, trace, warn};
 use tycho_common::{
     dto::{self, PaginationResponse},
@@ -146,6 +147,9 @@ pub struct RpcHandler<G, T> {
     writer_status: Option<WriterStatus>,
     /// How old the newest block of a streamed extractor may be on a ready follower.
     ready_head_tolerance: chrono::Duration,
+    /// Turns `true` when the process starts to shut down. `None` for a process without a
+    /// shutdown sequence.
+    shutdown: Option<watch::Receiver<bool>>,
 }
 
 impl<G, T> RpcHandler<G, T>
@@ -204,17 +208,32 @@ where
             off_worker: OffWorker::new(),
             writer_status,
             ready_head_tolerance: DEFAULT_READY_HEAD_TOLERANCE,
+            shutdown: None,
         }
     }
 
-    /// Turns the given response caches off. A request to an endpoint whose cache is off always
-    /// runs the full path and stores nothing.
     /// Sets how old the newest block of a streamed extractor may be on a ready follower.
     pub(crate) fn with_ready_head_tolerance(mut self, tolerance: chrono::Duration) -> Self {
         self.ready_head_tolerance = tolerance;
         self
     }
 
+    /// Sets the signal that turns `true` when the process starts to shut down.
+    pub(crate) fn with_shutdown_signal(mut self, shutdown: Option<watch::Receiver<bool>>) -> Self {
+        self.shutdown = shutdown;
+        self
+    }
+
+    /// Returns whether the process has started to shut down. Always `false` without a shutdown
+    /// signal.
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.shutdown
+            .as_ref()
+            .is_some_and(|shutdown| *shutdown.borrow())
+    }
+
+    /// Turns the given response caches off. A request to an endpoint whose cache is off always
+    /// runs the full path and stores nothing.
     pub(crate) fn with_disabled_caches(mut self, kinds: &[RpcCacheKind]) -> Self {
         for kind in kinds {
             match kind {
