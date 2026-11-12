@@ -20,8 +20,9 @@ pub fn drift(simulated: &BigUint, executed: &BigUint) -> Option<(BigInt, f64)> {
     if executed.is_zero() {
         return None;
     }
-    let difference = BigInt::from(executed.clone()) - BigInt::from(simulated.clone());
-    let bps = BigRational::new(&difference * 10_000, BigInt::from(executed.clone())).to_f64()?;
+    let executed = BigInt::from(executed.clone());
+    let difference = &executed - BigInt::from(simulated.clone());
+    let bps = BigRational::new(&difference * 10_000, executed).to_f64()?;
     Some((difference, bps))
 }
 
@@ -36,33 +37,29 @@ pub fn check_execution_slippage(
     amount_out: &BigUint,
     tolerance: Tolerance,
 ) -> Result<(), String> {
-    let Some((difference, bps)) = drift(expected_amount_out, amount_out) else {
+    let Some((difference, _)) = drift(expected_amount_out, amount_out) else {
         return Err("execution returned no output".to_string());
     };
-    let within = difference.abs() <= BigInt::from(tolerance.wei) ||
-        difference.abs() * 10_000u32 <= BigInt::from(amount_out.clone()) * tolerance.bps;
-    if within {
+    let gap = difference.magnitude();
+    if gap <= &BigUint::from(tolerance.wei) || gap * 10_000u32 <= amount_out * tolerance.bps {
         return Ok(());
     }
 
-    let bps = format_bps(bps.abs());
     let (paid, quotes) =
         if difference.is_negative() { ("less", "overquotes") } else { ("more", "underquotes") };
-    Err(format!(
-        "execution paid {} {paid} than simulated: the simulation {quotes} by {bps} bps, beyond \
-         the tolerance ({tolerance})",
-        difference.abs()
-    ))
-}
-
-/// Formats a basis-point difference with two decimals, or with two significant digits below
-/// 0.01 bps, where a wei of a large trade would otherwise print as `0.00`.
-fn format_bps(bps: f64) -> String {
-    if bps == 0.0 || bps.abs() >= 0.01 {
-        format!("{bps:.2}")
+    // In hundredths of a bps, rounded up, so a difference beyond a whole-bps tolerance never
+    // prints as equal to it. Below 0.01 bps the amount paid says it all.
+    let scaled = gap * 1_000_000u32;
+    let by = if &scaled >= amount_out {
+        let centi_bps = (scaled + amount_out - 1u32) / amount_out;
+        format!(" by {}.{:02} bps", &centi_bps / 100u32, &centi_bps % 100u32)
     } else {
-        format!("{bps:.1e}")
-    }
+        String::new()
+    };
+    Err(format!(
+        "execution paid {gap} {paid} than simulated: the simulation {quotes}{by}, beyond the \
+         tolerance ({tolerance})"
+    ))
 }
 
 /// Why the execution of `simulation_id` does not match its simulation, if it does not.
@@ -383,14 +380,28 @@ mod tests {
     }
 
     #[test]
-    fn a_tiny_mismatch_prints_its_bps_with_significant_digits() {
-        let executed = BigUint::from(150_000u32) * BigUint::from(10u32).pow(18);
+    fn a_mismatch_prints_its_bps_rounded_up_and_none_below_a_hundredth() {
+        let executed = BigUint::from(1_000_000_000u32);
+        // 3.00001 bps: beyond 3 bps, so it must not print as 3.00.
+        let reason = check_execution_slippage(
+            &BigUint::from(1_000_300_001u32),
+            &executed,
+            Tolerance { bps: 3, wei: 0 },
+        )
+        .unwrap_err();
+        assert!(
+            reason.contains("overquotes by 3.01 bps, beyond the tolerance (3 bps)"),
+            "{reason}"
+        );
+
+        let large = BigUint::from(150_000u32) * BigUint::from(10u32).pow(18);
         let reason =
-            check_execution_slippage(&(&executed + 1u32), &executed, Tolerance::EXACT).unwrap_err();
-        assert!(reason.contains("overquotes by 6.7e-20 bps"), "{reason}");
-        assert_eq!(format_bps(0.0), "0.00");
-        assert_eq!(format_bps(0.01), "0.01");
-        assert_eq!(format_bps(0.0042), "4.2e-3");
+            check_execution_slippage(&(&large + 1u32), &large, Tolerance::EXACT).unwrap_err();
+        assert_eq!(
+            reason,
+            "execution paid 1 less than simulated: the simulation overquotes, beyond the tolerance \
+             (exact)"
+        );
     }
 
     #[test]
