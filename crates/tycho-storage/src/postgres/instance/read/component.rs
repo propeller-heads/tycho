@@ -190,13 +190,16 @@ impl PostgresGatewayNew {
                         .eq(protocol_component_holds_contract::instance_id)
                         .and(account::id.eq(protocol_component_holds_contract::account_id))),
                 )
+                // Postgres does not carry `= ANY` across the join to `account`, so without this
+                // filter it plans and locks every account leaf.
                 .filter(
                     protocol_component_holds_contract::instance_id
-                        .eq_any(instance_ids)
+                        .eq_any(instance_ids.clone())
                         .and(
                             protocol_component_holds_contract::protocol_component_id
                                 .eq_any(component_ids),
-                        ),
+                        )
+                        .and(account::instance_id.eq_any(instance_ids)),
                 )
                 .select((
                     protocol_component_holds_contract::instance_id,
