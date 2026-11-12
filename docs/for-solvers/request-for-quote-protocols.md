@@ -39,7 +39,7 @@ export METRIC_API_KEY=<your-metric-trading-key>
 export PRIVATE_KEY=<your-wallet-private-key>
 ```
 
-Metric's feed talks to Metric's public endpoint (`MetricFeedBuilder::base_url` points it elsewhere) and sends the trading key as the Bearer token the authenticated `bid_ask` endpoint requires. The example registers Metric by default; `--disable-pamm` leaves it out.
+Metric's feed talks to Metric's public endpoint (`MetricFeedBuilder::base_url` points it elsewhere) and sends the trading key as a Bearer token with every request: the `bid_ask` endpoint requires it, and so does the metadata endpoint on the chains Metric serves only to partners. The example registers Metric by default; `--disable-pamm` leaves it out.
 
 The Metric feed serves a pool only while Metric reports its price provider `healthy`, and only in the directions where the pool quotes a price and its depth holds volume. It quotes a swap by walking that depth, and a swap larger than the depth fails.
 

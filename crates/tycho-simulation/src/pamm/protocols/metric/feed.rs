@@ -45,8 +45,9 @@ pub struct MetricFeedBuilder {
 }
 
 impl MetricFeedBuilder {
-    /// `api_key` is the Bearer trading key the batch bid/ask endpoint requires; without a
-    /// valid one no pool is quotable and the feed publishes empty books.
+    /// `api_key` is the Bearer trading key Metric's endpoints require. Metric refuses an invalid
+    /// one with `401`, so every poll fails and the feed publishes no books, retrying with
+    /// backoff.
     pub fn new(book_config: BookFeedConfig, api_key: String) -> Self {
         Self {
             assembler_builder: MetricBookAssemblerBuilder::new(book_config),

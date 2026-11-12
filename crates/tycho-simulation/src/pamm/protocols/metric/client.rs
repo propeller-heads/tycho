@@ -1,6 +1,7 @@
 //! Everything that talks to the `api.metric.xyz` v1 API.
 //!
-//! Endpoint reference: <https://docs.metric.xyz/RSm94m71kqtGICv4iKRj/developers/api>
+//! Endpoint reference: <https://docs.metric.xyz/reference/api/metadata> and
+//! <https://docs.metric.xyz/reference/api/retrieve-batch-bid-and-ask>
 
 use std::{collections::HashMap, num::NonZeroUsize};
 
@@ -51,8 +52,9 @@ const BID_ASK_TIMEOUT: Duration = Duration::from_secs(3);
 ///
 /// A poll's worst case is the metadata fetch plus
 /// `ceil(pools / (BID_ASK_BATCH_SIZE * this)) * BID_ASK_TIMEOUT`, and it has to stay inside the
-/// feed loop's whole-poll `request_timeout`. Metric serves fewer than `BID_ASK_BATCH_SIZE` pools
-/// per chain today, so a poll is a single batch.
+/// feed loop's whole-poll `request_timeout`. At the default the batches of up to
+/// `BID_ASK_BATCH_SIZE * 16` pools run in one round; Metric lists a few hundred pools on a chain
+/// with no TVL floor and under a hundred at its default floor of 10 USD.
 pub const DEFAULT_BID_ASK_CONCURRENCY: NonZeroUsize = NonZeroUsize::new(16).unwrap();
 
 /// Reads Metric's pool metadata and per-pool quotes. Unlike the RFQ venues' clients this one
@@ -65,7 +67,9 @@ pub struct MetricClient {
     metadata_endpoint: String,
     /// Prefix ending at /public/v1/evm/{chain_id}; pool-specific endpoints are derived from it.
     chain_endpoint: String,
-    /// Bearer trading key required by the authenticated endpoints (`bid_ask/batch`).
+    /// Bearer trading key, sent with every request: the batch bid/ask endpoint requires it, and so
+    /// does the metadata endpoint on the chains Metric serves to partners only. Metric answers an
+    /// invalid key with `401` on both.
     #[debug(skip)]
     api_key: String,
     bid_ask_concurrency: NonZeroUsize,
@@ -73,10 +77,8 @@ pub struct MetricClient {
 }
 
 impl MetricClient {
-    /// A client for the Metric deployment at `base_url`, serving the chain with `chain_id`.
-    /// Every endpoint it requests hangs off that chain's own prefix.
-    /// A client for Metric's API on `chain_id`. `base_url` points it somewhere else than the
-    /// venue, which is what
+    /// A client for Metric's API on `chain_id`; every endpoint it requests hangs off that chain's
+    /// own prefix. `base_url` points it somewhere else than the venue, which is what
     /// [`MetricFeedBuilder::base_url`](super::feed::MetricFeedBuilder::base_url) passes on.
     pub fn new(
         base_url: Option<&str>,
