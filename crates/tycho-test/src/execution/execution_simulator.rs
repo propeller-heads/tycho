@@ -165,11 +165,10 @@ pub enum SimulationBase {
     /// The state the block was built on — its parent's — with the block's number and timestamp:
     /// the call a client makes before the block exists, when those two are all it knows of it.
     BeforeBlock,
-    /// The state after the block, in the context of the block after it: the next number, and a
-    /// timestamp `block_time_secs` later. A swap quoted on the block's state executes there at the
-    /// earliest, and the tycho-simulation decoder prices states that implement
-    /// `ProtocolSim::apply_block` for it.
-    NextBlock { block_time_secs: u64 },
+    /// The state after the block, in the context of the block after it: the next number, at
+    /// `timestamp`. A swap quoted on the block's state executes there at the earliest, and the
+    /// tycho-simulation decoder prices states that implement `ProtocolSim::apply_block` for it.
+    NextBlock { timestamp: u64 },
 }
 
 impl SimulationBase {
@@ -198,9 +197,7 @@ impl SimulationBase {
         let (number, time) = match self {
             SimulationBase::AfterBlock => return None,
             SimulationBase::BeforeBlock => (block.number(), block.header.timestamp),
-            SimulationBase::NextBlock { block_time_secs } => {
-                (block.number() + 1, block.header.timestamp + block_time_secs)
-            }
+            SimulationBase::NextBlock { timestamp } => (block.number() + 1, timestamp),
         };
         Some(BlockOverrides {
             number: Some(U256::from(number)),

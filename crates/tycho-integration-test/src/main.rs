@@ -1483,7 +1483,7 @@ async fn process_update(
                 &block,
                 router_overwrites_data.clone(),
                 None,
-                chain.block_time_secs(),
+                next_block_timestamp(update, &block, chain),
             )
             .await
             .map_err(|(e, _, _)| e)?,
@@ -2253,6 +2253,17 @@ fn executes_in_next_block(protocol_system: &str) -> bool {
     NEXT_BLOCK_PROTOCOLS.contains(&protocol_system)
 }
 
+/// The timestamp of the block after `block`, where a swap quoted on `block`'s state executes at the
+/// earliest: the timestamp the decoder priced the protocol update for, else `block`'s timestamp
+/// plus the chain's block time.
+fn next_block_timestamp(update: &StreamUpdate, block: &Block, chain: Chain) -> u64 {
+    let projected = match &update.payload {
+        StreamUpdatePayload::Protocol(protocol_update) => protocol_update.execution_timestamp,
+        StreamUpdatePayload::Book { .. } | StreamUpdatePayload::PriceLevelStream(_) => None,
+    };
+    projected.unwrap_or_else(|| block.header.timestamp + chain.block_time_secs())
+}
+
 /// The block a Tenderly link replays a swap of `block` in. `None` keeps the link's default, the
 /// block after `block`, which matches a simulation on `block`'s own state. A swap simulated before
 /// `block` replays in `block` itself, on its parent's state.
@@ -2358,18 +2369,20 @@ fn format_error_chain(e: &miette::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{collections::HashMap, str::FromStr, time::Duration};
 
+    use alloy::rpc::types::Block;
     use clap::Parser;
     use rstest::rstest;
     use tycho_common::{models::token::Token, Bytes};
-    use tycho_simulation::tycho_common::models::Chain;
+    use tycho_simulation::{protocol::models::Update, tycho_common::models::Chain};
 
     use super::{
         book_swap_directions, executes_in_next_block, is_oracle_stale_revert, is_stale_quote,
-        pamm_venue, sample_swap_directions, should_fetch_block_by_number, Cli, PammVenue,
-        TychoState,
+        next_block_timestamp, pamm_venue, sample_swap_directions, should_fetch_block_by_number,
+        Cli, PammVenue, TychoState,
     };
+    use crate::stream_processor::{StreamUpdate, StreamUpdatePayload};
 
     #[rstest]
     #[case::direct("pricelevelstream:fermiswap", Some("fermiswap"))]
@@ -2400,6 +2413,38 @@ mod tests {
         #[case] expected: bool,
     ) {
         assert_eq!(executes_in_next_block(protocol_system), expected);
+    }
+
+    fn protocol_update(execution_timestamp: Option<u64>) -> StreamUpdate {
+        StreamUpdate {
+            payload: StreamUpdatePayload::Protocol(
+                Update::new(100, HashMap::new(), HashMap::new())
+                    .set_execution_timestamp(execution_timestamp),
+            ),
+            is_first_update: false,
+            received_at: Duration::ZERO,
+        }
+    }
+
+    fn block_at(timestamp: u64) -> Block {
+        let mut block: Block = Block::default();
+        block.header.timestamp = timestamp;
+        block
+    }
+
+    #[test]
+    fn next_block_timestamp_prefers_the_decoder_projection() {
+        let timestamp =
+            next_block_timestamp(&protocol_update(Some(1_000)), &block_at(1_000), Chain::Base);
+
+        assert_eq!(timestamp, 1_000);
+    }
+
+    #[test]
+    fn next_block_timestamp_falls_back_to_block_time() {
+        let timestamp = next_block_timestamp(&protocol_update(None), &block_at(1_000), Chain::Base);
+
+        assert_eq!(timestamp, 1_000 + Chain::Base.block_time_secs());
     }
 
     #[rstest]
