@@ -7,7 +7,7 @@ use tycho_common::models::token::Token;
 use crate::{
     book::{component::pair_book, Book, BookFeedConfig, BookSnapshot, Books, ReceivedAt},
     pamm::protocols::metric::{
-        client::MetricClient,
+        client::{MetricClient, METRIC_DEFAULT_MIN_TVL_USD},
         models::{MetricMetadata, MetricPoolPrice, MetricPrices},
         state::MetricState,
         PROTOCOL_TYPE,
@@ -35,7 +35,7 @@ impl HttpSource for MetricBookSource {
     async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
         let prices = self
             .prices
-            .poll(|pool| {
+            .poll(self.assembler.book_config.min_tvl_usd, |pool| {
                 self.assembler
                     .pool_tokens(pool)
                     .is_some()
@@ -112,17 +112,19 @@ impl MetricPricesSource {
         Self { client }
     }
 
-    /// Polls the metadata of every pool, then quotes the unpaused ones for which `keep` holds.
+    /// Polls the metadata of every pool with a USD TVL of at least `min_tvl_usd`, then quotes the
+    /// ones for which `keep` holds.
     ///
     /// A metadata failure fails the poll, and so does losing every pool; losing some only drops
     /// those from the prices.
     pub(super) async fn poll(
         &self,
+        min_tvl_usd: f64,
         keep: impl Fn(&MetricMetadata) -> bool,
     ) -> Result<MetricPrices, FeedError> {
         let pools = self
             .client
-            .fetch_metadata()
+            .fetch_metadata(min_tvl_usd)
             .await?
             .into_iter()
             .filter(|pool| keep(pool))
@@ -135,7 +137,8 @@ impl HttpSource for MetricPricesSource {
     type Snapshot = MetricPrices;
 
     async fn fetch(&self) -> Result<MetricPrices, FeedError> {
-        self.poll(is_unpaused).await
+        self.poll(METRIC_DEFAULT_MIN_TVL_USD, is_unpaused)
+            .await
     }
 }
 
@@ -216,7 +219,11 @@ impl MetricBookAssembler {
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::Arc, time::Duration};
+    use std::{
+        str::FromStr,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use chrono::DateTime;
     use rstest::rstest;
@@ -528,7 +535,10 @@ mod tests {
             api_key,
             DEFAULT_BID_ASK_CONCURRENCY,
         );
-        let metadata = client.fetch_metadata().await.unwrap();
+        let metadata = client
+            .fetch_metadata(0.0)
+            .await
+            .unwrap();
         assert!(!metadata.is_empty(), "Metric serves no Base pools");
 
         let tokens = metadata
@@ -581,6 +591,40 @@ mod tests {
         assert_eq!(received, prices);
         assert_same_books(&source.assembler.books(received), &published);
         assert_eq!(published.len(), 1, "only the healthy pool is servable");
+    }
+
+    /// The book source asks Metric for its own book floor; the prices source, which has no book
+    /// settings, asks for the floor Metric applies by default.
+    #[tokio::test]
+    async fn each_source_asks_metric_for_its_tvl_floor() {
+        let page = metadata_page(&[], None);
+        let floors = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&floors);
+        let server = spawn_http_server(move |request| {
+            let floor = request
+                .target
+                .split("minTvlFiat=")
+                .nth(1)?
+                .split('&')
+                .next()?
+                .to_string();
+            recorded.lock().unwrap().push(floor);
+            Some(("200 OK", page.clone()))
+        })
+        .await;
+        let book_source = MetricBookSource {
+            prices: prices_source(Chain::Ethereum, &server.url(), "key"),
+            assembler: serving_weth_usdc_above_100_usd(),
+        };
+
+        book_source.fetch().await.unwrap();
+        book_source
+            .prices
+            .fetch()
+            .await
+            .unwrap();
+
+        assert_eq!(*floors.lock().unwrap(), vec!["100", "10"]);
     }
 
     #[tokio::test]

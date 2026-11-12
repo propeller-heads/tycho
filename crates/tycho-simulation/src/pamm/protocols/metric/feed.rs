@@ -206,8 +206,9 @@ fn check_base_url(base_url: &str) -> Result<(), FeedError> {
 
 /// Polls Metric's metadata and batch bid/ask endpoints and publishes every poll as
 /// [`MetricPrices`]: each unpaused pool that answered its quote request. Requires only the chain
-/// and trading key. [`MetricBookAssembler`] applies the token list, TVL floor and quote-usability
-/// checks.
+/// and trading key. It lists the pools Metric lists by default, those with a USD TVL of at least
+/// 10, so books assembled from it with a lower floor lack the pools under 10.
+/// [`MetricBookAssembler`] applies the token list, TVL floor and quote-usability checks.
 ///
 /// A poll succeeds while any pool answers; a pool that fails is left out, so a reader loses only
 /// that pool's pairs. `Debug` output omits the API key.
