@@ -49,10 +49,6 @@ declare it on the component that needs it rather than the package.
 Strict `full` runs the ladder, the limit checks and the tolerance on every update, for every pool
 (unlisted pools get the package's `limits`), and stops on the first failed check (README, "Full
 mode").
-Strict `range` streams the range while indexing (`--no-stream` turns it off): it applies every block,
-simulates at up to 50 changed blocks, executes at as few as meet the coverage floor, and requires
-the streamed state to quote as the stop-block snapshot (`stream.matches_snapshot`);
-`stream.coverage` reports the floor as a warning for now.
 `range --report <path>` writes each check's outcome as JSON. See `README.md`, "Strict mode".
 
 ### Declaring limits
