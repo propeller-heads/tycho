@@ -10,6 +10,7 @@ import {IFeeCalculator, CustomFees} from "@interfaces/IFeeCalculator.sol";
 
 error FeeCalculator__FeeTooHigh();
 error FeeCalculator__ShareTooHigh();
+error FeeCalculator__CapTooHigh();
 error FeeCalculator__AddressZero();
 
 /**
@@ -28,6 +29,11 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     struct TokenPairFee {
         bool isSet;
         uint32 feeBps;
+    }
+
+    struct PositiveSlippageCap {
+        bool isSet;
+        uint32 capBps;
     }
 
     // 100% expressed in 8-decimal fee units (1 unit = 0.0001 BPS = 0.000001%)
@@ -58,6 +64,10 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     // keeps the rest, so the default of zero leaves the full surplus to it.
     mapping(address => uint32) private _clientPositiveSlippageShareBps;
 
+    // Most surplus captured from each client's swaps, as a fraction of the
+    // swap's actual output in fee units. A client without one is uncapped.
+    mapping(address => PositiveSlippageCap) private _positiveSlippageCaps;
+
     // Router fee on output for swaps between two tokens, in both
     // directions. Keyed by the lower token address, then the higher one.
     // A set pair fee replaces the default router fee on output, so it can
@@ -85,6 +95,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     event PositiveSlippageExemptionSet(address indexed client, bool exempt);
     event ClientPositiveSlippageShareUpdated(
         address indexed client, uint32 oldShareBps, uint32 newShareBps
+    );
+    event PositiveSlippageCapUpdated(
+        address indexed client, uint32 oldCapBps, uint32 newCapBps
     );
     event TokenPairFeeUpdated(
         address indexed token0, address indexed token1, uint32 newFeeBps
@@ -120,11 +133,13 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      *      Deduction order:
      *      1. When positive slippage capture is enabled and the client is not
      *         exempt, the surplus (actualAmountOut - expectedAmountOut) is
-     *         taken first. The client gets its share of the surplus and
-     *         the router keeps the rest.
+     *         taken first, up to the client's cap (a fraction of
+     *         actualAmountOut). The client gets its share of the captured
+     *         surplus and the router keeps the rest.
      *      2. Fees (client fee + router fees) are then calculated on
-     *         the amount *after* surplus extraction (expectedAmountOut when
-     *         surplus was taken, actualAmountOut otherwise).
+     *         the amount *after* surplus extraction: expectedAmountOut when
+     *         the whole surplus was taken, more when the cap bound it, and
+     *         actualAmountOut when nothing was taken.
      *
      *      Router fee parameters are retrieved from contract storage based on the client address.
      *      Client fee parameters are passed as function arguments.
@@ -147,7 +162,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
                 / MAX_BPS;
 
         // Fee base = actual output minus any extracted surplus.
-        // When surplus is taken: feeBase = expectedAmountOut.
+        // When the whole surplus is taken: feeBase = expectedAmountOut.
+        // When the cap binds, feeBase keeps the surplus above the cap.
         // When no surplus (disabled or actual <= expected): it is zero.
         uint256 feeBase = feeInput.actualAmountOut - positiveSlippage;
 
@@ -270,7 +286,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
     /**
      * @dev Calculates the positive slippage surplus that the router captures
-     * @return positiveSlippage The surplus (zero if disabled, the client is
+     * @return positiveSlippage The surplus, at most the client's cap
+     *         fraction of actualAmountOut (zero if disabled, the client is
      *         exempt, or there is no surplus)
      */
     function _calculatePositiveSlippage(
@@ -286,6 +303,13 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         }
 
         positiveSlippage = actualAmountOut - expectedAmountOut;
+
+        PositiveSlippageCap memory cap = _positiveSlippageCaps[client];
+        if (!cap.isSet) return positiveSlippage;
+        uint256 maxPositiveSlippage = actualAmountOut * cap.capBps / MAX_BPS;
+        if (positiveSlippage > maxPositiveSlippage) {
+            positiveSlippage = maxPositiveSlippage;
+        }
     }
 
     function _getTokenPairFee(address tokenA, address tokenB)
@@ -677,5 +701,45 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         returns (uint32)
     {
         return _clientPositiveSlippageShareBps[client];
+    }
+
+    /**
+     * @dev Caps the surplus captured from a client's swaps at a fraction of
+     *      each swap's actual output. The surplus above the cap stays in the
+     *      swap output, and fees are charged on it. A cap of 100_000_000
+     *      leaves the client uncapped again.
+     * @param client The client address to update
+     * @param capBps Cap in fee units (100_000_000 = 100%)
+     */
+    function setPositiveSlippageCap(address client, uint32 capBps)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        if (capBps > MAX_BPS) revert FeeCalculator__CapTooHigh();
+        uint32 oldCapBps = _getPositiveSlippageCap(client);
+        _positiveSlippageCaps[client] =
+            PositiveSlippageCap({isSet: true, capBps: capBps});
+        emit PositiveSlippageCapUpdated(client, oldCapBps, capBps);
+    }
+
+    /**
+     * @dev Returns a client's cap on captured surplus in fee units;
+     *      100_000_000 for a client without one
+     */
+    function getPositiveSlippageCap(address client)
+        external
+        view
+        returns (uint32)
+    {
+        return _getPositiveSlippageCap(client);
+    }
+
+    function _getPositiveSlippageCap(address client)
+        internal
+        view
+        returns (uint32)
+    {
+        PositiveSlippageCap memory cap = _positiveSlippageCaps[client];
+        return cap.isSet ? cap.capBps : MAX_BPS;
     }
 }
