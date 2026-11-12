@@ -1,3 +1,21 @@
+## [0.515.0](https://github.com/propeller-heads/tycho/compare/0.514.0...0.515.0) (2026-11-12)
+
+
+### Features
+
+* **execution:** charge a router fee per input or output token ([af76dde](https://github.com/propeller-heads/tycho/commit/af76ddea0be56109637c64bb14cd50de009227c9))
+* **execution:** charge a router fee per token pair ([ad8f100](https://github.com/propeller-heads/tycho/commit/ad8f100d928e1bd0748046e1a817c9a0bccb17fa))
+* **execution:** charge a router fee per token pair ([#1546](https://github.com/propeller-heads/tycho/issues/1546)) ([b30286f](https://github.com/propeller-heads/tycho/commit/b30286f0c0084ce5d026a0c5a3bb9ca2635ae729))
+* **execution:** charge router fees per token pair only ([a8f07dc](https://github.com/propeller-heads/tycho/commit/a8f07dc54bdec165e10fe5864ed3800dc8344e47))
+* **execution:** include the pair fee in the effective router fees ([462174c](https://github.com/propeller-heads/tycho/commit/462174c6ec62898d40bd4bed0e4778c9bfc504f9))
+* **execution:** make the pair fee replace the router fee on output ([092b13d](https://github.com/propeller-heads/tycho/commit/092b13d22d73e09494909852652d08ee637101d8))
+
+
+### Bug Fixes
+
+* **execution:** keep the router's fee calculator calls unchanged ([303fe32](https://github.com/propeller-heads/tycho/commit/303fe32218481eb12fa27f36dcc52d7efc3b111a))
+* **simulation:** refit the PancakeSwap Infinity Bin base gas ([1c18d8d](https://github.com/propeller-heads/tycho/commit/1c18d8da91a838e7e9112c3b242375cf62476630))
+
 ## [0.514.0](https://github.com/propeller-heads/tycho/compare/0.513.0...0.514.0) (2026-11-11)
 
 
