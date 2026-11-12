@@ -1067,15 +1067,17 @@ where
                 .contains(id)
         });
 
-        if let Some(header) = current_block.as_ref() {
-            let execution_block = self.execution_block(header);
+        let execution_block = current_block
+            .as_ref()
+            .map(|header| self.execution_block(header));
+        if let Some(execution_block) = &execution_block {
             let decoder_state = &mut *state_guard;
             Self::refresh_execution_block(
                 &mut updated_states,
                 &mut decoder_state.states,
                 &decoder_state.failed_components,
                 &removed_pairs,
-                &execution_block,
+                execution_block,
             );
         }
 
@@ -1109,7 +1111,12 @@ where
         Ok(Update::new(block_number, updated_states, new_pairs)
             .set_is_partial(is_partial)
             .set_removed_pairs(removed_pairs)
-            .set_sync_states(msg.sync_states.clone()))
+            .set_sync_states(msg.sync_states.clone())
+            .set_execution_timestamp(
+                execution_block
+                    .as_ref()
+                    .map(BlockContext::timestamp),
+            ))
     }
 
     /// Applies pending deltas from one or more `TxDeltaIndexer`s against the current confirmed
@@ -1830,6 +1837,27 @@ mod tests {
         assert_eq!(res2.states.len(), 1);
         assert_eq!(res1.sync_states.len(), 1);
         assert_eq!(res2.sync_states.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_decode_reports_the_execution_timestamp() {
+        let decoder = setup_decoder(true).await;
+        decoder
+            .decode(&load_test_msg("uniswap_v2_snapshot"))
+            .await
+            .expect("decode failure");
+        let mut msg = load_test_msg("uniswap_v2_delta");
+        for state_msg in msg.state_msgs.values_mut() {
+            state_msg.header.timestamp = 1_000;
+            state_msg.header.timestamp_ms = Some(1_000_000);
+        }
+
+        let update = decoder
+            .decode(&msg)
+            .await
+            .expect("decode failure");
+
+        assert_eq!(update.execution_timestamp, Some(1_012));
     }
 
     #[tokio::test]

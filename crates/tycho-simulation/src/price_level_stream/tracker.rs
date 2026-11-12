@@ -1166,15 +1166,23 @@ mod tests {
     fn first_message_emits_new_pair_with_both_directions() {
         let clock = Clock::new();
         let mut tracker = tracker();
-        let Update { block_number, is_partial, sync_states, states, new_pairs, removed_pairs } =
-            tracker
-                .on_price_level_message(message(100, wbtc_usdc_books()), clock.at(0))
-                .expect("update expected");
+        let Update {
+            block_number,
+            is_partial,
+            sync_states,
+            states,
+            new_pairs,
+            removed_pairs,
+            execution_timestamp,
+        } = tracker
+            .on_price_level_message(message(100, wbtc_usdc_books()), clock.at(0))
+            .expect("update expected");
 
         assert_eq!(block_number, 100);
         assert!(is_partial);
         assert!(sync_states.is_empty());
         assert!(removed_pairs.is_empty());
+        assert_eq!(execution_timestamp, None);
 
         let id = expected_id();
         let component = &new_pairs[&id];
