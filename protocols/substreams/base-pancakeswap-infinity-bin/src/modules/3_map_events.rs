@@ -1,7 +1,6 @@
 use crate::{
     abi::bin_pool_manager::events::{Burn, Donate, Initialize, Mint, ProtocolFeeUpdated, Swap},
     keys::pool_key,
-    modules::map_pool_created::decode_address,
     pb::pancakeswap::infinity::bin::{
         events::{
             pool_event::{self, Type},
@@ -10,6 +9,7 @@ use crate::{
         Events, Pool,
     },
 };
+use pancakeswap_infinity_substreams::params::decode_address;
 use substreams::store::{StoreGet, StoreGetProto};
 use substreams_ethereum::{
     pb::eth::v2::{self as eth, Log, TransactionTrace},

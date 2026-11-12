@@ -1,8 +1,9 @@
 //! Decoding of `PoolKey.parameters` and storage-slot arithmetic for PancakeSwap Infinity Bin.
 //!
-//! Sibling of `../../base-pancakeswap-infinity-cl/src/parameters.rs`. Same hook bitmap; bits
-//! [16, 32) hold a `uint16` bin step instead of an `int24` tick spacing, and the pools mapping
-//! slot differs.
+//! The hook bitmap, the dynamic fee flag, the pool slot hash and the protocol fee split are
+//! `pancakeswap_infinity_substreams::parameters`, re-exported here. Bin's own are the `uint16`
+//! bin step in bits [16, 32) where CL has an `int24` tick spacing, the `pools` mapping slot, the
+//! slot0 layout and the per-bin storage slots.
 //!
 //! Layout, bits counted from the least significant bit of the bytes32:
 //! [ParametersHelper](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/libraries/math/ParametersHelper.sol#L12-L29),
@@ -14,38 +15,8 @@
 //! [32, 256) must be zero
 //! ```
 
+pub use pancakeswap_infinity_substreams::parameters::*;
 use tiny_keccak::{Hasher, Keccak};
-
-/// Hook permission bit offsets (`src/pool-bin/interfaces/IBinHooks.sol:10-23`). Not v4's address
-/// bits, where `beforeSwap` is 7 and `afterSwap` 6. These four match `ICLHooks.sol` but the enums
-/// differ elsewhere, so read them from IBinHooks.
-pub(crate) const HOOKS_BEFORE_SWAP_OFFSET: u8 = 6;
-pub(crate) const HOOKS_AFTER_SWAP_OFFSET: u8 = 7;
-pub(crate) const HOOKS_BEFORE_SWAP_RETURNS_DELTA_OFFSET: u8 = 10;
-pub(crate) const HOOKS_AFTER_SWAP_RETURNS_DELTA_OFFSET: u8 = 11;
-
-/// `LPFeeLibrary.DYNAMIC_FEE_FLAG` (`src/libraries/LPFeeLibrary.sol:19`): the pool's LP fee comes
-/// from its hook.
-pub(crate) const DYNAMIC_FEE_FLAG: u32 = 0x800000;
-
-/// Low 16 bits of `parameters`.
-pub(crate) fn hooks_registration_bitmap(parameters: &[u8; 32]) -> u16 {
-    u16::from_be_bytes([parameters[30], parameters[31]])
-}
-
-/// True if any hook callback that can change swap amounts or fees is registered:
-/// beforeSwap, afterSwap, or either returns-delta variant.
-pub(crate) fn has_swap_hooks(parameters: &[u8; 32]) -> bool {
-    let mask = (1u16 << HOOKS_BEFORE_SWAP_OFFSET) |
-        (1u16 << HOOKS_AFTER_SWAP_OFFSET) |
-        (1u16 << HOOKS_BEFORE_SWAP_RETURNS_DELTA_OFFSET) |
-        (1u16 << HOOKS_AFTER_SWAP_RETURNS_DELTA_OFFSET);
-    hooks_registration_bitmap(parameters) & mask != 0
-}
-
-pub(crate) fn is_dynamic_fee(fee: u32) -> bool {
-    fee == DYNAMIC_FEE_FLAG
-}
 
 /// Storage slot of `BinPoolManager.pools`. The inherited state takes slots 0-3 (`_owner`,
 /// `_paused`, `protocolFeesAccrued`, `protocolFeeController`); Bin's `uint16 maxBinStep` packs into
@@ -54,7 +25,7 @@ pub(crate) fn is_dynamic_fee(fee: u32) -> bool {
 ///
 /// A wrong slot returns plausible numbers, never an error. The chain-pinned tests below are what
 /// catches it.
-pub(crate) const BIN_POOLS_MAPPING_SLOT: u8 = 5;
+pub(crate) const BIN_POOLS_MAPPING_SLOT: u64 = 5;
 
 /// `uint16` bin step from bits [16, 32): price ratio between adjacent bins in basis points, so
 /// `price(id) = (1 + bin_step / 10_000) ^ (id - 2^23)`. Where CL has a 24-bit signed tick spacing,
@@ -65,26 +36,12 @@ pub(crate) fn bin_step(parameters: &[u8; 32]) -> u16 {
     u16::from_be_bytes([parameters[28], parameters[29]])
 }
 
-/// `keccak256(pool_id ++ uint256(mapping_slot))`: the slot of `pools[pool_id].slot0`.
+/// `pools[pool_id]` base slot of a Bin pool. Pool ids are bytes32 on chain.
 ///
 /// Struct layout from there: `+0` slot0, `+1` reserveOfBin, `+2` shareOfBin, `+3` positions,
 /// `+4` the bin tree ([BinPool.State](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/BinPool.sol#L54-L68)). slot0
 /// packs `[0,24) activeId | [24,48) protocolFee | [48,72) lpFee`
 /// ([BinSlot0](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/types/BinSlot0.sol#L9)).
-pub(crate) fn pool_state_base_slot(pool_id: &[u8; 32], mapping_slot: u8) -> [u8; 32] {
-    let mut hasher = Keccak::v256();
-    hasher.update(pool_id);
-    // Slot index goes in the last byte. CL writes `slot[24..]` because its parameter is u64;
-    // with a u8 that panics on a length mismatch.
-    let mut slot = [0u8; 32];
-    slot[31] = mapping_slot;
-    hasher.update(&slot);
-    let mut out = [0u8; 32];
-    hasher.finalize(&mut out);
-    out
-}
-
-/// `pools[pool_id]` base slot of a Bin pool. Pool ids are bytes32 on chain.
 pub(crate) fn pool_base_slot(pool_id: &[u8]) -> [u8; 32] {
     let pool_id: &[u8; 32] = pool_id
         .try_into()
@@ -165,12 +122,6 @@ pub(crate) fn unpack_reserves(packed: &[u8; 32]) -> (u128, u128) {
     y.copy_from_slice(&packed[..16]);
     x.copy_from_slice(&packed[16..]);
     (u128::from_be_bytes(x), u128::from_be_bytes(y))
-}
-
-/// `(zero_for_one, one_for_zero)` from a packed uint24
-/// (`src/libraries/ProtocolFeeLibrary.sol:22-31`).
-pub(crate) fn split_protocol_fee(protocol_fee: u32) -> (u32, u32) {
-    (protocol_fee & 0xfff, (protocol_fee >> 12) & 0xfff)
 }
 
 pub(crate) fn protocol_fee_from_slot0(slot0: &[u8; 32]) -> u32 {
@@ -325,63 +276,6 @@ mod tests {
         assert_eq!(y, 624_200_763_065_197_599_347);
     }
 
-    fn parameters_with_hook_bits(bits: &[u8]) -> [u8; 32] {
-        let mut parameters = [0u8; 32];
-        let bitmap = bits
-            .iter()
-            .fold(0u16, |acc, bit| acc | (1u16 << bit));
-        parameters[30..32].copy_from_slice(&bitmap.to_be_bytes());
-        parameters
-    }
-
-    /// Any of the four swap callbacks puts the pool out of scope.
-    #[rstest::rstest]
-    #[case::before_swap(HOOKS_BEFORE_SWAP_OFFSET)]
-    #[case::after_swap(HOOKS_AFTER_SWAP_OFFSET)]
-    #[case::before_swap_returns_delta(HOOKS_BEFORE_SWAP_RETURNS_DELTA_OFFSET)]
-    #[case::after_swap_returns_delta(HOOKS_AFTER_SWAP_RETURNS_DELTA_OFFSET)]
-    fn test_has_swap_hooks_true(#[case] bit: u8) {
-        assert!(has_swap_hooks(&parameters_with_hook_bits(&[bit])), "bit {bit} is a swap hook");
-    }
-
-    /// Other callbacks leave swap amounts and fees alone. Treating them as hooked would drop
-    /// pools we can simulate.
-    #[rstest::rstest]
-    #[case::before_initialize(0)]
-    #[case::after_initialize(1)]
-    #[case::before_mint(2)]
-    #[case::after_mint(3)]
-    #[case::before_burn(4)]
-    #[case::after_burn(5)]
-    #[case::before_donate(8)]
-    #[case::after_donate(9)]
-    #[case::after_mint_returns_delta(12)]
-    #[case::after_burn_returns_delta(13)]
-    fn test_has_swap_hooks_false(#[case] bit: u8) {
-        assert!(
-            !has_swap_hooks(&parameters_with_hook_bits(&[bit])),
-            "bit {bit} is not a swap hook, so the pool stays in scope"
-        );
-    }
-
-    #[test]
-    fn test_has_swap_hooks_no_hooks_at_all() {
-        assert!(!has_swap_hooks(&[0u8; 32]), "a hookless pool has no swap hooks");
-    }
-
-    /// One swap bit among non-swap bits still counts.
-    #[test]
-    fn test_has_swap_hooks_mixed_bits() {
-        assert!(
-            !has_swap_hooks(&parameters_with_hook_bits(&[0, 2, 3, 8])),
-            "non-swap bits alone leave the pool in scope"
-        );
-        assert!(
-            has_swap_hooks(&parameters_with_hook_bits(&[0, 2, 3, 8, HOOKS_AFTER_SWAP_OFFSET])),
-            "one swap bit among non-swap bits still counts"
-        );
-    }
-
     /// Bin step sits directly above the bitmap. Off-by-a-byte would read it as hooks.
     #[test]
     fn test_has_swap_hooks_ignores_bin_step() {
@@ -390,14 +284,6 @@ mod tests {
             assert!(!has_swap_hooks(&parameters), "bin step {step} leaked into the hook bitmap");
             assert_eq!(hooks_registration_bitmap(&parameters), 0);
         }
-    }
-
-    #[test]
-    fn test_is_dynamic_fee() {
-        assert!(is_dynamic_fee(DYNAMIC_FEE_FLAG), "the flag itself is dynamic");
-        assert!(!is_dynamic_fee(67), "the live pool's static LP fee");
-        assert!(!is_dynamic_fee(0), "a zero fee is static");
-        assert!(!is_dynamic_fee(DYNAMIC_FEE_FLAG - 1), "one below the flag is still static");
     }
 
     /// Real slot0 word: activeId 8388604, protocolFee 32/32, lpFee 67. CL reads protocolFee from
@@ -412,12 +298,5 @@ mod tests {
             0,
             "CL offsets read zero"
         );
-    }
-
-    #[test]
-    fn test_split_protocol_fee_halves_are_independent() {
-        // zero-for-one in the low 12 bits, one-for-zero in the high 12.
-        assert_eq!(split_protocol_fee(0x00_1005), (5, 1));
-        assert_eq!(split_protocol_fee(0), (0, 0));
     }
 }

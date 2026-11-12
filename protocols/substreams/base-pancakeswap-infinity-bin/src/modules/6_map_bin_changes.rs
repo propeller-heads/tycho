@@ -1,6 +1,5 @@
 use crate::{
     keys::{pool_key, tree_key},
-    modules::map_pool_created::decode_address,
     parameters,
     pb::pancakeswap::infinity::bin::{
         events::{pool_event, PoolEvent},
@@ -8,6 +7,7 @@ use crate::{
     },
     storage::{in_window, storage_writes_by_tx, tx_index, with_floors, WritesBySlot},
 };
+use pancakeswap_infinity_substreams::params::decode_address;
 use std::collections::HashMap;
 use substreams::store::{StoreGet, StoreGetInt64, StoreGetRaw};
 use substreams_ethereum::pb::eth::v2::{self as eth, StorageChange};

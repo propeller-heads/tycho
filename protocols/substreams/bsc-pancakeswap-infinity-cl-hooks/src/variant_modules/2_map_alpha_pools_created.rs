@@ -1,9 +1,8 @@
 use base_pancakeswap_infinity_cl::{
-    abi::cl_pool_manager::events::Initialize,
-    modules::map_pool_created::{decode_address, pool_component},
-    parameters,
+    abi::cl_pool_manager::events::Initialize, modules::map_pool_created::pool_component, parameters,
 };
 use ethabi::ethereum_types::Address;
+use pancakeswap_infinity_substreams::params::decode_address;
 use serde::Deserialize;
 use substreams::{
     scalar::BigInt,

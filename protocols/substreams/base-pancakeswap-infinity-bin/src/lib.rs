@@ -3,9 +3,9 @@
 //! PancakeSwap Infinity Liquidity Book (Bin) pools.
 //!
 //! Sibling of `../base-pancakeswap-infinity-cl`. Same Vault, same PoolKey, same hook bitmap, same
-//! filtering. What differs is the pool math and therefore the whole state model: a Bin pool is a
-//! map of discrete bins to `(reserveX, reserveY)` plus an active bin, not a sqrt price with a tick
-//! map.
+//! filtering, through the `pancakeswap-infinity-substreams` crate both build on. What differs is
+//! the pool math and therefore the whole state model: a Bin pool is a map of discrete bins to
+//! `(reserveX, reserveY)` plus an active bin, not a sqrt price with a tick map.
 //!
 //! Two consequences that shape this package:
 //!
