@@ -28,11 +28,14 @@
 //! The arithmetic, the expiry rules, the fee and the gas model were measured against one
 //! implementation behind each proxy, pinned in `BASE_DEPLOYMENT`:
 //!
-//! | Proxy      | Implementation | Since Base block                       |
-//! |------------|----------------|----------------------------------------|
-//! | Entrypoint | `0xCc61…F3B0`  | 53,492,231                             |
-//! | CurveBook  | `0x3E6A…9f1d`  | 52,963,996                             |
-//! | Custodian  | `0x997b…3076`  | no change seen at blocks from 51,000,000 |
+//! | Proxy      | Implementation | Since Base block | Upgrades since deployment |
+//! |------------|----------------|------------------|---------------------------|
+//! | Entrypoint | `0xCc61…F3B0`  | 53,492,231       | 5                         |
+//! | CurveBook  | `0x3E6A…9f1d`  | 52,963,996       | 4                         |
+//! | Custodian  | `0x997b…3076`  | 50,895,903       | none                      |
+//!
+//! Counted from every `Upgraded` event of the three proxies, deployed at blocks 50,895,895 to
+//! 50,895,911, up to block 56,419,398.
 //!
 //! A Safe (`0xB1F4E4d67E330CC505e526488bAe0388e616A907`) owns all three and can upgrade any of
 //! them. None is source-verified, so every upgrade is treated as one that may change the
