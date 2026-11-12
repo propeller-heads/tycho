@@ -41,7 +41,7 @@ export PRIVATE_KEY=<your-wallet-private-key>
 
 Metric's feed talks to Metric's public endpoint (`MetricFeedBuilder::base_url` points it elsewhere) and sends the trading key as a Bearer token with every request: the `bid_ask` endpoint requires it, and so does the metadata endpoint on the chains Metric serves only to partners. The example registers Metric by default; `--disable-pamm` leaves it out.
 
-The Metric feed serves a pool only while Metric reports its price provider `healthy`, and only in the directions where the pool quotes a price and its depth holds volume. It quotes a swap by walking that depth, and a swap larger than the depth fails.
+The Metric feed serves a pool only while Metric reports its price provider `healthy`, and only in the directions where the pool quotes a price and its depth holds volume. It quotes a swap by walking that depth, and a swap larger than the depth fails. The feed refreshes quotes on every poll and the pool list every 15 seconds, so a pool Metric adds or unpauses reaches the books up to 15 seconds later. A paused pool leaves them on the next poll, since its quote reports `pool_paused`. If a list refresh fails, the feed retries it 15 seconds later and keeps quoting the pools of the last list until that list is 90 seconds old.
 
 Then run the example:
 

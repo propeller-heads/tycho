@@ -1,6 +1,12 @@
-use std::{collections::HashMap, mem};
+use std::{
+    collections::HashMap,
+    mem,
+    sync::{Arc, Mutex, PoisonError},
+    time::Duration,
+};
 
 use chrono::DateTime;
+use tokio::time::{timeout, Instant};
 use tracing::{debug, warn};
 use tycho_common::models::token::Token;
 
@@ -17,7 +23,8 @@ use crate::{
 
 /// Fetches one complete Metric book per poll: every unpaused, quotable pool between the
 /// configured tokens whose USD TVL clears the threshold, as simulate-ready books built by its
-/// [`MetricBookAssembler`]. `Debug` output omits the API key.
+/// [`MetricBookAssembler`]. Pause level and TVL are as of the last metadata refresh; whether a
+/// pool quotes is as of this poll. `Debug` output omits the API key.
 #[derive(Debug, Clone)]
 pub struct MetricBookSource {
     pub(super) prices: MetricPricesSource,
@@ -27,9 +34,10 @@ pub struct MetricBookSource {
 impl HttpSource for MetricBookSource {
     type Snapshot = BookSnapshot<ReceivedAt>;
 
-    /// A metadata failure fails the poll, and so does losing every pool: a book that reads as
-    /// nothing withdraws every pair the venue was serving, which is an outage rather than a
-    /// poll that worked. Losing some of the pools only drops those from this book.
+    /// Losing every pool fails the poll: a book that reads as nothing withdraws every pair the
+    /// venue was serving, which is an outage rather than a poll that worked. Losing some of the
+    /// pools only drops those from this book. A failed metadata refresh fails it only as
+    /// [`MetricPricesSource::poll`] says.
     ///
     /// Pools outside the token list, under the TVL floor or paused are not quoted.
     async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
@@ -101,35 +109,166 @@ fn every_pool_failed(failures: Vec<FeedError>) -> FeedError {
     }
 }
 
+/// How long a poll quotes the pools of the metadata it last fetched before fetching it again.
+/// Quotes change about every 2 s, but Metric's periodic capture reads a pool's status only about
+/// every 30 s, so fetching metadata on every poll would mostly fetch it unchanged. Refreshing at
+/// half that capture interval costs one request in seven polls and halves how late a pool Metric
+/// adds or unpauses reaches the books. Each quote's own status is still checked on every poll,
+/// and a paused pool's quote reports `pool_paused` with no price and no depth.
+const METADATA_REFRESH_AFTER: Duration = Duration::from_secs(15);
+
+/// How long fetched metadata stands in for refreshes that fail. A failed refresh is retried one
+/// [`METADATA_REFRESH_AFTER`] later rather than on the next poll, so a metadata endpoint that is
+/// down or rate-limiting is asked no more often than a healthy one, and five failed refreshes in a
+/// row cost no quotes. Past this age a failed refresh fails the poll, so an endpoint that stays
+/// broken (an outage, or an answer that no longer parses) withdraws the books and shows as a
+/// failing feed instead of quoting a pool list that no longer changes.
+const METADATA_SERVE_FOR: Duration = Duration::from_secs(90);
+
+/// Deadline for a refresh while fetched metadata can stand in for it: a refresh that misses it
+/// is a failed refresh, and the poll quotes the metadata it has. With the 3 s batch bid/ask
+/// deadline after it, a poll that refreshes still ends inside the feed's 5 s `request_timeout`. A
+/// poll with no metadata to stand in waits for its fetch within the whole poll's deadline instead,
+/// since it has no pools to quote without it.
+const METADATA_REFRESH_TIMEOUT: Duration = Duration::from_millis(1500);
+
 /// Reads the pools' metadata and quotes through a [`MetricClient`].
-#[derive(Clone, Debug)]
+#[derive(Clone, derive_more::Debug)]
 pub(super) struct MetricPricesSource {
     client: MetricClient,
+    #[debug(skip)]
+    metadata: MetadataCache,
+}
+
+/// The metadata a poll last fetched, kept to quote its pools until it is due for a refresh.
+/// Clones of a source share it.
+#[derive(Clone)]
+struct MetadataCache {
+    refresh_after: Duration,
+    serve_for: Duration,
+    refresh_timeout: Duration,
+    last: Arc<Mutex<Option<FetchedMetadata>>>,
+}
+
+#[derive(Clone)]
+struct FetchedMetadata {
+    /// The TVL floor it was fetched with; metadata for another floor lists other pools.
+    min_tvl_usd: f64,
+    fetched_at: Instant,
+    /// When a poll next refreshes it: `refresh_after` past the last attempt, whether that
+    /// attempt fetched it or failed.
+    refresh_at: Instant,
+    pools: Arc<[MetricMetadata]>,
+}
+
+impl MetadataCache {
+    /// The metadata last fetched with `min_tvl_usd`.
+    fn get(&self, min_tvl_usd: f64) -> Option<FetchedMetadata> {
+        let last = self
+            .last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()?;
+        // The floor is the caller's own setting, never computed, so it compares exactly.
+        #[expect(clippy::float_cmp, reason = "the floor is a setting compared with itself")]
+        let same_floor = last.min_tvl_usd == min_tvl_usd;
+        same_floor.then_some(last)
+    }
+
+    fn store(&self, fetched: FetchedMetadata) {
+        *self
+            .last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(fetched);
+    }
 }
 
 impl MetricPricesSource {
     pub(super) fn new(client: MetricClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            metadata: MetadataCache {
+                refresh_after: METADATA_REFRESH_AFTER,
+                serve_for: METADATA_SERVE_FOR,
+                refresh_timeout: METADATA_REFRESH_TIMEOUT,
+                last: Arc::default(),
+            },
+        }
     }
 
-    /// Polls the metadata of every pool with a USD TVL of at least `min_tvl_usd`, then quotes the
-    /// ones for which `keep` holds.
+    /// Quotes the pools with a USD TVL of at least `min_tvl_usd` for which `keep` holds, listed
+    /// by the metadata this source last fetched, which it refreshes [`METADATA_REFRESH_AFTER`]
+    /// after its last attempt.
     ///
-    /// A metadata failure fails the poll, and so does losing every pool; losing some only drops
-    /// those from the prices.
+    /// A failed refresh fails the poll only once the metadata it has is [`METADATA_SERVE_FOR`]
+    /// old, or when there is none, or when no retry can answer differently. Losing every pool
+    /// fails the poll; losing some only drops those from the prices.
     pub(super) async fn poll(
         &self,
         min_tvl_usd: f64,
         keep: impl Fn(&MetricMetadata) -> bool,
     ) -> Result<MetricPrices, FeedError> {
-        let pools = self
-            .client
-            .fetch_metadata(min_tvl_usd)
-            .await?
-            .into_iter()
+        let metadata = self.metadata(min_tvl_usd).await?;
+        let pools = metadata
+            .iter()
             .filter(|pool| keep(pool))
+            .cloned()
             .collect();
         quote_pools(&self.client, pools).await
+    }
+
+    /// The metadata to quote this poll: the last fetched until it is due for a refresh, a refresh
+    /// once it is, and the last fetched again while it can stand in for a refresh that failed.
+    async fn metadata(&self, min_tvl_usd: f64) -> Result<Arc<[MetricMetadata]>, FeedError> {
+        let now = Instant::now();
+        let last = self.metadata.get(min_tvl_usd);
+        if let Some(last) = &last {
+            if now < last.refresh_at {
+                return Ok(Arc::clone(&last.pools));
+            }
+        }
+        let standing_in =
+            last.filter(|last| now.duration_since(last.fetched_at) < self.metadata.serve_for);
+
+        let fetch = self.client.fetch_metadata(min_tvl_usd);
+        let deadline = self.metadata.refresh_timeout;
+        let refreshed = match standing_in {
+            None => fetch.await,
+            Some(_) => timeout(deadline, fetch)
+                .await
+                .unwrap_or_else(|_elapsed| {
+                    Err(FeedError::Connection(format!(
+                        "Metric metadata refresh timed out after {deadline:?}"
+                    )))
+                }),
+        };
+
+        match (refreshed, standing_in) {
+            (Ok(pools), _) => {
+                let pools: Arc<[MetricMetadata]> = pools.into();
+                self.metadata.store(FetchedMetadata {
+                    min_tvl_usd,
+                    fetched_at: now,
+                    refresh_at: now + self.metadata.refresh_after,
+                    pools: Arc::clone(&pools),
+                });
+                Ok(pools)
+            }
+            (Err(error), Some(last)) if !error.is_fatal() => {
+                warn!(
+                    %error,
+                    age_secs = now.duration_since(last.fetched_at).as_secs(),
+                    "Metric metadata refresh failed, quoting the pools it last listed"
+                );
+                let pools = Arc::clone(&last.pools);
+                self.metadata.store(FetchedMetadata {
+                    refresh_at: now + self.metadata.refresh_after,
+                    ..last
+                });
+                Ok(pools)
+            }
+            (Err(error), _) => Err(error),
+        }
     }
 }
 
@@ -221,7 +360,10 @@ impl MetricBookAssembler {
 mod tests {
     use std::{
         str::FromStr,
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
         time::Duration,
     };
 
@@ -245,7 +387,7 @@ mod tests {
                 FIRST_POOL, PAUSED, SECOND_POOL, SERVER_TS, UNKNOWN_POOL, UNQUOTABLE,
             },
         },
-        snapshot_feed::http::test_support::{spawn_http_server, MockResponse},
+        snapshot_feed::http::test_support::{spawn_http_server, MockHttpServer, MockResponse},
     };
 
     /// How the venue answers a key it has stopped accepting. It is about this request, so a
@@ -625,6 +767,185 @@ mod tests {
             .unwrap();
 
         assert_eq!(*floors.lock().unwrap(), vec!["100", "10"]);
+    }
+
+    /// A Metric deployment listing [`FIRST_POOL`] and quoting it healthy, whose n-th metadata
+    /// request (from 0) gets `metadata(n)`. Returns it with its count of metadata and of
+    /// bid/ask requests.
+    async fn metric_answering_metadata(
+        metadata: impl Fn(usize) -> MockResponse + Send + Sync + 'static,
+    ) -> (MockHttpServer, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let metadata_requests = Arc::new(AtomicUsize::new(0));
+        let bid_ask_requests = Arc::new(AtomicUsize::new(0));
+        let (listed, quoted) = (Arc::clone(&metadata_requests), Arc::clone(&bid_ask_requests));
+        let server = spawn_http_server(move |request| {
+            if request
+                .target
+                .starts_with("/public/v1/evm/1/metadata?")
+            {
+                return Some(metadata(listed.fetch_add(1, Ordering::SeqCst)));
+            }
+            quoted.fetch_add(1, Ordering::SeqCst);
+            let entries = [quote_entry(FIRST_POOL, &bid_ask_json(SERVER_TS, false))];
+            Some(MockResponse::from(("200 OK", batch_body(&entries))))
+        })
+        .await;
+        (server, metadata_requests, bid_ask_requests)
+    }
+
+    /// The first metadata request lists [`FIRST_POOL`]; every later one gets `then`.
+    fn listing_first_pool_then(then: fn() -> MockResponse) -> impl Fn(usize) -> MockResponse {
+        move |nth| {
+            if nth == 0 {
+                let page = metadata_page(&[pool_json(FIRST_POOL, Some(1_000.0))], None);
+                MockResponse::from(("200 OK", page))
+            } else {
+                then()
+            }
+        }
+    }
+
+    fn listing_nothing() -> MockResponse {
+        MockResponse::from(("200 OK", metadata_page(&[], None)))
+    }
+
+    fn failing() -> MockResponse {
+        MockResponse::from(("500 Internal Server Error", "boom".to_string()))
+    }
+
+    fn refusing_the_chain() -> MockResponse {
+        let (status, body) = UNSERVED_CHAIN;
+        MockResponse::from((status, body.to_string()))
+    }
+
+    fn hanging() -> MockResponse {
+        MockResponse {
+            status: "200 OK",
+            body: metadata_page(&[], None),
+            delay: Duration::from_secs(3600),
+        }
+    }
+
+    /// A book source against `server` serving WETH/USDC above 100 USD, refreshing its metadata
+    /// once it is `refresh_after` old and quoting the last fetched for `serve_for`.
+    fn caching_source(
+        server: &MockHttpServer,
+        refresh_after: Duration,
+        serve_for: Duration,
+    ) -> MetricBookSource {
+        let mut source = source(Chain::Ethereum, &server.url(), "key");
+        source.assembler = serving_weth_usdc_above_100_usd();
+        source.prices.metadata.refresh_after = refresh_after;
+        source.prices.metadata.serve_for = serve_for;
+        source
+    }
+
+    const LONG: Duration = Duration::from_secs(3600);
+
+    /// Polls between refreshes quote the pools the last metadata listed without asking for it
+    /// again, so only the quotes are fetched at the poll cadence.
+    #[tokio::test]
+    async fn polls_between_refreshes_quote_the_pools_last_listed() {
+        let (server, metadata_requests, bid_ask_requests) =
+            metric_answering_metadata(listing_first_pool_then(listing_nothing)).await;
+        let source = caching_source(&server, LONG, LONG);
+
+        let first = source.fetch().await.unwrap().books;
+        let second = source.fetch().await.unwrap().books;
+
+        assert_eq!(metadata_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(bid_ask_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(second.len(), 1);
+        assert_same_books(&second, &first);
+    }
+
+    /// Metadata due for a refresh is fetched again, and the pools the refresh lists are the ones
+    /// quoted.
+    #[tokio::test]
+    async fn metadata_due_for_a_refresh_is_fetched_again() {
+        let (server, metadata_requests, _) =
+            metric_answering_metadata(listing_first_pool_then(listing_nothing)).await;
+        let source = caching_source(&server, Duration::ZERO, LONG);
+
+        source.fetch().await.unwrap();
+        let after_refresh = source.fetch().await.unwrap().books;
+
+        assert_eq!(metadata_requests.load(Ordering::SeqCst), 2);
+        assert!(after_refresh.is_empty(), "the refresh listed no pools");
+    }
+
+    /// A refresh that fails or misses its deadline costs no quotes while the metadata last
+    /// fetched can stand in for it; the poll quotes the pools it listed.
+    #[rstest]
+    #[case::failing(failing)]
+    #[case::hanging(hanging)]
+    #[tokio::test]
+    async fn a_failed_refresh_quotes_the_pools_last_listed(#[case] refresh: fn() -> MockResponse) {
+        let (server, metadata_requests, _) =
+            metric_answering_metadata(listing_first_pool_then(refresh)).await;
+        let mut source = caching_source(&server, Duration::ZERO, LONG);
+        source.prices.metadata.refresh_timeout = Duration::from_millis(50);
+        let first = source.fetch().await.unwrap().books;
+
+        let second = source.fetch().await.unwrap().books;
+
+        assert_eq!(metadata_requests.load(Ordering::SeqCst), 2);
+        assert_same_books(&second, &first);
+    }
+
+    /// Makes the metadata `source` last fetched due for a refresh on its next poll.
+    fn make_due(source: &MetricBookSource) {
+        let mut last = source
+            .prices
+            .metadata
+            .last
+            .lock()
+            .unwrap();
+        last.as_mut()
+            .expect("a poll has stored its metadata")
+            .refresh_at = Instant::now();
+    }
+
+    /// A failed refresh is retried a refresh interval later, not on the next poll, so a metadata
+    /// endpoint that is down or rate-limiting is asked no more often than a healthy one.
+    #[tokio::test]
+    async fn a_failed_refresh_is_retried_a_refresh_interval_later() {
+        let (server, metadata_requests, bid_ask_requests) =
+            metric_answering_metadata(listing_first_pool_then(failing)).await;
+        let source = caching_source(&server, LONG, LONG);
+        source.fetch().await.unwrap();
+        make_due(&source);
+
+        let after_failure = source.fetch().await.unwrap().books;
+        let next = source.fetch().await.unwrap().books;
+
+        assert_eq!(metadata_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(bid_ask_requests.load(Ordering::SeqCst), 3);
+        assert_eq!(after_failure.len(), 1);
+        assert_same_books(&next, &after_failure);
+    }
+
+    /// Metadata stands in for failed refreshes only so long: past that, and for a failure no
+    /// retry can answer differently, the refresh's failure is the poll's.
+    #[rstest]
+    #[case::once_it_is_too_old(failing, Duration::ZERO, false)]
+    #[case::when_the_venue_refuses_the_chain(refusing_the_chain, LONG, true)]
+    #[tokio::test]
+    async fn a_failed_refresh_fails_the_poll(
+        #[case] refresh: fn() -> MockResponse,
+        #[case] serve_for: Duration,
+        #[case] fatal: bool,
+    ) {
+        let (server, _, _) = metric_answering_metadata(listing_first_pool_then(refresh)).await;
+        let source = caching_source(&server, Duration::ZERO, serve_for);
+        source.fetch().await.unwrap();
+
+        let error = source
+            .fetch()
+            .await
+            .expect_err("the refresh's failure must fail the poll");
+
+        assert_eq!(error.is_fatal(), fatal, "{error}");
     }
 
     #[tokio::test]
