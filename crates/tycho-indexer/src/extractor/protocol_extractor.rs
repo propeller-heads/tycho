@@ -274,7 +274,7 @@ where
             .first_message_processed
     }
 
-    async fn update_last_processed_block(&self, block: Block) {
+    pub(crate) async fn update_last_processed_block(&self, block: Block) {
         let mut state = self.inner.lock().await;
         state.last_processed_block = Some(block);
     }

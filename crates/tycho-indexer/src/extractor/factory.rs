@@ -3,6 +3,7 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 use anyhow::{format_err, Context};
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3::Client;
+use chrono::Duration;
 use prost::Message;
 use serde::Deserialize;
 use tokio::{
@@ -11,7 +12,10 @@ use tokio::{
 };
 use tracing::info;
 use tycho_common::{
-    models::{Address, Chain, ExtractorIdentity, FinancialType, ImplementationType, ProtocolType},
+    models::{
+        blockchain::Block, Address, Chain, ExtractorIdentity, FinancialType, ImplementationType,
+        ProtocolType,
+    },
     Bytes,
 };
 use tycho_ethereum::{
@@ -380,6 +384,24 @@ impl ExtractorFactory {
                 config_start_block = self.config.start_block,
                 "Fresh start: resuming from block after last committed"
             );
+        } else {
+            // A new extractor stamps its first block against the block before it, like the
+            // extractors that already processed that block.
+            let first_block = u64::try_from(start_block).map_err(|_negative| {
+                ExtractionError::Setup(format!("start block {start_block} must not be negative"))
+            })?;
+            let earlier_blocks =
+                earlier_blocks_in_second(&self.rpc_client, self.config.chain, first_block).await?;
+            if let Some(reference) = stamped_block_before(&earlier_blocks) {
+                info!(
+                    start_block,
+                    reference_ts = %reference.ts,
+                    "New extractor: stamps its first block after the block before it"
+                );
+                extractor
+                    .update_last_processed_block(reference)
+                    .await;
+            }
         }
 
         let stream = SubstreamsStream::new(
@@ -459,6 +481,63 @@ impl ExtractorFactory {
 
         Ok(rpc_dci)
     }
+}
+
+/// Most blocks that [`earlier_blocks_in_second`] reads back within one second.
+const MAX_BLOCKS_PER_SECOND: usize = 1_000;
+
+/// Reads from the node the blocks before block `number` that are in the same second, newest
+/// first.
+async fn earlier_blocks_in_second(
+    rpc: &EthereumRpcClient,
+    chain: Chain,
+    number: u64,
+) -> Result<Vec<Block>, ExtractionError> {
+    let second = rpc
+        .get_block(number, chain)
+        .await
+        .map_err(|err| ExtractionError::Setup(err.to_string()))?
+        .ts
+        .and_utc()
+        .timestamp();
+
+    let mut blocks = Vec::new();
+    for earlier in (0..number).rev() {
+        let block = rpc
+            .get_block(earlier, chain)
+            .await
+            .map_err(|err| ExtractionError::Setup(err.to_string()))?;
+        if block.ts.and_utc().timestamp() != second {
+            break;
+        }
+        if blocks.len() == MAX_BLOCKS_PER_SECOND {
+            return Err(ExtractionError::Setup(format!(
+                "More than {MAX_BLOCKS_PER_SECOND} blocks share the second of block {number}"
+            )));
+        }
+        blocks.push(block);
+    }
+    Ok(blocks)
+}
+
+/// Returns the block before the first block of a new extractor, with the timestamp every
+/// extractor stamps on it.
+///
+/// On a fast chain several blocks share one second, and each extractor stamps such a block one
+/// microsecond after the block before it. `earlier_blocks` are the blocks before the first block
+/// that are in its second, newest first, as [`earlier_blocks_in_second`] returns them. The newest
+/// one is stamped one microsecond after the second for each older one. The stamp depends only on
+/// the chain, never on what is stored.
+///
+/// Returns `None` when there are no such blocks: the first block then keeps its bare second, as
+/// on every extractor.
+pub(crate) fn stamped_block_before(earlier_blocks: &[Block]) -> Option<Block> {
+    let (newest, older) = earlier_blocks.split_first()?;
+    let mut block = newest.clone();
+    for _ in older {
+        block.ts += Duration::microseconds(1);
+    }
+    Some(block)
 }
 
 async fn ensure_spkg(spkg_path: &str, s3_bucket: Option<&str>) -> Result<(), ExtractionError> {
