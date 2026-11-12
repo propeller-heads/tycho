@@ -569,7 +569,7 @@ async fn run_rpc(
             server: server_handle,
             extractors: Vec::new(),
             db_write_executor: None,
-            close_websockets: None,
+            close_connections: None,
             release_lead: None,
         }
         .run(),
@@ -657,7 +657,7 @@ async fn create_indexing_tasks(
     // The load runs after the extractors are built and before the server and the pump start:
     // the snapshot sees the initialized accounts, nothing writes during the build, and no
     // request or fold can reach a half-built cache.
-    let (close_websockets, websockets_closed) = watch::channel(false);
+    let (close_connections, connections_closed) = watch::channel(false);
     let entity_cache = match global_args.entity_cache_mode {
         EntityCacheMode::Off => EntityCacheSetup::Off,
         mode @ (EntityCacheMode::Shadow | EntityCacheMode::Serve) => {
@@ -698,7 +698,7 @@ async fn create_indexing_tasks(
         .ready_head_tolerance(chrono::Duration::seconds(i64::from(
             global_args.ready_head_tolerance_secs,
         )))
-        .close_websockets_on(websockets_closed)
+        .close_connections_on(connections_closed)
         .run()?;
     info!(server_url, "Http and Ws server started");
 
@@ -707,7 +707,7 @@ async fn create_indexing_tasks(
             server: server_handle,
             extractors: extractor_handles,
             db_write_executor: Some(gw_writer_handle),
-            close_websockets: Some(close_websockets),
+            close_connections: Some(close_connections),
             release_lead: Some(release_lead),
         }
         .run(),
@@ -960,8 +960,9 @@ struct Shutdown {
     server: ServerHandle,
     extractors: Vec<ExtractorHandle>,
     db_write_executor: Option<JoinHandle<()>>,
-    /// Closes every websocket connection.
-    close_websockets: Option<watch::Sender<bool>>,
+    /// Closes every websocket connection, and each open HTTP/1 connection after its next
+    /// response.
+    close_connections: Option<watch::Sender<bool>>,
     /// Releases the leader lock, or stops a follower from retrying it.
     release_lead: Option<oneshot::Sender<()>>,
 }
@@ -970,8 +971,9 @@ impl Shutdown {
     /// Waits for SIGINT or SIGTERM, then hands the work to another instance and stops.
     ///
     /// The order makes the handover short, because the follower streams and serves already:
-    /// 1. Closes the websocket connections, so clients connect to another instance at once. The
-    ///    server stops to accept connections on the signal itself.
+    /// 1. Closes the websocket connections, and each HTTP/1 connection after its next response,
+    ///    so clients connect to another instance at once. The server stops to accept connections
+    ///    on the signal itself.
     /// 2. Stops the extractors, and waits up to [`EXTRACTOR_STOP_TIMEOUT`] until they ended. A
     ///    leader's extractors commit their final blocks before they end, so the next leader starts
     ///    from a newer cursor.
@@ -992,8 +994,8 @@ impl Shutdown {
             },
         }
 
-        if let Some(close_websockets) = &self.close_websockets {
-            close_websockets.send_replace(true);
+        if let Some(close_connections) = &self.close_connections {
+            close_connections.send_replace(true);
         }
         for e in self.extractors.iter() {
             if let Err(err) = e.stop().await {

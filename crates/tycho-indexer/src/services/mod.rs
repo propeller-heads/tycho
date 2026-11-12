@@ -23,7 +23,10 @@ use crate::{
     services::{
         api_docs::ApiDoc,
         deltas_buffer::PendingDeltas,
-        middleware::{compression_middleware, rpc_metrics_middleware},
+        middleware::{
+            close_connection_on_shutdown, compression_middleware, rpc_metrics_middleware,
+            ShutdownSignal,
+        },
         state::{
             service::StateService,
             shadow::{self, Sampler, Shadow},
@@ -78,8 +81,9 @@ pub struct ServicesBuilder<G> {
     disabled_rpc_caches: Vec<RpcCacheKind>,
     /// How old the newest block of a streamed extractor may be on a ready follower.
     ready_head_tolerance: chrono::Duration,
-    /// Turns `true` when the process shuts down, which closes every websocket connection.
-    ws_shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Turns `true` when the process shuts down, which closes every websocket connection and
+    /// ends the open HTTP/1 connections after their next response.
+    shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 /// Resolves with the first error either service task produces, or with `Ok` once both end
@@ -120,14 +124,14 @@ where
             disabled_rpc_caches: Vec::new(),
             writer_status: None,
             ready_head_tolerance: rpc::DEFAULT_READY_HEAD_TOLERANCE,
-            ws_shutdown: None,
+            shutdown: None,
         }
     }
 
-    /// Closes every websocket connection once `shutdown` turns `true`, so that clients connect to
-    /// another instance.
-    pub fn close_websockets_on(mut self, shutdown: tokio::sync::watch::Receiver<bool>) -> Self {
-        self.ws_shutdown = Some(shutdown);
+    /// Once `shutdown` turns `true`, closes every websocket connection and closes each open
+    /// HTTP/1 connection after its next response, so that clients connect to another instance.
+    pub fn close_connections_on(mut self, shutdown: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.shutdown = Some(shutdown);
         self
     }
 
@@ -309,8 +313,8 @@ where
         }
 
         let mut ws_data = ws::WsData::new(self.extractor_handles.clone());
-        if let Some(shutdown) = self.ws_shutdown.take() {
-            ws_data = ws_data.close_on_shutdown(shutdown);
+        if let Some(shutdown) = &self.shutdown {
+            ws_data = ws_data.close_on_shutdown(shutdown.clone());
         }
         let ws_data = web::Data::new(ws_data);
         let (server_handle, server_task) = self.start_server(
@@ -327,13 +331,17 @@ where
 
     /// Helper to spawn the main server task, optionally enabling WebSocket services.
     fn start_server(
-        self,
+        mut self,
         ws_data: Option<web::Data<ws::WsData>>,
         openapi: utoipa::openapi::OpenApi,
         pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
         state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
         let tracer = EVMEntrypointService::new(&self.rpc);
+        let shutdown_signal = self
+            .shutdown
+            .take()
+            .map(|shutdown| web::Data::new(ShutdownSignal(shutdown)));
 
         if !self.disabled_rpc_caches.is_empty() {
             info!(disabled = ?self.disabled_rpc_caches, "RPC response caches turned off");
@@ -376,6 +384,7 @@ where
                 // Enable zstd compression while being backwards compatible with clients that do not
                 .wrap(compression_middleware())
                 .wrap(RequestTracing::new())
+                .wrap(actix_middleware::from_fn(close_connection_on_shutdown))
                 .app_data(rpc_data.clone())
                 .service(
                     web::resource(format!("/{}/contract_state", self.prefix))
@@ -430,6 +439,10 @@ where
                         .wrap(access_control::AccessControl::new(&self.api_key))
                         .route(web::get().to(debug::heap_profile)),
                 );
+            }
+
+            if let Some(shutdown_signal) = shutdown_signal.clone() {
+                app = app.app_data(shutdown_signal);
             }
 
             if let Some(ws_data) = ws_data.clone() {

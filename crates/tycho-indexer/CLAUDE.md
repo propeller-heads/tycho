@@ -199,9 +199,11 @@ tries the `LeaderLock` once:
   (histogram) records each check. The check runs on the main runtime, so checks close to the 5s
   timeout show a runtime too busy to keep the lead.
 - **Shutdown**: on SIGTERM or SIGINT, `Shutdown::run` (`main.rs`) hands over in this order. It
-  closes every websocket connection with close code `Away` (`WsData::close_on_shutdown`; the server
-  already stops accepting connections on the signal), so clients connect to another instance, which
-  streams already. It stops the extractors and waits up to 120 s (`EXTRACTOR_STOP_TIMEOUT`) until
+  closes every websocket connection with close code `Away` (`WsData::close_on_shutdown`), and
+  closes each open HTTP/1 connection after its next response (`close_connection_on_shutdown`
+  middleware). The server already stops accepting connections on the signal, but serves open
+  keep-alive connections until it stops, from a view that no longer moves. So clients connect to
+  another instance, which streams already. It stops the extractors and waits up to 120 s (`EXTRACTOR_STOP_TIMEOUT`) until
   their supervisors end (`ExtractorHandle::stopped`). A stopping extractor of the leader first
   commits every final block of its reorg buffer and its staged writes (`Extractor::shutdown`),
   so the next leader starts from that cursor and a DCI extractor replays fewer blocks. With a large
