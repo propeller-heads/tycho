@@ -18,8 +18,8 @@ use crate::postgres::{instance::InstanceId, schema::protocol_system, PostgresErr
 /// The active instance of the protocol system `name`.
 ///
 /// `None` if the protocol system has no active instance, or if no protocol system has that name.
-/// Filter with the returned id as a bound value: Postgres then plans and locks only that
-/// instance's leaves.
+/// Filter with the returned id as a bound value: with a custom plan, Postgres then plans and
+/// locks only that instance's leaves. A generic plan still locks every leaf.
 pub async fn active_instance(
     conn: &mut AsyncPgConnection,
     name: &str,

@@ -42,7 +42,8 @@ instances. No table has a DEFAULT partition.
 
 - Create an instance's leaves with `tycho.create_instance_leaves(id)` then
   `tycho.attach_instance_leaves(id)`; an import loads between the two. Foreign keys exist only
-  between the leaves of one instance. Tests use `db_fixtures::insert_instance`.
+  between the leaves of one instance. Tests use `db_fixtures::insert_instance` on a connection from
+  `testing::instance_test_connection()`, which runs instance tests one at a time.
 - History days come from `tycho.premake_history_partitions()` (pg_cron, 00:15), not from
   pg_partman's `run_maintenance()`, which makes no day for a partition set without rows.
   `drop_expired_partitions()` drops expired days of both the old partitioned tables and the
