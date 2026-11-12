@@ -597,7 +597,170 @@ async fn download_file_from_s3(
 
 #[cfg(test)]
 mod tests {
+    use chrono::NaiveDateTime;
+    use mockito::{Matcher, ServerGuard};
+    use serde_json::json;
+    use tycho_ethereum::rpc::config::RPCRetryConfig;
+
     use super::*;
+
+    const SECOND: i64 = 1_700_000_000;
+
+    fn ts_at(second: i64, micros: i64) -> NaiveDateTime {
+        chrono::DateTime::from_timestamp(second, 0)
+            .expect("valid timestamp")
+            .naive_utc() +
+            Duration::microseconds(micros)
+    }
+
+    fn block(number: u64, ts: NaiveDateTime) -> Block {
+        Block::new(
+            number,
+            Chain::Ethereum,
+            Bytes::from(number).lpad(32, 0),
+            Bytes::from(number.saturating_sub(1)).lpad(32, 0),
+            ts,
+        )
+    }
+
+    /// An `eth_getBlockByNumber` response for block `number` in second `second`.
+    fn block_response(number: u64, second: i64) -> String {
+        let zero_hash = format!("0x{:064x}", 0);
+        json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+                "number": format!("{number:#x}"),
+                "hash": format!("0x{number:064x}"),
+                "parentHash": format!("0x{:064x}", number.saturating_sub(1)),
+                "timestamp": format!("{second:#x}"),
+                "sha3Uncles": zero_hash,
+                "miner": format!("0x{:040x}", 0),
+                "stateRoot": zero_hash,
+                "transactionsRoot": zero_hash,
+                "receiptsRoot": zero_hash,
+                "logsBloom": format!("0x{}", "0".repeat(512)),
+                "difficulty": "0x0",
+                "gasLimit": "0x0",
+                "gasUsed": "0x0",
+                "extraData": "0x",
+                "mixHash": zero_hash,
+                "nonce": "0x0000000000000000",
+                "size": "0x0",
+                "transactions": [],
+            },
+        })
+        .to_string()
+    }
+
+    /// Starts a node that serves the given blocks, as (number, second) pairs, and a client for
+    /// it that does not retry.
+    async fn node(blocks: &[(u64, i64)]) -> (ServerGuard, EthereumRpcClient) {
+        let mut server = mockito::Server::new_async().await;
+        for &(number, second) in blocks {
+            server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(json!({
+                    "method": "eth_getBlockByNumber",
+                    "params": [format!("{number:#x}"), false],
+                })))
+                .with_body(block_response(number, second))
+                .create_async()
+                .await;
+        }
+        let rpc = EthereumRpcClient::new(&server.url())
+            .expect("valid url")
+            .with_retry(RPCRetryConfig::new(0, 1, 1));
+        (server, rpc)
+    }
+
+    #[test]
+    fn test_stamped_block_before_without_earlier_blocks() {
+        assert_eq!(stamped_block_before(&[]), None);
+    }
+
+    #[test]
+    fn test_stamped_block_before_with_one_earlier_block() {
+        let earlier = [block(9, ts_at(SECOND, 0))];
+
+        assert_eq!(stamped_block_before(&earlier), Some(block(9, ts_at(SECOND, 0))));
+    }
+
+    #[test]
+    fn test_stamped_block_before_with_three_earlier_blocks() {
+        let earlier =
+            [block(9, ts_at(SECOND, 0)), block(8, ts_at(SECOND, 0)), block(7, ts_at(SECOND, 0))];
+
+        assert_eq!(stamped_block_before(&earlier), Some(block(9, ts_at(SECOND, 2))));
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_stops_at_earlier_second() {
+        let (_server, rpc) = node(&[(7, SECOND - 1), (8, SECOND), (9, SECOND), (10, SECOND)]).await;
+
+        let blocks = earlier_blocks_in_second(&rpc, Chain::Ethereum, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(blocks, vec![block(9, ts_at(SECOND, 0)), block(8, ts_at(SECOND, 0))]);
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_with_block_before_in_earlier_second() {
+        let (_server, rpc) = node(&[(9, SECOND - 1), (10, SECOND)]).await;
+
+        let blocks = earlier_blocks_in_second(&rpc, Chain::Ethereum, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(blocks, vec![]);
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_down_to_block_zero() {
+        let (_server, rpc) = node(&[(0, SECOND), (1, SECOND), (2, SECOND)]).await;
+
+        let blocks = earlier_blocks_in_second(&rpc, Chain::Ethereum, 2)
+            .await
+            .unwrap();
+
+        assert_eq!(blocks, vec![block(1, ts_at(SECOND, 0)), block(0, ts_at(SECOND, 0))]);
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_of_block_zero() {
+        let (_server, rpc) = node(&[(0, SECOND)]).await;
+
+        let blocks = earlier_blocks_in_second(&rpc, Chain::Ethereum, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(blocks, vec![]);
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_with_too_many_blocks_fails() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/")
+            .with_body(block_response(5_000, SECOND))
+            .create_async()
+            .await;
+        let rpc = EthereumRpcClient::new(&server.url()).unwrap();
+
+        let res = earlier_blocks_in_second(&rpc, Chain::Ethereum, 5_000).await;
+
+        assert!(matches!(res, Err(ExtractionError::Setup(_))));
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_node_error_fails() {
+        let (_server, rpc) = node(&[(10, SECOND)]).await;
+
+        let res = earlier_blocks_in_second(&rpc, Chain::Ethereum, 10).await;
+
+        assert!(matches!(res, Err(ExtractionError::Setup(_))));
+    }
 
     #[test]
     fn test_extractor_config_without_dci_plugin() {
