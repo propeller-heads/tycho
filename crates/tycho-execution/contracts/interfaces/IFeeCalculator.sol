@@ -22,8 +22,9 @@ interface IFeeCalculator {
      * @dev Called from TychoRouterV3. Does not perform any accounting.
      *      Handles both regular fees and positive slippage surplus
      *      in a single call. When positive slippage capture is
-     *      enabled, the full surplus is assigned to the router;
-     *      otherwise the surplus stays in the swap output.
+     *      enabled, the surplus is split between the router and the
+     *      client by the client's share; otherwise the surplus stays
+     *      in the swap output.
      *      Router fee parameters are retrieved from contract storage
      *      based on the client address; client fee parameters are
      *      passed as function arguments.
@@ -32,9 +33,10 @@ interface IFeeCalculator {
      *         are zero when there is nothing to capture (no fees, no
      *         surplus, or capture disabled).
      */
-    function calculateFee(
-        FeeInput memory feeInput
-    ) external view returns (FeeRecipient[] memory feeRecipients);
+    function calculateFee(FeeInput memory feeInput)
+        external
+        view
+        returns (FeeRecipient[] memory feeRecipients);
 
     /**
      * @notice Whether the router must receive swap output before forwarding
@@ -44,10 +46,10 @@ interface IFeeCalculator {
      * @return True if funds must pass through the router after the
      *         final swap instead of going directly to the receiver
      */
-    function mustOutputThroughRouter(
-        uint32 clientFeeBps,
-        address client
-    ) external view returns (bool);
+    function mustOutputThroughRouter(uint32 clientFeeBps, address client)
+        external
+        view
+        returns (bool);
 
     /**
      * @notice Returns a page of clients with custom fee overrides and their current settings
@@ -56,11 +58,32 @@ interface IFeeCalculator {
      * @return clients Addresses of clients with at least one custom fee
      * @return fees Custom fee configuration for each client (parallel array)
      */
-    function getAllClientFees(
-        uint256 start,
-        uint256 count
-    )
+    function getAllClientFees(uint256 start, uint256 count)
         external
         view
         returns (address[] memory clients, CustomFees[] memory fees);
+
+    /**
+     * @notice Returns the router fee rates `calculateFee` applies for a client
+     *         and a token pair
+     * @dev A client's custom rate overrides the default for that fee. A pair
+     *      fee replaces the default rate on output, and the lower of it and a
+     *      client's custom rate on output applies. A zero client resolves to
+     *      the transaction origin, as in `calculateFee`.
+     * @param client The client address to check
+     * @param tokenIn The swap's input token
+     * @param tokenOut The swap's output token
+     * @return routerFeeOnOutputBps Router fee on output in fee units
+     *         (100_000_000 = 100%)
+     * @return routerFeeOnClientFeeBps Router fee on client fee in fee units
+     *         (100_000_000 = 100%)
+     */
+    function getEffectiveRouterFees(
+        address client,
+        address tokenIn,
+        address tokenOut
+    )
+        external
+        view
+        returns (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps);
 }

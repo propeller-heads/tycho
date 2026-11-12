@@ -2,6 +2,7 @@ pub mod boosted_fees;
 pub mod concentrated;
 pub mod full_range;
 pub mod mev_capture;
+pub mod mev_capture_v21;
 pub mod oracle;
 pub mod stableswap;
 mod timed;

@@ -133,6 +133,13 @@ const deploy_protocols = {
         "uniswap_v3",
         "uniswap_v4",
     ],
+    "elysium": [
+        "aero_basic",
+        "uniswap_v2",
+        "uniswap_v3",
+        "uniswap_v4",
+        "native_wrapper",
+    ],
 };
 
 async function main() {

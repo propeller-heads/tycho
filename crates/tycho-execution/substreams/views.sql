@@ -21,7 +21,8 @@ BEGIN
     -- database was created before it, and `schema.sql` only creates a table it does not find,
     -- so the column is added here.
     ALTER TABLE trades ADD COLUMN IF NOT EXISTS state_committed BOOLEAN;
-    ALTER TABLE trades ADD COLUMN IF NOT EXISTS positive_slippage_exempt BOOLEAN;
+    ALTER TABLE trades ADD COLUMN IF NOT EXISTS router_positive_slippage_bps BIGINT;
+    ALTER TABLE trades ADD COLUMN IF NOT EXISTS client_positive_slippage_share_bps BIGINT;
     ALTER TABLE router_call_errors ADD COLUMN IF NOT EXISTS state_committed BOOLEAN;
 
     -- Looking up the trades of one transaction by hash, which no other index serves.
@@ -37,6 +38,9 @@ BEGIN
     -- `state_committed` separates the two exactly: the chain threw away the state changes of a
     -- probe. A row indexed before that column existed carries NULL and stays out, because
     -- nothing in it says the call was kept; re-indexing the chain settles it either way.
+    --
+    -- subsidized_trades reads this view, so it goes first; it is recreated further down.
+    DROP VIEW IF EXISTS subsidized_trades;
     DROP VIEW IF EXISTS trades_settled;
     CREATE VIEW trades_settled AS
     SELECT t.*

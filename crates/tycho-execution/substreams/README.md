@@ -156,22 +156,30 @@ WHERE protocol_systems = ARRAY[]::TEXT[] GROUP BY 1, 2 ORDER BY 3 DESC;
 ### Positive slippage
 
 A v3_1 trade carries `expected_amount_out`, so `positive_slippage` is the surplus the swaps
-produced above it. Who keeps that surplus takes two flags:
+produced above it. Who keeps that surplus takes three columns:
 
-| `positive_slippage_enabled` | `positive_slippage_exempt` | who keeps the surplus |
-| --- | --- | --- |
-| false | — | the receiver |
-| true | false | the router, as part of `router_fee_amount` |
-| true | true | the receiver |
+1. When `positive_slippage_enabled` is false, the receiver keeps all of it. Only a calculator
+   that emits `PositiveSlippageToggled` can turn capture off. A calculator with a router positive slippage bps has
+   no switch and always reports true.
+2. Otherwise the router captures `router_positive_slippage_bps` of it, and the receiver keeps the
+   rest.
+3. The client gets `client_positive_slippage_share_bps` of the captured amount, and the router
+   keeps the remainder, rounded in its favour.
 
-The exemption is FeeCalculator state, a `mapping(address => bool)` set by
-`setPositiveSlippageExempt` under `ROUTER_FEE_SETTER_ROLE`, and it emits
-`PositiveSlippageExemptionSet(address indexed client, bool exempt)`. `store_fee_config` keys it by
-calculator and client, so an exemption on one calculator does not follow a rotation to another.
+Both values are in fee units (100000000 = all of it). The router positive slippage bps is the client's custom
+value (`CustomRouterPositiveSlippageBpsUpdated`, `CustomRouterPositiveSlippageBpsRemoved`) when
+one is set, otherwise the calculator's global value (`RouterPositiveSlippageBpsUpdated`). A
+calculator that never emitted a router positive slippage event captures the full surplus. The client share comes from
+`ClientPositiveSlippageShareUpdated` and defaults to zero.
+
+The calculator generation before per-client router positive slippage bps exempted a client instead, with
+`PositiveSlippageExemptionSet(address indexed client, bool exempt)`. `store_fee_config` stores an
+exemption as a custom router positive slippage bps of zero and its removal as no custom router positive slippage bps, so trades on
+both generations resolve the same way. Every value is keyed by calculator and client, so a value
+on one calculator does not follow a rotation to another.
 
 The client is the one the FeeCalculator resolves: the signed `client_fee_receiver`, or `eoa`
-(`tx.origin`) when that is zero. Only the calculator generation that has the exemption emits the
-event, so a trade on an older calculator resolves to `false`.
+(`tx.origin`) when that is zero.
 
 `positive_slippage` is what the swaps produced, not what was taken. Read `router_fee_amount`,
 which comes from the `FeesTaken` event, for what the router actually collected.
@@ -530,8 +538,9 @@ hand. ABIs come from the verified sources on Sourcify
 (`TychoRouterV2` = `0xfD0b31d2…`, `TychoRouterV3_0` = `0x1f8dB310…`, `TychoRouterV3_1` =
 `0xea290cE3…`, `FeeCalculator` = `0xA236E1F0…`). Two ABI files hold events that deployment does not have:
 `FeeCalculatorV3_0.json` the `uint16` event signatures of the earlier FeeCalculator, and
-`FeeCalculatorExemption.json` the `PositiveSlippageExemptionSet` of the later one. Each is
-events-only, and the decoders try them in turn. `SubsidyPayer.json` holds the two events of
+`FeeCalculatorExemption.json` the `PositiveSlippageExemptionSet` of the later one, and
+`FeeCalculatorRouterPositiveSlippage.json` the router positive slippage events of the one after it.
+Each is events-only, and the decoders try them in turn. `SubsidyPayer.json` holds the two events of
 `contracts/interfaces/ISubsidyPayer.sol`, events-only as well.
 
 Regenerate protobuf bindings after editing `proto/` with `make protogen`. The abigen output under
