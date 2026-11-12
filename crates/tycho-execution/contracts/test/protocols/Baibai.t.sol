@@ -11,10 +11,12 @@ import {TransferManager} from "@src/TransferManager.sol";
 ///      (docs.baibai.cx/takers/quoting-and-swapping). The others were identified on the live,
 ///      not source-verified implementations behind the proxies: `owner` and
 ///      `prioritySurchargeBps` by their selectors, `setTakerFee` by its selector and its effect
-///      on `quoteFor`. Fees are in millionths of the gross output.
+///      on `quoteFor`. `setTakerFee` takes basis points, at most 1,000 (10%); the fee getter
+///      (selector 0xa5cbd1b7) and `quoteFor` report millionths of the gross output, so the
+///      getter returns the set value times 100.
 interface IBaibaiFees {
     function owner() external view returns (address);
-    function setTakerFee(address taker, address base, uint16 pips) external;
+    function setTakerFee(address taker, address base, uint16 bps) external;
     function quoteFor(
         address base,
         address tokenIn,
@@ -145,9 +147,18 @@ contract BaibaiTest is TychoRouterTestSetup {
         baibaiExecutor.getTransferData(abi.encodePacked(address(0), uint8(1)));
     }
 
-    function _setFee(address taker, uint16 pips) internal {
+    function _setFee(address taker, uint16 bps) internal {
         vm.prank(IBaibaiFees(BAIBAI_ENTRYPOINT).owner());
-        IBaibaiFees(BAIBAI_ENTRYPOINT).setTakerFee(taker, BASE, pips);
+        IBaibaiFees(BAIBAI_ENTRYPOINT).setTakerFee(taker, BASE, bps);
+    }
+
+    /// @dev The fee getter the simulator reads every poll, in millionths of the gross output.
+    function _takerFee(address taker) internal view returns (uint256) {
+        (bool ok, bytes memory raw) = BAIBAI_ENTRYPOINT.staticcall(
+            abi.encodeWithSelector(bytes4(0xa5cbd1b7), taker, BASE)
+        );
+        assertTrue(ok);
+        return abi.decode(raw, (uint256));
     }
 
     /// @dev A router swap that fills at exactly the entrypoint's surcharge-free quote.
@@ -199,13 +210,15 @@ contract BaibaiTest is TychoRouterTestSetup {
     }
 
     /// @dev The fee charged is the router's, whatever the venue sets it to; end-user fees do
-    ///      not apply.
+    ///      not apply. The router is charged the venue's cap of 1,000 bps (10%), which the
+    ///      getter reports as 100,000 millionths.
     function testRouterFeeIdentity() public {
         _setFee(BOB, 1000);
         _setFee(tychoRouterAddr, 0);
         _swap(true, 1e16);
         _swap(false, 10e6);
         _setFee(tychoRouterAddr, 1000);
+        assertEq(_takerFee(tychoRouterAddr), 100_000, "1,000 bps in millionths");
         _swap(true, 1e16);
         _swap(false, 10e6);
     }
