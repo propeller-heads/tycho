@@ -14,7 +14,7 @@ use alloy::{
 use futures::StreamExt;
 use itertools::Itertools;
 use miette::{ensure, miette, IntoDiagnostic, WrapErr};
-use num_bigint::{BigInt, BigUint};
+use num_bigint::BigUint;
 use num_traits::{FromPrimitive, Signed, Zero};
 use postgres::NoTls;
 use serde_json::json;
@@ -117,33 +117,29 @@ fn check_execution_slippage(
     amount_out: &BigUint,
     tolerance: Tolerance,
 ) -> Result<(), String> {
-    let Some((difference, bps)) = drift(expected_amount_out, amount_out) else {
+    let Some((difference, _)) = drift(expected_amount_out, amount_out) else {
         return Err("execution returned no output".to_string());
     };
-    let within = difference.abs() <= BigInt::from(tolerance.wei) ||
-        difference.abs() * 10_000u32 <= BigInt::from(amount_out.clone()) * tolerance.bps;
-    if within {
+    let gap = difference.magnitude();
+    if gap <= &BigUint::from(tolerance.wei) || gap * 10_000u32 <= amount_out * tolerance.bps {
         return Ok(());
     }
 
-    let bps = format_bps(bps.abs());
     let (paid, quotes) =
         if difference.is_negative() { ("less", "overquotes") } else { ("more", "underquotes") };
-    Err(format!(
-        "execution paid {} {paid} than simulated: the simulation {quotes} by {bps} bps, beyond \
-         the tolerance ({tolerance})",
-        difference.abs()
-    ))
-}
-
-/// Formats a basis-point difference with two decimals, or with two significant digits below
-/// 0.01 bps, where a wei of a large trade would otherwise print as `0.00`.
-fn format_bps(bps: f64) -> String {
-    if bps == 0.0 || bps.abs() >= 0.01 {
-        format!("{bps:.2}")
+    // In hundredths of a bps, rounded up, so a difference beyond a whole-bps tolerance never
+    // prints as equal to it. Below 0.01 bps the amount paid says it all.
+    let scaled = gap * 1_000_000u32;
+    let by = if &scaled >= amount_out {
+        let centi_bps = (scaled + amount_out - 1u32) / amount_out;
+        format!(" by {}.{:02} bps", &centi_bps / 100u32, &centi_bps % 100u32)
     } else {
-        format!("{bps:.1e}")
-    }
+        String::new()
+    };
+    Err(format!(
+        "execution paid {gap} {paid} than simulated: the simulation {quotes}{by}, beyond the \
+         tolerance ({tolerance})"
+    ))
 }
 
 /// The chain the balance check reads, at one block.
@@ -487,6 +483,7 @@ fn observe_executions(
             checks.observe_execution(
                 simulation_id,
                 &input.component_id,
+                &input.token_out,
                 &input.expected_amount_out,
                 amount_out,
             );
@@ -1104,9 +1101,9 @@ impl TestRunner {
                         });
                 if let Err(e) = indexed {
                     checks.fail(CheckId::Index, &e);
-                    report.results.extend(checks.finish().1);
+                    let result = report.add_test(checks.finish(), Err(e));
                     Self::write_report(test_type, &report)?;
-                    return Err(e);
+                    return result;
                 }
             }
             if let Some(Ok(streamed)) = &mut streamed {
@@ -1173,10 +1170,7 @@ impl TestRunner {
                 }
                 None => {}
             }
-            report.drift.extend(checks.take_drift());
-            let (outcome, results) = checks.finish();
-            report.results.extend(results);
-            let result = run.and(outcome);
+            let result = report.add_test(checks.finish(), run);
             match result {
                 Ok(_) => {
                     info!("✅ {} passed\n", test.name);
@@ -1355,11 +1349,6 @@ impl TestRunner {
         // below must come last for the ladders to run on it.
         let scaled = (!tvl_only_ids.is_empty()).then(|| {
             let mut scaled = snapshot.clone();
-            scaled.states.retain(|id, _| {
-                tvl_only_ids
-                    .iter()
-                    .any(|declared| declared.eq_ignore_ascii_case(id))
-            });
             let changed = tvl_only::scale_balances(&mut scaled, &tvl_only_ids);
             let decoded = adapter_contract_path().and_then(|path| {
                 self.decode_snapshot(
@@ -3344,7 +3333,7 @@ mod tests {
     ) -> (Vec<(CheckId, Option<String>, String)>, LadderSkips) {
         let mut checks = Checks::new(Harness::Strict, "t");
         let skips = record_ladder_skips(components, &mut checks);
-        let (_, results) = checks.finish();
+        let results = checks.finish().results;
         let recorded = results
             .into_iter()
             .map(|CheckResult { check, component, outcome, .. }| {
@@ -3655,13 +3644,16 @@ mod tests {
         let mut checks = Checks::new(Harness::Strict, "t");
         observe_executions(&mut checks, &ladder, &results);
         observe_executions(&mut checks, &at_limit, &results);
-        let drift = checks.take_drift().unwrap();
+        let drift = checks.finish().drift.unwrap();
         // The at-limit execution is 30 bps off, the ladder's 10.
         assert_eq!(
             (drift.test.as_str(), drift.simulation.as_str(), drift.component.as_str()),
             ("t", "at_limit_b", "0x02")
         );
-        assert_eq!(drift.largest_difference, "3");
+        assert_eq!(
+            (drift.largest_difference.as_str(), drift.largest_difference_token.as_str()),
+            ("3", "B")
+        );
     }
 
     #[test]
@@ -3675,7 +3667,14 @@ mod tests {
             .collect();
         let mut checks = Checks::new(Harness::Strict, "t");
         observe_executions(&mut checks, &inputs, &results);
-        assert_eq!(checks.take_drift().unwrap().simulation, "test_00");
+        assert_eq!(
+            checks
+                .finish()
+                .drift
+                .unwrap()
+                .simulation,
+            "test_00"
+        );
     }
 
     #[test]
@@ -3795,14 +3794,28 @@ mod tests {
     }
 
     #[test]
-    fn a_tiny_mismatch_prints_its_bps_with_significant_digits() {
-        let executed = BigUint::from(150_000u32) * BigUint::from(10u32).pow(18);
+    fn a_mismatch_prints_its_bps_rounded_up_and_none_below_a_hundredth() {
+        let executed = BigUint::from(1_000_000_000u32);
+        // 3.00001 bps: beyond 3 bps, so it must not print as 3.00.
+        let reason = check_execution_slippage(
+            &BigUint::from(1_000_300_001u32),
+            &executed,
+            Tolerance { bps: 3, wei: 0 },
+        )
+        .unwrap_err();
+        assert!(
+            reason.contains("overquotes by 3.01 bps, beyond the tolerance (3 bps)"),
+            "{reason}"
+        );
+
+        let large = BigUint::from(150_000u32) * BigUint::from(10u32).pow(18);
         let reason =
-            check_execution_slippage(&(&executed + 1u32), &executed, Tolerance::EXACT).unwrap_err();
-        assert!(reason.contains("overquotes by 6.7e-20 bps"), "{reason}");
-        assert_eq!(format_bps(0.0), "0.00");
-        assert_eq!(format_bps(0.01), "0.01");
-        assert_eq!(format_bps(0.0042), "4.2e-3");
+            check_execution_slippage(&(&large + 1u32), &large, Tolerance::EXACT).unwrap_err();
+        assert_eq!(
+            reason,
+            "execution paid 1 less than simulated: the simulation overquotes, beyond the tolerance \
+             (exact)"
+        );
     }
 
     #[test]
