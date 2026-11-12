@@ -35,9 +35,15 @@ use crate::{
     },
 };
 
-/// How many blocks a read's block may trail the wall clock. Past it the node is lagging, and
-/// curves it reports live may already have expired on chain.
-const MAX_BLOCK_LAG: u64 = 2;
+/// How many seconds a read's block timestamp may trail the wall clock. Past it the node is
+/// lagging, and curves it reports live may already have expired on chain. Half the book's 8 s
+/// TTL.
+const MAX_READ_LAG_SECS: u64 = 4;
+
+/// How many seconds past now a curve must stay live to be published: the time for a swap priced
+/// from it to be sent and land. Base block timestamps are whole seconds, shared by about five
+/// 200 ms blocks.
+const FILL_MARGIN_SECS: u64 = 2;
 
 /// BaiBai's book feed. Built through [`BaibaiFeedBuilder`]. Neither its `Debug` output nor its
 /// errors carry the RPC URL, which commonly carries a key.
@@ -94,22 +100,20 @@ impl BaibaiFeedBuilder {
         self
     }
 
-    /// The feed tuning a new builder starts from, in Base blocks.
+    /// The feed tuning a new builder starts from, set by BaiBai's curves rather than Base's
+    /// blocks.
     ///
-    /// Makers refresh their curves every block and a curve expires a few seconds after its
-    /// update (the earlier of its `validUntil` and the book's TTL, both read every poll). The
-    /// feed polls every half block to pick up each block soon after it lands, gives a poll one
-    /// block, and withdraws a book [`MAX_BLOCK_LAG`] blocks after its last refresh: 1 s, 2 s and
-    /// 4 s at Base's 2 s block time. A poll publishes only curves still live in the next block,
-    /// but while polls fail a book can outlive its curve by up to the withdrawal age; a swap
-    /// priced from an expired curve reverts at the venue.
+    /// Makers refresh their curves about every second and a curve expires a few seconds after
+    /// its update (the earlier of its `validUntil` and the book's 8 s TTL, both read every
+    /// poll). The feed polls every second, gives a poll 2 s, and withdraws a book
+    /// [`MAX_READ_LAG_SECS`] after its last refresh. A poll publishes only curves live for
+    /// [`FILL_MARGIN_SECS`] more, but while polls fail a book can outlive its curve by up to the
+    /// withdrawal age; a swap priced from an expired curve reverts at the venue.
     pub fn default_feed_config() -> HttpFeedConfig {
-        let block_secs = BASE_DEPLOYMENT.chain.block_time_secs();
-        let block = Duration::from_secs(block_secs);
         HttpFeedConfig {
-            poll_interval: block / 2,
-            request_timeout: block,
-            max_snapshot_age: Some(Duration::from_secs(MAX_BLOCK_LAG * block_secs)),
+            poll_interval: Duration::from_secs(1),
+            request_timeout: Duration::from_secs(2),
+            max_snapshot_age: Some(Duration::from_secs(MAX_READ_LAG_SECS)),
             ..default_http_feed_config()
         }
     }
@@ -183,14 +187,14 @@ impl HttpSource for BaibaiBookSource {
     type Snapshot = BookSnapshot<ReceivedAt>;
 
     /// A read that fails fails the poll, and so does one from a block older than a previous
-    /// poll's or more than [`MAX_BLOCK_LAG`] blocks behind the wall clock: a load-balanced or
+    /// poll's or more than [`MAX_READ_LAG_SECS`] behind the wall clock: a load-balanced or
     /// lagging node would otherwise roll the books back or publish curves expired on chain.
     /// Pairs the read returns but no book can be made of are left out of it, so a poll whose
     /// every curve has expired withdraws every pair.
     async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
         let read = self.reader.read().await?;
         let now = (self.clock)();
-        if now > read.timestamp + MAX_BLOCK_LAG * self.assembler.block_time() {
+        if now > read.timestamp + MAX_READ_LAG_SECS {
             return Err(FeedError::Connection(format!(
                 "BaiBai node is {} s behind: its latest block {} is from {}",
                 now - read.timestamp,
@@ -218,7 +222,7 @@ fn unix_now() -> u64 {
 }
 
 /// Turns one [`BookRead`] into books: one per pair between served tokens that clears the TVL
-/// floor and can still be filled in the next block.
+/// floor and stays live for [`FILL_MARGIN_SECS`].
 #[derive(Debug, Clone)]
 pub(super) struct BaibaiBookAssembler {
     pub(super) book_config: BookFeedConfig,
@@ -226,12 +230,6 @@ pub(super) struct BaibaiBookAssembler {
 }
 
 impl BaibaiBookAssembler {
-    /// The chain's block time in seconds. [`BaibaiFeedBuilder::build`] admits Base only, whose
-    /// block time is always registered.
-    fn block_time(&self) -> u64 {
-        self.book_config.chain.block_time_secs()
-    }
-
     /// The books of `read`, judging expiry at `now` (Unix seconds) or the read's block timestamp,
     /// whichever is later.
     pub(super) fn books(&self, read: &BookRead, now: u64) -> Books {
@@ -269,7 +267,7 @@ impl BaibaiBookAssembler {
     }
 
     /// The pair's state, or `None`, logged, when its tokens are not served, its curve expires
-    /// before the block after `now` or the chain reports it malformed.
+    /// within [`FILL_MARGIN_SECS`] of `now` or the chain reports it malformed.
     fn state(&self, read: &BookRead, pair: &PairRead, now: u64) -> Option<BaibaiState> {
         let base = Bytes::from(pair.base.to_vec());
         let quote = Bytes::from(self.deployment.quote.to_vec());
@@ -277,7 +275,7 @@ impl BaibaiBookAssembler {
             .book_config
             .pair_tokens(&base, &quote)?;
         let expires_at = expiry(pair.valid_until, pair.last_update_at, read.ttl);
-        if expires_at < now.saturating_add(self.block_time()) {
+        if expires_at < now.saturating_add(FILL_MARGIN_SECS) {
             debug!(%base, expires_at, now, "skipping expiring curve");
             return None;
         }
@@ -542,8 +540,8 @@ mod tests {
         Ok(source.fetch().await?.books.len())
     }
 
-    /// A node whose latest block trails the wall clock by more than two blocks is lagging: its
-    /// curves may have expired on chain.
+    /// A node whose latest block trails the wall clock by more than four seconds is lagging:
+    /// its curves may have expired on chain.
     #[tokio::test]
     async fn a_lagging_node_fails_the_poll() {
         assert_eq!(
@@ -561,7 +559,7 @@ mod tests {
     }
 
     /// Within the lag a node is allowed, a curve is judged at the wall clock: cbBTC's, cut to
-    /// five seconds, is still live in the block after the node's but not in the one after now.
+    /// five seconds, is live for the fill margin past the node's timestamp but not past now.
     #[tokio::test]
     async fn curves_are_judged_at_the_wall_clock_when_the_node_trails_it() {
         let mut node = FakeNode::new();
@@ -696,15 +694,15 @@ mod tests {
         assert!(error.is_fatal(), "{error}");
     }
 
-    /// A curve that expires before the next block cannot fill a swap priced from it. The
+    /// A curve that expires within the fill margin cannot fill a swap priced from it. The
     /// 53,545,000 recording's curves run until `validUntil`, six (cbBTC) and seven (WETH) seconds
     /// after their update.
     #[rstest]
     #[case::fresh(0, 2)]
-    #[case::one_expiring_before_the_next_block(5, 1)]
-    #[case::both_expiring_before_the_next_block(6, 0)]
+    #[case::one_expiring_within_the_margin(5, 1)]
+    #[case::both_expiring_within_the_margin(6, 0)]
     #[tokio::test]
-    async fn curves_expiring_before_the_next_block_are_withdrawn(
+    async fn curves_expiring_within_the_fill_margin_are_withdrawn(
         #[case] seconds_later: u64,
         #[case] expected: usize,
     ) {
@@ -780,17 +778,6 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, FeedError::InvalidInput(_)), "{error}");
-    }
-
-    /// At Base's 2 s block time the defaults poll every half block, give a poll one block and
-    /// withdraw a book after two.
-    #[test]
-    fn the_default_tuning_follows_base_block_time() {
-        let config = BaibaiFeedBuilder::default_feed_config();
-
-        assert_eq!(config.poll_interval, Duration::from_secs(1));
-        assert_eq!(config.request_timeout, Duration::from_secs(2));
-        assert_eq!(config.max_snapshot_age, Some(Duration::from_secs(4)));
     }
 
     #[test]
