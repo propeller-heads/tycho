@@ -203,7 +203,7 @@ tries the `LeaderLock` once:
   already stops accepting connections on the signal), so clients connect to another instance, which
   streams already. It stops the extractors and waits up to 120 s (`EXTRACTOR_STOP_TIMEOUT`) until
   their supervisors end (`ExtractorHandle::stopped`). A stopping extractor of the leader first
-  commits every final block of its reorg buffer and its staged writes (`Extractor::commit_final_blocks`),
+  commits every final block of its reorg buffer and its staged writes (`Extractor::shutdown`),
   so the next leader starts from that cursor and a DCI extractor replays fewer blocks. With a large
   `--database-insert-batch-size` this takes time: give the pods a grace period above the timeout. It then sends on the `release` of `elect`: a
   leader closes its lock session, so a follower takes over within one poll instead of when this

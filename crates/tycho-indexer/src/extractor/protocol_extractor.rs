@@ -404,9 +404,10 @@ where
             .first_message_processed
     }
 
-    async fn update_last_processed_block(&self, block: Block) {
+    async fn update_last_processed_block(&self, block: Block, final_block_height: u64) {
         let mut state = self.inner.lock().await;
         state.last_processed_block = Some(block);
+        state.final_block_height = Some(final_block_height);
     }
 
     /// Reports sync progress if a minute has passed since the last report.
@@ -1216,7 +1217,7 @@ where
 
     /// Commits every final block in the reorg buffer and every staged write, and waits until
     /// the database holds them. Does nothing while following: the leader commits those blocks.
-    async fn commit_final_blocks_now(&self) -> Result<(), ExtractionError> {
+    async fn commit_final_blocks(&self) -> Result<(), ExtractionError> {
         let CommitMode::Committing { floor } = *self.commit_mode.lock().await else {
             return Ok(());
         };
@@ -1251,7 +1252,7 @@ where
         }
         self.gateway
             .inner
-            .commit_staged_writes()
+            .commit_open_transaction()
             .await
             .map_err(ExtractionError::Storage)?;
         let flushed_block_height = self
@@ -1304,17 +1305,13 @@ where
             }
         }
 
-        self.update_last_processed_block(msg.block.clone())
+        self.update_last_processed_block(msg.block.clone(), final_block_height)
             .await;
 
         self.periodically_report_metrics(&msg, is_syncing)
             .await;
 
         self.update_cursor(cursor).await;
-        self.inner
-            .lock()
-            .await
-            .final_block_height = Some(final_block_height);
 
         let committed_block_height = self
             .reported_committed_height(final_block_height)
@@ -2198,7 +2195,7 @@ where
 
         debug!("Successfully retrieved all previous states during revert!");
 
-        self.update_last_processed_block(new_latest_block)
+        self.update_last_processed_block(new_latest_block, finalized_block_height)
             .await;
         self.update_cursor(inp.last_valid_cursor)
             .await;
@@ -2213,8 +2210,10 @@ where
         ))
     }
 
-    async fn commit_final_blocks(&self) -> Result<(), ExtractionError> {
-        self.commit_final_blocks_now().await
+    /// Commits every final block in the reorg buffer and every staged write while this process
+    /// writes the database. See [`ProtocolExtractor::commit_final_blocks`].
+    async fn shutdown(&self) -> Result<(), ExtractionError> {
+        self.commit_final_blocks().await
     }
 
     async fn wait_for_capacity(&self) {
@@ -2309,7 +2308,7 @@ pub trait ExtractorGateway: Send + Sync {
     ///
     /// # Errors
     /// Returns a [`StorageError`] if the write fails. The staged writes are then not committed.
-    async fn commit_staged_writes(&self) -> Result<(), StorageError>;
+    async fn commit_open_transaction(&self) -> Result<(), StorageError>;
 
     /// Makes `tokens` available to token queries of this process without persisting them, then
     /// records when each token of `last_traded` last traded, for the "recently traded" filter.
@@ -2681,7 +2680,7 @@ impl ExtractorGateway for ExtractorPgGateway {
             .flushed_block_height()
     }
 
-    async fn commit_staged_writes(&self) -> Result<(), StorageError> {
+    async fn commit_open_transaction(&self) -> Result<(), StorageError> {
         self.state_gateway
             .commit_open_transaction()
             .await
@@ -3098,7 +3097,7 @@ mod test {
                 Ok(())
             });
         let staged_flushes = commits.staged_flushes.clone();
-        gw.expect_commit_staged_writes()
+        gw.expect_commit_open_transaction()
             .returning(move || {
                 staged_flushes.fetch_add(1, Ordering::SeqCst);
                 Ok(())
