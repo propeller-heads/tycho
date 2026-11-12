@@ -211,7 +211,11 @@ tries the `LeaderLock` once:
   leader closes its lock session, so a follower takes over within one poll instead of when this
   process exits, and a follower stops retrying the lock, so a process that shuts down never becomes
   the leader. A commit still running then fails on the writer fence. Last, it stops the server and
-  the write executor.
+  the write executor. Each supervisor logs `ExtractorStopped` and `Shutdown::run` logs
+  `ExtractorsStopped`, both with the time since the stop. The main thread exits after the first
+  error, or after the services end. When the extractors end cleanly first, it waits up to 40 s
+  (`SERVICES_STOP_TIMEOUT`) for the services, so the shutdown releases the lock and stops the
+  server before the process exits.
 - **Health**: each successful lock check is published in the `WriterStatus`
   (`time_since_lead_confirmed`). `GET /v1/health` returns 503 while this process leads and has not
   confirmed its lock for 30s, so a liveness probe restarts a leader that is stuck but still holds

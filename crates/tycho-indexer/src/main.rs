@@ -14,7 +14,7 @@ use std::{
     env,
     fs::File,
     io::Read,
-    process, slice,
+    slice,
     str::FromStr,
     sync::{mpsc, Arc},
     time::Duration,
@@ -428,27 +428,19 @@ fn run_indexer(global_args: &GlobalArgs, index_args: &IndexArgs) -> Result<(), E
             }
         }
 
-        if extractor_ctrl_tx.send(res).is_err() {
-            error!("Fatal: failed to communicate with main thread. Exiting the process...");
-            process::exit(1);
-        }
+        report_task_end(&extractor_ctrl_tx, IndexerTask::Extraction, res);
     });
 
     let services_ctrl_tx = control_tx;
     main_runtime.spawn(async move {
         let (res, _, _) = select_all(other_tasks).await;
-
-        if services_ctrl_tx.send(res.unwrap_or_else(|join_err| Err(ExtractionError::Unknown(format!("Task panicked: {join_err}"))))).is_err() {
-            error!("Fatal service task exited and failed trying to communicate with main thread. Exiting the process...");
-            process::exit(1);
-        }
+        let res = res.unwrap_or_else(|join_err| {
+            Err(ExtractionError::Unknown(format!("Task panicked: {join_err}")))
+        });
+        report_task_end(&services_ctrl_tx, IndexerTask::Services, res);
     });
 
-    let res = control_rx.recv().map_err(|_closed| {
-        ExtractionError::Unknown("Control channel unexpectedly closed".to_string())
-    })?;
-
-    match res {
+    match wait_for_indexer_end(&control_rx, SERVICES_STOP_TIMEOUT) {
         Ok(()) => Ok(()),
         Err(err) => {
             error!(error = %err, "Fatal error, shutting down");
@@ -955,6 +947,82 @@ async fn get_accounts_data(
 /// A commit that is still running at the timeout fails on the writer fence of the new leader.
 const EXTRACTOR_STOP_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// A task of the indexer that reports its end to the main thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexerTask {
+    /// The extractor supervisors. Ends when every supervisor ended, or at the first one that
+    /// failed.
+    Extraction,
+    /// The server, the shutdown sequence and the other service tasks. Ends first of them.
+    Services,
+}
+
+type TaskEnd = (IndexerTask, Result<(), ExtractionError>);
+
+/// How long the main thread waits for the services after the extractors ended cleanly.
+///
+/// In a shutdown, the extractors end first. The shutdown then still releases the leader lock and
+/// stops the server, which waits up to 30 s (the actix default) for the open requests.
+const SERVICES_STOP_TIMEOUT: Duration = Duration::from_secs(40);
+
+/// Sends the end of `task` to the main thread.
+///
+/// The main thread returns after the first end it receives, unless that is a clean end of the
+/// extraction. A later end then finds the channel closed while the process exits. It is logged
+/// and dropped: there is nothing left to stop.
+fn report_task_end(
+    control_tx: &mpsc::Sender<TaskEnd>,
+    task: IndexerTask,
+    result: Result<(), ExtractionError>,
+) {
+    if let Err(mpsc::SendError((task, result))) = control_tx.send((task, result)) {
+        match result {
+            Ok(()) => debug!(?task, "The task ended after the main thread; the process exits"),
+            Err(err) => error!(
+                ?task,
+                error = %err,
+                "The task failed after the main thread ended; the process exits"
+            ),
+        }
+    }
+}
+
+/// Blocks until the indexer should exit, and returns why.
+///
+/// - The first error of either task returns at once.
+/// - A clean end of the services returns: in a shutdown they end last.
+/// - A clean end of the extraction waits up to `services_timeout` for the services, so that a
+///   shutdown releases the leader lock and stops the server before the process exits. It returns
+///   `Ok` when they do not end in time.
+///
+/// # Errors
+/// Returns the error a task ended with, or an error when both tasks dropped their sender
+/// without a result.
+fn wait_for_indexer_end(
+    control_rx: &mpsc::Receiver<TaskEnd>,
+    services_timeout: Duration,
+) -> Result<(), ExtractionError> {
+    let closed = || ExtractionError::Unknown("Control channel unexpectedly closed".to_string());
+    let (task, result) = control_rx
+        .recv()
+        .map_err(|_disconnected| closed())?;
+    result?;
+    match task {
+        IndexerTask::Services => Ok(()),
+        IndexerTask::Extraction => match control_rx.recv_timeout(services_timeout) {
+            Ok((_, result)) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                warn!(
+                    timeout = ?services_timeout,
+                    "The services did not end after the extractors; exiting anyway"
+                );
+                Ok(())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(closed()),
+        },
+    }
+}
+
 /// What a shutdown signal stops, in the order of [`Shutdown::run`].
 struct Shutdown {
     server: ServerHandle,
@@ -971,9 +1039,9 @@ impl Shutdown {
     /// Waits for SIGINT or SIGTERM, then hands the work to another instance and stops.
     ///
     /// The order makes the handover short, because the follower streams and serves already:
-    /// 1. Closes the websocket connections, and each HTTP/1 connection after its next response,
-    ///    so clients connect to another instance at once. The server stops to accept connections
-    ///    on the signal itself.
+    /// 1. Closes the websocket connections, and each HTTP/1 connection after its next response, so
+    ///    clients connect to another instance at once. The server stops to accept connections on
+    ///    the signal itself.
     /// 2. Stops the extractors, and waits up to [`EXTRACTOR_STOP_TIMEOUT`] until they ended. A
     ///    leader's extractors commit their final blocks before they end, so the next leader starts
     ///    from a newer cursor.
@@ -994,6 +1062,7 @@ impl Shutdown {
             },
         }
 
+        let signal_received = tokio::time::Instant::now();
         if let Some(close_connections) = &self.close_connections {
             close_connections.send_replace(true);
         }
@@ -1009,8 +1078,10 @@ impl Shutdown {
         );
         if tokio::time::timeout(EXTRACTOR_STOP_TIMEOUT, all_stopped)
             .await
-            .is_err()
+            .is_ok()
         {
+            info!(elapsed = ?signal_received.elapsed(), "ExtractorsStopped");
+        } else {
             warn!(
                 timeout = ?EXTRACTOR_STOP_TIMEOUT,
                 "Extractors did not stop in time; releasing the leader lock anyway"
@@ -1064,6 +1135,70 @@ mod tests {
             18
         )
         .is_err());
+    }
+
+    mod wait_for_indexer_end {
+        use std::{sync::mpsc, time::Duration};
+
+        use tycho_indexer::extractor::ExtractionError;
+
+        use super::super::{wait_for_indexer_end, IndexerTask};
+
+        const SHORT: Duration = Duration::from_millis(50);
+
+        fn failure() -> ExtractionError {
+            ExtractionError::Unknown("boom".to_string())
+        }
+
+        #[test]
+        fn test_returns_after_the_services_end() {
+            let (tx, rx) = mpsc::channel();
+            tx.send((IndexerTask::Services, Ok(())))
+                .unwrap();
+
+            assert!(wait_for_indexer_end(&rx, SHORT).is_ok());
+        }
+
+        #[test]
+        fn test_waits_for_the_services_after_the_extraction_ends() {
+            let (tx, rx) = mpsc::channel();
+            tx.send((IndexerTask::Extraction, Ok(())))
+                .unwrap();
+            tx.send((IndexerTask::Services, Err(failure())))
+                .unwrap();
+
+            assert!(
+                wait_for_indexer_end(&rx, SHORT).is_err(),
+                "the result of the services must be the outcome"
+            );
+        }
+
+        #[test]
+        fn test_returns_the_first_error_at_once() {
+            let (tx, rx) = mpsc::channel();
+            tx.send((IndexerTask::Extraction, Err(failure())))
+                .unwrap();
+
+            assert!(wait_for_indexer_end(&rx, Duration::from_secs(3600)).is_err());
+        }
+
+        #[test]
+        fn test_returns_ok_when_the_services_do_not_end_in_time() {
+            let (tx, rx) = mpsc::channel();
+            tx.send((IndexerTask::Extraction, Ok(())))
+                .unwrap();
+
+            assert!(wait_for_indexer_end(&rx, SHORT).is_ok());
+            drop(tx);
+        }
+
+        #[test]
+        fn test_fails_when_every_sender_is_gone_without_a_result() {
+            let (tx, rx) = mpsc::channel::<super::super::TaskEnd>();
+            drop(tx);
+
+            assert!(wait_for_indexer_end(&rx, SHORT).is_err());
+        }
     }
 
     #[test]
