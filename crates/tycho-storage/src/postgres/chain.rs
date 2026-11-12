@@ -462,6 +462,81 @@ mod test {
         assert_eq!(retrieved_block, block);
     }
 
+    fn new_block(number: u8, ts: NaiveDateTime) -> Block {
+        Block::new(
+            u64::from(number),
+            Chain::Ethereum,
+            Bytes::from([[0xab_u8; 31].as_slice(), &[number]].concat()),
+            Bytes::from([0xcd_u8; 32].as_slice()),
+            ts,
+        )
+    }
+
+    async fn stored_ts(hash: &Bytes, conn: &mut AsyncPgConnection) -> Vec<NaiveDateTime> {
+        schema::block::table
+            .filter(schema::block::hash.eq(hash))
+            .select(schema::block::ts)
+            .get_results(conn)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_upsert_stored_block_with_same_timestamp() {
+        let mut conn = setup_db().await;
+        setup_data(&mut conn).await;
+        let gw = EVMGateway::from_connection(&mut conn).await;
+        let block = new_block(1, yesterday_midnight());
+
+        gw.upsert_block(slice::from_ref(&block), &mut conn)
+            .await
+            .unwrap();
+        gw.upsert_block(slice::from_ref(&block), &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(stored_ts(&block.hash, &mut conn).await, vec![yesterday_midnight()]);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_stored_block_with_other_timestamp_fails() {
+        let mut conn = setup_db().await;
+        setup_data(&mut conn).await;
+        let gw = EVMGateway::from_connection(&mut conn).await;
+        let block = new_block(1, yesterday_midnight());
+        gw.upsert_block(slice::from_ref(&block), &mut conn)
+            .await
+            .unwrap();
+        let restamped =
+            Block { ts: yesterday_midnight() + chrono::Duration::microseconds(1), ..block.clone() };
+
+        let res = gw
+            .upsert_block(slice::from_ref(&restamped), &mut conn)
+            .await;
+
+        assert!(matches!(res, Err(StorageError::Unexpected(_))));
+        assert_eq!(stored_ts(&block.hash, &mut conn).await, vec![yesterday_midnight()]);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_blocks_with_one_already_stored() {
+        let mut conn = setup_db().await;
+        setup_data(&mut conn).await;
+        let gw = EVMGateway::from_connection(&mut conn).await;
+        let stored = new_block(1, yesterday_midnight());
+        let new = new_block(2, yesterday_half_past_midnight());
+        gw.upsert_block(slice::from_ref(&stored), &mut conn)
+            .await
+            .unwrap();
+
+        gw.upsert_block(&[stored.clone(), new.clone()], &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(stored_ts(&stored.hash, &mut conn).await, vec![yesterday_midnight()]);
+        assert_eq!(stored_ts(&new.hash, &mut conn).await, vec![yesterday_half_past_midnight()]);
+    }
+
     fn transaction(hash: &str) -> Transaction {
         Transaction {
             hash: Bytes::from(hash),
