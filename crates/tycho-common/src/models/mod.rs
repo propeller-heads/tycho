@@ -704,7 +704,7 @@ impl Chain {
             Chain::Robinhood => 100,
             Chain::Arc => 500,
             Chain::Elysium => 100,
-            Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.block_time_secs * 1000,
+            Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.block_time_ms(),
         })
     }
 }
@@ -951,6 +951,7 @@ mod tests {
         let chain = Chain::custom("testchain").unwrap();
         assert_eq!(chain.try_id().unwrap(), 9999);
         assert_eq!(chain.try_block_time_secs().unwrap(), 5);
+        assert_eq!(chain.try_block_time_ms().unwrap(), 5_000);
         assert_eq!(
             chain
                 .try_default_tvl_threshold(TvlThresholdTier::Low)

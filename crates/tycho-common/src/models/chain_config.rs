@@ -134,6 +134,8 @@ pub struct CustomChainConfig {
     pub(crate) native: ChainTokenConfig,
     pub(crate) wrapped_native: ChainTokenConfig,
     pub(crate) default_tvl_thresholds: TvlThresholds,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) block_time_ms: Option<u64>,
 }
 
 impl CustomChainConfig {
@@ -147,11 +149,32 @@ impl CustomChainConfig {
     ) -> Result<Self, ChainConfigError> {
         let name = ArrayString::from(name)
             .map_err(|e| ChainConfigError::NameTooLong(e.element().to_owned()))?;
-        Ok(Self { name, chain_id, block_time_secs, native, wrapped_native, default_tvl_thresholds })
+        Ok(Self {
+            name,
+            chain_id,
+            block_time_secs,
+            native,
+            wrapped_native,
+            default_tvl_thresholds,
+            block_time_ms: None,
+        })
+    }
+
+    /// Sets the block interval in milliseconds, for chains that make more than one block per
+    /// second. Default: `block_time_secs` × 1000.
+    pub fn with_block_time_ms(mut self, block_time_ms: u64) -> Self {
+        self.block_time_ms = Some(block_time_ms);
+        self
     }
 
     pub fn name(&self) -> &str {
         self.name.as_str()
+    }
+
+    /// Returns the expected block interval in milliseconds.
+    pub fn block_time_ms(&self) -> u64 {
+        self.block_time_ms
+            .unwrap_or(self.block_time_secs * 1000)
     }
 }
 
@@ -393,6 +416,47 @@ chains:
                 .chain_id,
             42
         );
+    }
+
+    #[test]
+    fn block_time_ms_defaults_to_block_time_secs() {
+        let registry = ChainConfigRegistry::from_yaml_str(SAMPLE_YAML).unwrap();
+        assert_eq!(
+            registry
+                .get("testchain")
+                .unwrap()
+                .block_time_ms(),
+            5_000
+        );
+    }
+
+    #[test]
+    fn parses_optional_block_time_ms() {
+        let yaml =
+            SAMPLE_YAML.replace("block_time_secs: 5", "block_time_secs: 1\n    block_time_ms: 250");
+        let registry = ChainConfigRegistry::from_yaml_str(&yaml).unwrap();
+        assert_eq!(
+            registry
+                .get("testchain")
+                .unwrap()
+                .block_time_ms(),
+            250
+        );
+    }
+
+    #[test]
+    fn with_block_time_ms_overrides_the_default() {
+        let cfg = CustomChainConfig::try_new(
+            "mychain",
+            42,
+            2,
+            ChainTokenConfig::try_new("0x00", "AAA", 18).unwrap(),
+            ChainTokenConfig::try_new("0x01", "WAAA", 18).unwrap(),
+            TvlThresholds::new(1.0, 2.0),
+        )
+        .unwrap()
+        .with_block_time_ms(400);
+        assert_eq!(cfg.block_time_ms(), 400);
     }
 
     #[test]
