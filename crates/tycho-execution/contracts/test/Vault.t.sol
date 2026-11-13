@@ -5,24 +5,21 @@ import {TestUtils} from "./TestUtils.sol";
 import {Constants} from "./Constants.sol";
 
 contract VaultExposed is Vault {
-    function setDelta(address token, int256 initialDelta) external {
+    function updateDeltaAccountingFrom(
+        address token,
+        int256 initialDelta,
+        uint256 initialNonZeroCount,
+        int256 change
+    )
+        external
+        returns (int256 deltaBefore, int256 deltaAfter, uint256 nonZeroCount)
+    {
         _setDelta(token, initialDelta);
-    }
-
-    function getDelta(address token) external view returns (int256 delta) {
-        delta = _getDelta(token);
-    }
-
-    function getNonZeroDeltaCount() external view returns (uint256 count) {
-        count = _getNonZeroDeltaCount();
-    }
-
-    function setNonZeroDeltaCount(uint256 count) external {
-        _setNonZeroDeltaCount(count);
-    }
-
-    function updateDeltaAccounting(address token, int256 change) external {
+        _setNonZeroDeltaCount(initialNonZeroCount);
+        deltaBefore = _getDelta(token);
         _updateDeltaAccounting(token, change);
+        deltaAfter = _getDelta(token);
+        nonZeroCount = _getNonZeroDeltaCount();
     }
 
     function creditVault(address user, address token, uint256 amount) external {
@@ -33,18 +30,18 @@ contract VaultExposed is Vault {
         _debitVault(user, token, amount);
     }
 
-    function finalizeBalances(
+    function finalizeBalancesWith(
+        bool useVault,
+        uint256 nonZeroCount,
+        int256 inputDelta,
         address user,
         address inputToken,
         uint256 inputAmount
     ) external {
+        TransientSlot.tstore(_USE_VAULT_SLOT, useVault);
+        _setNonZeroDeltaCount(nonZeroCount);
+        _setDelta(inputToken, inputDelta);
         _finalizeBalances(user, inputToken, inputAmount);
-    }
-
-    function setUseVault(bool useVault) external {
-        assembly {
-            tstore(_USE_VAULT_SLOT, useVault)
-        }
     }
 }
 
@@ -122,15 +119,9 @@ contract VaultTest is Constants, TestUtils {
         int256 change = 200;
         uint256 nonZeroCountInitial = 1;
 
-        vault.setDelta(token, initialDelta);
-        vault.setNonZeroDeltaCount(nonZeroCountInitial);
-
-        int256 beforeChange = vault.getDelta(token);
-
-        vault.updateDeltaAccounting(token, change);
-
-        int256 afterChange = vault.getDelta(token);
-        uint256 nonZeroCount = vault.getNonZeroDeltaCount();
+        (int256 beforeChange, int256 afterChange, uint256 nonZeroCount) = vault.updateDeltaAccountingFrom(
+            token, initialDelta, nonZeroCountInitial, change
+        );
 
         assertEq(beforeChange, 100);
         assertEq(afterChange, 300);
@@ -143,15 +134,9 @@ contract VaultTest is Constants, TestUtils {
         int256 change = 15;
         uint256 nonZeroDeltaInitial = 1;
 
-        vault.setDelta(token, initialDelta);
-        vault.setNonZeroDeltaCount(nonZeroDeltaInitial);
-
-        int256 beforeChange = vault.getDelta(token);
-
-        vault.updateDeltaAccounting(token, change);
-
-        int256 afterChange = vault.getDelta(token);
-        uint256 nonZeroCount = vault.getNonZeroDeltaCount();
+        (int256 beforeChange, int256 afterChange, uint256 nonZeroCount) = vault.updateDeltaAccountingFrom(
+            token, initialDelta, nonZeroDeltaInitial, change
+        );
 
         assertEq(beforeChange, -100);
         assertEq(afterChange, -85);
@@ -164,15 +149,9 @@ contract VaultTest is Constants, TestUtils {
         int256 change = 200;
         uint256 nonZeroCountInitial = 1;
 
-        vault.setDelta(token, initialDelta);
-        vault.setNonZeroDeltaCount(nonZeroCountInitial);
-
-        int256 beforeChange = vault.getDelta(token);
-
-        vault.updateDeltaAccounting(token, change);
-
-        int256 afterChange = vault.getDelta(token);
-        uint256 nonZeroCount = vault.getNonZeroDeltaCount();
+        (int256 beforeChange, int256 afterChange, uint256 nonZeroCount) = vault.updateDeltaAccountingFrom(
+            token, initialDelta, nonZeroCountInitial, change
+        );
 
         assertEq(beforeChange, -100);
         assertEq(afterChange, 100);
@@ -185,15 +164,9 @@ contract VaultTest is Constants, TestUtils {
         int256 change = -100;
         uint256 nonZeroCountInitial = 1;
 
-        vault.setDelta(token, initialDelta);
-        vault.setNonZeroDeltaCount(nonZeroCountInitial);
-
-        int256 beforeChange = vault.getDelta(token);
-
-        vault.updateDeltaAccounting(token, change);
-
-        int256 afterChange = vault.getDelta(token);
-        uint256 nonZeroCount = vault.getNonZeroDeltaCount();
+        (int256 beforeChange, int256 afterChange, uint256 nonZeroCount) = vault.updateDeltaAccountingFrom(
+            token, initialDelta, nonZeroCountInitial, change
+        );
 
         assertEq(beforeChange, 300);
         assertEq(afterChange, 200);
@@ -206,15 +179,9 @@ contract VaultTest is Constants, TestUtils {
         int256 change = -50;
         uint256 nonZeroCountInitial = 1;
 
-        vault.setDelta(token, initialDelta);
-        vault.setNonZeroDeltaCount(nonZeroCountInitial);
-
-        int256 beforeChange = vault.getDelta(token);
-
-        vault.updateDeltaAccounting(token, change);
-
-        int256 afterChange = vault.getDelta(token);
-        uint256 nonZeroCount = vault.getNonZeroDeltaCount();
+        (int256 beforeChange, int256 afterChange, uint256 nonZeroCount) = vault.updateDeltaAccountingFrom(
+            token, initialDelta, nonZeroCountInitial, change
+        );
 
         assertEq(beforeChange, 50);
         assertEq(afterChange, 0);
@@ -227,15 +194,9 @@ contract VaultTest is Constants, TestUtils {
         int256 change = 50;
         uint256 nonZeroCountInitial = 1;
 
-        vault.setDelta(token, initialDelta);
-        vault.setNonZeroDeltaCount(nonZeroCountInitial);
-
-        int256 beforeChange = vault.getDelta(token);
-
-        vault.updateDeltaAccounting(token, change);
-
-        int256 afterChange = vault.getDelta(token);
-        uint256 nonZeroCount = vault.getNonZeroDeltaCount();
+        (int256 beforeChange, int256 afterChange, uint256 nonZeroCount) = vault.updateDeltaAccountingFrom(
+            token, initialDelta, nonZeroCountInitial, change
+        );
 
         assertEq(beforeChange, -50);
         assertEq(afterChange, 0);
@@ -316,27 +277,28 @@ contract VaultTest is Constants, TestUtils {
         uint256 inputAmount = 1_000_000;
         uint256 nonZeroCount = 3;
 
-        vault.setNonZeroDeltaCount(nonZeroCount);
-
         vm.expectRevert(
             abi.encodeWithSelector(
                 Vault__UnexpectedNonZeroCount.selector, nonZeroCount
             )
         );
 
-        vault.finalizeBalances(BOB, USDC_ADDR, inputAmount);
+        vault.finalizeBalancesWith(
+            false, nonZeroCount, 0, BOB, USDC_ADDR, inputAmount
+        );
     }
 
     function testFinalizeBalancesNonZeroCountZero() public {
         uint256 inputAmount = 1_000_000;
         uint256 nonZeroCount = 0;
 
-        vault.setNonZeroDeltaCount(nonZeroCount);
         vault.creditVault(BOB, USDC_ADDR, 3_000_000);
 
         uint256 balanceStart = vault.balanceOf(BOB, uint256(uint160(USDC_ADDR)));
 
-        vault.finalizeBalances(BOB, USDC_ADDR, inputAmount);
+        vault.finalizeBalancesWith(
+            false, nonZeroCount, 0, BOB, USDC_ADDR, inputAmount
+        );
 
         uint256 balanceEnd = vault.balanceOf(BOB, uint256(uint160(USDC_ADDR)));
 
@@ -348,9 +310,6 @@ contract VaultTest is Constants, TestUtils {
         int256 inputDelta = -2_000_000;
         uint256 nonZeroCount = 1;
 
-        vault.setUseVault(true);
-        vault.setNonZeroDeltaCount(nonZeroCount);
-        vault.setDelta(USDC_ADDR, inputDelta);
         vault.creditVault(BOB, USDC_ADDR, 3_000_000);
 
         vm.expectRevert(
@@ -359,21 +318,19 @@ contract VaultTest is Constants, TestUtils {
             )
         );
 
-        vault.finalizeBalances(BOB, USDC_ADDR, inputAmount);
+        vault.finalizeBalancesWith(
+            true, nonZeroCount, inputDelta, BOB, USDC_ADDR, inputAmount
+        );
     }
 
     function testFinalizeBalancesZeroDeltaReverts() public {
-        vault.setUseVault(true);
-        vault.setNonZeroDeltaCount(1);
-        vault.setDelta(USDC_ADDR, 0);
-
         vm.expectRevert(
             abi.encodeWithSelector(
                 Vault__UnexpectedInputDelta.selector, int256(0)
             )
         );
 
-        vault.finalizeBalances(BOB, USDC_ADDR, 0);
+        vault.finalizeBalancesWith(true, 1, 0, BOB, USDC_ADDR, 0);
     }
 
     function testFinalizeBalancesSuccess() public {
@@ -381,13 +338,12 @@ contract VaultTest is Constants, TestUtils {
         int256 inputDelta = -2_000_000;
         uint256 nonZeroCount = 1;
 
-        vault.setUseVault(true);
-        vault.setNonZeroDeltaCount(nonZeroCount);
-        vault.setDelta(USDC_ADDR, inputDelta);
         vault.creditVault(BOB, USDC_ADDR, 3_000_000);
         uint256 balanceStart = vault.balanceOf(BOB, uint256(uint160(USDC_ADDR)));
 
-        vault.finalizeBalances(BOB, USDC_ADDR, inputAmount);
+        vault.finalizeBalancesWith(
+            true, nonZeroCount, inputDelta, BOB, USDC_ADDR, inputAmount
+        );
 
         uint256 balanceEnd = vault.balanceOf(BOB, uint256(uint160(USDC_ADDR)));
 

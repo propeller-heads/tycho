@@ -128,7 +128,7 @@ impl TickList {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn apply_liquidity_change(
         &mut self,
         lower: i32,
@@ -140,7 +140,7 @@ impl TickList {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn upsert_tick(&mut self, tick: i32, delta: i128) -> Result<(), SimulationError> {
         match self
             .ticks

@@ -186,7 +186,8 @@ contract TychoRouterForAeroBasicTest is
         uint256 amountIn = 100 ether;
         uint256 intermediateAmountOut = IAeroBasicPool(
                 AERO_DOLA_USDC_STABLE_POOL
-            ).getAmountOut(amountIn, AERO_DOLA);
+            )
+            .getAmountOut(amountIn, AERO_DOLA);
         uint256 expectedAmountOut = IAeroBasicPool(AERO_WETH_USDC_VOLATILE_POOL)
             .getAmountOut(intermediateAmountOut, AERO_USDC);
         deal(AERO_DOLA, ALICE, amountIn);

@@ -208,9 +208,8 @@ impl BebopClient {
                     )));
                     if attempt < MAX_RETRIES - 1 {
                         continue;
-                    } else {
-                        return Err(last_error.unwrap());
                     }
+                    return Err(last_error.unwrap());
                 }
                 Err(_) => {
                     return Err(RFQError::ConnectionError(format!(
@@ -234,9 +233,8 @@ impl BebopClient {
                     if attempt < MAX_RETRIES - 1 {
                         sleep(Duration::from_millis(100)).await;
                         continue;
-                    } else {
-                        return Err(last_error.unwrap());
                     }
+                    return Err(last_error.unwrap());
                 }
             };
 
@@ -274,15 +272,15 @@ impl BebopClient {
                     BebopOrderToSign::Single(ref single) => SignedQuote {
                         base_token: params.token_in.clone(),
                         quote_token: params.token_out.clone(),
-                        amount_in: BigUint::from_str(&single.taker_amount).map_err(|_| {
+                        amount_in: BigUint::from_str(&single.taker_amount).map_err(|e| {
                             RFQError::ParsingError(format!(
-                                "Failed to parse amount in string: {}",
+                                "Failed to parse amount in string: {} ({e})",
                                 single.taker_amount
                             ))
                         })?,
-                        amount_out: BigUint::from_str(&single.maker_amount).map_err(|_| {
+                        amount_out: BigUint::from_str(&single.maker_amount).map_err(|e| {
                             RFQError::ParsingError(format!(
-                                "Failed to parse amount out string: {}",
+                                "Failed to parse amount out string: {} ({e})",
                                 single.maker_amount
                             ))
                         })?,
@@ -662,7 +660,10 @@ mod tests {
             RFQError::ConnectionError(msg) => {
                 assert!(msg.contains("timed out"), "Expected timeout error, got: {}", msg);
             }
-            _ => panic!("Expected ConnectionError, got: {:?}", err),
+            RFQError::ParsingError(_) |
+            RFQError::FatalError(_) |
+            RFQError::InvalidInput(_) |
+            RFQError::QuoteNotFound(_) => panic!("Expected ConnectionError, got: {:?}", err),
         }
         assert!(
             elapsed.as_millis() >= 200 && elapsed.as_millis() < 400,

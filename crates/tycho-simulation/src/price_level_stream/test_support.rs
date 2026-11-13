@@ -165,6 +165,10 @@ impl FakeTitan {
         let connections = Arc::new(AtomicUsize::new(0));
         let counter = connections.clone();
         let accept_task = tokio::spawn(async move {
+            #[expect(
+                clippy::collection_is_never_read,
+                reason = "holding the sockets keeps the connections open, which is what hangs the client"
+            )]
             let mut accepted = Vec::new();
             loop {
                 let Ok((socket, _)) = listener.accept().await else {

@@ -45,7 +45,11 @@ impl TryFrom<BlockOrTimestamp> for BlockNumberOrTimestamp {
     fn try_from(value: BlockOrTimestamp) -> Result<Self, Self::Error> {
         Ok(match value {
             BlockOrTimestamp::Block(bid) => match bid {
-                BlockIdentifier::Number((_, no)) => BlockNumberOrTimestamp::Number(no as u64),
+                BlockIdentifier::Number((_, no)) => {
+                    BlockNumberOrTimestamp::Number(u64::try_from(no).map_err(|_overflow| {
+                        StorageError::Unexpected(format!("Block number {no} is negative"))
+                    })?)
+                }
                 BlockIdentifier::Hash(_) => {
                     return Err(StorageError::Unexpected("BlockHash unsupported!".to_string()))
                 }
@@ -222,7 +226,7 @@ where
 
     /// Purges all blocks following the specified block hash from the buffer. Returns the purged
     /// blocks ordered by ascending number or an error if the target hash is not found.
-    pub fn purge(&mut self, target_hash: Bytes) -> Result<Vec<B>, StorageError> {
+    pub fn purge(&mut self, target_hash: &Bytes) -> Result<Vec<B>, StorageError> {
         debug!("Purging reorg buffer... Target hash {}", target_hash.to_string());
         let mut target_index = None;
 
@@ -232,7 +236,7 @@ where
             .rev()
             .enumerate()
         {
-            if block_message.block().hash == target_hash {
+            if block_message.block().hash == *target_hash {
                 target_index = Some(self.block_messages.len() - index);
                 break;
             }
@@ -426,7 +430,7 @@ where
     /// Retrieves [CommitStatus] for a block, returns None if the buffer is empty.
     // The RPC side now answers from `DeltaWindow::commit_status`. Kept with its tests, which pin
     // the buffer-bound behaviour the window deliberately diverges from.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn get_commit_status(&self, version: BlockNumberOrTimestamp) -> Option<CommitStatus> {
         let first_block = self.block_messages.front();
         let last_block = self.block_messages.back();
@@ -466,19 +470,16 @@ pub(crate) trait StateUpdateBufferEntry: std::fmt::Debug {
         keys: Vec<(&ProtocolStateIdType, &ProtocolStateKeyType)>,
     ) -> HashMap<(ProtocolStateIdType, ProtocolStateKeyType), ProtocolStateValueType>;
 
-    #[allow(clippy::mutable_key_type)]
     fn get_filtered_account_state_update(
         &self,
         keys: Vec<(&AccountStateIdType, &AccountStateKeyType)>,
     ) -> HashMap<(AccountStateIdType, AccountStateKeyType), AccountStateValueType>;
 
-    #[allow(clippy::mutable_key_type)]
     fn get_filtered_component_balance_update(
         &self,
         keys: Vec<(&String, &Bytes)>,
     ) -> HashMap<(String, Bytes), ComponentBalance>;
 
-    #[allow(clippy::mutable_key_type)]
     fn get_filtered_account_balance_update(
         &self,
         keys: Vec<(&Address, &Address)>,
@@ -494,8 +495,10 @@ where
 {
     /// Looks up buffered protocol state updates for the provided keys. Returns a map of updates and
     /// a list of keys for which updates were not found in the buffered blocks.
-    // Clippy thinks it is a complex type that is difficult to read
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "returns the found updates together with the keys that were not found"
+    )]
     pub fn lookup_protocol_state(
         &self,
         keys: &[(&ProtocolStateIdType, &ProtocolStateKeyType)],
@@ -549,7 +552,10 @@ where
 
     /// Looks up buffered account state updates for the provided keys. Returns a map of updates and
     /// a list of keys for which updates were not found in the buffered blocks.
-    #[allow(clippy::mutable_key_type, clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "returns the found updates together with the keys that were not found"
+    )]
     pub fn lookup_account_state(
         &self,
         keys: &[(&AccountStateIdType, &AccountStateKeyType)],
@@ -587,7 +593,10 @@ where
     /// Looks up buffered balance updates for the provided component and token keys. Returns a map
     /// where each key is a component ID associated with its token balances, and a list of
     /// component-token pairs for which no updates were found.
-    #[allow(clippy::type_complexity, clippy::mutable_key_type)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "returns the found updates together with the keys that were not found"
+    )]
     pub fn lookup_component_balances(
         &self,
         keys: &[(&ComponentId, &Bytes)],
@@ -625,7 +634,10 @@ where
     /// Looks up buffered account balance updates for the provided account and token keys. Returns a
     /// map where each key is an account address associated with its token balances, and a list
     /// of account-token pairs for which no updates were found.
-    #[allow(clippy::type_complexity, clippy::mutable_key_type)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "returns the found updates together with the keys that were not found"
+    )]
     pub fn lookup_account_balances(
         &self,
         keys: &[(&Address, &Address)],
@@ -731,7 +743,7 @@ mod test {
                         [(
                             Bytes::from_str("0x6B175474E89094C44Da98b954EedeAC495271d0F").unwrap(),
                             ComponentBalance {
-                                token: token_addr.clone(),
+                                token: token_addr,
                                 balance: Bytes::from(30_i32.to_be_bytes()),
                                 modify_tx: tx.hash.clone(),
                                 component_id: "Balance2".to_string(),
@@ -795,7 +807,7 @@ mod test {
                                 token: token_addr.clone(),
                                 balance: Bytes::from(2_i32.to_be_bytes()),
                                 modify_tx: tx.hash.clone(),
-                                account: account1_addr.clone(),
+                                account: account1_addr,
                             },
                         )]
                         .into_iter()
@@ -806,7 +818,7 @@ mod test {
                         [(
                             token_addr.clone(),
                             AccountBalance {
-                                token: token_addr.clone(),
+                                token: token_addr,
                                 balance: Bytes::from(30_i32.to_be_bytes()),
                                 modify_tx: tx.hash.clone(),
                                 account: account2_addr,
@@ -954,16 +966,13 @@ mod test {
 
         // Need to sort because collecting a HashSet is unstable.
         missing_keys.sort();
-        assert_eq!(
-            missing_keys,
-            vec![(c_ids[0].clone(), missing.clone()), (missing.clone(), new.clone())]
-        );
+        assert_eq!(missing_keys, vec![(c_ids[0].clone(), missing.clone()), (missing, new.clone())]);
         assert_eq!(
             res,
             HashMap::from([
-                ((c_ids[0].clone(), new.clone()), Bytes::from(2_u64.to_be_bytes().to_vec())),
+                ((c_ids[0].clone(), new), Bytes::from(2_u64.to_be_bytes().to_vec())),
                 ((c_ids[0].clone(), reserve.clone()), Bytes::from(10_u64.to_be_bytes().to_vec())),
-                ((c_ids[1].clone(), reserve.clone()), Bytes::from(30_u64.to_be_bytes().to_vec()))
+                ((c_ids[1].clone(), reserve), Bytes::from(30_u64.to_be_bytes().to_vec()))
             ])
         );
     }
@@ -999,10 +1008,7 @@ mod test {
         missing_keys.sort();
         assert_eq!(
             missing_keys,
-            vec![
-                (c_ids[1].clone(), missing_token.clone()),
-                (missing_component.clone(), token_key.clone())
-            ]
+            vec![(c_ids[1].clone(), missing_token), (missing_component, token_key.clone())]
         );
         assert_eq!(
             res,
@@ -1025,7 +1031,7 @@ mod test {
                     HashMap::from([(
                         token_key.clone(),
                         tycho_common::models::protocol::ComponentBalance {
-                            token: token_key.clone(),
+                            token: token_key,
                             balance: Bytes::from(30_i32.to_be_bytes()),
                             modify_tx: transaction().hash,
                             component_id: c_ids[1].clone(),
@@ -1070,10 +1076,7 @@ mod test {
         missing_keys.sort();
         assert_eq!(
             missing_keys,
-            vec![
-                (missing_account.clone(), token_key.clone()),
-                (accounts[1].clone(), missing_token.clone())
-            ]
+            vec![(missing_account, token_key.clone()), (accounts[1].clone(), missing_token)]
         );
         assert_eq!(
             res,
@@ -1220,7 +1223,7 @@ mod test {
         let c1 = "c1".to_string();
         let c3 = "c3".to_string();
         let ghost = "ghost".to_string();
-        let ids = HashSet::from([c1.clone(), c3.clone(), ghost.clone()]);
+        let ids = HashSet::from([c1.clone(), c3, ghost.clone()]);
 
         let missing = reorg_buffer.missing_components(ids.clone());
         assert_eq!(missing, HashSet::from([ghost.clone()]));
@@ -1332,7 +1335,7 @@ mod test {
 
         let purged = reorg_buffer
             .purge(
-                Bytes::from_str(
+                &Bytes::from_str(
                     "0x0000000000000000000000000000000000000000000000000000000000000001",
                 )
                 .unwrap(),
@@ -1344,7 +1347,7 @@ mod test {
         assert_eq!(purged, vec![get_block_changes(2), get_block_changes(3)]);
 
         let unknown = reorg_buffer.purge(
-            Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000999")
+            &Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000999")
                 .unwrap(),
         );
 
@@ -1465,7 +1468,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Unexpected block sequence")]
     fn test_insert_wrong_block() {
         let mut reorg_buffer = ReorgBuffer::new();
         reorg_buffer

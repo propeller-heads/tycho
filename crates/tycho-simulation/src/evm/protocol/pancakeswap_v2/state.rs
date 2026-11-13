@@ -94,7 +94,7 @@ impl ProtocolSim for PancakeswapV2State {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        cpmm_get_limits(sell_token, buy_token, self.reserve0, self.reserve1, PANCAKESWAP_V2_FEE)
+        cpmm_get_limits(&sell_token, &buy_token, self.reserve0, self.reserve1, PANCAKESWAP_V2_FEE)
     }
 
     fn delta_transition(
@@ -104,7 +104,7 @@ impl ProtocolSim for PancakeswapV2State {
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
         let (reserve0_mut, reserve1_mut) = (&mut self.reserve0, &mut self.reserve1);
-        cpmm_delta_transition(delta, reserve0_mut, reserve1_mut)
+        cpmm_delta_transition(&delta, reserve0_mut, reserve1_mut)
     }
 
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
@@ -245,7 +245,7 @@ mod tests {
         let amount_in = BigUint::from_str("13088600769481610").unwrap();
 
         let res = state
-            .get_amount_out(amount_in.clone(), &t1, &t0)
+            .get_amount_out(amount_in, &t1, &t0)
             .unwrap();
 
         let exp = BigUint::from_str("21437847").unwrap();
@@ -413,7 +413,7 @@ mod tests {
         let token_1 = token_1();
 
         let result = state
-            .get_amount_out(amount_in.clone(), &token_0, &token_1)
+            .get_amount_out(amount_in, &token_0, &token_1)
             .unwrap();
         let new_state = result.new_state;
 
@@ -449,8 +449,8 @@ mod tests {
         let target_price = Price::new(BigUint::from(2u32), BigUint::from(5u32));
 
         let params = QueryPoolSwapParams::new(
-            token_in.clone(),
-            token_out.clone(),
+            token_in,
+            token_out,
             SwapConstraint::PoolTargetPrice {
                 target: target_price,
                 tolerance: 0f64,

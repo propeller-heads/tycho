@@ -292,7 +292,9 @@ mod tests {
     fn inner(emitted: &StreamUpdate) -> &Update {
         match &emitted.payload {
             StreamUpdatePayload::PriceLevelStream(update) => update,
-            other => panic!("expected a price level payload, got {other}"),
+            other @ (StreamUpdatePayload::Protocol(_) | StreamUpdatePayload::Book { .. }) => {
+                panic!("expected a price level payload, got {other}")
+            }
         }
     }
 

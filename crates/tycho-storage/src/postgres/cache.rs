@@ -70,7 +70,10 @@ pub(crate) enum WriteOp {
     // Simply merge
     InsertTokens(Vec<models::token::Token>),
     // Currently unused but supported, please see `CacheGateway.update_tokens` docs.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "handled by the cache writer but never constructed by the gateway"
+    )]
     UpdateTokens(Vec<models::token::Token>),
     // Simply merge
     InsertComponentBalances(Vec<models::protocol::ComponentBalance>),
@@ -169,62 +172,62 @@ impl DBTransaction {
     /// transaction.
     ///
     /// PERF: Use an array instead of a vec since the order is static.
-    fn add_operation(&mut self, op: WriteOp) -> Result<(), StorageError> {
+    fn add_operation(&mut self, op: WriteOp) {
         for existing_op in self.operations.iter_mut() {
             match (existing_op, &op) {
                 (WriteOp::UpsertBlock(l), WriteOp::UpsertBlock(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpsertTx(l), WriteOp::UpsertTx(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::SaveExtractionState(l), WriteOp::SaveExtractionState(r)) => {
                     l.clone_from(r);
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertContract(l), WriteOp::InsertContract(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpdateContracts(l), WriteOp::UpdateContracts(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertAccountBalances(l), WriteOp::InsertAccountBalances(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertProtocolComponents(l), WriteOp::InsertProtocolComponents(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertTokens(l), WriteOp::InsertTokens(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpdateTokens(l), WriteOp::InsertTokens(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertComponentBalances(l), WriteOp::InsertComponentBalances(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpsertProtocolState(l), WriteOp::UpsertProtocolState(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertEntryPoints(l), WriteOp::InsertEntryPoints(r)) => {
                     for (component_id, entry_points) in r.iter() {
@@ -235,7 +238,7 @@ impl DBTransaction {
                         entry.extend(entry_points.iter().cloned());
                         self.size += entry.len() - len_before;
                     }
-                    return Ok(());
+                    return;
                 }
                 (
                     WriteOp::InsertEntryPointTracingParams(l),
@@ -249,20 +252,19 @@ impl DBTransaction {
                         entry.extend(params.iter().cloned());
                         self.size += entry.len() - len_before;
                     }
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpsertTracedEntryPoints(l), WriteOp::UpsertTracedEntryPoints(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
-                _ => continue,
+                _ => {}
             }
         }
         // not quite accurate but currently all WriteOps are created with a single entry.
         self.size += 1;
         self.operations.push(op);
-        Ok(())
     }
 }
 
@@ -423,7 +425,6 @@ impl DBCacheWriteExecutor {
                             e
                         );
                         tokio::time::sleep(delay).await;
-                        continue;
                     }
                 }
                 _ => break,
@@ -449,6 +450,10 @@ impl DBCacheWriteExecutor {
         }
 
         // Forward the result to the sender
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the caller may have stopped waiting for the result; the write has been executed either way"
+        )]
         let _ = new_db_tx
             .tx
             .send(res.map_err(Into::into));
@@ -460,7 +465,7 @@ impl DBCacheWriteExecutor {
     /// upserts, updates, and reverts, ensuring data consistency in the database.
     #[instrument(skip_all, fields(op=operation.variant_name()))]
     async fn execute_write_op(
-        &mut self,
+        &self,
         operation: &WriteOp,
         conn: &mut AsyncPgConnection,
     ) -> Result<(), PostgresError> {
@@ -639,7 +644,7 @@ impl CachedGateway {
                 Err(StorageError::Unexpected("Usage error: No transaction started".to_string()))
             }
             Some((tx, _)) => {
-                tx.add_operation(op)?;
+                tx.add_operation(op);
                 Ok(())
             }
         }
@@ -685,8 +690,10 @@ impl CachedGateway {
                             .send(DBCacheMessage::Write(db_txn))
                             .await
                             .expect("Send message to receiver ok");
-                        rx.await
-                            .map_err(|_| StorageError::WriteCacheGoneAway())??;
+                        rx.await.map_err(|_closed| {
+                            error!("Write cache dropped the result channel");
+                            StorageError::WriteCacheGoneAway()
+                        })??;
 
                         Ok::<(), StorageError>(())
                     }
@@ -703,8 +710,7 @@ impl CachedGateway {
         }
     }
 
-    #[allow(private_interfaces)]
-    pub fn new(
+    pub(crate) fn new(
         tx: mpsc::Sender<DBCacheMessage>,
         pool: Pool<AsyncPgConnection>,
         state_gateway: PostgresGateway,
@@ -2038,161 +2044,5 @@ mod test_serial_db {
             .await
             .expect("Failed to update the token quality");
         conn
-    }
-
-    //noinspection SpellCheckingInspection
-    #[allow(dead_code)]
-    async fn setup_data(conn: &mut AsyncPgConnection) {
-        // set up blocks and txns
-        let chain_id = db_fixtures::insert_chain(conn, "ethereum").await;
-        let blk = db_fixtures::insert_blocks(conn, chain_id).await;
-        let ts = chrono::Local::now().naive_utc() - Duration::from_secs(3600);
-        let tx_hashes = [
-            "0xbb7e16d797a9e2fbc537e30f91ed3d27a254dd9578aa4c3af3e5f0d3e8130945".to_string(),
-            "0x794f7df7a3fe973f1583fbb92536f9a8def3a89902439289315326c04068de54".to_string(),
-            "0x3108322284d0a89a7accb288d1a94384d499504fe7e04441b0706c7628dee7b7".to_string(),
-            "0x50449de1973d86f21bfafa7c72011854a7e33a226709dc3e2e4edcca34188388".to_string(),
-        ];
-
-        let txn = db_fixtures::insert_txns(
-            conn,
-            &[
-                (blk[0], 1i64, &tx_hashes[0]),
-                (blk[0], 2i64, &tx_hashes[1]),
-                // ----- Block 01 LAST
-                (blk[1], 1i64, &tx_hashes[2]),
-                (blk[1], 2i64, &tx_hashes[3]),
-                // ----- Block 02 LAST
-            ],
-        )
-        .await;
-        let (_, native_token) = db_fixtures::insert_token(
-            conn,
-            chain_id,
-            "0000000000000000000000000000000000000000",
-            "ETH",
-            18,
-            Some(100),
-        )
-        .await;
-
-        // set up contract data
-        let c0 = db_fixtures::insert_account(
-            conn,
-            "6B175474E89094C44Da98b954EedeAC495271d0F",
-            "account0",
-            chain_id,
-            Some(txn[0]),
-        )
-        .await;
-        db_fixtures::insert_account_balance(conn, 0, native_token, txn[0], Some(&ts), c0).await;
-        db_fixtures::insert_contract_code(conn, c0, txn[0], Bytes::from_str("C0C0C0").unwrap())
-            .await;
-        db_fixtures::insert_account_balance(
-            conn,
-            100,
-            native_token,
-            txn[1],
-            Some(&(ts + Duration::from_secs(3600))),
-            c0,
-        )
-        .await;
-        db_fixtures::insert_slots(conn, c0, txn[1], &ts, None, &[(2, 1, None)]).await;
-        db_fixtures::insert_slots(
-            conn,
-            c0,
-            txn[1],
-            &ts,
-            Some(&(ts + Duration::from_secs(3600))),
-            &[(0, 1, None), (1, 5, None)],
-        )
-        .await;
-        db_fixtures::insert_account_balance(conn, 101, native_token, txn[3], None, c0).await;
-        db_fixtures::insert_slots(
-            conn,
-            c0,
-            txn[3],
-            &(ts + Duration::from_secs(3600)),
-            None,
-            &[(0, 2, Some(1)), (1, 3, Some(5)), (5, 25, None), (6, 30, None)],
-        )
-        .await;
-
-        let c1 = db_fixtures::insert_account(
-            conn,
-            "73BcE791c239c8010Cd3C857d96580037CCdd0EE",
-            "c1",
-            chain_id,
-            Some(txn[2]),
-        )
-        .await;
-        db_fixtures::insert_account_balance(conn, 50, native_token, txn[2], None, c1).await;
-        db_fixtures::insert_contract_code(conn, c1, txn[2], Bytes::from_str("C1C1C1").unwrap())
-            .await;
-        db_fixtures::insert_slots(
-            conn,
-            c1,
-            txn[3],
-            &(ts + Duration::from_secs(3600)),
-            None,
-            &[(0, 128, None), (1, 255, None)],
-        )
-        .await;
-
-        let c2 = db_fixtures::insert_account(
-            conn,
-            "94a3F312366b8D0a32A00986194053C0ed0CdDb1",
-            "c2",
-            chain_id,
-            Some(txn[1]),
-        )
-        .await;
-        db_fixtures::insert_account_balance(conn, 25, native_token, txn[1], None, c2).await;
-        db_fixtures::insert_contract_code(conn, c2, txn[1], Bytes::from_str("C2C2C2").unwrap())
-            .await;
-        db_fixtures::insert_slots(
-            conn,
-            c2,
-            txn[1],
-            &(ts + Duration::from_secs(3600)),
-            None,
-            &[(1, 2, None), (2, 4, None)],
-        )
-        .await;
-        db_fixtures::delete_account(conn, c2, &(ts + Duration::from_secs(3600))).await;
-
-        // set up protocol state data
-        let protocol_system_id =
-            db_fixtures::insert_protocol_system(conn, "ambient".to_owned()).await;
-        let protocol_type_id = db_fixtures::insert_protocol_type(
-            conn,
-            "Pool",
-            Some(models::FinancialType::Swap),
-            None,
-            Some(models::ImplementationType::Custom),
-        )
-        .await;
-        let protocol_component_id = db_fixtures::insert_protocol_component(
-            conn,
-            "state1",
-            chain_id,
-            protocol_system_id,
-            protocol_type_id,
-            txn[0],
-            None,
-            None,
-        )
-        .await;
-        // protocol state for state1-reserve1
-        db_fixtures::insert_protocol_state(
-            conn,
-            protocol_component_id,
-            txn[0],
-            "reserve1".to_owned(),
-            Bytes::from(1100u64).lpad(32, 0),
-            None,
-            Some(txn[2]),
-        )
-        .await;
     }
 }

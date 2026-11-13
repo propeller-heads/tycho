@@ -2,10 +2,7 @@
 //! using work-stealing.
 use std::{
     io::Write,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
@@ -33,7 +30,7 @@ use crate::{
 pub fn find_work(
     local_queue: &Worker<ParamsInner>,
     stealers: &[Stealer<ParamsInner>],
-    global_queue: &Arc<Injector<ParamsInner>>,
+    global_queue: &Injector<ParamsInner>,
 ) -> Option<ParamsInner> {
     // first try to get work item from the worker's thread local queue.
     // very efficient as it has no synchronization overhead.
@@ -93,9 +90,9 @@ pub fn find_work(
 pub fn find_work_unless_all_idle(
     local_queue: &Worker<ParamsInner>,
     stealers: &[Stealer<ParamsInner>],
-    global_queue: &Arc<Injector<ParamsInner>>,
-    is_worker_idle: &Arc<AtomicBool>,
-    tell_idle_workers_to_stop: &Arc<AtomicBool>,
+    global_queue: &Injector<ParamsInner>,
+    is_worker_idle: &AtomicBool,
+    tell_idle_workers_to_stop: &AtomicBool,
 ) -> Option<ParamsInner> {
     match find_work(local_queue, stealers, global_queue) {
         Some(work) => Some(work),
@@ -145,22 +142,22 @@ pub fn find_work_unless_all_idle(
 /// checks whether successful runs result in [suspicious](Outcome::is_suspicious)
 /// outcomes, and writes suspicious [Outcome]s as YAML docs to stdout.
 pub fn worker_thread(
-    global_queue: Arc<Injector<ParamsInner>>,
-    local_queue: Worker<ParamsInner>,
-    stealers: Vec<Stealer<ParamsInner>>,
-    is_worker_idle: Arc<AtomicBool>,
-    tell_idle_workers_to_stop: Arc<AtomicBool>,
-    is_first_output: Arc<AtomicBool>,
+    global_queue: &Injector<ParamsInner>,
+    local_queue: &Worker<ParamsInner>,
+    stealers: &[Stealer<ParamsInner>],
+    is_worker_idle: &AtomicBool,
+    tell_idle_workers_to_stop: &AtomicBool,
+    is_first_output: &AtomicBool,
     mut counters: Counters,
 ) -> Telemetry {
     eprintln!("worker thread {:?} spawned", std::thread::current().id());
     let mut telemetry = Telemetry::default();
     while let Some(work) = find_work_unless_all_idle(
-        &local_queue,
-        &stealers,
-        &global_queue,
-        &is_worker_idle,
-        &tell_idle_workers_to_stop,
+        local_queue,
+        stealers,
+        global_queue,
+        is_worker_idle,
+        tell_idle_workers_to_stop,
     ) {
         let params = Params::from(work);
         let result = simulate(&params);

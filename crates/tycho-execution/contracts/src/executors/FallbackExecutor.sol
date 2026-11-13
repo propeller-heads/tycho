@@ -48,7 +48,6 @@ abstract contract FallbackExecutor is IExecutor {
             bool outputToRouter
         )
     {
-        // slither-disable-next-line unused-return
         _fallbackOffset(data);
         tokenIn = address(bytes20(data[0:20]));
         tokenOut = address(bytes20(data[20:40]));

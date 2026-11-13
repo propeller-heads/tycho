@@ -1,5 +1,3 @@
-#![allow(dead_code)] // TODO: Remove this
-
 // This module provides hook entrypoint generation for Uniswap V4 hooks.
 
 use std::collections::{BTreeMap, HashMap};
@@ -52,10 +50,6 @@ const ACTION_SWAP_EXACT_IN_SINGLE: u8 = 6; // SWAP_EXACT_IN_SINGLE = 0x06
 const ACTION_SETTLE_ALL: u8 = 12; // SETTLE_ALL = 0x0c
 const ACTION_TAKE_ALL: u8 = 15; // TAKE_ALL = 0x0f
 
-// V4Router function selector for execute(bytes calldata params)
-// This is the keccak256 hash of "execute(bytes)" truncated to 4 bytes: 0x09c5eabe
-const EXECUTE_FUNCTION_SELECTOR: [u8; 4] = [0x09, 0xc5, 0xea, 0xbe];
-
 sol! {
     struct PoolKey {
         address currency0;
@@ -91,6 +85,10 @@ pub(super) struct HookEntrypointConfig {
     router_address: Option<Address>,
     /// Sender address for transactions. If not provided, uses a default address.
     /// Could be defined by a custom Hook Orchestrator.
+    #[expect(
+        dead_code,
+        reason = "accepted from the config but not applied to generated entrypoints"
+    )]
     sender: Option<Address>,
     /// Router bytecode to use for state overrides. If not provided, uses V4MiniRouter bytecode.
     router_code: Option<Bytes>,
@@ -162,7 +160,6 @@ pub(super) enum EntrypointGenerationError {
 }
 
 /// Trait for generating hook entrypoints
-#[allow(dead_code)]
 #[async_trait]
 pub(super) trait HookEntrypointGenerator<B>
 where
@@ -218,6 +215,10 @@ fn get_storage_slot_index_at_key(
 #[derive(Debug, PartialEq, Copy, Clone)]
 enum ContractCompiler {
     Solidity,
+    #[expect(
+        dead_code,
+        reason = "storage layout for Vyper contracts is supported but no ERC6909 token uses it"
+    )]
     Vyper,
 }
 
@@ -251,7 +252,9 @@ impl ContractCompiler {
 }
 struct ERC6909Overwrites {
     balance_of_slot: SlotId,
+    #[expect(dead_code, reason = "only the balance slot is overridden when simulating")]
     operator_slot: SlotId,
+    #[expect(dead_code, reason = "only the balance slot is overridden when simulating")]
     allowance_slot: SlotId,
 }
 
@@ -266,7 +269,7 @@ impl Default for ERC6909Overwrites {
 }
 
 impl ERC6909Overwrites {
-    fn balance_slot(&self, owner: Address, token: Address) -> SlotId {
+    fn balance_slot(&self, owner: &Address, token: &Address) -> SlotId {
         let balance_mapping_slot = get_storage_slot_index_at_key(
             U256::from_be_slice(owner.as_ref()),
             self.balance_of_slot,
@@ -286,6 +289,10 @@ pub(super) enum EstimationMethod {
     /// Prefer limits for estimation (if available)
     Limits,
     /// Prefer balances for estimation (if available)
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests construct a balances-first estimator")
+    )]
     Balances,
 }
 
@@ -307,6 +314,7 @@ impl DefaultSwapAmountEstimator {
     }
 
     /// Create an estimator that prefers balances
+    #[cfg(test)]
     pub(super) fn with_balances() -> Self {
         Self::new(EstimationMethod::Balances)
     }
@@ -333,19 +341,19 @@ impl SwapAmountEstimator for DefaultSwapAmountEstimator {
         let result = match self.preferred_method {
             EstimationMethod::Balances => {
                 // Try balances first
-                let mut result = self.try_estimate_from_balances(metadata, tokens);
+                let mut result = Self::try_estimate_from_balances(metadata, tokens);
                 if result.is_empty() {
                     // Fallback to limits
-                    result = self.try_estimate_from_limits(metadata);
+                    result = Self::try_estimate_from_limits(metadata);
                 }
                 result
             }
             EstimationMethod::Limits => {
                 // Try limits first
-                let mut result = self.try_estimate_from_limits(metadata);
+                let mut result = Self::try_estimate_from_limits(metadata);
                 if result.is_empty() {
                     // Fallback to balances
-                    result = self.try_estimate_from_balances(metadata, tokens);
+                    result = Self::try_estimate_from_balances(metadata, tokens);
                 }
                 result
             }
@@ -365,7 +373,6 @@ impl SwapAmountEstimator for DefaultSwapAmountEstimator {
 
 impl DefaultSwapAmountEstimator {
     fn try_estimate_from_limits(
-        &self,
         metadata: &ComponentTracingMetadata,
     ) -> HashMap<(Address, Address), Vec<Bytes>> {
         let mut result = HashMap::new();
@@ -444,7 +451,6 @@ impl DefaultSwapAmountEstimator {
     }
 
     fn try_estimate_from_balances(
-        &self,
         metadata: &ComponentTracingMetadata,
         tokens: &[Address],
     ) -> HashMap<(Address, Address), Vec<Bytes>> {
@@ -704,7 +710,7 @@ where
 
             let hooks = SolAddress::from_slice(data.hook_address.as_ref());
 
-            let fee = u32::from(
+            let fee = u32::try_from(
                 data.component
                     .static_attributes
                     .get("key_lp_fee")
@@ -718,9 +724,12 @@ where
                         )
                     })?
                     .clone(),
-            );
+            )
+            .map_err(|err| {
+                EntrypointGenerationError::EntrypointGenerationFailed(err.to_string())
+            })?;
 
-            let tick_spacing = i32::from(
+            let tick_spacing = i32::try_from(
                 data.component
                     .static_attributes
                     .get("tick_spacing")
@@ -734,7 +743,10 @@ where
                         )
                     })?
                     .clone(),
-            );
+            )
+            .map_err(|err| {
+                EntrypointGenerationError::EntrypointGenerationFailed(err.to_string())
+            })?;
 
             debug!(fee, tick_spacing, "Extracted pool parameters from component");
 
@@ -788,7 +800,7 @@ where
 
             for (amount_idx, amount_bytes) in amounts_to_use.iter().enumerate() {
                 let amount_u256 = U256::from_be_slice(amount_bytes.as_ref());
-                let amount_in = u128::try_from(amount_u256).map_err(|_| {
+                let amount_in = u128::try_from(amount_u256).map_err(|_out_of_range| {
                     error!(
                         token0 = %token_in,
                         token1 = %token_out,
@@ -839,8 +851,7 @@ where
 
                 // Always use ERC6909 overwrites for the router
                 let overwrites = ERC6909Overwrites::default();
-                let erc6909_balance_slot =
-                    overwrites.balance_slot(router_address.clone(), token_in.clone());
+                let erc6909_balance_slot = overwrites.balance_slot(&router_address, token_in);
 
                 debug!(
                     token_in = %token_in,
@@ -1383,9 +1394,6 @@ mod tests {
         let token1 = Address::from([2u8; 20]);
 
         // Create mock detected balance slots
-        let mut detected_slots = HashMap::new();
-        detected_slots.insert(token0.clone(), Bytes::from([0x12; 32])); // Mock detected slot for token0
-        detected_slots.insert(token1.clone(), Bytes::from([0x34; 32])); // Mock detected slot for token1
 
         // Create mock balance slot detector with detected slots
         let mut mock_detector = MockBalanceSlotDetector::new();

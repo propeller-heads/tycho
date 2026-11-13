@@ -1,12 +1,14 @@
 use tycho_common::simulation::errors::SimulationError;
 
 // Solidity spec: function addDelta(uint128 x, int128 y) internal pure returns (uint128 z) {
-pub(crate) fn add_liquidity_delta(x: u128, y: i128) -> Result<u128, SimulationError> {
-    if y < 0 {
-        x.checked_sub((-y) as u128)
-            .ok_or_else(|| SimulationError::FatalError("Underflow: Result is negative".to_string()))
-    } else {
-        Ok(x + (y as u128))
+pub fn add_liquidity_delta(x: u128, y: i128) -> Result<u128, SimulationError> {
+    match u128::try_from(y) {
+        Ok(increase) => Ok(x + increase),
+        Err(_) => x
+            .checked_sub(y.unsigned_abs())
+            .ok_or_else(|| {
+                SimulationError::FatalError("Underflow: Result is negative".to_string())
+            }),
     }
 }
 

@@ -57,7 +57,7 @@ fn test_uniswap_v3_uniswap_v2() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        default_token(wbtc.clone()),
+        default_token(wbtc),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -81,13 +81,13 @@ fn test_uniswap_v3_uniswap_v2() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -143,7 +143,7 @@ fn test_uniswap_v3_uniswap_v3() {
             },
             ..Default::default()
         },
-        default_token(wbtc.clone()),
+        default_token(wbtc),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -167,13 +167,13 @@ fn test_uniswap_v3_uniswap_v3() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -238,7 +238,7 @@ fn test_uniswap_v3_curve() {
             },
             ..Default::default()
         },
-        default_token(wbtc.clone()),
+        default_token(wbtc),
         default_token(usdt.clone()),
         BigUint::ZERO,
     );
@@ -262,13 +262,13 @@ fn test_uniswap_v3_curve() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -308,7 +308,7 @@ fn test_balancer_v2_uniswap_v2() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        default_token(wbtc.clone()),
+        default_token(wbtc),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -332,13 +332,13 @@ fn test_balancer_v2_uniswap_v2() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -381,7 +381,7 @@ fn test_evm_multi_protocol() {
             protocol_system: "vm:balancer_v2".to_string(),
             ..Default::default()
         },
-        default_token(weth.clone()),
+        default_token(weth),
         default_token(wbtc.clone()),
         BigUint::ZERO,
     );
@@ -409,7 +409,7 @@ fn test_evm_multi_protocol() {
             },
             ..Default::default()
         },
-        default_token(wbtc.clone()),
+        default_token(wbtc),
         default_token(usdt.clone()),
         BigUint::ZERO,
     );
@@ -428,12 +428,8 @@ fn test_evm_multi_protocol() {
         ]),
         ..Default::default()
     };
-    let ekubo_swap_usdt_usdc = Swap::new(
-        component,
-        default_token(usdt.clone()),
-        default_token(usdc.clone()),
-        BigUint::ZERO,
-    );
+    let ekubo_swap_usdt_usdc =
+        Swap::new(component, default_token(usdt), default_token(usdc.clone()), BigUint::ZERO);
 
     // USV4
     // Fee and tick spacing information for this test is obtained by querying the
@@ -452,7 +448,7 @@ fn test_evm_multi_protocol() {
             static_attributes: static_attributes_usdc_eth,
             ..Default::default()
         },
-        default_token(usdc.clone()),
+        default_token(usdc),
         default_token(eth.clone()),
         BigUint::ZERO,
     );
@@ -485,13 +481,13 @@ fn test_evm_multi_protocol() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth,
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -535,7 +531,7 @@ fn test_uniswap_v3_balancer_v3() {
             protocol_system: "vm:balancer_v3".to_string(),
             ..Default::default()
         },
-        default_token(wbtc.clone()),
+        default_token(wbtc),
         default_token(qnt.clone()),
         BigUint::ZERO,
     );
@@ -559,13 +555,13 @@ fn test_uniswap_v3_balancer_v3() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;

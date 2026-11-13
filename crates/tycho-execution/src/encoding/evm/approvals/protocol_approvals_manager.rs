@@ -20,7 +20,10 @@ use crate::encoding::{
 pub struct ProtocolApprovalsManager {
     client: EVMProvider,
     runtime_handle: Handle,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "owns the runtime behind `runtime_handle`; dropping it would shut the runtime down"
+    )]
     runtime: SafeRuntime,
 }
 impl ProtocolApprovalsManager {
@@ -52,8 +55,10 @@ impl ProtocolApprovalsManager {
         })?;
         match output {
             Ok(response) => {
-                let allowance: U256 = U256::abi_decode(&response).map_err(|_| {
-                    EncodingError::FatalError("Failed to decode response for allowance".to_string())
+                let allowance: U256 = U256::abi_decode(&response).map_err(|e| {
+                    EncodingError::FatalError(format!(
+                        "Failed to decode response for allowance: {e}"
+                    ))
                 })?;
 
                 if allowance < U256::MAX / U256::from(2) {

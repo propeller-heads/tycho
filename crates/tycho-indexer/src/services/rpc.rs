@@ -24,6 +24,7 @@ use tycho_common::{
     traits::EntryPointTracer,
     Bytes,
 };
+use tycho_storage::postgres::{count_to_i64, page_window};
 
 use crate::{
     extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
@@ -57,7 +58,7 @@ pub enum RpcError {
     DeltasError(#[from] PendingDeltasError),
 
     #[error("Page size must be less than or equal to {0}.")]
-    Pagination(usize),
+    Pagination(i64),
 
     #[error("Page must be at least 0 and page size at least 1, got page {page} and page size {page_size}.")]
     InvalidPagination { page: i64, page_size: i64 },
@@ -127,7 +128,6 @@ pub struct RpcHandler<G, T> {
         RpcCache<dto::ProtocolComponentsRequestBody, dto::ProtocolComponentRequestResponse>,
     traced_entry_point_cache:
         RpcCache<dto::TracedEntryPointRequestBody, dto::TracedEntryPointRequestResponse>,
-    #[allow(dead_code)]
     tracer: T,
     plans_config: PlansConfig,
     /// Protocol systems that use Dynamic Contract Indexing (DCI). Included in the
@@ -276,10 +276,10 @@ where
                         Box::new(move |b: &BlockAggregatedChanges| b.block.hash == hash)
                     }
                     BlockIdentifier::Number((_, no)) => {
-                        let no = *no as u64;
+                        let no = u64::try_from(*no).ok()?;
                         Box::new(move |b: &BlockAggregatedChanges| b.block.number == no)
                     }
-                    _ => return None,
+                    BlockIdentifier::Latest(_) => return None,
                 };
                 pending
                     .search_block(&predicate, protocol_system)
@@ -392,6 +392,7 @@ where
             .await?;
 
         let pagination_params: PaginationParams = (&request.pagination).into();
+        let (page_offset, page_limit) = page_window(&pagination_params)?;
 
         // Get the contract IDs from the request
         let addresses = request.contract_ids.clone();
@@ -405,8 +406,8 @@ where
             paginated_addrs = Some(
                 addrs
                     .iter()
-                    .skip(pagination_params.offset() as usize)
-                    .take(pagination_params.page_size as usize)
+                    .skip(page_offset)
+                    .take(page_limit)
                     .cloned()
                     .collect(),
             );
@@ -448,7 +449,7 @@ where
         let total = match addresses {
             Some(adrs) => {
                 // If contract addresses are specified, the total count is the number of addresses
-                adrs.len() as i64
+                count_to_i64(adrs.len())
             }
             None => account_data.total.unwrap_or_default(), /* TODO: handle case where contract
                                                              * addresses are not specified */
@@ -483,7 +484,9 @@ where
     ) -> Result<(Version, Option<BlockNumberOrTimestamp>), RpcError> {
         let ordered_version = match request_version {
             BlockOrTimestamp::Block(BlockIdentifier::Number((_, no))) => {
-                BlockNumberOrTimestamp::Number(*no as u64)
+                BlockNumberOrTimestamp::Number(u64::try_from(*no).map_err(|_overflow| {
+                    RpcError::Parse(format!("Block number {no} is negative"))
+                })?)
             }
             BlockOrTimestamp::Block(BlockIdentifier::Hash(hash)) => {
                 let block_number = if let Some(block_number) = self
@@ -668,6 +671,7 @@ where
             .await?;
 
         let pagination_params: PaginationParams = (&request.pagination).into();
+        let (page_offset, page_limit) = page_window(&pagination_params)?;
 
         // Get the protocol IDs from the request
         let protocol_ids = request.protocol_ids.clone();
@@ -682,11 +686,11 @@ where
         let (paginated_ids, total): (Vec<String>, i64) = match ids {
             Some(ids) => (
                 ids.iter()
-                    .skip(pagination_params.offset() as usize)
-                    .take(pagination_params.page_size as usize)
+                    .skip(page_offset)
+                    .take(page_limit)
                     .map(|s| s.to_string())
                     .collect(),
-                ids.len() as i64,
+                count_to_i64(ids.len()),
             ),
             None => {
                 let req = dto::ProtocolComponentsRequestBody {
@@ -776,11 +780,10 @@ where
                 .collect(),
             None => self.protocol_systems.iter().collect(),
         };
-        let total = filtered.len() as i64;
+        let total = count_to_i64(filtered.len());
         let page = request.pagination.page;
         let page_size = request.pagination.page_size;
-        let skip = (page * page_size) as usize;
-        let take = page_size as usize;
+        let (skip, take) = page_window(&PaginationParams::new(page, page_size))?;
         let systems: Vec<String> = filtered
             .into_iter()
             .skip(skip)
@@ -884,7 +887,7 @@ where
         let n_days_ago = if let Some(days) = traded_n_days_ago {
             i64::try_from(days)
                 .map(|days| Some(Utc::now().naive_utc() - Duration::days(days)))
-                .map_err(|_| RpcError::Parse("traded_n_days_ago is too big.".to_string()))?
+                .map_err(|e| RpcError::Parse(format!("traded_n_days_ago is too big: {e}")))?
         } else {
             None
         };
@@ -942,12 +945,12 @@ where
                         // If component ids were specified, check if we have all requested
                         // components are in the response (should cache)
                         if let Some(component_ids) = &request.component_ids {
-                            let all_found = component_ids.len() == res.pagination.total as usize;
+                            let all_found =
+                                count_to_i64(component_ids.len()) == res.pagination.total;
                             if all_found {
                                 return (res, true);
-                            } else {
-                                return (res, false);
                             }
+                            return (res, false);
                         }
                         // Otherwise check if request is for the last page (shouldn't cache)
                         let last_page = res.pagination.total_pages() - 1;
@@ -987,16 +990,15 @@ where
                 .map(|comp| comp.id.as_str())
                 .collect();
 
-            let total = buffered_components.len() as i64;
+            let n_buffered = buffered_components.len();
+            let total = count_to_i64(n_buffered);
+            let (page_offset, page_limit) = page_window(&pagination_params)?;
 
             if requested_ids.len() == fetched_ids.len() {
                 let response_components: Vec<dto::ProtocolComponent> = buffered_components
                     .into_iter()
-                    .skip(
-                        ((pagination_params.page * pagination_params.page_size) as usize)
-                            .min(total as usize),
-                    )
-                    .take(pagination_params.page_size as usize)
+                    .skip(page_offset.min(n_buffered))
+                    .take(page_limit)
                     .map(dto::ProtocolComponent::from)
                     .collect();
 
@@ -1024,7 +1026,8 @@ where
         {
             Ok(component_data) => {
                 let db_total = component_data.total.unwrap_or_default();
-                let total = db_total + buffered_components.len() as i64;
+                let total = db_total + count_to_i64(buffered_components.len());
+                let (_, page_limit) = page_window(&pagination_params)?;
                 let mut components = component_data.entity;
 
                 // Handle adding buffered components to the response
@@ -1034,12 +1037,13 @@ where
                     // buffered data only
                     components = buffered_components
                         .into_iter()
-                        .skip(buffer_offset as usize)
-                        .take(pagination_params.page_size as usize)
+                        .skip(usize::try_from(buffer_offset).map_err(|_overflow| {
+                            RpcError::Unknown(format!("Buffer offset {buffer_offset} is too large"))
+                        })?)
+                        .take(page_limit)
                         .collect();
                 } else {
-                    let remaining_capacity =
-                        pagination_params.page_size as usize - components.len();
+                    let remaining_capacity = page_limit - components.len();
                     if remaining_capacity > 0 {
                         // The db response does not fill a page - add buffered components to the
                         // response
@@ -1103,6 +1107,7 @@ where
         request: dto::TracedEntryPointRequestBody,
     ) -> Result<dto::TracedEntryPointRequestResponse, RpcError> {
         let pagination_params: PaginationParams = (&request.pagination).into();
+        let (page_offset, page_limit) = page_window(&pagination_params)?;
 
         // For consistency, we pre-apply pagination to the component ids to ensure it's
         // predetermined which components will appear on which page.
@@ -1111,8 +1116,8 @@ where
             paginated_component_ids = Some(
                 component_ids
                     .iter()
-                    .skip(pagination_params.offset() as usize)
-                    .take(pagination_params.page_size as usize)
+                    .skip(page_offset)
+                    .take(page_limit)
                     .cloned()
                     .collect(),
             );
@@ -1163,7 +1168,6 @@ where
         })
     }
 
-    #[allow(dead_code)]
     async fn add_entry_points(
         &self,
         request: &dto::AddEntryPointRequestBody,
@@ -1686,7 +1690,6 @@ pub async fn health() -> Result<HttpResponse, RpcError> {
 // elision, so the mocked trait methods need explicit lifetime parameters.
 // The allow is on the module because Clippy does not apply this lint allow
 // reliably when it is placed on the macro invocation itself.
-#[allow(clippy::extra_unused_lifetimes)]
 mod tests {
     use std::{collections::HashMap, env, str::FromStr, sync::Mutex};
 
@@ -1731,46 +1734,55 @@ mod tests {
     const WETH: &str = "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
-    mock! {
-        pub PendingDeltas {}
+    #[expect(
+        clippy::ref_option_ref,
+        reason = "mockall's expectation API takes each argument by reference, so an Option<&T> parameter becomes &Option<&T>"
+    )]
+    mod pending_deltas_mock {
+        use super::*;
 
-        impl PendingDeltasBuffer for PendingDeltas {
-            fn merge_native_states<'a>(
-                &self,
-                protocol_ids: Option<&'a [&'a str]>,
-                db_states: &mut Vec<ProtocolComponentState>,
-                version: Option<BlockNumberOrTimestamp>,
-                protocol_system: &'a str,
-            ) -> Result<(), PendingDeltasError>;
+        mock! {
+            pub PendingDeltas {}
 
-            fn update_vm_states<'a>(
-                &self,
-                addresses: Option<&'a [Bytes]>,
-                db_states: &mut Vec<Account>,
-                version: Option<BlockNumberOrTimestamp>,
-                protocol_system: &'a str,
-            ) -> Result<(), PendingDeltasError>;
+            impl PendingDeltasBuffer for PendingDeltas {
+                fn merge_native_states<'a>(
+                    &self,
+                    protocol_ids: Option<&'a [&'a str]>,
+                    db_states: &mut Vec<ProtocolComponentState>,
+                    version: Option<BlockNumberOrTimestamp>,
+                    protocol_system: &'a str,
+                ) -> Result<(), PendingDeltasError>;
 
-            fn get_new_components<'a>(
-                &self,
-                ids: Option<&'a [&'a str]>,
-                protocol_system: &'a str,
-                min_tvl: Option<f64>,
-            ) -> Result<Vec<ProtocolComponent>, PendingDeltasError>;
+                fn update_vm_states<'a>(
+                    &self,
+                    addresses: Option<&'a [Bytes]>,
+                    db_states: &mut Vec<Account>,
+                    version: Option<BlockNumberOrTimestamp>,
+                    protocol_system: &'a str,
+                ) -> Result<(), PendingDeltasError>;
 
-            fn get_block_commit_status<'a>(
-                &self,
-                version: BlockNumberOrTimestamp,
-                protocol_system: &'a str,
-            ) -> Result<Option<CommitStatus>, PendingDeltasError>;
+                fn get_new_components<'a>(
+                    &self,
+                    ids: Option<&'a [&'a str]>,
+                    protocol_system: &'a str,
+                    min_tvl: Option<f64>,
+                ) -> Result<Vec<ProtocolComponent>, PendingDeltasError>;
 
-            fn search_block<'a>(
-                &self,
-                f: &dyn Fn(&BlockAggregatedChanges) -> bool,
-                protocol_system: &'a str,
-            ) -> Result<Option<BlockAggregatedChanges>, PendingDeltasError>;
+                fn get_block_commit_status<'a>(
+                    &self,
+                    version: BlockNumberOrTimestamp,
+                    protocol_system: &'a str,
+                ) -> Result<Option<CommitStatus>, PendingDeltasError>;
+
+                fn search_block<'a>(
+                    &self,
+                    f: &dyn Fn(&BlockAggregatedChanges) -> bool,
+                    protocol_system: &'a str,
+                ) -> Result<Option<BlockAggregatedChanges>, PendingDeltasError>;
+            }
         }
     }
+    use pending_deltas_mock::MockPendingDeltas;
 
     #[test]
     async fn test_validate_version_priority() {
@@ -1849,11 +1861,13 @@ mod tests {
             .version
             .timestamp
             .unwrap()
+            .and_utc()
             .timestamp_millis() -
             result
                 .version
                 .timestamp
                 .unwrap()
+                .and_utc()
                 .timestamp_millis();
 
         // Allowing a small time delta (1 second)
@@ -2954,7 +2968,10 @@ mod tests {
     }
 
     /// Helper used to make tracing results comparisons deterministic.
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "test helper returning several parallel collections"
+    )]
     fn normalize_tracing_result(
         result: &dto::TracingResult,
     ) -> (Vec<(Bytes, dto::AddressStorageLocation)>, Vec<(Bytes, Vec<Bytes>)>) {
@@ -2988,7 +3005,10 @@ mod tests {
         });
     }
 
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "test helper returning several parallel collections"
+    )]
     fn get_add_entry_point_test_data(
         block_hash: Bytes,
         component_id: ComponentId,
@@ -3069,7 +3089,7 @@ mod tests {
             },
             TracedEntryPoint {
                 entry_point_with_params: entry_points_with_tracing_params[1].clone().into(),
-                detection_block_hash: block_hash.clone(),
+                detection_block_hash: block_hash,
                 tracing_result: TracingResult::new(
                     HashSet::from([
                         (
@@ -3114,7 +3134,7 @@ mod tests {
             ),
             (
                 entry_point_ids[1].clone(),
-                HashSet::from([(tracing_params[1].clone().into(), component_id.clone())]),
+                HashSet::from([(tracing_params[1].clone().into(), component_id)]),
             ),
         ]);
 
@@ -3221,7 +3241,6 @@ mod tests {
             )
             .return_once(move |_, _| {
                 tracing_results
-                    .clone()
                     .into_iter()
                     .map(Ok)
                     .collect()
@@ -3247,7 +3266,7 @@ mod tests {
             .unwrap();
 
         // Sort to make test deterministic
-        let mut traced_entry_points_response = response.traced_entry_points.clone();
+        let mut traced_entry_points_response = response.traced_entry_points;
         let traced_entry_points_for_component = traced_entry_points_response
             .get_mut(&component_id)
             .unwrap();
@@ -3321,7 +3340,7 @@ mod tests {
             .unwrap();
 
         // Sort to make test deterministic
-        let mut traced_entry_points_response = response.traced_entry_points.clone();
+        let mut traced_entry_points_response = response.traced_entry_points;
         let traced_entry_points_for_component = traced_entry_points_response
             .get_mut(&component_id)
             .unwrap();
@@ -4111,14 +4130,8 @@ plans:
         let config: PlansConfig = serde_yaml::from_str(yaml).unwrap();
 
         let gw_free = MockGateway::new();
-        let handler_free = RpcHandler::new(
-            gw_free,
-            None,
-            MockEntryPointTracer::new(),
-            config.clone(),
-            vec![],
-            vec![],
-        );
+        let handler_free =
+            RpcHandler::new(gw_free, None, MockEntryPointTracer::new(), config, vec![], vec![]);
 
         let restrictions = handler_free
             .resolve_plan_restrictions(

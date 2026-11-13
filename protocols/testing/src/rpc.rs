@@ -22,8 +22,8 @@ pub struct RPCProvider {
 }
 
 impl RPCProvider {
-    pub fn new(url: String) -> Self {
-        let url = url.as_str().parse().unwrap();
+    pub fn new(url: &str) -> Self {
+        let url = url.parse().unwrap();
         RPCProvider { url }
     }
 
@@ -112,7 +112,7 @@ mod tests {
     async fn get_token_balance_native_token() {
         let eth_rpc_url = env::var("RPC_URL").expect("Missing RPC_URL in environment");
 
-        let rpc_provider = RPCProvider::new(eth_rpc_url);
+        let rpc_provider = RPCProvider::new(&eth_rpc_url);
         let token_address = address!("0x0000000000000000000000000000000000000000");
         let wallet_address = address!("0x787B8840100d9BaAdD7463f4a73b5BA73B00C6cA");
         let block_number = 21998530;
@@ -132,7 +132,7 @@ mod tests {
     async fn get_token_balance_erc20_token() {
         let eth_rpc_url = env::var("RPC_URL").expect("Missing RPC_URL in environment");
 
-        let rpc_provider = RPCProvider::new(eth_rpc_url);
+        let rpc_provider = RPCProvider::new(&eth_rpc_url);
         let token_address = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
         let wallet_address = address!("0x787B8840100d9BaAdD7463f4a73b5BA73B00C6cA");
         let block_number = 21998530;
@@ -198,7 +198,7 @@ mod tests {
             }
         });
 
-        let rpc_provider = RPCProvider::new(format!("http://{address}"));
+        let rpc_provider = RPCProvider::new(&format!("http://{address}"));
         let component = address!("0x1111111111111111111111111111111111111111");
 
         assert_eq!(
@@ -242,7 +242,7 @@ mod tests {
     async fn get_block_header() {
         let eth_rpc_url = env::var("RPC_URL").expect("Missing RPC_URL in environment");
 
-        let rpc_provider = RPCProvider::new(eth_rpc_url);
+        let rpc_provider = RPCProvider::new(&eth_rpc_url);
         let block_number = 21998530;
 
         let block_header = rpc_provider

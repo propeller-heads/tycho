@@ -2,7 +2,7 @@
 # Migrated from tycho-simulation/Dockerfile.
 
 # ── Stage 1: build ───────────────────────────────────────────────────────────
-FROM rust:bookworm AS builder
+FROM rust:1.99.1-bookworm AS builder
 WORKDIR /build
 COPY . .
 RUN cargo build --release --package tycho-integration-test

@@ -28,7 +28,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
     /// an `EVMPoolState`.
     ///
     /// Errors with a `InvalidSnapshotError`.
-    #[allow(deprecated)]
+    #[expect(
+        deprecated,
+        reason = "indexed snapshots may carry a balance_owner, which only the deprecated builder setter accepts"
+    )]
     async fn try_from_with_header(
         snapshot: ComponentWithState,
         _block: BlockHeader,
@@ -175,10 +178,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
             "{hex_protocol_name:0>40}",
             hex_protocol_name = hex::encode(protocol_name)
         ))
-        .map_err(|_| {
-            InvalidSnapshotError::ValueError(
-                "Error converting protocol name to address".to_string(),
-            )
+        .map_err(|e| {
+            InvalidSnapshotError::ValueError(format!(
+                "Error converting protocol name to address: {e}"
+            ))
         })?;
         let mut vm_traces = false;
         if let Some(trace) = &decoder_context.vm_traces {
@@ -194,7 +197,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
             .map(|block_number| {
                 <[u8; 8]>::try_from(block_number.as_ref())
                     .map(u64::from_be_bytes)
-                    .map_err(|_| {
+                    .map_err(|_wrong_length| {
                         InvalidSnapshotError::ValueError(
                             "override_block_number attribute must be an 8-byte big-endian u64"
                                 .to_string(),
@@ -209,7 +212,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
             .map(|block_timestamp| {
                 <[u8; 8]>::try_from(block_timestamp.as_ref())
                     .map(u64::from_be_bytes)
-                    .map_err(|_| {
+                    .map_err(|_wrong_length| {
                         InvalidSnapshotError::ValueError(
                             "override_block_timestamp attribute must be an 8-byte big-endian u64"
                                 .to_string(),

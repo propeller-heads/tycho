@@ -157,7 +157,10 @@ pub struct Solution {
 }
 
 impl Solution {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         sender: Bytes,
         receiver: Bytes,
@@ -249,7 +252,8 @@ impl Solution {
     ///
     /// - `expected_amount_out` must include the subsidy, or positive slippage capture takes it.
     /// - `min_amount_out` must exclude it, so the swap fills when the payer skips the subsidy.
-    ///   Encoding fails when `min_amount_out > expected_amount_out - amount`.
+    ///   Encoding does not check this: on a swap group before the last the subsidy is in another
+    ///   token, which the later swaps convert.
     /// - Router and client fees apply to the subsidy.
     /// - Until [`EncodedSolution::write_subsidy_signature`], the swaps fill without the subsidy.
     /// - A cyclical solution (`token_in == token_out`) encodes without the subsidy, and its
@@ -275,9 +279,9 @@ pub struct SubsidyTerms {
     pub nonce: B256,
     /// Unix timestamp in seconds. Must fit in 48 bits.
     pub deadline: u64,
-    /// Index in the solution's swaps of a swap in the subsidized swap group. The group's output
-    /// must be the solution's `token_out`, or the input of a final wrap/unwrap that takes all of
-    /// it. Never a wrap/unwrap.
+    /// Index in the solution's swaps of a swap in the subsidized swap group. Any group but a
+    /// wrap/unwrap. A group earlier in the route pays its own output token, and the swaps after
+    /// it take the subsidy as input.
     pub subsidized_swap_index: usize,
 }
 
@@ -376,14 +380,26 @@ impl Swap {
         self.split
     }
 
+    #[expect(
+        clippy::ref_option,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn user_data(&self) -> &Option<Bytes> {
         &self.user_data
     }
 
+    #[expect(
+        clippy::ref_option,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn protocol_state(&self) -> &Option<Arc<dyn ProtocolSim>> {
         &self.protocol_state
     }
 
+    #[expect(
+        clippy::ref_option,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn estimated_amount_in(&self) -> &Option<BigUint> {
         &self.estimated_amount_in
     }
@@ -653,6 +669,10 @@ pub enum Strategy {
 /// Creates a minimal `Token` from just an address, with zero-value defaults for other fields.
 /// Only available in tests and when the `test-utils` feature is enabled.
 #[cfg(any(test, feature = "test-utils"))]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "public API; taking `&Bytes` is a breaking change"
+)]
 pub fn default_token(address: Bytes) -> Token {
     Token::new(&address, "", 0, 0, &[Some(60_000u64)], Default::default(), 100)
 }

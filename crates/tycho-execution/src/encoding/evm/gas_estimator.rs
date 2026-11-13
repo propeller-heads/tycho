@@ -2,8 +2,8 @@ use num_bigint::BigUint;
 
 use super::{
     constants::{
-        FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
-        SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS,
+        BAIBAI_PROTOCOL_SYSTEM, FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM,
+        PRICE_LEVEL_STREAM_PREFIX, SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS,
     },
     group_swaps::group_swaps,
     subsidy::encoded_subsidy,
@@ -45,8 +45,15 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
 ///
 /// This list is incomplete on its own: whole protocol families can qualify too. Use
 /// [`optimizable_transfer_in`] for the full classification.
-pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] =
-    &["erc4626", "maverick_v2", "uniswap_v2", "sushiswap_v2", "pancakeswap_v2", "quickswap_v2"];
+pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] = &[
+    "biconomy",
+    "erc4626",
+    "maverick_v2",
+    "uniswap_v2",
+    "sushiswap_v2",
+    "pancakeswap_v2",
+    "quickswap_v2",
+];
 
 /// Whether the router-to-pool input transfer is skipped for `protocol_system` (see
 /// [`PROTOCOLS_OPTIMIZABLE_TRANSFER_IN`]). Price-level-stream pAMMs are push-payment venues whose
@@ -73,6 +80,7 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "erc4626",
     "ring_swap_v2",
     "sky",
+    BAIBAI_PROTOCOL_SYSTEM,
 ];
 
 /// Whether the router must approve the protocol before swapping (see
@@ -135,6 +143,10 @@ pub const ROUTER_FEES_ACTIVE: bool = true;
 ///   pay nothing extra. Non-callback protocols add the full user transfer cost. For split swaps,
 ///   funds always go through the router first, so the full user input transfer is always added
 ///   regardless of protocol type.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "public API; taking `&Strategy` is a breaking change"
+)]
 pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
     let mut total_gas = BigUint::ZERO;
     let swap_groups = group_swaps(solution.swaps());
@@ -158,34 +170,12 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
         total_gas += BigUint::from(SUBSIDY_GAS);
     }
 
-    // Add user transfer overhead
-    if strategy != Strategy::Split {
-        if let Some(first_group) = swap_groups.first() {
-            let protocol = first_group.protocol_system.as_str();
-            // if the solution is not a split swap, the protocol gas usage for callback protocols
-            // already includes a regular transfer gas usage:
-            // - for the permit2 case we need to deduct the transfer usage already included
-            // - for the regular transfer from and vault, do nothing, everything is already
-            //   accounted
-            if PROTOCOLS_CALLBACK.contains(&protocol) {
-                if *solution.user_transfer_type() == UserTransferType::TransferFromPermit2 {
-                    total_gas += BigUint::from(USER_PERMIT2_TRANSFER - DEFAULT_TOKEN_TRANSFER_GAS);
-                }
-            } else {
-                total_gas += BigUint::from(match *solution.user_transfer_type() {
-                    UserTransferType::TransferFromPermit2 => USER_PERMIT2_TRANSFER,
-                    _ => DEFAULT_TOKEN_TRANSFER_GAS, /* TransferFrom and UseVaultsFunds have
-                                                      * similar overheads */
-                });
-            }
-        }
-    } else {
-        // for split swaps the funds always go through the router first
-        total_gas += BigUint::from(match *solution.user_transfer_type() {
-            UserTransferType::TransferFromPermit2 => USER_PERMIT2_TRANSFER,
-            _ => DEFAULT_TOKEN_TRANSFER_GAS, /* TransferFrom and UseVaultsFunds have
-                                              * similar overheads */
-        });
+    if let Some(first_group) = swap_groups.first() {
+        total_gas += estimate_user_transfer_gas(
+            &first_group.protocol_system,
+            solution.user_transfer_type(),
+            &strategy,
+        );
     }
 
     // Add fees overhead: when fees are active and the last swap's protocol does not
@@ -201,6 +191,36 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
     }
 
     total_gas
+}
+
+/// Gas for the user's input transfer that is NOT captured by the first swap's `get_amount_out`.
+///
+/// A non-split solution's first protocol, if it is a callback protocol, already pays a regular
+/// `transferFrom` inside `swap()`, so only the Permit2 delta (`USER_PERMIT2_TRANSFER -
+/// DEFAULT_TOKEN_TRANSFER_GAS`) is added for Permit2 users. Any other first protocol adds the full
+/// user transfer. A split solution always adds the full user transfer, because its funds go
+/// through the router first.
+///
+/// Public so a solver can rank a route's first leg on the gas this estimator will charge for it.
+pub fn estimate_user_transfer_gas(
+    first_protocol_system: &str,
+    user_transfer_type: &UserTransferType,
+    strategy: &Strategy,
+) -> BigUint {
+    let full_transfer = match user_transfer_type {
+        UserTransferType::TransferFromPermit2 => USER_PERMIT2_TRANSFER,
+        // TransferFrom and UseVaultsFunds have similar overheads.
+        UserTransferType::TransferFrom | UserTransferType::UseVaultsFunds => {
+            DEFAULT_TOKEN_TRANSFER_GAS
+        }
+    };
+    let included_in_swap =
+        *strategy != Strategy::Split && PROTOCOLS_CALLBACK.contains(&first_protocol_system);
+    if included_in_swap {
+        BigUint::from(full_transfer - DEFAULT_TOKEN_TRANSFER_GAS)
+    } else {
+        BigUint::from(full_transfer)
+    }
 }
 
 fn transfer_token_gas(token: &tycho_common::models::token::Token) -> BigUint {
@@ -238,7 +258,10 @@ fn transfer_token_gas(token: &tycho_common::models::token::Token) -> BigUint {
 ///   Curve, etc.), regardless of other exclusions.
 /// - **Output**: the extra `_transferOut(router, receiver)` for protocols with `outputToRouter =
 ///   true`, or any protocol when the strategy is Split (output always routes through the router).
-fn estimate_transfer_overhead(
+///
+/// `estimate_gas_usage` charges this once per swap group. It is public so a solver can rank each
+/// leg of a route on the gas this estimator will charge for it.
+pub fn estimate_transfer_overhead(
     protocol_system: &str,
     token_in: &tycho_common::models::token::Token,
     token_out: &tycho_common::models::token::Token,
@@ -327,9 +350,9 @@ mod tests {
         let one_transfer = transfer_token_gas(&default_token(Bytes::from(vec![0u8; 20])));
         let input_and_output = &one_transfer + &one_transfer;
 
-        assert_eq!(overhead(eth.clone(), steth.clone()), input_and_output.clone());
-        assert_eq!(overhead(eth, wsteth.clone()), input_and_output.clone());
-        assert_eq!(overhead(wsteth.clone(), steth.clone()), input_and_output.clone());
+        assert_eq!(overhead(eth.clone(), steth.clone()), input_and_output);
+        assert_eq!(overhead(eth, wsteth.clone()), input_and_output);
+        assert_eq!(overhead(wsteth.clone(), steth.clone()), input_and_output);
         assert_eq!(overhead(steth, wsteth), input_and_output + BigUint::from(TOKEN_APPROVAL_GAS));
     }
 
@@ -492,6 +515,48 @@ mod tests {
         assert_eq!(gas, BigUint::from(285_000u64));
     }
 
+    #[rstest]
+    // callback pulls a regular transfer inside swap()          0
+    #[case::callback_transfer_from(
+        "uniswap_v3",
+        UserTransferType::TransferFrom,
+        Strategy::Single,
+        0
+    )]
+    // USER_PERMIT2_TRANSFER − the transfer in pool gas    40_000
+    #[case::callback_permit2(
+        "uniswap_v3",
+        UserTransferType::TransferFromPermit2,
+        Strategy::Single,
+        40_000
+    )]
+    // DEFAULT_TOKEN_TRANSFER_GAS                          40_000
+    #[case::push_payment_transfer_from(
+        "fallback:fermiswap",
+        UserTransferType::TransferFrom,
+        Strategy::Sequential,
+        40_000
+    )]
+    // USER_PERMIT2_TRANSFER                               80_000
+    #[case::push_payment_permit2(
+        "uniswap_v2",
+        UserTransferType::TransferFromPermit2,
+        Strategy::Single,
+        80_000
+    )]
+    // split funds go through the router first: DEFAULT_TOKEN_TRANSFER_GAS 40_000
+    #[case::split_callback("uniswap_v3", UserTransferType::UseVaultsFunds, Strategy::Split, 40_000)]
+    fn test_user_transfer_gas(
+        #[case] first_protocol_system: &str,
+        #[case] user_transfer_type: UserTransferType,
+        #[case] strategy: Strategy,
+        #[case] expected: u64,
+    ) {
+        let gas = estimate_user_transfer_gas(first_protocol_system, &user_transfer_type, &strategy);
+
+        assert_eq!(gas, BigUint::from(expected));
+    }
+
     #[test]
     fn test_single_callback_protocol() {
         // uniswap_v3 is a callback protocol: the pool pulls funds inside the callback, so that
@@ -584,7 +649,7 @@ mod tests {
         let solution = make_solution(vec![
             make_swap_with_tokens("uniswap_v4", token_a(), token_b(), 100_000),
             make_swap_with_tokens("uniswap_v4", token_b(), token_c(), 100_000),
-            make_swap_with_tokens("uniswap_v2", token_c(), token_d.clone(), 100_000),
+            make_swap_with_tokens("uniswap_v2", token_c(), token_d, 100_000),
         ]);
         let gas = estimate_gas_usage(&solution, Strategy::Sequential);
 

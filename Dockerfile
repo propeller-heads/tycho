@@ -1,15 +1,17 @@
-FROM rust:1.91-bookworm AS chef
-ARG TARGETPLATFORM=linux/amd64
+# Tools pinned in mise.toml, installed from mise.lock: mise refuses any version not locked there.
+FROM jdxcode/mise:2026.10.25-debian@sha256:00a8a9d05a300e5a15a89d6d3a87ea88ec4e78c4702b78d49aa1d3250af61427 AS tools
+WORKDIR /tools
+COPY mise.toml mise.lock ./
+ENV MISE_TRUSTED_CONFIG_PATHS=/tools
+RUN mise install github:streamingfast/substreams github:LukeMathWalker/cargo-chef \
+    && mkdir /out \
+    && cp "$(mise which substreams)" "$(mise which cargo-chef)" /out/
+
+FROM rust:1.99.1-bookworm AS chef
 WORKDIR /build
-RUN apt-get update && apt-get install -y libpq-dev jq
-RUN ARCH=$(echo $TARGETPLATFORM | sed -e 's/\//_/g') && \
-    if [ "$ARCH" = "linux_amd64" ]; then \
-    ARCH="linux_x86_64"; \
-    fi && \
-    LINK=$(curl -s https://api.github.com/repos/streamingfast/substreams/releases/latest | jq -r ".assets[] | select(.name | contains(\"$ARCH\")) | .browser_download_url")  && \
-    echo ARCH: $ARCH, LINK: $LINK && \
-    curl -L  $LINK  | tar zxf - -C /usr/local/bin/
-RUN cargo install cargo-chef
+RUN apt-get update && apt-get install -y libpq-dev
+COPY --from=tools /out/substreams /usr/local/bin/
+COPY --from=tools /out/cargo-chef /usr/local/cargo/bin/
 COPY rust-toolchain.toml .
 RUN rustup set profile minimal && rustup install
 

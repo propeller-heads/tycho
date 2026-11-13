@@ -260,7 +260,7 @@ impl PendingDeltas {
     // Creates a new account state from the buffered deltas only.
     fn get_account(
         &self,
-        address: Bytes,
+        address: &Bytes,
         version: Option<BlockNumberOrTimestamp>,
     ) -> Result<Account> {
         let mut account: Option<Account> = None;
@@ -269,7 +269,7 @@ impl PendingDeltas {
                 .lock()
                 .map_err(|e| PendingDeltasError::LockError("VM".to_string(), e.to_string()))?;
             for entry in guard.blocks(None, version)? {
-                if let Some(delta) = entry.account_deltas.get(&address) {
+                if let Some(delta) = entry.account_deltas.get(address) {
                     // Update account state or create a new one if not present
                     let account_ref =
                         account.get_or_insert_with(|| delta.clone().into_account_without_tx());
@@ -278,7 +278,7 @@ impl PendingDeltas {
                 // Keep token balances consistent with the storage applied above (see
                 // `update_vm_state`). Only meaningful once the account exists via a delta.
                 if let Some(account_ref) = account.as_mut() {
-                    if let Some(token_balances) = entry.account_balances.get(&address) {
+                    if let Some(token_balances) = entry.account_balances.get(address) {
                         for (token, balance) in token_balances {
                             account_ref
                                 .token_balances
@@ -312,7 +312,7 @@ impl PendingDeltas {
         // Send the start signal to the startup task
         start_tx
             .send(())
-            .map_err(|_| anyhow::anyhow!("Failed to send PendingDeltas start signal"))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send PendingDeltas start signal: {e}"))?;
 
         // Start a reporting task to log buffer sizes every 60 seconds
         let self_clone = self.clone();
@@ -431,7 +431,7 @@ impl PendingDeltasBuffer for PendingDeltas {
         // the request in order, so a missing account fails with the first missing address.
         for address in addresses.unwrap_or_default() {
             if found.insert(address.clone()) {
-                db_states.push(self.get_account(address.clone(), version)?);
+                db_states.push(self.get_account(address, version)?);
             }
         }
 
@@ -895,7 +895,7 @@ mod test {
         fn fold(&self, block: &BlockAggregatedChanges) -> std::result::Result<(), StorageError> {
             self.folded
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(block.block.number);
             Ok(())
         }
@@ -1257,7 +1257,7 @@ mod test {
             HashMap::from([(
                 usdc.clone(),
                 AccountBalance {
-                    token: usdc.clone(),
+                    token: usdc,
                     balance: Bytes::from("0x02"),
                     modify_tx: Bytes::zero(32),
                     account: address0.clone(),
@@ -1282,7 +1282,7 @@ mod test {
             HashMap::from([(
                 weth.clone(),
                 AccountBalance {
-                    token: weth.clone(),
+                    token: weth,
                     balance: Bytes::from("0x2a"),
                     modify_tx: Bytes::zero(32),
                     account: address1.clone(),

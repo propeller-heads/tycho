@@ -6,12 +6,12 @@ use tycho_common::{simulation::errors::SimulationError, Bytes};
 
 use crate::evm::protocol::utils::slipstreams::observations::Observations;
 
-pub(crate) const ZERO_FEE_INDICATOR: u32 = 420;
-pub(crate) const DEFAULT_SECONDS_AGO: u32 = 600;
-pub(crate) const MIN_SECONDS_AGO: u32 = 2;
-pub(crate) const DEFAULT_SCALING_FACTOR: u64 = 0;
+pub const ZERO_FEE_INDICATOR: u32 = 420;
+pub const DEFAULT_SECONDS_AGO: u32 = 600;
+pub const MIN_SECONDS_AGO: u32 = 2;
+pub const DEFAULT_SCALING_FACTOR: u64 = 0;
 // The upgraded DynamicSwapFeeModule deployments use 30_000 as their default fee cap.
-pub(crate) const DEFAULT_FEE_CAP: u32 = 30_000;
+pub const DEFAULT_FEE_CAP: u32 = 30_000;
 const SCALING_PRECISION: u128 = 1_000_000;
 const SUPPORTED_DYNAMIC_FEE_MODULES: [Address; 4] = [
     address!("090b2A6bb475c00e2256e2095A60887cD710803b"),
@@ -55,9 +55,7 @@ impl DynamicFeeConfig {
     /// An absent or unsupported `dynamic_fee_module` marker yields the default config, whose
     /// `base_fee == 0` makes `get_dynamic_fee` fall back to the pool's static `default_fee`. Only
     /// errors when a supported marker is present but a dynamic-fee attribute is missing.
-    pub(crate) fn from_attributes(
-        attributes: &HashMap<String, Bytes>,
-    ) -> Result<Self, &'static str> {
+    pub(crate) fn from_attributes(attributes: &HashMap<String, Bytes>) -> Result<Self, String> {
         if !attributes
             .get(DYNAMIC_FEE_MODULE_ATTRIBUTE)
             .is_some_and(|module| is_supported_dynamic_fee_module(module))
@@ -66,31 +64,36 @@ impl DynamicFeeConfig {
         }
 
         Ok(Self {
-            base_fee: u32::from(
+            base_fee: u32::try_from(
                 attributes
                     .get("dfc_baseFee")
                     .ok_or("missing dynamic fee attribute `dfc_baseFee`")?
                     .clone(),
-            ),
-            fee_cap: u32::from(
+            )
+            .map_err(|err| err.to_string())?,
+            fee_cap: u32::try_from(
                 attributes
                     .get("dfc_feeCap")
                     .ok_or("missing dynamic fee attribute `dfc_feeCap`")?
                     .clone(),
-            ),
-            scaling_factor: u64::from(
+            )
+            .map_err(|err| err.to_string())?,
+            scaling_factor: u64::try_from(
                 attributes
                     .get("dfc_scalingFactor")
                     .ok_or("missing dynamic fee attribute `dfc_scalingFactor`")?
                     .clone(),
-            ),
+            )
+            .map_err(|err| err.to_string())?,
             initial_fee_enabled: attributes
                 .get("dfc_initialFeeEnabled")
                 .is_some_and(|value| value.iter().any(|byte| *byte != 0)),
             initial_fee: attributes
                 .get("dfc_initialFee")
                 .cloned()
-                .map(u32::from)
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|err| err.to_string())?
                 .unwrap_or_default(),
         })
     }
@@ -102,20 +105,21 @@ impl DynamicFeeConfig {
     pub(crate) fn update_from_attributes(
         &mut self,
         attributes: &HashMap<String, Bytes>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), String> {
         if attributes.contains_key(DYNAMIC_FEE_MODULE_ATTRIBUTE) {
             *self = Self::from_attributes(attributes)?;
             return Ok(());
         }
 
         if let Some(base_fee) = attributes.get("dfc_baseFee") {
-            self.base_fee = u32::from(base_fee.clone());
+            self.base_fee = u32::try_from(base_fee.clone()).map_err(|err| err.to_string())?;
         }
         if let Some(fee_cap) = attributes.get("dfc_feeCap") {
-            self.fee_cap = u32::from(fee_cap.clone());
+            self.fee_cap = u32::try_from(fee_cap.clone()).map_err(|err| err.to_string())?;
         }
         if let Some(scaling_factor) = attributes.get("dfc_scalingFactor") {
-            self.scaling_factor = u64::from(scaling_factor.clone());
+            self.scaling_factor =
+                u64::try_from(scaling_factor.clone()).map_err(|err| err.to_string())?;
         }
         if let Some(initial_fee_enabled) = attributes.get("dfc_initialFeeEnabled") {
             self.initial_fee_enabled = initial_fee_enabled
@@ -123,7 +127,7 @@ impl DynamicFeeConfig {
                 .any(|byte| *byte != 0);
         }
         if let Some(initial_fee) = attributes.get("dfc_initialFee") {
-            self.initial_fee = u32::from(initial_fee.clone());
+            self.initial_fee = u32::try_from(initial_fee.clone()).map_err(|err| err.to_string())?;
         }
         Ok(())
     }
@@ -140,7 +144,7 @@ impl DynamicFeeConfig {
 /// worst-case default the oracle read is charged whenever the dynamic branch evaluated it, even
 /// when the initial fee wins the max — conservative on both fee and gas.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedFee {
+pub struct ResolvedFee {
     pub(crate) fee: u32,
     pub(crate) observed_twap: bool,
 }
@@ -158,8 +162,11 @@ impl ResolvedFee {
 /// before any other on the pool), while the default quotes the worse of the initial and dynamic
 /// fees so the output is never over-quoted. Once the pool has been touched in the execution
 /// block, position is a known fact and the flag has no effect.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn get_dynamic_fee(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "inputs mirror the on-chain dynamic fee module and pool state"
+)]
+pub fn get_dynamic_fee(
     dfc: &DynamicFeeConfig,
     default_base_fee: u32,
     current_tick: i32,
@@ -217,7 +224,10 @@ pub(crate) fn get_dynamic_fee(
 }
 
 /// The dynamic branch of the module: base fee plus the TWAP-deviation component, capped.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "inputs mirror the on-chain dynamic fee module and pool state"
+)]
 fn resolve_dynamic_fee(
     dfc: &DynamicFeeConfig,
     base_fee: u32,
@@ -258,36 +268,41 @@ fn calculate_dynamic_fee(
     blocktime: u32,
     scaling_factor: u64,
 ) -> Result<(u32, bool), SimulationError> {
-    if observation_cardinality < (DEFAULT_SECONDS_AGO / MIN_SECONDS_AGO) as u16 {
+    if u32::from(observation_cardinality) < DEFAULT_SECONDS_AGO / MIN_SECONDS_AGO {
         // The module returns before reaching the oracle: no observe gas.
         return Ok((0, false));
     };
     // Mirror the on-chain module's `try pool.observe(...) { ... } catch { return 0; }`: a failed
     // observation (e.g. a ring buffer Tycho only partially indexed) contributes no dynamic
     // component instead of failing the whole quote.
-    let observed = match observations.observe(
+    let Ok(observed) = observations.observe(
         blocktime,
         &[DEFAULT_SECONDS_AGO, 0],
         current_tick,
         observation_index,
         liquidity,
         observation_cardinality,
-    ) {
-        Ok(observed) => observed,
-        // The on-chain try/catch still paid for the attempted observe.
-        Err(_) => return Ok((0, true)),
+    ) else {
+        return Ok((0, true));
     };
     let tw_avg_tick = match observed {
         (tick_cumulatives, _) if tick_cumulatives.len() >= 2 => {
-            ((tick_cumulatives[1] - tick_cumulatives[0]) / DEFAULT_SECONDS_AGO as i64) as i32
+            let average =
+                (tick_cumulatives[1] - tick_cumulatives[0]) / i64::from(DEFAULT_SECONDS_AGO);
+            i32::try_from(average).map_err(|e| {
+                SimulationError::FatalError(format!("Time-weighted average tick {average}: {e}"))
+            })?
         }
         _ => return Ok((0, true)),
     };
 
     let abs_tick_delta = (current_tick - tw_avg_tick).unsigned_abs();
 
-    let dynamic_fee = (abs_tick_delta as u128 * scaling_factor as u128) / SCALING_PRECISION;
-    Ok((dynamic_fee as u32, true))
+    let dynamic_fee = (u128::from(abs_tick_delta) * u128::from(scaling_factor)) / SCALING_PRECISION;
+    let dynamic_fee = u32::try_from(dynamic_fee).map_err(|e| {
+        SimulationError::FatalError(format!("Dynamic fee component {dynamic_fee}: {e}"))
+    })?;
+    Ok((dynamic_fee, true))
 }
 
 #[cfg(test)]

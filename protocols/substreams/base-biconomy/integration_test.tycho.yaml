@@ -1,0 +1,61 @@
+substreams_yaml_path: ./base-biconomy.yaml
+protocol_system: "biconomy"
+protocol_type_names:
+  - "biconomy_venue"
+module_name: "map_protocol_changes"
+# The venue holds no inventory: its component balances are the providers' inventory, which no
+# account balance of the venue matches.
+skip_balance_check: true
+tests:
+  - name: test_venue_component
+    start_block: 52547671
+    stop_block: 52549230
+    expected_components:
+      - id: "0x0000009e5f98cdb4dd1e1d2e15b220217c88b3b8"
+        tokens:
+          - "0x4200000000000000000000000000000000000006"
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+          - "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+          - "0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42"
+          - "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"
+          - "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22"
+          - "0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452"
+          - "0x3f5bf3edac59d650d8fdf9657a71f2f904a3a4ee"
+          - "0xb2000000000000000000004884b426556b92883d"
+          - "0xb2000000000000000000008bc8786b856e61707c"
+          - "0xb200000000000000000000397293cb8cda9a10c5"
+          - "0xb20000000000000000000078ee7ce2fe4908108c"
+          - "0xb200000000000000000000fd2f87532b90095211"
+          - "0xb2000000000000000000002d0ba3164cc74f58b7"
+          - "0xb200000000000000000000d9192b6b456483c2e8"
+          - "0xb2000000000000000000007b9fcbd005511acbd5"
+          - "0xb200000000000000000000ab99cfa739e253872b"
+          - "0xb2000000000000000000001e800a7f5189430cd0"
+        creation_tx: "0x3f3ca25c68af17bb8ca5ed326895186d17a842276efd356d98f56f234cee6cb9"
+  # From creation through the vault provider's onboarding and the maker list rewrites, to a few
+  # blocks after the vault provider's first fill (52839186), when its boards have depth.
+  - name: test_vault_provider_and_maker_list
+    start_block: 52547671
+    stop_block: 52839191
+    expected_components:
+      - id: "0x0000009e5f98cdb4dd1e1d2e15b220217c88b3b8"
+        tokens:
+          - "0x4200000000000000000000000000000000000006"
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+          - "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+          - "0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42"
+          - "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"
+          - "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22"
+          - "0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452"
+          - "0x3f5bf3edac59d650d8fdf9657a71f2f904a3a4ee"
+          - "0xb2000000000000000000004884b426556b92883d"
+          - "0xb2000000000000000000008bc8786b856e61707c"
+          - "0xb200000000000000000000397293cb8cda9a10c5"
+          - "0xb20000000000000000000078ee7ce2fe4908108c"
+          - "0xb200000000000000000000fd2f87532b90095211"
+          - "0xb2000000000000000000002d0ba3164cc74f58b7"
+          - "0xb200000000000000000000d9192b6b456483c2e8"
+          - "0xb2000000000000000000007b9fcbd005511acbd5"
+          - "0xb200000000000000000000ab99cfa739e253872b"
+          - "0xb2000000000000000000001e800a7f5189430cd0"
+        creation_tx: "0x3f3ca25c68af17bb8ca5ed326895186d17a842276efd356d98f56f234cee6cb9"

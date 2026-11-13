@@ -17,11 +17,11 @@
 //! Deletions folded into the cache are always below the window floor by then, so a below-window
 //! read never misses them.
 
-pub(crate) mod cache;
-pub(crate) mod service;
-pub(crate) mod shadow;
-pub(crate) use cache::view;
-pub(crate) mod window;
+pub mod cache;
+pub mod service;
+pub mod shadow;
+pub use cache::view;
+pub mod window;
 
 /// Which path answers `/contract_state` and `/protocol_state`. Set per deployment with
 /// `ENTITY_CACHE_MODE`.

@@ -80,7 +80,10 @@ pub struct TokenSlots {
     pub allowance_slot: B256,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is an independent input of one swap encoding"
+)]
 pub fn encode_swap(
     component: &ProtocolComponent,
     state: Option<Arc<dyn ProtocolSim>>,
@@ -97,8 +100,8 @@ pub fn encode_swap(
         state,
         sell_token.clone(),
         buy_token.clone(),
-        amount_in.clone(),
-        gas_usage.clone(),
+        amount_in,
+        gas_usage,
         expected_amount_out,
     )?;
     let swap_encoder_registry = SwapEncoderRegistry::new(chain)
@@ -121,7 +124,7 @@ pub fn encode_swap(
             .ok_or_else(|| miette!("Missing solution"))?
     };
     let transaction =
-        encoded_transaction(encoded_solution.clone(), &solution, chain.native_token().address)?;
+        encoded_transaction(&encoded_solution, &solution, &chain.native_token().address);
     Ok((solution, transaction))
 }
 
@@ -164,10 +167,10 @@ pub fn create_solution(
 }
 
 fn encoded_transaction(
-    encoded_solution: EncodedSolution,
+    encoded_solution: &EncodedSolution,
     solution: &Solution,
-    native_address: Bytes,
-) -> miette::Result<Transaction> {
+    native_address: &Bytes,
+) -> Transaction {
     let amount_in = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.expected_amount_out());
     let min_amount_out = biguint_to_u256(solution.min_amount_out());
@@ -198,19 +201,19 @@ fn encoded_transaction(
         .abi_encode();
 
     let contract_interaction = encode_input(encoded_solution.function_signature(), method_calldata);
-    let value = if *solution.token_in() == native_address {
+    let value = if solution.token_in() == native_address {
         solution.amount_in().clone()
     } else {
         BigUint::ZERO
     };
-    Ok(Transaction::new(
+    Transaction::new(
         encoded_solution
             .interacting_with()
             .clone(),
         value,
         contract_interaction,
         encoded_solution.estimated_gas().clone(),
-    ))
+    )
 }
 
 /// Encodes the input data for a function call to the given function selector.
@@ -403,7 +406,8 @@ pub(crate) fn swap_request(
     block: &Block,
 ) -> miette::Result<TransactionRequest> {
     let (max_fee_per_gas, max_priority_fee_per_gas) = calculate_gas_fees(block)?;
-    let user_address = Address::from_str(USER_ADDR).expect("Valid user address");
+    let user_address = Address::from_str(USER_ADDR)
+        .map_err(|e| miette!("Invalid user address {USER_ADDR}: {e}"))?;
     Ok(TransactionRequest::default()
         .to(Address::from_slice(&transaction.to()[..20]))
         .input(transaction.data().clone().into())
@@ -527,8 +531,9 @@ pub async fn setup_fermiswap_overwrites(
 ) -> miette::Result<AddressHashMap<AccountOverride>> {
     let registry_address = Address::from_str(FERMISWAP_REGISTRY_ADDRESS).into_diagnostic()?;
     let target_address = Address::from_str(FERMISWAP_TARGET_ADDRESS).into_diagnostic()?;
-    let timestamp = u32::try_from(block.header.timestamp)
-        .map_err(|_| miette!("Block timestamp {} exceeds uint32", block.header.timestamp))?;
+    let timestamp = u32::try_from(block.header.timestamp).map_err(|_out_of_range| {
+        miette!("Block timestamp {} exceeds uint32", block.header.timestamp)
+    })?;
 
     let mut state_diff = Vec::new();
     for &(base_asset, quote_asset) in pairs {
@@ -600,8 +605,9 @@ pub async fn setup_bopamm_overwrites(
 ) -> miette::Result<AddressHashMap<AccountOverride>> {
     let registry_address = Address::from_str(BOPAMM_REGISTRY_ADDRESS).into_diagnostic()?;
     let module_address = Address::from_str(BOPAMM_MODULE_ADDRESS).into_diagnostic()?;
-    let timestamp = u32::try_from(block.header.timestamp)
-        .map_err(|_| miette!("Block timestamp {} exceeds uint32", block.header.timestamp))?;
+    let timestamp = u32::try_from(block.header.timestamp).map_err(|_out_of_range| {
+        miette!("Block timestamp {} exceeds uint32", block.header.timestamp)
+    })?;
 
     let mut state_diff = Vec::new();
     for asset_id in asset_ids {

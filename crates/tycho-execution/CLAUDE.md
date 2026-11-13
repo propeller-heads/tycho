@@ -53,7 +53,8 @@ Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
 getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRouter],
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
 calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client → bool],
-getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]). Also
+getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)], getEffectiveRouterFees [takes
+client, tokenIn, tokenOut → (routerFeeOnOutputBps, routerFeeOnClientFeeBps)]). Also
 `IPropAMM` (the pAMM standard), `IUniversalRouter` and `ISubsidyPayer` (`pay`, the `Subsidy` struct, `SkipReason`).
 
 ### Vault (`Vault.sol`)
@@ -109,11 +110,18 @@ later. It is explicit rather than defaulted to `msg.sender` because deployment g
 
 **Per-client overrides**: Both router fees can be overridden per client address via `_customRouterFees`
 mapping (`CustomFees` struct, single storage slot). If set, the custom rate replaces the default for that client. Can be
-removed to revert to defaults.
+removed to revert to defaults. `getEffectiveRouterFees(client, tokenIn, tokenOut)` returns the pair of rates `calculateFee`
+applies to a client and token pair, pair fee included, so integrators can model the user's net output without reading every override.
+
+**Token pair fees** (`_tokenPairFees`, set via `setTokenPairFee`, removed via `removeTokenPairFee`, read via
+`getTokenPairFee`): a router fee on output for swaps between two tokens, in both directions. A set pair fee replaces
+the default router fee on output, so it can raise or lower it, and zero removes it for the pair. For a client with a
+custom fee on output, the lower of the custom fee and the pair fee applies. The router does not pass the swap tokens
+to `mustOutputThroughRouter`, so it returns true while any pair fee is set (`_tokenPairFeeCount > 0`).
 
 **Client resolution** (`_resolveClient`): When `client == address(0)` (no EIP-712 signature supplied),
-`calculateFee` and `mustOutputThroughRouter` fall back to `tx.origin` for the custom fee lookup. This lets
-unsigned calls still benefit from a custom rate when the originating EOA is a registered client.
+`calculateFee`, `mustOutputThroughRouter` and `getEffectiveRouterFees` fall back to `tx.origin` for the custom fee
+lookup. This lets unsigned calls still benefit from a custom rate when the originating EOA is a registered client.
 
 **Fee scale**: Fees use 8-decimal-BPS units (1 unit = 0.0001 BPS; 100% = 100 000 000). Two public constants are
 queryable via RPC:
@@ -121,14 +129,23 @@ queryable via RPC:
 - `MAX_BPS_SQUARED = 10_000_000_000_000_000` — `MAX_BPS²`; the combined denominator when both fees use the
   sub-BPS scale
 
-**Positive slippage** (`_positiveSlippageEnabled`, enabled from the constructor — which emits
-`PositiveSlippageToggled(true)` — and toggled afterwards via `setPositiveSlippageEnabled`): when enabled, the router
-takes the entire surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees compute on
-`expectedAmountOut`. When disabled, fees compute on `actualAmountOut` and the surplus stays in the swap output. The flag
-also forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
-exemptions (`setPositiveSlippageExempt`, `_positiveSlippageExempt` mapping) opt a resolved client out while capture
-stays enabled globally: the surplus stays in the swap output, fees compute on `actualAmountOut`, and an exempt client
-with no fees skips the forced router hop.
+**Positive slippage** (`_routerPositiveSlippageBps`, 100% from the constructor — which emits
+`RouterPositiveSlippageBpsUpdated(0, MAX_BPS)` — and changed afterwards via `setRouterPositiveSlippageBps`): the
+router captures that part of the surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees
+compute on the output minus the captured amount. The rest of the surplus stays in the swap output. A router positive slippage bps above
+zero forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
+router positive slippage bps (`setCustomRouterPositiveSlippageBps`, `removeCustomRouterPositiveSlippageBps`,
+`_customRouterPositiveSlippageBps` mapping) replace the global router positive slippage bps for a resolved client. There is no switch
+that stops capture for every client: a global router positive slippage bps of zero leaves each custom router positive slippage bps in effect. A capture
+bps of zero leaves the surplus in the swap output, fees compute on `actualAmountOut`, and a client with no fees skips
+the forced router hop.
+Per-client shares (`setClientPositiveSlippageShare`, `_clientPositiveSlippageShareBps` mapping, fee units) give the
+resolved client part of the captured surplus, credited with its client fee; the router keeps the rest, rounded in its
+favour. The default share of zero leaves the full surplus to the router.
+Per-client caps (`setPositiveSlippageCap`, `_positiveSlippageCaps` mapping of `{isSet, capBps}`, fee units of
+`actualAmountOut`) limit the captured surplus of the resolved client's swaps, after the router positive slippage bps,
+to `actualAmountOut * capBps / MAX_BPS`. The surplus above the cap stays in the swap output and fees compute on it. A client without a cap is uncapped, and
+`getPositiveSlippageCap` reports `MAX_BPS` for it; setting `MAX_BPS` uncaps a client again.
 
 **Deduction order**: client fee calculated first, then router's cut of client fee subtracted from it, then router fee on
 output. `amountOut = amountIn - clientPortion - totalRouterFee`.
@@ -145,11 +162,12 @@ simple: they just call the protocol. All balance tracking, output verification, 
 Dispatcher/TransferManager.
 
 Supported: UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3,
-Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Bebop (RFQ),
-Hashflow (RFQ), Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other
-native wrappers), PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface;
-the pAMM address travels in the swap data), Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
-fallback"), and TychoSubsidizing (runs one hop through an inner executor and pays a signed subsidy -- see "Subsidies").
+Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, BaiBai, RingSwapV2, Sky,
+Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH
+and other native wrappers), PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM`
+interface; the pAMM address travels in the swap data), Fallback (runs one leg through `TychoFallbackRouter` -- see
+"Protocol fallback"), and TychoSubsidizing (runs one hop through an inner executor and pays a signed subsidy -- see
+"Subsidies").
 
 ### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/*FallbackRouter.sol`, `executors/*FallbackExecutor.sol`)
 
@@ -362,8 +380,9 @@ pool and the hop. Data shorter than 207 bytes reverts `TychoSubsidizingExecutor_
   would not count as output.
 
 Encoding (`src/encoding/evm/subsidy.rs`): `Solution::with_subsidy(SubsidyTerms)` makes the strategy encoders wrap one
-swap group in the subsidizing executor. `SubsidyTerms` documents which swap group can carry the subsidy, and
-`EncodedSolution::write_subsidy_signature` documents the signing order.
+swap group in the subsidizing executor. Any group but a wrap/unwrap can carry the subsidy; on a group that does not
+pay `token_out` the later swaps convert it. Encoding does not check that `min_amount_out` excludes the subsidy; the
+caller keeps it there. `EncodedSolution::write_subsidy_signature` documents the signing order.
 
 - The encoder does not sign. It writes a 65-byte zero signature, which the payer skips as `InvalidSignature`.
 - The executor address is the `subsidy` entry of `config/executor_addresses.json`; the payer is `payer_address` under
@@ -385,7 +404,7 @@ is the exception: `TychoFallbackRouter` transfers to the protocol itself, outsid
 
 | Category                   | Executors                                                                                                                                       | `outputToRouter` | Behavior                                                                                         |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|------------------|--------------------------------------------------------------------------------------------------|
-| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Metric, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
+| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, BaiBai, RingSwapV2, Sky, Metric, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
 | **Output-lands-at-router** | Curve, NativeWrap, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice                                                                              | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
 
 **Two input categories**:
@@ -672,7 +691,8 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 ### CI
 
 - **`.github/workflows/ci-foundry.yaml`**: per-project `forge fmt --check` + `forge test` + gas
-  snapshot (`forge test` includes the runtime bytecode fixture check), and a Slither static-analysis job
+  snapshot (`forge test` includes the runtime bytecode fixture check), `forge lint` for these
+  contracts, and a Slither static-analysis job
 - **`.github/workflows/ci-router-trades.yaml`**: the `substreams/` router-trades workspace
 
 ## Adding a New Executor
@@ -681,10 +701,12 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 2. `swap()` returns void -- just call the protocol. No balance tracking, no output transfers, no amount validation
    needed (the Dispatcher handles all of this via balance-diff). **Never use pool return values or callback arguments to
    determine transfer amounts** -- protocols can return arbitrary data. The Dispatcher's pre/post balance diff is the
-   only trusted source of truth.
-3. Hardcode the correct `TransferType`, `tokenOut`, and `outputToRouter` in `getTransferData()` -- do NOT make them
-   encodable. Set `outputToRouter = true` if the protocol sends output to `msg.sender` rather than accepting a receiver
-   param
+   only trusted source of truth. Nor does it compare `msg.value` with an amount, or revert on venue pricing
+   parameters that the simulation models: the simulation decides whether a quote is worth sending.
+3. Hardcode the correct `TransferType` and `outputToRouter` in `getTransferData()` -- do NOT make them encodable.
+   Set `outputToRouter = true` if the protocol sends output to `msg.sender` rather than accepting a receiver param.
+   Token and receiver addresses may come from the swap data; validate them on chain wherever the executor approves,
+   transfers to or calls them
 4. Return the correct `fundsExpectedAddress()` (pool address for direct-transfer protocols, `address(this)` for
    pull-based)
 5. Add Rust encoder in `src/encoding/evm/swap_encoder/` and register in `swap_encoder_registry.rs`
@@ -727,24 +749,21 @@ Executors run via `delegatecall` inside TychoRouterV3 — they have full access 
 - **Never write to state variables.** Any storage write in an executor writes to TychoRouterV3's storage.
 - **Do not execute `delegatecall`.** If unavoidable, ensure the caller cannot control the target address.
 - **Verify callback origin.** Call `verifyCallback` inside `handleCallback` to confirm `msg.sender` is a valid pool.
+- **Check the requested token.** A callback that pays from stored context checks the token the venue asks for against
+  that context and reverts with an error naming the mismatch.
 - **Allowlist selectors when the caller controls calldata.** If `swap()` forwards caller-supplied calldata to an external contract (e.g. RFQ settlement), validate the first 4 bytes against an explicit allowlist of safe function selectors before making the call. An unrestricted selector lets an attacker invoke arbitrary functions on that contract — including ones that could drain TychoRouterV3's balance at the settlement contract. See `LiquoriceExecutor` for the pattern.
 - `handleCallback`'s `data` argument is raw ABI-encoded calldata the executor must decode manually.
 - `handleCallback`'s return value must be raw ABI-encoded data the executor encodes manually.
 
 ## Conventions
 
-### Solidity
-
-- Prefix private/internal state with underscore: `_feeCalculator`, `_ALLOWED_DUST`
-- Transient storage slots use keccak256 of descriptive names
-- Custom errors with contract-prefixed names: `TychoRouter__EmptySwaps`, `Vault__AmountZero`
-- Format with `forge fmt` (80 char line length)
-- Slither `// slither-disable-next-line` annotations where false positives occur
+Coding rules for Solidity and Rust (naming, errors, tests) are in `.claude/knowledge/solidity.md`,
+`.claude/knowledge/rust.md` and `.claude/knowledge/execution.md`; `forge fmt` (80-character lines) and
+`forge lint` check formatting.
 
 ### Testing
 
-- Foundry tests use `TychoRouterTestSetup.sol` as the shared base
-- Test naming: `test_<description>` in Rust, `test<Description>` in Solidity
+- Router tests inherit `TychoRouterTestSetup.sol`; tests that don't use the router have their own test contract
 - **Cross-language integration tests**: Rust encoding tests
   call `write_calldata_to_file(test_identifier, hex_calldata)` (`src/encoding/evm/utils.rs`), which appends `name:hex`
   lines to `contracts/test/assets/calldata.txt`. Solidity tests then read that file

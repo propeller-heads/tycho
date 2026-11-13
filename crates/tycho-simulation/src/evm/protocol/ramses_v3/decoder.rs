@@ -35,11 +35,11 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for RamsesV3State {
         let state_attrs = snapshot.state.attributes;
 
         // The fee is governance-mutable, so it lives in the (dynamic) state attributes.
-        let fee = u32::from(attribute(&state_attrs, "fee")?.clone());
-        let liquidity = u128::from(attribute(&state_attrs, "liquidity")?.clone());
+        let fee = u32::try_from(attribute(&state_attrs, "fee")?.clone())?;
+        let liquidity = u128::try_from(attribute(&state_attrs, "liquidity")?.clone())?;
         let sqrt_price = U256::from_be_slice(attribute(&state_attrs, "sqrt_price_x96")?);
-        let tick_spacing = u16::from(attribute(&static_attrs, "tick_spacing")?.clone());
-        let tick = i32::from(attribute(&state_attrs, "tick")?.clone());
+        let tick_spacing = u16::try_from(attribute(&static_attrs, "tick_spacing")?.clone())?;
+        let tick = i32::try_from(attribute(&state_attrs, "tick")?.clone())?;
 
         // An empty tick list is valid: a pool that is not yet initialized (or has no liquidity)
         // simply decodes to a zero-liquidity state that gracefully returns "No liquidity" on quote.
@@ -54,7 +54,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for RamsesV3State {
                     Err(err) => return Some(Err(InvalidSnapshotError::ValueError(err.to_string()))),
                 };
 
-                let net_liquidity = i128::from(value.clone());
+                let net_liquidity = match i128::try_from(value.clone()) {
+                    Ok(net_liquidity) => net_liquidity,
+                    Err(err) => return Some(Err(err.into())),
+                };
                 if net_liquidity.is_zero() {
                     return None;
                 }

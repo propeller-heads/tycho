@@ -19,6 +19,7 @@ use tycho_simulation::{
             ekubo::state::EkuboState,
             ekubo_v3::state::EkuboV3State,
             filters::{balancer_v2_pool_filter, curve_filter, ekubo_v3_extension_filter},
+            pancakeswap_infinity_bin::state::PancakeswapInfinityBinState,
             pancakeswap_v2::state::PancakeswapV2State,
             ramses_v3::state::RamsesV3State,
             sky::state::SkyState,
@@ -42,7 +43,7 @@ struct Cli {
     tvl_threshold: Option<f64>,
     /// The target blockchain
     #[clap(long, default_value = "ethereum")]
-    pub chain: String,
+    chain: String,
     /// Connect to Tycho over plain HTTP/WS instead of TLS. Enable this when targeting a local
     /// dev instance (e.g. http://127.0.0.1:4242).
     #[arg(long, env = "TYCHO_NO_TLS", default_value_t = false)]
@@ -76,7 +77,7 @@ fn register_exchanges(
                 )
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
                 .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None)
-                .exchange::<SkyState>("sky", tvl_filter.clone(), None);
+                .exchange::<SkyState>("sky", tvl_filter, None);
         }
         Chain::Base => {
             builder = builder
@@ -91,6 +92,11 @@ fn register_exchanges(
                     None,
                 )
                 .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)
+                .exchange::<PancakeswapInfinityBinState>(
+                    "pancakeswap_infinity_bin",
+                    tvl_filter,
+                    None,
+                )
         }
         Chain::Bsc => {
             builder = builder
@@ -100,12 +106,17 @@ fn register_exchanges(
                 .exchange::<PancakeswapV2State>("pancakeswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)
+                .exchange::<PancakeswapInfinityBinState>(
+                    "pancakeswap_infinity_bin",
+                    tvl_filter,
+                    None,
+                )
         }
         Chain::Unichain => {
             builder = builder
                 .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
-                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter, None)
         }
         Chain::Polygon => {
             builder = builder
@@ -113,7 +124,7 @@ fn register_exchanges(
                 .exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
-                .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+                .exchange::<RamsesV3State>("ramses_v3", tvl_filter, None)
         }
         Chain::Robinhood => {
             builder = builder
@@ -125,8 +136,14 @@ fn register_exchanges(
                 .exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None)
                 .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None)
-                .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter, None)
         }
+        Chain::Starknet |
+        Chain::ZkSync |
+        Chain::Arbitrum |
+        Chain::Plasma |
+        Chain::Arc |
+        Chain::Custom(_) |
         _ => {}
     }
     builder
@@ -232,6 +249,10 @@ async fn main() {
             .await
     });
     let tasks = [tycho_message_processor, terminal_app];
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "the first finished task ends the example; its join result is not reported"
+    )]
     let _ = select_all(tasks).await;
     ratatui::restore();
 }

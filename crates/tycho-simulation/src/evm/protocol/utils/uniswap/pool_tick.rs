@@ -12,7 +12,7 @@ use super::tick_math::{check_sqrt_price_in_range, get_tick_at_sqrt_ratio};
 /// price. That tick is computed on the first read, because most post-swap states are dropped
 /// without a read. Equality, `Debug` and serde use only the tick's `i32` value.
 #[derive(Clone)]
-pub(crate) struct PoolTick(TickSource);
+pub struct PoolTick(TickSource);
 
 /// Where a [`PoolTick`] gets its value. Only [`PoolTick::at_sqrt_price`] makes `AtSqrtPrice`,
 /// and it checks the sqrt price range first.

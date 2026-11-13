@@ -21,14 +21,14 @@ use crate::{Address, Error, params::ParamValue};
 /// Only the delta matters.
 #[derive(Clone, Debug)]
 pub struct State {
-    pub owner_to_eth_balance: rustc_hash::FxHashMap<Address, i64>,
+    owner_to_eth_balance: rustc_hash::FxHashMap<Address, i64>,
     /// first element of key tuple is owner.
     /// second element of key tuple is token.
-    pub owner_and_token_to_balance: rustc_hash::FxHashMap<(Address, Address), i64>,
+    owner_and_token_to_balance: rustc_hash::FxHashMap<(Address, Address), i64>,
     /// first element of key tuple is token.
     /// second element of key tuple is owner who approves spender to spend their assets.
     /// third element of key tuple is spender who is approved to spend owner's assets.
-    pub token_and_owner_and_spender_to_allowance:
+    token_and_owner_and_spender_to_allowance:
         rustc_hash::FxHashMap<(Address, Address, Address), i64>,
 
     /// transient storage
@@ -54,6 +54,31 @@ impl Default for State {
 }
 
 impl State {
+    /// ETH balance per owner.
+    pub fn eth_balances(&self) -> &rustc_hash::FxHashMap<Address, i64> {
+        &self.owner_to_eth_balance
+    }
+
+    /// ERC20 balance per (owner, token).
+    pub fn token_balances(&self) -> &rustc_hash::FxHashMap<(Address, Address), i64> {
+        &self.owner_and_token_to_balance
+    }
+
+    /// ERC20 allowance per (token, owner, spender).
+    pub fn allowances(&self) -> &rustc_hash::FxHashMap<(Address, Address, Address), i64> {
+        &self.token_and_owner_and_spender_to_allowance
+    }
+
+    /// Removes the zero entries from the balance and allowance maps.
+    pub fn drop_zero_entries(&mut self) {
+        self.owner_to_eth_balance
+            .retain(|_, v| *v != 0);
+        self.owner_and_token_to_balance
+            .retain(|_, v| *v != 0);
+        self.token_and_owner_and_spender_to_allowance
+            .retain(|_, v| *v != 0);
+    }
+
     /// Simulate `assembly { tstore(key, value) }`
     pub fn tstore<K: Into<Cow<'static, str>>, V: Into<ParamValue>>(&mut self, key: K, value: V) {
         self.transient
@@ -101,6 +126,10 @@ impl State {
     }
 
     /// Simulate `IERC20(token).balanceOf(owner)`
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn erc20_balance_of(&mut self, token: Address, owner: Address) -> Result<i64, Error> {
         if token.is_never_erc20() {
             return Err(Error::revert("erc20_balance_of: token is never erc20"));
@@ -251,6 +280,10 @@ impl State {
     }
 
     /// Simulate `owner.balance`
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn eth_balance(&mut self, owner: Address) -> i64 {
         self.owner_to_eth_balance
             .get(&owner)

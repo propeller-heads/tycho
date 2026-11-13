@@ -59,7 +59,7 @@ use tycho_common::{
     Bytes,
 };
 
-pub(crate) mod view;
+pub mod view;
 
 use super::window::FoldSink;
 
@@ -79,7 +79,7 @@ enum WriteOutcome {
 
 /// A cached value together with the timestamp of the write that set it.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Timestamped<T> {
+pub struct Timestamped<T> {
     value: T,
     written_at: WriteTimestamp,
 }
@@ -136,7 +136,7 @@ fn write_timestamped<K: Eq + Hash, V: PartialEq>(
 
 /// Contract code with its hash, so a code write replaces both or neither.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CachedCode {
+pub struct CachedCode {
     pub(crate) code: Code,
     pub(crate) hash: CodeHash,
 }
@@ -153,7 +153,7 @@ impl CachedCode {
 /// (which run at different points of the chain) can never regress a value: only a strictly newer
 /// block replaces one. The getters return each value with its timestamp.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CachedAccount {
+pub struct CachedAccount {
     chain: Chain,
     address: Address,
     title: String,
@@ -173,7 +173,7 @@ pub(crate) struct CachedAccount {
 impl CachedAccount {
     /// Builds an entry from the startup snapshot. Every slot and token balance of `account` must
     /// have a timestamp in `timestamps`; a missing one is a snapshot bug and panics.
-    pub(crate) fn from_snapshot(account: Account, timestamps: AccountWriteTimestamps) -> Self {
+    pub(crate) fn from_snapshot(account: Account, timestamps: &AccountWriteTimestamps) -> Self {
         let updated_at = timestamps
             .slots
             .values()
@@ -237,7 +237,7 @@ impl CachedAccount {
     ) -> Self {
         let account = delta.clone().into_account_without_tx();
         let timestamps = AccountWriteTimestamps::uniform(&account, at);
-        let mut entry = Self::from_snapshot(account, timestamps);
+        let mut entry = Self::from_snapshot(account, &timestamps);
         entry.apply_block(None, balances, at);
         entry
     }
@@ -396,7 +396,7 @@ impl From<CachedAccount> for Account {
 
 /// Cached state of one protocol component.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CachedComponentState {
+pub struct CachedComponentState {
     component_id: ComponentId,
     attributes: HashMap<AttrStoreKey, StoreVal>,
     balances: HashMap<Address, Balance>,
@@ -503,7 +503,7 @@ pub struct EntityCache {
 }
 
 /// The maps behind the lock.
-pub(crate) struct CacheState {
+pub struct CacheState {
     accounts: HashMap<Address, Arc<CachedAccount>>,
     /// Component states by protocol system, then component id. The system is the extractor name:
     /// the RPC resolves one window per protocol system by extractor name, so both are one string.
@@ -566,7 +566,7 @@ impl EntityCache {
         for AccountSnapshot { account, written_at } in accounts {
             account_entries.insert(
                 account.address.clone(),
-                Arc::new(CachedAccount::from_snapshot(account, written_at)),
+                Arc::new(CachedAccount::from_snapshot(account, &written_at)),
             );
         }
         let mut component_entries: HashMap<
@@ -993,7 +993,7 @@ mod test {
 
         let cached = CachedAccount::from_snapshot(
             loaded.clone(),
-            AccountWriteTimestamps::uniform(&loaded, at(1)),
+            &AccountWriteTimestamps::uniform(&loaded, at(1)),
         );
 
         assert_eq!(Account::from(cached.clone()), loaded);
@@ -1016,7 +1016,7 @@ mod test {
         let address = addr(1);
         let mut cached = CachedAccount::from_snapshot(
             account(&address),
-            AccountWriteTimestamps::uniform(&account(&address), at(5)),
+            &AccountWriteTimestamps::uniform(&account(&address), at(5)),
         );
 
         cached.apply_block(
@@ -1039,7 +1039,7 @@ mod test {
         let address = addr(1);
         let mut cached = CachedAccount::from_snapshot(
             account(&address),
-            AccountWriteTimestamps::uniform(&account(&address), at(5)),
+            &AccountWriteTimestamps::uniform(&account(&address), at(5)),
         );
 
         cached.apply_block(
@@ -1118,7 +1118,7 @@ mod test {
         let mut timestamps = AccountWriteTimestamps::uniform(&account(&address), at(5));
         make_newest(&mut timestamps);
 
-        let cached = CachedAccount::from_snapshot(account(&address), timestamps);
+        let cached = CachedAccount::from_snapshot(account(&address), &timestamps);
 
         assert_eq!(cached.updated_at(), at(9));
     }
@@ -1128,7 +1128,7 @@ mod test {
         let address = addr(1);
         let mut cached = CachedAccount::from_snapshot(
             account(&address),
-            AccountWriteTimestamps::uniform(&account(&address), at(5)),
+            &AccountWriteTimestamps::uniform(&account(&address), at(5)),
         );
 
         cached.apply_block(

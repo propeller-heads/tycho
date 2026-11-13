@@ -6,19 +6,20 @@
 #
 # Build from the repository root:
 #   docker build -f crates/tycho-execution/substreams/Dockerfile -t tycho-router-trades .
-ARG SINK_SQL_VERSION=v4.13.1
+# Tools pinned in mise.toml, installed from mise.lock: mise refuses any version not locked there.
+FROM jdxcode/mise:2026.10.25-debian@sha256:00a8a9d05a300e5a15a89d6d3a87ea88ec4e78c4702b78d49aa1d3250af61427 AS tools
+WORKDIR /tools
+COPY mise.toml mise.lock ./
+ENV MISE_TRUSTED_CONFIG_PATHS=/tools
+RUN mise install github:streamingfast/substreams-sink-sql \
+    && mkdir /out \
+    && cp "$(mise which substreams-sink-sql)" /out/
 
 FROM debian:bookworm-slim
-ARG SINK_SQL_VERSION
-# Kaniko does not set TARGETARCH, so it needs a default.
-ARG TARGETARCH=amd64
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl postgresql-client awscli \
-    && apt-get clean \
-    && case "$TARGETARCH" in amd64) ARCH=x86_64 ;; arm64) ARCH=arm64 ;; *) echo "unsupported arch $TARGETARCH" && exit 1 ;; esac \
-    && curl -fsSL --retry 5 --retry-all-errors -o /tmp/sink.tgz \
-       "https://github.com/streamingfast/substreams-sink-sql/releases/download/${SINK_SQL_VERSION}/substreams-sink-sql_linux_${ARCH}.tar.gz" \
-    && tar -xzf /tmp/sink.tgz -C /usr/local/bin substreams-sink-sql && rm /tmp/sink.tgz
+    && apt-get clean
+COPY --from=tools /out/substreams-sink-sql /usr/local/bin/
 WORKDIR /opt/router-trades
 COPY crates/tycho-execution/substreams/schema.sql crates/tycho-execution/substreams/executors.sql crates/tycho-execution/substreams/views.sql ./
 COPY crates/tycho-execution/substreams/pricing ./pricing

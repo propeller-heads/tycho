@@ -98,7 +98,7 @@ pub(super) fn error_entry(pool: &str, status: u16, error: &str) -> serde_json::V
     serde_json::json!({ "poolAddress": pool, "error": { "status": status, "error": error } })
 }
 
-pub(super) fn batch_body(entries: Vec<serde_json::Value>) -> String {
+pub(super) fn batch_body(entries: &[serde_json::Value]) -> String {
     serde_json::json!({ "results": entries }).to_string()
 }
 
@@ -137,11 +137,11 @@ pub(super) async fn pool_server() -> MockHttpServer {
         {
             return Some(("200 OK", page.clone()));
         }
-        let entries = requested_pools(request)
+        let entries: Vec<_> = requested_pools(request)
             .into_iter()
             .map(|pool| quote_entry(&pool, &bid_ask_json(SERVER_TS, pool == UNQUOTABLE)))
             .collect();
-        Some(("200 OK", batch_body(entries)))
+        Some(("200 OK", batch_body(&entries)))
     })
     .await
 }

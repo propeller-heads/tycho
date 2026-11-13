@@ -31,7 +31,7 @@ use super::{
 /// A cached account with the window changes up to the requested version laid over it. Each overlay
 /// field holds only the values that win over the base.
 #[derive(Debug)]
-pub(crate) struct AccountView {
+pub struct AccountView {
     base: Arc<CachedAccount>,
     /// Slots the window changes override or add.
     slots: HashMap<StoreKey, Timestamped<StoreVal>>,
@@ -256,7 +256,7 @@ impl From<AccountView> for dto::ResponseAccount {
 /// A `/contract_state` answer made of account views. Serializes like
 /// [`dto::StateRequestResponse`].
 #[derive(Debug, Serialize)]
-pub(crate) struct ContractStateView {
+pub struct ContractStateView {
     pub(crate) accounts: Vec<AccountView>,
     pub(crate) pagination: PaginationResponse,
 }
@@ -275,7 +275,7 @@ impl From<ContractStateView> for dto::StateRequestResponse {
 
 /// A cached component state with the window changes newer than the entry laid over it.
 #[derive(Debug)]
-pub(crate) struct ComponentView {
+pub struct ComponentView {
     component_id: ComponentId,
     /// `None` for an id the cache does not hold: the view then starts from an empty state.
     base: Option<Arc<CachedComponentState>>,
@@ -413,7 +413,7 @@ impl From<ComponentView> for dto::ResponseProtocolState {
 /// A `/protocol_state` answer made of component views. Serializes like
 /// [`dto::ProtocolStateRequestResponse`].
 #[derive(Debug, Serialize)]
-pub(crate) struct ProtocolStateView {
+pub struct ProtocolStateView {
     pub(crate) states: Vec<ComponentView>,
     pub(crate) pagination: PaginationResponse,
 }
@@ -543,7 +543,7 @@ mod test {
             code: at(1),
             token_balances: HashMap::from([(addr(9), at(1))]),
         };
-        Arc::new(CachedAccount::from_snapshot(account, timestamps))
+        Arc::new(CachedAccount::from_snapshot(account, &timestamps))
     }
 
     /// The view must write the JSON of the owned answer: copy the entry, apply every block with
@@ -751,7 +751,10 @@ mod test {
 
     /// Stops compiling when a DTO gains a field: the view `Serialize` impls must then write it.
     #[test]
-    #[allow(deprecated)]
+    #[expect(
+        deprecated,
+        reason = "destructures every field of the DTOs, including deprecated ones"
+    )]
     fn views_write_every_dto_field() {
         let _ = |dto::ResponseAccount {
                      chain: _,

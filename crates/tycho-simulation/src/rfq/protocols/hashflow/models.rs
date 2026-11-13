@@ -197,8 +197,8 @@ pub struct HashflowRFQOptions {
 pub struct HashflowQuoteResponse {
     pub status: String,
     pub error: Option<HashflowError>,
-    rfq_id: String,
-    internal_rfq_ids: Option<Vec<String>>,
+    pub rfq_id: String,
+    pub internal_rfq_ids: Option<Vec<String>>,
     pub quotes: Option<Vec<HashflowQuote>>,
 }
 

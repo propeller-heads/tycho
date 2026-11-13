@@ -9,7 +9,7 @@ use crate::evm::protocol::{
 
 /// What one swap step does, from [`compute_swap_step`].
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct SwapStepResult {
+pub struct SwapStepResult {
     /// The sqrt price after the step.
     pub(crate) sqrt_price: U256,
     /// The input the step spends, fee included. An exact-input step that stops short of its
@@ -18,7 +18,7 @@ pub(crate) struct SwapStepResult {
     pub(crate) amount_out: U256,
 }
 
-pub(crate) fn compute_swap_step(
+pub fn compute_swap_step(
     sqrt_ratio_current: U256,
     sqrt_ratio_target: U256,
     liquidity: u128,

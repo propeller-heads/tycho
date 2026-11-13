@@ -43,13 +43,19 @@ pub struct HookCreationParams<'a> {
     hook_address: Address,
     account_balances: &'a HashMap<Bytes, HashMap<Bytes, Bytes>>,
     all_tokens: &'a HashMap<Bytes, Token>,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "no hook handler reads it; removing it changes the public HookCreationParams::new, a breaking change"
+    )]
     state: UniswapV4State,
     /// Attributes of the component. If an attribute's value is a `bigint`,
     /// it will be encoded as a big endian signed hex string. See ResponseProtocolState for more
     /// details.
     pub(crate) attributes: &'a HashMap<String, Bytes>,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "no hook handler reads it; removing it changes the public HookCreationParams::new, a breaking change"
+    )]
     /// Mapping from token address to big-endian encoded balance for this component.
     balances: &'a HashMap<Bytes, Bytes>,
     /// Show vm traces in simulations or not
@@ -60,7 +66,6 @@ pub struct HookCreationParams<'a> {
 }
 
 impl<'a> HookCreationParams<'a> {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         hook_address: Address,
         account_balances: &'a HashMap<Bytes, HashMap<Bytes, Bytes>>,
@@ -200,8 +205,8 @@ static DEFAULT_HANDLER: LazyLock<Box<dyn HookHandlerCreator>> =
 /// Calling it more than once is harmless: each registration replaces the previous one for the
 /// same chain and hook.
 pub fn initialize_hook_handlers() -> Result<(), SimulationError> {
-    let angstrom_hook_address = Address::from_str(ANGSTROM_HOOK_ADDRESS).map_err(|_| {
-        SimulationError::FatalError("Failed to parse Angstrom hook address".to_string())
+    let angstrom_hook_address = Address::from_str(ANGSTROM_HOOK_ADDRESS).map_err(|e| {
+        SimulationError::FatalError(format!("Failed to parse Angstrom hook address: {e}"))
     })?;
     // Angstrom's attributes are only produced by the Ethereum manifest, so the same address on
     // another chain is not an Angstrom pool.

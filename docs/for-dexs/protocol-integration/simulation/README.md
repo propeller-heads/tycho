@@ -23,26 +23,18 @@ The following exchanges are integrated with the VM approach:
 
 ### Install prerequisites <a href="#install-prerequisites" id="install-prerequisites"></a>
 
-1.  Install <a href="https://book.getfoundry.sh/getting-started/installation#using-foundryup" target="_blank" rel="noopener noreferrer">Foundry</a>, start by downloading and installing the Foundry installer:
-
-    ```bash
-    curl -L https://foundry.paradigm.xyz | bash
-    ```
-
-    then start a new terminal session and run
-
-    ```bash
-    foundryup
-    ```
-2.  Clone the Tycho monorepo:
+1.  Install <a href="https://mise.jdx.dev/getting-started.html" target="_blank" rel="noopener noreferrer">mise</a> and <a href="https://mise.jdx.dev/getting-started.html#activate-mise" target="_blank" rel="noopener noreferrer">activate it</a> in your shell. It provides Foundry at the version CI runs.
+2.  Clone the Tycho monorepo and install the pinned tools:
 
     ```bash
     git clone https://github.com/propeller-heads/tycho
+    cd tycho
+    mise install
     ```
 3.  Install dependencies:
 
     ```bash
-    cd ./tycho/protocols/adapter-integration/evm/
+    cd protocols/adapter-integration/evm/
     forge install
     ```
 

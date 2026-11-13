@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
 jobs:
   audit:
     name: Cargo Audit
@@ -19,13 +23,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9
-        with:
-          toolchain: stable
+      - name: Install the Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install --no-self-update --profile minimal
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
+      - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e  # v5.2.3
+        with:
+          version: 2026.10.25
+          install_args: github:rustsec/rustsec jq
 
       - name: Run cargo audit
         run: |
@@ -59,5 +63,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e  # v5.2.3
+        with:
+          version: 2026.10.25
+          install_args: github:bnjbvr/cargo-machete
+
       - name: Machete
-        uses: bnjbvr/cargo-machete@main
+        run: cargo-machete

@@ -763,7 +763,6 @@ contract ExternalSettlerMock {
         bytes calldata tychoCalldata
     ) external {
         IERC20(tokenIn).forceApprove(tychoRouter, amountIn);
-        // slither-disable-next-line unused-return
         poolManager.unlock(abi.encode(loans, v4SyncToken, tychoCalldata));
     }
 
@@ -789,7 +788,6 @@ contract ExternalSettlerMock {
 
         // 3. Route through TychoRouterV3 (replaces the old
         //    direct executor call + safeTransfer pattern)
-        // slither-disable-next-line low-level-calls
         (bool success, bytes memory result) = tychoRouter.call(tychoCalldata);
         if (!success) {
             if (result.length == 0) revert("Fill failed");
@@ -804,7 +802,6 @@ contract ExternalSettlerMock {
             poolManager.sync(currency);
             IERC20(loans[i].token)
                 .safeTransfer(address(poolManager), loans[i].amount);
-            // slither-disable-next-line unused-return
             poolManager.settle();
         }
 

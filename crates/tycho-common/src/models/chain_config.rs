@@ -17,12 +17,15 @@ pub struct ChainAddress {
 
 impl ChainAddress {
     pub fn new(bytes: &[u8]) -> Result<Self, ChainConfigError> {
-        if bytes.len() > 32 {
+        let Some(len) = u8::try_from(bytes.len())
+            .ok()
+            .filter(|&len| len <= 32)
+        else {
             return Err(ChainConfigError::AddressTooLong(bytes.len()));
-        }
+        };
         let mut arr = [0u8; 32];
         arr[..bytes.len()].copy_from_slice(bytes);
-        Ok(Self { bytes: arr, len: bytes.len() as u8 })
+        Ok(Self { bytes: arr, len })
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -86,7 +89,7 @@ impl ChainTokenConfig {
             .map_err(|e| ChainConfigError::InvalidAddress(address_hex.to_owned(), e.to_string()))?;
         let address = ChainAddress::new(&raw)?;
         let symbol = ArrayString::from(symbol)
-            .map_err(|_| ChainConfigError::SymbolTooLong(symbol.to_owned()))?;
+            .map_err(|e| ChainConfigError::SymbolTooLong(e.element().to_owned()))?;
         Ok(Self { address, symbol, decimals })
     }
 }
@@ -119,6 +122,10 @@ impl std::hash::Hash for TvlThresholds {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; the private fields are validated by `try_new`, and making `block_time_secs` private is a breaking change"
+)]
 pub struct CustomChainConfig {
     #[schema(value_type = String)]
     pub(crate) name: ArrayString<32>,
@@ -138,8 +145,8 @@ impl CustomChainConfig {
         wrapped_native: ChainTokenConfig,
         default_tvl_thresholds: TvlThresholds,
     ) -> Result<Self, ChainConfigError> {
-        let name =
-            ArrayString::from(name).map_err(|_| ChainConfigError::NameTooLong(name.to_owned()))?;
+        let name = ArrayString::from(name)
+            .map_err(|e| ChainConfigError::NameTooLong(e.element().to_owned()))?;
         Ok(Self { name, chain_id, block_time_secs, native, wrapped_native, default_tvl_thresholds })
     }
 
@@ -175,7 +182,7 @@ impl CustomChainId {
         }
         ArrayString::from(name)
             .map(Self)
-            .map_err(|_| ChainConfigError::NameTooLong(name.to_owned()))
+            .map_err(|e| ChainConfigError::NameTooLong(e.element().to_owned()))
     }
 
     pub fn as_str(&self) -> &str {

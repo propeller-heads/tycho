@@ -142,13 +142,13 @@ impl EkuboPool for BasePool {
         updated_attributes: HashMap<String, Bytes>,
         deleted_attributes: HashSet<String>,
     ) -> Result<(), TransitionError> {
-        let active_tick_update = updated_attributes
-            .get("tick")
-            .and_then(|updated_tick| {
-                let updated_tick = updated_tick.clone().into();
-
+        let active_tick_update = match updated_attributes.get("tick") {
+            Some(updated_tick) => {
+                let updated_tick = i32::try_from(updated_tick.clone())?;
                 (self.active_tick != Some(updated_tick)).then_some(updated_tick)
-            });
+            }
+            None => None,
+        };
 
         let changed_ticks = ticks_from_attributes(
             updated_attributes.into_iter().chain(
@@ -190,7 +190,7 @@ impl EkuboPool for BasePool {
             self.state.active_tick_index = find_nearest_initialized_tick_index(
                 new_initialized_ticks
                     .as_ref()
-                    .unwrap_or(self.imp.get_sorted_ticks()),
+                    .unwrap_or_else(|| self.imp.get_sorted_ticks()),
                 self.active_tick.ok_or_else(|| {
                     TransitionError::MissingAttribute(
                         "base state should always have an active tick during transitions"

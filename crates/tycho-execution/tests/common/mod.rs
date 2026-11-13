@@ -1,4 +1,7 @@
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "shared by several test crates, each of which uses a different subset of the helpers"
+)]
 pub mod encoding;
 
 use std::{fs, str::FromStr};

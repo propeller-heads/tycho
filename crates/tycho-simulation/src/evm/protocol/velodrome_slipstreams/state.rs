@@ -79,7 +79,6 @@ impl VelodromeSlipstreamsState {
     /// - `tick_spacing`: The tick spacing for the pool.
     /// - `tick`: The current tick of the pool.
     /// - `ticks`: A vector of `TickInfo` representing the tick information for the pool.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         liquidity: u128,
         sqrt_price: U256,
@@ -89,7 +88,10 @@ impl VelodromeSlipstreamsState {
         tick: i32,
         ticks: Vec<TickInfo>,
     ) -> Result<Self, SimulationError> {
-        let tick_list = TickList::from(tick_spacing as u16, ticks)?;
+        let tick_list_spacing = u16::try_from(tick_spacing).map_err(|e| {
+            SimulationError::InvalidInput(format!("Invalid tick spacing {tick_spacing}: {e}"), None)
+        })?;
+        let tick_list = TickList::from(tick_list_spacing, ticks)?;
         Ok(VelodromeSlipstreamsState {
             liquidity,
             sqrt_price,
@@ -248,7 +250,9 @@ impl VelodromeSlipstreamsState {
                             )),
                         ));
                     }
-                    _ => return Err(SimulationError::FatalError("Unknown error".to_string())),
+                    TickListErrorKind::BelowSmallest | TickListErrorKind::AtOrAboveLargest => {
+                        return Err(SimulationError::FatalError("Unknown error".to_string()))
+                    }
                 },
             };
 
@@ -345,11 +349,11 @@ impl ProtocolSim for VelodromeSlipstreamsState {
         self.get_fee() as f64 / 1_000_000.0
     }
 
-    fn spot_price(&self, a: &Token, b: &Token) -> Result<f64, SimulationError> {
-        if a < b {
-            sqrt_price_q96_to_f64(self.sqrt_price, a.decimals, b.decimals)
+    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        if base < quote {
+            sqrt_price_q96_to_f64(self.sqrt_price, base.decimals, quote.decimals)
         } else {
-            sqrt_price_q96_to_f64(self.sqrt_price, b.decimals, a.decimals)
+            sqrt_price_q96_to_f64(self.sqrt_price, quote.decimals, base.decimals)
                 .map(|price| 1.0f64 / price)
         }
     }
@@ -357,10 +361,10 @@ impl ProtocolSim for VelodromeSlipstreamsState {
     fn get_amount_out(
         &self,
         amount_in: BigUint,
-        token_a: &Token,
-        token_b: &Token,
+        token_in: &Token,
+        token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let zero_for_one = token_a < token_b;
+        let zero_for_one = token_in < token_out;
         let amount_specified = I256::checked_from_sign_and_abs(
             Sign::Positive,
             U256::from_be_slice(&amount_in.to_bytes_be()),
@@ -371,7 +375,7 @@ impl ProtocolSim for VelodromeSlipstreamsState {
 
         let result = self.swap(zero_for_one, amount_specified, None)?;
 
-        trace!(?amount_in, ?token_a, ?token_b, ?zero_for_one, ?result, "SLIPSTREAMS SWAP");
+        trace!(?amount_in, ?token_in, ?token_out, ?zero_for_one, ?result, "SLIPSTREAMS SWAP");
         let new_state = self.clone_post_swap(result.sqrt_price, result.tick, result.liquidity);
 
         Ok(GetAmountOutResult::new(
@@ -388,15 +392,15 @@ impl ProtocolSim for VelodromeSlipstreamsState {
 
     fn get_limits(
         &self,
-        token_in: Bytes,
-        token_out: Bytes,
+        sell_token: Bytes,
+        buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         // If the pool has no liquidity, return zeros for both limits
         if self.liquidity == 0 {
             return Ok((BigUint::zero(), BigUint::zero()));
         }
 
-        let zero_for_one = token_in < token_out;
+        let zero_for_one = sell_token < buy_token;
         let mut current_tick = self.tick.value();
         let mut current_sqrt_price = self.sqrt_price;
         let mut current_liquidity = self.liquidity;
@@ -485,7 +489,7 @@ impl ProtocolSim for VelodromeSlipstreamsState {
             .updated_attributes
             .get("liquidity")
         {
-            self.liquidity = u128::from(liquidity.clone());
+            self.liquidity = u128::try_from(liquidity.clone())?;
         }
         if let Some(sqrt_price) = delta
             .updated_attributes
@@ -497,16 +501,16 @@ impl ProtocolSim for VelodromeSlipstreamsState {
             .updated_attributes
             .get("default_fee")
         {
-            self.default_fee = u32::from(default_fee.clone());
+            self.default_fee = u32::try_from(default_fee.clone())?;
         }
         if let Some(custom_fee) = delta
             .updated_attributes
             .get("custom_fee")
         {
-            self.custom_fee = u32::from(custom_fee.clone());
+            self.custom_fee = u32::try_from(custom_fee.clone())?;
         }
         if let Some(tick) = delta.updated_attributes.get("tick") {
-            self.tick = i32::from(tick.clone()).into();
+            self.tick = i32::try_from(tick.clone())?.into();
         }
 
         // apply tick & observations changes
@@ -519,7 +523,7 @@ impl ProtocolSim for VelodromeSlipstreamsState {
                         parts[1]
                             .parse::<i32>()
                             .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
-                        i128::from(value.clone()),
+                        i128::try_from(value.clone())?,
                     )
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
             }
@@ -958,6 +962,10 @@ mod step_cache_tests {
         // WETH needs a far larger amount to leave its first tick.
         for (sell, buy, doublings) in [(&wbtc, &weth, 30u32), (&weth, &wbtc, 70)] {
             let cached = test_pool();
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the quote may run out of liquidity; only the step cache it fills is used"
+            )]
             let _ = cached.get_amount_out(BigUint::from(10u32) << doublings, sell, buy);
             let boundaries = cached.step_cache.min_inputs(sell < buy);
             assert!(boundaries.len() > 2, "only {} steps cached", boundaries.len());

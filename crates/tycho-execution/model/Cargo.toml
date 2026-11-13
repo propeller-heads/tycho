@@ -9,3 +9,6 @@ crossbeam-deque = "0.8.7"
 rustc-hash = "2.1.2"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_yaml = "0.9.34"
+
+[lints]
+workspace = true

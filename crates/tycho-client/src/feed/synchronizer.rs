@@ -45,6 +45,21 @@ use crate::{
 pub const DEFAULT_SNAPSHOT_JITTER: Duration = Duration::from_secs(60);
 /// Lowest accepted maximum delay before a restarted synchronizer requests a snapshot.
 pub const MIN_SNAPSHOT_JITTER: Duration = Duration::from_secs(5);
+/// Background snapshot backoff after the first transient failure.
+const SNAPSHOT_BACKOFF_BASE: Duration = Duration::from_secs(1);
+/// Longest background snapshot backoff.
+const SNAPSHOT_BACKOFF_MAX: Duration = Duration::from_secs(300);
+/// Messages a synchronizer can queue for the block synchronizer before its send waits.
+pub(crate) const SYNC_CHANNEL_CAPACITY: usize = 15;
+
+/// Returns the background snapshot backoff after `failures` consecutive transient failures.
+/// One failure gives [`SNAPSHOT_BACKOFF_BASE`]; each further failure doubles it, up to
+/// [`SNAPSHOT_BACKOFF_MAX`].
+fn snapshot_backoff_duration(failures: u32) -> Duration {
+    SNAPSHOT_BACKOFF_BASE
+        .saturating_mul(2u32.saturating_pow(failures.saturating_sub(1)))
+        .min(SNAPSHOT_BACKOFF_MAX)
+}
 
 #[derive(Error, Debug)]
 pub enum SynchronizerError {
@@ -100,7 +115,9 @@ impl SynchronizerError {
             SynchronizerError::Timeout(_) |
             SynchronizerError::ConnectionError(_) |
             SynchronizerError::ConnectionClosed => true,
-            _ => false,
+            SynchronizerError::ChannelError(_) |
+            SynchronizerError::CloseError(_) |
+            SynchronizerError::Internal(_) => false,
         }
     }
 }
@@ -115,11 +132,20 @@ impl From<DeltasError> for SynchronizerError {
     fn from(err: DeltasError) -> Self {
         match err {
             DeltasError::NotConnected => SynchronizerError::ConnectionClosed,
-            _ => SynchronizerError::ConnectionError(err.to_string()),
+            DeltasError::UriParsing(..) |
+            DeltasError::SubscriptionAlreadyPending |
+            DeltasError::ServerError(_) |
+            DeltasError::TransportError(_) |
+            DeltasError::BufferFull |
+            DeltasError::AlreadyConnected |
+            DeltasError::ConnectionClosed |
+            DeltasError::ConnectionError(_) |
+            DeltasError::Fatal(_) => SynchronizerError::ConnectionError(err.to_string()),
         }
     }
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "each bool is an independent feature toggle")]
 pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     extractor_id: ExtractorIdentity,
     retrieve_balances: bool,
@@ -148,6 +174,22 @@ pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     /// from the moment it's queued until its snapshot is successfully applied (at which point it
     /// moves into `component_tracker.components`).
     snapshot_queue: HashMap<String, SnapshotStatus>,
+    /// Backoff started by a transient background snapshot failure and reset by the next
+    /// successful one. It covers the whole extractor because a stale snapshot block or a rate
+    /// limit fails every component's request, not only the one that failed.
+    snapshot_backoff: Option<SnapshotBackoff>,
+}
+
+/// An extractor's background snapshot backoff.
+#[derive(Debug, Clone, Copy)]
+struct SnapshotBackoff {
+    /// When the failure that started this backoff was drained. Results of tasks spawned before
+    /// it neither reset nor lengthen the backoff.
+    started_at: Instant,
+    /// No background snapshot is fetched before this instant.
+    retry_at: Instant,
+    /// Consecutive transient failures; sets the length of the next backoff.
+    failures: u32,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -233,8 +275,9 @@ enum SnapshotStatus {
     Deferred,
     /// A background snapshot task has been spawned and is in-flight.
     InFlight,
-    /// The last fetch attempt failed transiently; will be re-queued on the next delta.
-    RetryNext,
+    /// Waiting for the extractor's snapshot backoff to end; the component is re-queued on the
+    /// first delta after it.
+    Backoff,
     /// The fetch failed permanently; component is excluded until the synchronizer restarts.
     Blacklisted,
 }
@@ -250,6 +293,7 @@ struct SnapshotFetchResult {
 struct SnapshotTask {
     component_ids: Vec<String>,
     snapshot_block: u64,
+    spawned_at: Instant,
     receiver: oneshot::Receiver<Result<SnapshotFetchResult, SynchronizerError>>,
 }
 
@@ -412,7 +456,15 @@ where
     D: DeltasClient + Clone + Send + Sync + 'static,
 {
     /// Creates a new state synchronizer.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
+    #[expect(
+        clippy::needless_pass_by_value,
+        clippy::fn_params_excessive_bools,
+        reason = "public API; taking `&ExtractorIdentity` and replacing the bool flags with an options type are breaking changes"
+    )]
     pub fn new(
         extractor_id: ExtractorIdentity,
         retrieve_balances: bool,
@@ -450,6 +502,7 @@ where
             snapshot_tasks: Vec::new(),
             buffered_deltas: Vec::new(),
             snapshot_queue: HashMap::new(),
+            snapshot_backoff: None,
         }
     }
 
@@ -502,7 +555,7 @@ where
     #[instrument(skip(self, block_tx, end_rx), fields(extractor_id = %self.extractor_id))]
     async fn state_sync(
         &mut self,
-        block_tx: &mut Sender<SyncResult<StateSyncMessage<BlockHeader>>>,
+        block_tx: &Sender<SyncResult<StateSyncMessage<BlockHeader>>>,
         mut end_rx: oneshot::Receiver<()>,
         snapshot_delay: Duration,
     ) -> Result<(), Box<SyncError>> {
@@ -542,7 +595,7 @@ where
                     let msg = select! {
                         deltas_result = timeout(Duration::from_secs(self.timeout), msg_rx.recv()) => {
                             deltas_result
-                                .map_err(|_| {
+                                .map_err(|_elapsed| {
                                     SynchronizerError::Timeout(format!(
                                         "First deltas took longer than {t}s to arrive",
                                         t = self.timeout
@@ -730,9 +783,8 @@ where
                         removed_components: HashMap::new(),
                     };
                     break 'init (snapshot_msg.merge(deltas_msg), header);
-                } else {
-                    break 'init (deltas_msg, header);
                 }
+                break 'init (deltas_msg, header);
             };
 
             block_tx.send(Ok(msg)).await?;
@@ -769,20 +821,21 @@ where
                                 let (to_add, to_remove) =
                                     self.component_tracker.filter_updated_components(&deltas);
 
-                                // Harvest transient retries now so they feed into truly_new.
-                                // TVL changes are not re-emitted, so without explicit re-queuing
-                                // a transiently failed component would never be retried.
-                                // Remove from the map first so the truly_new filter below treats
-                                // them the same as brand-new components.
-                                let retry_ids: Vec<String> = self
-                                    .snapshot_queue
-                                    .iter()
-                                    .filter(|(_, s)| matches!(s, SnapshotStatus::RetryNext))
-                                    .map(|(id, _)| id.clone())
-                                    .collect();
-                                for id in &retry_ids {
-                                    self.snapshot_queue.remove(id);
-                                }
+                                self.remove_from_backoff(&to_remove);
+
+                                // Once the backoff has ended, take the waiting components out of
+                                // `snapshot_queue`, so the `truly_new` filter below treats them
+                                // like brand-new components. TVL changes are not re-emitted, so
+                                // without this a component that failed transiently would never be
+                                // retried.
+                                let retry_ids: Vec<String> = if self.in_snapshot_backoff() {
+                                    Vec::new()
+                                } else {
+                                    self.snapshot_queue
+                                        .extract_if(|_, s| matches!(s, SnapshotStatus::Backoff))
+                                        .map(|(id, _)| id)
+                                        .collect()
+                                };
 
                                 // Components not yet tracked and not in the staged state machine
                                 // (not in-flight, not deferred, not blacklisted). Merges
@@ -843,13 +896,15 @@ where
                                         );
                                         self.spawn_snapshot_task(
                                             to_fire,
-                                            snapshot_header,
+                                            &snapshot_header,
                                             &deltas,
                                         );
                                     }
 
                                     // Accumulate truly_new into the deferred set for the current
-                                    // block; they will be fired when the next block arrives.
+                                    // block; they will be fired when the next block arrives,
+                                    // unless a snapshot backoff is running, in which case they
+                                    // move to `Backoff`.
                                     for id in truly_new {
                                         self.snapshot_queue
                                             .insert(id, SnapshotStatus::Deferred);
@@ -863,7 +918,7 @@ where
                                     );
                                     let snapshot_header =
                                         BlockHeader { revert: false, ..header.clone() };
-                                    self.spawn_snapshot_task(truly_new, snapshot_header, &deltas);
+                                    self.spawn_snapshot_task(truly_new, &snapshot_header, &deltas);
                                 }
 
                                 let snapshots = background_snapshots;
@@ -908,14 +963,13 @@ where
 
         // This cleanup code now runs regardless of how the function exits (error or channel close)
         warn!(last_synced_block = ?&self.last_synced_block, "Deltas processing ended.");
-        //Ignore error
-        let _ = self
+        if let Err(err) = self
             .deltas_client
             .unsubscribe(subscription_id)
             .await
-            .map_err(|err| {
-                warn!(err=?err, "Unsubscribing from deltas on cleanup failed!");
-            });
+        {
+            warn!(err=?err, "Unsubscribing from deltas on cleanup failed!");
+        }
 
         // Handle the result: if it succeeded, we're done. If it errored, we need to determine
         // whether the end_rx was consumed (close signal received) or not
@@ -988,15 +1042,49 @@ where
         }
     }
 
+    /// Returns true while the extractor's snapshot backoff runs.
+    fn in_snapshot_backoff(&self) -> bool {
+        self.snapshot_backoff
+            .is_some_and(|backoff| Instant::now() < backoff.retry_at)
+    }
+
+    /// Marks `component_ids` as `SnapshotStatus::Backoff` in `snapshot_queue`, to be fetched when
+    /// the backoff ends.
+    fn queue_in_backoff(&mut self, component_ids: Vec<String>) {
+        debug!(
+            components = ?component_ids,
+            extractor = %self.extractor_id.name,
+            "snapshot_queued_in_backoff"
+        );
+        for id in component_ids {
+            self.snapshot_queue
+                .insert(id, SnapshotStatus::Backoff);
+        }
+    }
+
+    /// Removes the components of `component_ids` that wait for the snapshot backoff from the
+    /// queue, so they are not fetched when it ends.
+    fn remove_from_backoff(&mut self, component_ids: &[String]) {
+        for id in component_ids {
+            if self.snapshot_queue.get(id) == Some(&SnapshotStatus::Backoff) {
+                self.snapshot_queue.remove(id);
+            }
+        }
+    }
+
     /// Spawns a background snapshot task for `component_ids` at `snapshot_header`. If no other
     /// task is already in-flight, starts buffering deltas from `current_delta` so the snapshot
-    /// can be brought up to date when the task drains.
+    /// can be brought up to date when the task drains. While a snapshot backoff runs, queues the
+    /// components to wait for it instead.
     fn spawn_snapshot_task(
         &mut self,
         component_ids: Vec<String>,
-        snapshot_header: BlockHeader,
+        snapshot_header: &BlockHeader,
         current_delta: &BlockAggregatedChanges,
     ) {
+        if self.in_snapshot_backoff() {
+            return self.queue_in_backoff(component_ids);
+        }
         let snapshot_block = snapshot_header.number;
 
         if self.snapshot_tasks.is_empty() {
@@ -1016,14 +1104,22 @@ where
         };
         let ids = component_ids.clone();
         tokio::spawn(async move {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the receiver is dropped only when the synchronizer has shut down"
+            )]
             let _ = tx.send(fetch_snapshot_background(rpc, ids, bg_params).await);
         });
         for id in &component_ids {
             self.snapshot_queue
                 .insert(id.clone(), SnapshotStatus::InFlight);
         }
-        self.snapshot_tasks
-            .push(SnapshotTask { component_ids, snapshot_block, receiver: rx });
+        self.snapshot_tasks.push(SnapshotTask {
+            component_ids,
+            snapshot_block,
+            spawned_at: Instant::now(),
+            receiver: rx,
+        });
     }
 
     /// Drains any background snapshot tasks that have completed. Returns a `Snapshot` containing
@@ -1042,6 +1138,14 @@ where
                     );
                     for id in &p.component_ids {
                         self.snapshot_queue.remove(id);
+                    }
+                    // A task spawned before the backoff started says nothing about whether the
+                    // failure that started it has cleared.
+                    if self
+                        .snapshot_backoff
+                        .is_none_or(|backoff| p.spawned_at >= backoff.started_at)
+                    {
+                        self.snapshot_backoff = None;
                     }
                     let new_component_ids: Vec<String> = fetch_result
                         .components
@@ -1065,16 +1169,30 @@ where
                 }
                 Ok(Err(e)) => {
                     if e.is_transient() {
+                        let now = Instant::now();
+                        // A task spawned before the backoff started failed for the same reason,
+                        // so it does not lengthen the backoff.
+                        let backoff = match self.snapshot_backoff {
+                            Some(current) if p.spawned_at < current.started_at => current,
+                            previous => {
+                                let failures = previous.map_or(0, |b| b.failures) + 1;
+                                SnapshotBackoff {
+                                    started_at: now,
+                                    retry_at: now + snapshot_backoff_duration(failures),
+                                    failures,
+                                }
+                            }
+                        };
+                        self.snapshot_backoff = Some(backoff);
                         warn!(
                             components = ?p.component_ids,
                             extractor = %self.extractor_id.name,
                             err = %e,
-                            "Background snapshot fetch failed transiently; will retry next block"
+                            failures = backoff.failures,
+                            retry_in = ?backoff.retry_at.saturating_duration_since(now),
+                            "Background snapshot fetch failed transiently; backing off"
                         );
-                        for id in &p.component_ids {
-                            self.snapshot_queue
-                                .insert(id.clone(), SnapshotStatus::RetryNext);
-                        }
+                        self.queue_in_backoff(p.component_ids);
                     } else {
                         warn!(
                             components = ?p.component_ids,
@@ -1152,7 +1270,7 @@ where
     async fn start(
         mut self,
     ) -> (SynchronizerTaskHandle, Receiver<SyncResult<StateSyncMessage<BlockHeader>>>) {
-        let (mut tx, rx) = channel(15);
+        let (tx, rx) = channel(SYNC_CHANNEL_CAPACITY);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         let jh = tokio::spawn(async move {
@@ -1181,7 +1299,7 @@ where
                     Duration::ZERO
                 };
                 let res = self
-                    .state_sync(&mut tx, current_end_rx, snapshot_delay)
+                    .state_sync(&tx, current_end_rx, snapshot_delay)
                     .await;
                 let made_progress = self
                     .last_synced_block
@@ -1215,12 +1333,13 @@ where
                                 error!(
                                     "Websocket connection closed. State synchronization exiting."
                                 );
-                                let _ = tx.send(Err(e)).await;
+                                if let Err(SendError(Err(e))) = tx.send(Err(e)).await {
+                                    warn!(error = ?e, "consumer is gone; dropping the error that ends the task");
+                                }
                                 return;
-                            } else {
-                                // Store error in case this is our last retry
-                                final_error = Some(e);
                             }
+                            // Store error in case this is our last retry
+                            final_error = Some(e);
                         } else {
                             // Close signal was received, exit cleanly
                             info!(extractor_id=%&self.extractor_id, "Received close signal, exiting.");
@@ -1240,7 +1359,9 @@ where
             }
             if let Some(e) = final_error {
                 warn!(extractor_id=%&self.extractor_id, retry_count, error=%e, "Max retries exceeded");
-                let _ = tx.send(Err(e)).await;
+                if let Err(SendError(Err(e))) = tx.send(Err(e)).await {
+                    warn!(error = ?e, "consumer is gone; dropping the error that ends the task");
+                }
             }
         });
 
@@ -2313,6 +2434,10 @@ mod test {
             .await
             .expect("waiting for third state msg timed out!")
             .expect("state sync block sender closed!");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await
             .expect("state sync task panicked!");
@@ -2662,6 +2787,10 @@ mod test {
             .expect("deltas channel msg 0 closed!");
 
         // Expecting to receive the initial state message
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the first message only shows that the synchronizer started; its content is not under test"
+        )]
         let _ = timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("waiting for first state msg timed out!")
@@ -2690,6 +2819,10 @@ mod test {
             .expect("state sync block sender closed!")
             .expect("no error");
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await
             .expect("state sync task panicked!");
@@ -2885,6 +3018,10 @@ mod test {
                 };
 
                 tokio::spawn(async move {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the receiver may have been dropped when the test no longer reads"
+                    )]
                     let _ = tx.send(delta).await;
                     // Close the channel after sending one message
                 });
@@ -2927,12 +3064,12 @@ mod test {
         });
 
         // Create a channel for state_sync to send messages to
-        let (mut block_tx, _block_rx) = channel(10);
+        let (block_tx, _block_rx) = channel(10);
 
         // Call state_sync directly - this should error during processing
         let (_end_tx, end_rx) = oneshot::channel::<()>();
         let result = state_sync
-            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .state_sync(&block_tx, end_rx, Duration::ZERO)
             .await;
         // Verify that state_sync returned an error
         assert!(result.is_err(), "state_sync should have errored during processing");
@@ -2981,13 +3118,13 @@ mod test {
             .await
             .expect("Init should succeed");
 
-        let (mut block_tx, _block_rx) = channel(10);
+        let (block_tx, _block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         // Start state_sync in a task
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+                .state_sync(&block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -2995,6 +3132,10 @@ mod test {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Send close signal
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = end_tx.send(());
 
         // state_sync should exit cleanly
@@ -3057,6 +3198,10 @@ mod test {
                 };
 
                 tokio::spawn(async move {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the receiver may have been dropped when the test no longer reads"
+                    )]
                     let _ = tx.send(first_delta).await;
                     // Keep the sender alive but don't send more messages
                     // This will make the recv() block waiting for the next message
@@ -3089,13 +3234,13 @@ mod test {
             .await
             .expect("Init should succeed");
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         // Start state_sync in a task
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+                .state_sync(&block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3113,6 +3258,10 @@ mod test {
                 first_snapshot.deltas.is_some()
         );
         // Now send close signal - this should be handled in the main processing loop
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = end_tx.send(());
 
         // state_sync should exit cleanly after receiving close signal in main loop
@@ -3208,6 +3357,10 @@ mod test {
         let mut deltas_client = MockDeltasClient::new();
         let (resubscribed_tx, resubscribed_rx) = oneshot::channel();
         let mut resubscribed_tx = Some(resubscribed_tx);
+        #[expect(
+            clippy::collection_is_never_read,
+            reason = "holds the senders so the subscription channels stay open"
+        )]
         let mut open_senders = Vec::new();
         let mut calls = 0;
         deltas_client
@@ -3222,6 +3375,7 @@ mod test {
                         .unwrap();
                 } else {
                     if let Some(notify) = resubscribed_tx.take() {
+                        #[expect(clippy::let_underscore_must_use, reason = "the receiver may have been dropped when the test no longer reads")]
                         let _ = notify.send(std::time::Instant::now());
                     }
                     open_senders.push(tx);
@@ -3258,6 +3412,10 @@ mod test {
             .expect("synchronizer should resubscribe")
             .unwrap();
         let (_jh, close_tx) = handle.split();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
 
         assert!(resubscribed_at - started < Duration::from_secs(1));
@@ -3297,7 +3455,7 @@ mod test {
             timestamp: 123456788,
             partial_block_index: None,
         };
-        state_sync.last_synced_block = Some(previous_header.clone());
+        state_sync.last_synced_block = Some(previous_header);
 
         assert!(
             state_sync.is_next_expected(&incoming_header),
@@ -3367,6 +3525,10 @@ mod test {
                 };
 
                 tokio::spawn(async move {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the receiver may have been dropped when the test no longer reads"
+                    )]
                     let _ = tx.send(expected_next_delta).await;
                 });
 
@@ -3409,13 +3571,13 @@ mod test {
             partial_block_index: None,
         });
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         // Start state_sync
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+                .state_sync(&block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3427,9 +3589,17 @@ mod test {
             .expect("Should not be an error");
 
         // Send close signal
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = end_tx.send(());
 
         // Wait for state_sync to finish
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the mock deltas channel closes, so state sync ends with a connection error"
+        )]
         let _ = state_sync_handle
             .await
             .expect("Task should not panic");
@@ -3573,6 +3743,7 @@ mod test {
 
                 tokio::spawn(async move {
                     for message in old_messages {
+                        #[expect(clippy::let_underscore_must_use, reason = "the receiver may have been dropped when the test no longer reads")]
                         let _ = tx.send(message).await;
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
@@ -3616,13 +3787,13 @@ mod test {
             partial_block_index: None,
         });
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         // Start state_sync
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+                .state_sync(&block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3634,12 +3805,17 @@ mod test {
             .expect("Should not be an error");
 
         // Send close signal
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = end_tx.send(());
 
         // Wait for state_sync to finish
-        let _ = state_sync_handle
+        state_sync_handle
             .await
-            .expect("Task should not panic");
+            .expect("Task should not panic")
+            .expect("state sync should end without an error");
 
         // Verify we only got the message for block 6 (the expected next block)
         assert!(result_msg.deltas.is_some(), "Should contain deltas");
@@ -3712,6 +3888,10 @@ mod test {
             .return_once(move |_, _| {
                 tokio::spawn(async move {
                     for block in blocks {
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "the outcome is not under test"
+                        )]
                         let _ = tx
                             .send(make_block_changes(block, None))
                             .await;
@@ -3738,11 +3918,11 @@ mod test {
             .expect("Init should succeed");
         state_sync.last_synced_block = Some(header_of(&make_block_changes(5, None)));
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
         let handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::from_millis(300))
+                .state_sync(&block_tx, end_rx, Duration::from_millis(300))
                 .await
         });
 
@@ -3756,10 +3936,15 @@ mod test {
             .expect("Should receive second message")
             .expect("Channel should be open")
             .expect("Should not be an error");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = end_tx.send(());
-        let _ = handle
+        handle
             .await
-            .expect("Task should not panic");
+            .expect("Task should not panic")
+            .expect("state sync should end without an error");
 
         // Blocks 10-15 arrive within the 300 ms delay, 50 ms apart.
         let snapshot_blocks = snapshot_blocks.lock().unwrap().clone();
@@ -3798,11 +3983,11 @@ mod test {
             .expect("Init should succeed");
         state_sync.last_synced_block = Some(header_of(&make_block_changes(9, None)));
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
         let handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::from_millis(300))
+                .state_sync(&block_tx, end_rx, Duration::from_millis(300))
                 .await
         });
 
@@ -3811,10 +3996,15 @@ mod test {
             .expect("Should receive the next expected block at once")
             .expect("Channel should be open")
             .expect("Should not be an error");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = end_tx.send(());
-        let _ = handle
+        handle
             .await
-            .expect("Task should not panic");
+            .expect("Task should not panic")
+            .expect("state sync should end without an error");
 
         assert_eq!(msg.header.number, 10);
         assert!(msg.snapshots.states.is_empty());
@@ -3840,6 +4030,10 @@ mod test {
             .expect("Should receive the first block at once")
             .expect("Channel should be open")
             .expect("Should not be an error");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
 
@@ -3871,6 +4065,10 @@ mod test {
             .return_once(move |_, _| {
                 tokio::spawn(async move {
                     for block in 1..=5 {
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "the outcome is not under test"
+                        )]
                         let _ = tx
                             .send(make_block_changes(block, None))
                             .await;
@@ -3898,6 +4096,10 @@ mod test {
             .expect("Should receive the first block")
             .expect("Channel should be open")
             .expect("Should not be an error");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
 
@@ -3925,6 +4127,10 @@ mod test {
             .expect("Should receive the first block at once")
             .expect("Channel should be open")
             .expect("Should not be an error");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
         msg.header.number
@@ -3970,9 +4176,14 @@ mod test {
     }
 
     fn make_block_changes(block_num: u64, partial_idx: Option<u32>) -> BlockAggregatedChanges {
-        // Use vec to create Bytes from block number
-        let hash = Bytes::from(vec![block_num as u8; 32]);
-        let parent_hash = Bytes::from(vec![block_num.saturating_sub(1) as u8; 32]);
+        // A 32-byte hash whose last 8 bytes are the block number, so every block has its own hash.
+        let hash_of = |number: u64| {
+            let mut hash = [0u8; 32];
+            hash[24..].copy_from_slice(&number.to_be_bytes());
+            Bytes::from(hash.to_vec())
+        };
+        let hash = hash_of(block_num);
+        let parent_hash = hash_of(block_num.saturating_sub(1));
         BlockAggregatedChanges {
             extractor: "uniswap-v2".to_string(),
             chain: Chain::Ethereum,
@@ -4018,6 +4229,10 @@ mod test {
         assert_eq!(msg.header.number, 1, "Should use block 1 (full block)");
         assert_eq!(msg.header.partial_block_index, None, "Should be a full block");
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
     }
@@ -4066,6 +4281,10 @@ mod test {
         assert_eq!(msg.header.number, 2, "Should use block 2 (block number increased)");
         assert_eq!(msg.header.partial_block_index, Some(5));
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
     }
@@ -4130,6 +4349,10 @@ mod test {
 
         assert_eq!(msg.header.number, 6, "Should use block 6 (after last synced)");
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
     }
@@ -4565,8 +4788,387 @@ mod test {
                 .collect::<Vec<_>>()
         );
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
+    }
+
+    #[test]
+    fn test_snapshot_backoff_duration() {
+        assert_eq!(snapshot_backoff_duration(0), Duration::from_secs(1));
+        assert_eq!(snapshot_backoff_duration(1), Duration::from_secs(1));
+        assert_eq!(snapshot_backoff_duration(2), Duration::from_secs(2));
+        assert_eq!(snapshot_backoff_duration(5), Duration::from_secs(16));
+        assert_eq!(snapshot_backoff_duration(9), Duration::from_secs(256));
+        assert_eq!(snapshot_backoff_duration(10), SNAPSHOT_BACKOFF_MAX);
+        assert_eq!(snapshot_backoff_duration(u32::MAX), SNAPSHOT_BACKOFF_MAX);
+    }
+
+    /// The sorted component ids of every background snapshot fetch, in fetch order.
+    type FetchedBatches = Arc<std::sync::Mutex<Vec<Vec<String>>>>;
+
+    /// A started synchronizer whose RPC client scripts background snapshot fetches.
+    struct BackoffHarness {
+        deltas_tx: Sender<BlockAggregatedChanges>,
+        block_rx: Receiver<SyncResult<StateSyncMessage<BlockHeader>>>,
+        fetched_batches: FetchedBatches,
+        /// Notified once per background fetch. The mock answers synchronously, so by the time a
+        /// waiter wakes, the fetch task has sent its result.
+        fetched: Arc<tokio::sync::Notify>,
+        close_tx: oneshot::Sender<()>,
+        join_handle: JoinHandle<()>,
+    }
+
+    impl BackoffHarness {
+        /// Starts a synchronizer that tracks `Component1` after its initial sync. The background
+        /// fetch with index `n` (from 0) fails with a stale block when `fails(n)` is true and
+        /// otherwise returns the requested components.
+        async fn start(fails: impl Fn(usize) -> bool + Send + 'static) -> Self {
+            let fetched_batches = FetchedBatches::default();
+            let fetched = Arc::new(tokio::sync::Notify::new());
+            let mut rpc_client = make_mock_client();
+            let batches = fetched_batches.clone();
+            let notify = fetched.clone();
+            rpc_client
+                .expect_get_protocol_components()
+                .withf(|params: &crate::rpc::ProtocolComponentsParams| {
+                    params.component_ids().is_some()
+                })
+                .returning(move |params| {
+                    let mut ids = params
+                        .component_ids()
+                        .cloned()
+                        .unwrap_or_default();
+                    ids.sort();
+                    let fetch_index = {
+                        let mut batches = batches.lock().unwrap();
+                        batches.push(ids.clone());
+                        batches.len() - 1
+                    };
+                    notify.notify_one();
+                    if fails(fetch_index) {
+                        return Err(RPCError::StaleBlock(
+                            "version is older than the 10 minute limit".to_string(),
+                        ));
+                    }
+                    let components: Vec<ProtocolComponent> = ids
+                        .into_iter()
+                        .map(|id| ProtocolComponent { id, ..Default::default() })
+                        .collect();
+                    let total = i64::try_from(components.len()).unwrap();
+                    Ok(Page::new(components, total, 0, 100))
+                });
+            rpc_client
+                .expect_get_protocol_components()
+                .returning(|_| {
+                    Ok(Page::new(
+                        vec![ProtocolComponent {
+                            id: "Component1".to_string(),
+                            ..Default::default()
+                        }],
+                        1,
+                        0,
+                        100,
+                    ))
+                });
+            rpc_client
+                .expect_get_snapshots()
+                .returning(|request, _chunk_size, _concurrency| {
+                    let states = request
+                        .components
+                        .iter()
+                        .map(|(id, component)| {
+                            let state = ComponentWithState {
+                                state: ProtocolComponentState::new(
+                                    id,
+                                    Default::default(),
+                                    Default::default(),
+                                ),
+                                component: component.clone(),
+                                component_tvl: Some(100.0),
+                                entrypoints: vec![],
+                            };
+                            (id.clone(), state)
+                        })
+                        .collect();
+                    Ok(Snapshot { states, vm_storage: HashMap::new() })
+                });
+            rpc_client
+                .expect_get_traced_entry_points()
+                .returning(|_| Ok(Page::new(HashMap::new(), 0, 0, 0)));
+
+            let mut deltas_client = MockDeltasClient::new();
+            let (deltas_tx, rx) = channel(1);
+            deltas_client
+                .expect_subscribe()
+                .return_once(move |_, _| Ok((Uuid::default(), rx)));
+            deltas_client
+                .expect_unsubscribe()
+                .return_once(|_| Ok(()));
+
+            let mut state_sync =
+                with_mocked_clients(true, true, Some(rpc_client), Some(deltas_client));
+            state_sync
+                .initialize()
+                .await
+                .expect("Init failed");
+            let (handle, block_rx) = state_sync.start().await;
+            let (join_handle, close_tx) = handle.split();
+            let mut harness =
+                Self { deltas_tx, block_rx, fetched_batches, fetched, close_tx, join_handle };
+            harness
+                .sync_block(make_block_changes(1, None))
+                .await;
+            harness
+        }
+
+        /// Sends `delta` and waits for the synchronizer to emit that block.
+        async fn sync_block(&mut self, delta: BlockAggregatedChanges) {
+            self.deltas_tx
+                .send(delta)
+                .await
+                .expect("Deltas channel open");
+            timeout(Duration::from_millis(200), self.block_rx.recv())
+                .await
+                .expect("Should receive a block")
+                .expect("Channel open")
+                .expect("No error");
+        }
+
+        /// Sends block `block_number` with the given component TVLs.
+        async fn sync_block_with_tvl(&mut self, block_number: u64, tvls: &[(&str, f64)]) {
+            let mut delta = make_block_changes(block_number, None);
+            delta.component_tvl = tvls
+                .iter()
+                .map(|(id, tvl)| (id.to_string(), *tvl))
+                .collect();
+            self.sync_block(delta).await;
+        }
+
+        /// Waits until the next background snapshot fetch has run.
+        async fn wait_for_fetch(&self) {
+            timeout(Duration::from_millis(200), self.fetched.notified())
+                .await
+                .expect("Expected a background snapshot fetch");
+        }
+
+        fn fetched_batches(&self) -> Vec<Vec<String>> {
+            self.fetched_batches
+                .lock()
+                .unwrap()
+                .clone()
+        }
+
+        async fn close(self) {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the synchronizer may already have exited; the test only requests shutdown"
+            )]
+            let _ = self.close_tx.send(());
+            self.join_handle
+                .await
+                .expect("Task should not panic");
+        }
+    }
+
+    /// Timeline (clock paused, backoffs 1 s then 2 s):
+    /// - Block 2: "Late" crosses the TVL threshold → fetch #1 fails with a stale block
+    /// - Block 3: #1 drains into a 1 s backoff; "Fresh" crosses the threshold and waits
+    /// - +1 s, block 4: backoff ended → "Late" and "Fresh" fetched together as #2, which fails
+    /// - Block 5: #2 drains into a 2 s backoff
+    /// - +1 s, block 6: still backing off; no fetch
+    /// - +1 s, block 7: backoff ended → fetch #3
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_background_snapshot_backoff() {
+        let mut harness = BackoffHarness::start(|_| true).await;
+
+        harness
+            .sync_block_with_tvl(2, &[("Late", 100.0)])
+            .await;
+        harness.wait_for_fetch().await;
+        harness
+            .sync_block_with_tvl(3, &[("Fresh", 100.0)])
+            .await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness
+            .sync_block(make_block_changes(4, None))
+            .await;
+        harness.wait_for_fetch().await;
+        harness
+            .sync_block(make_block_changes(5, None))
+            .await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness
+            .sync_block(make_block_changes(6, None))
+            .await;
+        let batches_before_second_backoff_ends = harness.fetched_batches().len();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness
+            .sync_block(make_block_changes(7, None))
+            .await;
+        harness.wait_for_fetch().await;
+        let fetched_batches = harness.fetched_batches();
+        harness.close().await;
+
+        let late_and_fresh = vec!["Fresh".to_string(), "Late".to_string()];
+        assert_eq!(
+            fetched_batches,
+            vec![vec!["Late".to_string()], late_and_fresh.clone(), late_and_fresh]
+        );
+        assert_eq!(
+            batches_before_second_backoff_ends, 2,
+            "Second backoff must be longer than the first"
+        );
+    }
+
+    /// Timeline (clock paused):
+    /// - Block 2: "Late" crosses the TVL threshold → fetch #1 fails with a stale block
+    /// - Block 3: #1 drains into a 1 s backoff; "Gone" crosses the threshold and waits
+    /// - Block 4: "Gone" drops below the threshold and leaves the queue
+    /// - +1 s, block 5: backoff ended → only "Late" is fetched
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_background_snapshot_backoff_tvl_drop() {
+        let mut harness = BackoffHarness::start(|_| true).await;
+
+        harness
+            .sync_block_with_tvl(2, &[("Late", 100.0)])
+            .await;
+        harness.wait_for_fetch().await;
+        harness
+            .sync_block_with_tvl(3, &[("Gone", 100.0)])
+            .await;
+        harness
+            .sync_block_with_tvl(4, &[("Gone", 0.0)])
+            .await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness
+            .sync_block(make_block_changes(5, None))
+            .await;
+        harness.wait_for_fetch().await;
+        let fetched_batches = harness.fetched_batches();
+        harness.close().await;
+
+        assert_eq!(fetched_batches, vec![vec!["Late".to_string()], vec!["Late".to_string()]]);
+    }
+
+    /// Timeline (clock paused):
+    /// - Block 2: "Late" crosses the TVL threshold → fetch #1 fails, starting a 1 s backoff
+    /// - +1 s, block 4: fetch #2 of "Late" succeeds, which resets the backoff on the next drain
+    /// - Block 5: "Other" crosses the threshold → fetch #3 fails
+    /// - +1 s, block 7: a reset backoff lasts 1 s again, so "Other" is fetched as #4
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_background_snapshot_backoff_reset() {
+        let mut harness = BackoffHarness::start(|fetch_index| fetch_index != 1).await;
+
+        harness
+            .sync_block_with_tvl(2, &[("Late", 100.0)])
+            .await;
+        harness.wait_for_fetch().await;
+        harness
+            .sync_block(make_block_changes(3, None))
+            .await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness
+            .sync_block(make_block_changes(4, None))
+            .await;
+        harness.wait_for_fetch().await;
+        harness
+            .sync_block_with_tvl(5, &[("Other", 100.0)])
+            .await;
+        harness.wait_for_fetch().await;
+        harness
+            .sync_block(make_block_changes(6, None))
+            .await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness
+            .sync_block(make_block_changes(7, None))
+            .await;
+        harness.wait_for_fetch().await;
+        let fetched_batches = harness.fetched_batches();
+        harness.close().await;
+
+        assert_eq!(
+            fetched_batches,
+            vec![
+                vec!["Late".to_string()],
+                vec!["Late".to_string()],
+                vec!["Other".to_string()],
+                vec!["Other".to_string()],
+            ]
+        );
+    }
+
+    /// A snapshot task in flight for `component_id`, spawned now, and the sender that completes
+    /// it.
+    fn snapshot_task_in_flight(
+        component_id: &str,
+    ) -> (SnapshotTask, oneshot::Sender<Result<SnapshotFetchResult, SynchronizerError>>) {
+        let (tx, receiver) = oneshot::channel();
+        let task = SnapshotTask {
+            component_ids: vec![component_id.to_string()],
+            snapshot_block: 1,
+            spawned_at: Instant::now(),
+            receiver,
+        };
+        (task, tx)
+    }
+
+    fn stale_block_error() -> SynchronizerError {
+        SynchronizerError::RPCError(RPCError::StaleBlock(
+            "version is older than the 10 minute limit".to_string(),
+        ))
+    }
+
+    /// Timeline (clock paused): "OldOk" and "OldErr" are spawned, then 1 ms later "New". "New"
+    /// fails and starts a 1 s backoff. After it ends, "OldOk" succeeds and "OldErr" fails;
+    /// neither result touches the backoff, because both tasks were spawned before it started.
+    #[tokio::test(start_paused = true)]
+    async fn test_drain_snapshot_results_spawned_before_backoff() {
+        let mut state_sync = with_mocked_clients(true, false, None, None);
+        let (old_ok, old_ok_tx) = snapshot_task_in_flight("OldOk");
+        let (old_err, old_err_tx) = snapshot_task_in_flight("OldErr");
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let (new, new_tx) = snapshot_task_in_flight("New");
+        state_sync
+            .snapshot_tasks
+            .extend([old_ok, old_err, new]);
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the snapshot task result is only consumed if the receiver is still held"
+        )]
+        let _ = new_tx.send(Err(stale_block_error()));
+        state_sync.drain_completed_snapshots();
+        let backoff_started = state_sync
+            .snapshot_backoff
+            .expect("The failure of New starts a backoff");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the snapshot task result is only consumed if the receiver is still held"
+        )]
+        let _ = old_ok_tx.send(Ok(SnapshotFetchResult {
+            components: HashMap::new(),
+            contract_ids: HashSet::new(),
+            dci_update: DCIUpdate::default(),
+            snapshot: Snapshot::default(),
+            snapshot_block: 1,
+        }));
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the snapshot task result is only consumed if the receiver is still held"
+        )]
+        let _ = old_err_tx.send(Err(stale_block_error()));
+        state_sync.drain_completed_snapshots();
+
+        let backoff = state_sync
+            .snapshot_backoff
+            .expect("Results of older tasks do not reset the backoff");
+        assert_eq!(backoff.failures, 1);
+        assert_eq!(backoff.retry_at, backoff_started.retry_at);
     }
 
     /// Directly exercises all four mutation paths of `apply_deltas_to_snapshot`:

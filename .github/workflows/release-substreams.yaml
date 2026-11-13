@@ -18,6 +18,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
   publish-crates:
@@ -30,10 +31,9 @@ jobs:
           persist-credentials: false
           submodules: false
 
-      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1  # stable
-        with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
+      - name: Install the Rust toolchain from protocols/substreams/rust-toolchain.toml
+        working-directory: protocols/substreams
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
         with:
@@ -75,22 +75,18 @@ jobs:
           persist-credentials: false
           submodules: false
 
-      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1  # stable
-        with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
+      - name: Install the Rust toolchain from protocols/substreams/rust-toolchain.toml
+        working-directory: protocols/substreams
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
         with:
           cache-on-failure: true
 
-      - name: Install Substreams CLI
-        run: |
-          LINK=$(curl -s https://api.github.com/repos/streamingfast/substreams/releases/latest \
-            | awk "/download.url.*linux_$(uname -m)/ {print \$2}" | sed 's/"//g')
-          curl -L "$LINK" | tar zxf - -C /usr/local/bin
-          chmod +x /usr/local/bin/substreams
-          substreams --version
+      - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e  # v5.2.3
+        with:
+          version: 2026.10.25
+          install_args: github:streamingfast/substreams jq
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a  # v4.3.1

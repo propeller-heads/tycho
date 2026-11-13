@@ -17,9 +17,9 @@ buf format -w
 ```
 
 ## Protobuf Linting
-1. To install the linter execute:
+1. `buf` is pinned in the repository's `mise.toml`; install it with:
 ```bash
-brew install bufbuild/buf/buf@1.28.1
+mise install buf
 ```
 2. Linting the files works like:
 ```bash

@@ -35,8 +35,8 @@ impl SwapEncoder for AerodromeV1SwapEncoder {
         let token_in_address = bytes_to_address(&swap.token_in().address)?;
         let token_out_address = bytes_to_address(&swap.token_out().address)?;
         let zero_for_one = token_in_address < token_out_address;
-        let component_id = Address::from_str(&swap.component().id).map_err(|_| {
-            EncodingError::FatalError("Invalid aerodrome_v1 component id".to_string())
+        let component_id = Address::from_str(&swap.component().id).map_err(|e| {
+            EncodingError::FatalError(format!("Invalid aerodrome_v1 component id: {e}"))
         })?;
 
         Ok((component_id, token_in_address, token_out_address, zero_for_one).abi_encode_packed())
@@ -80,8 +80,8 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             origin: None,
         };
 

@@ -3,7 +3,7 @@ use std::io;
 
 use serde_json::Error as SerdeError;
 use thiserror::Error;
-use tycho_common::simulation::errors::SimulationError;
+use tycho_common::{hex_bytes::IntegerFromBytesError, simulation::errors::SimulationError};
 
 #[derive(Debug, Error)]
 pub enum InvalidSnapshotError {
@@ -18,6 +18,12 @@ pub enum InvalidSnapshotError {
 impl From<SimulationError> for InvalidSnapshotError {
     fn from(error: SimulationError) -> Self {
         InvalidSnapshotError::VMError(error)
+    }
+}
+
+impl From<IntegerFromBytesError> for InvalidSnapshotError {
+    fn from(error: IntegerFromBytesError) -> Self {
+        InvalidSnapshotError::ValueError(error.to_string())
     }
 }
 

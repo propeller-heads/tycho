@@ -28,6 +28,8 @@ use tycho_common::{
     },
 };
 
+use crate::utils::decimals_scale;
+
 const MAX_ITERATIONS: u32 = 30;
 const IQI_THRESHOLD: f64 = 0.01;
 
@@ -177,7 +179,7 @@ fn search(
     let mut high = max_in.clone();
     let mut price_points: Vec<PricePoint> = vec![
         PricePoint::new(BigUint::zero(), BigUint::zero(), spot),
-        PricePoint::new(max_in, limit_result.amount.clone(), limit_price),
+        PricePoint::new(max_in, limit_result.amount, limit_price),
     ];
 
     let mut best: Option<PoolSwap> = Some(PoolSwap::new(
@@ -251,7 +253,7 @@ fn calculate_trade_price(
     if amount_in <= 0.0 {
         return f64::MAX;
     }
-    (amount_out / amount_in) * 10_f64.powi(decimals_in as i32 - decimals_out as i32)
+    (amount_out / amount_in) * (decimals_scale(decimals_in) / decimals_scale(decimals_out))
 }
 
 /// Returns true if `actual` is within `[target, target * (1 + tolerance)]`.
@@ -362,6 +364,7 @@ fn geometric_mean(a: &BigUint, b: &BigUint) -> BigUint {
 #[cfg(test)]
 pub(crate) mod test_helpers {
     use num_bigint::BigUint;
+    use num_traits::FromPrimitive;
     use tycho_common::{
         models::token::Token,
         simulation::protocol_sim::{Price, QueryPoolSwapParams, SwapConstraint},
@@ -369,15 +372,19 @@ pub(crate) mod test_helpers {
 
     /// Converts a price of `token_out` per `token_in` in whole-token units into a [`Price`] in
     /// atomic units.
-    pub(crate) fn to_price(price_f64: f64, token_in: &Token, token_out: &Token) -> Price {
-        let decimal_adj = 10_f64.powi(token_in.decimals as i32 - token_out.decimals as i32);
+    pub fn to_price(price_f64: f64, token_in: &Token, token_out: &Token) -> Price {
+        let decimal_adj = crate::utils::decimals_scale(token_in.decimals) /
+            crate::utils::decimals_scale(token_out.decimals);
         let price_no_decimals = price_f64 / decimal_adj;
-        Price::new(BigUint::from((price_no_decimals * 1e18) as u128), BigUint::from(10u128.pow(18)))
+        Price::new(
+            BigUint::from_f64(price_no_decimals * 1e18).unwrap(),
+            BigUint::from(10u128.pow(18)),
+        )
     }
 
     /// Builds [`QueryPoolSwapParams`] for a [`SwapConstraint::PoolTargetPrice`] with no amount
     /// bounds.
-    pub(crate) fn target_price_params(
+    pub fn target_price_params(
         token_in: &Token,
         token_out: &Token,
         target: Price,
@@ -836,7 +843,10 @@ mod tests {
                 alloy::primitives::Address::from_str("0xA2C5C98A892fD6656a7F39A2f63228C0Bc846270")
                     .unwrap();
 
-            #[allow(deprecated)]
+            #[expect(
+                deprecated,
+                reason = "the Balancer V2 vault holds the pool balances and is set through the deprecated balance_owner setter"
+            )]
             EVMPoolStateBuilder::new(pool_id, tokens, adapter_address)
                 .balances(balances)
                 .balance_owner(

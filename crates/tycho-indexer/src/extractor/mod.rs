@@ -51,6 +51,7 @@ mod u256_num;
 mod protobuf_conversion_tests;
 
 #[derive(Error, Debug, PartialEq)]
+#[expect(clippy::enum_variant_names, reason = "public API; renaming is a breaking change")]
 pub enum ExtractionError {
     #[error("Extractor setup failed: {0}")]
     Setup(String),

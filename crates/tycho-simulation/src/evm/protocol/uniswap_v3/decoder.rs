@@ -49,7 +49,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV3State {
             liq
         };
 
-        let liquidity = u128::from(liq_16_bytes);
+        let liquidity = u128::try_from(liq_16_bytes)?;
 
         let sqrt_price = U256::from_be_slice(
             snapshot
@@ -97,7 +97,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV3State {
                             .parse::<i32>()
                             .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
                             .and_then(|tick_index| {
-                                TickInfo::new(tick_index, i128::from(value.clone())).map_err(
+                                TickInfo::new(tick_index, i128::try_from(value.clone())?).map_err(
                                     |err| InvalidSnapshotError::ValueError(err.to_string()),
                                 )
                             }),
@@ -139,26 +139,23 @@ fn decode_fee_tier(
     let Some(tick_spacing) = static_attributes.get("tick_spacing") else {
         return FeeAmount::try_from(fee)
             .map(FeeTier::from)
-            .map_err(|_| InvalidSnapshotError::ValueError("Unsupported fee amount".to_string()));
+            .map_err(|()| {
+                InvalidSnapshotError::ValueError(format!("Unsupported fee amount {fee}"))
+            });
     };
     let tick_spacing = decode_i32("tick_spacing", tick_spacing)?;
 
     let fee = u32::try_from(fee)
-        .map_err(|_| InvalidSnapshotError::ValueError(format!("Negative fee {fee}")))?;
-    let tick_spacing = u16::try_from(tick_spacing).map_err(|_| {
+        .map_err(|_out_of_range| InvalidSnapshotError::ValueError(format!("Negative fee {fee}")))?;
+    let tick_spacing = u16::try_from(tick_spacing).map_err(|_out_of_range| {
         InvalidSnapshotError::ValueError(format!("Tick spacing {tick_spacing} out of range"))
     })?;
     FeeTier::new(fee, tick_spacing).map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
 }
 
 fn decode_i32(name: &str, value: &Bytes) -> Result<i32, InvalidSnapshotError> {
-    if value.len() > 4 {
-        return Err(InvalidSnapshotError::ValueError(format!(
-            "Attribute {name} is {} bytes, expected at most 4",
-            value.len()
-        )));
-    }
-    Ok(i32::from(value.clone()))
+    i32::try_from(value.clone())
+        .map_err(|err| InvalidSnapshotError::ValueError(format!("Attribute {name}: {err}")))
 }
 
 #[cfg(test)]
@@ -357,7 +354,7 @@ mod tests {
     #[case::zero_spacing(vec![0x32], vec![0x00], "must be positive")]
     #[case::negative_spacing(vec![0x32], vec![0xff], "out of range")]
     #[case::spacing_above_u16(vec![0x32], vec![0x01, 0x00, 0x00], "out of range")]
-    #[case::spacing_wider_than_i32(vec![0x32], vec![0x00; 5], "expected at most 4")]
+    #[case::spacing_wider_than_i32(vec![0x32], vec![0x01, 0x00, 0x00, 0x00, 0x00], "does not fit into i32")]
     async fn test_usv3_try_from_invalid_tick_spacing_attribute(
         #[case] fee_bytes: Vec<u8>,
         #[case] tick_spacing_bytes: Vec<u8>,
@@ -398,7 +395,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.err().unwrap(),
-            InvalidSnapshotError::ValueError(err) if err == *"Unsupported fee amount"
+            InvalidSnapshotError::ValueError(err) if err == *"Unsupported fee amount 4000"
         ));
     }
 }

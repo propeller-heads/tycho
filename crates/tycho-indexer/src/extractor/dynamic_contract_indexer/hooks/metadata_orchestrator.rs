@@ -63,7 +63,7 @@ impl BlockMetadataOrchestrator {
 
         info!(total_requests = all_requests.len(), "Generated metadata requests");
 
-        let requests_by_provider = self.group_requests_by_routing_key(&all_requests);
+        let requests_by_provider = Self::group_requests_by_routing_key(&all_requests);
 
         info!(provider_count = requests_by_provider.len(), "Grouped requests by provider");
 
@@ -73,7 +73,7 @@ impl BlockMetadataOrchestrator {
 
         info!(result_count = all_results.len(), "Executed provider batches");
 
-        let final_metadata = self.assemble_component_metadata(&all_components, all_results)?;
+        let final_metadata = Self::assemble_component_metadata(&all_components, all_results)?;
 
         info!(metadata_count = final_metadata.len(), "Completed metadata collection");
 
@@ -161,11 +161,10 @@ impl BlockMetadataOrchestrator {
         Ok(all_requests)
     }
 
-    #[instrument(skip(self, requests), fields(
+    #[instrument(skip(requests), fields(
         request_count = requests.len()
     ))]
     fn group_requests_by_routing_key(
-        &self,
         requests: &[MetadataRequest],
     ) -> HashMap<String, Vec<MetadataRequest>> {
         debug!("Grouping requests by routing key");
@@ -270,23 +269,29 @@ impl BlockMetadataOrchestrator {
             for (dedup_id, result) in results {
                 let request = ids_to_requests
                     .get(&dedup_id)
-                    .ok_or(MetadataError::UnknownError(format!(
-                        "Received result for unknown deduplication id: {dedup_id}"
-                    )))?;
+                    .ok_or_else(|| {
+                        MetadataError::UnknownError(format!(
+                            "Received result for unknown deduplication id: {dedup_id}"
+                        ))
+                    })?;
 
                 let parser = self
                     .response_parser_registry
                     .get_parser(request.get_generator_name())
-                    .ok_or(MetadataError::UnknownError(format!(
-                        "No parser found for {}",
-                        request.get_generator_name()
-                    )))?;
+                    .ok_or_else(|| {
+                        MetadataError::UnknownError(format!(
+                            "No parser found for {}",
+                            request.get_generator_name()
+                        ))
+                    })?;
 
                 let component_ids = component_ids_by_dedup_id
                     .get(&dedup_id)
-                    .ok_or(MetadataError::UnknownError(format!(
-                        "Received result for unknown deduplication id: {dedup_id}"
-                    )))?;
+                    .ok_or_else(|| {
+                        MetadataError::UnknownError(format!(
+                            "Received result for unknown deduplication id: {dedup_id}"
+                        ))
+                    })?;
 
                 for comp_id in component_ids {
                     let component = all_components
@@ -314,7 +319,6 @@ impl BlockMetadataOrchestrator {
                     };
 
                     let metadata_result = MetadataResult::new(
-                        request.request_id().clone(),
                         component.1.id.clone(),
                         request.request_type().clone(),
                         metadata_value,
@@ -336,12 +340,11 @@ impl BlockMetadataOrchestrator {
         Ok(all_results)
     }
 
-    #[instrument(skip(self, all_components, results), fields(
+    #[instrument(skip(all_components, results), fields(
         component_count = all_components.len(),
         result_count = results.len()
     ))]
     fn assemble_component_metadata(
-        &self,
         all_components: &HashMap<String, (TxHash, ProtocolComponent)>,
         results: Vec<MetadataResult>,
     ) -> Result<Vec<(ProtocolComponent, ComponentTracingMetadata)>, MetadataError> {
@@ -406,6 +409,7 @@ impl BlockMetadataOrchestrator {
     }
 }
 
+#[derive(Clone, Copy)]
 enum RequestMode {
     Full,
     BalanceOnly,
@@ -428,7 +432,7 @@ mod tests {
     use super::{
         super::component_metadata::{
             MetadataRequestType, MetadataValue, MockMetadataRequestGenerator,
-            MockMetadataResponseParser, MockRequestProvider, RequestTransport, RpcTransport,
+            MockMetadataResponseParser, MockRequestProvider, RpcTransport,
         },
         *,
     };
@@ -505,9 +509,7 @@ mod tests {
             .returning(|_, _| {
                 let request = create_test_metadata_request(
                     "component1",
-                    MetadataRequestType::ComponentBalance {
-                        token_addresses: vec![Address::from([2u8; 20])],
-                    },
+                    MetadataRequestType::ComponentBalance,
                     "rpc_mainnet",
                 );
                 Ok(vec![request])
@@ -520,17 +522,11 @@ mod tests {
             .returning(|_, _| {
                 let request = create_test_metadata_request(
                     "component2",
-                    MetadataRequestType::ComponentBalance {
-                        token_addresses: vec![Address::from([3u8; 20])],
-                    },
+                    MetadataRequestType::ComponentBalance,
                     "rpc_mainnet",
                 );
                 Ok(vec![request])
             });
-
-        mock_generator
-            .expect_supported_metadata_types()
-            .returning(|| vec![MetadataRequestType::ComponentBalance { token_addresses: vec![] }]);
 
         // Mock parser
         let mut mock_parser = MockMetadataResponseParser::new();
@@ -605,10 +601,6 @@ mod tests {
             .expect_generate_requests()
             .returning(|_, _| Err(MetadataError::GenerationFailed("Generator failed".to_string())));
 
-        mock_generator
-            .expect_supported_metadata_types()
-            .returning(|| vec![MetadataRequestType::ComponentBalance { token_addresses: vec![] }]);
-
         // Setup registries
         let mut generator_registry = MetadataGeneratorRegistry::new();
         generator_registry.set_default_generator(Some(Box::new(mock_generator)));
@@ -631,7 +623,11 @@ mod tests {
             MetadataError::GenerationFailed(msg) => {
                 assert_eq!(msg, "Generator failed");
             }
-            _ => panic!("Expected GenerationFailed error"),
+            other @ (MetadataError::ProviderFailed(_) |
+            MetadataError::UnknownError(_) |
+            MetadataError::MissingData(..)) => {
+                panic!("Expected GenerationFailed error, got: {:?}", other)
+            }
         }
     }
 
@@ -650,17 +646,11 @@ mod tests {
             .returning(|_, _| {
                 let request = create_test_metadata_request(
                     "component1",
-                    MetadataRequestType::ComponentBalance {
-                        token_addresses: vec![Address::from([2u8; 20])],
-                    },
+                    MetadataRequestType::ComponentBalance,
                     "rpc_mainnet",
                 );
                 Ok(vec![request])
             });
-
-        mock_generator
-            .expect_supported_metadata_types()
-            .returning(|| vec![MetadataRequestType::ComponentBalance { token_addresses: vec![] }]);
 
         // Mock provider that returns error
         let mut mock_provider = MockRequestProvider::new();
@@ -713,45 +703,36 @@ mod tests {
 
     #[test]
     fn test_group_requests_by_routing_key() {
-        // Setup
-        let generator_registry = MetadataGeneratorRegistry::new();
-        let parser_registry = MetadataResponseParserRegistry::new();
-        let provider_registry = ProviderRegistry::new();
-
-        let orchestrator =
-            BlockMetadataOrchestrator::new(generator_registry, parser_registry, provider_registry);
-
         // Create test requests with different routing keys
         let request1 = create_test_metadata_request(
             "component1",
-            MetadataRequestType::ComponentBalance {
-                token_addresses: vec![Address::from([2u8; 20])],
-            },
+            MetadataRequestType::ComponentBalance,
             "rpc_mainnet",
         );
 
         let request2 = create_test_metadata_request(
             "component2",
-            MetadataRequestType::ComponentBalance {
-                token_addresses: vec![Address::from([3u8; 20])],
-            },
+            MetadataRequestType::ComponentBalance,
             "rpc_mainnet",
         );
 
-        let request3 =
-            create_test_metadata_request("component3", MetadataRequestType::Tvl, "api_defillama");
+        let request3 = create_test_metadata_request(
+            "component3",
+            MetadataRequestType::Limits { token_pair: vec![] },
+            "rpc_archive",
+        );
 
         let requests = vec![request1, request2, request3];
 
         // Execute
-        let grouped = orchestrator.group_requests_by_routing_key(&requests);
+        let grouped = BlockMetadataOrchestrator::group_requests_by_routing_key(&requests);
 
         // Assert
         assert_eq!(grouped.len(), 2);
         assert!(grouped.contains_key("rpc_mainnet"));
-        assert!(grouped.contains_key("api_defillama"));
+        assert!(grouped.contains_key("rpc_archive"));
         assert_eq!(grouped["rpc_mainnet"].len(), 2);
-        assert_eq!(grouped["api_defillama"].len(), 1);
+        assert_eq!(grouped["rpc_archive"].len(), 1);
     }
 
     #[test]
@@ -768,9 +749,7 @@ mod tests {
             .returning(|_, _| {
                 let request = create_test_metadata_request(
                     "component1",
-                    MetadataRequestType::ComponentBalance {
-                        token_addresses: vec![Address::from([2u8; 20])],
-                    },
+                    MetadataRequestType::ComponentBalance,
                     "rpc_mainnet",
                 );
                 Ok(vec![request])
@@ -809,9 +788,7 @@ mod tests {
             .returning(|_, _| {
                 let request = create_test_metadata_request(
                     "component1",
-                    MetadataRequestType::ComponentBalance {
-                        token_addresses: vec![Address::from([2u8; 20])],
-                    },
+                    MetadataRequestType::ComponentBalance,
                     "rpc_mainnet",
                 );
                 Ok(vec![request])
@@ -846,35 +823,25 @@ mod tests {
         let tx_hash2 = TxHash::from([2u8; 32]);
 
         let mut all_components = HashMap::new();
-        all_components.insert(component1.id.clone(), (tx_hash1.clone(), component1.clone()));
-        all_components.insert(component2.id.clone(), (tx_hash2.clone(), component2.clone()));
+        all_components.insert(component1.id.clone(), (tx_hash1, component1));
+        all_components.insert(component2.id.clone(), (tx_hash2, component2));
 
         let result1 = MetadataResult::new(
-            "test_request_1".to_string(),
             "component1".to_string(),
-            MetadataRequestType::ComponentBalance {
-                token_addresses: vec![Address::from([2u8; 20])],
-            },
+            MetadataRequestType::ComponentBalance,
             Ok(MetadataValue::Balances(HashMap::new())),
         );
         let result2 = MetadataResult::new(
-            "test_request_2".to_string(),
             "component2".to_string(),
-            MetadataRequestType::Tvl,
-            Ok(MetadataValue::Tvl(1000.0)),
+            MetadataRequestType::Limits { token_pair: vec![] },
+            Ok(MetadataValue::Limits(vec![])),
         );
 
         let results = vec![result1, result2];
 
-        let generator_registry = MetadataGeneratorRegistry::new();
-        let parser_registry = MetadataResponseParserRegistry::new();
-        let provider_registry = ProviderRegistry::new();
-
-        let orchestrator =
-            BlockMetadataOrchestrator::new(generator_registry, parser_registry, provider_registry);
-
         // Execute
-        let result = orchestrator.assemble_component_metadata(&all_components, results);
+        let result =
+            BlockMetadataOrchestrator::assemble_component_metadata(&all_components, results);
 
         // Assert
         assert!(result.is_ok());
@@ -901,10 +868,10 @@ mod tests {
             .iter()
             .find(|(component, _)| component.id == "component2")
             .unwrap();
-        assert!(component2_metadata.1.tvl().is_some());
+        assert!(component2_metadata.1.limits().is_some());
         assert!(component2_metadata
             .1
-            .tvl()
+            .limits()
             .unwrap()
             .is_ok());
     }
@@ -917,26 +884,17 @@ mod tests {
         let tx_hash = TxHash::from([1u8; 32]);
 
         let mut all_components = HashMap::new();
-        all_components.insert(component.id.clone(), (tx_hash.clone(), component.clone()));
+        all_components.insert(component.id.clone(), (tx_hash, component));
 
         let results = vec![MetadataResult::new(
-            "test_request_1".to_string(),
             "component1".to_string(),
-            MetadataRequestType::ComponentBalance {
-                token_addresses: vec![Address::from([2u8; 20])],
-            },
+            MetadataRequestType::ComponentBalance,
             Err(MetadataError::GenerationFailed("Test error".to_string())),
         )];
 
-        let generator_registry = MetadataGeneratorRegistry::new();
-        let parser_registry = MetadataResponseParserRegistry::new();
-        let provider_registry = ProviderRegistry::new();
-
-        let orchestrator =
-            BlockMetadataOrchestrator::new(generator_registry, parser_registry, provider_registry);
-
         // Execute
-        let result = orchestrator.assemble_component_metadata(&all_components, results);
+        let result =
+            BlockMetadataOrchestrator::assemble_component_metadata(&all_components, results);
 
         // Assert
         assert!(result.is_ok());

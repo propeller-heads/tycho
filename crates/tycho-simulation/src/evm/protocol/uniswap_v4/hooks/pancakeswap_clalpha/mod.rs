@@ -19,7 +19,7 @@ pub fn decode_start_timestamp(raw: &Bytes) -> Result<u64, InvalidSnapshotError> 
     let trimmed = raw
         .iter()
         .position(|byte| *byte != 0)
-        .map_or(&raw[raw.len()..], |first| &raw[first..]);
+        .map_or_else(|| &raw[raw.len()..], |first| &raw[first..]);
     if trimmed.len() > 32 {
         return Err(InvalidSnapshotError::ValueError(format!(
             "{START_TIMESTAMP_ATTRIBUTE} is {} bytes (0x{}), wider than the uint256 it encodes",

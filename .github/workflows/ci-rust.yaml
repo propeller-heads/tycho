@@ -50,6 +50,8 @@ jobs:
             Cargo.toml
             Cargo.lock
             rust-toolchain.toml
+            mise.toml
+            mise.lock
             .github/workflows/ci-rust.yaml
 
   lint:
@@ -63,21 +65,23 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # nightly
-        id: toolchain
+      - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e  # v5.2.3
         with:
-          toolchain: nightly-2026-06-28
-          components: rustfmt, clippy
+          version: 2026.10.25
+          install: false
+
+      - name: Install the fmt and clippy nightly from mise.toml
+        run: rustup toolchain install --no-self-update "$RUST_NIGHTLY" --profile minimal --component rustfmt,clippy
 
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
         with:
           cache-on-failure: true
 
       - name: fmt
-        run: cargo +${{ steps.toolchain.outputs.name }} fmt --all --check
+        run: cargo +"$RUST_NIGHTLY" fmt --all --check
 
       - name: clippy
-        run: cargo +${{ steps.toolchain.outputs.name }} clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo +"$RUST_NIGHTLY" clippy --workspace --all-targets --all-features -- -D warnings
 
   lint-skip:
     name: Lint (fmt + clippy)
@@ -98,17 +102,17 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1  # stable
-        with:
-          toolchain: stable
+      - name: Install the Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
         with:
           cache-on-failure: true
 
-      - uses: taiki-e/install-action@aba36d755ec7ca22d38b12111787c26115943952  # v2.68.12
+      - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e  # v5.2.3
         with:
-          tool: cargo-nextest
+          version: 2026.10.25
+          install_args: github:nextest-rs/nextest
 
       - name: Run unit tests (excluding DB and EVM tests)
         # Exclusions:
@@ -187,29 +191,20 @@ jobs:
             sleep 1
           done
 
-      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1  # stable
-        with:
-          toolchain: stable
+      - name: Install the Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
         with:
           cache-on-failure: true
 
-      - name: Install libsqlite3-dev
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
-
-      - name: Install diesel_cli
-        uses: baptiste0928/cargo-install@c7dafcfd8a0035d58dfc65d0fbaf71a9ac347715  # v2
+      - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e  # v5.2.3
         with:
-          crate: diesel_cli
-          features: postgres
+          version: 2026.10.25
+          install_args: github:diesel-rs/diesel github:nextest-rs/nextest
 
       - name: Run migrations
         run: diesel migration run --migration-dir ./crates/tycho-storage/migrations
-
-      - uses: taiki-e/install-action@aba36d755ec7ca22d38b12111787c26115943952  # v2.68.12
-        with:
-          tool: cargo-nextest
 
       - name: Run DB tests (parallel)
         run: |
@@ -245,9 +240,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1  # stable
-        with:
-          toolchain: stable
+      - name: Install the Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
         with:
@@ -277,9 +271,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1  # stable
-        with:
-          toolchain: stable
+      - name: Install the Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
         with:

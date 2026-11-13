@@ -25,6 +25,8 @@ contract BebopFallbackRouter is TychoFallbackRouter {
     using Address for address;
 
     uint256 private constant _CALLDATA_START = 33;
+    uint256 private constant _SELECTOR_LEN = 4;
+    uint256 private constant _WORD_LEN = 32;
 
     bytes4 private constant _SWAP_SINGLE_SELECTOR = 0x4dcebcba;
     bytes4 private constant _SWAP_AGGREGATE_SELECTOR = 0xa2f74893;
@@ -60,11 +62,12 @@ contract BebopFallbackRouter is TychoFallbackRouter {
         bytes calldata bebopData,
         bytes calldata fallbackSwap
     ) external {
-        if (bebopData.length < _CALLDATA_START + 4) {
+        if (bebopData.length < _CALLDATA_START + _SELECTOR_LEN) {
             revert BebopFallbackRouter__InvalidDataLength(bebopData.length);
         }
         _validateCall(
-            target, bytes4(bebopData[_CALLDATA_START:_CALLDATA_START + 4])
+            target,
+            bytes4(bebopData[_CALLDATA_START:_CALLDATA_START + _SELECTOR_LEN])
         );
         _swap(swap_, target, bebopData, fallbackSwap);
 
@@ -101,7 +104,7 @@ contract BebopFallbackRouter is TychoFallbackRouter {
         uint256 balanceBefore = tokenOut.balanceOf(address(this));
 
         tokenIn.forceApprove(target, fillAmount);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The output is measured by balance diff below.
         target.functionCall(bebopCalldata);
         tokenIn.forceApprove(target, 0);
 
@@ -130,7 +133,7 @@ contract BebopFallbackRouter is TychoFallbackRouter {
     /// @dev Writes `amountIn` as the calldata's `filledTakerAmount` when it is below the signed
     /// amount.
     function _capFilledTakerAmount(
-        bytes memory bebopCalldata,
+        bytes calldata bebopCalldata,
         uint256 amountIn,
         uint256 originalFilledTakerAmount,
         uint8 partialFillOffset
@@ -138,15 +141,16 @@ contract BebopFallbackRouter is TychoFallbackRouter {
         if (amountIn >= originalFilledTakerAmount) {
             return bebopCalldata;
         }
-        uint256 filledTakerAmountPos = 4 + uint256(partialFillOffset) * 32;
-        // slither-disable-next-line assembly
-        assembly {
-            mstore(
-                add(add(bebopCalldata, 0x20), filledTakerAmountPos),
-                amountIn
-            )
+        uint256 filledTakerAmountPos =
+            _SELECTOR_LEN + uint256(partialFillOffset) * _WORD_LEN;
+        if (filledTakerAmountPos + _WORD_LEN > bebopCalldata.length) {
+            revert BebopFallbackRouter__InvalidDataLength(bebopCalldata.length);
         }
-        return bebopCalldata;
+        return bytes.concat(
+            bebopCalldata[:filledTakerAmountPos],
+            bytes32(amountIn),
+            bebopCalldata[filledTakerAmountPos + _WORD_LEN:]
+        );
     }
 
     function _originalFilledTakerAmount(bytes calldata bebopData)

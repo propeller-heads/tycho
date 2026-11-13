@@ -19,6 +19,7 @@ services/
   ├─ token_analyzer/
   │    ├─ mod.rs              Public API; re-exports EthCallDetector (primary) and TraceCallDetector (deprecated)
   │    ├─ ethcall_detector.rs EthCallDetector — simulates token transfers via eth_call with bytecode state overrides; works on all EVM chains
+  │    ├─ onchain_owners.rs   OnChainTokenOwners — TokenOwnerFinding that reads all candidate holders' balanceOf in one batch at the analysis block and picks the largest
   │    ├─ trace_detector.rs   TraceCallDetector — legacy trace_callMany approach; deprecated, use EthCallDetector
   │    ├─ common.rs           Shared helpers (token quality classification, transfer cost parsing)
   │    └─ bytecode.rs         Compiled bytecode + ABI for Analyzer and Forwarder Solidity contracts
@@ -49,7 +50,7 @@ tycho-common traits
 |---|---|
 | `account_extractor` | `AccountExtractor` |
 | `token_pre_processor` | `TokenPreProcessor` |
-| `token_analyzer` | `TokenAnalyzer` |
+| `token_analyzer` | `TokenAnalyzer`, `TokenOwnerFinding` (`OnChainTokenOwners`) |
 | `entrypoint_tracer` | `EntryPointTracer` |
 | `entrypoint_tracer/balance_slot_detector` | `BalanceSlotDetector` (`EVMBalanceSlotDetector`) |
 | `entrypoint_tracer/allowance_slot_detector` | `AllowanceSlotDetector` (`EVMAllowanceSlotDetector`) |

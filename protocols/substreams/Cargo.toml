@@ -29,6 +29,7 @@ members = [
     "base-aerodrome-slipstreams",
     "evm-aero-cl",
     "base-lunarbase",
+    "base-biconomy",
     "ethereum-erc4626",
     "ethereum-rocketpool",
     "unichain-velodrome",
@@ -40,6 +41,7 @@ members = [
     "polygon-ramses-v3",
     "ethereum-etherfi",
     "base-pancakeswap-infinity-cl",
+    "base-pancakeswap-infinity-bin",
     "bsc-pancakeswap-infinity-cl-hooks",
 ]
 resolver = "2"

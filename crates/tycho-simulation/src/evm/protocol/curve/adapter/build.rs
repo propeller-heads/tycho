@@ -453,7 +453,17 @@ fn build_stableswap_plain(state: &RawPoolState) -> Result<Pool, BuildError> {
         CurveVariant::StableSwapV2 => Pool::StableSwapV2 { balances, rates, amp, fee },
         CurveVariant::StableSwapSTETH => Pool::StableSwapSTETH { balances, rates, amp, fee },
         CurveVariant::StableSwapMeta => Pool::StableSwapMeta { balances, rates, amp, fee },
-        _ => unreachable!(),
+        #[expect(
+            clippy::unreachable,
+            reason = "build_pool dispatches only the plain StableSwap variants here"
+        )]
+        CurveVariant::StableSwapALend |
+        CurveVariant::StableSwapNG |
+        CurveVariant::TwoCryptoV1 |
+        CurveVariant::TwoCryptoNG |
+        CurveVariant::TwoCryptoStable |
+        CurveVariant::TriCryptoV1 |
+        CurveVariant::TriCryptoNG => unreachable!(),
     })
 }
 
@@ -465,7 +475,7 @@ fn build_stableswap_ng(state: &RawPoolState) -> Result<Pool, BuildError> {
     // offpeg_fee_multiplier: None for these pools — this default handles it.
     let offpeg = state
         .offpeg_fee_multiplier
-        .unwrap_or(U256::from(10_000_000_000u64));
+        .unwrap_or_else(|| U256::from(10_000_000_000u64));
 
     for (i, &d) in state.token_decimals.iter().enumerate() {
         if d > 36 {
@@ -586,7 +596,21 @@ fn build_twocrypto(state: &RawPoolState) -> Result<Pool, BuildError> {
             out_fee,
             fee_gamma,
         }),
-        _ => unreachable!("build_twocrypto called for non-twocrypto variant"),
+        #[expect(
+            clippy::unreachable,
+            reason = "build_pool dispatches only the TwoCrypto variants here"
+        )]
+        CurveVariant::StableSwapV0 |
+        CurveVariant::StableSwapV1 |
+        CurveVariant::StableSwapV2 |
+        CurveVariant::StableSwapSTETH |
+        CurveVariant::StableSwapALend |
+        CurveVariant::StableSwapNG |
+        CurveVariant::StableSwapMeta |
+        CurveVariant::TriCryptoV1 |
+        CurveVariant::TriCryptoNG => {
+            unreachable!("build_twocrypto called for non-twocrypto variant")
+        }
     }
 }
 
@@ -652,7 +676,22 @@ fn build_tricrypto(state: &RawPoolState) -> Result<Pool, BuildError> {
             out_fee,
             fee_gamma,
         }),
-        _ => unreachable!("build_tricrypto called for non-tricrypto variant"),
+        #[expect(
+            clippy::unreachable,
+            reason = "build_pool dispatches only the TriCrypto variants here"
+        )]
+        CurveVariant::StableSwapV0 |
+        CurveVariant::StableSwapV1 |
+        CurveVariant::StableSwapV2 |
+        CurveVariant::StableSwapSTETH |
+        CurveVariant::StableSwapALend |
+        CurveVariant::StableSwapNG |
+        CurveVariant::StableSwapMeta |
+        CurveVariant::TwoCryptoV1 |
+        CurveVariant::TwoCryptoNG |
+        CurveVariant::TwoCryptoStable => {
+            unreachable!("build_tricrypto called for non-tricrypto variant")
+        }
     }
 }
 
@@ -760,13 +799,11 @@ mod tests {
         let pool = build_pool(&state).unwrap();
 
         // Check rates are correct: [10^18, 10^30]
-        match &pool {
-            Pool::StableSwapV2 { rates, .. } => {
-                assert_eq!(rates[0], U256::from(10u64).pow(U256::from(18u64)));
-                assert_eq!(rates[1], U256::from(10u64).pow(U256::from(30u64)));
-            }
-            _ => panic!("wrong variant"),
-        }
+        let Pool::StableSwapV2 { rates, .. } = &pool else {
+            panic!("wrong variant");
+        };
+        assert_eq!(rates[0], U256::from(10u64).pow(U256::from(18u64)));
+        assert_eq!(rates[1], U256::from(10u64).pow(U256::from(30u64)));
     }
 
     #[test]
@@ -790,13 +827,11 @@ mod tests {
         };
 
         let pool = build_pool(&state).unwrap();
-        match &pool {
-            Pool::StableSwapNG { rates, .. } => {
-                assert_eq!(rates[0], U256::from(10u64).pow(U256::from(18u64)));
-                assert_eq!(rates[1], oracle_rate);
-            }
-            _ => panic!("wrong variant"),
-        }
+        let Pool::StableSwapNG { rates, .. } = &pool else {
+            panic!("wrong variant");
+        };
+        assert_eq!(rates[0], U256::from(10u64).pow(U256::from(18u64)));
+        assert_eq!(rates[1], oracle_rate);
     }
 
     #[test]
@@ -815,14 +850,12 @@ mod tests {
         };
 
         let pool = build_pool(&state).unwrap();
-        match &pool {
-            Pool::StableSwapALend { precision_mul, .. } => {
-                // 18 decimals → 10^(18-18) = 1
-                assert_eq!(precision_mul[0], U256::from(1u64));
-                assert_eq!(precision_mul[1], U256::from(1u64));
-            }
-            _ => panic!("wrong variant"),
-        }
+        let Pool::StableSwapALend { precision_mul, .. } = &pool else {
+            panic!("wrong variant");
+        };
+        // 18 decimals → 10^(18-18) = 1
+        assert_eq!(precision_mul[0], U256::from(1u64));
+        assert_eq!(precision_mul[1], U256::from(1u64));
     }
 
     #[test]
@@ -845,13 +878,11 @@ mod tests {
         };
 
         let pool = build_pool(&state).unwrap();
-        match &pool {
-            Pool::StableSwapMeta { rates, .. } => {
-                assert_eq!(rates[0], U256::from(10u64).pow(U256::from(34u64)));
-                assert_eq!(rates[1], virtual_price);
-            }
-            _ => panic!("wrong variant"),
-        }
+        let Pool::StableSwapMeta { rates, .. } = &pool else {
+            panic!("wrong variant");
+        };
+        assert_eq!(rates[0], U256::from(10u64).pow(U256::from(34u64)));
+        assert_eq!(rates[1], virtual_price);
     }
 
     #[test]
@@ -874,14 +905,12 @@ mod tests {
         };
 
         let pool = build_pool(&state).unwrap();
-        match &pool {
-            Pool::TwoCryptoNG { precisions, ann, .. } => {
-                assert_eq!(precisions[0], U256::from(1u64)); // 10^(18-18)
-                assert_eq!(precisions[1], U256::from(1u64));
-                assert_eq!(*ann, state.amp);
-            }
-            _ => panic!("wrong variant"),
-        }
+        let Pool::TwoCryptoNG { precisions, ann, .. } = &pool else {
+            panic!("wrong variant");
+        };
+        assert_eq!(precisions[0], U256::from(1u64)); // 10^(18-18)
+        assert_eq!(precisions[1], U256::from(1u64));
+        assert_eq!(*ann, state.amp);
     }
 
     #[test]
@@ -901,13 +930,11 @@ mod tests {
         };
 
         let pool = build_pool(&state).unwrap();
-        match &pool {
-            Pool::TwoCryptoStable { precisions, .. } => {
-                // 6 decimals → 10^(18-6) = 10^12
-                assert_eq!(precisions[0], U256::from(10u64).pow(U256::from(12u64)));
-            }
-            _ => panic!("wrong variant"),
-        }
+        let Pool::TwoCryptoStable { precisions, .. } = &pool else {
+            panic!("wrong variant");
+        };
+        // 6 decimals → 10^(18-6) = 10^12
+        assert_eq!(precisions[0], U256::from(10u64).pow(U256::from(12u64)));
     }
 
     #[test]
@@ -934,15 +961,13 @@ mod tests {
         };
 
         let pool = build_pool(&state).unwrap();
-        match &pool {
-            Pool::TriCryptoNG { precisions, price_scale, .. } => {
-                assert_eq!(precisions[0], U256::from(10u64).pow(U256::from(12u64))); // 10^(18-6)
-                assert_eq!(precisions[1], U256::from(10u64).pow(U256::from(10u64))); // 10^(18-8)
-                assert_eq!(precisions[2], U256::from(1u64)); // 10^(18-18)
-                assert_eq!(price_scale.len(), 2);
-            }
-            _ => panic!("wrong variant"),
-        }
+        let Pool::TriCryptoNG { precisions, price_scale, .. } = &pool else {
+            panic!("wrong variant");
+        };
+        assert_eq!(precisions[0], U256::from(10u64).pow(U256::from(12u64))); // 10^(18-6)
+        assert_eq!(precisions[1], U256::from(10u64).pow(U256::from(10u64))); // 10^(18-8)
+        assert_eq!(precisions[2], U256::from(1u64)); // 10^(18-18)
+        assert_eq!(price_scale.len(), 2);
     }
 
     #[test]

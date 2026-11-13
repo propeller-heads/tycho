@@ -21,8 +21,9 @@ gas used.
 
 Related tables: `trade_hops` (one row per executor hop), `fees_taken` (one row per fee
 recipient), `fee_config_events` (FeeCalculator admin events and fee-calculator rotations),
-`vault_transfers` (ERC-6909 balance movements inside a router), and `router_call_errors`
-(selector-matched calls that could not be decoded safely).
+`vault_transfers` (ERC-6909 balance movements inside a router), `subsidies` (what the
+SubsidyPayer did with each signed subsidy), and `router_call_errors` (selector-matched calls
+that could not be decoded safely).
 
 ### Discarded calls
 
@@ -155,22 +156,30 @@ WHERE protocol_systems = ARRAY[]::TEXT[] GROUP BY 1, 2 ORDER BY 3 DESC;
 ### Positive slippage
 
 A v3_1 trade carries `expected_amount_out`, so `positive_slippage` is the surplus the swaps
-produced above it. Who keeps that surplus takes two flags:
+produced above it. Who keeps that surplus takes three columns:
 
-| `positive_slippage_enabled` | `positive_slippage_exempt` | who keeps the surplus |
-| --- | --- | --- |
-| false | — | the receiver |
-| true | false | the router, as part of `router_fee_amount` |
-| true | true | the receiver |
+1. When `positive_slippage_enabled` is false, the receiver keeps all of it. Only a calculator
+   that emits `PositiveSlippageToggled` can turn capture off. A calculator with a router positive slippage bps has
+   no switch and always reports true.
+2. Otherwise the router captures `router_positive_slippage_bps` of it, and the receiver keeps the
+   rest.
+3. The client gets `client_positive_slippage_share_bps` of the captured amount, and the router
+   keeps the remainder, rounded in its favour.
 
-The exemption is FeeCalculator state, a `mapping(address => bool)` set by
-`setPositiveSlippageExempt` under `ROUTER_FEE_SETTER_ROLE`, and it emits
-`PositiveSlippageExemptionSet(address indexed client, bool exempt)`. `store_fee_config` keys it by
-calculator and client, so an exemption on one calculator does not follow a rotation to another.
+Both values are in fee units (100000000 = all of it). The router positive slippage bps is the client's custom
+value (`CustomRouterPositiveSlippageBpsUpdated`, `CustomRouterPositiveSlippageBpsRemoved`) when
+one is set, otherwise the calculator's global value (`RouterPositiveSlippageBpsUpdated`). A
+calculator that never emitted a router positive slippage event captures the full surplus. The client share comes from
+`ClientPositiveSlippageShareUpdated` and defaults to zero.
+
+The calculator generation before per-client router positive slippage bps exempted a client instead, with
+`PositiveSlippageExemptionSet(address indexed client, bool exempt)`. `store_fee_config` stores an
+exemption as a custom router positive slippage bps of zero and its removal as no custom router positive slippage bps, so trades on
+both generations resolve the same way. Every value is keyed by calculator and client, so a value
+on one calculator does not follow a rotation to another.
 
 The client is the one the FeeCalculator resolves: the signed `client_fee_receiver`, or `eoa`
-(`tx.origin`) when that is zero. Only the calculator generation that has the exemption emits the
-event, so a trade on an older calculator resolves to `false`.
+(`tx.origin`) when that is zero.
 
 `positive_slippage` is what the swaps produced, not what was taken. Read `router_fee_amount`,
 which comes from the `FeesTaken` event, for what the router actually collected.
@@ -351,6 +360,8 @@ in practice, all of them.
    DELETE FROM fees_taken         WHERE chain = '<chain>';
    DELETE FROM fee_config_events  WHERE chain = '<chain>';
    DELETE FROM router_call_errors WHERE chain = '<chain>';
+   DELETE FROM vault_transfers    WHERE chain = '<chain>';
+   DELETE FROM subsidies          WHERE chain = '<chain>';
    ```
 
 4. The container recovers on its next backoff restart. Confirm the new range in its log:
@@ -420,8 +431,10 @@ Six places, and the deployment fails quietly if any of the last three is missed.
    The chain must serve Extended (Firehose) blocks. Trades are recovered from call traces, so a
    chain without them yields nothing at all rather than an error.
 
-   Put the same routers in the `blockFilter` of `map_trades`, and `fee_cfg` in the one of
-   `map_fee_config_events`. Run `make check-manifests` to confirm.
+   Put the same routers in the `blockFilter` of `map_trades`, `fee_cfg` in the one of
+   `map_fee_config_events`, and `subsidy` in the one of `map_subsidy_events`. Give every
+   module the same params. Run
+   `make check-manifests` to confirm.
 
 4. **Pin the pricing tokens** in `pricing/preferred_tokens.sql`: the native sentinel row for the
    chain with its native symbol and price band, at least one stablecoin, and the majors. Without a
@@ -448,18 +461,20 @@ Nothing has to be cleared in the database: a chain with no cursor row starts at 
 
 ```
 index_router_activity ─┬─▶ map_fee_config_events ─▶ store_fee_config ─▶ map_trades
-                       └─▶ map_vault_transfers
+                       ├─▶ map_vault_transfers
+                       └─▶ map_subsidy_events
 
-db_out ◀── map_trades, map_fee_config_events, map_vault_transfers
+db_out ◀── map_trades, map_fee_config_events, map_vault_transfers, map_subsidy_events
 ```
 
 ### Block index
 
-`index_router_activity` writes two kinds of key per block: `addr:0x<address>` for every call
-frame, and `fee_cfg` for a block that carries a log the fee-config decoders recognise.
-`map_trades` and `map_fee_config_events` carry a `blockFilter` over them, so the server skips a
-block that has neither, which is more than 999 blocks in 1000. Everything downstream of a
-filtered module, `store_fee_config` included, only sees the blocks that pass.
+`index_router_activity` writes three kinds of key per block: `addr:0x<address>` for every call
+frame, `fee_cfg` for a block that carries a log the fee-config decoders recognise, and
+`subsidy` for one that carries a SubsidyPayer event. Every map module carries a `blockFilter`
+over them, so the server skips a block that has none, which is more than 999 blocks in 1000.
+Everything downstream of a filtered module, `store_fee_config` included, only sees the blocks
+that pass.
 
 `map_trades` and `map_vault_transfers` filter on the routers of their params, which are the
 same params. A filter has to name the same addresses, because one that is too narrow drops rows
@@ -473,16 +488,17 @@ emitter, and a list of addresses would not hold: nearly half of the fee-config e
 far come from an emitter no manifest configures. The index sets the key with the same two
 decoders the module uses, so the two cannot drift.
 
+`map_subsidy_events` filters on `subsidy` too, set by its own decoders. It configures no payer:
+an event counts only inside a router swap call, which keeps other emitters out.
+
 The index takes no params and knows no router, so a new router changes the filter of the
 consumer and leaves the index alone. An index that is already built stays valid.
 
 ## Running locally
 
+With mise activated, `substreams` and `substreams-sink-sql` come from the repository's `mise.toml`.
+
 ```bash
-rustup target add wasm32-unknown-unknown
-brew install streamingfast/tap/substreams            # or see substreams.dev
-# substreams-sink-sql: download the release binary for your platform from
-# https://github.com/streamingfast/substreams-sink-sql/releases (tested with v4.13.1)
 export SUBSTREAMS_API_TOKEN=$(curl -s https://auth.streamingfast.io/v1/auth/issue \
   -d "{\"api_key\":\"$STREAMINGFAST_KEY\"}" | jq -r .token)
 
@@ -522,8 +538,10 @@ hand. ABIs come from the verified sources on Sourcify
 (`TychoRouterV2` = `0xfD0b31d2…`, `TychoRouterV3_0` = `0x1f8dB310…`, `TychoRouterV3_1` =
 `0xea290cE3…`, `FeeCalculator` = `0xA236E1F0…`). Two ABI files hold events that deployment does not have:
 `FeeCalculatorV3_0.json` the `uint16` event signatures of the earlier FeeCalculator, and
-`FeeCalculatorExemption.json` the `PositiveSlippageExemptionSet` of the later one. Each is
-events-only, and the decoders try them in turn.
+`FeeCalculatorExemption.json` the `PositiveSlippageExemptionSet` of the later one, and
+`FeeCalculatorRouterPositiveSlippage.json` the router positive slippage events of the one after it.
+Each is events-only, and the decoders try them in turn. `SubsidyPayer.json` holds the two events of
+`contracts/interfaces/ISubsidyPayer.sol`, events-only as well.
 
 Regenerate protobuf bindings after editing `proto/` with `make protogen`. The abigen output under
 `src/abi/` is not committed; `build.rs` regenerates it from the minified JSON ABIs on every build.

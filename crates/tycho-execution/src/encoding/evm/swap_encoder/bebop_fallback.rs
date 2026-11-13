@@ -49,9 +49,9 @@ impl SwapEncoder for BebopFallbackSwapEncoder {
                      protocol_specific_addresses.json"
                 ))
             })?;
-        let fallback_router = Bytes::from_str(fallback_router).map_err(|_| {
+        let fallback_router = Bytes::from_str(fallback_router).map_err(|e| {
             EncodingError::FatalError(format!(
-                "Invalid {FALLBACK_ROUTER_CONFIG_KEY} address for {chain}: {fallback_router}"
+                "Invalid {FALLBACK_ROUTER_CONFIG_KEY} address for {chain}: {fallback_router}: {e}"
             ))
         })?;
         let bebop = BebopSwapEncoder::new(executor_address.clone(), chain, None)?;
@@ -63,7 +63,7 @@ impl SwapEncoder for BebopFallbackSwapEncoder {
         swap: &Swap,
         encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let fallback = FallbackSwap::from_user_data(swap.user_data())?;
+        let fallback = FallbackSwap::from_user_data(swap.user_data().as_ref())?;
         if !fallback
             .protocol
             .supported_on(self.chain)
@@ -80,7 +80,7 @@ impl SwapEncoder for BebopFallbackSwapEncoder {
             .bebop
             .encode_swap(swap, &self.quote_context(encoding_context))?;
         let (head, bebop_data) = bebop.split_at(BEBOP_HEAD_LENGTH);
-        let bebop_data_length = u32::try_from(bebop_data.len()).map_err(|_| {
+        let bebop_data_length = u32::try_from(bebop_data.len()).map_err(|_out_of_range| {
             EncodingError::FatalError(format!(
                 "Bebop swap data of {} bytes does not fit the uint32 length prefix",
                 bebop_data.len()

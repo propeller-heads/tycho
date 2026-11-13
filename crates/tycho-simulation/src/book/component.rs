@@ -26,7 +26,7 @@ pub fn pair_component_id(protocol_system: &str, base: &Bytes, quote: &Bytes) -> 
 
 /// The id of `market_maker`'s book on that pair: its [`pair_component_id`] followed by the
 /// maker's name, for a venue whose quote comes from the one maker it is asked of.
-pub(crate) fn maker_component_id(
+pub fn maker_component_id(
     protocol_system: &str,
     base: &Bytes,
     quote: &Bytes,
@@ -41,7 +41,7 @@ pub(crate) fn maker_component_id(
 /// trades, and a consumer that finds none reads every permutation of the tokens instead.
 pub const SWAP_DIRECTIONS_ATTRIBUTE: &str = "swap_directions";
 
-pub(crate) fn encode_swap_directions<'a>(
+pub fn encode_swap_directions<'a>(
     directions: impl IntoIterator<Item = &'a (Bytes, Bytes)>,
 ) -> Bytes {
     let mut encoded = Vec::new();

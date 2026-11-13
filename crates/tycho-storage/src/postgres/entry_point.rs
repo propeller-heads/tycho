@@ -31,11 +31,11 @@ use super::{
 
 /// A component id, an entry point, its tracing type, its tracing params JSON and its tracing
 /// result JSON.
-pub(crate) type TracedEntryPointRow =
+pub type TracedEntryPointRow =
     (String, orm::EntryPoint, EntryPointTracingType, Option<String>, Option<String>);
 
 /// Traced entry point rows as loaded from the database, with unparsed JSON.
-pub(crate) struct TracedEntryPointRows {
+pub struct TracedEntryPointRows {
     pub(crate) total: Option<i64>,
     pub(crate) rows: Vec<TracedEntryPointRow>,
 }
@@ -107,25 +107,19 @@ impl PostgresGateway {
         let mut pc_entry_point_links = Vec::new();
 
         for (pc_ext_id, eps) in new_data.iter() {
-            let pc_id = match pc_ids.get(pc_ext_id) {
-                Some(_id) => _id,
-                None => {
-                    return Err(StorageError::NotFound(
-                        "ProtocolComponent".to_string(),
-                        pc_ext_id.to_string(),
-                    ));
-                }
+            let Some(pc_id) = pc_ids.get(pc_ext_id) else {
+                return Err(StorageError::NotFound(
+                    "ProtocolComponent".to_string(),
+                    pc_ext_id.to_string(),
+                ));
             };
 
             for ep in eps.iter() {
-                let ep_id = match entry_point_ids.get(&ep.external_id) {
-                    Some(_id) => _id,
-                    None => {
-                        return Err(StorageError::NotFound(
-                            "EntryPoint".to_string(),
-                            ep.external_id.clone(),
-                        ));
-                    }
+                let Some(ep_id) = entry_point_ids.get(&ep.external_id) else {
+                    return Err(StorageError::NotFound(
+                        "EntryPoint".to_string(),
+                        ep.external_id.clone(),
+                    ));
                 };
 
                 pc_entry_point_links.push(NewProtocolComponentUsesEntryPoint {
@@ -244,24 +238,18 @@ impl PostgresGateway {
         let mut pc_tracing_params_links = Vec::new();
         for (ep_id, set) in new_data.iter() {
             for (params, pc_ext_id) in set.iter() {
-                let pc_id = match pc_ids.get(pc_ext_id.as_str()) {
-                    Some(_id) => _id,
-                    None => {
-                        return Err(StorageError::NotFound(
-                            "ProtocolComponent".to_string(),
-                            pc_ext_id.to_string(),
-                        ));
-                    }
+                let Some(pc_id) = pc_ids.get(pc_ext_id.as_str()) else {
+                    return Err(StorageError::NotFound(
+                        "ProtocolComponent".to_string(),
+                        pc_ext_id.to_string(),
+                    ));
                 };
 
-                let params_id = match params_ids.get(&(ep_id.clone(), params.clone())) {
-                    Some(_id) => _id,
-                    None => {
-                        return Err(StorageError::NotFound(
-                            "EntryPointTracingParams".to_string(),
-                            format!("{ep_id:?}, {params:?}"),
-                        ));
-                    }
+                let Some(params_id) = params_ids.get(&(ep_id.clone(), params.clone())) else {
+                    return Err(StorageError::NotFound(
+                        "EntryPointTracingParams".to_string(),
+                        format!("{ep_id:?}, {params:?}"),
+                    ));
                 };
 
                 pc_tracing_params_links.push(NewProtocolComponentHasEntryPointTracingParams {
@@ -370,15 +358,12 @@ impl PostgresGateway {
                 )
             })?;
 
-        let res: HashMap<String, HashSet<EntryPointWithTracingParams>> =
-            results
-                .into_iter()
-                .fold(HashMap::new(), |mut acc, (pc_ext_id, ep, params)| {
-                    acc.entry(pc_ext_id)
-                        .or_default()
-                        .insert(EntryPointWithTracingParams::new(ep.into(), (&params).into()));
-                    acc
-                });
+        let mut res: HashMap<String, HashSet<EntryPointWithTracingParams>> = HashMap::new();
+        for (pc_ext_id, ep, params) in results {
+            res.entry(pc_ext_id)
+                .or_default()
+                .insert(EntryPointWithTracingParams::new(ep.into(), (&params).try_into()?));
+        }
 
         Ok(WithTotal { entity: res, total: count })
     }
@@ -730,7 +715,7 @@ impl PostgresGateway {
             results_by_entry_point
                 .entry(ep_ext_id.clone())
                 .or_insert_with(HashMap::new)
-                .insert((&tracing_params).into(), converted_tracing_result);
+                .insert((&tracing_params).try_into()?, converted_tracing_result);
         }
 
         Ok(results_by_entry_point)
@@ -1213,9 +1198,7 @@ mod test {
 
         let insert_eptp_data = &HashMap::from([
             (
-                rpc_tracer_entry_point(0)
-                    .external_id
-                    .clone(),
+                rpc_tracer_entry_point(0).external_id,
                 HashSet::from([
                     (tracing_params(0), "pc_0".to_string()),
                     (tracing_params(0), "unknown_pc".to_string()),
@@ -1223,9 +1206,7 @@ mod test {
                 ]),
             ),
             (
-                rpc_tracer_entry_point(1)
-                    .external_id
-                    .clone(),
+                rpc_tracer_entry_point(1).external_id,
                 HashSet::from([
                     (tracing_params(0), "pc_1".to_string()),
                     (tracing_params(1), "pc_2".to_string()),

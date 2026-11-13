@@ -111,7 +111,7 @@ fn matches_onchain_get_amount_out_to_the_wei() {
                     fee_module: Bytes::from_str(&pool.fee_module).unwrap(),
                     paused: false,
                 },
-                (pool.decimals0 as u8, pool.decimals1 as u8),
+                (u8::try_from(pool.decimals0).unwrap(), u8::try_from(pool.decimals1).unwrap()),
             )
             .unwrap();
             for quote in &pool.quotes {

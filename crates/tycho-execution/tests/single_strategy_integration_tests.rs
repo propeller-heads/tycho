@@ -59,13 +59,13 @@ fn test_evm_single_swap_strategy_encoder() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solutions[0].clone(),
+        &encoded_solutions[0],
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -102,7 +102,7 @@ fn test_evm_single_swap_strategy_encoder() {
 
     assert_eq!(hex_calldata[..456], expected_input);
     assert_eq!(hex_calldata[1608..], expected_swap);
-    write_calldata_to_file("test_single_swap_strategy_encoder", &hex_calldata.to_string());
+    write_calldata_to_file("test_single_swap_strategy_encoder", &hex_calldata);
 }
 
 #[test]
@@ -145,13 +145,13 @@ fn test_single_swap_strategy_encoder_transfer_from() {
         .clone();
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -236,20 +236,20 @@ fn test_single_swap_with_client_fees() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solutions[0].clone(),
+        &encoded_solutions[0],
         &solution,
         &eth(),
         None,
         1_000_000,
-        client_fee_receiver(),
-        BigUint::ZERO,
+        &client_fee_receiver(),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
 
     let hex_calldata = encode(&calldata);
 
-    write_calldata_to_file("test_single_swap_with_client_fees", &hex_calldata.to_string());
+    write_calldata_to_file("test_single_swap_with_client_fees", &hex_calldata);
 }
 
 #[test]
@@ -294,21 +294,18 @@ fn test_single_swap_with_fees_and_client_contribution() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solutions[0].clone(),
+        &encoded_solutions[0],
         &solution,
         &eth(),
         None,
         1_000_000,
-        client_fee_receiver(),
-        BigUint::from_str("22_000000000000000000").unwrap(),
+        &client_fee_receiver(),
+        &BigUint::from_str("22_000000000000000000").unwrap(),
     )
     .unwrap()
     .data;
 
     let hex_calldata = encode(&calldata);
 
-    write_calldata_to_file(
-        "test_single_swap_with_fees_and_client_contribution",
-        &hex_calldata.to_string(),
-    );
+    write_calldata_to_file("test_single_swap_with_fees_and_client_contribution", &hex_calldata);
 }

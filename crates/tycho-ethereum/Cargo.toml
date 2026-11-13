@@ -46,3 +46,6 @@ tracing-test = "0.2.5"
 
 [[example]]
 name = "run-analysis"
+
+[lints]
+workspace = true

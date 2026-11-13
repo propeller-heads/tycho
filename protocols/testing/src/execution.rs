@@ -34,11 +34,12 @@ const UNISWAP_V4_ROBINHOOD_BYTECODE_JSON: &str =
     include_str!("../fixtures/UniswapV4Robinhood.runtime.json");
 const FLUIDV1_BYTECODE_JSON: &str = include_str!("../fixtures/FluidV1.runtime.json");
 const LIQUIDITYPARTY_BYTECODE_JSON: &str = include_str!("../fixtures/LiquidityParty.runtime.json");
+const BICONOMY_BYTECODE_JSON: &str = include_str!("../fixtures/Biconomy.runtime.json");
 const LUNARBASE_BYTECODE_JSON: &str = include_str!("../fixtures/LunarBase.runtime.json");
 const SKY_BYTECODE_JSON: &str = include_str!("../fixtures/Sky.runtime.json");
 const SLIPSTREAMS_BYTECODE_JSON: &str = include_str!("../fixtures/Slipstreams.runtime.json");
 const LIDO_V4_BYTECODE_JSON: &str = include_str!("../fixtures/LidoV4.runtime.json");
-const PANCAKESWAP_INFINITY_CL_BYTECODE_JSON: &str =
+const PANCAKESWAP_INFINITY_BYTECODE_JSON: &str =
     include_str!("../fixtures/PancakeswapInfinity.runtime.json");
 const PANCAKESWAP_INFINITY_CL_ROBINHOOD_BYTECODE_JSON: &str =
     include_str!("../fixtures/PancakeswapInfinityRobinhood.runtime.json");
@@ -53,6 +54,9 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("uniswap_v3", UNISWAP_V3_BYTECODE_JSON);
     map.insert("pancakeswap_v3", UNISWAP_V3_BYTECODE_JSON);
     map.insert("gigadex_v3", UNISWAP_V3_BYTECODE_JSON);
+    map.insert("kleos_v3", UNISWAP_V3_BYTECODE_JSON);
+    map.insert("elyspump_v3", UNISWAP_V3_BYTECODE_JSON);
+    map.insert("stockiumswap_v3", UNISWAP_V3_BYTECODE_JSON);
     map.insert("ramses_v3", UNISWAP_V3_BYTECODE_JSON);
     map.insert("uniswap_v4", UNISWAP_V4_BYTECODE_JSON);
     // If you would like to test any other hook, replace this bytecode with the
@@ -67,14 +71,16 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("fluid_v1", FLUIDV1_BYTECODE_JSON);
     map.insert("vm:liquidityparty", LIQUIDITYPARTY_BYTECODE_JSON);
     map.insert("lunarbase", LUNARBASE_BYTECODE_JSON);
+    map.insert("biconomy", BICONOMY_BYTECODE_JSON);
     map.insert("sky", SKY_BYTECODE_JSON);
     map.insert("aerodrome_slipstreams", SLIPSTREAMS_BYTECODE_JSON);
     map.insert("aero_basic", AERO_BASIC_BYTECODE_JSON);
     map.insert("aero_cl", SLIPSTREAMS_BYTECODE_JSON);
     map.insert("lido_v4", LIDO_V4_BYTECODE_JSON);
     map.insert("up_v3", SLIPSTREAMS_BYTECODE_JSON);
-    map.insert("pancakeswap_infinity_cl", PANCAKESWAP_INFINITY_CL_BYTECODE_JSON);
-    map.insert("pancakeswap_infinity_cl_hooks", PANCAKESWAP_INFINITY_CL_BYTECODE_JSON);
+    map.insert("pancakeswap_infinity_cl", PANCAKESWAP_INFINITY_BYTECODE_JSON);
+    map.insert("pancakeswap_infinity_cl_hooks", PANCAKESWAP_INFINITY_BYTECODE_JSON);
+    map.insert("pancakeswap_infinity_bin", PANCAKESWAP_INFINITY_BYTECODE_JSON);
     map
 });
 

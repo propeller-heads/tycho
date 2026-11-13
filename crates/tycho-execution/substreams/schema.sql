@@ -36,8 +36,10 @@ CREATE TABLE IF NOT EXISTS trades (
     -- amount_out + total fees taken, i.e. what the swaps produced before fee deduction.
     gross_amount_out           NUMERIC(78, 0),
     -- gross_amount_out - expected_amount_out, floored at zero: the surplus the swaps produced.
-    -- The router captured it only when positive_slippage_enabled AND NOT positive_slippage_exempt;
-    -- otherwise the receiver kept it. Read router_fee_amount for what was actually taken.
+    -- When positive_slippage_enabled, the router captured router_positive_slippage_bps of it and
+    -- the receiver kept the rest; otherwise the receiver kept all of it. The client got
+    -- client_positive_slippage_share_bps of the captured amount. Read router_fee_amount for what
+    -- was actually taken.
     positive_slippage          NUMERIC(78, 0),
     native_value               NUMERIC(78, 0) NOT NULL,
     gas_used                   BIGINT NOT NULL,
@@ -53,11 +55,16 @@ CREATE TABLE IF NOT EXISTS trades (
     router_fee_on_client_fee_bps BIGINT,
     custom_fee_on_output       BOOLEAN,
     custom_fee_on_client_fee   BOOLEAN,
+    -- False only when an older calculator turned capture off with PositiveSlippageToggled. A
+    -- calculator with a router positive slippage bps has no switch and reports true.
     positive_slippage_enabled  BOOLEAN,
-    -- Whether this trade's client is exempt from positive slippage capture. The client is the
-    -- signed client_fee_receiver, or eoa (tx.origin) when that is zero. NULL on a row indexed
-    -- before this column existed.
-    positive_slippage_exempt   BOOLEAN,
+    -- Part of the surplus the router captures for this trade's client, in fee units (100000000 =
+    -- all of it): the client's custom value if set, otherwise the calculator's global one. The client
+    -- is the signed client_fee_receiver, or eoa (tx.origin) when that is zero. An exemption on an
+    -- older calculator reads as 0. NULL on a row indexed before this column existed.
+    router_positive_slippage_bps BIGINT,
+    -- The client's share of the captured surplus, in fee units. The router keeps the rest.
+    client_positive_slippage_share_bps BIGINT,
     fee_bps_scale              BIGINT,
     router_fee_amount          NUMERIC(78, 0),
     client_fee_amount          NUMERIC(78, 0),
@@ -194,3 +201,34 @@ CREATE TABLE IF NOT EXISTS vault_transfers (
 CREATE INDEX IF NOT EXISTS vault_transfers_owner_idx
     ON vault_transfers (chain, router, token);
 CREATE INDEX IF NOT EXISTS vault_transfers_block_idx ON vault_transfers (chain, block_number);
+
+-- SubsidyPayer events inside a router swap: each signed subsidy paid, or skipped and why.
+CREATE TABLE IF NOT EXISTS subsidies (
+    id           TEXT PRIMARY KEY, -- {chain}:{tx_hash}:{log_index}
+    chain        TEXT NOT NULL,
+    block_number BIGINT NOT NULL,
+    block_time   TIMESTAMPTZ NOT NULL,
+    tx_hash      TEXT NOT NULL,
+    log_index    INTEGER NOT NULL,
+    -- The contract that emitted the event.
+    payer        TEXT NOT NULL,
+    event        TEXT NOT NULL CHECK (event IN ('paid', 'skipped')),
+    -- The nonce of the signed terms, 32 bytes.
+    nonce        TEXT NOT NULL,
+    -- The trade the payer ran in: the row of the nearest router swap call enclosing the event
+    -- in the call trace. A transaction can hold several router calls, probes included, so the
+    -- hash alone would not say which.
+    trade_id     TEXT NOT NULL,
+    -- Paid only. The payment goes to the router (`receiver`), which pays the user with the
+    -- swap's output; `bound_to` is the address the terms were signed for.
+    bound_to     TEXT,
+    receiver     TEXT,
+    token        TEXT,
+    amount       NUMERIC(78, 0),
+    -- Skipped only: paused, expired, invalid_signature, caller_mismatch, below_min_amount_in,
+    -- nonce_used, insufficient_balance or transfer_failed, or the number of a reason newer
+    -- than the package.
+    reason       TEXT
+);
+CREATE INDEX IF NOT EXISTS subsidies_block_idx ON subsidies (chain, block_number);
+CREATE INDEX IF NOT EXISTS subsidies_trade_idx ON subsidies (trade_id);

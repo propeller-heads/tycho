@@ -24,3 +24,6 @@ book-feeds = ["evm", "tycho-simulation/book-feeds"]
 
 [dev-dependencies]
 tokio = { workspace = true }
+
+[lints]
+workspace = true

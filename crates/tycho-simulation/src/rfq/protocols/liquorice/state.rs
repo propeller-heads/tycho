@@ -16,7 +16,7 @@ use tycho_common::{
 
 use crate::{
     book::{
-        all_pairs::{all_pairs_state, RefusesQuote, SignedByMakers},
+        all_pairs::{all_pairs_state, PricesAfterFill, RefusesQuote, SignedByMakers},
         component::PairState,
         sim::{self, SwapDirection},
     },
@@ -81,8 +81,24 @@ impl PairState for LiquoriceState {
     }
 }
 
+impl PricesAfterFill for LiquoriceState {
+    fn marginal_price(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        filled: &BigUint,
+    ) -> Result<f64, SimulationError> {
+        self.valid_direction_guard(token_in, token_out)?;
+        sim::marginal_price(&self.book.levels, filled, self.base_token.decimals)
+    }
+}
+
 #[typetag::serde]
 impl ProtocolSim for LiquoriceState {
+    #[expect(
+        clippy::todo,
+        reason = "the trait method returns no error, and a book has no separate fee to report"
+    )]
     fn fee(&self) -> f64 {
         todo!()
     }
@@ -135,7 +151,9 @@ impl ProtocolSim for LiquoriceState {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        todo!()
+        Err(TransitionError::DecodeError(
+            "Liquorice state is snapshot-based and does not support deltas".into(),
+        ))
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
@@ -188,6 +206,7 @@ impl RefusesQuote for LiquoriceAllPairsState {}
 mod tests {
     use std::str::FromStr;
 
+    use rstest::rstest;
     use tokio::time::Duration;
     use tycho_common::models::Chain;
 
@@ -267,6 +286,32 @@ mod tests {
         }
     }
 
+    /// After some input went in, the next unit is priced at the level where the fill stopped,
+    /// and a reverse swap is rejected like a token outside the pair.
+    #[rstest]
+    #[case::in_the_first_level(250_000_000_000_000_000, Some(3000.0))]
+    #[case::on_the_second_boundary(2_000_000_000_000_000_000, Some(2999.0))]
+    #[case::past_the_depth(7_000_000_000_000_000_000, None)]
+    fn the_price_after_a_fill_is_the_level_where_it_stopped(
+        #[case] filled: u64,
+        #[case] expected: Option<f64>,
+    ) {
+        let state = create_test_liquorice_state();
+
+        let price = state.marginal_price(&weth().address, &usdc().address, &BigUint::from(filled));
+        let reverse =
+            state.marginal_price(&usdc().address, &weth().address, &BigUint::from(filled));
+
+        match (price, expected) {
+            (Ok(price), Some(expected)) => assert_eq!(price, expected),
+            (Err(SimulationError::RecoverableError(message)), None) => {
+                assert_eq!(message, "No liquidity")
+            }
+            (price, _) => panic!("expected {expected:?}, got {price:?}"),
+        }
+        assert!(matches!(reverse, Err(SimulationError::InvalidInput(_, None))), "{reverse:?}");
+    }
+
     /// A Liquorice book prices one direction, so the reverse direction is rejected like a token
     /// outside the pair, by every method.
     #[test]
@@ -297,7 +342,7 @@ mod tests {
         ));
         assert!(is_invalid_pair(
             state
-                .get_limits(wbtc().address.clone(), state.quote_token.address.clone())
+                .get_limits(wbtc().address, state.quote_token.address.clone())
                 .map(|_| ())
         ));
     }
@@ -382,8 +427,8 @@ mod tests {
                 .get_limits(state.base_token.address.clone(), state.quote_token.address.clone())
                 .unwrap();
 
-            assert_eq!(sell_limit, BigUint::from((7.0 * 10f64.powi(18)) as u128));
-            assert_eq!(buy_limit, BigUint::from((20995.0 * 10f64.powi(6)) as u128));
+            assert_eq!(sell_limit, BigUint::from(7_000_000_000_000_000_000u128));
+            assert_eq!(buy_limit, BigUint::from(20_995_000_000u128));
         }
     }
 

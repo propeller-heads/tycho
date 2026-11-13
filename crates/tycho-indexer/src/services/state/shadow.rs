@@ -33,7 +33,7 @@ const MAX_LOGGED_VALUE_LEN: usize = 66;
 /// Decides which state requests shadow mode compares. The decision depends only on the request
 /// body, so a repeated request gets the same decision.
 #[derive(Debug)]
-pub(crate) struct Sampler {
+pub struct Sampler {
     /// A request is sampled when its hash is at or below this value. `0` samples nothing.
     threshold: u64,
 }
@@ -41,8 +41,13 @@ pub(crate) struct Sampler {
 impl Sampler {
     /// Samples the share `rate` of requests, from `0.0` (none) to `1.0` (all).
     pub(crate) fn new(rate: f64) -> Self {
-        // `as` saturates, so a rate of 1.0 gives `u64::MAX`.
-        Self { threshold: (rate * u64::MAX as f64) as u64 }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the saturating cast clamps the threshold: a rate of 1.0 or more gives u64::MAX, below 0.0 or NaN gives 0"
+        )]
+        let threshold = (rate * u64::MAX as f64) as u64;
+        Self { threshold }
     }
 
     /// Whether shadow mode compares `request`. Does no work when the rate is zero.
@@ -59,7 +64,7 @@ impl Sampler {
 }
 
 /// Shadow mode: the state service it compares with, and which requests it compares.
-pub(crate) struct Shadow {
+pub struct Shadow {
     service: Arc<StateService>,
     sampler: Sampler,
 }
@@ -109,7 +114,7 @@ impl Shadow {
 }
 
 /// What the cache path returned for a sampled request.
-pub(crate) enum CacheAnswer<R> {
+pub enum CacheAnswer<R> {
     Answered(R),
     /// The cache cannot answer the request; serve mode would ask the database path.
     Fallback,
@@ -180,7 +185,7 @@ impl Outcome {
 
 /// The result of comparing one sampled request.
 #[derive(Debug)]
-pub(crate) struct Comparison {
+pub struct Comparison {
     outcome: Outcome,
     /// For a mismatch or a known mismatch, where the answers differ, as `path: db=… cache=…`; at
     /// most [`MAX_LOGGED_DIFFS`]. Empty otherwise.
@@ -199,7 +204,7 @@ impl Comparison {
 
 /// Compares the two answers of a sampled `/contract_state` request. `unsaved_elsewhere` says
 /// whether another extractor has an unsaved change to an address at or below the version.
-pub(crate) fn compare_contract_state(
+pub fn compare_contract_state(
     db: &Result<dto::StateRequestResponse, RpcError>,
     cache: CacheAnswer<dto::StateRequestResponse>,
     unsaved_elsewhere: impl Fn(&Bytes) -> bool,
@@ -245,7 +250,7 @@ fn explained_by_unsaved_changes(
 }
 
 /// Compares the two answers of a sampled `/protocol_state` request.
-pub(crate) fn compare_protocol_state(
+pub fn compare_protocol_state(
     include_balances: bool,
     db: &Result<dto::ProtocolStateRequestResponse, RpcError>,
     cache: CacheAnswer<dto::ProtocolStateRequestResponse>,
@@ -410,7 +415,11 @@ fn to_value(value: &impl Serialize) -> Value {
 fn render(value: &Value) -> String {
     let text = match value {
         Value::String(text) => text.clone(),
-        other => other.to_string(),
+        other @ (Value::Null |
+        Value::Bool(_) |
+        Value::Number(_) |
+        Value::Array(_) |
+        Value::Object(_)) => other.to_string(),
     };
     if text.len() <= MAX_LOGGED_VALUE_LEN {
         return text;
@@ -422,7 +431,7 @@ fn render(value: &Value) -> String {
 
 /// The state endpoint a comparison belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Endpoint {
+pub enum Endpoint {
     ContractState,
     ProtocolState,
 }
@@ -439,7 +448,7 @@ impl Endpoint {
 }
 
 /// The request fields a comparison log names.
-pub(crate) struct SampledRequest<'a> {
+pub struct SampledRequest<'a> {
     pub(crate) endpoint: Endpoint,
     pub(crate) protocol_system: &'a str,
     pub(crate) version: &'a dto::VersionParam,
@@ -449,7 +458,7 @@ pub(crate) struct SampledRequest<'a> {
 /// Registers every comparison counter at zero, so the first event of a series counts as growth,
 /// and sets the sample-rate gauge. The duration histogram appears with its first sample, like the
 /// other histograms of the indexer.
-pub(crate) fn register_metrics(sample_rate: f64) {
+pub fn register_metrics(sample_rate: f64) {
     for endpoint in Endpoint::ALL {
         for outcome in Outcome::ALL {
             counter!(
@@ -502,14 +511,14 @@ fn record(request: &SampledRequest<'_>, comparison: &Comparison, elapsed: Durati
 }
 
 #[cfg(test)]
-pub(crate) mod testing {
+pub mod testing {
     use metrics_util::{
         debugging::{DebugValue, Snapshotter},
         MetricKind,
     };
 
     /// The comparison counters that moved, as `(endpoint, outcome, count)`, sorted.
-    pub(crate) fn moved_comparisons(snapshotter: &Snapshotter) -> Vec<(String, String, u64)> {
+    pub fn moved_comparisons(snapshotter: &Snapshotter) -> Vec<(String, String, u64)> {
         let mut moved: Vec<_> = snapshotter
             .snapshot()
             .into_vec()
@@ -545,6 +554,7 @@ mod test {
     };
     use rstest::rstest;
     use tycho_common::dto::PaginationResponse;
+    use tycho_storage::postgres::count_to_i64;
 
     use super::*;
     use crate::services::state::{
@@ -603,7 +613,10 @@ mod test {
 
     /// Both paths report `total` as the number of requested ids, not of returned entities.
     fn contracts(accounts: Vec<dto::ResponseAccount>, total: usize) -> dto::StateRequestResponse {
-        dto::StateRequestResponse::new(accounts, PaginationResponse::new(0, 100, total as i64))
+        dto::StateRequestResponse::new(
+            accounts,
+            PaginationResponse::new(0, 100, count_to_i64(total)),
+        )
     }
 
     fn compare_contracts(
@@ -872,7 +885,7 @@ mod test {
     ) -> dto::ProtocolStateRequestResponse {
         dto::ProtocolStateRequestResponse::new(
             states,
-            PaginationResponse::new(0, 100, total as i64),
+            PaginationResponse::new(0, 100, count_to_i64(total)),
         )
     }
 

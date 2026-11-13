@@ -121,7 +121,10 @@ impl FallbackProtocol {
             FallbackProtocol::UniswapV2 => &[UNISWAP_V2_FORKS],
             // Slipstream pools use Uniswap V3's `swap` and callback.
             FallbackProtocol::UniswapV3 => &[UNISWAP_V3_FORKS, SLIPSTREAMS_FORKS],
-            _ => &[],
+            FallbackProtocol::UniswapV4 |
+            FallbackProtocol::Curve |
+            FallbackProtocol::FluidV1 |
+            FallbackProtocol::AerodromeV1 => &[],
         }
     }
 
@@ -158,11 +161,8 @@ pub(super) struct FallbackSwap {
 }
 
 impl FallbackSwap {
-    pub(super) fn from_user_data(user_data: &Option<Bytes>) -> Result<Self, EncodingError> {
-        let Some(bytes) = user_data
-            .as_ref()
-            .filter(|bytes| !bytes.is_empty())
-        else {
+    pub(super) fn from_user_data(user_data: Option<&Bytes>) -> Result<Self, EncodingError> {
+        let Some(bytes) = user_data.filter(|bytes| !bytes.is_empty()) else {
             return Err(EncodingError::InvalidInput(
                 "Fallback swaps require user_data naming the fallback protocol \
                  (e.g. {\"fallback_protocol\":\"uniswap_v3\",\"pool\":\"0x…\"})"
@@ -356,7 +356,7 @@ impl SwapEncoder for FallbackSwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let fallback = FallbackSwap::from_user_data(swap.user_data())?;
+        let fallback = FallbackSwap::from_user_data(swap.user_data().as_ref())?;
         self.reject_unsupported(fallback.protocol)?;
         let pamm = bytes_to_address(&Self::pamm_address(swap)?)?;
         let token_in = bytes_to_address(&swap.token_in().address)?;
@@ -741,7 +741,7 @@ mod tests {
                 "020001f400000a0000000000000000000000000000000000000000".to_string(),
             ),
             (
-                FallbackSwapData::Curve { pool: pool.clone(), pool_type: 1, i: 0, j: 2 },
+                FallbackSwapData::Curve { pool, pool_type: 1, i: 0, j: 2 },
                 format!("03{USDC_WETH_USV3}010002"),
             ),
         ];
@@ -752,7 +752,7 @@ mod tests {
 
             assert_eq!(hex_swap, format!("{USDC}{WETH}{PAMM}{expected_tail}"), "{json}");
             let decoded =
-                FallbackSwap::from_user_data(&Some(Bytes::from(json.as_bytes()))).unwrap();
+                FallbackSwap::from_user_data(Some(&Bytes::from(json.as_bytes()))).unwrap();
             assert_eq!(decoded.data, data);
         }
     }

@@ -42,6 +42,10 @@ pub struct MockRFQState {
     pub received_origins: Arc<Mutex<Vec<Option<Bytes>>>>,
 }
 #[typetag::serde]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "the mock panics on trait methods that tests must not reach"
+)]
 impl ProtocolSim for MockRFQState {
     fn fee(&self) -> f64 {
         panic!("MockRFQState does not implement fee")

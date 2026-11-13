@@ -213,7 +213,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 receiver,
             )?;
         }
-        function => unimplemented!("function {function} is not implemented"),
+        function => return Err(Error::warning(format!("function {function} is not implemented"))),
     }
 
     Ok((state, vault, log))

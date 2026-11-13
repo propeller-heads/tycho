@@ -45,14 +45,18 @@ fn archive_existing_log() {
 
     // Create logs directory if it doesn't exist
     if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent).ok();
+        if let Err(e) = fs::create_dir_all(parent) {
+            eprintln!("Warning: Failed to create log directory: {e}");
+        }
     }
 
     // If log file exists, move it to the archive
     if log_path.exists() {
         // Remove old archive if it exists
         if archive_path.exists() {
-            fs::remove_file(archive_path).ok();
+            if let Err(e) = fs::remove_file(archive_path) {
+                eprintln!("Warning: Failed to remove old log archive: {e}");
+            }
         }
 
         // Move current log to archive

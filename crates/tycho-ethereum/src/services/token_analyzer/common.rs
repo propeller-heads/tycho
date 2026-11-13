@@ -7,13 +7,13 @@ use tycho_common::models::blockchain::BlockTag;
 /// Returns a deterministic address with no token balance, used as the transfer-out recipient.
 /// An address that never holds tokens catches exemptions some tokens grant to known addresses
 /// (e.g. their own Uniswap pools).
-pub(crate) fn arbitrary_recipient() -> Address {
+pub fn arbitrary_recipient() -> Address {
     let hash = keccak256(b"propeller");
     Address::from_slice(&hash[..20])
 }
 
 /// One simulated token transfer, seen through the receiver's balance.
-pub(crate) struct ObservedTransfer {
+pub struct ObservedTransfer {
     /// Amount the sender transferred.
     pub(crate) sent: U256,
     /// Receiver balance before the transfer.
@@ -51,9 +51,9 @@ impl ObservedTransfer {
 /// Returns the higher of the two fee rates. A transfer that credits the receiver with at least
 /// the amount sent has no fee. The result exceeds 10_000 when a receiver ends with less than it
 /// started. Errors if `balance_before + sent` or `shortfall * 10_000` overflows U256.
-pub(crate) fn calculate_fee_bps(
-    inbound: ObservedTransfer,
-    outbound: ObservedTransfer,
+pub fn calculate_fee_bps(
+    inbound: &ObservedTransfer,
+    outbound: &ObservedTransfer,
 ) -> Result<U256, String> {
     Ok(inbound
         .fee_bps()?
@@ -61,7 +61,7 @@ pub(crate) fn calculate_fee_bps(
 }
 
 /// Converts a tycho BlockTag to an alloy BlockNumberOrTag.
-pub(crate) fn map_block_tag(block: BlockTag) -> BlockNumberOrTag {
+pub fn map_block_tag(block: BlockTag) -> BlockNumberOrTag {
     match block {
         BlockTag::Finalized => BlockNumberOrTag::Finalized,
         BlockTag::Safe => BlockNumberOrTag::Safe,
@@ -73,11 +73,7 @@ pub(crate) fn map_block_tag(block: BlockTag) -> BlockNumberOrTag {
 }
 
 /// Builds a `TransactionRequest` for a read-only or impersonated call used in trace simulations.
-pub(crate) fn call_request(
-    from: Option<Address>,
-    to: Address,
-    calldata: Vec<u8>,
-) -> TransactionRequest {
+pub fn call_request(from: Option<Address>, to: Address, calldata: Vec<u8>) -> TransactionRequest {
     let mut req = TransactionRequest::default()
         .to(to)
         .input(TransactionInput::both(calldata.into()));
@@ -108,12 +104,12 @@ mod tests {
         let before_in = U256::from(before_in);
         let after_in = U256::from(after_in);
         calculate_fee_bps(
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: U256::from(amount),
                 balance_before: before_in,
                 balance_after: after_in,
             },
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: after_in - before_in,
                 balance_before: U256::from(recipient_before),
                 balance_after: U256::from(recipient_after),
@@ -161,12 +157,12 @@ mod tests {
     #[test]
     fn calculate_fee_bps_balance_near_max_errors() {
         let result = calculate_fee_bps(
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: U256::from(1_000_000),
                 balance_before: U256::MAX,
                 balance_after: U256::MAX,
             },
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: U256::ZERO,
                 balance_before: U256::ZERO,
                 balance_after: U256::ZERO,
@@ -180,12 +176,12 @@ mod tests {
     #[test]
     fn calculate_fee_bps_shortfall_near_max_errors() {
         let result = calculate_fee_bps(
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: U256::MAX,
                 balance_before: U256::ZERO,
                 balance_after: U256::ZERO,
             },
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: U256::ZERO,
                 balance_before: U256::ZERO,
                 balance_after: U256::ZERO,

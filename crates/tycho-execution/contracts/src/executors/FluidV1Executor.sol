@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
-import {
-    SafeERC20,
-    IERC20
-} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {TransferManager} from "../TransferManager.sol";
 import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 import {IFluidV1Dex} from "@interfaces/IFluidV1Dex.sol";
@@ -16,10 +13,12 @@ error FluidV1Executor__InvalidDataLength();
 error FluidV1Executor__InvalidCallback();
 
 contract FluidV1Executor is IExecutor, ICallback {
-    // keccak(FluidV1Executor#CURRENT_DEX)
-    // stores current dex address
-    bytes32 private constant _CURRENT_DEX_SLOT =
-        0x823205ddf0d345ca541c0f695a3f87b5dce7be9df5ecffce73a87e1ad796ad20;
+    // One directive per slot type: Slither 0.11.6 can fail to analyse a
+    // contract that uses `using TransientSlot for *`.
+    using TransientSlot for TransientSlot.AddressSlot;
+    TransientSlot.AddressSlot private constant _CURRENT_DEX_SLOT =
+        TransientSlot.AddressSlot
+        .wrap(keccak256("FluidV1Executor#CURRENT_DEX"));
     // dexCallback(address,amount)
     bytes4 private constant _CALLBACK_SELECTOR = 0x9410ae88;
 
@@ -42,7 +41,6 @@ contract FluidV1Executor is IExecutor, ICallback {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -55,27 +53,22 @@ contract FluidV1Executor is IExecutor, ICallback {
 
         if (!isNativeSell) {
             _setCurrentDex(dex);
-            // slither-disable-next-line unused-return
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             dex.swapInWithCallback(zero2one, amountIn, 0, receiver);
         } else {
-            // slither-disable-next-line arbitrary-send-eth,unused-return
+            // forge-lint: disable-next-item(arbitrary-send-eth) Sends the swap input to the dex the swap data names.
+            // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
             dex.swapIn{value: amountIn}(zero2one, amountIn, 0, receiver);
         }
     }
 
     // Stores dex address in transient storage
     function _setCurrentDex(IFluidV1Dex dex) internal {
-        // slither-disable-next-line assembly
-        assembly {
-            tstore(_CURRENT_DEX_SLOT, dex)
-        }
+        _CURRENT_DEX_SLOT.tstore(address(dex));
     }
 
     function _getCurrentDex() internal view returns (address dex) {
-        // slither-disable-next-line assembly
-        assembly {
-            dex := tload(_CURRENT_DEX_SLOT)
-        }
+        dex = _CURRENT_DEX_SLOT.tload();
     }
 
     function _decodeData(bytes calldata data)

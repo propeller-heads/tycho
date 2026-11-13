@@ -2,6 +2,8 @@
 
 This monorepo contains three language ecosystems — **Rust crates**, **Solidity/Foundry contracts**, and **Substreams** — each with their own CI workflows, plus a shared CD pipeline for Docker image delivery.
 
+Jobs install the Rust toolchains from the `rust-toolchain.toml` files (`rustup toolchain install` in the workspace's directory) and every other tool through `jdx/mise-action`, which installs the versions pinned in the root `mise.toml` and `mise.lock` and exports `RUST_NIGHTLY`, the toolchain for `cargo fmt` and `cargo clippy`. A workflow therefore runs the same tool versions a developer gets from `mise install`.
+
 Reusable build/deploy steps are delegated to [propeller-heads/ci-cd-templates](https://github.com/propeller-heads/ci-cd-templates).
 
 ---
@@ -52,7 +54,7 @@ Covers all Rust crates under `crates/` and `protocols/testing/`. Triggered on PR
 
 **Jobs (all run in parallel):**
 
-- **`lint`** — `cargo fmt` and `cargo clippy` on nightly toolchain.
+- **`lint`** — `cargo fmt` and `cargo clippy` on the `RUST_NIGHTLY` toolchain.
 - **`test-unit`** — Unit tests excluding anything requiring a database, RPC, or anvil.
 - **`test-db`** — Tests requiring a live Postgres instance. Spins up a custom Postgres Docker image (built from `docker/postgres.Dockerfile`) with pg_cron. Runs parallel and serial DB test suites separately.
 - **`doc`** — `cargo doc` with broken intra-doc link detection.
@@ -89,7 +91,7 @@ Covers Rust-based Substreams packages under `protocols/substreams/`. Only proces
 
 **Jobs:**
 
-- **`lint`** — Detects changed packages via a custom action, then runs `cargo fmt` and `cargo clippy` (nightly) for each.
+- **`lint`** — Detects changed packages via a custom action, then runs `cargo fmt` and `cargo clippy` (`RUST_NIGHTLY`) for each.
 - **`test`** — Builds each changed package targeting `wasm32-unknown-unknown` and runs its unit tests.
 
 ---
