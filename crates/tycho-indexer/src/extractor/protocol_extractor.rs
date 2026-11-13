@@ -10,6 +10,7 @@ use chrono::{Duration, NaiveDateTime};
 use deepsize::DeepSizeOf;
 use metrics::{counter, gauge, histogram};
 use mockall::automock;
+use num_bigint::BigUint;
 use prost::Message;
 use tokio::{sync::Mutex, task::JoinHandle};
 use tracing::{debug, error, info, info_span, instrument, trace, warn, Instrument};
@@ -685,54 +686,7 @@ where
             .into_iter()
             .map(|(addr, _)| addr)
             .collect::<Vec<_>>();
-        // Construct unkown tokens using rpc
-        let balance_map: HashMap<Address, (Address, Balance)> = msg
-            .txs_with_update
-            .iter()
-            .flat_map(|tx| {
-                tx.protocol_components
-                    .iter()
-                    // Filtering to keep only components with ChangeType::Creation
-                    .filter(|(_, c_change)| c_change.change == ChangeType::Creation)
-                    .filter_map(|(c_id, change)| {
-                        tx.state_updates
-                            .get(&change.id)
-                            .and_then(|state| {
-                                state
-                                    .updated_attributes
-                                    .get("balance_owner")
-                                    .cloned()
-                            })
-                            .or_else(|| {
-                                change
-                                    .contract_addresses
-                                    // TODO: Currently, it's assumed that the pool is always the
-                                    // first contract in the
-                                    // protocol component. This approach is a temporary
-                                    // workaround and needs to be revisited for a more robust
-                                    // solution.
-                                    .first()
-                                    .cloned()
-                                    .or_else(|| Bytes::from_str(&change.id).ok())
-                            })
-                            .map(|owner| (c_id, owner))
-                    })
-                    .filter_map(|(c_id, addr)| {
-                        tx.balance_changes
-                            .get(c_id)
-                            .map(|balances| {
-                                balances
-                                    .iter()
-                                    // We currently only keep the latest created pool for
-                                    // it's token
-                                    .map(move |(token, balance)| {
-                                        (token.clone(), (addr.clone(), balance.balance.clone()))
-                                    })
-                            })
-                    })
-                    .flatten()
-            })
-            .collect::<HashMap<_, _>>();
+        let balance_map = largest_new_pool_per_token(msg);
         let tf = TokenOwnerStore::new(balance_map);
         let existing_tokens = self
             .protocol_cache
@@ -2271,6 +2225,71 @@ impl ExtractorGateway for ExtractorPgGateway {
             .get_account_balances(&self.chain, Some(accounts), None)
             .await
     }
+}
+
+/// For each token of a component the message creates, the address holding that component's
+/// balance and its token balance at the end of the message: the analyzers simulate trades
+/// against it. A token in several new components gets the one with the largest balance. A
+/// component without a balance change in the message gets an empty balance, which the analyzer
+/// can still fund.
+fn largest_new_pool_per_token(msg: &BlockChanges) -> HashMap<Address, (Address, Balance)> {
+    let mut balance_owners = HashMap::new();
+    let mut balances: HashMap<(&str, &Address), &Balance> = HashMap::new();
+    for tx in &msg.txs_with_update {
+        for (component_id, state) in &tx.state_updates {
+            if let Some(owner) = state
+                .updated_attributes
+                .get("balance_owner")
+            {
+                balance_owners.insert(component_id.as_str(), owner.clone());
+            }
+        }
+        for (component_id, token_balances) in &tx.balance_changes {
+            for (token, balance) in token_balances {
+                balances.insert((component_id.as_str(), token), &balance.balance);
+            }
+        }
+    }
+
+    let mut largest: HashMap<Address, (Address, Balance)> = HashMap::new();
+    for tx in &msg.txs_with_update {
+        for (component_id, component) in &tx.protocol_components {
+            if component.change != ChangeType::Creation {
+                continue;
+            }
+            // TODO: Currently, it's assumed that the pool is always the first contract in the
+            // protocol component. This approach is a temporary workaround and needs to be
+            // revisited for a more robust solution.
+            let Some(owner) = balance_owners
+                .get(component_id.as_str())
+                .cloned()
+                .or_else(|| {
+                    component
+                        .contract_addresses
+                        .first()
+                        .cloned()
+                })
+                .or_else(|| Bytes::from_str(component_id).ok())
+            else {
+                continue;
+            };
+            for token in &component.tokens {
+                let balance = balances
+                    .get(&(component_id.as_str(), token))
+                    .map(|balance| (*balance).clone())
+                    .unwrap_or_default();
+                let is_larger = largest
+                    .get(token)
+                    .is_none_or(|(_, current)| {
+                        BigUint::from_bytes_be(&balance) > BigUint::from_bytes_be(current)
+                    });
+                if is_larger {
+                    largest.insert(token.clone(), (owner.clone(), balance));
+                }
+            }
+        }
+    }
+    largest
 }
 
 #[cfg(test)]
