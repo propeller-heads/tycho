@@ -44,6 +44,7 @@ use tycho_simulation::{
     },
 };
 use tycho_test::{
+    checks::tvl_only,
     execution::{
         encoding::{encode_swap, EXECUTOR_ADDRESS},
         models::{TychoExecutionInput, TychoExecutionResult},
@@ -61,10 +62,9 @@ use crate::{
         Tolerance,
     },
     execution, limits,
-    report::{drift, CheckId, Checks, LimitReport, Outcome, Report},
+    report::{drift, limit_report, CheckId, Checks, LimitReport, Outcome, Report},
     rpc::RPCProvider,
     state_registry::register_protocol,
-    tvl_only,
     tycho_rpc::TychoClient,
     tycho_runner::TychoRunner,
     utils::{build_spkg, extract_initial_block},
@@ -254,7 +254,7 @@ struct LimitDirection {
 impl LimitDirection {
     /// The limit and its declaration, as every `limits.*` result of the direction reports them.
     fn report(&self) -> LimitReport {
-        LimitReport::new(
+        limit_report(
             &self.limits,
             self.declared_by,
             Some((&self.max_input, &self.max_output)),
@@ -2388,9 +2388,9 @@ impl TestRunner {
             let report = match why {
                 Unchecked::ZeroLimit => {
                     let zero = BigUint::zero();
-                    LimitReport::new(limits, *declared_by, Some((&zero, &zero)), false)
+                    limit_report(limits, *declared_by, Some((&zero, &zero)), false)
                 }
-                Unchecked::NotQuoted => LimitReport::new(limits, *declared_by, None, false),
+                Unchecked::NotQuoted => limit_report(limits, *declared_by, None, false),
             };
             for check in CheckId::LIMITS {
                 match why {

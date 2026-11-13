@@ -469,8 +469,7 @@ fn tolerance_problems(
 }
 
 /// Which `limits` declaration a direction's limit comes from, most specific first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeclaredBy {
     /// The component's entry for the direction.
     Component,
@@ -480,6 +479,18 @@ pub enum DeclaredBy {
     Package,
     /// The package's `default`, or its one declaration for every direction.
     PackageDefault,
+}
+
+impl DeclaredBy {
+    /// The name a report gives it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeclaredBy::Component => "component",
+            DeclaredBy::ComponentDefault => "component_default",
+            DeclaredBy::Package => "package",
+            DeclaredBy::PackageDefault => "package_default",
+        }
+    }
 }
 
 /// A swap direction, as a `limits` declaration keys it: `"0x<token in>->0x<token out>"`.
