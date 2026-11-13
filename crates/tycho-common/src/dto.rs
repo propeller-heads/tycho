@@ -1476,6 +1476,7 @@ pub struct ProtocolComponentRequestResponse {
     /// Ids of the components in `protocol_components` that are paused. Clients should not track
     /// them.
     #[serde(default)]
+    #[schema(value_type = Vec<String>)]
     pub paused_component_ids: Vec<ComponentId>,
 }
 
