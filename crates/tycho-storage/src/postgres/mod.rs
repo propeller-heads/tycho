@@ -1534,6 +1534,58 @@ pub mod db_fixtures {
         account_id
     }
 
+    /// Inserts an account of the instance at `address`, with an empty title and no creation or
+    /// deletion data. Returns the account id.
+    pub async fn insert_instance_account(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        address: Bytes,
+    ) -> i64 {
+        use instance::schema::tycho::account;
+
+        diesel::insert_into(account::table)
+            .values(instance::orm::NewAccount {
+                instance_id,
+                address,
+                title: String::new(),
+                created_at: None,
+                creation_block: None,
+                creation_tx_hash: None,
+                deleted_at: None,
+                deletion_tx_hash: None,
+            })
+            .returning(account::id)
+            .get_result(conn)
+            .await
+            .expect("inserting the instance account failed")
+    }
+
+    /// Inserts the balance of `token` in an account of the instance, valid from 2020-01-01 00:00 at
+    /// transaction index 0.
+    pub async fn insert_instance_account_balance(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        account_id: i64,
+        token: Bytes,
+        balance: Bytes,
+    ) {
+        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        diesel::insert_into(instance::schema::tycho::account_balance::table)
+            .values(instance::orm::NewAccountBalance {
+                instance_id,
+                account_id,
+                token,
+                balance,
+                valid_from,
+                tx_index: 0,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the account balance failed");
+    }
+
     /// Inserts the extraction state of the instance at block 1, hash `0x01`, with the given block
     /// timestamp, no cursor and no attributes.
     pub async fn set_instance_head(
