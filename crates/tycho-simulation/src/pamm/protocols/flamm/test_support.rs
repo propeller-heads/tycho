@@ -364,6 +364,8 @@ pub(super) struct Seen {
     pub code_reads: HashMap<Address, usize>,
     pub views: HashMap<Address, usize>,
     pub params_reads: HashMap<Address, usize>,
+    /// Calls to a hook of any other view than `params()`, sent to it directly.
+    pub other_hook_calls: usize,
     pub pair_requests: Vec<RequestSeen>,
     pub hook_reads: Vec<HookReadSeen>,
     pub samples: Vec<SampleSeen>,
@@ -799,6 +801,9 @@ impl FakeNode {
         seen: &Mutex<Seen>,
     ) -> Result<Vec<u8>, Value> {
         if selector != paramsCall::SELECTOR {
+            seen.lock()
+                .map_err(revert_because)?
+                .other_hook_calls += 1;
             return Err(revert());
         }
         *seen

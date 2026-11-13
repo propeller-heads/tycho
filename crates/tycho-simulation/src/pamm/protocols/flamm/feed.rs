@@ -2159,6 +2159,84 @@ mod node_tests {
         assert_eq!(node.seen.lock().unwrap().params_reads[&HOOK], 3);
     }
 
+    /// A hook may keep its tuning row in a parameter record that a keeper's `setTuning`
+    /// publishes (an idle-entry hook: the record's address in slot 13's low 160 bits, zero until
+    /// a `setTuning` lands, and always on a locked hook, whose row in force is then the
+    /// construction's, from code). The feed reads neither the record nor `tuning()`: it reads
+    /// `params()`, whose leverage words 27-34 a record never moves, and the hook's answers to
+    /// `quotePair` and `levState`, which price on the row in force. So with no record, a record
+    /// that lands between two polls, or one that landed before the first, the feed reads the row
+    /// once and publishes what it publishes for a hook whose tuning words never move, with no
+    /// more storage read and no other call to the hook.
+    #[tokio::test]
+    async fn a_hooks_parameter_record_moves_no_read_of_the_feed() {
+        let baseline = record_polls(None, None).await;
+        for (first, second) in [(Some(1), Some(1)), (Some(1), Some(2)), (Some(2), Some(2))] {
+            let got = record_polls(first, second).await;
+            assert_eq!(got.0, baseline.0, "the books, tuning words {first:?} then {second:?}");
+            assert_eq!(got.1, 1, "params() read once");
+            assert_eq!(got.2, baseline.2, "no more storage read");
+            assert_eq!(got.3, 0, "no other call to the hook");
+        }
+    }
+
+    /// Two polls of one pool whose hook answers `params()` with tuning words of `first`, then of
+    /// `second` (`None`: zero, else distinct words of that seed), its leverage row the levered one
+    /// throughout: the states published, the `params()` reads, the storage reads and the other
+    /// calls to the hook.
+    async fn record_polls(
+        first: Option<u64>,
+        second: Option<u64>,
+    ) -> ([Vec<FlammPairState>; 2], usize, usize, usize) {
+        let hook = |seed: Option<u64>| {
+            let mut hook = FakeHook::levered();
+            if let (Some(seed), Some(params)) = (seed, hook.params.as_mut()) {
+                for (k, word) in params[..27].iter_mut().enumerate() {
+                    *word = U256::from(seed * 1_000_000 + k as u64 + 1);
+                }
+            }
+            hook
+        };
+        let node = FakeNode::spawn(CHAIN_ID, 0, vec![fake::pool(0x01)]).await;
+        node.chain
+            .lock()
+            .unwrap()
+            .hooks
+            .insert(HOOK, hook(first));
+        let feed = builder(&node, config(0.0))
+            .build()
+            .unwrap();
+        let mut catalogue = Catalogue::default();
+        let mut states = Vec::new();
+        for seed in [first, second] {
+            node.chain
+                .lock()
+                .unwrap()
+                .hooks
+                .insert(HOOK, hook(seed));
+            let snapshot = next_poll(&feed, &node, Some(&mut catalogue))
+                .await
+                .unwrap();
+            assert_eq!(snapshot.books.len(), 1);
+            states.push(
+                snapshot
+                    .books
+                    .values()
+                    .map(|book| state(book).clone())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let seen = node.seen.lock().unwrap();
+        let second_states = states.pop().unwrap();
+        let first_states = states.pop().unwrap();
+        (
+            [first_states, second_states],
+            seen.params_reads[&HOOK],
+            seen.storage_reads,
+            seen.other_hook_calls,
+        )
+    }
+
     /// Where answers carry a leverage label, the direction reads the pool's request once, as the
     /// router, at the first such answer that pays more than dust; the hook's curve fee with the
     /// same words, the input zeroed, where every answer carries that one label; and, last, one
