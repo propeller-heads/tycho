@@ -1,3 +1,27 @@
+## [0.519.0](https://github.com/propeller-heads/tycho/compare/0.518.0...0.519.0) (2026-11-13)
+
+
+### Features
+
+* **execution:** register the BaiBai executor on Base ([bd09181](https://github.com/propeller-heads/tycho/commit/bd091816722475c6325bd1312f75fcc1aa39b13d))
+* **execution:** register the BaiBai executor on Base ([#1793](https://github.com/propeller-heads/tycho/issues/1793)) ([d548efe](https://github.com/propeller-heads/tycho/commit/d548efe14508a27d2ae77726a51feb1a9f2bf9bb))
+
+## [0.518.0](https://github.com/propeller-heads/tycho/compare/0.517.1...0.518.0) (2026-11-13)
+
+
+### Features
+
+* **execution:** add Metric executors and fallbacks on Elysium ([#1791](https://github.com/propeller-heads/tycho/issues/1791)) ([4f6a000](https://github.com/propeller-heads/tycho/commit/4f6a0000409c9a10e2fcb91f367176bffe19b7c9))
+* **execution:** prepare Metric executors and fallbacks on Elysium ([166906d](https://github.com/propeller-heads/tycho/commit/166906d2df9f7ed9e6f12f36e52677dcc6b47a1e))
+
+## [0.517.1](https://github.com/propeller-heads/tycho/compare/0.517.0...0.517.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **router-trades:** imply the price of the side that did not value a trade ([3f1f029](https://github.com/propeller-heads/tycho/commit/3f1f029d087eb05c977bac291217fa8f6747733f))
+* **router-trades:** imply the price of the side that did not value a trade ([#1403](https://github.com/propeller-heads/tycho/issues/1403)) ([8a783a1](https://github.com/propeller-heads/tycho/commit/8a783a193be7bffd50e0f873531717d6497f56fe))
+
 ## [0.517.0](https://github.com/propeller-heads/tycho/compare/0.516.0...0.517.0) (2026-11-12)
 
 
