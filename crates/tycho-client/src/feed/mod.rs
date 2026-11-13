@@ -2306,6 +2306,128 @@ mod tests {
         shutdown_block_synchronizer(nanny_handle, rx).await;
     }
 
+    /// Starts a block synchronizer over two mocks, uniswap-v2 and uniswap-v3, whose first
+    /// messages carry blocks `v2_start` and `v3_start`. Returns the mocks, the nanny handle, the
+    /// feed receiver and the first feed.
+    async fn setup_block_sync_from(
+        block_time: Duration,
+        max_missed_blocks: u64,
+        v2_start: u8,
+        v3_start: u8,
+    ) -> (
+        MockStateSync,
+        MockStateSync,
+        JoinHandle<()>,
+        Receiver<BlockSyncResult<FeedMessage>>,
+        FeedMessage,
+    ) {
+        let v2_sync = MockStateSync::new();
+        let v3_sync = MockStateSync::new();
+        let block_sync =
+            BlockSynchronizer::new(block_time, Duration::from_millis(10), max_missed_blocks)
+                .register_synchronizer(
+                    ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v2".to_string() },
+                    v2_sync.clone(),
+                )
+                .register_synchronizer(
+                    ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v3".to_string() },
+                    v3_sync.clone(),
+                );
+        v2_sync
+            .send_header(header_message(v2_start))
+            .await
+            .expect("send failed");
+        v3_sync
+            .send_header(header_message(v3_start))
+            .await
+            .expect("send failed");
+        let (nanny_handle, mut rx) = block_sync
+            .run()
+            .await
+            .expect("BlockSynchronizer failed to start");
+        let first = receive_message(&mut rx).await;
+        (v2_sync, v3_sync, nanny_handle, rx, first)
+    }
+
+    /// A Ready stream that starts to replay blocks more than `max_missed_blocks` behind the tip
+    /// goes stale at once. A replay sends a message every round, so the stale timeout never
+    /// fires, and as Delayed the stream would hold every round for its `block_time` wait.
+    #[test(tokio::test)]
+    async fn test_ready_synchronizer_replaying_old_blocks_goes_stale() {
+        let block_time = Duration::from_millis(300);
+        let (v2_sync, v3_sync, nanny_handle, mut rx, first) =
+            setup_block_sync_from(block_time, 2, 10, 10).await;
+        assert_ready_at(&first, "uniswap-v3", 10, None);
+
+        for (block, old) in [(11, 5), (12, 6), (13, 7)] {
+            v3_sync
+                .send_header(header_message(old))
+                .await
+                .expect("send failed");
+            let feed = v2_round(&v2_sync, &mut rx, block, block_time / 2).await;
+
+            assert_ready_at(&feed, "uniswap-v2", u64::from(block), None);
+            assert!(
+                matches!(feed.sync_states.get("uniswap-v3"), Some(SynchronizerState::Stale(_))),
+                "v3 not stale at block {block}: {:?}",
+                feed.sync_states
+            );
+        }
+
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// A stream that starts more than `max_missed_blocks` behind the others starts stale, so its
+    /// replay does not hold the first rounds. It turns Ready once the replay reaches the tip.
+    #[test(tokio::test)]
+    async fn test_synchronizer_far_behind_at_startup_starts_stale() {
+        let block_time = Duration::from_millis(300);
+        let (v2_sync, v3_sync, nanny_handle, mut rx, first) =
+            setup_block_sync_from(block_time, 2, 10, 5).await;
+        assert!(
+            matches!(first.sync_states.get("uniswap-v3"), Some(SynchronizerState::Stale(_))),
+            "v3 not stale at startup: {:?}",
+            first.sync_states
+        );
+
+        v3_sync
+            .send_header(header_message(6))
+            .await
+            .expect("send failed");
+        let feed = v2_round(&v2_sync, &mut rx, 11, block_time / 2).await;
+        assert!(
+            matches!(feed.sync_states.get("uniswap-v3"), Some(SynchronizerState::Stale(_))),
+            "v3 not stale while replaying: {:?}",
+            feed.sync_states
+        );
+
+        for old in 7..=12 {
+            v3_sync
+                .send_header(header_message(old))
+                .await
+                .expect("send failed");
+        }
+        let feed = v2_round(&v2_sync, &mut rx, 12, block_time / 2).await;
+
+        assert_ready_at(&feed, "uniswap-v3", 12, None);
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// A stream exactly `max_missed_blocks` behind at startup can still catch up within a round,
+    /// so it starts Delayed, not stale.
+    #[test(tokio::test)]
+    async fn test_synchronizer_max_missed_blocks_behind_at_startup_starts_delayed() {
+        let (_v2_sync, _v3_sync, nanny_handle, rx, first) =
+            setup_block_sync_from(Duration::from_millis(300), 2, 10, 8).await;
+
+        assert!(
+            matches!(first.sync_states.get("uniswap-v3"), Some(SynchronizerState::Delayed(_))),
+            "v3 not delayed at startup: {:?}",
+            first.sync_states
+        );
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
     /// With every stream stale there is no round to keep up with, so each round still waits
     /// `block_time` rather than spinning the main loop.
     #[test(tokio::test)]
