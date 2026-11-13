@@ -15,8 +15,8 @@ use tracing::{debug_span, error, instrument, trace, warn, Instrument, Level};
 use tycho_common::{
     models::{
         protocol::{
-            ComponentBalance, ProtocolComponent, ProtocolComponentState,
-            ProtocolComponentStateDelta, QualityRange,
+            ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
+            ProtocolComponentState, ProtocolComponentStateDelta, QualityRange,
         },
         token::Token,
         Address, Balance, Chain, ChangeType, ComponentId, FinancialType, ImplementationType,
@@ -2023,6 +2023,118 @@ impl PostgresGateway {
             .collect::<HashMap<_, _>>();
 
         Ok(WithTotal { entity: result, total: Some(count) })
+    }
+
+    /// Inserts one open pause row per record, skipping components that already have one.
+    ///
+    /// Returns the ids of the rows inserted.
+    pub async fn pause_components(
+        &self,
+        chain: &Chain,
+        system: &str,
+        pauses: &[PauseRecord],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<ComponentId>, StorageError> {
+        use schema::component_pause::dsl as cp;
+
+        let chain_id = self.get_chain_id(chain)?;
+        let system_id = self.get_protocol_system_id(&system.to_string())?;
+        if pauses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows: Vec<_> = pauses
+            .iter()
+            .map(|pause| orm::NewComponentPause {
+                chain_id,
+                protocol_system_id: system_id,
+                component_id: &pause.component_id,
+                reason: pause.reason.as_deref(),
+                actor: pause.actor.as_deref(),
+                evidence_url: pause.evidence_url.as_deref(),
+            })
+            .collect();
+
+        // The only unique index besides the primary key allows one open row per component, so
+        // a conflict means the component is already paused.
+        diesel::insert_into(cp::component_pause)
+            .values(&rows)
+            .on_conflict_do_nothing()
+            .returning(cp::component_id)
+            .get_results(conn)
+            .await
+            .map_err(|err| storage_error_from_diesel(err, "ComponentPause", system, None).into())
+    }
+
+    /// Closes the open pause rows of the given components.
+    ///
+    /// Returns the ids of the rows closed.
+    pub async fn unpause_components(
+        &self,
+        chain: &Chain,
+        system: &str,
+        component_ids: &[&str],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<ComponentId>, StorageError> {
+        use schema::component_pause::dsl as cp;
+
+        let chain_id = self.get_chain_id(chain)?;
+        let system_id = self.get_protocol_system_id(&system.to_string())?;
+        if component_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        diesel::update(cp::component_pause)
+            .filter(cp::chain_id.eq(chain_id))
+            .filter(cp::protocol_system_id.eq(system_id))
+            .filter(cp::component_id.eq_any(component_ids))
+            .filter(cp::valid_to.is_null())
+            .set(cp::valid_to.eq(diesel::dsl::now))
+            .returning(cp::component_id)
+            .get_results(conn)
+            .await
+            .map_err(|err| storage_error_from_diesel(err, "ComponentPause", system, None).into())
+    }
+
+    /// Loads the open pause rows of a chain, ordered by protocol system and component id.
+    pub async fn get_paused_components(
+        &self,
+        chain: &Chain,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<ComponentPause>, StorageError> {
+        use schema::{component_pause::dsl as cp, protocol_system::dsl as ps};
+
+        let chain_id = self.get_chain_id(chain)?;
+        let rows: Vec<orm::OpenComponentPause> = cp::component_pause
+            .inner_join(ps::protocol_system)
+            .filter(cp::chain_id.eq(chain_id))
+            .filter(cp::valid_to.is_null())
+            .order_by((ps::name, cp::component_id))
+            .select((
+                ps::name,
+                cp::component_id,
+                cp::reason,
+                cp::actor,
+                cp::evidence_url,
+                cp::valid_from,
+            ))
+            .load(conn)
+            .await
+            .map_err(|err| {
+                storage_error_from_diesel(err, "ComponentPause", &chain.to_string(), None)
+            })?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| ComponentPause {
+                protocol_system: row.protocol_system,
+                record: PauseRecord {
+                    component_id: row.component_id,
+                    reason: row.reason,
+                    actor: row.actor,
+                    evidence_url: row.evidence_url,
+                },
+                paused_since: row.valid_from,
+            })
+            .collect())
     }
 }
 
