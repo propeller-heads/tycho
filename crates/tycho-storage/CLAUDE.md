@@ -28,6 +28,7 @@ postgres/
     ├── gateway.rs      — PostgresGatewayNew, inner gateway on the instance tables (renamed to PostgresGateway at cut-over)
     ├── read/           — its read methods, one file per domain
     │   ├── component.rs — protocol components and their TVL from the active instance of each protocol
+    │   ├── contract.rs — contracts, slots and account balances of a protocol's active instance at the latest version
     │   ├── snapshot.rs — begin and end calls that run every statement of one read in one read-only REPEATABLE READ snapshot
     │   ├── state.rs    — protocol state and component balances of the active instance at the latest version
     │   └── version.rs  — the check that the current tables can answer a version

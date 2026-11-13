@@ -423,6 +423,7 @@ where
             .db_gateway
             .get_contracts(
                 &chain,
+                &request.protocol_system,
                 paginated_addrs.as_deref(),
                 Some(&db_version),
                 true,
@@ -1906,7 +1907,7 @@ mod tests {
         let mut gw = MockGateway::new();
         let mock_response = Ok(WithTotal { entity: vec![expected.clone()], total: Some(10) });
         gw.expect_get_contracts()
-            .return_once(|_, _, _, _, _| Box::pin(async move { mock_response }));
+            .return_once(|_, _, _, _, _, _| Box::pin(async move { mock_response }));
 
         let mut mock_buffer = MockPendingDeltas::new();
         let buf_expected = Account::new(
@@ -1997,7 +1998,7 @@ mod tests {
         let mut gw = MockGateway::new();
         let mock_response = Ok(WithTotal { entity: vec![account.clone()], total: Some(1) });
         gw.expect_get_contracts()
-            .return_once(|_, _, _, _, _| Box::pin(async move { mock_response }));
+            .return_once(|_, _, _, _, _, _| Box::pin(async move { mock_response }));
         let service = StateService::new(
             new_windows(["uniswap_v2"], WindowConfig::default()),
             Arc::new(EntityCache::new()),
@@ -2169,7 +2170,7 @@ mod tests {
         let mut gw = MockGateway::new();
         let response = Ok(WithTotal { entity: vec![account], total: Some(1) });
         gw.expect_get_contracts()
-            .return_once(|_, _, _, _, _| Box::pin(async move { response }));
+            .return_once(|_, _, _, _, _, _| Box::pin(async move { response }));
         gw
     }
 
@@ -2251,7 +2252,7 @@ mod tests {
         let response = Ok(WithTotal { entity: vec![account.clone()], total: Some(1) });
         // The fold lands while the database path runs, between the two token reads.
         gw.expect_get_contracts()
-            .return_once(move |_, _, _, _, _| {
+            .return_once(move |_, _, _, _, _, _| {
                 folding
                     .fold(&crate::testing::aggregated_changes("uniswap_v2", 7, 7, Some(7)))
                     .unwrap();
@@ -2303,7 +2304,7 @@ mod tests {
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let mut gw = MockGateway::new();
         gw.expect_get_contracts()
-            .return_once(|_, _, _, _, _| {
+            .return_once(|_, _, _, _, _, _| {
                 Box::pin(async move { Err(StorageError::Unexpected("db down".to_string())) })
             });
         let address = Bytes::from(1u64).lpad(20, 0);
@@ -2570,7 +2571,7 @@ mod tests {
         let mut gw = MockGateway::new();
         gw.expect_get_contracts()
             .times(db_calls)
-            .returning(|_, _, _, _, _| {
+            .returning(|_, _, _, _, _, _| {
                 Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
             });
         let handler = state_routing_handler(gw, mode);
@@ -2697,7 +2698,7 @@ mod tests {
         let mut gw = MockGateway::new();
         gw.expect_get_contracts()
             .times(2)
-            .returning(|_, _, _, _, _| {
+            .returning(|_, _, _, _, _, _| {
                 Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
             });
         let handler = state_routing_handler(gw, CacheMode::Serve);
@@ -2926,7 +2927,7 @@ mod tests {
         let args_writer = observed_args.clone();
         let response = expected.clone();
         gw.expect_get_contracts()
-            .return_once(move |_, addresses, _, _, pagination| {
+            .return_once(move |_, _, addresses, _, _, pagination| {
                 *args_writer.lock().unwrap() =
                     Some((addresses.map(|a| a.to_vec()), pagination.cloned()));
                 Box::pin(async move { Ok(WithTotal { entity: vec![response], total: Some(1) }) })
@@ -2965,6 +2966,37 @@ mod tests {
         assert_eq!(state.accounts[0], expected.into());
         // Paging is over the requested address list, so the total is its length.
         assert_eq!(state.pagination.total, 2);
+    }
+
+    #[tokio::test]
+    async fn test_contract_state_passes_protocol_system() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_contracts()
+            .withf(|_, protocol_system, _, _, _, _| protocol_system == "uniswap_v2")
+            .times(1)
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        let req_handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let request = dto::StateRequestBody {
+            contract_ids: None,
+            protocol_system: "uniswap_v2".to_string(),
+            version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 0, page_size: 10 },
+        };
+
+        req_handler
+            .get_contract_state_inner(request)
+            .await
+            .unwrap();
     }
 
     /// Helper used to make tracing results comparisons deterministic.
@@ -4398,7 +4430,7 @@ plans:
         if should_pass {
             let mock_response = Ok(WithTotal { entity: vec![], total: Some(0) });
             gw.expect_get_contracts()
-                .return_once(|_, _, _, _, _| Box::pin(async move { mock_response }));
+                .return_once(|_, _, _, _, _, _| Box::pin(async move { mock_response }));
         }
 
         let mut mock_buffer = MockPendingDeltas::new();
