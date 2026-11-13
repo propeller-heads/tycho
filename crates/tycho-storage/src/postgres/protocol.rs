@@ -2025,6 +2025,26 @@ impl PostgresGateway {
         Ok(WithTotal { entity: result, total: Some(count) })
     }
 
+    /// Resolves a protocol system id from the cache, or from the table if another process added
+    /// the system after the cache was loaded.
+    async fn load_protocol_system_id(
+        &self,
+        system: &str,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<i64, StorageError> {
+        use schema::protocol_system::dsl as ps;
+
+        if let Ok(id) = self.get_protocol_system_id(&system.to_string()) {
+            return Ok(id);
+        }
+        ps::protocol_system
+            .filter(ps::name.eq(system))
+            .select(ps::id)
+            .first(conn)
+            .await
+            .map_err(|err| storage_error_from_diesel(err, "ProtocolSystem", system, None).into())
+    }
+
     /// Inserts one open pause row per record, skipping components that already have one.
     ///
     /// Returns the ids of the rows inserted.
@@ -2038,7 +2058,9 @@ impl PostgresGateway {
         use schema::component_pause::dsl as cp;
 
         let chain_id = self.get_chain_id(chain)?;
-        let system_id = self.get_protocol_system_id(&system.to_string())?;
+        let system_id = self
+            .load_protocol_system_id(system, conn)
+            .await?;
         if pauses.is_empty() {
             return Ok(Vec::new());
         }
