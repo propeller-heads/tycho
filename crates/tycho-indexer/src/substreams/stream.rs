@@ -106,6 +106,18 @@ fn should_retry_unauthenticated(block_received: bool, retries_used: u32) -> bool
     block_received && retries_used < MAX_UNAUTHENTICATED_RETRIES
 }
 
+/// Converts a block clock timestamp to Unix milliseconds.
+///
+/// Chains with sub-second blocks (for example Base and BSC) put the milliseconds of the block in
+/// `nanos`. Chains with whole-second block timestamps send zero `nanos`.
+fn timestamp_millis(ts: &prost_types::Timestamp) -> Result<u128, Error> {
+    let seconds = u128::try_from(ts.seconds)
+        .map_err(|_negative| anyhow!("Block timestamp {} is negative", ts.seconds))?;
+    let nanos = u128::try_from(ts.nanos)
+        .map_err(|_negative| anyhow!("Block timestamp nanos {} is negative", ts.nanos))?;
+    Ok(seconds * 1000 + nanos / 1_000_000)
+}
+
 async fn wait_for_next_retry(
     backoff: &mut impl Iterator<Item = Duration>,
     retry_count: &mut u32,
@@ -192,8 +204,7 @@ fn stream_blocks(
                                     if !block_scoped_data.is_partial || block_scoped_data.is_last_partial.is_some_and(|last_partial| last_partial) {
                                         if let Some(block_ts) = block.timestamp {
                                             let now = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards!?").as_millis();
-                                            let block_millis = u128::try_from(block_ts.seconds * 1000)
-                                                .map_err(|_overflow| anyhow::anyhow!("Block timestamp {} is negative", block_ts.seconds))?;
+                                            let block_millis = timestamp_millis(&block_ts)?;
                                             let lag = now.saturating_sub(block_millis);
                                             gauge!("substreams_lag_millis", "extractor" => extractor_id.clone()).set(lag as f64);
                                         }
