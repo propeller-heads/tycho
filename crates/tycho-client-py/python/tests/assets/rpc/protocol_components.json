@@ -41,5 +41,8 @@
     "page": 0,
     "page_size": 20,
     "total": 2
-  }
+  },
+  "paused_component_ids": [
+    "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc"
+  ]
 }
