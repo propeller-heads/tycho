@@ -483,3 +483,51 @@ fn select_field_probes(
     );
     probes
 }
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::address;
+    use tycho_common::models::token::TokenOwnerStore;
+
+    use super::*;
+
+    fn detector(chain: Chain) -> SimulationDetector {
+        let rpc = EthereumRpcClient::new("http://localhost:1").expect("client");
+        let finder = Arc::new(TokenOwnerStore::new(HashMap::new()));
+        SimulationDetector::new(&rpc, finder, chain)
+    }
+
+    #[test]
+    fn swaps_against_the_chains_wrapped_native_token() {
+        assert_eq!(
+            detector(Chain::Ethereum).wrapped_native,
+            Some(address!("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"))
+        );
+        assert_eq!(
+            detector(Chain::Base).wrapped_native,
+            Some(address!("4200000000000000000000000000000000000006"))
+        );
+        assert_eq!(
+            detector(Chain::Bsc).wrapped_native,
+            Some(address!("bb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"))
+        );
+        assert_eq!(detector(Chain::Starknet).wrapped_native, None);
+    }
+
+    #[tokio::test]
+    async fn a_pool_id_that_is_not_an_address_gives_no_liquidity() {
+        let token = Address::repeat_byte(7);
+        let pool_id = Bytes::from([1u8; 32]);
+        let owners = HashMap::from([(token.to_bytes(), (pool_id, Bytes::from(vec![1u8])))]);
+        let rpc = EthereumRpcClient::new("http://localhost:1").expect("client");
+        let finder = Arc::new(TokenOwnerStore::new(owners));
+        let detector = SimulationDetector::new(&rpc, finder, Chain::Ethereum);
+
+        let analysis = detector
+            .analyze_at(token, BlockTag::Latest)
+            .await
+            .expect("analysis");
+
+        assert_eq!(analysis.verdict, TokenVerdict::NoLiquidity);
+    }
+}
