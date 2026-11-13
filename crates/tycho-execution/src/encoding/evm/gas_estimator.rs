@@ -27,6 +27,9 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "pancakeswap_v3",
     "uniswap_v4",
     "uniswap_v4_hooks",
+    // Aqua0 settles through the Uniswap V4 executor, so its input moves inside the unlock
+    // callback.
+    "rfq:aqua0",
     "pancakeswap_infinity_cl",
     "pancakeswap_infinity_cl_hooks",
     "pancakeswap_infinity_bin",

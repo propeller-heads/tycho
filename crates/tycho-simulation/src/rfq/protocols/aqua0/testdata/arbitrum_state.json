@@ -29,60 +29,7 @@
       "tickUpper": -2,
       "liquidity": "3868053345"
      }
-    ],
-    "routePlan": {
-     "routeType": "same_chain",
-     "swapDirection": "zeroForOne",
-     "requestedAmount0": "10000000",
-     "requestedAmount1": "0",
-     "totalCapital0": "0",
-     "totalCapital1": "10235238",
-     "sameChainCapital0": "0",
-     "sameChainCapital1": "10235238",
-     "crossChainCapital0": "0",
-     "crossChainCapital1": "0",
-     "ranges": [
-      {
-       "tickLower": -55,
-       "tickUpper": -2,
-       "liquidity": "3868053345",
-       "lp": "0x9b080ef51af94d120ce7b23b9a375bc7b0f8a044",
-       "position": 0
-      }
-     ],
-     "executorContributions": [
-      {
-       "lp": "0x9b080ef51af94d120ce7b23b9a375bc7b0f8a044",
-       "sourceChainId": 42161,
-       "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-       "amount": "10235238"
-      }
-     ],
-     "backingContributions": [
-      {
-       "lp": "0x9b080ef51af94d120ce7b23b9a375bc7b0f8a044",
-       "sourceChainId": 42161,
-       "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-       "amount": "10235238"
-      }
-     ],
-     "routeLegs": [
-      {
-       "routeKind": "same_chain",
-       "reservationRole": "same_chain_lp",
-       "actor": "0x9b080ef51af94d120ce7b23b9a375bc7b0f8a044",
-       "actorChainId": 42161,
-       "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-       "amount": "10235238",
-       "tickLower": -55,
-       "tickUpper": -2,
-       "targetChainId": 42161
-      }
-     ],
-     "deltaExposures": [],
-     "repaymentObligations": [],
-     "diagnostics": []
-    }
+    ]
    },
    {
     "requestedAmountIn": "100000000",
@@ -97,60 +44,7 @@
       "tickUpper": -2,
       "liquidity": "3868053345"
      }
-    ],
-    "routePlan": {
-     "routeType": "same_chain",
-     "swapDirection": "zeroForOne",
-     "requestedAmount0": "100000000",
-     "requestedAmount1": "0",
-     "totalCapital0": "0",
-     "totalCapital1": "97750829",
-     "sameChainCapital0": "0",
-     "sameChainCapital1": "97750829",
-     "crossChainCapital0": "0",
-     "crossChainCapital1": "0",
-     "ranges": [
-      {
-       "tickLower": -514,
-       "tickUpper": -2,
-       "liquidity": "3868053345",
-       "lp": "0x9b080ef51af94d120ce7b23b9a375bc7b0f8a044",
-       "position": 0
-      }
-     ],
-     "executorContributions": [
-      {
-       "lp": "0x9b080ef51af94d120ce7b23b9a375bc7b0f8a044",
-       "sourceChainId": 42161,
-       "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-       "amount": "97750829"
-      }
-     ],
-     "backingContributions": [
-      {
-       "lp": "0x9b080ef51af94d120ce7b23b9a375bc7b0f8a044",
-       "sourceChainId": 42161,
-       "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-       "amount": "97750829"
-      }
-     ],
-     "routeLegs": [
-      {
-       "routeKind": "same_chain",
-       "reservationRole": "same_chain_lp",
-       "actor": "0x9b080ef51af94d120ce7b23b9a375bc7b0f8a044",
-       "actorChainId": 42161,
-       "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-       "amount": "97750829",
-       "tickLower": -514,
-       "tickUpper": -2,
-       "targetChainId": 42161
-      }
-     ],
-     "deltaExposures": [],
-     "repaymentObligations": [],
-     "diagnostics": []
-    }
+    ]
    }
   ],
   "oneForZero": []

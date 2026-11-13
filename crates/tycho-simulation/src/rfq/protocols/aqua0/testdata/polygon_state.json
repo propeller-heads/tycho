@@ -30,60 +30,7 @@
       "tickUpper": 2670,
       "liquidity": "1421601076"
      }
-    ],
-    "routePlan": {
-     "routeType": "same_chain",
-     "swapDirection": "oneForZero",
-     "requestedAmount0": "0",
-     "requestedAmount1": "10000000",
-     "totalCapital0": "8111593",
-     "totalCapital1": "0",
-     "sameChainCapital0": "8111593",
-     "sameChainCapital1": "0",
-     "crossChainCapital0": "0",
-     "crossChainCapital1": "0",
-     "ranges": [
-      {
-       "tickLower": 2540,
-       "tickUpper": 2670,
-       "liquidity": "1421601076",
-       "lp": "0xfca63c50066acfe952785d36c591a113294d9e53",
-       "position": 0
-      }
-     ],
-     "executorContributions": [
-      {
-       "lp": "0xfca63c50066acfe952785d36c591a113294d9e53",
-       "sourceChainId": 137,
-       "token": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
-       "amount": "8111593"
-      }
-     ],
-     "backingContributions": [
-      {
-       "lp": "0xfca63c50066acfe952785d36c591a113294d9e53",
-       "sourceChainId": 137,
-       "token": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
-       "amount": "8111593"
-      }
-     ],
-     "routeLegs": [
-      {
-       "routeKind": "same_chain",
-       "reservationRole": "same_chain_lp",
-       "actor": "0xfca63c50066acfe952785d36c591a113294d9e53",
-       "actorChainId": 137,
-       "token": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
-       "amount": "8111593",
-       "tickLower": 2540,
-       "tickUpper": 2670,
-       "targetChainId": 137
-      }
-     ],
-     "deltaExposures": [],
-     "repaymentObligations": [],
-     "diagnostics": []
-    }
+    ]
    }
   ]
  },

@@ -103,10 +103,11 @@ impl Aqua0FeedBuilder {
         if self.markets_refresh.is_zero() {
             return Err(FeedError::InvalidInput("markets_refresh must not be zero".into()));
         }
+        // Half the poll's deadline per request, so one hung pool cannot fail the whole poll.
         let client = Aqua0Client::new(
             &self.base_url,
             chain_id,
-            self.feed_config.request_timeout,
+            self.feed_config.request_timeout / 2,
             self.quote_timeout,
         );
         Ok(Aqua0Feed {

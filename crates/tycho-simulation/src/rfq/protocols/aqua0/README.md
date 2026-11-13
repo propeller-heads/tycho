@@ -22,7 +22,8 @@ are in the universe, and publishes one component per market. A market the backen
 or that has no quotable liquidity right now, is left out of the snapshot, which removes it.
 
 Each token is sampled at 1, 10, 100, 1,000 and 10,000 whole units unless `sample_sizes` names
-other sizes. Levels expire 10 seconds after the backend prices them.
+other sizes. Levels expire 10 seconds after the backend prices them. Gas per level is Aqua0's
+estimate from its recent fills on the chain with the same number of JIT ranges.
 
 Before a market is published, the client checks that `/state` describes the listed pool and
 class, that every address is 20 bytes, and that `keccak256(abi.encode(PoolKey))` from the
@@ -33,10 +34,9 @@ check is logged and skipped; the rest of the poll is published.
 
 `POST /quote` reserves LP backing for one exact-input fill until its deadline (45 seconds) and
 returns signed `hookData`. It is requested inside `encode_solutions`, so encode an Aqua0 route only
-to execute it. An approval that is not used on chain by its deadline, including one whose
-transaction reverted, counts against the caller: the backend answers `429` with `Retry-After`.
-The client then stops requesting approvals and publishes no Aqua0 markets until that time has
-passed, and an encode in the meantime fails with a recoverable error.
+to execute it. If anything in front of the API answers `429`, the client stops requesting
+approvals and publishes no Aqua0 markets until `Retry-After` has passed, and an encode in the
+meantime fails with a recoverable error.
 
 The quote is accepted only if it matches the request: schema, request id, component, chain, tokens,
 exact input, router and executor (both the Tycho router), a positive output, non-empty hook data and
@@ -48,8 +48,6 @@ an unexpired deadline.
 - One Aqua0 leg, the first hop, whose input equals the whole solution's input.
 - The `rfq:aqua0` encoder reuses the chain's `uniswap_v4` executor; there is no Aqua0 executor
   contract to deploy.
-
-Gas is estimated from the number of JIT ranges the sampled fill draws on.
 
 ```bash
 cargo test -p tycho-simulation --lib aqua0
