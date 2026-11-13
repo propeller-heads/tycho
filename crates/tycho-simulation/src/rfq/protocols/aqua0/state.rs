@@ -33,8 +33,9 @@ use crate::{
 };
 
 /// Gas for one Aqua0 fill when the backend sends no measured estimate: `PoolManager.swap` while
-/// the hook adds and removes each JIT range, fitted to Aqua0's Arbitrum fills since October 2026.
-const SWAP_GAS_BASE: u64 = 500_000;
+/// the hook adds and removes each JIT range. A one-range fill through the Arbitrum Tycho Router
+/// used 802,743 (`Aqua0.t.sol`).
+const SWAP_GAS_BASE: u64 = 600_000;
 const SWAP_GAS_PER_RANGE: u64 = 200_000;
 
 fn swap_gas(ranges: usize) -> BigUint {
@@ -439,8 +440,8 @@ mod tests {
                 .unwrap()
                 .gas
         };
-        assert_eq!(gas(100), BigUint::from(700_000u32));
-        assert_eq!(gas(150), BigUint::from(900_000u32));
+        assert_eq!(gas(100), BigUint::from(800_000u32));
+        assert_eq!(gas(150), BigUint::from(1_000_000u32));
     }
 
     #[test]
