@@ -13,7 +13,7 @@
 -- The other side's unit price is then implied from the trade itself, which is the only way the
 -- long tail gets a price at all: Tycho prices 29 tokens on unichain and 126 on arbitrum.
 -- Implying it needs only that side's decimals, which are token metadata: they come from Tycho's
--- token table whether or not the token has a fresh price.
+-- token table (or the pinned list) whether or not the token has a fresh price.
 --
 -- Age. Tycho keeps one current price per token, not a history. A stablecoin is worth 1 USD
 -- whenever the trade happened, so a stable-anchored trade is valued at any age. Every other basis
@@ -37,68 +37,83 @@
 \set price_max_age '3 hours'
 \endif
 
-WITH tycho_prices AS (
-    SELECT '0x' || encode(a.address, 'hex') AS token,
-           tp.price::numeric                AS price_raw,
-           t.decimals                       AS tycho_decimals
-    FROM :schema.token_price tp
-    JOIN :schema.token t ON t.id = tp.token_id
+-- The tokens this pass needs from Tycho: both sides of every unpriced trade, and the chain's
+-- pinned tokens (the anchor). Passed as a literal so the lookup below runs on the Tycho database
+-- instead of copying its whole token table across the link on every pass.
+SELECT COALESCE(array_agg(DISTINCT decode(substr(token, 3), 'hex')), '{}')::text AS needed_tokens
+FROM (
+    SELECT token_in AS token FROM trades
+    WHERE priced_at IS NULL AND chain = :'chain' AND tx_success AND call_success
+    UNION ALL
+    SELECT token_out FROM trades
+    WHERE priced_at IS NULL AND chain = :'chain' AND tx_success AND call_success
+    UNION ALL
+    SELECT address FROM preferred_tokens WHERE chain = :'chain'
+) needed
+WHERE token ~ '^0x[0-9a-f]{40}$'
+\gset
+
+-- Every needed token Tycho knows, with its decimals whether or not it is priced, and its price
+-- only while fresh. Decimals are token metadata, so a token without a fresh price can still have
+-- the price a trade implies for it.
+WITH tycho_tokens AS (
+    SELECT '0x' || encode(a.address, 'hex')                        AS token,
+           CASE WHEN tp.price > 0
+                     AND tp.modified_ts > now() - :'price_max_age'::interval
+                THEN tp.price::numeric END                          AS price_raw,
+           -- Tycho reads decimals() when it first sees a token and stores 18 if that call fails.
+           -- A failed call usually fails the token's analysis too (quality 10 or below), so an
+           -- 18 on such a token is not trusted.
+           CASE WHEN t.decimals = 18 AND t.quality <= 10 THEN NULL
+                ELSE t.decimals END                                 AS tycho_decimals
+    FROM :schema.token t
     JOIN :schema.account a ON a.id = t.account_id
-    WHERE tp.price > 0
-      AND tp.modified_ts > now() - :'price_max_age'::interval
+    LEFT JOIN :schema.token_price tp ON tp.token_id = t.id
+    -- A bare column against a constant array, so postgres_fdw sends the filter to Tycho.
+    WHERE a.address = ANY (:'needed_tokens'::bytea[])
 ),
 -- The router spends and receives the native token under this sentinel. One native token is
 -- 10^18 of its own raw units, which is what a Tycho price means.
-prices AS (
-    SELECT * FROM tycho_prices
+tokens AS (
+    SELECT * FROM tycho_tokens
     UNION ALL
     SELECT '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', power(10::numeric, 18), 18
 ),
--- Decimals of every token Tycho knows, priced or not, for the side whose price is implied. A
--- preferred token's pinned decimals win, as they do in `valued`.
-known_decimals AS (
-    SELECT DISTINCT ON (token) token, decimals
-    FROM (
-        SELECT pt.address AS token, pt.decimals, 0 AS rank
-        FROM preferred_tokens pt
-        WHERE pt.chain = :'chain'
-        UNION ALL
-        SELECT '0x' || encode(a.address, 'hex'), t.decimals, 1
-        FROM :schema.token t
-        JOIN :schema.account a ON a.id = t.account_id
-        UNION ALL
-        SELECT '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 18, 0
-    ) k
-    ORDER BY token, rank
-),
 anchor AS (
     SELECT percentile_cont(0.5) WITHIN GROUP (
-               ORDER BY p.price_raw / power(10::numeric, pt.decimals)
+               ORDER BY k.price_raw / power(10::numeric, pt.decimals)
            ) AS native_usd
     FROM preferred_tokens pt
-    JOIN prices p ON p.token = pt.address
+    JOIN tokens k ON k.token = pt.address
     WHERE pt.chain = :'chain'
       AND pt.is_stable
+      AND k.price_raw IS NOT NULL
 ),
+-- One row per known token. A pinned token's decimals win over Tycho's. `price_raw` is kept only
+-- when the token can value a trade: fresh, and for a pinned token inside its band (outside it,
+-- it is a copied symbol or a stale row, not a price). Its decimals stay usable either way.
 valued AS (
-    SELECT p.token,
-           p.price_raw,
-           COALESCE(pt.decimals, p.tycho_decimals)      AS decimals,
+    SELECT k.token,
+           CASE WHEN pt.address IS NULL
+                     OR (power(10::numeric, pt.decimals) / k.price_raw * a.native_usd)
+                        BETWEEN pt.min_usd AND pt.max_usd
+                THEN k.price_raw END                    AS price_raw,
+           COALESCE(pt.decimals, k.tycho_decimals)      AS decimals,
            (pt.address IS NOT NULL)                     AS preferred,
            COALESCE(pt.is_stable, false)                AS is_stable,
            COALESCE(pt.priority, 99)                    AS priority,
-           power(10::numeric, COALESCE(pt.decimals, p.tycho_decimals))
-               / p.price_raw * a.native_usd             AS unit_usd,
            a.native_usd
-    FROM prices p
+    FROM tokens k
     CROSS JOIN anchor a
     LEFT JOIN preferred_tokens pt
-           ON pt.chain = :'chain' AND pt.address = p.token
+           ON pt.chain = :'chain' AND pt.address = k.token
     WHERE a.native_usd IS NOT NULL
-      -- A pinned token outside its band is a copied symbol or a stale row, not a price.
-      AND (pt.address IS NULL
-           OR (power(10::numeric, pt.decimals) / p.price_raw * a.native_usd)
-               BETWEEN pt.min_usd AND pt.max_usd)
+),
+priced AS (
+    SELECT v.*,
+           power(10::numeric, v.decimals) / v.price_raw * v.native_usd AS unit_usd,
+           (v.preferred AND v.price_raw IS NOT NULL)                    AS can_anchor
+    FROM valued v
 ),
 sided AS (
     SELECT t.id,
@@ -106,22 +121,23 @@ sided AS (
            t.amount_in,
            t.amount_out,
            i.unit_usd AS in_unit, i.price_raw AS in_price_raw,
-           COALESCE(i.decimals, di.decimals) AS in_decimals,
-           i.preferred AS in_preferred, i.is_stable AS in_stable, i.priority AS in_priority,
+           -- A token Tycho does not know keeps the decimals the trade already has.
+           CASE WHEN i.token IS NULL THEN t.decimals_in ELSE i.decimals END AS in_decimals,
+           COALESCE(i.can_anchor, false) AS in_preferred, i.is_stable AS in_stable,
+           i.priority AS in_priority,
            o.unit_usd AS out_unit, o.price_raw AS out_price_raw,
-           COALESCE(o.decimals, do_.decimals) AS out_decimals,
-           o.preferred AS out_preferred, o.is_stable AS out_stable, o.priority AS out_priority,
+           CASE WHEN o.token IS NULL THEN t.decimals_out ELSE o.decimals END AS out_decimals,
+           COALESCE(o.can_anchor, false) AS out_preferred, o.is_stable AS out_stable,
+           o.priority AS out_priority,
            COALESCE(i.native_usd, o.native_usd) AS native_usd
     FROM trades t
-    LEFT JOIN valued i ON i.token = t.token_in
-    LEFT JOIN valued o ON o.token = t.token_out
-    LEFT JOIN known_decimals di ON di.token = t.token_in
-    LEFT JOIN known_decimals do_ ON do_.token = t.token_out
+    LEFT JOIN priced i ON i.token = t.token_in
+    LEFT JOIN priced o ON o.token = t.token_out
     WHERE t.priced_at IS NULL
       AND t.chain = :'chain'
       AND t.tx_success
       AND t.call_success
-      AND (i.token IS NOT NULL OR o.token IS NOT NULL)
+      AND (i.price_raw IS NOT NULL OR o.price_raw IS NOT NULL)
 ),
 chosen AS (
     SELECT s.*,

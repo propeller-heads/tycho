@@ -51,9 +51,11 @@ load_source_token() {
 	local decimals="$4"
 	local price="$5"
 	local age="$6"
+	local quality="${7:-100}"
 	docker exec -i "$container" psql -v ON_ERROR_STOP=1 -U tycho -d tycho \
 		-v id="$id" -v token_hex="$token_hex" -v decimals="$decimals" \
-		-v price="$price" -v age="$age" <"$workspace_dir/pricing/test_source.sql"
+		-v price="$price" -v age="$age" -v quality="$quality" \
+		<"$workspace_dir/pricing/test_source.sql"
 }
 
 docker network create "$test_network" >/dev/null
@@ -71,6 +73,8 @@ load_source_token "$base_db" 3 fff1111111111111111111111111111111111111 6 100000
 load_source_token "$base_db" 4 eee1111111111111111111111111111111111111 6 500000 "0 minutes"
 # pinned but priced far below its band, so it must be ignored rather than trusted.
 load_source_token "$base_db" 5 deadbeef00000000000000000000000000000000 18 10000000000000000000 "0 minutes"
+# failed analysis with the 18 Tycho stores when decimals() fails, and no fresh price.
+load_source_token "$base_db" 6 1818181818181818181818181818181818181818 18 1000000 "4 hours" 10
 
 docker exec -i "$main_db" psql -v ON_ERROR_STOP=1 -U tycho -d router_trades \
 	<"$workspace_dir/schema.sql"

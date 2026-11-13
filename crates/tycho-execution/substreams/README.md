@@ -242,8 +242,15 @@ a year old.
 Pinning is by address, never by symbol. Tycho holds many tokens with a copied symbol — base has
 about 40 `cbBTC` rows and ethereum a second 18-decimal `USDC` — and their prices are nonsense.
 `min_usd`/`max_usd` bound the resulting unit price so a pinned row that has drifted is dropped
-instead of trusted, and `decimals` is kept in the list rather than read from Tycho, whose token
-rows carry 18 for anything it has not analysed.
+instead of trusted, and `decimals` is kept in the list rather than read from Tycho.
+
+The implied side needs only its token's decimals, which are metadata rather than a price, so they
+are read from Tycho's `token` table whether or not the token has a fresh price (a pinned token's
+listed decimals win). Tycho reads `decimals()` when it first sees a token and stores 18 if that call
+fails, without marking it, so an 18 on a token that failed analysis (`quality` 10 or below) is not
+trusted: such a trade is still valued, but no price is implied for that side. A token Tycho does
+not know keeps the decimals its trade already has. Only the tokens of unpriced trades and the
+pinned list are looked up, as a constant array that postgres_fdw sends to the Tycho database.
 
 Age is the reason `price_source` exists. Tycho keeps one current price per token, not a history.
 A stablecoin is worth 1 USD whenever the trade happened, so a stable-anchored trade is valued at

@@ -78,4 +78,26 @@ INSERT INTO trades (
      true, true, '0x01', 'v3_1', 'single', 'transfer_from',
      '0x01', '0x01', '0x01', '0xfff1111111111111111111111111111111111111',
      '0xcccccccccccccccccccccccccccccccccccccccc', 1000000000, 0,
+     0, 1, 0, 1, '{}', true, false, false, 500000000),
+    -- the out token failed Tycho's analysis and carries the 18 Tycho stores when decimals()
+    -- fails: that 18 is not trusted, so the trade is valued but the out side gets no price
+    ('untrusted-decimals', 'base', 1, now() - interval '30 days', '0x0e', 0, 0,
+     true, true, '0x01', 'v3_1', 'single', 'transfer_from',
+     '0x01', '0x01', '0x01', '0xfff1111111111111111111111111111111111111',
+     '0x1818181818181818181818181818181818181818', 1000000000, 0,
      0, 1, 0, 1, '{}', true, false, false, 500000000);
+
+-- A token Tycho does not know keeps the decimals its trade already has: 1000 USD for 4 units
+-- of a 9-decimal token is 250 USD each.
+INSERT INTO trades (
+    id, chain, block_number, block_time, tx_hash, tx_index, call_index,
+    tx_success, call_success, router, router_version, strategy, funding,
+    eoa, msg_sender, receiver, token_in, token_out, amount_in, min_amount_out,
+    native_value, gas_used, n_tokens, n_hops, executors, state_committed, wrap_eth, unwrap_eth,
+    amount_out, decimals_out
+) VALUES
+    ('kept-decimals', 'base', 1, now() - interval '30 days', '0x0f', 0, 0,
+     true, true, '0x01', 'v3_1', 'single', 'transfer_from',
+     '0x01', '0x01', '0x01', '0xfff1111111111111111111111111111111111111',
+     '0x9999999999999999999999999999999999999999', 1000000000, 0,
+     0, 1, 0, 1, '{}', true, false, false, 4000000000, 9);

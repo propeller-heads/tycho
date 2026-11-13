@@ -5,7 +5,8 @@ CREATE TABLE IF NOT EXISTS account (
 CREATE TABLE IF NOT EXISTS token (
     id BIGINT PRIMARY KEY,
     account_id BIGINT NOT NULL UNIQUE REFERENCES account(id),
-    decimals INTEGER NOT NULL
+    decimals INTEGER NOT NULL,
+    quality INTEGER NOT NULL DEFAULT 100
 );
 CREATE TABLE IF NOT EXISTS token_price (
     token_id BIGINT PRIMARY KEY REFERENCES token(id),
@@ -15,7 +16,7 @@ CREATE TABLE IF NOT EXISTS token_price (
 
 INSERT INTO account (id, address)
 VALUES (:id, decode(:'token_hex', 'hex'));
-INSERT INTO token (id, account_id, decimals)
-VALUES (:id, :id, :decimals);
+INSERT INTO token (id, account_id, decimals, quality)
+VALUES (:id, :id, :decimals, :quality);
 INSERT INTO token_price (token_id, price, modified_ts)
 VALUES (:id, :price, now() - :'age'::interval);
