@@ -272,3 +272,41 @@ async fn eip1967_implementation(
         .filter(|address| !address.is_zero());
     Ok(implementation)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_addresses_packed_at_an_offset() {
+        let owner = Address::repeat_byte(0x11);
+        let mut word = B256::ZERO;
+        word[31] = 1;
+        word[11..31].copy_from_slice(owner.as_slice());
+        assert_eq!(address_at(&word, 1), Some(owner));
+        assert!(address_at(&word, 12).is_some());
+        assert_eq!(address_at(&word, 13), None);
+    }
+
+    #[test]
+    fn reads_the_implementation_slot_before_the_beacon_slot() {
+        let (implementation, beacon) = (Address::repeat_byte(0x42), Address::repeat_byte(0x43));
+        let (implementation_word, beacon_word) = (implementation.into_word(), beacon.into_word());
+        assert_eq!(
+            eip1967_target(implementation_word, beacon_word),
+            Some(Eip1967Target::Implementation(implementation))
+        );
+        assert_eq!(eip1967_target(B256::ZERO, beacon_word), Some(Eip1967Target::Beacon(beacon)));
+        assert_eq!(eip1967_target(B256::ZERO, B256::ZERO), None);
+    }
+
+    #[test]
+    fn recognises_minimal_proxies() {
+        let target = Address::repeat_byte(0x42);
+        let code =
+            [MINIMAL_PROXY_PREFIX.as_slice(), target.as_slice(), &MINIMAL_PROXY_SUFFIX].concat();
+        assert_eq!(minimal_proxy_target(&code), Some(target));
+        assert_eq!(minimal_proxy_target(&code[..code.len() - 1]), None);
+        assert_eq!(minimal_proxy_target(&[0x60, 0x80]), None);
+    }
+}
