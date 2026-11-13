@@ -9,3 +9,7 @@ mod runner;
 mod scenario;
 mod swap;
 mod trace;
+mod verdict;
+
+/// Identifies this analyzer and its version in stored analyses.
+pub const ANALYZER_NAME: &str = "simulation/1";
