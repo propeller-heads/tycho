@@ -345,6 +345,28 @@ diesel::table! {
         inserted_ts -> Timestamptz,
         modified_ts -> Timestamptz,
         quality -> Int4,
+        #[max_length = 32]
+        verdict -> Nullable<Varchar>,
+        buy_tax -> Nullable<Int8>,
+        transfer_tax -> Nullable<Int8>,
+        sell_tax -> Nullable<Int8>,
+        analyzed_block -> Nullable<Int8>,
+    }
+}
+
+diesel::table! {
+    token_analysis (token_id) {
+        token_id -> Int8,
+        #[max_length = 64]
+        analyzer -> Varchar,
+        reason -> Nullable<Text>,
+        pool -> Nullable<Bytea>,
+        gas -> Nullable<Int8>,
+        flags -> Jsonb,
+        external_calls -> Jsonb,
+        control_slots -> Jsonb,
+        inserted_ts -> Timestamptz,
+        modified_ts -> Timestamptz,
     }
 }
 
@@ -406,6 +428,7 @@ diesel::joinable!(protocol_component_holds_token -> token (token_id));
 diesel::joinable!(protocol_component_uses_entry_point -> entry_point (entry_point_id));
 diesel::joinable!(protocol_component_uses_entry_point -> protocol_component (protocol_component_id));
 diesel::joinable!(token -> account (account_id));
+diesel::joinable!(token_analysis -> token (token_id));
 diesel::joinable!(token_price -> token (token_id));
 diesel::joinable!(transaction -> block (block_id));
 
@@ -437,6 +460,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     protocol_system,
     protocol_type,
     token,
+    token_analysis,
     token_price,
     transaction,
     transaction_cleanup_progress,
