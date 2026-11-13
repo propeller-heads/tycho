@@ -171,7 +171,7 @@ async fn analyze_batch(
         .await?;
     let component_ids = token_owner
         .values()
-        .map(|(cid, _)| cid.as_str())
+        .map(|owner| owner.component_id.as_str())
         .collect::<Vec<_>>();
     let components = gw
         .get_protocol_components(&chain, None, Some(&component_ids), None, None)
@@ -197,9 +197,9 @@ async fn analyze_batch(
 
     let candidates_per_token = token_owner
         .into_iter()
-        .filter_map(|(address, (cid, _))| {
-            let Some(pc) = components.get(&cid) else {
-                warn!(component_id=?cid, "Failed to find component for id!");
+        .filter_map(|(address, owner)| {
+            let Some(pc) = components.get(&owner.component_id) else {
+                warn!(component_id=?owner.component_id, "Failed to find component for id!");
                 return None;
             };
             let candidates =
@@ -312,7 +312,7 @@ mod test {
     use mockall::Sequence;
     use rstest::rstest;
     use tycho_common::{
-        models::{protocol::ProtocolComponent, ChangeType},
+        models::{protocol::ProtocolComponent, token::TokenOwner, ChangeType},
         storage::WithTotal,
     };
 
@@ -616,17 +616,21 @@ mod test {
                     Ok(HashMap::from([
                         (
                             Bytes::from("0x228c6fcd7376177ff0cff304043f461189752750"),
-                            (
-                                "0x7ec8e94a9b379f6b90ee5af7b9a78624280b50ea".to_string(),
-                                Bytes::from("0x0186a0"),
-                            ),
+                            TokenOwner {
+                                protocol_system: "uniswap_v2".to_string(),
+                                component_id: "0x7ec8e94a9b379f6b90ee5af7b9a78624280b50ea"
+                                    .to_string(),
+                                balance: Bytes::from("0x0186a0"),
+                            },
                         ),
                         (
                             Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),
-                            (
-                                "0x7ec8e94a9b379f6b90ee5af7b9a78624280b50ea".to_string(),
-                                Bytes::from("0x0186a0"),
-                            ),
+                            TokenOwner {
+                                protocol_system: "uniswap_v2".to_string(),
+                                component_id: "0x7ec8e94a9b379f6b90ee5af7b9a78624280b50ea"
+                                    .to_string(),
+                                balance: Bytes::from("0x0186a0"),
+                            },
                         ),
                     ]))
                 })
@@ -715,7 +719,11 @@ mod test {
                 Box::pin(async move {
                     Ok(HashMap::from([(
                         Bytes::from(usdtb),
-                        (POOL.to_string(), Bytes::from("0x08c7be39eaf21f5b7efb68")),
+                        TokenOwner {
+                            protocol_system: "vm:curve".to_string(),
+                            component_id: POOL.to_string(),
+                            balance: Bytes::from("0x08c7be39eaf21f5b7efb68"),
+                        },
                     )]))
                 })
             });
