@@ -4778,6 +4778,25 @@ mod test {
         }
 
         #[tokio::test]
+        async fn test_pause_components_system_added_after_startup() {
+            let mut conn = setup_db().await;
+            let gw = setup_pause_gateway(&mut conn).await;
+            db_fixtures::insert_protocol_system(&mut conn, "new_system".to_owned()).await;
+
+            let paused = gw
+                .pause_components(
+                    &Chain::Ethereum,
+                    "new_system",
+                    &[pause("pool_a", "r")],
+                    &mut conn,
+                )
+                .await
+                .expect("pause failed");
+
+            assert_eq!(paused, vec!["pool_a"]);
+        }
+
+        #[tokio::test]
         async fn test_pause_components_unknown_system() {
             let mut conn = setup_db().await;
             let gw = setup_pause_gateway(&mut conn).await;
