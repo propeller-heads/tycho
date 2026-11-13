@@ -1841,4 +1841,44 @@ pub mod fixtures {
         let display_output = traced_entry_point.to_string();
         assert_eq!(display_output, "[uniswap_v3_pool_swap: 2 retriggers, 3 accessed addresses]");
     }
+
+    fn ids(ids: &[&str]) -> HashSet<ComponentId> {
+        ids.iter()
+            .map(|id| id.to_string())
+            .collect()
+    }
+
+    fn pause_changes(paused: &[&str], unpaused: &[&str]) -> BlockAggregatedChanges {
+        BlockAggregatedChanges {
+            paused_components: ids(paused),
+            unpaused_components: ids(unpaused),
+            ..Default::default()
+        }
+    }
+
+    #[rstest]
+    #[case::pause_then_unpause(pause_changes(&["a"], &[]), pause_changes(&[], &["a"]), &[], &["a"])]
+    #[case::unpause_then_pause(pause_changes(&[], &["a"]), pause_changes(&["a"], &[]), &["a"], &[])]
+    #[case::disjoint_ids(pause_changes(&["a"], &["b"]), pause_changes(&["c"], &["d"]), &["a", "c"], &["b", "d"])]
+    fn test_block_aggregated_changes_merge_pause_events(
+        #[case] earlier: BlockAggregatedChanges,
+        #[case] later: BlockAggregatedChanges,
+        #[case] expected_paused: &[&str],
+        #[case] expected_unpaused: &[&str],
+    ) {
+        let merged = earlier.merge(later);
+
+        assert_eq!(merged.paused_components, ids(expected_paused));
+        assert_eq!(merged.unpaused_components, ids(expected_unpaused));
+    }
+
+    #[test]
+    fn test_block_aggregated_changes_drop_state_keeps_pause_events() {
+        let changes = pause_changes(&["a"], &["b"]);
+
+        let dropped = changes.drop_state();
+
+        assert_eq!(dropped.paused_components, ids(&["a"]));
+        assert_eq!(dropped.unpaused_components, ids(&["b"]));
+    }
 }

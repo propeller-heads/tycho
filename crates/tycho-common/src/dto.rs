@@ -2746,6 +2746,84 @@ mod test {
         serde_json::from_str::<BlockAggregatedChanges>(&json_data).expect("parsing failed");
     }
 
+    fn ids(ids: &[&str]) -> HashSet<ComponentId> {
+        ids.iter()
+            .map(|id| id.to_string())
+            .collect()
+    }
+
+    fn pause_changes(paused: &[&str], unpaused: &[&str]) -> BlockAggregatedChanges {
+        BlockAggregatedChanges {
+            paused_components: ids(paused),
+            unpaused_components: ids(unpaused),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_block_changes_pause_events_round_trip() {
+        let mut model = create_models_block_changes();
+        model.paused_components = ids(&["a"]);
+        model.unpaused_components = ids(&["b"]);
+        let json = serde_json::to_string(&model).expect("serialize model");
+
+        let dto: BlockAggregatedChanges = serde_json::from_str(&json).expect("deserialize dto");
+        let back = models::blockchain::BlockAggregatedChanges::from(dto.clone());
+        let dto_json = serde_json::to_string(&dto).expect("serialize dto");
+        let dto_again: BlockAggregatedChanges =
+            serde_json::from_str(&dto_json).expect("deserialize dto again");
+
+        assert_eq!(dto.paused_components, ids(&["a"]));
+        assert_eq!(dto.unpaused_components, ids(&["b"]));
+        assert_eq!(BlockAggregatedChanges::from(model), dto);
+        assert_eq!(back.paused_components, ids(&["a"]));
+        assert_eq!(back.unpaused_components, ids(&["b"]));
+        assert_eq!(dto_again, dto);
+    }
+
+    #[test]
+    fn test_block_changes_without_pause_events() {
+        let mut json = serde_json::to_value(create_models_block_changes()).expect("serialize");
+        let fields = json
+            .as_object_mut()
+            .expect("json object");
+        fields.remove("paused_components");
+        fields.remove("unpaused_components");
+
+        let dto: BlockAggregatedChanges = serde_json::from_value(json.clone()).expect("dto");
+        let model: models::blockchain::BlockAggregatedChanges =
+            serde_json::from_value(json).expect("model");
+
+        assert!(dto.paused_components.is_empty());
+        assert!(dto.unpaused_components.is_empty());
+        assert!(model.paused_components.is_empty());
+        assert!(model.unpaused_components.is_empty());
+    }
+
+    #[rstest]
+    #[case::pause_then_unpause(pause_changes(&["a"], &[]), pause_changes(&[], &["a"]), &[], &["a"])]
+    #[case::unpause_then_pause(pause_changes(&[], &["a"]), pause_changes(&["a"], &[]), &["a"], &[])]
+    #[case::disjoint_ids(pause_changes(&["a"], &["b"]), pause_changes(&["c"], &["d"]), &["a", "c"], &["b", "d"])]
+    fn test_block_changes_merge_pause_events(
+        #[case] earlier: BlockAggregatedChanges,
+        #[case] later: BlockAggregatedChanges,
+        #[case] expected_paused: &[&str],
+        #[case] expected_unpaused: &[&str],
+    ) {
+        let merged = earlier.merge(later);
+
+        assert_eq!(merged.paused_components, ids(expected_paused));
+        assert_eq!(merged.unpaused_components, ids(expected_unpaused));
+    }
+
+    #[test]
+    fn test_block_changes_drop_state_keeps_pause_events() {
+        let dropped = pause_changes(&["a"], &["b"]).drop_state();
+
+        assert_eq!(dropped.paused_components, ids(&["a"]));
+        assert_eq!(dropped.unpaused_components, ids(&["b"]));
+    }
+
     #[test]
     fn test_parse_block_changes() {
         let json_data = r#"
