@@ -23,7 +23,7 @@ use tycho_common::{
             ComponentBalance, ProtocolComponent, ProtocolComponentState,
             ProtocolComponentStateDelta,
         },
-        token::{Token, TokenOwnerStore},
+        token::{AnalyzedToken, Token, TokenOwnerStore},
         Address, Balance, BlockHash, Chain, ChangeType, ComponentId, EntryPointId, ExtractionState,
         ExtractorIdentity, ProtocolType, TxHash,
     },
@@ -931,7 +931,7 @@ where
             .get_tokens(unknown_tokens, Arc::new(tf), BlockTag::Number(msg.block.number))
             .await
             .into_iter()
-            .map(|t| (t.address.clone(), t))
+            .map(|AnalyzedToken { token, .. }| (token.address.clone(), token))
             .chain(existing_tokens)
             .collect();
         Ok(new_tokens)
@@ -2842,7 +2842,7 @@ mod test {
                 addresses: Vec<Bytes>,
                 token_finder: Arc<dyn TokenOwnerFinding>,
                 block: BlockTag,
-            ) -> Vec<Token>;
+            ) -> Vec<AnalyzedToken>;
         }
     }
 
@@ -4670,7 +4670,7 @@ mod test {
             Chain::Ethereum,
             100,
         );
-        let ret = vec![t3.clone()];
+        let ret = vec![AnalyzedToken { token: t3.clone(), analysis: None }];
         #[expect(
             clippy::disallowed_methods,
             reason = "the test runs on a multi-thread runtime (`flavor = \"multi_thread\"`)"
@@ -7084,7 +7084,7 @@ mod test_serial_db {
                 addresses: Vec<Bytes>,
                 token_finder: Arc<dyn TokenOwnerFinding>,
                 block: BlockTag,
-            ) -> Vec<Token>;
+            ) -> Vec<AnalyzedToken>;
         }
     }
 
@@ -7111,7 +7111,7 @@ mod test_serial_db {
     // SETUP
     fn get_mocked_token_pre_processor() -> MockTokenPreProcessor {
         let mut mock_processor = MockTokenPreProcessor::new();
-        let new_tokens = vec![
+        let new_tokens = [
             Token::new(
                 &Bytes::from_str(WETH_ADDRESS).expect("Invalid address"),
                 "WETH",
@@ -7153,7 +7153,12 @@ mod test_serial_db {
         ];
         mock_processor
             .expect_get_tokens()
-            .returning(move |_, _, _| new_tokens.clone());
+            .returning(move |_, _, _| {
+                new_tokens
+                    .iter()
+                    .map(|token| AnalyzedToken { token: token.clone(), analysis: None })
+                    .collect()
+            });
 
         mock_processor
     }
