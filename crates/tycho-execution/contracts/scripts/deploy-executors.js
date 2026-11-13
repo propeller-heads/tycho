@@ -139,6 +139,8 @@ const deploy_protocols = {
         "uniswap_v3",
         "uniswap_v4",
         "native_wrapper",
+        "rfq:metric",
+        "fallback:rfq:metric",
     ],
 };
 

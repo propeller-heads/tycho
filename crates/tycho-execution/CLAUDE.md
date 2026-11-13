@@ -555,7 +555,7 @@ same `FallbackSwapData` `user_data`:
   inserts a length prefix before the venue data and appends the fallback; the Liquorice one drops the partial-fill
   fields and keeps the settlement calldata.
 
-The Metric router is deployed on Ethereum, Base, BSC, Robinhood, Arbitrum and Polygon, Bebop's on Ethereum and Base,
+The Metric router is deployed on Ethereum, Base, BSC, Robinhood, Arbitrum, Polygon and Elysium, Bebop's on Ethereum and Base,
 and Hashflow's on Ethereum. The Native and Liquorice routers are not deployed, so no chain lists their entries yet.
 The gas estimator charges a Metric leg its pool gas twice (the simulation runs the pool's swap), and a Bebop,
 Hashflow, Native or Liquorice leg the router's approval and output forward.
@@ -564,10 +564,11 @@ Hashflow, Native or Liquorice leg the router's approval and output forward.
 reads it. A chain lists a protocol when its router has the protocol's singleton (Uniswap V4, Fluid
 V1) and `executor_addresses.json` has an executor for it there; tests check both against the
 executor configs. A chain missing from the list has no router and supports nothing. Ethereum,
-Base, Robinhood, BSC, Arbitrum and Polygon are listed today. On BSC, PancakeSwap V2 pairs encode as Uniswap V2
+Base, Robinhood, BSC, Arbitrum, Polygon and Elysium are listed today. On BSC, PancakeSwap V2 pairs encode as Uniswap V2
 with `fee_bps` 25 and PancakeSwap V3 pools as Uniswap V3, quoted by simulation since BSC has no
 static quoter. On Polygon, QuickSwap V2 pairs encode as Uniswap V2 with `fee_bps` 30, and Uniswap V3
-and Ramses V3 pools are quoted by Eden's static quoter.
+and Ramses V3 pools are quoted by Eden's static quoter. Elysium has no static quoter either, so its
+Uniswap V3 pools and V3 forks (Kleos, ElysPump, StockiumSwap, AERO CL) are quoted by simulation.
 
 `FallbackProtocol` is `#[repr(u8)]`, so the discriminant is the protocol byte, and `strum` derives
 its snake-case variant name as the `user_data` tag, which the `FallbackSwapData` variant of the same
