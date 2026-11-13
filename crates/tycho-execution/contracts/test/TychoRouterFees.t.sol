@@ -218,7 +218,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
     /// keeps everything the pool produced above the quote.
     function testSingleSwapCapturesPositiveSlippage() public {
         vm.prank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageEnabled(true);
+        feeCalculator.setRouterPositiveSlippageBps(100_000_000);
 
         uint256 amountIn = 1 ether;
         // 1 WETH buys 2018.8 DAI on the USV2 pool, quoted at a round 2000
@@ -256,9 +256,66 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         );
     }
 
+    function testSingleSwapCapsPositiveSlippage() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterPositiveSlippageBps(100_000_000);
+        feeCalculator.setPositiveSlippageCap(clientFeeReceiver, 500_000); // 0.5%
+        vm.stopPrank();
+
+        uint256 amountIn = 1 ether;
+        // 1 WETH buys 2018.8 DAI on the USV2 pool, quoted at a round 2000
+        uint256 quotedAmountOut = 2000 ether;
+        uint256 poolAmountOut = 2018817438608734439722;
+        // 0.5% of the output (~10.09 DAI) is less than the ~18.8 DAI surplus
+        uint256 cap = poolAmountOut * 500_000 / 100_000_000;
+
+        deal(WETH_ADDR, ALICE, amountIn);
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
+
+        bytes memory swap = encodeSingleSwap(
+            address(usv2Executor),
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
+        );
+        ClientFeeParams memory feeParams = makeClientFeeParams(
+            0,
+            0,
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            quotedAmountOut,
+            quotedAmountOut,
+            ALICE,
+            swap,
+            tychoRouterAddr,
+            CLIENT_FEE_RECEIVER_PK
+        );
+        uint256 amountOut = tychoRouter.singleSwap(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            quotedAmountOut,
+            quotedAmountOut,
+            ALICE,
+            feeParams,
+            swap
+        );
+        vm.stopPrank();
+
+        // The router takes the capped surplus, ALICE keeps the rest of it
+        assertEq(amountOut, poolAmountOut - cap);
+        assertEq(IERC20(DAI_ADDR).balanceOf(ALICE), poolAmountOut - cap);
+        assertEq(
+            tychoRouter.balanceOf(
+                routerFeeReceiver, uint256(uint160(DAI_ADDR))
+            ),
+            cap
+        );
+    }
+
     function testSingleSwapSplitsPositiveSlippageWithClient() public {
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageEnabled(true);
+        feeCalculator.setRouterPositiveSlippageBps(100_000_000);
         feeCalculator.setClientPositiveSlippageShare(
             clientFeeReceiver, 50_000_000
         );

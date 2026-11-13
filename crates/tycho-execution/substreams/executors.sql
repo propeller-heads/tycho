@@ -91,6 +91,8 @@ INSERT INTO executors (chain, address, protocol_systems) VALUES
     ('elysium', '0x618bc57d1e133c861730e28b64c3ffe93ba264fe', ARRAY['aero_cl', 'elyspump_v3', 'kleos_v3', 'stockiumswap_v3', 'uniswap_v3']),
     ('elysium', '0x6b8dfbbef1f5ef947427985f7c27d1c50cd025ea', ARRAY['uniswap_v2']),
     ('elysium', '0x74145bbb8f3e51f7138ed3f7c96dfb3d56f784b5', ARRAY['uniswap_v4']),
+    ('elysium', '0x9a98eba41d56ed6172dc4167179f7e0f9638a974', ARRAY['rfq:metric']),
+    ('elysium', '0xb64e27b8ff972eb0af32fa6b4830de382cfd74f2', ARRAY['rfq:metric']),
     ('ethereum', '0x0017c84f2b3414514b67bfc9a63830c8e0e690d0', ARRAY['sushiswap_v2', 'uniswap_v2']),
     ('ethereum', '0x03ad6010948ac034c0bbf7e449217798b4504e1d', ARRAY['sky']),
     ('ethereum', '0x08ba9e85c8944098deaace0e164b7ec379a7e810', ARRAY['ring_swap_v2']),

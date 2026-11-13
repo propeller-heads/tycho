@@ -421,7 +421,9 @@
         "stockiumswap_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
         "aero_cl": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
         "aero_basic": "0x5aEE932D9E17D4bad31898Cf6fd8b6bFe701Ac0b",
-        "native_wrapper": "0x3FF36AE3cD6579f79B776D5861A17fDFde7495cf"
+        "native_wrapper": "0x3FF36AE3cD6579f79B776D5861A17fDFde7495cf",
+        "rfq:metric": "0x9a98EBA41d56eD6172Dc4167179f7e0f9638a974",
+        "fallback:rfq:metric": "0xB64E27B8ff972EB0aF32fA6b4830De382CfD74F2"
       },
       "superseded": []
     }

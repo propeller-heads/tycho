@@ -129,17 +129,23 @@ queryable via RPC:
 - `MAX_BPS_SQUARED = 10_000_000_000_000_000` — `MAX_BPS²`; the combined denominator when both fees use the
   sub-BPS scale
 
-**Positive slippage** (`_positiveSlippageEnabled`, enabled from the constructor — which emits
-`PositiveSlippageToggled(true)` — and toggled afterwards via `setPositiveSlippageEnabled`): when enabled, the router
-captures the surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees compute on
-`expectedAmountOut`. When disabled, fees compute on `actualAmountOut` and the surplus stays in the swap output. The flag
-also forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
-exemptions (`setPositiveSlippageExempt`, `_positiveSlippageExempt` mapping) opt a resolved client out while capture
-stays enabled globally: the surplus stays in the swap output, fees compute on `actualAmountOut`, and an exempt client
-with no fees skips the forced router hop.
+**Positive slippage** (`_routerPositiveSlippageBps`, 100% from the constructor — which emits
+`RouterPositiveSlippageBpsUpdated(0, MAX_BPS)` — and changed afterwards via `setRouterPositiveSlippageBps`): the
+router captures that part of the surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees
+compute on the output minus the captured amount. The rest of the surplus stays in the swap output. A router positive slippage bps above
+zero forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
+router positive slippage bps (`setCustomRouterPositiveSlippageBps`, `removeCustomRouterPositiveSlippageBps`,
+`_customRouterPositiveSlippageBps` mapping) replace the global router positive slippage bps for a resolved client. There is no switch
+that stops capture for every client: a global router positive slippage bps of zero leaves each custom router positive slippage bps in effect. A capture
+bps of zero leaves the surplus in the swap output, fees compute on `actualAmountOut`, and a client with no fees skips
+the forced router hop.
 Per-client shares (`setClientPositiveSlippageShare`, `_clientPositiveSlippageShareBps` mapping, fee units) give the
 resolved client part of the captured surplus, credited with its client fee; the router keeps the rest, rounded in its
 favour. The default share of zero leaves the full surplus to the router.
+Per-client caps (`setPositiveSlippageCap`, `_positiveSlippageCaps` mapping of `{isSet, capBps}`, fee units of
+`actualAmountOut`) limit the captured surplus of the resolved client's swaps, after the router positive slippage bps,
+to `actualAmountOut * capBps / MAX_BPS`. The surplus above the cap stays in the swap output and fees compute on it. A client without a cap is uncapped, and
+`getPositiveSlippageCap` reports `MAX_BPS` for it; setting `MAX_BPS` uncaps a client again.
 
 **Deduction order**: client fee calculated first, then router's cut of client fee subtracted from it, then router fee on
 output. `amountOut = amountIn - clientPortion - totalRouterFee`.
@@ -549,7 +555,7 @@ same `FallbackSwapData` `user_data`:
   inserts a length prefix before the venue data and appends the fallback; the Liquorice one drops the partial-fill
   fields and keeps the settlement calldata.
 
-The Metric router is deployed on Ethereum, Base, BSC, Robinhood, Arbitrum and Polygon, Bebop's on Ethereum and Base,
+The Metric router is deployed on Ethereum, Base, BSC, Robinhood, Arbitrum, Polygon and Elysium, Bebop's on Ethereum and Base,
 and Hashflow's on Ethereum. The Native and Liquorice routers are not deployed, so no chain lists their entries yet.
 The gas estimator charges a Metric leg its pool gas twice (the simulation runs the pool's swap), and a Bebop,
 Hashflow, Native or Liquorice leg the router's approval and output forward.
@@ -558,10 +564,11 @@ Hashflow, Native or Liquorice leg the router's approval and output forward.
 reads it. A chain lists a protocol when its router has the protocol's singleton (Uniswap V4, Fluid
 V1) and `executor_addresses.json` has an executor for it there; tests check both against the
 executor configs. A chain missing from the list has no router and supports nothing. Ethereum,
-Base, Robinhood, BSC, Arbitrum and Polygon are listed today. On BSC, PancakeSwap V2 pairs encode as Uniswap V2
+Base, Robinhood, BSC, Arbitrum, Polygon and Elysium are listed today. On BSC, PancakeSwap V2 pairs encode as Uniswap V2
 with `fee_bps` 25 and PancakeSwap V3 pools as Uniswap V3, quoted by simulation since BSC has no
 static quoter. On Polygon, QuickSwap V2 pairs encode as Uniswap V2 with `fee_bps` 30, and Uniswap V3
-and Ramses V3 pools are quoted by Eden's static quoter.
+and Ramses V3 pools are quoted by Eden's static quoter. Elysium has no static quoter either, so its
+Uniswap V3 pools and V3 forks (Kleos, ElysPump, StockiumSwap, AERO CL) are quoted by simulation.
 
 `FallbackProtocol` is `#[repr(u8)]`, so the discriminant is the protocol byte, and `strum` derives
 its snake-case variant name as the `user_data` tag, which the `FallbackSwapData` variant of the same
