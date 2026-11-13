@@ -1,3 +1,11 @@
+## [0.517.1](https://github.com/propeller-heads/tycho/compare/0.517.0...0.517.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **router-trades:** imply the price of the side that did not value a trade ([3f1f029](https://github.com/propeller-heads/tycho/commit/3f1f029d087eb05c977bac291217fa8f6747733f))
+* **router-trades:** imply the price of the side that did not value a trade ([#1403](https://github.com/propeller-heads/tycho/issues/1403)) ([8a783a1](https://github.com/propeller-heads/tycho/commit/8a783a193be7bffd50e0f873531717d6497f56fe))
+
 ## [0.517.0](https://github.com/propeller-heads/tycho/compare/0.516.0...0.517.0) (2026-11-12)
 
 
