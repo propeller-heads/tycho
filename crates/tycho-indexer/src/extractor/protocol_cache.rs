@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Local, NaiveDateTime};
 use deepsize::DeepSizeOf;
 use tokio::sync::RwLock;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, info_span, instrument, Instrument};
 use tycho_common::{
     models::{
         protocol::{ProtocolComponent, QualityRange},
@@ -56,6 +56,7 @@ pub struct ProtocolMemoryCache {
     components: Arc<RwLock<ProtocolComponentStore>>,
     max_price_age: chrono::Duration,
     gateway: Arc<dyn ProtocolGateway + Send + Sync>,
+    size_metric: bool,
 }
 
 #[derive(Default)]
@@ -77,7 +78,19 @@ impl ProtocolMemoryCache {
             tokens: Arc::new(RwLock::new(HashMap::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
             token_prices: Arc::new(RwLock::new(TokenPrices::default())),
+            size_metric: true,
         }
+    }
+
+    /// Sets whether extractors report the size of this cache (on by default). See
+    /// [`ProtocolMemoryCache::size_of`].
+    pub fn with_size_metric(mut self, enabled: bool) -> Self {
+        self.size_metric = enabled;
+        self
+    }
+
+    pub fn size_metric_enabled(&self) -> bool {
+        self.size_metric
     }
 
     #[instrument(skip_all)]
@@ -130,19 +143,35 @@ impl ProtocolMemoryCache {
     }
 
     /// Returns the approximate size of the cache in bytes.
+    ///
+    /// Walks every cached entry under its read lock, one part at a time.
+    #[instrument(skip_all)]
     pub async fn size_of(&self) -> usize {
-        self.chain.deep_size_of() +
-            self.tokens.read().await.deep_size_of() +
+        let tokens = async { self.tokens.read().await.deep_size_of() }
+            .instrument(info_span!("size_of_tokens"))
+            .await;
+        let prices = async {
             self.token_prices
                 .read()
                 .await
                 .prices
-                .deep_size_of() +
-            size_of::<NaiveDateTime>() +
+                .deep_size_of()
+        }
+        .instrument(info_span!("size_of_prices"))
+        .await;
+        let components = async {
             self.components
                 .read()
                 .await
-                .deep_size_of() +
+                .deep_size_of()
+        }
+        .instrument(info_span!("size_of_components"))
+        .await;
+        self.chain.deep_size_of() +
+            tokens +
+            prices +
+            size_of::<NaiveDateTime>() +
+            components +
             size_of::<Duration>() +
             size_of_val(&self.gateway)
     }
@@ -205,6 +234,7 @@ impl ProtocolDataCache for ProtocolMemoryCache {
             .collect::<Vec<_>>())
     }
 
+    #[instrument(skip_all, fields(n_addresses = addresses.len()))]
     async fn has_token(&self, addresses: &[Address]) -> Vec<bool> {
         let guard = self.tokens.read().await;
         addresses
@@ -213,16 +243,21 @@ impl ProtocolDataCache for ProtocolMemoryCache {
             .collect()
     }
 
+    #[instrument(skip_all)]
     async fn add_tokens<T: IntoIterator<Item = Token> + Send + Sync>(
         &self,
         tokens: T,
     ) -> Result<(), StorageError> {
-        let mut guard = self.tokens.write().await;
-        guard.extend(
-            tokens
-                .into_iter()
-                .map(|t| (t.address.clone(), t)),
-        );
+        let tokens = tokens
+            .into_iter()
+            .map(|t| (t.address.clone(), t))
+            .collect::<Vec<_>>();
+        // Most blocks bring no new token. Taking the write lock anyway would queue this
+        // extractor behind any reader, and every later reader behind it.
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        self.tokens.write().await.extend(tokens);
         Ok(())
     }
 
@@ -278,10 +313,18 @@ impl ProtocolDataCache for ProtocolMemoryCache {
             .collect())
     }
 
+    #[instrument(skip_all)]
     async fn add_components<T: IntoIterator<Item = ProtocolComponent> + Send + Sync>(
         &self,
         components: T,
     ) -> Result<(), StorageError> {
+        let components = components
+            .into_iter()
+            .collect::<Vec<_>>();
+        // See `add_tokens`: skip the write lock when there is nothing to add.
+        if components.is_empty() {
+            return Ok(());
+        }
         let mut guard = self.components.write().await;
         components.into_iter().for_each(|pc| {
             let components = guard
@@ -324,6 +367,30 @@ mod tests {
             .unwrap();
 
         assert_eq!(prices, vec![Some(1.0), Some(2.0)]);
+    }
+
+    #[tokio::test]
+    async fn test_empty_adds_do_not_wait_for_readers() {
+        let cache = ProtocolMemoryCache::new(
+            Chain::Ethereum,
+            Duration::seconds(60),
+            Arc::new(MockGateway::new()),
+        );
+        let wait = std::time::Duration::from_millis(100);
+
+        let tokens_reader = cache.tokens.read().await;
+        let components_reader = cache.components.read().await;
+
+        tokio::time::timeout(wait, cache.add_tokens(Vec::<Token>::new()))
+            .await
+            .expect("empty add_tokens waited for a reader")
+            .unwrap();
+        tokio::time::timeout(wait, cache.add_components(Vec::<ProtocolComponent>::new()))
+            .await
+            .expect("empty add_components waited for a reader")
+            .unwrap();
+
+        drop((tokens_reader, components_reader));
     }
 
     fn prices() -> HashMap<Bytes, f64> {

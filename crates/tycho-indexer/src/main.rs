@@ -226,6 +226,34 @@ fn spawn_jemalloc_stats_reporter() {
     });
 }
 
+/// Logs a warning when the extraction runtime starts a task late.
+///
+/// The task asks to wake every 100 ms. A wake-up more than 250 ms late means that the runtime's
+/// threads were busy, for example with long synchronous work inside a task. The warning carries
+/// the delay as `stall_ms`. The task runs on one thread at a time, so it can miss a stall that
+/// blocks only another thread.
+async fn watch_extraction_runtime_stalls() {
+    const PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+    const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+    let mut tick = tokio::time::interval(PERIOD);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await;
+    let mut last = tokio::time::Instant::now();
+    loop {
+        tick.tick().await;
+        // `tick` returns the planned instant, so measure the actual wake-up time.
+        let now = tokio::time::Instant::now();
+        let delay = now
+            .duration_since(last)
+            .saturating_sub(PERIOD);
+        if delay > MAX_DELAY {
+            warn!(stall_ms = delay.as_millis(), "Extraction runtime stalled");
+        }
+        last = now;
+    }
+}
+
 /// Starts continuous profiling if `PYROSCOPE_SERVER_URL` is set and not empty, and returns no
 /// agent otherwise. The CPU agent samples all threads `PYROSCOPE_SAMPLE_RATE` times per
 /// CPU-second (default 100). When jemalloc heap profiling is active (`_RJEM_MALLOC_CONF` with
@@ -393,6 +421,8 @@ fn run_indexer(global_args: &GlobalArgs, index_args: &IndexArgs) -> Result<(), E
 
         Ok::<_, ExtractionError>((extraction_tasks, other_tasks))
     })?;
+
+    extraction_runtime.spawn(watch_extraction_runtime_stalls());
 
     let extractor_ctrl_tx = control_tx.clone();
     extraction_runtime.spawn(async move {
@@ -616,6 +646,7 @@ async fn create_indexing_tasks(
         &rpc_client,
         extraction_runtime,
         substreams_args.enable_partial_blocks,
+        global_args.protocol_cache_size_metric,
     )
     .await
     .map_err(|e| ExtractionError::Setup(format!("Failed to create extractors: {e}")))?;
@@ -703,6 +734,7 @@ async fn build_all_extractors(
     rpc_client: &EthereumRpcClient,
     runtime: Option<&tokio::runtime::Handle>,
     partial_blocks: bool,
+    protocol_cache_size_metric: bool,
 ) -> Result<
     (
         Vec<ExtractorSupervisor>,
@@ -727,7 +759,8 @@ async fn build_all_extractors(
         chain,
         chrono::Duration::seconds(900),
         Arc::new(cached_gw.clone()),
-    );
+    )
+    .with_size_metric(protocol_cache_size_metric);
     protocol_cache.populate().await?;
 
     for extractor_config in config.extractors.values() {

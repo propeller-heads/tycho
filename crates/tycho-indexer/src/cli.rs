@@ -112,6 +112,18 @@ pub struct GlobalArgs {
     #[clap(long, env = "COMPONENT_INDEX", default_value_t = true, action = clap::ArgAction::Set)]
     pub component_index: bool,
 
+    /// Report `protocol_cache_size`, the memory size of the token and component cache, once a
+    /// minute per extractor. The size walk visits every cached entry under the cache's read
+    /// lock, which takes about 1 s on chains with several GB of cache. On by default; `false`
+    /// skips the walk and stops reporting the metric.
+    #[clap(
+        long,
+        env = "PROTOCOL_CACHE_SIZE_METRIC",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub protocol_cache_size_metric: bool,
+
     /// Name of the s3 bucket used to retrieve spkgs
     #[clap(env = "TYCHO_S3_BUCKET", long, default_value = "repo.propellerheads-propellerheads")]
     //Default is for backward compatibility but needs to be removed later
@@ -449,6 +461,7 @@ mod cli_tests {
                 entity_cache_shadow_sample_rate: 0.0,
                 disabled_rpc_caches: DisabledRpcCaches::default(),
                 component_index: true,
+                protocol_cache_size_metric: true,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,
@@ -586,6 +599,26 @@ mod cli_tests {
     }
 
     #[test]
+    fn test_arg_parsing_protocol_cache_size_metric_is_on_by_default() {
+        let default =
+            Cli::try_parse_from(args_with_delta_window("128", "1")).expect("parse errored");
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--protocol-cache-size-metric", "false"]);
+        let disabled = Cli::try_parse_from(args).expect("parse errored");
+
+        assert!(
+            default
+                .global_args
+                .protocol_cache_size_metric
+        );
+        assert!(
+            !disabled
+                .global_args
+                .protocol_cache_size_metric
+        );
+    }
+
+    #[test]
     fn test_arg_parsing_rejects_unknown_entity_cache_mode() {
         let mut args = args_with_delta_window("128", "1");
         args.splice(1..1, ["--entity-cache-mode", "on"]);
@@ -669,6 +702,7 @@ mod cli_tests {
                 entity_cache_shadow_sample_rate: 0.0,
                 disabled_rpc_caches: DisabledRpcCaches::default(),
                 component_index: true,
+                protocol_cache_size_metric: true,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,
