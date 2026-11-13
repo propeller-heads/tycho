@@ -20,7 +20,7 @@ use crate::{
             ComponentBalance, ProtocolComponent, ProtocolComponentState,
             ProtocolComponentStateDelta, QualityRange,
         },
-        token::Token,
+        token::{Token, TokenOwner},
         Address, BlockHash, Chain, ComponentId, ContractId, EntryPointId, ExtractionState,
         PaginationParams, ProtocolSystem, ProtocolType, StoreKey, TxHash,
     },
@@ -290,24 +290,19 @@ pub trait ProtocolGateway {
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<ProtocolComponent>>, StorageError>;
 
-    /// Retrieves owners of tokens
-    ///
-    /// Queries for owners (protocol components) of tokens that have a certain minimum
-    /// balance and returns a maximum aggregate of those in case there are multiple
-    /// owners.
+    /// Returns, per token, the component with the largest balance of the token, and the
+    /// component's protocol system.
     ///
     /// # Parameters
-    /// - `chain` The chain of the component
-    /// - `tokens` The tokens to query for, any component with at least one of these tokens is
-    ///   returned.
-    /// - `min_balance` A minimum balance we expect the component to have on any of the tokens
-    ///   mentioned in `tokens`.
+    /// - `chain`: the chain of the components.
+    /// - `tokens`: the tokens to find owners for. A token without a matching balance is absent.
+    /// - `min_balance`: only balances whose float value is at least this.
     async fn get_token_owners(
         &self,
         chain: &Chain,
         tokens: &[Address],
         min_balance: Option<f64>,
-    ) -> Result<HashMap<Address, (ComponentId, Bytes)>, StorageError>;
+    ) -> Result<HashMap<Address, TokenOwner>, StorageError>;
 
     async fn add_protocol_components(&self, new: &[ProtocolComponent]) -> Result<(), StorageError>;
 
