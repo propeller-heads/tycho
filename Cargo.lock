@@ -10105,6 +10105,7 @@ dependencies = [
  "chrono",
  "evmole",
  "futures 0.3.31",
+ "metrics",
  "mockito",
  "num-bigint",
  "pretty_assertions",
