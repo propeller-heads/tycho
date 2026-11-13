@@ -1473,6 +1473,10 @@ impl ProtocolComponentRequestParameters {
 pub struct ProtocolComponentRequestResponse {
     pub protocol_components: Vec<ProtocolComponent>,
     pub pagination: PaginationResponse,
+    /// Ids of the components in `protocol_components` that are paused. Clients should not track
+    /// them.
+    #[serde(default)]
+    pub paused_component_ids: Vec<ComponentId>,
 }
 
 impl ProtocolComponentRequestResponse {
@@ -1480,7 +1484,7 @@ impl ProtocolComponentRequestResponse {
         protocol_components: Vec<ProtocolComponent>,
         pagination: PaginationResponse,
     ) -> Self {
-        Self { protocol_components, pagination }
+        Self { protocol_components, pagination, paused_component_ids: Vec::new() }
     }
 }
 
