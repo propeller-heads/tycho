@@ -3230,7 +3230,7 @@ mod tests {
             TickInfo::new(6000, -outer).unwrap(),
         ];
         UniswapV4State::new(
-            (outer + inner) as u128,
+            u128::try_from(outer + inner).unwrap(),
             get_sqrt_ratio_at_tick(0).unwrap(),
             UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 3000 },
             0,
