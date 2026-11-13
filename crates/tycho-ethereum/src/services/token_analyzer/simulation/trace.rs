@@ -380,3 +380,245 @@ fn is_precompile(address: Address) -> bool {
         .iter()
         .all(|byte| *byte == 0)
 }
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::{Bytes as AlloyBytes, U256};
+
+    use super::*;
+
+    fn context() -> TokenContext {
+        let rpc = crate::rpc::EthereumRpcClient::new("http://localhost:1").expect("client");
+        TokenContext::new(
+            &rpc,
+            Address::repeat_byte(7),
+            Address::repeat_byte(8),
+            U256::from(1000),
+            (1, 1, 12),
+        )
+    }
+
+    fn frame(from: Address, to: Address, typ: &str, input: &[u8]) -> CallFrame {
+        CallFrame {
+            from,
+            to: Some(to),
+            typ: typ.to_string(),
+            input: AlloyBytes::copy_from_slice(input),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn collects_token_calls_except_to_known_parties_and_proxy_forwarding() {
+        let context = context();
+        let veto = Address::repeat_byte(9);
+        let library = Address::repeat_byte(3);
+        let transfer = [0xa9, 0x05, 0x9c, 0xbb];
+        let mut forward = frame(context.token, Address::repeat_byte(5), "DELEGATECALL", &transfer);
+        forward.calls = vec![
+            frame(context.token, veto, "CALL", &[1, 2, 3, 4, 5]),
+            frame(context.token, context.pool, "STATICCALL", &[0x09, 0x02, 0xf1, 0xac]),
+            frame(context.token, library, "DELEGATECALL", &[1, 1, 1, 1]),
+            frame(context.token, Address::repeat_byte(4), "CALL", &[]),
+            frame(context.token, Address::with_last_byte(1), "STATICCALL", &[0; 128]),
+        ];
+        let mut root = frame(context.pool, context.token, "CALL", &transfer);
+        root.calls = vec![forward];
+        let mut calls = Vec::new();
+        collect_calls(&root, &context, "buy", &mut calls);
+        let targets: Vec<Bytes> = calls
+            .iter()
+            .map(|c| c.target.clone())
+            .collect();
+        assert_eq!(
+            targets,
+            [veto.to_bytes(), library.to_bytes(), Address::repeat_byte(4).to_bytes()]
+        );
+        assert_eq!(calls[0].selector, Some(Bytes::from(vec![1, 2, 3, 4])));
+        assert_eq!(calls[1].selector, Some(Bytes::from(vec![1, 1, 1, 1])));
+        assert_eq!(calls[2].selector, None);
+    }
+
+    #[test]
+    fn skips_a_beacon_lookup_that_returns_the_forward_target() {
+        let context = context();
+        let (beacon, implementation) = (Address::repeat_byte(6), Address::repeat_byte(5));
+        let transfer = [0xa9, 0x05, 0x9c, 0xbb];
+        let lookup = |returns: Address| {
+            // `childImplementation()`: beacons name their getter differently.
+            let mut lookup = frame(context.token, beacon, "STATICCALL", &[0xda, 0x52, 0x57, 0x16]);
+            lookup.output = Some(AlloyBytes::from(returns.into_word().to_vec()));
+            lookup
+        };
+        let forward = || frame(context.token, implementation, "DELEGATECALL", &transfer);
+        let call_with = |calls: Vec<CallFrame>| {
+            let mut call = frame(context.pool, context.token, "CALL", &transfer);
+            call.calls = calls;
+            call
+        };
+
+        let mut calls = Vec::new();
+        collect_calls(
+            &call_with(vec![lookup(implementation), forward()]),
+            &context,
+            "buy",
+            &mut calls,
+        );
+        assert!(calls.is_empty());
+        collect_calls(&call_with(vec![lookup(implementation)]), &context, "buy", &mut calls);
+        collect_calls(
+            &call_with(vec![lookup(Address::repeat_byte(4)), forward()]),
+            &context,
+            "buy",
+            &mut calls,
+        );
+        let targets: Vec<Bytes> = calls
+            .iter()
+            .map(|c| c.target.clone())
+            .collect();
+        assert_eq!(targets, [beacon.to_bytes(), beacon.to_bytes()]);
+    }
+
+    #[test]
+    fn collects_the_implementations_a_call_into_the_token_is_forwarded_to() {
+        let context = context();
+        let transfer = [0xa9, 0x05, 0x9c, 0xbb];
+        let implementation = Address::repeat_byte(5);
+        let mut proxy_call = frame(context.pool, context.token, "CALL", &transfer);
+        proxy_call.calls = vec![
+            frame(context.token, implementation, "DELEGATECALL", &transfer),
+            frame(context.token, Address::repeat_byte(6), "DELEGATECALL", &[0x01]),
+        ];
+        let mut other_proxy = frame(context.pool, Address::repeat_byte(4), "CALL", &transfer);
+        other_proxy.calls = vec![frame(
+            Address::repeat_byte(4),
+            Address::repeat_byte(3),
+            "DELEGATECALL",
+            &transfer,
+        )];
+        let mut root = frame(context.trader, context.pool, "CALL", &[0x02]);
+        root.calls = vec![proxy_call, other_proxy];
+
+        let mut targets = BTreeSet::new();
+        collect_forward_targets(&root, context.token, &mut targets);
+        assert_eq!(targets, BTreeSet::from([implementation]));
+    }
+
+    #[test]
+    fn labels_calls_with_the_leg_they_happen_under() {
+        let context = context();
+        let tax = Address::repeat_byte(9);
+        let under = |caller: Address, input: Vec<u8>| {
+            let mut frame = frame(caller, context.token, "CALL", &input);
+            frame.calls = vec![frame_to(context.token, tax)];
+            frame
+        };
+        let mut sell_tx = frame(context.wallet, swap::router(), "CALL", &[0; 4]);
+        sell_tx.calls = vec![under(
+            swap::router(),
+            transferFromCall { _from: context.wallet, _to: context.pool, _value: U256::from(1) }
+                .abi_encode(),
+        )];
+        let mut swap_frame = frame(swap::router(), context.pool, "CALL", &[0; 4]);
+        swap_frame.calls = vec![under(
+            context.pool,
+            transferCall { _to: swap::router(), _value: U256::from(1) }.abi_encode(),
+        )];
+        let mut buy_tx = frame(swap::buyer(), swap::router(), "CALL", &[0; 4]);
+        buy_tx.calls = vec![
+            swap_frame,
+            under(
+                swap::router(),
+                transferCall { _to: context.wallet, _value: U256::from(1) }.abi_encode(),
+            ),
+        ];
+
+        let mut calls = Vec::new();
+        collect_calls(&buy_tx, &context, "read", &mut calls);
+        collect_calls(&sell_tx, &context, "read", &mut calls);
+        let legs: Vec<&str> = calls
+            .iter()
+            .map(|c| c.leg.as_str())
+            .collect();
+        assert_eq!(legs, ["buy", "transfer", "sell"]);
+    }
+
+    /// The buy as traced: the router calls the pair's `swap`, which reverts with "UniswapV2: K"
+    /// when `payout_error` is `None`, and the pair calls the token's `transfer` to the router,
+    /// which reverts with `payout_error` or returns `payout_output`.
+    fn swap_buy(
+        context: &TokenContext,
+        payout_error: Option<&str>,
+        payout_output: Vec<u8>,
+    ) -> CallFrame {
+        let mut payout = frame(
+            context.pool,
+            context.token,
+            "CALL",
+            &transferCall { _to: swap::router(), _value: U256::from(1) }.abi_encode(),
+        );
+        payout.error = payout_error.map(str::to_string);
+        payout.output = Some(payout_output.into());
+        let mut swap_frame = frame(swap::router(), context.pool, "CALL", &[0; 4]);
+        swap_frame.error = Some("execution reverted".to_string());
+        swap_frame.calls = vec![payout];
+        let mut buy_tx = frame(swap::buyer(), swap::router(), "CALL", &[0; 4]);
+        buy_tx.calls = vec![swap_frame];
+        buy_tx
+    }
+
+    #[test]
+    fn a_token_refusing_the_payout_is_told_apart_from_a_pair_refusing_the_swap() {
+        let context = context();
+        let reason = alloy::sol_types::Revert { reason: "Trading not open".to_string() };
+        let reverted = swap_buy(
+            &context,
+            Some("execution reverted"),
+            alloy::sol_types::SolError::abi_encode(&reason),
+        );
+        assert_eq!(refused_payout(&reverted, &context).as_deref(), Some("Trading not open"));
+        let returned_false = swap_buy(&context, None, vec![0; 32]);
+        assert_eq!(
+            refused_payout(&returned_false, &context).as_deref(),
+            Some("transfer returned false")
+        );
+        let paid = swap_buy(
+            &context,
+            None,
+            U256::from(1)
+                .to_be_bytes::<32>()
+                .to_vec(),
+        );
+        assert_eq!(refused_payout(&paid, &context), None);
+    }
+
+    fn frame_to(from: Address, to: Address) -> CallFrame {
+        frame(from, to, "CALL", &[1, 2, 3, 4])
+    }
+
+    #[test]
+    fn carry_forward_zeroes_slots_cleared_by_the_leg() {
+        let token = Address::repeat_byte(7);
+        let (kept, cleared) = (B256::repeat_byte(1), B256::repeat_byte(2));
+        let mut pre = AccountState::default();
+        pre.storage
+            .insert(kept, B256::repeat_byte(5));
+        pre.storage
+            .insert(cleared, B256::repeat_byte(6));
+        let mut post = AccountState::default();
+        post.storage
+            .insert(kept, B256::repeat_byte(9));
+        let diff = DiffMode {
+            pre: [(token, pre)].into_iter().collect(),
+            post: [(token, post)].into_iter().collect(),
+        };
+        let mut state = StateOverride::default();
+        apply_state_diff(&mut state, &diff);
+        let slots = state[&token]
+            .state_diff
+            .as_ref()
+            .expect("diff set");
+        assert_eq!(slots[&kept], B256::repeat_byte(9));
+        assert_eq!(slots[&cleared], B256::ZERO);
+    }
+}
