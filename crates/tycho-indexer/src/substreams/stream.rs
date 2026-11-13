@@ -419,6 +419,37 @@ mod tests {
 
     type MockRequests = std::sync::Arc<std::sync::Mutex<Vec<Request>>>;
 
+    #[test]
+    fn test_timestamp_millis_whole_seconds() {
+        let ts = prost_types::Timestamp { seconds: 1_794_582_934, nanos: 0 };
+
+        assert_eq!(timestamp_millis(&ts).unwrap(), 1_794_582_934_000);
+    }
+
+    #[test]
+    fn test_timestamp_millis_keeps_sub_second_part() {
+        // Base block 56962795: timestampMs 1794582934600.
+        let ts = prost_types::Timestamp { seconds: 1_794_582_934, nanos: 600_000_000 };
+
+        assert_eq!(timestamp_millis(&ts).unwrap(), 1_794_582_934_600);
+    }
+
+    #[test]
+    fn test_timestamp_millis_truncates_below_one_millisecond() {
+        let ts = prost_types::Timestamp { seconds: 1, nanos: 999_999 };
+
+        assert_eq!(timestamp_millis(&ts).unwrap(), 1_000);
+    }
+
+    #[test]
+    fn test_timestamp_millis_rejects_negative_values() {
+        let negative_seconds = prost_types::Timestamp { seconds: -1, nanos: 0 };
+        let negative_nanos = prost_types::Timestamp { seconds: 1, nanos: -1 };
+
+        assert!(timestamp_millis(&negative_seconds).is_err());
+        assert!(timestamp_millis(&negative_nanos).is_err());
+    }
+
     #[tokio::test]
     async fn test_unauthenticated_before_first_block_is_fatal() {
         let (mut stream, captured) = stream_against(vec![MockResponse::Unauthenticated]).await;
