@@ -43,3 +43,34 @@ interface ICurveStablePool {
 function isCurveStablePool(uint8 poolType) pure returns (bool) {
     return poolType == 1 || poolType == 10;
 }
+
+/// @notice Twocrypto pools with a policy slot (Twocrypto v3).
+interface ITwocryptoPolicyPool {
+    // slither-disable-next-line naming-convention
+    function POLICY() external view returns (address);
+}
+
+/// @notice The Twocrypto policy that charges a swap the fee of a grant signed
+/// by Fynd's controller key. Only the router may submit a grant, in the same
+/// transaction as the swap.
+interface ICurveFyndPolicy {
+    // forge-lint: disable-next-item(mixed-case-variable) Field names are the
+    // Vyper struct's, which define the EIP-712 type hash.
+    struct Grant {
+        address taker;
+        uint8 coin_in;
+        uint256 min_amount_in;
+        uint256 max_amount_in;
+        uint256 fee;
+        uint64 nonce;
+        uint32 deadline;
+    }
+
+    // forge-lint: disable-next-line(mixed-case-function) Vyper function name.
+    // slither-disable-next-line naming-convention
+    function submit_grant(
+        Grant calldata grant,
+        bytes calldata signature,
+        address taker
+    ) external;
+}
