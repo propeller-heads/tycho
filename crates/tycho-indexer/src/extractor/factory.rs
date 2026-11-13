@@ -540,6 +540,26 @@ pub(crate) fn stamped_block_before(earlier_blocks: &[Block]) -> Option<Block> {
     Some(block)
 }
 
+/// Reads block `number` from the node and gives it the timestamp every extractor stamps on it.
+///
+/// Use it for a block that is stored outside an extractor, so that the extractors find it with
+/// the same timestamp.
+pub async fn stamped_block(
+    rpc: &EthereumRpcClient,
+    chain: Chain,
+    number: u64,
+) -> Result<Block, ExtractionError> {
+    let mut block = rpc
+        .get_block(number, chain)
+        .await
+        .map_err(|err| ExtractionError::Setup(err.to_string()))?;
+    let earlier_blocks = earlier_blocks_in_second(rpc, chain, number).await?;
+    if let Some(before) = stamped_block_before(&earlier_blocks) {
+        block.ts = before.ts + Duration::microseconds(1);
+    }
+    Ok(block)
+}
+
 async fn ensure_spkg(spkg_path: &str, s3_bucket: Option<&str>) -> Result<(), ExtractionError> {
     if !Path::new(spkg_path).exists() {
         download_file_from_s3(
