@@ -1,20 +1,27 @@
-use std::collections::HashMap;
+use std::{cmp::Ordering, collections::HashMap};
 
 use chrono::NaiveDateTime;
 use diesel::{dsl::exists, pg::Pg, prelude::*};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::{
-    models::{protocol::QualityRange, token::Token, Address, Chain, PaginationParams},
+    models::{
+        protocol::QualityRange,
+        token::{Token, TokenOwner},
+        Address, Chain, ComponentId, PaginationParams,
+    },
     storage::{StorageError, WithTotal},
     Bytes,
 };
 
 use crate::postgres::{
     instance::{
-        active::active_instance_ids, gateway::PostgresGatewayNew, schema::tycho::component_balance,
+        active::active_instance_ids,
+        gateway::PostgresGatewayNew,
+        schema::tycho::{component_balance, protocol_component, protocol_instance},
     },
     orm,
-    schema::{token, token_price},
+    protocol::compare_balances,
+    schema::{protocol_system, token, token_price},
     PostgresError,
 };
 
@@ -111,6 +118,74 @@ impl PostgresGatewayNew {
             .map_err(PostgresError::from)?;
         Ok(prices.into_iter().collect())
     }
+
+    /// Returns, per token, the component of an active instance with the largest balance of the
+    /// token, and the component's protocol system.
+    ///
+    /// - `min_balance`: only balances whose float value is at least this.
+    ///
+    /// Balances compare as unsigned integers. On a tie, the component of the lower instance id,
+    /// then the lower component id, stays. A token without such a balance is absent. `NotFound`
+    /// for an unknown chain.
+    pub async fn get_token_owners(
+        &self,
+        chain: &Chain,
+        tokens: &[Address],
+        min_balance: Option<f64>,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<HashMap<Address, TokenOwner>, StorageError> {
+        self.get_chain_id(chain)?;
+        let instances = active_instance_ids(conn).await?;
+        if instances.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut query = component_balance::table
+            .inner_join(
+                protocol_component::table.on(protocol_component::instance_id
+                    .eq(component_balance::instance_id)
+                    .and(protocol_component::id.eq(component_balance::protocol_component_id))),
+            )
+            .inner_join(
+                protocol_instance::table
+                    .on(protocol_instance::id.eq(protocol_component::instance_id)),
+            )
+            .inner_join(
+                protocol_system::table
+                    .on(protocol_system::id.eq(protocol_instance::protocol_system_id)),
+            )
+            .filter(component_balance::instance_id.eq_any(&instances))
+            .filter(protocol_component::instance_id.eq_any(&instances))
+            .filter(component_balance::token.eq_any(tokens))
+            .order_by((component_balance::instance_id, component_balance::protocol_component_id))
+            .select((
+                component_balance::token,
+                protocol_system::name,
+                protocol_component::external_id,
+                component_balance::new_balance,
+            ))
+            .into_boxed::<Pg>();
+        if let Some(min_balance) = min_balance {
+            query = query.filter(component_balance::balance_float.ge(min_balance));
+        }
+        let rows: Vec<(Address, String, ComponentId, Bytes)> = query
+            .load(conn)
+            .await
+            .map_err(PostgresError::from)?;
+
+        let mut owners: HashMap<Address, TokenOwner> = HashMap::new();
+        for (token, protocol_system, component_id, balance) in rows {
+            let larger = owners
+                .get(&token)
+                .is_none_or(|current| {
+                    compare_balances(&balance, &current.balance) == Ordering::Greater
+                });
+            if larger {
+                owners.insert(token, TokenOwner { protocol_system, component_id, balance });
+            }
+        }
+        Ok(owners)
+    }
 }
 
 #[cfg(test)]
@@ -121,7 +196,11 @@ mod tests {
     use diesel::prelude::*;
     use diesel_async::{AsyncPgConnection, RunQueryDsl};
     use tycho_common::{
-        models::{protocol::QualityRange, token::Token, Address, Chain, PaginationParams},
+        models::{
+            protocol::QualityRange,
+            token::{Token, TokenOwner},
+            Address, Chain, PaginationParams,
+        },
         storage::StorageError,
         Bytes,
     };
@@ -142,19 +221,24 @@ mod tests {
         chain_id: i64,
         active: InstanceId,
         inactive: InstanceId,
+        uniswap_v4: InstanceId,
     }
 
-    /// "vm:curve" on ethereum, pointing to one instance, with a second `ready` instance it does
-    /// not point to.
+    /// "vm:curve" and "uniswap_v4" on ethereum, each pointing to an instance. "vm:curve" has a
+    /// second `ready` instance it does not point to.
     async fn setup(conn: &mut AsyncPgConnection) -> Setup {
         let chain_id = db_fixtures::insert_chain(conn, "ethereum").await;
         let curve_system_id =
             db_fixtures::insert_protocol_system(conn, "vm:curve".to_string()).await;
+        let uniswap_v4_system_id =
+            db_fixtures::insert_protocol_system(conn, "uniswap_v4".to_string()).await;
         let active = db_fixtures::insert_instance(conn, curve_system_id, "0.0.1").await;
         let inactive = db_fixtures::insert_instance(conn, curve_system_id, "0.0.2").await;
+        let uniswap_v4 = db_fixtures::insert_instance(conn, uniswap_v4_system_id, "0.0.1").await;
         db_fixtures::set_active_instance(conn, curve_system_id, Some(active)).await;
+        db_fixtures::set_active_instance(conn, uniswap_v4_system_id, Some(uniswap_v4)).await;
         let gateway = PostgresGatewayNew::from_connection(conn).await;
-        Setup { gateway, chain_id, active, inactive }
+        Setup { gateway, chain_id, active, inactive, uniswap_v4 }
     }
 
     /// Inserts a token at the `0x`-prefixed `address` and returns its id.
@@ -173,16 +257,37 @@ mod tests {
 
     /// Inserts a pool of the instance that holds `token`, with a balance of it.
     async fn traded(conn: &mut AsyncPgConnection, instance: InstanceId, token: &str) {
-        let id = db_fixtures::insert_instance_component(conn, instance, "pool", &[b(token)]).await;
+        pool(conn, instance, "pool", token, "0x01", 1.0).await;
+    }
+
+    /// Inserts the pool `external_id` of the instance with a balance of `token`.
+    async fn pool(
+        conn: &mut AsyncPgConnection,
+        instance: InstanceId,
+        external_id: &str,
+        token: &str,
+        balance: &str,
+        balance_float: f64,
+    ) {
+        let id =
+            db_fixtures::insert_instance_component(conn, instance, external_id, &[b(token)]).await;
         db_fixtures::insert_instance_component_balance(
             conn,
             instance,
             id,
             b(token),
-            b("0x01"),
-            1.0,
+            b(balance),
+            balance_float,
         )
         .await;
+    }
+
+    fn owner(protocol_system: &str, component_id: &str, balance: &str) -> TokenOwner {
+        TokenOwner {
+            protocol_system: protocol_system.to_string(),
+            component_id: component_id.to_string(),
+            balance: b(balance),
+        }
     }
 
     fn b(hex: &str) -> Bytes {
@@ -358,5 +463,73 @@ mod tests {
 
         assert!(matches!(tokens, Err(StorageError::NotFound(..))), "{tokens:?}");
         assert!(matches!(prices, Err(StorageError::NotFound(..))), "{prices:?}");
+    }
+
+    #[tokio::test]
+    async fn test_owner_is_the_largest_balance_across_protocols() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        pool(&mut conn, s.active, "curve_pool", A, "0xfe", 254.0).await;
+        pool(&mut conn, s.uniswap_v4, "v4_pool", A, "0x00ff", 255.0).await;
+
+        let owners = s
+            .gateway
+            .get_token_owners(&Chain::Ethereum, &[b(A)], None, &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(owners, HashMap::from([(b(A), owner("uniswap_v4", "v4_pool", "0x00ff"))]));
+    }
+
+    #[tokio::test]
+    async fn test_owners_skip_instances_that_are_not_active() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        pool(&mut conn, s.active, "active_pool", A, "0x01", 1.0).await;
+        pool(&mut conn, s.inactive, "inactive_pool", A, "0xff", 255.0).await;
+
+        let owners = s
+            .gateway
+            .get_token_owners(&Chain::Ethereum, &[b(A)], None, &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(owners, HashMap::from([(b(A), owner("vm:curve", "active_pool", "0x01"))]));
+    }
+
+    #[tokio::test]
+    async fn test_owners_respect_min_balance() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        pool(&mut conn, s.active, "pool", A, "0x0a", 10.0).await;
+
+        let below = s
+            .gateway
+            .get_token_owners(&Chain::Ethereum, &[b(A)], Some(100.0), &mut conn)
+            .await
+            .unwrap();
+        let above = s
+            .gateway
+            .get_token_owners(&Chain::Ethereum, &[b(A)], Some(5.0), &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(below, HashMap::new());
+        assert_eq!(above, HashMap::from([(b(A), owner("vm:curve", "pool", "0x0a"))]));
+    }
+
+    #[tokio::test]
+    async fn test_token_without_balance_has_no_owner() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        pool(&mut conn, s.active, "pool", A, "0x01", 1.0).await;
+
+        let owners = s
+            .gateway
+            .get_token_owners(&Chain::Ethereum, &[b(A), b(B)], None, &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(owners, HashMap::from([(b(A), owner("vm:curve", "pool", "0x01"))]));
     }
 }
