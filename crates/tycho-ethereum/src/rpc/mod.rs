@@ -2381,14 +2381,17 @@ mod tests {
         };
         let payload: SimulatePayload =
             SimulatePayload::default().extend(alloy::rpc::types::simulate::SimBlock {
-                block_overrides: Some(block_overrides),
+                block_overrides: Some(block_overrides.clone()),
                 state_overrides: None,
                 calls: vec![],
             });
+        let options = GethDebugTracingCallOptions::default().with_block_overrides(block_overrides);
 
         let payload = with_spec_block_override_names(&payload, "payload").unwrap();
+        let options = with_spec_block_override_names(&options, "options").unwrap();
 
         let expected = json!({"number": "0x7", "prevRandao": B256::repeat_byte(1)});
         assert_eq!(payload["blockStateCalls"][0]["blockOverrides"], expected);
+        assert_eq!(options["blockOverrides"], expected);
     }
 }
