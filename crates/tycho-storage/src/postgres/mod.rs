@@ -1800,6 +1800,7 @@ pub mod db_fixtures {
             schema::token::tax.eq(10),
             schema::token::gas.eq(vec![10]),
             schema::token::quality.eq(quality),
+            schema::token::address.eq(hex::decode(address).unwrap()),
         ));
         (
             account_id,
