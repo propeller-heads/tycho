@@ -14,8 +14,8 @@ use tycho_common::{
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
-            ComponentBalance, ProtocolComponent, ProtocolComponentState,
-            ProtocolComponentStateDelta, QualityRange,
+            ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
+            ProtocolComponentState, ProtocolComponentStateDelta, QualityRange,
         },
         token::Token,
         Address, Chain, ComponentId, ContractId, EntryPointId, ExtractionState, PaginationParams,
@@ -702,6 +702,60 @@ mod gateway_mock {
                 'life2: 'async_trait,
                 'life3: 'async_trait,
                 'life4: 'async_trait,
+                Self: 'async_trait;
+
+            fn pause_components<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+                system: &'life2 str,
+                pauses: &'life3 [PauseRecord],
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<Vec<ComponentId>, StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                'life3: 'async_trait,
+                Self: 'async_trait;
+
+            fn unpause_components<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+                system: &'life2 str,
+                component_ids: &'life3 [&'life4 str],
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<Vec<ComponentId>, StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                'life3: 'async_trait,
+                'life4: 'async_trait,
+                Self: 'async_trait;
+
+            fn get_paused_components<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<Vec<ComponentPause>, StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
                 Self: 'async_trait;
         }
 
