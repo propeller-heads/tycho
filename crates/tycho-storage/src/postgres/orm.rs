@@ -26,8 +26,8 @@ use super::{
     convert_int,
     schema::{
         account, account_balance, block, chain, component_balance, component_balance_default,
-        component_tvl, contract_code, contract_storage, contract_storage_default, entry_point,
-        entry_point_tracing_params, entry_point_tracing_params_calls_account,
+        component_pause, component_tvl, contract_code, contract_storage, contract_storage_default,
+        entry_point, entry_point_tracing_params, entry_point_tracing_params_calls_account,
         entry_point_tracing_result, extraction_state, protocol_component,
         protocol_component_has_entry_point_tracing_params, protocol_component_holds_contract,
         protocol_component_holds_token, protocol_component_uses_entry_point, protocol_state,
@@ -1897,6 +1897,29 @@ impl ComponentTVL {
         }
         q
     }
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = component_pause)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewComponentPause<'a> {
+    pub chain_id: i64,
+    pub protocol_system_id: i64,
+    pub component_id: &'a str,
+    pub reason: Option<&'a str>,
+    pub actor: Option<&'a str>,
+    pub evidence_url: Option<&'a str>,
+}
+
+/// An open `component_pause` row joined with its protocol system name.
+#[derive(Queryable, Debug)]
+pub struct OpenComponentPause {
+    pub protocol_system: String,
+    pub component_id: String,
+    pub reason: Option<String>,
+    pub actor: Option<String>,
+    pub evidence_url: Option<String>,
+    pub valid_from: NaiveDateTime,
 }
 
 #[derive(Debug, DbEnum, Clone, PartialEq, Eq, Hash)]
