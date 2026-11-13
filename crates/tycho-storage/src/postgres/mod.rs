@@ -1555,6 +1555,35 @@ pub mod db_fixtures {
             .expect("inserting the extraction state failed");
     }
 
+    /// Inserts the balance of `token` in a component of the instance, valid from 2020-01-01 00:00
+    /// at transaction index 0, with previous value `0x00`.
+    pub async fn insert_instance_component_balance(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        token: Bytes,
+        balance: Bytes,
+        balance_float: f64,
+    ) {
+        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        diesel::insert_into(instance::schema::tycho::component_balance::table)
+            .values(instance::orm::NewComponentBalance {
+                instance_id,
+                protocol_component_id: component_id,
+                token,
+                new_balance: balance,
+                previous_value: Bytes::from("0x00"),
+                balance_float,
+                valid_from,
+                tx_index: 0,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the component balance failed");
+    }
+
     /// Inserts the TVL of a component of the instance.
     pub async fn insert_instance_tvl(
         conn: &mut AsyncPgConnection,
