@@ -3,7 +3,8 @@ use std::{sync::Arc, time::Duration};
 use alloy::{primitives::Address, rpc::types::BlockNumberOrTag, sol_types::SolCall};
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
-use tracing::{instrument, warn};
+use metrics::histogram;
+use tracing::{debug, instrument, warn};
 use tycho_common::{
     models::{
         blockchain::BlockTag,
@@ -95,8 +96,50 @@ const ANALYSIS_CONCURRENCY: usize = 8;
 /// Longest a new token's analysis may hold up the block it appears in. A token that takes
 /// longer gets no analysis, and the analysis cron retries it.
 const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest wait for the node to reach the block of the new tokens. The indexer can receive a
+/// block before the node, and the analysis at that block then fails.
+const NODE_WAIT: Duration = Duration::from_secs(2);
+const NODE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 impl EthereumTokenPreProcessor {
+    /// Waits until the node has `number`, for at most `NODE_WAIT`. After that the calls go out
+    /// anyway: a failed analysis is retried by the analysis cron. Records the wait in the
+    /// `token_node_wait_seconds` histogram.
+    async fn wait_for_block(&self, number: u64) {
+        let start = tokio::time::Instant::now();
+        let reached = self
+            .poll_until_block(number, start + NODE_WAIT)
+            .await;
+        let waited = start.elapsed();
+        let outcome = if reached { "reached" } else { "timeout" };
+        histogram!(
+            "token_node_wait_seconds",
+            "chain" => self.chain.to_string(),
+            "outcome" => outcome,
+        )
+        .record(waited.as_secs_f64());
+        if reached {
+            debug!(number, waited_ms = waited.as_millis(), "Node has the block of the new tokens");
+        } else {
+            warn!(number, waited_ms = waited.as_millis(), "Node did not reach the block in time");
+        }
+    }
+
+    /// Whether the node reported a head of at least `number` before `deadline`.
+    async fn poll_until_block(&self, number: u64, deadline: tokio::time::Instant) -> bool {
+        loop {
+            match self.rpc.get_block_number().await {
+                Ok(head) if head >= number => return true,
+                Ok(head) => debug!(head, number, "Node is behind the block of the new tokens"),
+                Err(error) => warn!(?error, "Failed to read the node's block number"),
+            }
+            if tokio::time::Instant::now() + NODE_POLL_INTERVAL > deadline {
+                return false;
+            }
+            tokio::time::sleep(NODE_POLL_INTERVAL).await;
+        }
+    }
+
     async fn get_token(
         &self,
         address: Bytes,
@@ -156,6 +199,9 @@ impl TokenPreProcessor for EthereumTokenPreProcessor {
         token_finder: Arc<dyn TokenOwnerFinding>,
         block: BlockTag,
     ) -> Vec<AnalyzedToken> {
+        if let BlockTag::Number(number) = block {
+            self.wait_for_block(number).await;
+        }
         let analyzer = SimulationDetector::new(&self.rpc, token_finder, self.chain);
         stream::iter(addresses)
             .map(|address| self.get_token(address, &analyzer, block))
