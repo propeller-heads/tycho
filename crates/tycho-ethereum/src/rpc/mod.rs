@@ -724,6 +724,27 @@ impl EthereumRpcClient {
             })
     }
 
+    /// Executes `debug_traceCall` for a single transaction with the given tracer options.
+    #[instrument(level = "debug", skip(self, tx, options))]
+    pub(crate) async fn debug_trace_call(
+        &self,
+        tx: &TransactionRequest,
+        block: BlockNumberOrTag,
+        options: &GethDebugTracingCallOptions,
+    ) -> Result<GethTrace, RPCError> {
+        let options = with_spec_block_override_names(options, "debug_traceCall options")?;
+        self.retry_policy
+            .call_with_retry(|| async {
+                self.inner
+                    .request("debug_traceCall", (tx, block, &options))
+                    .await
+            })
+            .await
+            .map_err(|e| {
+                RPCError::from_alloy(format!("debug_traceCall failed on block {block}"), e)
+            })
+    }
+
     #[instrument(level = "debug", skip(self, access_list_params, trace_call_params))]
     pub(crate) async fn trace_and_access_list(
         &self,
