@@ -741,10 +741,16 @@ contract FeeCalculatorConfigTest is Constants {
         feeCalculator.removeCustomRouterFeeOnClientFee(ALICE);
     }
 
-    function testSetPositiveSlippageExemptUnauthorized() public {
+    function testSetCustomRouterPositiveSlippageBpsUnauthorized() public {
         vm.prank(BOB);
         vm.expectRevert();
-        feeCalculator.setPositiveSlippageExempt(BOB, true);
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, 0);
+    }
+
+    function testRemoveCustomRouterPositiveSlippageBpsUnauthorized() public {
+        vm.prank(BOB);
+        vm.expectRevert();
+        feeCalculator.removeCustomRouterPositiveSlippageBps(BOB);
     }
 
     // FEE RECEIVER TESTS
@@ -850,8 +856,8 @@ contract FeeCalculatorConfigTest is Constants {
         assertEq(feeCalculator.getRouterFeeOnClientFee(), 0);
         // The fee receiver is whatever the constructor was given
         assertEq(feeCalculator.getRouterFeeReceiver(), _ROUTER_FEE_RECEIVER);
-        // Positive slippage capture starts enabled
-        assertTrue(feeCalculator.getPositiveSlippageEnabled());
+        // The router captures the full surplus to start
+        assertEq(feeCalculator.getRouterPositiveSlippageBps(), _100_PCT);
     }
 
     function testMaximumFee() public {
@@ -1027,6 +1033,95 @@ contract FeeCalculatorConfigTest is Constants {
         (clients,) = feeCalculator.getAllClientFees(0, 10);
         assertEq(clients.length, 0);
     }
+
+    function testGetEffectiveRouterFees() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setRouterFeeOnClientFee(_10_PCT);
+        feeCalculator.setCustomRouterFeeOnOutput(BOB, _HALF_PCT);
+        feeCalculator.setCustomRouterFeeOnClientFee(ALICE, _5_PCT);
+        vm.stopPrank();
+
+        // No override: both defaults
+        (uint32 onOutput, uint32 onClientFee) = feeCalculator.getEffectiveRouterFees(
+            address(0xC1), USDC_ADDR, DAI_ADDR
+        );
+        assertEq(onOutput, _1_PCT);
+        assertEq(onClientFee, _10_PCT);
+
+        // Each override replaces only its own fee
+        (onOutput, onClientFee) =
+            feeCalculator.getEffectiveRouterFees(BOB, USDC_ADDR, DAI_ADDR);
+        assertEq(onOutput, _HALF_PCT);
+        assertEq(onClientFee, _10_PCT);
+
+        (onOutput, onClientFee) =
+            feeCalculator.getEffectiveRouterFees(ALICE, USDC_ADDR, DAI_ADDR);
+        assertEq(onOutput, _1_PCT);
+        assertEq(onClientFee, _5_PCT);
+    }
+
+    function testGetEffectiveRouterFeesAppliesTokenPairFee() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _5_PCT);
+        feeCalculator.setCustomRouterFeeOnOutput(BOB, _HALF_PCT);
+        vm.stopPrank();
+
+        // The pair fee replaces the default rate on output
+        (uint32 onOutput,) =
+            feeCalculator.getEffectiveRouterFees(ALICE, DAI_ADDR, USDC_ADDR);
+        assertEq(onOutput, _5_PCT);
+
+        // A custom rate lower than the pair fee wins
+        (onOutput,) =
+            feeCalculator.getEffectiveRouterFees(BOB, USDC_ADDR, DAI_ADDR);
+        assertEq(onOutput, _HALF_PCT);
+
+        // Another pair keeps the default rate
+        (onOutput,) =
+            feeCalculator.getEffectiveRouterFees(ALICE, USDC_ADDR, WETH_ADDR);
+        assertEq(onOutput, _1_PCT);
+    }
+
+    function testGetEffectiveRouterFeesAfterOverrideRemoved() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setRouterFeeOnClientFee(_10_PCT);
+        feeCalculator.setCustomRouterFeeOnOutput(BOB, _HALF_PCT);
+        feeCalculator.setCustomRouterFeeOnClientFee(BOB, _5_PCT);
+        feeCalculator.removeCustomRouterFeeOnOutput(BOB);
+        feeCalculator.removeCustomRouterFeeOnClientFee(BOB);
+        vm.stopPrank();
+
+        (uint32 onOutput, uint32 onClientFee) =
+            feeCalculator.getEffectiveRouterFees(BOB, USDC_ADDR, DAI_ADDR);
+        assertEq(onOutput, _1_PCT);
+        assertEq(onClientFee, _10_PCT);
+    }
+
+    function testGetEffectiveRouterFeesResolvesOrigin() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setCustomRouterFeeOnOutput(ALICE, _HALF_PCT);
+        feeCalculator.setCustomRouterFeeOnClientFee(ALICE, _5_PCT);
+        vm.stopPrank();
+
+        // A zero client reads tx.origin's overrides
+        vm.prank(address(this), ALICE);
+        (uint32 onOutput, uint32 onClientFee) = feeCalculator.getEffectiveRouterFees(
+            address(0), USDC_ADDR, DAI_ADDR
+        );
+        assertEq(onOutput, _HALF_PCT);
+        assertEq(onClientFee, _5_PCT);
+
+        // A named client ignores tx.origin's overrides
+        vm.prank(address(this), ALICE);
+        (onOutput, onClientFee) =
+            feeCalculator.getEffectiveRouterFees(BOB, USDC_ADDR, DAI_ADDR);
+        assertEq(onOutput, _1_PCT);
+        assertEq(onClientFee, 0);
+    }
 }
 
 // Tests for positive slippage surplus distribution
@@ -1060,6 +1155,119 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[0].feeAmount, 0.1 ether);
         assertEq(fees[1].recipient, BOB);
         assertEq(fees[1].feeAmount, 0);
+    }
+
+    function _surplusInput() internal view returns (FeeInput memory) {
+        return FeeInput({
+            actualAmountOut: 1.1 ether,
+            expectedAmountOut: 1 ether,
+            amountIn: 0,
+            tokenIn: address(0),
+            tokenOut: address(0),
+            clientFeeBps: 0,
+            client: BOB
+        });
+    }
+
+    function testSetRouterPositiveSlippageBpsUnauthorized() public {
+        vm.prank(BOB);
+        vm.expectRevert();
+        feeCalculator.setRouterPositiveSlippageBps(_50_PCT);
+    }
+
+    function testSetRouterPositiveSlippageBpsTooHigh() public {
+        vm.prank(FEE_SETTER);
+        vm.expectRevert(
+            FeeCalculator__RouterPositiveSlippageBpsTooHigh.selector
+        );
+        feeCalculator.setRouterPositiveSlippageBps(_100_PCT + 1);
+    }
+
+    function testSetCustomRouterPositiveSlippageBpsTooHigh() public {
+        vm.prank(FEE_SETTER);
+        vm.expectRevert(
+            FeeCalculator__RouterPositiveSlippageBpsTooHigh.selector
+        );
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, _100_PCT + 1);
+    }
+
+    function testSetAndRemoveCustomRouterPositiveSlippageBps() public {
+        (bool isSet, uint32 slippageBps) =
+            feeCalculator.getCustomRouterPositiveSlippageBps(BOB);
+        assertFalse(isSet);
+        assertEq(slippageBps, 0);
+
+        vm.prank(FEE_SETTER);
+        vm.expectEmit(true, false, false, true);
+        emit FeeCalculator.CustomRouterPositiveSlippageBpsUpdated(
+            BOB, _100_PCT, _50_PCT
+        );
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, _50_PCT);
+        (isSet, slippageBps) =
+            feeCalculator.getCustomRouterPositiveSlippageBps(BOB);
+        assertTrue(isSet);
+        assertEq(slippageBps, _50_PCT);
+
+        vm.prank(FEE_SETTER);
+        vm.expectEmit(true, false, false, false);
+        emit FeeCalculator.CustomRouterPositiveSlippageBpsRemoved(BOB);
+        feeCalculator.removeCustomRouterPositiveSlippageBps(BOB);
+        (isSet, slippageBps) =
+            feeCalculator.getCustomRouterPositiveSlippageBps(BOB);
+        assertFalse(isSet);
+        assertEq(slippageBps, 0);
+    }
+
+    function testCustomRouterPositiveSlippageBpsReplacesGlobal() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterPositiveSlippageBps(_10_PCT);
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, _50_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory bobFees =
+            feeCalculator.calculateFee(_surplusInput());
+        FeeInput memory aliceInput = _surplusInput();
+        aliceInput.client = ALICE;
+        FeeRecipient[] memory aliceFees = feeCalculator.calculateFee(aliceInput);
+
+        // surplus = 0.1 ether: BOB's custom 50%, ALICE's global 10%
+        assertEq(bobFees[0].feeAmount, 0.05 ether);
+        assertEq(aliceFees[0].feeAmount, 0.01 ether);
+    }
+
+    function testSetRouterPositiveSlippageBps() public {
+        assertEq(feeCalculator.getRouterPositiveSlippageBps(), _100_PCT);
+
+        vm.prank(FEE_SETTER);
+        vm.expectEmit(false, false, false, true);
+        emit FeeCalculator.RouterPositiveSlippageBpsUpdated(_100_PCT, _50_PCT);
+        feeCalculator.setRouterPositiveSlippageBps(_50_PCT);
+        assertEq(feeCalculator.getRouterPositiveSlippageBps(), _50_PCT);
+    }
+
+    function testRouterCapturesPartOfPositiveSlippage() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterPositiveSlippageBps(_10_PCT);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(_surplusInput());
+
+        // captured = 0.1 ether * 10% = 0.01 ether
+        // feeBase = 1.1 - 0.01 = 1.09 ether
+        // router fee on output = 1.09 ether * 1% = 0.0109 ether
+        assertEq(fees[0].feeAmount, 0.0209 ether);
+        assertEq(fees[1].feeAmount, 0);
+    }
+
+    function testZeroRouterPositiveSlippageBpsSkipsRouterHop() public {
+        vm.prank(FEE_SETTER);
+        feeCalculator.setRouterPositiveSlippageBps(0);
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(_surplusInput());
+
+        assertEq(fees[0].feeAmount, 0);
+        assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
     }
 
     function testNegativeSlippageNoSurplus() public {
@@ -1116,10 +1324,12 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[1].feeAmount, 0);
     }
 
-    function testExemptClientKeepsPositiveSlippage() public {
+    function testZeroCustomRouterPositiveSlippageBpsKeepsPositiveSlippage()
+        public
+    {
         vm.startPrank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
-        feeCalculator.setPositiveSlippageExempt(BOB, true);
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, 0);
         vm.stopPrank();
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
@@ -1141,10 +1351,10 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[1].feeAmount, 0);
     }
 
-    function testExemptionRemovalRestoresCapture() public {
+    function testCustomRouterPositiveSlippageBpsRemovalRestoresGlobal() public {
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageExempt(BOB, true);
-        feeCalculator.setPositiveSlippageExempt(BOB, false);
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, 0);
+        feeCalculator.removeCustomRouterPositiveSlippageBps(BOB);
         vm.stopPrank();
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
@@ -1159,15 +1369,15 @@ contract FeeCalculatorSlippageTest is Constants {
             })
         );
 
-        // With the exemption removed, the router captures the surplus again
+        // With the custom router positive slippage bps removed, the global 100% applies again
         assertEq(fees[0].feeAmount, 0.1 ether);
     }
 
-    function testExemptionResolvesOrigin() public {
-        // When client == address(0) (no signature), the exemption of
+    function testCustomRouterPositiveSlippageBpsResolvesOrigin() public {
+        // When client == address(0) (no signature), the custom router positive slippage bps of
         // tx.origin applies.
         vm.prank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageExempt(ALICE, true);
+        feeCalculator.setCustomRouterPositiveSlippageBps(ALICE, 0);
 
         vm.prank(address(this), ALICE);
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
@@ -1185,20 +1395,472 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[0].feeAmount, 0);
     }
 
-    function testMustOutputThroughRouterWithExemption() public {
-        // Positive slippage is enabled in setUp, so a non-exempt client
-        // must route output through the router
-        assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
+    // TOKEN FEE TESTS
+    function _pairFeeInput(address tokenIn, address tokenOut)
+        internal
+        view
+        returns (FeeInput memory)
+    {
+        return FeeInput({
+            actualAmountOut: 1 ether,
+            expectedAmountOut: 1 ether,
+            amountIn: 0.5 ether,
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            clientFeeBps: 0,
+            client: BOB
+        });
+    }
 
-        // An exempt client with no fees may skip the router hop
+    function testSetTokenPairFeeUnauthorized() public {
+        vm.prank(BOB);
+        vm.expectRevert();
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _1_PCT);
+    }
+
+    function testRemoveTokenPairFeeUnauthorized() public {
+        vm.prank(BOB);
+        vm.expectRevert();
+        feeCalculator.removeTokenPairFee(USDC_ADDR, DAI_ADDR);
+    }
+
+    function testSetTokenPairFeeTooHigh() public {
         vm.prank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageExempt(BOB, true);
+        vm.expectRevert(FeeCalculator__FeeTooHigh.selector);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _100_PCT + 1);
+    }
+
+    function testSetAndRemoveTokenPairFeeInBothDirections() public {
+        (bool isSet, uint32 feeBps) =
+            feeCalculator.getTokenPairFee(USDC_ADDR, DAI_ADDR);
+        assertFalse(isSet);
+        assertEq(feeBps, 0);
+
+        (address token0, address token1) =
+            USDC_ADDR < DAI_ADDR ? (USDC_ADDR, DAI_ADDR) : (DAI_ADDR, USDC_ADDR);
+        vm.prank(FEE_SETTER);
+        vm.expectEmit(true, true, false, true);
+        emit FeeCalculator.TokenPairFeeUpdated(token0, token1, _1_PCT);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _1_PCT);
+        (isSet, feeBps) = feeCalculator.getTokenPairFee(DAI_ADDR, USDC_ADDR);
+        assertTrue(isSet);
+        assertEq(feeBps, _1_PCT);
+
+        vm.prank(FEE_SETTER);
+        feeCalculator.removeTokenPairFee(DAI_ADDR, USDC_ADDR);
+        (isSet, feeBps) = feeCalculator.getTokenPairFee(USDC_ADDR, DAI_ADDR);
+        assertFalse(isSet);
+        assertEq(feeBps, 0);
+    }
+
+    function testTokenPairFeeReplacesDefaultRouterFee() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _5_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory forward =
+            feeCalculator.calculateFee(_pairFeeInput(USDC_ADDR, DAI_ADDR));
+        FeeRecipient[] memory reverse =
+            feeCalculator.calculateFee(_pairFeeInput(DAI_ADDR, USDC_ADDR));
+        FeeRecipient[] memory otherPair =
+            feeCalculator.calculateFee(_pairFeeInput(USDC_ADDR, WETH_ADDR));
+
+        assertEq(forward[0].feeAmount, 0.05 ether);
+        assertEq(reverse[0].feeAmount, 0.05 ether);
+        assertEq(otherPair[0].feeAmount, 0.01 ether);
+    }
+
+    function testZeroTokenPairFeeRemovesRouterFee() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterPositiveSlippageBps(0);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, 0);
+        vm.stopPrank();
+
+        FeeRecipient[] memory fees =
+            feeCalculator.calculateFee(_pairFeeInput(USDC_ADDR, DAI_ADDR));
+        assertEq(fees[0].feeAmount, 0);
+
+        vm.prank(FEE_SETTER);
+        feeCalculator.removeTokenPairFee(USDC_ADDR, DAI_ADDR);
+        fees = feeCalculator.calculateFee(_pairFeeInput(USDC_ADDR, DAI_ADDR));
+        assertEq(fees[0].feeAmount, 0.01 ether);
+    }
+
+    function testTokenPairFeeAndClientCustomFeeTakeLower() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _HALF_PCT);
+        feeCalculator.setCustomRouterFeeOnOutput(BOB, _1_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory pairLower =
+            feeCalculator.calculateFee(_pairFeeInput(USDC_ADDR, DAI_ADDR));
+        assertEq(pairLower[0].feeAmount, 0.005 ether);
+
+        vm.prank(FEE_SETTER);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _5_PCT);
+        FeeRecipient[] memory customLower =
+            feeCalculator.calculateFee(_pairFeeInput(USDC_ADDR, DAI_ADDR));
+        assertEq(customLower[0].feeAmount, 0.01 ether);
+    }
+
+    function testMustOutputThroughRouterWhileAnyTokenPairFeeIsSet() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterPositiveSlippageBps(0);
         assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
 
-        // Any fee still forces the router hop for the exempt client
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, 0);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _1_PCT);
+        feeCalculator.setTokenPairFee(USDC_ADDR, WETH_ADDR, _1_PCT);
+        assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
+
+        feeCalculator.removeTokenPairFee(USDC_ADDR, DAI_ADDR);
+        feeCalculator.removeTokenPairFee(DAI_ADDR, USDC_ADDR);
+        assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
+
+        feeCalculator.removeTokenPairFee(WETH_ADDR, USDC_ADDR);
+        assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
+        vm.stopPrank();
+    }
+
+    function testMustOutputThroughRouterWithZeroCustomRouterPositiveSlippageBps()
+        public
+    {
+        // Positive slippage is enabled in setUp, so a client with a non-zero
+        // router positive slippage bps must route output through the router
+        assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
+
+        // A client with a zero router positive slippage bps and no fees may skip the router hop
+        vm.prank(FEE_SETTER);
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, 0);
+        assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
+
+        // Any fee still forces the router hop for that client
         vm.prank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
         assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
+    }
+
+    function testClientShareOfPositiveSlippage() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setClientPositiveSlippageShare(BOB, _50_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 1.1 ether,
+                expectedAmountOut: 1 ether,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: _1_PCT,
+                client: BOB
+            })
+        );
+
+        // surplus = 0.1 ether, split 50/50
+        // feeBase = 1 ether: client fee 0.01 ether, router fee 0.01 ether
+        assertEq(fees[0].recipient, ADMIN);
+        assertEq(fees[0].feeAmount, 0.06 ether);
+        assertEq(fees[1].recipient, BOB);
+        assertEq(fees[1].feeAmount, 0.06 ether);
+    }
+
+    function testClientShareAppliesToCapturedSurplus() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterPositiveSlippageBps(_10_PCT);
+        feeCalculator.setClientPositiveSlippageShare(BOB, _50_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 1.1 ether,
+                expectedAmountOut: 1 ether,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
+        );
+
+        // captured = 0.1 ether * 10% = 0.01 ether, split 50/50
+        // the other 0.09 ether stays in the swap output
+        assertEq(fees[0].feeAmount, 0.005 ether);
+        assertEq(fees[1].feeAmount, 0.005 ether);
+    }
+
+    function testClientShareOfPositiveSlippageRoundsToRouter() public {
+        vm.prank(FEE_SETTER);
+        feeCalculator.setClientPositiveSlippageShare(BOB, _50_PCT);
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 103,
+                expectedAmountOut: 100,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
+        );
+
+        assertEq(fees[0].feeAmount, 2);
+        assertEq(fees[1].feeAmount, 1);
+    }
+
+    function testSetClientPositiveSlippageShareTooHighReverts() public {
+        vm.prank(FEE_SETTER);
+        vm.expectRevert(FeeCalculator__ShareTooHigh.selector);
+        feeCalculator.setClientPositiveSlippageShare(BOB, 100_000_001);
+    }
+
+    function testSetClientPositiveSlippageShareUnauthorized() public {
+        vm.prank(BOB);
+        vm.expectRevert();
+        feeCalculator.setClientPositiveSlippageShare(BOB, _50_PCT);
+    }
+
+    function testPositiveSlippageUncappedByDefault() public view {
+        assertEq(feeCalculator.getPositiveSlippageCap(BOB), _100_PCT);
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 1.1 ether,
+                expectedAmountOut: 1 ether,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
+        );
+
+        assertEq(fees[0].feeAmount, 0.1 ether);
+    }
+
+    function testPositiveSlippageCapBindsSurplus() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setClientPositiveSlippageShare(BOB, _50_PCT);
+        feeCalculator.setPositiveSlippageCap(BOB, _1_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 1.1 ether,
+                expectedAmountOut: 1 ether,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
+        );
+
+        // surplus = 0.1 ether, capped at 1% of 1.1 ether = 0.011 ether
+        // split 50/50: 0.0055 ether each
+        // feeBase = 1.1 - 0.011 = 1.089 ether, router fee = 0.01089 ether
+        assertEq(fees[0].feeAmount, 0.01089 ether + 0.0055 ether);
+        assertEq(fees[1].feeAmount, 0.0055 ether);
+    }
+
+    function testPositiveSlippageCapBelowRouterPart() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, _50_PCT);
+        feeCalculator.setPositiveSlippageCap(BOB, _1_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 1.1 ether,
+                expectedAmountOut: 1 ether,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
+        );
+
+        // router part = 50% of 0.1 ether = 0.05 ether
+        // cap = 1% of 1.1 ether = 0.011 ether
+        assertEq(fees[0].feeAmount, 0.011 ether);
+        assertEq(fees[1].feeAmount, 0);
+    }
+
+    function testPositiveSlippageCapAboveRouterPart() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setCustomRouterPositiveSlippageBps(BOB, _50_PCT);
+        feeCalculator.setPositiveSlippageCap(BOB, 10_000_000); // 10%
+        vm.stopPrank();
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 1.1 ether,
+                expectedAmountOut: 1 ether,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
+        );
+
+        // router part = 50% of 0.1 ether = 0.05 ether
+        // cap = 10% of 1.1 ether = 0.11 ether
+        assertEq(fees[0].feeAmount, 0.05 ether);
+        assertEq(fees[1].feeAmount, 0);
+    }
+
+    function testPositiveSlippageCapEqualToSurplus() public {
+        vm.prank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageCap(BOB, 20_000_000); // 20%
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 1.25 ether,
+                expectedAmountOut: 1 ether,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
+        );
+
+        // cap = 20% of 1.25 ether = 0.25 ether = surplus
+        assertEq(fees[0].feeAmount, 0.25 ether);
+        assertEq(fees[1].feeAmount, 0);
+    }
+
+    function testPositiveSlippageCapAboveSurplus() public {
+        vm.prank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageCap(BOB, _10_PCT);
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 1.1 ether,
+                expectedAmountOut: 1 ether,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
+        );
+
+        // cap = 0.11 ether exceeds the 0.1 ether surplus
+        assertEq(fees[0].feeAmount, 0.1 ether);
+        assertEq(fees[1].feeAmount, 0);
+    }
+
+    function testZeroPositiveSlippageCap() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setPositiveSlippageCap(BOB, 0);
+        vm.stopPrank();
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 1.1 ether,
+                expectedAmountOut: 1 ether,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
+        );
+
+        // Nothing captured, router fee on the full 1.1 ether
+        assertEq(fees[0].feeAmount, 0.011 ether);
+        assertEq(fees[1].feeAmount, 0);
+    }
+
+    function testPositiveSlippageCapWithNegativeSlippage() public {
+        vm.prank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageCap(BOB, _1_PCT);
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 0.9 ether,
+                expectedAmountOut: 1 ether,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
+        );
+
+        assertEq(fees[0].feeAmount, 0);
+        assertEq(fees[1].feeAmount, 0);
+    }
+
+    function testPositiveSlippageCapOtherClient() public {
+        vm.prank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageCap(BOB, _1_PCT);
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 1.1 ether,
+                expectedAmountOut: 1 ether,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: ALICE
+            })
+        );
+
+        assertEq(fees[0].feeAmount, 0.1 ether);
+    }
+
+    function testPositiveSlippageCapResetToFull() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageCap(BOB, _1_PCT);
+        feeCalculator.setPositiveSlippageCap(BOB, _100_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 1.1 ether,
+                expectedAmountOut: 1 ether,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
+        );
+
+        assertEq(fees[0].feeAmount, 0.1 ether);
+    }
+
+    function testSetPositiveSlippageCap() public {
+        vm.expectEmit(true, false, false, true);
+        emit FeeCalculator.PositiveSlippageCapUpdated(BOB, _100_PCT, _1_PCT);
+        vm.prank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageCap(BOB, _1_PCT);
+
+        assertEq(feeCalculator.getPositiveSlippageCap(BOB), _1_PCT);
+        assertEq(feeCalculator.getPositiveSlippageCap(ALICE), _100_PCT);
+    }
+
+    function testSetPositiveSlippageCapTooHighReverts() public {
+        vm.prank(FEE_SETTER);
+        vm.expectRevert(FeeCalculator__CapTooHigh.selector);
+        feeCalculator.setPositiveSlippageCap(BOB, 100_000_001);
+    }
+
+    function testSetPositiveSlippageCapUnauthorized() public {
+        vm.prank(BOB);
+        vm.expectRevert();
+        feeCalculator.setPositiveSlippageCap(BOB, _1_PCT);
     }
 
     function testZeroSlippageNoSurplus() public {

@@ -18,7 +18,7 @@ use alloy::{
     rpc::types::{state::AccountOverride, Block, BlockId},
 };
 use clap::Parser;
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, NarratableReportHandler, WrapErr};
 use num_bigint::BigUint;
@@ -111,10 +111,11 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_pamm: bool,
 
-    /// pAMM book feeds to run, comma-separated (e.g. metric). Replaces the default list
-    /// (metric). A listed venue missing its credentials, or whose feed fails to build, fails the
-    /// run; a default venue is skipped instead. A feed that builds but fails once it runs, for
-    /// example on a chain its venue does not serve, ends with a warning like any other feed.
+    /// pAMM book feeds to run, comma-separated (e.g. metric,baibai). Replaces the default list
+    /// (metric). BaiBai runs on Base only and reads its books over --rpc-url. A listed venue
+    /// missing its credentials, or whose feed fails to build, fails the run; a default venue
+    /// is skipped instead. A feed that builds but fails once it runs, for example on a chain
+    /// its venue does not serve, ends with a warning like any other feed.
     #[arg(long, value_delimiter = ',', conflicts_with = "disable_pamm")]
     pamm: Option<Vec<PammVenue>>,
 
@@ -339,10 +340,6 @@ fn hashflow_min_amount_in(
 }
 
 #[tokio::main]
-#[expect(
-    clippy::unwrap_in_result,
-    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
-)]
 async fn main() -> miette::Result<()> {
     miette::set_hook(Box::new(|_| Box::new(NarratableReportHandler::new())))?;
     match dotenv() {
@@ -517,6 +514,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
         Duration::from_secs(cli.skip_messages_duration),
         RfqSelection::from_cli(cli.disable_rfq, |name| std::env::var(name).ok()),
         PammSelection::from_cli(cli.disable_pamm, cli.pamm.clone()),
+        cli.rpc_url.clone(),
         cli.rfq_all_pairs,
     );
     let mut book_handle = book_stream_processor

@@ -24,9 +24,10 @@ for any protocol indexed by Tycho.
     `aero_basic/`, `aerodrome_v1/`, `aerodrome_slipstreams/`, `velodrome_slipstreams/`,
     `pancakeswap_v2/`,
     `ramses_v3/`, `ring_swap_v2/`, `lunarbase/`, `native_wrapper/`, `sky/`, `etherfi/`,
-    `erc4626/`, `rocketpool/`): Pure Rust math, no EVM execution. `aerodrome_slipstreams/` also
-    serves Robinhood `up_v3` and AERO v1.1 `aero_cl` pools; for `aero_cl` the fee comes from the
-    pool's swap hook (`utils/slipstreams/aero_hook_fee.rs`) instead of a dynamic fee module.
+    `erc4626/`, `rocketpool/`, `pancakeswap_infinity_bin/`): Pure Rust math, no EVM execution.
+    `aerodrome_slipstreams/` also serves Robinhood `up_v3` and AERO v1.1 `aero_cl` pools; for
+    `aero_cl` the fee comes from the pool's swap hook (`utils/slipstreams/aero_hook_fee.rs`)
+    instead of a dynamic fee module.
     `cpmm.rs` / `clmm.rs` / `safe_math.rs` / `u256_num.rs` / `utils.rs` are shared math helpers,
     not protocols. Uniswap V4 hook handlers register per `(Chain, hook address)` in
     `uniswap_v4/hooks/hook_handler_creator.rs`; the generic VM fallback covers only Ethereum and
@@ -80,8 +81,8 @@ for any protocol indexed by Tycho.
   complete book rather than as chain state. A feed publishes `BookSnapshot<A>` (a provider's whole
   set of `Book`s at one anchor — `ReceivedAt` for every feed here; a block-anchored feed would pick
   another `A`), and a `Book` is one book's simulate-ready component + state, plus the provider's
-  `updated_at` where it reports one: a pair for Bebop, Native and Metric, a pair and one market
-  maker for Hashflow and Liquorice, whose firm quote comes from the maker it is asked of. A
+  `updated_at` where it reports one: a pair for Bebop, Native, Metric and BaiBai, a pair and one
+  market maker for Hashflow and Liquorice, whose firm quote comes from the maker it is asked of. A
   provider's `*Feed` implements `SnapshotFeed` directly, with a `run` that calls one of the two
   loops and nothing else. `BookFeedConfig` (chain, tokens, minimum book TVL in USD) is what every
   book feed needs whatever transport it runs on, and is the first argument of every feed builder;
@@ -148,8 +149,17 @@ for any protocol indexed by Tycho.
   fallback router; off by default. The Native and Liquorice routers are not deployed yet. The
   fallback routers trade ERC20s only, so Native's fallback feed offers no native-token books
 - **`pamm/`**: book feeds for pAMMs — venues priced off-chain but executed directly against
-  the pool, no binding quote (Metric today; its state does not implement `IndicativelyPriced`,
-  and its client is held by the feed alone rather than by every state).
+  the pool, no binding quote (Metric and BaiBai; their states do not implement
+  `IndicativelyPriced`, and each client is held by the feed alone rather than by every state).
+  Metric polls the venue's API; BaiBai reads its on-chain curve over JSON-RPC (one batch per
+  poll: a Multicall3 call, and each proxy's implementation slot, checked against the
+  implementation it is pinned to) and prices it with the contract's arithmetic, at the fee the
+  entrypoint reports for the taker, read every poll: Tycho's Base router unless
+  `BaibaiFeedBuilder::taker` sets another. BaiBai has no venue API, so instead of the
+  per-provider `client.rs`/`source.rs`/`models.rs` split it has `reader.rs` (the batch read and
+  its decoding), `math.rs` (the CurveBook's arithmetic) and `feed.rs` (the feed, its builder and
+  the book assembly), beside `state.rs`; its tests run on `test_support.rs` (the recordings and a
+  fake node) and `testdata/` (the recordings and `record_fixture.py`, which makes them).
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
   it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
@@ -243,19 +253,20 @@ fallback for protocols too complex to port, not a default.
 1. **Native** — pure Rust math; fastest. Use whenever the protocol logic can be expressed in Rust.
 2. **Hybrid** — native Rust math for swap calculation, but reads/updates pool state via the local
    VM (`SimulationDB`). Use when the swap logic can be ported but state is complex to track
-   independently. Examples: Fluid V1, Balancer V3, Curve. Note that a hybrid protocol keeps its
-   VM-shaped indexing — component keys stay `vm:*` and the indexer still tracks full contract
-   storage; only the quote path changes.
+   independently. Examples: Fluid V1, Balancer V3, Curve. A hybrid keeps VM-shaped indexing (the
+   indexer tracks full contract storage); only the quote path changes. The `vm:` prefix of a
+   `protocol_system` tells users that quotes run through the VM, so a new hybrid that quotes
+   natively takes a key without it. An existing `vm:` protocol whose quotes move to native keeps
+   its key until a deliberate rename, which ships as a deployment-breaking change of its own.
 3. **VM** — Solidity adapter in `revm`; works for any EVM protocol but is slower and requires an
    adapter contract in `protocols/adapter-integration/`. Use only when native is not feasible.
 4. **RFQ** — off-chain quotes via API; for protocols that cannot be simulated on-chain at all.
 
 ## Pending-block state for hybrid/VM protocols
 
-`apply_deltas_ephemeral` applies only `state_deltas`; nothing on the pending path writes to the
-VM database, so `apply_deltas_ephemeral` can't read the pending state from there. A protocol
-whose `delta_transition` re-reads the VM would therefore quote a pending block against confirmed
-state. Fluid and Curve close that gap the same way:
+Nothing on the pending path writes to the VM database, so a protocol whose `delta_transition`
+re-reads the VM quotes a pending block against confirmed state. Fluid and Curve close that gap
+the same way:
 
 1. A `TxDeltaIndexer` implementation — which lives in the consuming repo, not here — builds
    `evm::simulation::PendingOverrides` (storage, native balances and block environment) from the
@@ -268,6 +279,14 @@ state. Fluid and Curve close that gap the same way:
 
 Reading under the pending block's own number and timestamp matters: anything with on-chain time
 math (Fluid's expanding limits, Curve's ramping `A()`) is wrong under the parent block's clock.
+
+`apply_deltas_ephemeral` also sets each extractor's account deltas as `PendingOverrides` on the
+pools linked to a written account through `contracts_map`. Only Uniswap V4 states read them: a
+hooked pool prices from its hook's storage. It sets them only on pools whose protocol system is
+the extractor's key in `pending_deltas`, so the extractor's indexer must emit the writes to every
+account those pools read. Without this rule, a write to a token contract linked to Curve, V4 hooks
+and Fluid pools would make the decoder rebuild every Fluid pool from confirmed state, one EVM call
+per pool. Another extractor's override set would also replace a V4 pool's own.
 
 ## Features
 

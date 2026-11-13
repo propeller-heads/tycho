@@ -23,7 +23,7 @@ use alloy::{
 use alloy_chains::NamedChain;
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Select};
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use futures::StreamExt as _;
 use num_bigint::BigUint;
 use num_traits::{FromPrimitive, ToPrimitive};

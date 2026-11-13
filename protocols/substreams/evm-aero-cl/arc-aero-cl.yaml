@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "arc_aero_cl"
-  version: v0.1.0
+  version: v0.1.1
   url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/evm-aero-cl"
 
 protobuf:

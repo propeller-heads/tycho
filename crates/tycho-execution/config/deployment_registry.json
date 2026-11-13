@@ -123,7 +123,8 @@
         "pancakeswap_infinity_cl": "0x6EbFE9c9b8Ed29260a1301db5F2a7fDf72899E25",
         "aero_basic": "0xf6F8fb2321FB8431400ae546037cD2AE969a2c22",
         "fallback:rfq:native": "0x57D9099BB65dCAB2F64238718f2CbB261255Fc5c",
-        "biconomy": "0xF30f4c985fCA63913f421F78058031FA6514eF7f"
+        "biconomy": "0xF30f4c985fCA63913f421F78058031FA6514eF7f",
+        "baibai": "0x997Ada592ea5b2eF46c4d30A9C1ea3a59156F798"
       },
       "superseded": [{
         "status": "superseded",
@@ -190,6 +191,7 @@
         "uniswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
         "aero_cl": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
         "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
+        "ramses_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
         "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f",
         "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab",
         "rfq:native": "0x73ab9F8741a4EF6cB44fc095BFc767B5E458E125",
@@ -389,6 +391,40 @@
         "uniswap_v4": "0xf7630dAAC56f3ee857cC3fCc758F67302542564D",
         "aero_basic": "0x68F46568a26d46E4fc7FB97BbbDDfd3c4FaBdd0a",
         "aero_cl": "0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015"
+      },
+      "superseded": []
+    },
+    "elysium": {
+      "chain_id": 99901,
+      "status": "active",
+      "effective_at": "2026-11-09T16:41:04Z",
+      "notice_published_at": "2026-11-09T16:41:04Z",
+      "migration_deadline": null,
+      "scheduled_successor": null,
+      "deployment_record_commit": "460fc8f3950205502f7618a5fb591a15fde3d341",
+      "dependency_snapshot": {
+        "source_commit": "460fc8f3950205502f7618a5fb591a15fde3d341",
+        "executor_deployments_path": "crates/tycho-execution/config/executor_deployments.json",
+        "protocol_specific_addresses_path": "crates/tycho-execution/config/protocol_specific_addresses.json"
+      },
+      "router": {
+        "address": "0xf7d2Ec960Cb9714C97897Db395Ff7f0a11de1060"
+      },
+      "fee_calculator": {
+        "address": "0x4609Ed897E905F95C15159cb9cBC1A08486f5Fcf"
+      },
+      "executors": {
+        "uniswap_v2": "0x6B8DFbbef1f5EF947427985F7C27D1c50CD025ea",
+        "uniswap_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+        "uniswap_v4": "0x74145BbB8F3E51f7138eD3F7C96dFb3d56F784b5",
+        "kleos_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+        "elyspump_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+        "stockiumswap_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+        "aero_cl": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+        "aero_basic": "0x5aEE932D9E17D4bad31898Cf6fd8b6bFe701Ac0b",
+        "native_wrapper": "0x3FF36AE3cD6579f79B776D5861A17fDFde7495cf",
+        "rfq:metric": "0x9a98EBA41d56eD6172Dc4167179f7e0f9638a974",
+        "fallback:rfq:metric": "0xB64E27B8ff972EB0aF32fA6b4830De382CfD74F2"
       },
       "superseded": []
     }
