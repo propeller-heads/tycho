@@ -11,7 +11,10 @@ use tycho_common::{
     Bytes,
 };
 
-use super::version::check_current;
+use super::{
+    snapshot::{begin_snapshot, end_snapshot},
+    version::check_current,
+};
 use crate::postgres::{
     instance::{
         active::{active_instance, active_instance_ids},
@@ -50,44 +53,9 @@ impl PostgresGatewayNew {
                     .to_string(),
             ));
         };
-        let Some(instance) = active_instance(conn, system).await? else {
-            return Ok(HashMap::new());
-        };
-        check_current(conn, instance, at).await?;
-
-        let mut query = component_balance::table
-            .inner_join(
-                protocol_component::table.on(protocol_component::instance_id
-                    .eq(component_balance::instance_id)
-                    .and(protocol_component::id.eq(component_balance::protocol_component_id))),
-            )
-            .filter(component_balance::instance_id.eq(instance))
-            .filter(protocol_component::instance_id.eq(instance))
-            .select((protocol_component::external_id, iorm::ComponentBalance::as_select()))
-            .into_boxed::<Pg>();
-        if let Some(ids) = ids {
-            query = query.filter(protocol_component::external_id.eq_any(ids));
-        }
-        let rows: Vec<(String, iorm::ComponentBalance)> = query
-            .load(conn)
-            .await
-            .map_err(PostgresError::from)?;
-
-        let mut balances: HashMap<ComponentId, HashMap<Address, ComponentBalance>> = HashMap::new();
-        for (external_id, row) in rows {
-            let balance = ComponentBalance::new(
-                row.token.clone(),
-                row.new_balance,
-                row.balance_float,
-                Bytes::zero(32),
-                &external_id,
-            );
-            balances
-                .entry(external_id)
-                .or_default()
-                .insert(row.token, balance);
-        }
-        Ok(balances)
+        let snapshot = begin_snapshot(conn).await?;
+        let result = balances_of(conn, system, ids, at).await;
+        end_snapshot(conn, snapshot, result).await
     }
 
     /// Returns the state of the components of the active instance of each protocol system, and,
@@ -115,7 +83,8 @@ impl PostgresGatewayNew {
         conn: &mut AsyncPgConnection,
     ) -> Result<WithTotal<Vec<ProtocolComponentState>>, StorageError> {
         self.get_chain_id(chain)?;
-        match (system, ids) {
+        let snapshot = begin_snapshot(conn).await?;
+        let result = match (system, ids) {
             (Some(system), ids) => {
                 states_of(&system, ids, at.as_ref(), retrieve_balances, pagination_params, conn)
                     .await
@@ -125,17 +94,61 @@ impl PostgresGatewayNew {
                  across protocols"
                     .to_string(),
             )),
-            (None, None) => {
-                if at.is_some() {
-                    return Err(StorageError::Unsupported(
-                        "a version needs a protocol system until the history tables are read"
-                            .to_string(),
-                    ));
-                }
-                active_states(retrieve_balances, pagination_params, conn).await
-            }
-        }
+            (None, None) if at.is_some() => Err(StorageError::Unsupported(
+                "a version needs a protocol system until the history tables are read".to_string(),
+            )),
+            (None, None) => active_states(retrieve_balances, pagination_params, conn).await,
+        };
+        end_snapshot(conn, snapshot, result).await
     }
+}
+
+/// Reads the token balances of the matching components of the active instance of `system`, by
+/// external id and token address.
+async fn balances_of(
+    conn: &mut AsyncPgConnection,
+    system: &str,
+    ids: Option<&[&str]>,
+    at: Option<&Version>,
+) -> Result<HashMap<ComponentId, HashMap<Address, ComponentBalance>>, StorageError> {
+    let Some(instance) = active_instance(conn, system).await? else {
+        return Ok(HashMap::new());
+    };
+    check_current(conn, instance, at).await?;
+
+    let mut query = component_balance::table
+        .inner_join(
+            protocol_component::table.on(protocol_component::instance_id
+                .eq(component_balance::instance_id)
+                .and(protocol_component::id.eq(component_balance::protocol_component_id))),
+        )
+        .filter(component_balance::instance_id.eq(instance))
+        .filter(protocol_component::instance_id.eq(instance))
+        .select((protocol_component::external_id, iorm::ComponentBalance::as_select()))
+        .into_boxed::<Pg>();
+    if let Some(ids) = ids {
+        query = query.filter(protocol_component::external_id.eq_any(ids));
+    }
+    let rows: Vec<(String, iorm::ComponentBalance)> = query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?;
+
+    let mut balances: HashMap<ComponentId, HashMap<Address, ComponentBalance>> = HashMap::new();
+    for (external_id, row) in rows {
+        let balance = ComponentBalance::new(
+            row.token.clone(),
+            row.new_balance,
+            row.balance_float,
+            Bytes::zero(32),
+            &external_id,
+        );
+        balances
+            .entry(external_id)
+            .or_default()
+            .insert(row.token, balance);
+    }
+    Ok(balances)
 }
 
 /// Reads the states of the matching components of the active instance of `system`.
@@ -385,7 +398,10 @@ mod tests {
     use std::collections::HashMap;
 
     use chrono::{NaiveDate, NaiveDateTime};
-    use diesel_async::AsyncPgConnection;
+    use diesel::prelude::*;
+    use diesel_async::{
+        AnsiTransactionManager, AsyncPgConnection, RunQueryDsl, TransactionManager,
+    };
     use tycho_common::{
         models::{
             protocol::{ComponentBalance, ProtocolComponentState},
@@ -397,8 +413,13 @@ mod tests {
 
     use crate::postgres::{
         db_fixtures,
-        instance::{gateway::PostgresGatewayNew, InstanceId},
-        testing::instance_test_connection,
+        instance::{
+            gateway::PostgresGatewayNew,
+            read::snapshot::{begin_snapshot, end_snapshot},
+            schema::tycho::{extraction_state, protocol_state},
+            InstanceId,
+        },
+        testing::{instance_test_connection, run_against_db},
     };
 
     struct Setup {
@@ -880,5 +901,87 @@ mod tests {
         let result = states(&s.gateway, &mut conn, None, None, None, Some(at(day(1)))).await;
 
         assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+    }
+
+    fn depth(conn: &mut AsyncPgConnection) -> Option<u32> {
+        AnsiTransactionManager::transaction_manager_status_mut(conn)
+            .transaction_depth()
+            .expect("a valid transaction manager")
+            .map(u32::from)
+    }
+
+    #[tokio::test]
+    async fn test_serial_db_state_read_at_head_ignores_a_later_commit() {
+        run_against_db(|pool| async move {
+            let mut reader = pool.get().await.unwrap();
+            let mut writer = pool.get().await.unwrap();
+            let s = setup(&mut writer).await;
+            let a = component_with_state(&mut writer, s.curve, "a", "0x01").await;
+            db_fixtures::set_instance_head(&mut writer, s.curve, day(2)).await;
+
+            let started = begin_snapshot(&mut reader)
+                .await
+                .unwrap();
+            let before =
+                states(&s.gateway, &mut reader, Some("vm:curve"), None, None, Some(at(day(2))))
+                    .await
+                    .unwrap();
+            diesel::update(
+                protocol_state::table
+                    .filter(protocol_state::instance_id.eq(s.curve))
+                    .filter(protocol_state::protocol_component_id.eq(a)),
+            )
+            .set(protocol_state::attribute_value.eq(b("0x02")))
+            .execute(&mut writer)
+            .await
+            .unwrap();
+            diesel::update(extraction_state::table.find(s.curve))
+                .set(extraction_state::block_ts.eq(day(3)))
+                .execute(&mut writer)
+                .await
+                .unwrap();
+            let during =
+                states(&s.gateway, &mut reader, Some("vm:curve"), None, None, Some(at(day(2))))
+                    .await;
+            end_snapshot(&mut reader, started, Ok(()))
+                .await
+                .unwrap();
+
+            let expected = vec![ProtocolComponentState::new(
+                "a",
+                [("reserve".to_string(), b("0x01"))].into(),
+                HashMap::new(),
+            )];
+            assert_eq!(before, (expected.clone(), None));
+            assert_eq!(during, Ok((expected, None)));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_serial_db_state_reads_leave_no_transaction_open() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let s = setup(&mut conn).await;
+            component_with_balance(&mut conn, s.curve, "a", "0x10").await;
+            db_fixtures::set_instance_head(&mut conn, s.curve, day(2)).await;
+
+            states(&s.gateway, &mut conn, Some("vm:curve"), None, None, Some(at(day(2))))
+                .await
+                .unwrap();
+            assert_eq!(depth(&mut conn), None);
+            balances(&s.gateway, &mut conn, Some("vm:curve"), Some(&at(day(2))))
+                .await
+                .unwrap();
+            assert_eq!(depth(&mut conn), None);
+            let result =
+                states(&s.gateway, &mut conn, Some("vm:curve"), None, None, Some(at(day(1)))).await;
+            assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+            assert_eq!(depth(&mut conn), None);
+            balances(&s.gateway, &mut conn, Some("vm:curve"), None)
+                .await
+                .unwrap();
+        })
+        .await;
     }
 }
