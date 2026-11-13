@@ -16,7 +16,7 @@ use crate::encoding::{
         },
         subsidy::SubsidyEncoder,
         swap_encoder::{
-            aerodrome_v1::AerodromeV1SwapEncoder, baibai::BaibaiSwapEncoder,
+            aerodrome_v1::AerodromeV1SwapEncoder, aqua0::Aqua0SwapEncoder, baibai::BaibaiSwapEncoder,
             balancer_v2::BalancerV2SwapEncoder, balancer_v3::BalancerV3SwapEncoder,
             bebop::BebopSwapEncoder, bebop_fallback::BebopFallbackSwapEncoder,
             bopamm::BopAMMSwapEncoder, curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder,
@@ -103,6 +103,18 @@ impl SwapEncoderRegistry {
             let encoder = self.create_encoder(protocol, executor_address, config.cloned())?;
             self.encoders
                 .insert(protocol.to_string(), encoder);
+        }
+        // Aqua0 supplies signed hookData to the existing V4 executor. It has no Solidity executor
+        // deployment of its own, and must follow a caller's configured V4 address as well.
+        if matches!(self.chain, Chain::Base | Chain::Arbitrum | Chain::Polygon | Chain::Robinhood) &&
+            !self.encoders.contains_key("rfq:aqua0")
+        {
+            if let Some(v4) = self.encoders.get("uniswap_v4") {
+                let encoder =
+                    Aqua0SwapEncoder::new(v4.executor_address().clone(), self.chain, None)?;
+                self.encoders
+                    .insert("rfq:aqua0".into(), Box::new(encoder));
+            }
         }
         Ok(self)
     }
@@ -236,6 +248,9 @@ impl SwapEncoderRegistry {
                     self.chain,
                     config,
                 )?))
+            }
+            "rfq:aqua0" => {
+                Ok(Box::new(Aqua0SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "ekubo_v2" => {
                 Ok(Box::new(EkuboSwapEncoder::new(executor_address, self.chain, config)?))
@@ -584,6 +599,21 @@ mod tests {
         assert!(registry
             .get_encoder("uniswap_v4")
             .is_none());
+    }
+
+    #[test]
+    fn aqua0_reuses_the_existing_v4_executor() {
+        for chain in [Chain::Base, Chain::Arbitrum, Chain::Polygon, Chain::Robinhood] {
+            let registry = SwapEncoderRegistry::new_with_defaults(chain).unwrap();
+            let aqua0 = registry
+                .get_encoder("rfq:aqua0")
+                .unwrap();
+            let v4 = registry
+                .get_encoder("uniswap_v4")
+                .unwrap();
+            assert_eq!(aqua0.executor_address(), v4.executor_address());
+            assert!(aqua0.blocks_on_quote());
+        }
     }
 
     #[test]
