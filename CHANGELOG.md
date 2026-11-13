@@ -1,3 +1,11 @@
+## [0.519.1](https://github.com/propeller-heads/tycho/compare/0.519.0...0.519.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **simulation:** price Infinity CL swaps with their own gas costs ([d89515d](https://github.com/propeller-heads/tycho/commit/d89515db46332d58cd69d5fb2f0108424ee80839))
+* **simulation:** price Infinity CL swaps with their own gas costs ([#1703](https://github.com/propeller-heads/tycho/issues/1703)) ([fc34cc0](https://github.com/propeller-heads/tycho/commit/fc34cc09d4ec238d172af213163e6dd7d20f7184))
+
 ## [0.519.0](https://github.com/propeller-heads/tycho/compare/0.518.0...0.519.0) (2026-11-13)
 
 
