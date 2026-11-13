@@ -642,12 +642,15 @@ pub trait ContractStateGateway {
     ///
     /// # Parameters
     /// - `id` The identifier for the contract.
+    /// - `protocol_system`: the protocol system whose copy of the contracts to read. A contract can
+    ///   exist in the instances of several protocol systems.
     /// - `version` Version at which to retrieve state for. None retrieves the latest state.
     /// - `include_slots`: Flag to determine whether to include slot changes. If set to `true`, it
     ///   includes storage slot.
     async fn get_contract(
         &self,
         id: &ContractId,
+        protocol_system: &str,
         version: Option<&Version>,
         include_slots: bool,
     ) -> Result<Account, StorageError>;
@@ -660,6 +663,8 @@ pub trait ContractStateGateway {
     ///
     /// # Parameters:
     /// - `chain`: The blockchain where the contracts reside.
+    /// - `protocol_system`: the protocol system whose copy of the contracts to read. A contract can
+    ///   exist in the instances of several protocol systems.
     /// - `addresses`: Filter for specific addresses. If set to `None`, it retrieves all indexed
     ///   contracts in the chain.
     /// - `version`: Version at which to retrieve state for. If set to `None`, it retrieves the
@@ -674,6 +679,7 @@ pub trait ContractStateGateway {
     async fn get_contracts(
         &self,
         chain: &Chain,
+        protocol_system: &str,
         addresses: Option<&[Address]>,
         version: Option<&Version>,
         include_slots: bool,
@@ -792,6 +798,8 @@ pub trait ContractStateGateway {
     ///
     /// # Parameters
     /// - `chain` The chain of the account balances
+    /// - `protocol_system`: the protocol system whose copy of the contracts to read. A contract can
+    ///   exist in the instances of several protocol systems.
     /// - `accounts` The accounts to query for. If set to `None`, it retrieves balances for all
     ///   indexed
     ///  accounts in the chain.
@@ -800,6 +808,7 @@ pub trait ContractStateGateway {
     async fn get_account_balances(
         &self,
         chain: &Chain,
+        protocol_system: &str,
         accounts: Option<&[Address]>,
         version: Option<&Version>,
     ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError>;

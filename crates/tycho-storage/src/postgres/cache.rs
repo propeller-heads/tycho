@@ -878,12 +878,13 @@ impl ContractStateGateway for CachedGateway {
     async fn get_contract(
         &self,
         id: &ContractId,
+        protocol_system: &str,
         version: Option<&Version>,
         include_slots: bool,
     ) -> Result<Account, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
-            .get_contract(id, version, include_slots, &mut conn)
+            .get_contract(id, protocol_system, version, include_slots, &mut conn)
             .await
     }
 
@@ -891,6 +892,7 @@ impl ContractStateGateway for CachedGateway {
     async fn get_contracts(
         &self,
         chain: &Chain,
+        protocol_system: &str,
         addresses: Option<&[Address]>,
         version: Option<&Version>,
         include_slots: bool,
@@ -898,7 +900,15 @@ impl ContractStateGateway for CachedGateway {
     ) -> Result<WithTotal<Vec<Account>>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
-            .get_contracts(chain, addresses, version, include_slots, pagination_params, &mut conn)
+            .get_contracts(
+                chain,
+                protocol_system,
+                addresses,
+                version,
+                include_slots,
+                pagination_params,
+                &mut conn,
+            )
             .await
     }
 
@@ -951,12 +961,13 @@ impl ContractStateGateway for CachedGateway {
     async fn get_account_balances(
         &self,
         chain: &Chain,
+        protocol_system: &str,
         addresses: Option<&[Address]>,
         version: Option<&Version>,
     ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
-            .get_account_balances(chain, addresses, version, false, &mut conn)
+            .get_account_balances(chain, protocol_system, addresses, version, false, &mut conn)
             .await
     }
 }
