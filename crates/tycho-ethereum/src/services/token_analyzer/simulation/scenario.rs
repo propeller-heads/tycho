@@ -155,6 +155,18 @@ pub(super) fn block_after(block: &BlockOverrides, gap: BlockGap) -> BlockOverrid
     }
 }
 
+/// The block and transaction environment of the swap legs. The direct legs always run without
+/// validation and at zero gas price: the pool sends them, and it is a contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Environment {
+    /// What the chain enforces: base fee, gas price paid, funded senders without code, a
+    /// non-zero `prevrandao`.
+    Realistic,
+    /// Validation off, zero gas price, zero base fee and `prevrandao`. For owner calls: the owner
+    /// may be a contract, which a validating simulation rejects as a sender.
+    Bare,
+}
+
 /// What to change before running the legs.
 #[derive(Debug, Clone)]
 pub(super) struct Scenario {
@@ -164,12 +176,29 @@ pub(super) struct Scenario {
     pub size: BuySize,
     pub time_shift_days: u64,
     pub timing: LegTiming,
+    pub environment: Environment,
 }
 
 impl Scenario {
-    /// A scenario with the small buy and no time shift.
+    /// A scenario in the `Bare` environment, which accepts senders that have code: for owner
+    /// calls in `prefix`.
     pub fn new(name: &str, prefix: Vec<TransactionRequest>, timing: LegTiming) -> Self {
-        Self { name: name.to_string(), prefix, size: BuySize::Small, time_shift_days: 0, timing }
+        Self {
+            name: name.to_string(),
+            prefix,
+            size: BuySize::Small,
+            time_shift_days: 0,
+            timing,
+            environment: Environment::Bare,
+        }
+    }
+
+    /// A scenario without a prefix in the `Realistic` environment, the buy with the first block.
+    pub fn realistic(name: &str) -> Self {
+        Self {
+            environment: Environment::Realistic,
+            ..Self::new(name, vec![], LegTiming::BuyWithPrefix)
+        }
     }
 }
 
@@ -188,6 +217,9 @@ pub(super) struct Outcome {
     /// pool during the sell raises the first; a token emitting events without moving balances
     /// raises the second. Only the balance change when the seller logged no `Transfer`.
     pub sell_arrived: U256,
+    /// The pool's `swap` reverted on the buy. The token may have refused the payout, or the pool
+    /// may have refused the trade itself, so this says nothing about the token on its own.
+    pub pool_rejected_buy: bool,
     /// Logs emitted during the transfer and sell.
     pub leg_logs: Vec<Log>,
 }
@@ -299,11 +331,23 @@ pub(super) struct TokenContext {
     pub trader: Address,
     pub wallet: Address,
     pub pool_balance: U256,
+    /// The pool as a Uniswap V2 style pair against the wrapped native token, when it is one.
+    pub v2: Option<V2Pair>,
+    /// Base fee of the analysed block; `None` before London.
+    pub base_fee: Option<u64>,
     /// Storage slots that every simulation of the token runs with, on top of the chain's
     /// state, by contract.
     pub storage: BTreeMap<Address, BTreeMap<B256, B256>>,
     /// Code that every simulation of the token runs with, by address.
     pub code: BTreeMap<Address, Bytes>,
+}
+
+/// A Uniswap V2 style pair between the token and the chain's wrapped native token.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct V2Pair {
+    pub wrapped_native: Address,
+    /// The pair's reserve of the wrapped native token.
+    pub reserve: U256,
 }
 
 impl TokenContext {
@@ -324,6 +368,8 @@ impl TokenContext {
             trader: derived_address(b"tycho-token-analysis-trader"),
             wallet: derived_address(b"tycho-token-analysis-wallet"),
             pool_balance,
+            v2: None,
+            base_fee: None,
             storage: BTreeMap::new(),
             code: BTreeMap::new(),
         }
@@ -417,10 +463,13 @@ impl TokenContext {
         }
     }
 
-    /// Simulates `scenario` with the direct legs; fails only when the simulation itself could
-    /// not run.
+    /// Simulates `scenario` as swaps against `v2` when the pool is such a pair, as direct legs
+    /// otherwise; fails only when the simulation itself could not run.
     pub async fn run(&self, scenario: &Scenario) -> Result<Outcome, String> {
-        self.run_direct(scenario).await
+        match &self.v2 {
+            Some(pair) => super::swap::run(self, pair, scenario).await,
+            None => self.run_direct(scenario).await,
+        }
     }
 
     /// Simulates `blocks` one after the other, the first at `first` on top of `state`, and
@@ -502,6 +551,7 @@ impl TokenContext {
                 .then_some(legs)
                 .flatten(),
             sell_arrived,
+            pool_rejected_buy: false,
             leg_logs: legs_result.logs.clone(),
         })
     }
@@ -573,6 +623,14 @@ pub(super) fn first_word(data: &[u8]) -> U256 {
         .unwrap_or_default()
 }
 
+/// `Swap` events of Uniswap V2 and V3 style pools.
+pub(super) fn swap_topics() -> [B256; 2] {
+    [
+        keccak256("Swap(address,uint256,uint256,uint256,uint256,address)"),
+        keccak256("Swap(address,address,int256,int256,uint160,uint128,int24)"),
+    ]
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
@@ -624,6 +682,7 @@ pub(super) mod tests {
                 .as_ref()
                 .map(|l| l.sellArrived)
                 .unwrap_or_default(),
+            pool_rejected_buy: false,
             legs,
             leg_logs: vec![],
         }
