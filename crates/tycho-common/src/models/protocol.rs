@@ -269,6 +269,13 @@ pub struct PauseRecord {
     pub evidence_url: Option<String>,
 }
 
+/// The end of admin pauses, with optional audit details for operators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnpauseRecord {
+    pub actor: Option<String>,
+    pub reason: Option<String>,
+}
+
 /// An admin pause that is in effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComponentPause {

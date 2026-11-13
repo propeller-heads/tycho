@@ -18,7 +18,7 @@ use crate::{
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
             ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
-            ProtocolComponentState, ProtocolComponentStateDelta, QualityRange,
+            ProtocolComponentState, ProtocolComponentStateDelta, QualityRange, UnpauseRecord,
         },
         token::Token,
         Address, BlockHash, Chain, ComponentId, ContractId, EntryPointId, ExtractionState,
@@ -539,6 +539,7 @@ pub trait ComponentPauseGateway {
     /// # Parameters
     /// - `chain` The chain of the components.
     /// - `component_ids` The external ids of the components to unpause.
+    /// - `unpause` Who ended the pauses and why, stored on every pause this call ends.
     ///
     /// # Returns
     /// The ids of the components whose pause this call ended. Err if storage access failed.
@@ -546,6 +547,7 @@ pub trait ComponentPauseGateway {
         &self,
         chain: &Chain,
         component_ids: &[&str],
+        unpause: &UnpauseRecord,
     ) -> Result<Vec<ComponentId>, StorageError>;
 
     /// Reads the admin pauses that are in effect.

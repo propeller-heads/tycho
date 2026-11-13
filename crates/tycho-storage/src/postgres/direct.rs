@@ -17,7 +17,7 @@ use tycho_common::{
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
             ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
-            ProtocolComponentState, ProtocolComponentStateDelta, QualityRange,
+            ProtocolComponentState, ProtocolComponentStateDelta, QualityRange, UnpauseRecord,
         },
         token::Token,
         Address, Chain, ComponentId, ContractId, EntryPointId, ExtractionState, PaginationParams,
@@ -529,10 +529,11 @@ impl ComponentPauseGateway for DirectGateway {
         &self,
         chain: &Chain,
         component_ids: &[&str],
+        unpause: &UnpauseRecord,
     ) -> Result<Vec<ComponentId>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
-            .unpause_components(chain, component_ids, &mut conn)
+            .unpause_components(chain, component_ids, unpause, &mut conn)
             .await
     }
 

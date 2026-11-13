@@ -16,7 +16,7 @@ use tycho_common::{
     models::{
         protocol::{
             ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
-            ProtocolComponentState, ProtocolComponentStateDelta, QualityRange,
+            ProtocolComponentState, ProtocolComponentStateDelta, QualityRange, UnpauseRecord,
         },
         token::Token,
         Address, Balance, Chain, ChangeType, ComponentId, FinancialType, ImplementationType,
@@ -2072,6 +2072,7 @@ impl PostgresGateway {
         &self,
         chain: &Chain,
         component_ids: &[&str],
+        unpause: &UnpauseRecord,
         conn: &mut AsyncPgConnection,
     ) -> Result<Vec<ComponentId>, StorageError> {
         use schema::component_pause::dsl as cp;
@@ -2084,7 +2085,11 @@ impl PostgresGateway {
             .filter(cp::chain_id.eq(chain_id))
             .filter(cp::component_id.eq_any(component_ids))
             .filter(cp::unpaused_at.is_null())
-            .set(cp::unpaused_at.eq(diesel::dsl::now))
+            .set((
+                cp::unpaused_at.eq(diesel::dsl::now),
+                cp::unpause_actor.eq(unpause.actor.as_deref()),
+                cp::unpause_reason.eq(unpause.reason.as_deref()),
+            ))
             .returning(cp::component_id)
             .get_results(conn)
             .await

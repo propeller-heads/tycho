@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS component_pause (
     reason             TEXT,
     actor              TEXT,
     evidence_url       TEXT,
+    unpause_actor      TEXT,
+    unpause_reason     TEXT,
     paused_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     unpaused_at        TIMESTAMPTZ,
     inserted_ts        TIMESTAMPTZ NOT NULL DEFAULT now(),
