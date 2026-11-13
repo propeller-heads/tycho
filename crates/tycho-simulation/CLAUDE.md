@@ -162,6 +162,86 @@ for any protocol indexed by Tycho.
   fake node) and `testdata/` (the recordings and `record_fixture.py`, which makes them).
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
   it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
+  - **`pamm/protocols/flamm/`**: Efficient pools, read from the chain instead of a venue API.
+    `FlammFeed` polls the configured factories' pools over JSON-RPC and quotes each pool's hook
+    pair, tokens 0 and 1, as a ladder of the pool's own `previewSwap` answers at one block, asked
+    as Tycho's router (the caller the pool's hooks see when it swaps), by one `eth_call` per pool
+    of the sampler, which the node runs by state override at the router (`sample_gas`, 45M by
+    default, refused under 20,717,460). A pool's pairs share one
+    inventory, so its other pairs wait for a component that can carry every direction. It
+    publishes one `flamm_pair` book per pool, id `pool ++ lower token ++ higher token`, with the
+    pool as `pamm_address` for the generic `PropAMMSwapEncoder` and `PropAMMExecutor`. Anyone can
+    create a pool over their own hook and price feed, so a pool is served only where both are
+    listed (`hook_classes`, each class with the `HookShape` of its answers; `price_feeds` or
+    `price_feed_code_hashes`), or by name (`pools`), where a hook of no listed class is quoted by
+    steps if its `params()` show no leverage row and not at all if they show one; the lists are
+    configuration and a builder without them refuses to build. A pool a front prices (a hook its
+    factory lists as a front, or a lane-on pool) is never served, whatever the lists, the names or
+    `serve_front_priced` (which does nothing) say; that check runs first. Discovery runs beside the
+    polls: it pages each factory's `_pools` out of storage, checking every entry with `isPool`
+    (named pools too), and keeps what it cannot read from the round before, so nothing it reads ends
+    the feed. Nothing of the pools' pricing is ported, so a new hook or feed is a list entry and a
+    new venue kind or policy needs no change here. `ladder::settle` turns a direction's answers into
+    rungs by their route labels (`feeWad`), the hook's row (`params()`, a decoded one cached per
+    hook) and, where a leverage label shows, the pool's `pairRequest`, the hook's `quotePair` and on
+    a buy its `levState`, read at the poll's block as the router, plus one more `previewSwap` just
+    above the top; `testdata/settle_vectors.json` holds the rule's shared vectors, pinned by hash. A
+    rung is the pool's answer less the haircut, which the router's fee receiver takes as positive
+    slippage where the pool fills at its answer. Inside a span the state prices on the chord,
+    rounded down, where one route priced both rungs, and at the lower rung where the route changes
+    (`Segment::Flat`); nothing is quoted under the first rung, a swap moves only its own side, and a
+    ladder with a flat span has no second fill. A poll's pools share one deadline, three quarters
+    of `request_timeout` from the poll's start, and the polls' permits (`max_in_flight` less
+    discovery's quarter); each poll starts past the last one's answers, so no pool is always last,
+    and a pool given no permit by the deadline is skipped, never a miss. The sampler never
+    reverts, so `reader.rs` classes a node's error by its form, then its wording: not run (a
+    revert, which means the override was dropped; a refused method, parameter, override, gas or
+    size; an answer that is not the sampler's; no probe at the default cap), skipped (a rate limit
+    or null answer, an older block, a block the node lacks) or missed (the rest); none is the
+    pool's, and a poll fails where under half the pools were run. Each of the sampler's calls has a
+    cap, `probe_gas` (5M), doubled per pool where a probe runs short of it, up to 20M, and the
+    default again once an answer fits well under it. A read short of any pool is not cached for its
+    block. A pool that reverts a view, or whose first answer in a direction cannot be a fill, is set
+    aside, with a backoff that grows until its quotes come back. One that misses a poll drops out of
+    that snapshot, and is set aside on a second miss in a row; a poll fails only where most pools
+    miss it, and nobody is set aside where no pool answered. A view's error counts as the pool's
+    answer only where its form says the call reverted (code 3 or revert data). Gas is charged per
+    fill, never over what the fill costs inside the pool's own `swap()` net of its refund, the
+    basis Tycho's gas guide asks for: the least base of `gas_table.rs`, a table generated from
+    measured fills and never edited, over the cells the feed's reads allow (the class of what
+    prices the pair, `hook_class`, the hook's code with its immutables zeroed; the chain; the
+    live venue kinds; the side; how the payout reaches past custody, from the walk's legs; and
+    whether the input repays, from each venue's `venueActions` and, at a venue holding a minimum
+    position, its `minimumDebt`). A fill on a state a swap returned, and every fill on a pool of
+    three or more tokens, takes its key's second-fill charge instead, the least measured of the
+    second of two fills of one pool in one transaction. A pair with a live venue of a kind its
+    chain does not route or with no second-fill charge, an unread venue record or no live venue is
+    not served, and the builder's `gas` does nothing.
+    `gas_limit_addition` is what a fill adds to a limit. Where a live venue whose account holds a
+    partial repay at a minimum position (`capabilities()` bit 512, Lista Moolah's) lends a
+    direction's output, `guard.rs` keeps one piece of its settled ladder before the haircut: the
+    rungs whose payouts and parts fit custody, or those paying at least what the venues free plus
+    the minimum (1 % over) less the debt; none where no walk read the legs.
+    `testdata/held_repay_guard_vectors.json` holds the rule's shared vectors, pinned by hash. A
+    pool worth less than the TVL floor is not quoted at all. `assets/FlammSampler.sol` (SPDX MIT) is the sampler a node runs by state
+    override at the taker, never deployed: one call walks each direction's `previewSwap` and
+    reads the request words the rule needs, and never reverts. Its raw runtime
+    (`assets/FlammSampler.evm.runtime`) and the fake pool's (`testdata/MaxOfTwoPool.sol`, its own
+    hook) come from `assets/build_sampler.py` (solc 0.8.35, via IR, paris, no metadata; `--check`
+    verifies the committed bytes). `sampler_evm.rs` runs the sampler's bytes on revm against the
+    fake pool at the feed's settings, pins both runtimes' and sources' keccaks (the sampler's are
+    the same in every client), and audits the settled ladders against the pool's own
+    `previewSwap`; the feed's node tests answer the sampler's call from `test_support.rs`'s fake
+    pools, walking their seeds and the probe above a tier-labelled top with none of its bisection.
+    `fork.rs` runs the feed against a local anvil fork of Base where the real pools' leverage
+    route wins small fills, its tests ignored without `RPC_URL`: the published ladders against the
+    pools' own swaps from the router on a dense grid, within a tolerance read from the request
+    words, and the far edge, a capped sale, the lever-down's join and a token-ceiling hole, each
+    with a control; and, against a fork of BSC, every published input of the pools it serves there
+    filled through the pool's own swap at or over its quote, at a gas net of the refund at or over
+    its charge, before and after a borrowing sale and a buy. Its one test with no node replays
+    `testdata/base_fork_lever.json`, which `testdata/record_base_fork_lever.sh` re-records from
+    that fork.
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
   Titan WebSocket's price level messages directly into `Update`s (no indexer feed
   round-trip); `PriceLevelStreamState` quotes by interpolating its quotes, records each swap's
