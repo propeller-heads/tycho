@@ -2,10 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use alloy::{
     primitives::{Address as AlloyAddress, B256},
-    rpc::types::{BlockId, BlockNumberOrTag},
+    rpc::types::BlockNumberOrTag,
 };
 use async_trait::async_trait;
-use chrono::DateTime;
 use futures::future::try_join_all;
 use tracing::{debug, info};
 use tycho_common::{
@@ -15,10 +14,7 @@ use tycho_common::{
 };
 
 use crate::{
-    rpc::{
-        errors::{RPCError, RequestError},
-        EthereumRpcClient,
-    },
+    rpc::{errors::RPCError, EthereumRpcClient},
     BytesCodec,
 };
 
@@ -39,26 +35,9 @@ impl EVMAccountExtractor {
     }
 
     pub async fn get_block_data(&self, block_id: u64) -> Result<Block, RPCError> {
-        let block_id = BlockId::from(block_id);
-
-        let block = self
-            .rpc
-            .eth_get_block_by_number(block_id)
-            .await?;
-
-        Ok(Block {
-            number: block.header.number,
-            hash: block.header.hash.to_bytes(),
-            parent_hash: block.header.parent_hash.to_bytes(),
-            chain: self.chain,
-            ts: i64::try_from(block.header.timestamp)
-                .ok()
-                .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
-                .ok_or_else(|| {
-                    RPCError::RequestError(RequestError::Other("Invalid timestamp in block".into()))
-                })?
-                .naive_utc(),
-        })
+        self.rpc
+            .get_block(block_id, self.chain)
+            .await
     }
 }
 

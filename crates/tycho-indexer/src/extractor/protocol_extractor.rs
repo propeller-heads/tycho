@@ -274,7 +274,7 @@ where
             .first_message_processed
     }
 
-    async fn update_last_processed_block(&self, block: Block) {
+    pub(crate) async fn update_last_processed_block(&self, block: Block) {
         let mut state = self.inner.lock().await;
         state.last_processed_block = Some(block);
     }
@@ -2357,6 +2357,96 @@ mod test {
         let res = extractor.get_cursor().await;
 
         assert_eq!(res, "cursor");
+    }
+
+    /// Starts a new extractor at block `first` the way the factory does, then sends it the
+    /// blocks from `first` to `last`. `node` gives the second of each block.
+    async fn run_new_extractor(node: &[(u64, i64)], first: u64, last: u64) -> Vec<NaiveDateTime> {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .returning(|| Err(StorageError::NotFound("ExtractionState".into(), "test".into())));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        let extractor = create_extractor(gw).await;
+        let second_of = |number: u64| {
+            node.iter()
+                .find(|(n, _)| *n == number)
+                .map(|(_, second)| *second)
+                .unwrap()
+        };
+
+        // The blocks before `first` in its second, newest first, as the node returns them.
+        let earlier_blocks: Vec<Block> = (0..first)
+            .rev()
+            .take_while(|number| second_of(*number) == second_of(first))
+            .map(|number| {
+                Block::new(
+                    number,
+                    Chain::Ethereum,
+                    Bytes::from(number).lpad(32, 0),
+                    Bytes::from(number.saturating_sub(1)).lpad(32, 0),
+                    chrono::DateTime::from_timestamp(second_of(number), 0)
+                        .unwrap()
+                        .naive_utc(),
+                )
+            })
+            .collect();
+        if let Some(reference) = crate::extractor::factory::stamped_block_before(&earlier_blocks) {
+            extractor
+                .update_last_processed_block(reference)
+                .await;
+        }
+
+        let mut stamps = Vec::new();
+        for number in first..=last {
+            extractor
+                .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                    &tycho_pb::BlockChanges {
+                        block: Some(tycho_pb::Block {
+                            number,
+                            hash: Bytes::from(number).lpad(32, 0).to_vec(),
+                            parent_hash: Bytes::from(number - 1)
+                                .lpad(32, 0)
+                                .to_vec(),
+                            ts: u64::try_from(second_of(number)).unwrap(),
+                        }),
+                        ..Default::default()
+                    },
+                    Some(&format!("cursor@{number}")),
+                    Some(1),
+                ))
+                .await
+                .unwrap();
+            stamps.push(
+                extractor
+                    .get_last_processed_block()
+                    .await
+                    .unwrap()
+                    .ts,
+            );
+        }
+        stamps
+    }
+
+    #[tokio::test]
+    async fn test_extractors_starting_at_different_blocks_stamp_the_same() {
+        // Blocks 8, 9 and 10 share one second; block 7 is in the second before.
+        const SECOND: i64 = 1_700_000_000;
+        let node = [(7, SECOND - 1), (8, SECOND), (9, SECOND), (10, SECOND)];
+        let at = |micros| {
+            chrono::DateTime::from_timestamp(SECOND, 0)
+                .unwrap()
+                .naive_utc() +
+                Duration::microseconds(micros)
+        };
+
+        let from_10 = run_new_extractor(&node, 10, 10).await;
+        let from_8 = run_new_extractor(&node, 8, 10).await;
+
+        assert_eq!(from_10, vec![at(2)]);
+        assert_eq!(from_8, vec![at(0), at(1), at(2)]);
     }
 
     #[tokio::test]
