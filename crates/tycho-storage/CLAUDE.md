@@ -27,6 +27,9 @@ postgres/
     ├── active.rs       — the active instance of one protocol and of all protocols, looked up once per read from `protocol_system.active_instance_id`
     ├── gateway.rs      — PostgresGatewayNew, inner gateway on the instance tables (renamed to PostgresGateway at cut-over)
     ├── read/           — its read methods, one file per domain
+    │   ├── component.rs — protocol components and their TVL from the active instance of each protocol
+    │   ├── state.rs    — protocol state and component balances of the active instance at the latest version
+    │   └── version.rs  — the check that the current tables can answer a version
     ├── orm.rs          — Diesel row and insert structs for every `tycho` table
     ├── schema.rs       — auto-generated (`[print_schema.instance]` in diesel.toml)
     └── tests.rs        — schema behaviour: leaves, FKs, partition routing, history days
