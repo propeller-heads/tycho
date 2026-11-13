@@ -2828,6 +2828,23 @@ mod test {
         assert_eq!(dropped.unpaused_components, ids(&["b"]));
     }
 
+    #[rstest]
+    #[case::with_paused_ids(r#","paused_component_ids":["a"]"#, vec!["a".to_string()])]
+    #[case::without_paused_ids("", vec![])]
+    fn test_protocol_components_response_paused_ids(
+        #[case] paused_field: &str,
+        #[case] expected: Vec<ComponentId>,
+    ) {
+        let json = format!(
+            r#"{{"protocol_components":[],"pagination":{{"page":0,"page_size":20,"total":0}}{paused_field}}}"#
+        );
+
+        let response: ProtocolComponentRequestResponse =
+            serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(response.paused_component_ids, expected);
+    }
+
     #[test]
     fn test_parse_block_changes() {
         let json_data = r#"
