@@ -2293,6 +2293,116 @@ fn largest_new_pool_per_token(msg: &BlockChanges) -> HashMap<Address, (Address, 
 }
 
 #[cfg(test)]
+mod largest_new_pool_tests {
+    use tycho_common::models::blockchain::TxWithChanges;
+
+    use super::*;
+
+    const TOKEN: &str = "0x00000000000000000000000000000000000000aa";
+
+    fn token() -> Address {
+        Bytes::from_str(TOKEN).unwrap()
+    }
+
+    fn pool(byte: u8) -> Address {
+        Bytes::from([byte; 20])
+    }
+
+    fn created(id: &str, contract: Option<Address>) -> (ComponentId, ProtocolComponent) {
+        let component = ProtocolComponent {
+            id: id.to_string(),
+            tokens: vec![token()],
+            contract_addresses: contract.into_iter().collect(),
+            change: ChangeType::Creation,
+            ..Default::default()
+        };
+        (id.to_string(), component)
+    }
+
+    fn balance_of(id: &str, amount: u64) -> (ComponentId, HashMap<Address, ComponentBalance>) {
+        let balance = ComponentBalance {
+            token: token(),
+            balance: Bytes::from(amount.to_be_bytes().to_vec()),
+            balance_float: amount as f64,
+            modify_tx: Bytes::zero(32),
+            component_id: id.to_string(),
+        };
+        (id.to_string(), HashMap::from([(token(), balance)]))
+    }
+
+    fn message(txs: Vec<TxWithChanges>) -> BlockChanges {
+        BlockChanges { txs_with_update: txs, ..Default::default() }
+    }
+
+    #[test]
+    fn the_new_pool_with_the_largest_balance_is_used() {
+        let msg = message(vec![TxWithChanges {
+            protocol_components: HashMap::from([
+                created("small", Some(pool(1))),
+                created("large", Some(pool(2))),
+            ]),
+            balance_changes: HashMap::from([balance_of("small", 10), balance_of("large", 500)]),
+            ..Default::default()
+        }]);
+        let (owner, balance) = largest_new_pool_per_token(&msg)[&token()].clone();
+        assert_eq!(owner, pool(2));
+        assert_eq!(balance, Bytes::from(500u64.to_be_bytes().to_vec()));
+    }
+
+    #[test]
+    fn a_balance_from_a_later_transaction_counts() {
+        let msg = message(vec![
+            TxWithChanges {
+                protocol_components: HashMap::from([created("pair", Some(pool(1)))]),
+                ..Default::default()
+            },
+            TxWithChanges {
+                balance_changes: HashMap::from([balance_of("pair", 7)]),
+                ..Default::default()
+            },
+        ]);
+        let (_, balance) = largest_new_pool_per_token(&msg)[&token()].clone();
+        assert_eq!(balance, Bytes::from(7u64.to_be_bytes().to_vec()));
+    }
+
+    #[test]
+    fn a_new_pool_without_a_balance_change_gets_an_empty_balance() {
+        let msg = message(vec![TxWithChanges {
+            protocol_components: HashMap::from([created("pair", Some(pool(1)))]),
+            ..Default::default()
+        }]);
+        assert_eq!(largest_new_pool_per_token(&msg)[&token()], (pool(1), Bytes::new()));
+    }
+
+    #[test]
+    fn the_balance_owner_attribute_wins_over_the_contract_address() {
+        let state = ProtocolComponentStateDelta {
+            component_id: "pool".to_string(),
+            updated_attributes: HashMap::from([("balance_owner".to_string(), pool(9))]),
+            ..Default::default()
+        };
+        let msg = message(vec![TxWithChanges {
+            protocol_components: HashMap::from([created("pool", Some(pool(1)))]),
+            state_updates: HashMap::from([("pool".to_string(), state)]),
+            ..Default::default()
+        }]);
+        assert_eq!(largest_new_pool_per_token(&msg)[&token()].0, pool(9));
+    }
+
+    #[test]
+    fn updated_components_are_not_pools_for_new_tokens() {
+        let (id, mut component) = created("pool", Some(pool(1)));
+        component.change = ChangeType::Update;
+        let msg = message(vec![TxWithChanges {
+            protocol_components: HashMap::from([(id, component)]),
+            balance_changes: HashMap::from([balance_of("pool", 5)]),
+            ..Default::default()
+        }]);
+        assert!(largest_new_pool_per_token(&msg).is_empty());
+    }
+}
+
+#[cfg(test)]
 mod test {
     use std::{
         sync::{
