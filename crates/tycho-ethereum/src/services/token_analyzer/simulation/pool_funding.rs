@@ -272,3 +272,69 @@ async fn read_balance_with(
         Err(error) => Err(format!("balanceOf of {token:#x} with the funded balance: {error}")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::{keccak256, Bytes};
+
+    use super::*;
+    use crate::services::token_analyzer::simulation::code::StorageField;
+
+    fn mapping(slot: u8, reads: &[&str]) -> StorageField {
+        StorageField {
+            slot: B256::with_last_byte(slot),
+            offset: 0,
+            r#type: "mapping(address => uint256)".to_string(),
+            reads: reads
+                .iter()
+                .map(|s| Bytes::copy_from_slice(&keccak256(s)[..4]))
+                .collect(),
+            writes: vec![],
+        }
+    }
+
+    #[test]
+    fn finds_the_mapping_balance_of_reads() {
+        let code = CodeSummary {
+            functions: vec![],
+            storage: vec![
+                mapping(0, &["balanceOf(address)", "transfer(address,uint256)"]),
+                mapping(1, &["allowance(address,address)"]),
+            ],
+        };
+        assert_eq!(balance_mappings(&code), [B256::with_last_byte(0)]);
+    }
+
+    #[test]
+    fn a_full_reserve_fits_the_pair_slot() {
+        let reserves = max_reserve() | (max_reserve() << 112) | (U256::from(u32::MAX) << 224);
+        assert_eq!(reserves, U256::MAX);
+    }
+
+    #[test]
+    fn reflection_tokens_read_several_mappings() {
+        let code = CodeSummary {
+            functions: vec![],
+            storage: vec![mapping(2, &["balanceOf(address)"]), mapping(3, &["balanceOf(address)"])],
+        };
+        assert_eq!(balance_mappings(&code).len(), 2);
+    }
+
+    #[test]
+    fn scaling_a_reflection_value_does_not_overflow() {
+        let rate = U256::from(10).pow(U256::from(60));
+        let target = U256::from(10).pow(U256::from(16));
+        let stored = target << 192;
+        let balance = stored / rate;
+        let scaled = scale(stored, target, balance).expect("fits");
+        assert!(close_to(scaled / rate, target));
+    }
+
+    #[test]
+    fn a_balance_within_a_tenth_of_a_percent_is_close_enough() {
+        let target = U256::from(1_000_000);
+        assert!(close_to(U256::from(999_000), target));
+        assert!(close_to(U256::from(1_001_000), target));
+        assert!(!close_to(U256::from(998_999), target));
+    }
+}
