@@ -229,6 +229,57 @@ mod tests {
         }
     }
 
+    /// A node whose `eth_blockNumber` answers `head` to every request.
+    async fn node_at(server: &mut mockito::ServerGuard, head: u64) -> mockito::Mock {
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().expect("body")).expect("json");
+                serde_json::json!({ "jsonrpc": "2.0", "id": body["id"], "result": format!("{head:#x}") })
+                    .to_string()
+                    .into()
+            })
+            .create_async()
+            .await
+    }
+
+    fn preprocessor_for(server: &mockito::ServerGuard) -> EthereumTokenPreProcessor {
+        let rpc = EthereumRpcClient::new(&server.url()).expect("client");
+        EthereumTokenPreProcessor::new(&rpc, Chain::Ethereum)
+    }
+
+    #[tokio::test]
+    async fn a_node_at_the_block_is_not_waited_for() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = node_at(&mut server, 100).await;
+
+        let start = std::time::Instant::now();
+        preprocessor_for(&server)
+            .wait_for_block(100)
+            .await;
+
+        assert!(start.elapsed() < NODE_POLL_INTERVAL);
+        mock.expect(1).assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_node_behind_the_block_is_waited_for_until_the_limit() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = node_at(&mut server, 99).await;
+
+        let start = std::time::Instant::now();
+        preprocessor_for(&server)
+            .wait_for_block(100)
+            .await;
+
+        let waited = start.elapsed();
+        assert!(waited >= NODE_WAIT - NODE_POLL_INTERVAL, "waited {waited:?}");
+        assert!(waited < NODE_WAIT + Duration::from_secs(1), "waited {waited:?}");
+    }
+
     #[tokio::test]
     #[ignore = "require RPC connection"]
     async fn test_call_symbol() {
