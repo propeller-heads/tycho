@@ -1201,7 +1201,8 @@ impl ProtocolGateway for CachedGateway {
 
 #[async_trait]
 impl ComponentPauseGateway for CachedGateway {
-    // Pauses are written on their own connection, not queued with the block writes.
+    // Pause writes skip `DBCacheWriteExecutor` and use their own connection, because they are
+    // not block data.
     #[instrument(skip_all)]
     async fn pause_components(
         &self,

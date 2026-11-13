@@ -2047,7 +2047,7 @@ impl PostgresGateway {
 
     /// Inserts one open pause row per record, skipping components that already have one.
     ///
-    /// Returns the ids of the rows inserted.
+    /// Returns the component ids of the inserted rows.
     pub async fn pause_components(
         &self,
         chain: &Chain,
@@ -2094,7 +2094,7 @@ impl PostgresGateway {
 
     /// Closes the open pause rows of the given components.
     ///
-    /// Returns the ids of the rows closed.
+    /// Returns the component ids of the closed rows.
     pub async fn unpause_components(
         &self,
         chain: &Chain,

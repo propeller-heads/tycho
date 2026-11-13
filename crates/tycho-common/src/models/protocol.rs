@@ -260,19 +260,25 @@ impl ComponentBalance {
 
 /// An admin pause of one component, with optional audit details for operators.
 ///
-/// The audit details only explain the pause to people; nothing decides on them.
+/// `reason`, `actor` and `evidence_url` are notes for operators; no logic depends on them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PauseRecord {
+    /// External id of the component to pause.
     pub component_id: ComponentId,
+    /// Why the component is paused.
     pub reason: Option<String>,
+    /// Who asked for the pause: an operator, or the service that called the admin API.
     pub actor: Option<String>,
+    /// Link to evidence for the pause, such as a failing quote or an incident report.
     pub evidence_url: Option<String>,
 }
 
 /// The end of admin pauses, with optional audit details for operators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnpauseRecord {
+    /// Who ended the pauses: an operator, or the service that called the admin API.
     pub actor: Option<String>,
+    /// Why the pauses ended.
     pub reason: Option<String>,
 }
 

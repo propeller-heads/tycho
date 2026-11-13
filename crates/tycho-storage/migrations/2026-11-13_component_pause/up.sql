@@ -1,12 +1,12 @@
--- Admin pauses of protocol components. A pause is closed by setting unpaused_at, never deleted,
--- so closed rows keep the history of every pause.
+-- Admin pauses of protocol components. Unpausing sets unpaused_at instead of deleting the row,
+-- so the table keeps every past pause.
 CREATE TABLE IF NOT EXISTS component_pause (
     id                 BIGSERIAL PRIMARY KEY,
     chain_id           BIGINT NOT NULL REFERENCES chain(id),
     protocol_system_id BIGINT NOT NULL REFERENCES protocol_system(id),
     -- External id of the component. No foreign key, so an id can be paused before it is indexed.
     component_id       VARCHAR(255) NOT NULL,
-    -- Operator audit fields. Nothing reads them to make a decision.
+    -- Operator audit fields. No logic depends on them.
     reason             TEXT,
     actor              TEXT,
     evidence_url       TEXT,

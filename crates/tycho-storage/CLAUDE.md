@@ -13,7 +13,7 @@ postgres/
 ├── direct.rs           — DirectGateway: unbuffered read/write path (testing, auditing)
 ├── chain.rs            — block & transaction persistence
 ├── contract.rs         — account, code, storage slot, and native-balance persistence
-├── protocol.rs         — protocol component, attribute, and token-balance persistence
+├── protocol.rs         — protocol component, attribute, token-balance and admin pause persistence
 ├── token_cache.rs      — in-memory token store answering get_tokens without SQL (opt-in)
 ├── component_index.rs  — in-memory id/TVL index counting and paging get_protocol_components
 ├── entry_point.rs      — entry point + tracing param/result persistence

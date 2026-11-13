@@ -512,18 +512,17 @@ pub trait ProtocolGateway {
 pub trait ComponentPauseGateway {
     /// Records admin pauses of components.
     ///
-    /// Only records the pauses; it does not change how anything is indexed or sent. A component
-    /// that is already paused keeps its existing pause and audit details. The component does
-    /// not have to be indexed yet.
+    /// A component that is already paused keeps its existing pause and audit details. A
+    /// component can be paused before it is indexed.
     ///
     /// # Parameters
     /// - `chain` The chain of the components.
     /// - `system` The protocol system the components belong to.
-    /// - `pauses` One pause per component.
+    /// - `pauses` The pauses to record. A repeated id keeps its first pause.
     ///
     /// # Returns
-    /// The ids of the components that were not paused before this call. Err if the protocol
-    /// system is unknown or storage access failed.
+    /// The ids of the components this call paused. Err if the protocol system is unknown or
+    /// storage access failed.
     async fn pause_components(
         &self,
         chain: &Chain,
@@ -533,7 +532,6 @@ pub trait ComponentPauseGateway {
 
     /// Ends admin pauses of components.
     ///
-    /// Only records the end of the pauses; it does not change how anything is indexed or sent.
     /// Ended pauses stay stored as history. Ids that are not paused are ignored.
     ///
     /// # Parameters
