@@ -1775,6 +1775,8 @@ where
             component_tvl: HashMap::new(),
             dci_update: DCIUpdate::default(), // TODO: get reverted entrypoint info?
             partial_block_index: revert_partial_block_index,
+            paused_components: HashSet::new(),
+            unpaused_components: HashSet::new(),
         };
 
         debug!("Successfully retrieved all previous states during revert!");
