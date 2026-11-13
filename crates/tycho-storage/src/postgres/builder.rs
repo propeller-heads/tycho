@@ -128,7 +128,7 @@ impl GatewayBuilder {
     pub async fn build_with_rpc_gateway(
         self,
     ) -> Result<(CachedGateway, CachedGateway, JoinHandle<()>), StorageError> {
-        let rpc_pool = postgres::new_pool(&self.database_url)?;
+        let rpc_pool = postgres::new_rpc_pool(&self.database_url)?;
         let (extraction_gw, writer) = self.build().await?;
         spawn_status_gauges(rpc_pool.clone(), RPC_POOL, POOL_STATUS_PERIOD);
         let rpc_gw = extraction_gw.with_pool(rpc_pool, RPC_POOL);
@@ -157,7 +157,8 @@ impl GatewayBuilder {
 
     pub async fn build_direct_gw(self) -> Result<DirectGateway, StorageError> {
         let chain = self.single_chain()?;
-        let pool = postgres::connect(&self.database_url).await?;
+        let pool = postgres::new_rpc_pool(&self.database_url)?;
+        postgres::run_migrations(&self.database_url);
         let mut conn = pool
             .get()
             .await
@@ -204,10 +205,26 @@ fn spawn_refresh_tasks(
 mod test_serial_db {
     use std::time::Duration;
 
-    use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
+    use diesel::{sql_query, sql_types::Text, QueryableByName};
+    use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection, RunQueryDsl};
 
     use super::*;
     use crate::postgres::testing::run_against_db;
+
+    #[derive(QueryableByName)]
+    struct PlanCacheMode {
+        #[diesel(sql_type = Text)]
+        plan_cache_mode: String,
+    }
+
+    async fn plan_cache_mode(pool: &Pool<AsyncPgConnection>) -> String {
+        let mut conn = pool.get().await.unwrap();
+        sql_query("SHOW plan_cache_mode")
+            .get_result::<PlanCacheMode>(&mut conn)
+            .await
+            .unwrap()
+            .plan_cache_mode
+    }
 
     #[tokio::test]
     async fn build_with_rpc_gateway_keeps_request_connections_apart_serial_db() {
@@ -219,6 +236,9 @@ mod test_serial_db {
                 .await
                 .expect("gateways should build");
             let rpc_pool = rpc_gw.pool();
+
+            assert_eq!(plan_cache_mode(rpc_pool).await, "force_custom_plan");
+            assert_eq!(plan_cache_mode(extraction_gw.pool()).await, "auto");
 
             // Requests hold every request connection; extraction still connects at once.
             let connect = |pool: &Pool<AsyncPgConnection>| {
@@ -239,6 +259,21 @@ mod test_serial_db {
                 held.push(connect(rpc_pool).await);
             }
             held.push(connect(extraction_gw.pool()).await);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_direct_gw_forces_custom_plans_serial_db() {
+        run_against_db(|_| async move {
+            let db_url = std::env::var("DATABASE_URL").expect("Database URL must be set");
+            let direct_gw = GatewayBuilder::new(&db_url)
+                .set_chains(&[Chain::Ethereum])
+                .build_direct_gw()
+                .await
+                .expect("gateway should build");
+
+            assert_eq!(plan_cache_mode(direct_gw.pool()).await, "force_custom_plan");
         })
         .await;
     }

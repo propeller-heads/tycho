@@ -133,8 +133,8 @@ use std::{collections::HashMap, hash::Hash, ops::Deref, str::FromStr, sync::Arc,
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel_async::{
-    pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
-    AsyncPgConnection, RunQueryDsl,
+    pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager, ManagerConfig},
+    AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection,
 };
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use tracing::{debug, info};
@@ -698,6 +698,29 @@ fn new_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
         .map_err(|err| StorageError::Unexpected(err.to_string()))
 }
 
+/// Creates a connection pool whose connections always plan a prepared statement for its actual
+/// values (`plan_cache_mode = force_custom_plan`).
+///
+/// A generic plan locks every partition of an instance table before it skips the ones it does
+/// not read. Under concurrent reads, those locks queue in Postgres' shared lock table.
+fn new_rpc_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
+    let mut config = ManagerConfig::<AsyncPgConnection>::default();
+    config.custom_setup = Box::new(|url| {
+        Box::pin(async move {
+            let mut conn = AsyncPgConnection::establish(url).await?;
+            conn.batch_execute("SET plan_cache_mode = force_custom_plan")
+                .await
+                .map_err(diesel::ConnectionError::CouldntSetupConfiguration)?;
+            Ok(conn)
+        })
+    });
+    let manager =
+        AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(db_url, config);
+    Pool::builder(manager)
+        .build()
+        .map_err(|err| StorageError::Unexpected(err.to_string()))
+}
+
 /// Ensures the given chain is present in the database, inserting it if absent.
 ///
 /// Inserts the chain into the `chain` table. If the chain already exists, does nothing.
@@ -838,11 +861,13 @@ pub mod testing {
     //! # Reusable components to write tests against the DB.
     use std::future::Future;
 
-    use diesel::sql_query;
+    use diesel::{sql_query, sql_types::BigInt};
     use diesel_async::{
         pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
-        AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection,
+        AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection,
     };
+
+    const INSTANCE_TESTS_LOCK: i64 = 0x1a57_a9ce;
 
     async fn setup_pool() -> Pool<AsyncPgConnection> {
         let database_url =
@@ -914,6 +939,25 @@ pub mod testing {
                 .unwrap_or_else(|e| panic!("Error truncating {t} table: {e}"));
         }
         dbg!("Teardown completed");
+    }
+
+    /// A connection in a test transaction that holds the instance-test lock. Tests that create
+    /// instances wait for each other: `ATTACH PARTITION` takes a lock on each parent that
+    /// conflicts with itself, and in a different order two tests deadlock.
+    pub async fn instance_test_connection() -> AsyncPgConnection {
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests");
+        let mut conn = AsyncPgConnection::establish(&db_url)
+            .await
+            .expect("connecting to the test database failed");
+        conn.begin_test_transaction()
+            .await
+            .expect("starting the test transaction failed");
+        sql_query("SELECT pg_advisory_xact_lock($1)")
+            .bind::<BigInt, _>(INSTANCE_TESTS_LOCK)
+            .execute(&mut conn)
+            .await
+            .expect("taking the instance-test lock failed");
+        conn
     }
 
     /// Run tests that require committing data to the db.
@@ -1403,6 +1447,109 @@ pub mod db_fixtures {
             .execute(conn)
             .await
             .expect("setting the active instance failed");
+    }
+
+    /// Inserts a component of the instance, of protocol type "pool", created at 2020-01-01 00:00
+    /// in block 1 by the transaction `0x01`. Its tokens get `token_index` 0..n in the given order.
+    /// Returns the component id.
+    pub async fn insert_instance_component(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        external_id: &str,
+        tokens: &[Bytes],
+    ) -> i64 {
+        use instance::schema::tycho::{protocol_component, protocol_component_holds_token};
+
+        let created_at = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        let component_id: i64 = diesel::insert_into(protocol_component::table)
+            .values(instance::orm::NewProtocolComponent {
+                instance_id,
+                external_id: external_id.to_string(),
+                protocol_type: "pool".to_string(),
+                attributes: None,
+                created_at,
+                creation_block: 1,
+                creation_tx_hash: Bytes::from("0x01"),
+                deleted_at: None,
+                deletion_tx_hash: None,
+            })
+            .returning(protocol_component::id)
+            .get_result(conn)
+            .await
+            .expect("inserting the instance component failed");
+        let links: Vec<_> = tokens
+            .iter()
+            .enumerate()
+            .map(|(index, token)| instance::orm::NewProtocolComponentHoldsToken {
+                instance_id,
+                protocol_component_id: component_id,
+                token: token.clone(),
+                token_index: i16::try_from(index).expect("fewer than 2^15 tokens"),
+            })
+            .collect();
+        diesel::insert_into(protocol_component_holds_token::table)
+            .values(links)
+            .execute(conn)
+            .await
+            .expect("inserting the component tokens failed");
+        component_id
+    }
+
+    /// Inserts an account of the instance at `address` and links it to the component as a
+    /// contract. Returns the account id.
+    pub async fn insert_instance_contract_link(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        address: Bytes,
+    ) -> i64 {
+        use instance::schema::tycho::{account, protocol_component_holds_contract};
+
+        let account_id: i64 = diesel::insert_into(account::table)
+            .values(instance::orm::NewAccount {
+                instance_id,
+                address,
+                title: String::new(),
+                created_at: None,
+                creation_block: None,
+                creation_tx_hash: None,
+                deleted_at: None,
+                deletion_tx_hash: None,
+            })
+            .returning(account::id)
+            .get_result(conn)
+            .await
+            .expect("inserting the instance account failed");
+        diesel::insert_into(protocol_component_holds_contract::table)
+            .values(instance::orm::NewProtocolComponentHoldsContract {
+                instance_id,
+                protocol_component_id: component_id,
+                account_id,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the contract link failed");
+        account_id
+    }
+
+    /// Inserts the TVL of a component of the instance.
+    pub async fn insert_instance_tvl(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        tvl: f64,
+    ) {
+        diesel::insert_into(instance::schema::tycho::component_tvl::table)
+            .values(instance::orm::NewComponentTvl {
+                instance_id,
+                protocol_component_id: component_id,
+                tvl,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the component TVL failed");
     }
 
     // Insert a new Protocol Type
@@ -1913,5 +2060,42 @@ mod tests_partition_retention {
                 .expect("no-work run should succeed");
         })
         .await;
+    }
+}
+
+#[cfg(test)]
+mod tests_rpc_pool {
+    use diesel::{sql_query, sql_types::Text, QueryableByName};
+    use diesel_async::RunQueryDsl;
+
+    use super::{new_pool, new_rpc_pool};
+
+    #[derive(QueryableByName)]
+    struct PlanCacheMode {
+        #[diesel(sql_type = Text)]
+        plan_cache_mode: String,
+    }
+
+    async fn plan_cache_mode(pool: super::Pool<super::AsyncPgConnection>) -> String {
+        let mut conn = pool.get().await.unwrap();
+        sql_query("SHOW plan_cache_mode")
+            .get_result::<PlanCacheMode>(&mut conn)
+            .await
+            .unwrap()
+            .plan_cache_mode
+    }
+
+    #[tokio::test]
+    async fn test_rpc_pool_forces_custom_plans() {
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests");
+        let mode = plan_cache_mode(new_rpc_pool(&db_url).unwrap()).await;
+        assert_eq!(mode, "force_custom_plan");
+    }
+
+    #[tokio::test]
+    async fn test_default_pool_keeps_auto_plans() {
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests");
+        let mode = plan_cache_mode(new_pool(&db_url).unwrap()).await;
+        assert_eq!(mode, "auto");
     }
 }

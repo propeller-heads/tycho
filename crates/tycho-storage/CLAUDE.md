@@ -22,9 +22,11 @@ postgres/
 ├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
 ├── orm.rs              — Diesel Queryable/Insertable structs for every table
 ├── schema.rs           — auto-generated Diesel table! macros
-└── instance/           — per-instance `tycho` schema, not yet read or written by the gateways
+└── instance/           — per-instance `tycho` schema, not yet read or written by the public gateways
     ├── mod.rs          — `InstanceId` newtype; joins with the shared `public` tables
-    ├── active.rs       — SQL subselects for the active instance of one protocol and for all active instances, read from `protocol_system.active_instance_id`
+    ├── active.rs       — the active instance of one protocol and of all protocols, looked up once per read from `protocol_system.active_instance_id`
+    ├── gateway.rs      — PostgresGatewayNew, inner gateway on the instance tables (renamed to PostgresGateway at cut-over)
+    ├── read/           — its read methods, one file per domain
     ├── orm.rs          — Diesel row and insert structs for every `tycho` table
     ├── schema.rs       — auto-generated (`[print_schema.instance]` in diesel.toml)
     └── tests.rs        — schema behaviour: leaves, FKs, partition routing, history days
@@ -40,7 +42,8 @@ instances. No table has a DEFAULT partition.
 
 - Create an instance's leaves with `tycho.create_instance_leaves(id)` then
   `tycho.attach_instance_leaves(id)`; an import loads between the two. Foreign keys exist only
-  between the leaves of one instance. Tests use `db_fixtures::insert_instance`.
+  between the leaves of one instance. Tests use `db_fixtures::insert_instance` on a connection from
+  `testing::instance_test_connection()`, which runs instance tests one at a time.
 - History days come from `tycho.premake_history_partitions()` (pg_cron, 00:15), not from
   pg_partman's `run_maintenance()`, which makes no day for a partition set without rows.
   `drop_expired_partitions()` drops expired days of both the old partitioned tables and the
@@ -89,7 +92,9 @@ reload corrects.
 
 Every gateway checkout and the DB writer checkout go through `pool::checkout`. It opens a
 `db_pool_checkout` span and records the wait in `db_pool_checkout_duration_seconds{pool}`. The
-`pool` label is `extraction`, `rpc` or `direct`. A 1 s sampler sets
+`pool` label is `extraction`, `rpc` or `direct`. The `rpc` and `direct` pools serve requests and set
+`plan_cache_mode = force_custom_plan` on each connection: a generic plan locks every
+instance-table partition. The `extraction` pool keeps `auto`. A 1 s sampler sets
 `db_pool_connections{pool,state}`, `db_pool_waiting{pool}` and `db_pool_max_size{pool}`. Traced
 entry point reads load rows with a connection (`load_traced_entry_point_rows`) and return the
 connection before they decode the JSON (`decode_traced_entry_points`). Do not hold a connection

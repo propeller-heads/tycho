@@ -56,6 +56,11 @@ impl DirectGateway {
         pool::checkout(&self.pool, DIRECT_POOL).await
     }
 
+    #[cfg(test)]
+    pub(crate) fn pool(&self) -> &Pool<AsyncPgConnection> {
+        &self.pool
+    }
+
     pub async fn get_delta(
         &self,
         chain: &Chain,

@@ -5,22 +5,14 @@ use diesel::{
     sql_query,
     sql_types::{BigInt, Bool, Int4, Text},
 };
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection};
+use diesel_async::{AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection};
 use tycho_common::Bytes;
 
 use super::{orm::*, schema::tycho, InstanceId};
-use crate::postgres::{db_fixtures, testing::run_against_db};
-
-async fn setup_db() -> AsyncPgConnection {
-    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests");
-    let mut conn = AsyncPgConnection::establish(&db_url)
-        .await
-        .expect("connecting to the test database failed");
-    conn.begin_test_transaction()
-        .await
-        .expect("starting the test transaction failed");
-    conn
-}
+use crate::postgres::{
+    db_fixtures,
+    testing::{instance_test_connection, run_against_db},
+};
 
 async fn setup_instance(conn: &mut AsyncPgConnection) -> InstanceId {
     let protocol_system_id =
@@ -67,7 +59,7 @@ async fn count(conn: &mut AsyncPgConnection, query: &str, instance_id: InstanceI
 
 #[tokio::test]
 async fn test_instance_gets_one_attached_leaf_per_table_with_check_and_fks() {
-    let mut conn = setup_db().await;
+    let mut conn = instance_test_connection().await;
     let instance_id = setup_instance(&mut conn).await;
 
     let attached = count(
@@ -125,7 +117,7 @@ async fn test_instance_gets_one_attached_leaf_per_table_with_check_and_fks() {
 
 #[tokio::test]
 async fn test_create_instance_leaves_rejects_unknown_instance() {
-    let mut conn = setup_db().await;
+    let mut conn = instance_test_connection().await;
 
     let result = sql_query("SELECT tycho.create_instance_leaves(-1)")
         .execute(&mut conn)
@@ -617,7 +609,7 @@ async fn round_trip_entry_points(
 /// generated schema matches the migration.
 #[tokio::test]
 async fn test_rows_round_trip_through_orm_structs() {
-    let mut conn = setup_db().await;
+    let mut conn = instance_test_connection().await;
     let instance_id = setup_instance(&mut conn).await;
     let component_id = insert_component(&mut conn, instance_id).await;
     let account_id = insert_account(&mut conn, instance_id).await;
@@ -629,7 +621,7 @@ async fn test_rows_round_trip_through_orm_structs() {
 
 #[tokio::test]
 async fn test_leaf_fk_rejects_state_of_missing_component() {
-    let mut conn = setup_db().await;
+    let mut conn = instance_test_connection().await;
     let instance_id = setup_instance(&mut conn).await;
 
     let result = diesel::insert_into(tycho::protocol_state::table)
@@ -650,7 +642,7 @@ async fn test_leaf_fk_rejects_state_of_missing_component() {
 
 #[tokio::test]
 async fn test_instance_without_leaves_has_no_partition() {
-    let mut conn = setup_db().await;
+    let mut conn = instance_test_connection().await;
     let instance_id = setup_instance(&mut conn).await;
     insert_component(&mut conn, instance_id).await;
 
@@ -678,7 +670,7 @@ async fn test_instance_without_leaves_has_no_partition() {
 
 #[tokio::test]
 async fn test_leaf_check_rejects_rows_of_another_instance() {
-    let mut conn = setup_db().await;
+    let mut conn = instance_test_connection().await;
     let instance_id = setup_instance(&mut conn).await;
 
     let result = sql_query(format!(
@@ -709,7 +701,7 @@ fn history_row(instance_id: InstanceId, valid_to: NaiveDateTime) -> ProtocolStat
 
 #[tokio::test]
 async fn test_history_rejects_a_day_that_is_not_premade() {
-    let mut conn = setup_db().await;
+    let mut conn = instance_test_connection().await;
     let instance_id = setup_instance(&mut conn).await;
 
     let result = diesel::insert_into(tycho::protocol_state_history::table)
@@ -722,7 +714,7 @@ async fn test_history_rejects_a_day_that_is_not_premade() {
 
 #[tokio::test]
 async fn test_history_pk_rejects_the_same_version_archived_twice() {
-    let mut conn = setup_db().await;
+    let mut conn = instance_test_connection().await;
     let instance_id = setup_instance(&mut conn).await;
     let row = history_row(instance_id, now());
     diesel::insert_into(tycho::protocol_state_history::table)
@@ -791,7 +783,7 @@ async fn test_drop_expired_partitions_covers_history_tables_serial_db() {
 
 #[tokio::test]
 async fn test_premake_makes_days_for_empty_history_tables() {
-    let mut conn = setup_db().await;
+    let mut conn = instance_test_connection().await;
     // The history tables have no rows, as they do until the data migration.
     let day_ahead = "to_char(now() + interval '7 days', 'YYYYMMDD')";
     for table in HISTORY_TABLES {
