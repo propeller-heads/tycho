@@ -205,7 +205,14 @@ mod tests {
 
         // The packed V4 pool tail is hook address | uint16 hookData length | hookData.
         assert!(encoded.ends_with(
-            &[hook.as_ref(), &(hook_data.len() as u16).to_be_bytes(), hook_data.as_ref(),].concat()
+            &[
+                hook.as_ref(),
+                &u16::try_from(hook_data.len())
+                    .unwrap()
+                    .to_be_bytes(),
+                hook_data.as_ref(),
+            ]
+            .concat()
         ));
     }
 

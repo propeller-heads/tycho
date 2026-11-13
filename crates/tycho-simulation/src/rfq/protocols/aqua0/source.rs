@@ -35,7 +35,7 @@ const STALE_MARKETS_FACTOR: u32 = 5;
 /// cadence, then each listed pool's state. Markets the backend stops listing, or that cannot be
 /// quoted right now, are left out of the snapshot, which removes them.
 #[derive(derive_more::Debug)]
-pub(crate) struct Aqua0BookSource {
+pub struct Aqua0BookSource {
     pub(crate) client: Arc<Aqua0Client>,
     pub(crate) book_config: BookFeedConfig,
     /// Sample sizes by token address; a token missing here samples 1 to 10,000 whole units.
@@ -194,7 +194,7 @@ fn address(value: &str) -> Result<Bytes, String> {
 }
 
 /// `keccak256(abi.encode(PoolKey))`: the V4 pool id of the key a fill is encoded with.
-pub(crate) fn v4_pool_id(
+pub fn v4_pool_id(
     currency0: &Bytes,
     currency1: &Bytes,
     fee: u32,
@@ -230,7 +230,8 @@ fn book(
     {
         return Err("unsupported schema or protocol identity".into());
     }
-    let class_id = BigUint::from_str(&state.class_id).map_err(|_| "invalid classId")?;
+    let class_id =
+        BigUint::from_str(&state.class_id).map_err(|error| format!("invalid classId: {error}"))?;
     if state.chain_id != client.chain_id() ||
         !state
             .pool_id
@@ -321,7 +322,7 @@ fn book(
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tycho_common::models::Chain;
@@ -332,7 +333,7 @@ pub(crate) mod tests {
     };
 
     /// The backend's `componentId` in the recorded Polygon `/state` answer.
-    pub(crate) const POLYGON_COMPONENT_ID: &str =
+    pub const POLYGON_COMPONENT_ID: &str =
         "0x9e8a3c65a8e5a3c3bf90e59f2d41e5adf3264d39153b31d2da004ffc138b8b81";
     const POLYGON_STATE: &str = include_str!("testdata/polygon_state.json");
     const ARBITRUM_STATE: &str = include_str!("testdata/arbitrum_state.json");
@@ -434,10 +435,12 @@ pub(crate) mod tests {
         let good = market_of(&polygon);
         let empty_pool = format!("0x{}", "33".repeat(32));
         let broken_pool = format!("0x{}", "44".repeat(32));
+        let quiet_pool = format!("0x{}", "55".repeat(32));
         let markets = serde_json::json!({ "markets": [
             { "chainId": 137, "poolId": good.pool_id, "classId": good.class_id, "tokens": good.tokens },
             { "chainId": 137, "poolId": empty_pool, "classId": "1", "tokens": good.tokens },
             { "chainId": 137, "poolId": broken_pool, "classId": "1", "tokens": good.tokens },
+            { "chainId": 137, "poolId": quiet_pool, "classId": "1", "tokens": good.tokens },
         ]})
         .to_string();
         let mut state_json: serde_json::Value = serde_json::from_str(POLYGON_STATE).unwrap();
@@ -457,6 +460,12 @@ pub(crate) mod tests {
                     r#"{"error":"RFQ_REFUSED","code":"RFQ_REFUSED","message":"no quotable Aqua0 JIT liquidity for pool"}"#
                         .to_string(),
                 ));
+            }
+            if target.contains(&quiet_pool) {
+                let mut quiet = serde_json::from_str::<serde_json::Value>(POLYGON_STATE).unwrap();
+                quiet["quotable"] = false.into();
+                quiet["directions"] = serde_json::json!({ "zeroForOne": [], "oneForZero": [] });
+                return Some(("200 OK", quiet.to_string()));
             }
             if target.contains(&broken_pool) {
                 return Some(("200 OK", r#"{"schemaVersion":"aqua0-rfq-state-v1"}"#.to_string()));

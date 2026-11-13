@@ -32,14 +32,13 @@ use crate::{
     },
 };
 
-/// Gas for one Aqua0 fill: `PoolManager.swap` while the hook adds and removes each JIT range.
-/// Fitted to 40 Arbitrum fills since the 2026-10-07 hooks (one range: 536k to 837k per
-/// transaction, two ranges: 895k) and a 785k `PoolManager.swap` on Polygon.
+/// Gas for one Aqua0 fill when the backend sends no measured estimate: `PoolManager.swap` while
+/// the hook adds and removes each JIT range, fitted to Aqua0's Arbitrum fills since October 2026.
 const SWAP_GAS_BASE: u64 = 500_000;
 const SWAP_GAS_PER_RANGE: u64 = 200_000;
 
 fn swap_gas(ranges: usize) -> BigUint {
-    BigUint::from(SWAP_GAS_BASE + SWAP_GAS_PER_RANGE * ranges.max(1) as u64)
+    BigUint::from(SWAP_GAS_BASE) + BigUint::from(SWAP_GAS_PER_RANGE) * BigUint::from(ranges.max(1))
 }
 
 /// One fully backed sample: what the binding quote for `amount_in` signs, and how many JIT
@@ -48,7 +47,7 @@ fn swap_gas(ranges: usize) -> BigUint {
 struct Point {
     amount_in: BigUint,
     amount_out: BigUint,
-    ranges: usize,
+    gas: BigUint,
 }
 
 /// The fully backed levels of one direction, in rising input, checked to be monotonic.
@@ -59,10 +58,14 @@ fn points(levels: &[Aqua0Level]) -> Result<Vec<Point>, String> {
         .map(|level| {
             Ok(Point {
                 amount_in: BigUint::from_str(&level.amount_in)
-                    .map_err(|_| format!("invalid amountIn {}", level.amount_in))?,
+                    .map_err(|error| format!("invalid amountIn {}: {error}", level.amount_in))?,
                 amount_out: BigUint::from_str(&level.amount_out)
-                    .map_err(|_| format!("invalid amountOut {}", level.amount_out))?,
-                ranges: level.ranges.len(),
+                    .map_err(|error| format!("invalid amountOut {}: {error}", level.amount_out))?,
+                gas: match &level.gas_estimate {
+                    Some(gas) => BigUint::from_str(gas)
+                        .map_err(|error| format!("invalid gasEstimate {gas}: {error}"))?,
+                    None => swap_gas(level.ranges.len()),
+                },
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -186,25 +189,25 @@ impl Aqua0State {
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let points = Self::backed_points(levels)?;
         if amount_in == &BigUint::default() {
-            return Ok((BigUint::default(), swap_gas(points[0].ranges)));
+            return Ok((BigUint::default(), points[0].gas.clone()));
         }
         let mut previous_in = BigUint::default();
         let mut previous_out = BigUint::default();
-        let mut previous_ranges = 1;
+        let mut previous_gas = swap_gas(1);
         for point in &points {
             if amount_in <= &point.amount_in {
                 let input_span = &point.amount_in - &previous_in;
                 let output_span = &point.amount_out - &previous_out;
                 let out = previous_out + ((amount_in - &previous_in) * output_span / input_span);
-                return Ok((out, swap_gas(point.ranges)));
+                return Ok((out, point.gas.clone()));
             }
             previous_in = point.amount_in.clone();
             previous_out = point.amount_out.clone();
-            previous_ranges = point.ranges;
+            previous_gas = point.gas.clone();
         }
         let partial = GetAmountOutResult {
             amount: previous_out,
-            gas: swap_gas(previous_ranges),
+            gas: previous_gas,
             new_state: self.clone_box(),
         };
         Err(SimulationError::InvalidInput(
@@ -228,9 +231,11 @@ impl ProtocolSim for Aqua0State {
         let (levels, input, output) = self.direction(&base.address, &quote.address)?;
         let first = &Self::backed_points(levels)?[0];
         let human = |amount: &BigUint, decimals: u32| -> Result<f64, SimulationError> {
+            let decimals = i32::try_from(decimals)
+                .map_err(|error| SimulationError::FatalError(error.to_string()))?;
             Ok(amount.to_f64().ok_or_else(|| {
                 SimulationError::FatalError("Aqua0 amount does not fit f64".into())
-            })? / 10f64.powi(decimals as i32))
+            })? / 10f64.powi(decimals))
         };
         Ok(human(&first.amount_out, output.decimals)? / human(&first.amount_in, input.decimals)?)
     }
@@ -275,7 +280,7 @@ impl ProtocolSim for Aqua0State {
             self.get_limits(params.token_in().address.clone(), params.token_out().address.clone())?;
         let maximum = max_amount_in
             .as_ref()
-            .map_or(capacity.clone(), |bound| capacity.min(bound.clone()));
+            .map_or_else(|| capacity.clone(), |bound| capacity.clone().min(bound.clone()));
         let minimum = min_amount_in
             .clone()
             .unwrap_or_default();
@@ -384,6 +389,7 @@ mod tests {
                 Aqua0Range { tick_lower: -60, tick_upper: 60, liquidity: "10".into() };
                 ranges
             ],
+            gas_estimate: None,
         }
     }
 
@@ -438,6 +444,17 @@ mod tests {
     }
 
     #[test]
+    fn a_measured_gas_estimate_wins_over_the_range_model() {
+        let mut measured = level("100", "300", 1);
+        measured.gas_estimate = Some("612345".into());
+        let state = state_with(vec![measured]).unwrap();
+        let result = state
+            .get_amount_out(BigUint::from(100u32), &state.token0, &state.token1)
+            .unwrap();
+        assert_eq!(result.gas, BigUint::from(612_345u32));
+    }
+
+    #[test]
     fn refuses_amounts_above_the_largest_backed_level() {
         let state = state();
         assert!(matches!(
@@ -465,10 +482,7 @@ mod tests {
     #[test]
     fn a_one_sided_market_names_its_direction() {
         let state = state_with(vec![]).unwrap();
-        assert_eq!(
-            state.directions(),
-            vec![(state.token1.address.clone(), state.token0.address.clone())]
-        );
+        assert_eq!(state.directions(), vec![(state.token1.address.clone(), state.token0.address)]);
     }
 
     #[test]

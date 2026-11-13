@@ -37,7 +37,7 @@ fn refuses_the_chain(body: &str) -> bool {
 
 /// What `/state` said about one pool.
 #[derive(Debug)]
-pub(crate) enum StateAnswer {
+pub enum StateAnswer {
     Quotable(Box<Aqua0StateResponse>),
     /// The pool is listed but no sampled size can be fully backed right now.
     NoLiquidity,
@@ -54,13 +54,13 @@ pub struct Aqua0Pool {
 
 /// The backend's component id for a pool and strategy:
 /// `keccak256("aqua0-rfq-v1:{chain}:{pool}:{class}")`.
-pub(crate) fn backend_component_id(
+pub fn backend_component_id(
     chain_id: u64,
     pool_id: &str,
     class_id: &str,
 ) -> Result<String, String> {
-    let class_id =
-        BigUint::from_str(class_id).map_err(|_| format!("invalid Aqua0 class id {class_id}"))?;
+    let class_id = BigUint::from_str(class_id)
+        .map_err(|error| format!("invalid Aqua0 class id {class_id}: {error}"))?;
     Ok(format!(
         "{:#x}",
         keccak256(format!("aqua0-rfq-v1:{chain_id}:{}:{class_id}", pool_id.to_lowercase()))
@@ -168,8 +168,11 @@ impl Aqua0Client {
         if status.is_success() {
             let state: Aqua0StateResponse = serde_json::from_slice(&body)
                 .map_err(|error| FeedError::Parsing(format!("Aqua0 state: {error}")))?;
-            // No level in either direction is the same answer as the refusal below.
-            if state.directions.zero_for_one.is_empty() && state.directions.one_for_zero.is_empty()
+            // `quotable: false`, or no level in either direction, is the same answer as the
+            // refusal older backends send below.
+            if state.quotable == Some(false) ||
+                (state.directions.zero_for_one.is_empty() &&
+                    state.directions.one_for_zero.is_empty())
             {
                 return Ok(StateAnswer::NoLiquidity);
             }
@@ -267,7 +270,7 @@ impl Aqua0Client {
     }
 }
 
-pub(crate) fn unix_now() -> Result<u64, RFQError> {
+pub fn unix_now() -> Result<u64, RFQError> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| RFQError::FatalError(error.to_string()))?
@@ -310,14 +313,14 @@ fn check_binding_quote(
         return Err(mismatch("router"));
     }
     let amount_out = BigUint::from_str(&quote.amount_out)
-        .map_err(|_| RFQError::ParsingError("Invalid Aqua0 amountOut".into()))?;
+        .map_err(|error| RFQError::ParsingError(format!("Invalid Aqua0 amountOut: {error}")))?;
     if amount_out == BigUint::default() {
         return Err(mismatch("amountOut"));
     }
     let deadline = quote
         .deadline
         .parse::<u64>()
-        .map_err(|_| RFQError::ParsingError("Invalid Aqua0 deadline".into()))?;
+        .map_err(|error| RFQError::ParsingError(format!("Invalid Aqua0 deadline: {error}")))?;
     if deadline <= now {
         return Err(RFQError::QuoteNotFound("Aqua0 binding quote is already expired".into()));
     }
