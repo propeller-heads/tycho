@@ -1,3 +1,11 @@
+## [0.519.0](https://github.com/propeller-heads/tycho/compare/0.518.0...0.519.0) (2026-11-13)
+
+
+### Features
+
+* **execution:** register the BaiBai executor on Base ([bd09181](https://github.com/propeller-heads/tycho/commit/bd091816722475c6325bd1312f75fcc1aa39b13d))
+* **execution:** register the BaiBai executor on Base ([#1793](https://github.com/propeller-heads/tycho/issues/1793)) ([d548efe](https://github.com/propeller-heads/tycho/commit/d548efe14508a27d2ae77726a51feb1a9f2bf9bb))
+
 ## [0.518.0](https://github.com/propeller-heads/tycho/compare/0.517.1...0.518.0) (2026-11-13)
 
 
