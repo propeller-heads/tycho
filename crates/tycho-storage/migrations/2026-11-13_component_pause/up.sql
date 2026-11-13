@@ -16,9 +16,10 @@ CREATE TABLE IF NOT EXISTS component_pause (
     modified_ts        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- At most one open pause per component.
+-- At most one open pause per component. A component id is unique per chain, so the protocol
+-- system is not part of the key.
 CREATE UNIQUE INDEX IF NOT EXISTS component_pause_open_idx
-    ON component_pause (chain_id, protocol_system_id, component_id)
+    ON component_pause (chain_id, component_id)
     WHERE valid_to IS NULL;
 
 CREATE TRIGGER update_modtime_component_pause

@@ -538,16 +538,13 @@ pub trait ComponentPauseGateway {
     ///
     /// # Parameters
     /// - `chain` The chain of the components.
-    /// - `system` The protocol system the components belong to.
     /// - `component_ids` The external ids of the components to unpause.
     ///
     /// # Returns
-    /// The ids of the components whose pause this call ended. Err if the protocol system is
-    /// unknown or storage access failed.
+    /// The ids of the components whose pause this call ended. Err if storage access failed.
     async fn unpause_components(
         &self,
         chain: &Chain,
-        system: &str,
         component_ids: &[&str],
     ) -> Result<Vec<ComponentId>, StorageError>;
 

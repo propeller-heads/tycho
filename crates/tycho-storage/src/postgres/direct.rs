@@ -528,12 +528,11 @@ impl ComponentPauseGateway for DirectGateway {
     async fn unpause_components(
         &self,
         chain: &Chain,
-        system: &str,
         component_ids: &[&str],
     ) -> Result<Vec<ComponentId>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
-            .unpause_components(chain, system, component_ids, &mut conn)
+            .unpause_components(chain, component_ids, &mut conn)
             .await
     }
 

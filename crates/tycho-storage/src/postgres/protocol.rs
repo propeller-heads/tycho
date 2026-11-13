@@ -2071,27 +2071,26 @@ impl PostgresGateway {
     pub async fn unpause_components(
         &self,
         chain: &Chain,
-        system: &str,
         component_ids: &[&str],
         conn: &mut AsyncPgConnection,
     ) -> Result<Vec<ComponentId>, StorageError> {
         use schema::component_pause::dsl as cp;
 
         let chain_id = self.get_chain_id(chain)?;
-        let system_id = self.get_protocol_system_id(&system.to_string())?;
         if component_ids.is_empty() {
             return Ok(Vec::new());
         }
         diesel::update(cp::component_pause)
             .filter(cp::chain_id.eq(chain_id))
-            .filter(cp::protocol_system_id.eq(system_id))
             .filter(cp::component_id.eq_any(component_ids))
             .filter(cp::valid_to.is_null())
             .set(cp::valid_to.eq(diesel::dsl::now))
             .returning(cp::component_id)
             .get_results(conn)
             .await
-            .map_err(|err| storage_error_from_diesel(err, "ComponentPause", system, None).into())
+            .map_err(|err| {
+                storage_error_from_diesel(err, "ComponentPause", &chain.to_string(), None).into()
+            })
     }
 
     /// Loads the open pause rows of a chain, ordered by protocol system and component id.
