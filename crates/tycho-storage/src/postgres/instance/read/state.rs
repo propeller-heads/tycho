@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use diesel::{pg::Pg, prelude::*};
+use diesel::{dsl::exists, pg::Pg, prelude::*};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::{
     models::{
@@ -14,7 +14,7 @@ use tycho_common::{
 use super::version::check_current;
 use crate::postgres::{
     instance::{
-        active::active_instance,
+        active::{active_instance, active_instance_ids},
         gateway::PostgresGatewayNew,
         orm as iorm,
         schema::tycho::{component_balance, protocol_component, protocol_state},
@@ -115,14 +115,25 @@ impl PostgresGatewayNew {
         conn: &mut AsyncPgConnection,
     ) -> Result<WithTotal<Vec<ProtocolComponentState>>, StorageError> {
         self.get_chain_id(chain)?;
-        match system {
-            Some(system) => {
+        match (system, ids) {
+            (Some(system), ids) => {
                 states_of(&system, ids, at.as_ref(), retrieve_balances, pagination_params, conn)
                     .await
             }
-            None => Err(StorageError::Unsupported(
-                "protocol states without a protocol system are not supported yet".to_string(),
+            (None, Some(_)) => Err(StorageError::Unsupported(
+                "protocol states by component id need a protocol system: a pool id can repeat \
+                 across protocols"
+                    .to_string(),
             )),
+            (None, None) => {
+                if at.is_some() {
+                    return Err(StorageError::Unsupported(
+                        "a version needs a protocol system until the history tables are read"
+                            .to_string(),
+                    ));
+                }
+                active_states(retrieve_balances, pagination_params, conn).await
+            }
         }
     }
 }
@@ -211,6 +222,89 @@ async fn states_of(
     let components = components
         .into_iter()
         .map(|(id, external_id)| ((instance, id), external_id))
+        .collect();
+    Ok(WithTotal { entity: build_states(components, state_rows, balances), total })
+}
+
+/// Reads the states of every component of the active instances that has a state attribute.
+async fn active_states(
+    retrieve_balances: bool,
+    pagination_params: Option<&PaginationParams>,
+    conn: &mut AsyncPgConnection,
+) -> Result<WithTotal<Vec<ProtocolComponentState>>, StorageError> {
+    let instances = active_instance_ids(conn).await?;
+    let filtered = || {
+        protocol_component::table
+            .filter(protocol_component::instance_id.eq_any(&instances))
+            .filter(exists(
+                protocol_state::table
+                    .filter(protocol_state::instance_id.eq_any(&instances))
+                    .filter(protocol_state::instance_id.eq(protocol_component::instance_id))
+                    .filter(protocol_state::protocol_component_id.eq(protocol_component::id)),
+            ))
+            .into_boxed::<Pg>()
+    };
+    let columns =
+        (protocol_component::instance_id, protocol_component::id, protocol_component::external_id);
+    let (components, total) = match pagination_params {
+        Some(pagination) => {
+            let total = filtered()
+                .count()
+                .get_result::<i64>(conn)
+                .await
+                .map_err(PostgresError::from)?;
+            let components: Vec<(InstanceId, i64, String)> = filtered()
+                .order_by((protocol_component::instance_id, protocol_component::id))
+                .limit(pagination.page_size)
+                .offset(pagination.offset())
+                .select(columns)
+                .load(conn)
+                .await
+                .map_err(PostgresError::from)?;
+            (components, Some(total))
+        }
+        None => {
+            let components: Vec<(InstanceId, i64, String)> = filtered()
+                .select(columns)
+                .load(conn)
+                .await
+                .map_err(PostgresError::from)?;
+            (components, None)
+        }
+    };
+    let page_ids: Option<Vec<i64>> = pagination_params.is_some().then(|| {
+        components
+            .iter()
+            .map(|(_, id, _)| *id)
+            .collect()
+    });
+
+    let mut state_query = protocol_state::table
+        .filter(protocol_state::instance_id.eq_any(&instances))
+        .select((
+            protocol_state::instance_id,
+            protocol_state::protocol_component_id,
+            protocol_state::attribute_name,
+            protocol_state::attribute_value,
+        ))
+        .into_boxed::<Pg>();
+    if let Some(page_ids) = &page_ids {
+        state_query = state_query.filter(protocol_state::protocol_component_id.eq_any(page_ids));
+    }
+    let state_rows: Vec<StateRow> = state_query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?;
+
+    let balances = if retrieve_balances {
+        load_balances(conn, &instances, page_ids.as_deref()).await?
+    } else {
+        HashMap::new()
+    };
+
+    let components = components
+        .into_iter()
+        .map(|(instance_id, id, external_id)| ((instance_id, id), external_id))
         .collect();
     Ok(WithTotal { entity: build_states(components, state_rows, balances), total })
 }
@@ -714,6 +808,76 @@ mod tests {
 
         let result =
             states(&s.gateway, &mut conn, Some("vm:curve"), None, None, Some(at(day(1)))).await;
+
+        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+    }
+    #[tokio::test]
+    async fn test_states_by_id_need_a_protocol() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+
+        let result = states(&s.gateway, &mut conn, None, Some(&["a"]), None, None).await;
+
+        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_states_without_filters_read_active_instances_only() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let next = db_fixtures::insert_instance(&mut conn, s.curve_system_id, "0.0.2").await;
+        component_with_state(&mut conn, s.curve, "0xpool", "0x01").await;
+        component_with_balance(&mut conn, s.curve, "0xpool2", "0x10").await;
+        component_with_state(&mut conn, s.uniswap_v4, "0xpool", "0x02").await;
+        component_with_state(&mut conn, next, "0xpool", "0x03").await;
+
+        let (result, total) = states(&s.gateway, &mut conn, None, None, None, None)
+            .await
+            .unwrap();
+
+        let mut values: Vec<&Bytes> = result
+            .iter()
+            .map(|state| &state.attributes["reserve"])
+            .collect();
+        values.sort();
+        assert_eq!(component_ids(&result), vec!["0xpool", "0xpool"]);
+        assert_eq!(values, vec![&b("0x01"), &b("0x02")]);
+        assert_eq!(total, None);
+    }
+
+    #[tokio::test]
+    async fn test_states_without_filters_page_by_instance_then_id() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        component_with_state(&mut conn, s.uniswap_v4, "u", "0x02").await;
+        component_with_state(&mut conn, s.curve, "c", "0x01").await;
+        let (first, second) = if s.curve < s.uniswap_v4 { ("c", "u") } else { ("u", "c") };
+
+        let mut pages = Vec::new();
+        for page in 0..2 {
+            let (result, total) = states(
+                &s.gateway,
+                &mut conn,
+                None,
+                None,
+                Some(&PaginationParams::new(page, 1)),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(total, Some(2));
+            pages.push(component_ids(&result).join(","));
+        }
+
+        assert_eq!(pages, vec![first, second]);
+    }
+
+    #[tokio::test]
+    async fn test_states_without_a_protocol_at_a_version_are_unsupported() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+
+        let result = states(&s.gateway, &mut conn, None, None, None, Some(at(day(1)))).await;
 
         assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
     }
