@@ -4822,6 +4822,34 @@ mod test {
         }
 
         #[tokio::test]
+        async fn test_pause_components_empty() {
+            let mut conn = setup_db().await;
+            let gw = setup_pause_gateway(&mut conn).await;
+
+            let paused = gw
+                .pause_components(&Chain::Ethereum, SYSTEM, &[], &mut conn)
+                .await
+                .expect("pause failed");
+
+            assert!(paused.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_unpause_components_empty() {
+            let mut conn = setup_db().await;
+            let gw = setup_pause_gateway(&mut conn).await;
+            insert_open_pause(&gw, &mut conn, &Chain::Ethereum, "pool_a").await;
+
+            let unpaused = gw
+                .unpause_components(&Chain::Ethereum, &[], &unpause(), &mut conn)
+                .await
+                .expect("unpause failed");
+
+            assert!(unpaused.is_empty());
+            assert_eq!(stored_rows(&mut conn, "pool_a").await, vec![None]);
+        }
+
+        #[tokio::test]
         async fn test_pause_components_unknown_system() {
             let mut conn = setup_db().await;
             let gw = setup_pause_gateway(&mut conn).await;
