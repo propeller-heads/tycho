@@ -248,12 +248,16 @@ impl ProtocolDataCache for ProtocolMemoryCache {
         &self,
         tokens: T,
     ) -> Result<(), StorageError> {
-        let mut guard = self.tokens.write().await;
-        guard.extend(
-            tokens
-                .into_iter()
-                .map(|t| (t.address.clone(), t)),
-        );
+        let tokens = tokens
+            .into_iter()
+            .map(|t| (t.address.clone(), t))
+            .collect::<Vec<_>>();
+        // Most blocks bring no new token. Taking the write lock anyway would queue this
+        // extractor behind any reader, and every later reader behind it.
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        self.tokens.write().await.extend(tokens);
         Ok(())
     }
 
@@ -314,6 +318,13 @@ impl ProtocolDataCache for ProtocolMemoryCache {
         &self,
         components: T,
     ) -> Result<(), StorageError> {
+        let components = components
+            .into_iter()
+            .collect::<Vec<_>>();
+        // See `add_tokens`: skip the write lock when there is nothing to add.
+        if components.is_empty() {
+            return Ok(());
+        }
         let mut guard = self.components.write().await;
         components.into_iter().for_each(|pc| {
             let components = guard
