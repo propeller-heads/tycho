@@ -2076,13 +2076,13 @@ impl PostgresGateway {
             })
             .collect();
 
-        // The only unique index besides the primary key allows one open row per component, so
-        // a conflict means the component is already paused.
         let mut paused = Vec::with_capacity(rows.len());
         for chunk in rows.chunks(orm::NewComponentPause::MAX_BATCH_SIZE) {
             let mut chunk_paused: Vec<ComponentId> = diesel::insert_into(cp::component_pause)
                 .values(chunk)
-                .on_conflict_do_nothing()
+                .on_conflict((cp::chain_id, cp::component_id))
+                .filter_target(cp::unpaused_at.is_null())
+                .do_nothing()
                 .returning(cp::component_id)
                 .get_results(conn)
                 .await
