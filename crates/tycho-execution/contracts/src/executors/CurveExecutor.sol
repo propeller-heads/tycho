@@ -11,6 +11,8 @@ import {
     ICurveCryptoPool,
     ICurveCryptoPoolETH,
     ICurveStablePool,
+    ICurveFyndPolicy,
+    ITwocryptoPolicyPool,
     isCurveStablePool
 } from "@interfaces/ICurvePool.sol";
 
@@ -19,8 +21,17 @@ error CurveExecutor__InvalidDataLength();
 error CurveExecutor__TokenAddressZero();
 error CurveExecutor__NotAContract(address addr);
 
+/// @notice Swap data: tokenIn(20) | tokenOut(20) | pool(20) | poolType(1) |
+/// i(1) | j(1), optionally followed by a grant for a pool whose policy is
+/// `ICurveFyndPolicy`: minAmountIn(32) | maxAmountIn(32) | fee(32) |
+/// nonce(8) | deadline(4) | signature(65). The executor submits the grant to
+/// the pool's policy before the swap. The grant's taker is the router's
+/// caller and its input coin is `i`, so the swap data does not carry them.
 contract CurveExecutor is IExecutor {
     using SafeERC20 for IERC20;
+
+    uint256 private constant _SWAP_DATA_LENGTH = 63;
+    uint256 private constant _GRANT_LENGTH = 173;
 
     address public immutable nativeToken;
     address public immutable stEthAddress;
@@ -55,7 +66,10 @@ contract CurveExecutor is IExecutor {
         external
         payable
     {
-        if (data.length != 63) {
+        if (
+            data.length != _SWAP_DATA_LENGTH
+                && data.length != _SWAP_DATA_LENGTH + _GRANT_LENGTH
+        ) {
             revert CurveExecutor__InvalidDataLength();
         }
         address tokenIn;
@@ -65,6 +79,10 @@ contract CurveExecutor is IExecutor {
         uint8 i;
         uint8 j;
         (tokenIn, tokenOut, pool, poolType, i, j) = _decodeData(data);
+
+        if (data.length > _SWAP_DATA_LENGTH) {
+            _submitGrant(pool, i, data[_SWAP_DATA_LENGTH:]);
+        }
 
         uint256 ethAmount = 0;
         if (tokenIn == nativeToken) {
@@ -87,6 +105,27 @@ contract CurveExecutor is IExecutor {
                 ICurveCryptoPool(pool).exchange(i, j, amountIn, 0);
             }
         }
+    }
+
+    /// @dev Under the router's delegatecall, `msg.sender` is the router's
+    /// caller: the policy accepts the grant only if it names that address.
+    function _submitGrant(address pool, uint8 coinIn, bytes calldata grant)
+        internal
+    {
+        ICurveFyndPolicy(ITwocryptoPolicyPool(pool).POLICY())
+            .submit_grant(
+                ICurveFyndPolicy.Grant({
+                    taker: msg.sender,
+                    coin_in: coinIn,
+                    min_amount_in: uint256(bytes32(grant[0:32])),
+                    max_amount_in: uint256(bytes32(grant[32:64])),
+                    fee: uint256(bytes32(grant[64:96])),
+                    nonce: uint64(bytes8(grant[96:104])),
+                    deadline: uint32(bytes4(grant[104:108]))
+                }),
+                grant[108:_GRANT_LENGTH],
+                msg.sender
+            );
     }
 
     function _decodeData(bytes calldata data)
