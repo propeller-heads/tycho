@@ -558,7 +558,7 @@ pub trait ComponentPauseGateway {
     /// # Returns
     /// Every pause in effect on the chain, across all protocol systems. Err if storage access
     /// failed.
-    async fn get_paused_components(
+    async fn get_component_pauses(
         &self,
         chain: &Chain,
     ) -> Result<Vec<ComponentPause>, StorageError>;

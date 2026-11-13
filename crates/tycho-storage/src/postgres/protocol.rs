@@ -2126,7 +2126,7 @@ impl PostgresGateway {
     }
 
     /// Loads the open pause rows of a chain, ordered by protocol system and component id.
-    pub async fn get_paused_components(
+    pub async fn get_component_pauses(
         &self,
         chain: &Chain,
         conn: &mut AsyncPgConnection,
