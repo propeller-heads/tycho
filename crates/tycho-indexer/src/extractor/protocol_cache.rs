@@ -369,6 +369,30 @@ mod tests {
         assert_eq!(prices, vec![Some(1.0), Some(2.0)]);
     }
 
+    #[tokio::test]
+    async fn test_empty_adds_do_not_wait_for_readers() {
+        let cache = ProtocolMemoryCache::new(
+            Chain::Ethereum,
+            Duration::seconds(60),
+            Arc::new(MockGateway::new()),
+        );
+        let wait = std::time::Duration::from_millis(100);
+
+        let tokens_reader = cache.tokens.read().await;
+        let components_reader = cache.components.read().await;
+
+        tokio::time::timeout(wait, cache.add_tokens(Vec::<Token>::new()))
+            .await
+            .expect("empty add_tokens waited for a reader")
+            .unwrap();
+        tokio::time::timeout(wait, cache.add_components(Vec::<ProtocolComponent>::new()))
+            .await
+            .expect("empty add_components waited for a reader")
+            .unwrap();
+
+        drop((tokens_reader, components_reader));
+    }
+
     fn prices() -> HashMap<Bytes, f64> {
         HashMap::from([(Bytes::from("0x01"), 1.0), (Bytes::from("0x02"), 2.0)])
     }
