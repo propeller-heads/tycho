@@ -4471,6 +4471,7 @@ mod test {
         use super::*;
 
         const SYSTEM: &str = "ambient";
+        const OTHER_SYSTEM: &str = "zigzag";
 
         async fn setup_pause_gateway(conn: &mut AsyncPgConnection) -> EVMGateway {
             // The gateway loads each chain's native token when it is built.
@@ -4487,6 +4488,7 @@ mod test {
                 .await;
             }
             db_fixtures::insert_protocol_system(conn, SYSTEM.to_owned()).await;
+            db_fixtures::insert_protocol_system(conn, OTHER_SYSTEM.to_owned()).await;
             EVMGateway::from_connection(conn).await
         }
 
@@ -4579,6 +4581,49 @@ mod test {
         }
 
         #[tokio::test]
+        async fn test_pause_components_other_system() {
+            let mut conn = setup_db().await;
+            let gw = setup_pause_gateway(&mut conn).await;
+            gw.pause_components(&Chain::Ethereum, SYSTEM, &[pause("pool_a", "r")], &mut conn)
+                .await
+                .expect("first pause failed");
+
+            let second = gw
+                .pause_components(
+                    &Chain::Ethereum,
+                    OTHER_SYSTEM,
+                    &[pause("pool_a", "r")],
+                    &mut conn,
+                )
+                .await
+                .expect("second pause failed");
+
+            assert!(second.is_empty());
+            assert_eq!(stored_rows(&mut conn, "pool_a").await, vec![None]);
+        }
+
+        #[tokio::test]
+        async fn test_unpause_components_other_chain() {
+            let mut conn = setup_db().await;
+            let gw = setup_pause_gateway(&mut conn).await;
+            for chain in [Chain::Ethereum, Chain::Starknet] {
+                gw.pause_components(&chain, SYSTEM, &[pause("pool_a", "r")], &mut conn)
+                    .await
+                    .expect("pause failed");
+            }
+
+            gw.unpause_components(&Chain::Ethereum, &["pool_a"], &mut conn)
+                .await
+                .expect("unpause failed");
+
+            let paused = gw
+                .get_paused_components(&Chain::Starknet, &mut conn)
+                .await
+                .expect("reading pauses failed");
+            assert_eq!(paused_ids(&paused), vec!["pool_a"]);
+        }
+
+        #[tokio::test]
         async fn test_unpause_components_twice() {
             let mut conn = setup_db().await;
             let gw = setup_pause_gateway(&mut conn).await;
@@ -4592,16 +4637,11 @@ mod test {
             .expect("pause failed");
 
             let first = gw
-                .unpause_components(
-                    &Chain::Ethereum,
-                    SYSTEM,
-                    &["pool_a", "never_paused"],
-                    &mut conn,
-                )
+                .unpause_components(&Chain::Ethereum, &["pool_a", "never_paused"], &mut conn)
                 .await
                 .expect("first unpause failed");
             let second = gw
-                .unpause_components(&Chain::Ethereum, SYSTEM, &["pool_a"], &mut conn)
+                .unpause_components(&Chain::Ethereum, &["pool_a"], &mut conn)
                 .await
                 .expect("second unpause failed");
 
@@ -4625,7 +4665,7 @@ mod test {
             gw.pause_components(&Chain::Ethereum, SYSTEM, &pauses, &mut conn)
                 .await
                 .expect("pause failed");
-            gw.unpause_components(&Chain::Ethereum, SYSTEM, &["pool_a"], &mut conn)
+            gw.unpause_components(&Chain::Ethereum, &["pool_a"], &mut conn)
                 .await
                 .expect("unpause failed");
 
