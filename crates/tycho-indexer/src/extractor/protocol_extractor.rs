@@ -23,7 +23,7 @@ use tycho_common::{
             ComponentBalance, ProtocolComponent, ProtocolComponentState,
             ProtocolComponentStateDelta,
         },
-        token::{AnalyzedToken, Token, TokenOwnerStore},
+        token::{AnalyzedToken, Token, TokenAnalysis, TokenOwnerStore},
         Address, Balance, BlockHash, Chain, ChangeType, ComponentId, EntryPointId, ExtractionState,
         ExtractorIdentity, ProtocolType, TxHash,
     },
@@ -76,6 +76,13 @@ struct GatewayInner<G> {
 /// When a full block signal arrives (`output == None`), the accumulated block
 /// is taken from the buffer and processed as a complete block.
 type PartialBlockBuffer = Option<BlockChanges>;
+
+/// The tokens of a message's components and the analyses of those analysed for it.
+#[derive(Debug, PartialEq)]
+struct CurrencyTokens {
+    tokens: HashMap<Address, Token>,
+    analyses: HashMap<Address, TokenAnalysis>,
+}
 
 pub struct ProtocolExtractor<G, T, E> {
     gateway: GatewayInner<G>,
@@ -649,10 +656,12 @@ where
     }
 
     #[instrument(skip_all, fields(new_tokens_count))]
+    /// The tokens of the message's new components, with the analyses of those that were not
+    /// known before.
     async fn construct_currency_tokens(
         &self,
         msg: &BlockChanges,
-    ) -> Result<HashMap<Address, Token>, StorageError> {
+    ) -> Result<CurrencyTokens, StorageError> {
         let new_token_addresses = msg
             .protocol_components()
             .into_iter()
@@ -738,15 +747,20 @@ where
             debug!(?unknown_tokens, block_number = msg.block.number, "NewTokens");
         }
 
-        let new_tokens: HashMap<Address, Token> = self
+        let analyzed = self
             .token_pre_processor
             .get_tokens(unknown_tokens, Arc::new(tf), BlockTag::Number(msg.block.number))
-            .await
-            .into_iter()
-            .map(|AnalyzedToken { token, .. }| (token.address.clone(), token))
-            .chain(existing_tokens)
-            .collect();
-        Ok(new_tokens)
+            .await;
+        let mut analyses = HashMap::new();
+        let mut new_tokens = HashMap::new();
+        for AnalyzedToken { token, analysis } in analyzed {
+            if let Some(analysis) = analysis {
+                analyses.insert(token.address.clone(), analysis);
+            }
+            new_tokens.insert(token.address.clone(), token);
+        }
+        new_tokens.extend(existing_tokens);
+        Ok(CurrencyTokens { tokens: new_tokens, analyses })
     }
 
     /// Process a full block
@@ -1095,9 +1109,11 @@ where
                     .await?;
             }
 
-            msg.new_tokens = self
+            let currency_tokens = self
                 .construct_currency_tokens(&msg)
                 .await?;
+            msg.new_tokens = currency_tokens.tokens;
+            msg.new_token_analyses = currency_tokens.analyses;
             self.protocol_cache
                 .add_tokens(msg.new_tokens.values().cloned())
                 .await?;
@@ -2002,6 +2018,16 @@ impl ExtractorGateway for ExtractorPgGateway {
                 .add_tokens(&new_tokens)
                 .await?;
         }
+        if !changes.new_token_analyses.is_empty() {
+            let analyses: Vec<_> = changes
+                .new_token_analyses
+                .iter()
+                .map(|(address, analysis)| (address.clone(), analysis.clone()))
+                .collect();
+            self.state_gateway
+                .upsert_token_analyses(&analyses)
+                .await?;
+        }
 
         // Insert block
         self.state_gateway
@@ -2265,7 +2291,10 @@ mod test {
     use float_eq::assert_float_eq;
     use futures03::FutureExt;
     use mockall::mock;
-    use tycho_common::{models::blockchain::TxWithChanges, traits::TokenOwnerFinding};
+    use tycho_common::{
+        models::{blockchain::TxWithChanges, token::TokenVerdict},
+        traits::TokenOwnerFinding,
+    };
 
     use super::*;
     use crate::{
@@ -2980,7 +3009,8 @@ mod test {
             Chain::Ethereum,
             100,
         );
-        let ret = vec![AnalyzedToken { token: t3.clone(), analysis: None }];
+        let analysis = TokenAnalysis::verdict_only(TokenVerdict::Fee, None, Some(1), "test");
+        let ret = vec![AnalyzedToken { token: t3.clone(), analysis: Some(analysis.clone()) }];
         #[expect(
             clippy::disallowed_methods,
             reason = "the test runs on a multi-thread runtime (`flavor = \"multi_thread\"`)"
@@ -3060,6 +3090,7 @@ mod test {
         )
         .await
         .expect("Extractor init failed");
+        let exp_analyses = HashMap::from([(t3.address.clone(), analysis)]);
         let exp = HashMap::from([(t1.address.clone(), t1), (t3.address.clone(), t3)]);
 
         let res = extractor
@@ -3067,7 +3098,7 @@ mod test {
             .await
             .expect("construct_currency_tokens failed");
 
-        assert_eq!(res, exp);
+        assert_eq!(res, CurrencyTokens { tokens: exp, analyses: exp_analyses });
     }
 
     #[test_log::test(tokio::test)]
