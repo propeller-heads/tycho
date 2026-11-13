@@ -1,4 +1,5 @@
 mod adapter_builder;
+mod balances;
 mod config;
 mod execution;
 mod limits;

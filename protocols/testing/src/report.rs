@@ -369,14 +369,34 @@ impl Checks {
         unfailed: Outcome,
         failures: &[String],
     ) {
+        self.record_scoped(id, component, Some(direction), Some(limit), unfailed, failures);
+    }
+
+    /// Records the outcome of a check on one component: a failure listing `failures` if there
+    /// are any, else a pass.
+    pub fn record_component(&mut self, id: CheckId, component: &str, failures: &[String]) {
+        self.record_scoped(id, component, None, None, Outcome::Pass, failures);
+    }
+
+    fn record_scoped(
+        &mut self,
+        id: CheckId,
+        component: &str,
+        direction: Option<&str>,
+        limit: Option<&LimitReport>,
+        unfailed: Outcome,
+        failures: &[String],
+    ) {
         let outcome = if failures.is_empty() {
             unfailed
         } else {
             let detail = failures.join("; ");
-            error!("[{}] {id} failed for {component} {direction}: {detail}", self.test);
+            let scope =
+                direction.map_or_else(|| component.to_string(), |d| format!("{component} {d}"));
+            error!("[{}] {id} failed for {scope}: {detail}", self.test);
             Outcome::Fail { detail }
         };
-        self.record(id, Some(component), Some(direction), outcome, Some(limit));
+        self.record(id, Some(component), direction, outcome, limit);
     }
 
     fn record(
@@ -637,6 +657,21 @@ mod tests {
             directions,
             vec![(Some("0x01"), Some("0xa->0xb")), (Some("0x01"), Some("0xb->0xa"))]
         );
+    }
+
+    #[test]
+    fn a_check_recorded_per_component_has_no_direction() {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.record_component(CheckId::Balances, "0x01", &[]);
+        checks.record_component(CheckId::Balances, "0x02", &["A: indexed 1".to_string()]);
+
+        let Finished { outcome, results, .. } = checks.finish();
+        assert_eq!(outcome.unwrap_err().to_string(), "Failed checks: balances");
+        assert_eq!(
+            (results[0].component.as_deref(), results[0].direction.as_deref(), &results[0].outcome),
+            (Some("0x01"), None, &Outcome::Pass)
+        );
+        assert_eq!(results[1].outcome, Outcome::Fail { detail: "A: indexed 1".to_string() });
     }
 
     #[test]
