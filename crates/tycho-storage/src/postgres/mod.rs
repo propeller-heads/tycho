@@ -1534,6 +1534,27 @@ pub mod db_fixtures {
         account_id
     }
 
+    /// Inserts the extraction state of the instance at block 1, hash `0x01`, with the given block
+    /// timestamp, no cursor and no attributes.
+    pub async fn set_instance_head(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        block_ts: NaiveDateTime,
+    ) {
+        diesel::insert_into(instance::schema::tycho::extraction_state::table)
+            .values(instance::orm::NewExtractionState {
+                instance_id,
+                cursor: None,
+                block_number: 1,
+                block_hash: Bytes::from("0x01"),
+                block_ts,
+                attributes: None,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the extraction state failed");
+    }
+
     /// Inserts the TVL of a component of the instance.
     pub async fn insert_instance_tvl(
         conn: &mut AsyncPgConnection,
