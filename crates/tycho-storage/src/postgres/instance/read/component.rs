@@ -8,6 +8,7 @@ use tycho_common::{
     storage::{StorageError, WithTotal},
 };
 
+use super::snapshot::{begin_snapshot, end_snapshot};
 use crate::postgres::{
     instance::{
         active::{active_instance, active_instance_ids},
@@ -47,23 +48,11 @@ impl PostgresGatewayNew {
         conn: &mut AsyncPgConnection,
     ) -> Result<WithTotal<Vec<ProtocolComponent>>, StorageError> {
         self.get_chain_id(chain)?;
-        let (rows, total) = match (system, ids) {
-            (Some(system), ids) => {
-                self.get_protocol_system_id(&system)?;
-                load_components_of(&system, ids, min_tvl, pagination_params, conn).await?
-            }
-            (None, Some(_)) => {
-                return Err(StorageError::Unsupported(
-                    "component ids need a protocol system: a pool id can repeat across protocols"
-                        .to_string(),
-                ));
-            }
-            (None, None) => load_active_components(min_tvl, pagination_params, conn).await?,
-        };
-        let entity = self
-            .build_components(rows, chain, conn)
-            .await?;
-        Ok(WithTotal { entity, total: Some(total) })
+        let snapshot = begin_snapshot(conn).await?;
+        let result = self
+            .components(chain, system, ids, min_tvl, pagination_params, conn)
+            .await;
+        end_snapshot(conn, snapshot, result).await
     }
 
     /// Returns the TVL of the components of `system`'s active instance, by external id, and the
@@ -94,46 +83,39 @@ impl PostgresGatewayNew {
             ));
         };
         self.get_protocol_system_id(&system)?;
-        let Some(instance) = active_instance(conn, &system).await? else {
-            return Ok(WithTotal { entity: HashMap::new(), total: Some(0) });
-        };
+        let snapshot = begin_snapshot(conn).await?;
+        let result = tvls_of(conn, &system, component_ids, pagination_params).await;
+        end_snapshot(conn, snapshot, result).await
+    }
 
-        let filtered = || {
-            let mut query = component_tvl::table
-                .inner_join(
-                    protocol_component::table.on(protocol_component::instance_id
-                        .eq(component_tvl::instance_id)
-                        .and(protocol_component::id.eq(component_tvl::protocol_component_id))),
-                )
-                .filter(component_tvl::instance_id.eq(instance))
-                .into_boxed::<Pg>();
-            if let Some(ids) = component_ids {
-                query = query.filter(protocol_component::external_id.eq_any(ids));
+    /// Reads the components of [`Self::get_protocol_components`] and the number of matches on all
+    /// pages.
+    async fn components(
+        &self,
+        chain: &Chain,
+        system: Option<String>,
+        ids: Option<&[&str]>,
+        min_tvl: Option<f64>,
+        pagination_params: Option<&PaginationParams>,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<WithTotal<Vec<ProtocolComponent>>, StorageError> {
+        let (rows, total) = match (system, ids) {
+            (Some(system), ids) => {
+                self.get_protocol_system_id(&system)?;
+                load_components_of(&system, ids, min_tvl, pagination_params, conn).await?
             }
-            query
+            (None, Some(_)) => {
+                return Err(StorageError::Unsupported(
+                    "component ids need a protocol system: a pool id can repeat across protocols"
+                        .to_string(),
+                ));
+            }
+            (None, None) => load_active_components(min_tvl, pagination_params, conn).await?,
         };
-
-        let total = filtered()
-            .count()
-            .get_result::<i64>(conn)
-            .await
-            .map_err(PostgresError::from)?;
-
-        let mut query = filtered().select((protocol_component::external_id, component_tvl::tvl));
-        if let Some(pagination) = pagination_params {
-            query = query
-                .order_by(component_tvl::protocol_component_id)
-                .limit(pagination.page_size)
-                .offset(pagination.offset());
-        }
-        let rows: Vec<(String, f64)> = query.load(conn).await.map_err(|err| {
-            let id_hint = component_ids
-                .and_then(|ids| ids.first().copied())
-                .unwrap_or_default();
-            storage_error_from_diesel(err, "ComponentTVL", id_hint, None)
-        })?;
-
-        Ok(WithTotal { entity: rows.into_iter().collect(), total: Some(total) })
+        let entity = self
+            .build_components(rows, chain, conn)
+            .await?;
+        Ok(WithTotal { entity, total: Some(total) })
     }
 
     /// Builds the models of component rows, each with the name of its protocol system. Tokens and
@@ -246,6 +228,56 @@ impl PostgresGatewayNew {
             })
             .collect()
     }
+}
+
+/// Reads the TVL of the matching components of the active instance of `system`, by external id,
+/// and the number of matching components on all pages.
+async fn tvls_of(
+    conn: &mut AsyncPgConnection,
+    system: &str,
+    component_ids: Option<&[&str]>,
+    pagination_params: Option<&PaginationParams>,
+) -> Result<WithTotal<HashMap<String, f64>>, StorageError> {
+    let Some(instance) = active_instance(conn, system).await? else {
+        return Ok(WithTotal { entity: HashMap::new(), total: Some(0) });
+    };
+
+    let filtered = || {
+        let mut query = component_tvl::table
+            .inner_join(
+                protocol_component::table.on(protocol_component::instance_id
+                    .eq(component_tvl::instance_id)
+                    .and(protocol_component::id.eq(component_tvl::protocol_component_id))),
+            )
+            .filter(component_tvl::instance_id.eq(instance))
+            .into_boxed::<Pg>();
+        if let Some(ids) = component_ids {
+            query = query.filter(protocol_component::external_id.eq_any(ids));
+        }
+        query
+    };
+
+    let total = filtered()
+        .count()
+        .get_result::<i64>(conn)
+        .await
+        .map_err(PostgresError::from)?;
+
+    let mut query = filtered().select((protocol_component::external_id, component_tvl::tvl));
+    if let Some(pagination) = pagination_params {
+        query = query
+            .order_by(component_tvl::protocol_component_id)
+            .limit(pagination.page_size)
+            .offset(pagination.offset());
+    }
+    let rows: Vec<(String, f64)> = query.load(conn).await.map_err(|err| {
+        let id_hint = component_ids
+            .and_then(|ids| ids.first().copied())
+            .unwrap_or_default();
+        storage_error_from_diesel(err, "ComponentTVL", id_hint, None)
+    })?;
+
+    Ok(WithTotal { entity: rows.into_iter().collect(), total: Some(total) })
 }
 
 /// Loads the matching component rows of the active instance of `system`, each with `system` as

@@ -1534,6 +1534,83 @@ pub mod db_fixtures {
         account_id
     }
 
+    /// Inserts the extraction state of the instance at block 1, hash `0x01`, with the given block
+    /// timestamp, no cursor and no attributes.
+    pub async fn set_instance_head(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        block_ts: NaiveDateTime,
+    ) {
+        diesel::insert_into(instance::schema::tycho::extraction_state::table)
+            .values(instance::orm::NewExtractionState {
+                instance_id,
+                cursor: None,
+                block_number: 1,
+                block_hash: Bytes::from("0x01"),
+                block_ts,
+                attributes: None,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the extraction state failed");
+    }
+
+    /// Inserts the balance of `token` in a component of the instance, valid from 2020-01-01 00:00
+    /// at transaction index 0, with previous value `0x00`.
+    pub async fn insert_instance_component_balance(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        token: Bytes,
+        balance: Bytes,
+        balance_float: f64,
+    ) {
+        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        diesel::insert_into(instance::schema::tycho::component_balance::table)
+            .values(instance::orm::NewComponentBalance {
+                instance_id,
+                protocol_component_id: component_id,
+                token,
+                new_balance: balance,
+                previous_value: Bytes::from("0x00"),
+                balance_float,
+                valid_from,
+                tx_index: 0,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the component balance failed");
+    }
+
+    /// Inserts the state attribute `attribute_name` of a component of the instance, valid from
+    /// 2020-01-01 00:00 at transaction index 0, with no previous value.
+    pub async fn insert_instance_state(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        attribute_name: &str,
+        value: Bytes,
+    ) {
+        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        diesel::insert_into(instance::schema::tycho::protocol_state::table)
+            .values(instance::orm::NewProtocolState {
+                instance_id,
+                protocol_component_id: component_id,
+                attribute_name: attribute_name.to_string(),
+                attribute_value: value,
+                previous_value: None,
+                valid_from,
+                tx_index: 0,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the protocol state failed");
+    }
+
     /// Inserts the TVL of a component of the instance.
     pub async fn insert_instance_tvl(
         conn: &mut AsyncPgConnection,

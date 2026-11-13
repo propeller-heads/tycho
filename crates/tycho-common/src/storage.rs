@@ -457,9 +457,18 @@ pub trait ProtocolGateway {
         target_version: &BlockOrTimestamp,
     ) -> Result<Vec<ComponentBalance>, StorageError>;
 
+    /// Retrieve the token balances of protocol components, keyed by component id and token.
+    ///
+    /// # Parameters
+    /// - `chain` The chain of the components.
+    /// - `system` Only components of this protocol system. Required, because the answer is keyed by
+    ///   pool id and a pool id can repeat across protocol systems.
+    /// - `ids` Only components with these ids.
+    /// - `version` The version of the balances. The latest version if `None`.
     async fn get_component_balances(
         &self,
         chain: &Chain,
+        system: &str,
         ids: Option<&[&str]>,
         version: Option<&Version>,
     ) -> Result<HashMap<String, HashMap<Bytes, ComponentBalance>>, StorageError>;

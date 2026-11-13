@@ -1796,6 +1796,7 @@ where
 }
 pub struct ExtractorPgGateway {
     name: String,
+    protocol_system: String,
     chain: Chain,
     db_tx_batch_size: usize,
     state_gateway: CachedGateway,
@@ -1916,13 +1917,22 @@ pub trait ExtractorGateway: Send + Sync {
 }
 
 impl ExtractorPgGateway {
+    /// `name` keys the extraction state. `protocol_system` limits the reads by component id to
+    /// the extractor's own components, because a component id can repeat across protocol systems.
     pub fn new(
         name: &str,
+        protocol_system: &str,
         chain: Chain,
         db_tx_batch_size: usize,
         state_gateway: CachedGateway,
     ) -> Self {
-        Self { name: name.to_owned(), chain, db_tx_batch_size, state_gateway }
+        Self {
+            name: name.to_owned(),
+            protocol_system: protocol_system.to_owned(),
+            chain,
+            db_tx_batch_size,
+            state_gateway,
+        }
     }
 
     #[instrument(skip_all)]
@@ -2205,18 +2215,30 @@ impl ExtractorGateway for ExtractorPgGateway {
         component_ids: &[&'a str],
     ) -> Result<Vec<ProtocolComponentState>, StorageError> {
         self.state_gateway
-            .get_protocol_states(&self.chain, None, None, Some(component_ids), false, None)
+            .get_protocol_states(
+                &self.chain,
+                None,
+                Some(self.protocol_system.clone()),
+                Some(component_ids),
+                false,
+                None,
+            )
             .await
             .map(|state_data| state_data.entity)
     }
 
-    /// Component ids are unique per chain, so the protocol system is left unconstrained.
     async fn get_protocol_components<'a>(
         &self,
         component_ids: &[&'a str],
     ) -> Result<Vec<ProtocolComponent>, StorageError> {
         self.state_gateway
-            .get_protocol_components(&self.chain, None, Some(component_ids), None, None)
+            .get_protocol_components(
+                &self.chain,
+                Some(self.protocol_system.clone()),
+                Some(component_ids),
+                None,
+                None,
+            )
             .await
             .map(|component_data| component_data.entity)
     }
@@ -2233,7 +2255,7 @@ impl ExtractorGateway for ExtractorPgGateway {
         component_ids: &[&'a str],
     ) -> Result<HashMap<String, HashMap<Bytes, ComponentBalance>>, StorageError> {
         self.state_gateway
-            .get_component_balances(&self.chain, Some(component_ids), None)
+            .get_component_balances(&self.chain, &self.protocol_system, Some(component_ids), None)
             .await
     }
 
@@ -5496,7 +5518,7 @@ mod test_serial_db {
             .await
             .expect("failed to build postgres gateway");
 
-        let gw = ExtractorPgGateway::new("test", Chain::Ethereum, 1000, cached_gw);
+        let gw = ExtractorPgGateway::new("test", "test", Chain::Ethereum, 1000, cached_gw);
         (gw, chain_id)
     }
 
@@ -5898,6 +5920,7 @@ mod test_serial_db {
 
             let gw = ExtractorPgGateway::new(
                 "native_name",
+                "native_protocol_system",
                 Chain::Ethereum,
                 0,
                 cached_gw.clone(),
@@ -5950,6 +5973,14 @@ mod test_serial_db {
             if let Some(handle) = commit_handle {
                 handle.await.unwrap().unwrap();
             }
+
+            let stored_balances = extractor
+                .gateway
+                .inner
+                .get_components_balances(&["pc_1"])
+                .await
+                .unwrap();
+            assert!(stored_balances.contains_key("pc_1"), "{stored_balances:?}");
 
             let client_msg = extractor
                 .handle_revert(BlockUndoSignal {
@@ -6090,6 +6121,7 @@ mod test_serial_db {
 
             let gw = ExtractorPgGateway::new(
                 "vm_name",
+                "vm_protocol_system",
                 Chain::Ethereum,
                 0,
                 cached_gw.clone(),
@@ -6303,7 +6335,13 @@ mod test_serial_db {
                 .await
                 .unwrap();
 
-            let gw = ExtractorPgGateway::new("vm_name", Chain::Ethereum, 0, cached_gw.clone());
+            let gw = ExtractorPgGateway::new(
+                "vm_name",
+                "vm_protocol_system",
+                Chain::Ethereum,
+                0,
+                cached_gw.clone(),
+            );
             let protocol_types = HashMap::from([
                 ("pt_1".to_string(), ProtocolType::default()),
                 ("pt_2".to_string(), ProtocolType::default()),
