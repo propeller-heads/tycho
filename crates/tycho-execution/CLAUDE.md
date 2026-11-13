@@ -129,17 +129,23 @@ queryable via RPC:
 - `MAX_BPS_SQUARED = 10_000_000_000_000_000` — `MAX_BPS²`; the combined denominator when both fees use the
   sub-BPS scale
 
-**Positive slippage** (`_positiveSlippageEnabled`, enabled from the constructor — which emits
-`PositiveSlippageToggled(true)` — and toggled afterwards via `setPositiveSlippageEnabled`): when enabled, the router
-captures the surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees compute on
-`expectedAmountOut`. When disabled, fees compute on `actualAmountOut` and the surplus stays in the swap output. The flag
-also forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
-exemptions (`setPositiveSlippageExempt`, `_positiveSlippageExempt` mapping) opt a resolved client out while capture
-stays enabled globally: the surplus stays in the swap output, fees compute on `actualAmountOut`, and an exempt client
-with no fees skips the forced router hop.
+**Positive slippage** (`_routerPositiveSlippageBps`, 100% from the constructor — which emits
+`RouterPositiveSlippageBpsUpdated(0, MAX_BPS)` — and changed afterwards via `setRouterPositiveSlippageBps`): the
+router captures that part of the surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees
+compute on the output minus the captured amount. The rest of the surplus stays in the swap output. A router positive slippage bps above
+zero forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
+router positive slippage bps (`setCustomRouterPositiveSlippageBps`, `removeCustomRouterPositiveSlippageBps`,
+`_customRouterPositiveSlippageBps` mapping) replace the global router positive slippage bps for a resolved client. There is no switch
+that stops capture for every client: a global router positive slippage bps of zero leaves each custom router positive slippage bps in effect. A capture
+bps of zero leaves the surplus in the swap output, fees compute on `actualAmountOut`, and a client with no fees skips
+the forced router hop.
 Per-client shares (`setClientPositiveSlippageShare`, `_clientPositiveSlippageShareBps` mapping, fee units) give the
 resolved client part of the captured surplus, credited with its client fee; the router keeps the rest, rounded in its
 favour. The default share of zero leaves the full surplus to the router.
+Per-client caps (`setPositiveSlippageCap`, `_positiveSlippageCaps` mapping of `{isSet, capBps}`, fee units of
+`actualAmountOut`) limit the captured surplus of the resolved client's swaps, after the router positive slippage bps,
+to `actualAmountOut * capBps / MAX_BPS`. The surplus above the cap stays in the swap output and fees compute on it. A client without a cap is uncapped, and
+`getPositiveSlippageCap` reports `MAX_BPS` for it; setting `MAX_BPS` uncaps a client again.
 
 **Deduction order**: client fee calculated first, then router's cut of client fee subtracted from it, then router fee on
 output. `amountOut = amountIn - clientPortion - totalRouterFee`.
