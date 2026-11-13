@@ -8,8 +8,8 @@ use tycho_common::{
     models::{
         blockchain::BlockTag,
         protocol::QualityRange,
-        token::{Token, TokenQuality, TransferCost, TransferTax},
-        Chain, PaginationParams,
+        token::{Token, TokenOwner, TokenQuality, TransferCost, TransferTax},
+        Chain, ComponentId, PaginationParams,
     },
     storage::ProtocolGateway,
     traits::TokenAnalyzer,
@@ -166,47 +166,10 @@ async fn analyze_batch(
         .iter()
         .map(|t| t.address.clone())
         .collect::<Vec<_>>();
-    let token_owner = gw
+    let owners = gw
         .get_token_owners(&chain, &addresses, Some(100_000f64))
         .await?;
-    let component_ids = token_owner
-        .values()
-        .map(|owner| owner.component_id.as_str())
-        .collect::<Vec<_>>();
-    let components = gw
-        .get_protocol_components(&chain, None, Some(&component_ids), None, None)
-        .await?
-        .entity
-        .into_iter()
-        .map(|pc| (pc.id.clone(), pc))
-        .collect::<HashMap<_, _>>();
-
-    let balance_owners = gw
-        .get_protocol_states(&chain, None, None, Some(&component_ids), false, None)
-        .await?
-        .entity
-        .into_iter()
-        .filter_map(|state| {
-            state
-                .attributes
-                .get("balance_owner")
-                .cloned()
-                .map(|owner| (state.component_id.clone(), owner))
-        })
-        .collect::<HashMap<_, _>>();
-
-    let candidates_per_token = token_owner
-        .into_iter()
-        .filter_map(|(address, owner)| {
-            let Some(pc) = components.get(&owner.component_id) else {
-                warn!(component_id=?owner.component_id, "Failed to find component for id!");
-                return None;
-            };
-            let candidates =
-                pool_holder_candidates(balance_owners.get(&pc.id), &pc.contract_addresses, &pc.id);
-            Some((address, candidates))
-        })
-        .collect::<HashMap<_, _>>();
+    let candidates_per_token = holder_candidates(&chain, gw.as_ref(), owners).await?;
     let analyzer = EthCallDetector::new(
         rpc,
         Arc::new(OnChainTokenOwners::new(rpc, BlockTag::Latest, candidates_per_token)),
@@ -242,6 +205,82 @@ async fn analyze_batch(
         gw.update_tokens(&tokens).await?;
     }
     Ok(outcome)
+}
+
+/// Lists, per token, the addresses that may hold it in its owner's pool (see
+/// [`pool_holder_candidates`]). A token whose owner component is not found is left out.
+async fn holder_candidates(
+    chain: &Chain,
+    gw: &(dyn ProtocolGateway + Send + Sync),
+    owners: HashMap<Bytes, TokenOwner>,
+) -> anyhow::Result<HashMap<Bytes, Vec<Bytes>>> {
+    // A pool id can repeat across protocols, so each protocol's pools are read on their own.
+    let mut owners_by_protocol: HashMap<String, Vec<(Bytes, ComponentId)>> = HashMap::new();
+    for (token, owner) in owners {
+        owners_by_protocol
+            .entry(owner.protocol_system)
+            .or_default()
+            .push((token, owner.component_id));
+    }
+
+    let mut candidates_per_token = HashMap::new();
+    for (protocol, owned) in owners_by_protocol {
+        let component_ids = owned
+            .iter()
+            .map(|(_, id)| id.as_str())
+            .collect::<Vec<_>>();
+        let components = gw
+            .get_protocol_components(
+                chain,
+                Some(protocol.clone()),
+                Some(&component_ids),
+                None,
+                None,
+            )
+            .await?
+            .entity
+            .into_iter()
+            .map(|pc| (pc.id.clone(), pc))
+            .collect::<HashMap<_, _>>();
+        let balance_owners = gw
+            .get_protocol_states(
+                chain,
+                None,
+                Some(protocol.clone()),
+                Some(&component_ids),
+                false,
+                None,
+            )
+            .await?
+            .entity
+            .into_iter()
+            .filter_map(|state| {
+                state
+                    .attributes
+                    .get("balance_owner")
+                    .cloned()
+                    .map(|owner| (state.component_id.clone(), owner))
+            })
+            .collect::<HashMap<_, _>>();
+
+        candidates_per_token.extend(
+            owned
+                .into_iter()
+                .filter_map(|(token, id)| {
+                    let Some(pc) = components.get(&id) else {
+                        warn!(protocol, component_id=?id, "Failed to find component for id!");
+                        return None;
+                    };
+                    let candidates = pool_holder_candidates(
+                        balance_owners.get(&pc.id),
+                        &pc.contract_addresses,
+                        &pc.id,
+                    );
+                    Some((token, candidates))
+                }),
+        );
+    }
+    Ok(candidates_per_token)
 }
 
 /// Applies an analysis verdict to the token's quality, gas and tax fields.
@@ -312,7 +351,10 @@ mod test {
     use mockall::Sequence;
     use rstest::rstest;
     use tycho_common::{
-        models::{protocol::ProtocolComponent, token::TokenOwner, ChangeType},
+        models::{
+            protocol::{ProtocolComponent, ProtocolComponentState},
+            ChangeType,
+        },
         storage::WithTotal,
     };
 
@@ -701,6 +743,88 @@ mod test {
                 .iter()
                 .map(|e| Bytes::from(*e))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_owners_in_two_protocols_with_the_same_pool_id() {
+        let curve_token = Bytes::from("0x00000000000000000000000000000000000000a1");
+        let v4_token = Bytes::from("0x00000000000000000000000000000000000000a2");
+        let protocols = [
+            (
+                "vm:curve",
+                curve_token.clone(),
+                FACTORY,
+                "0x00000000000000000000000000000000000000c1",
+            ),
+            (
+                "uniswap_v4",
+                v4_token.clone(),
+                POOL_MANAGER,
+                "0x00000000000000000000000000000000000000c2",
+            ),
+        ];
+        let owners = protocols
+            .iter()
+            .map(|(system, token, _, _)| {
+                let owner = TokenOwner {
+                    protocol_system: system.to_string(),
+                    component_id: POOL.to_string(),
+                    balance: Bytes::from("0x01"),
+                };
+                (token.clone(), owner)
+            })
+            .collect::<HashMap<_, _>>();
+        let mut gw = testing::MockGateway::new();
+        for (system, token, contract, balance_owner) in protocols {
+            gw.expect_get_protocol_components()
+                .withf(move |_, s, ids, _, _| {
+                    s.as_deref() == Some(system) && ids == &Some(&[POOL][..])
+                })
+                .times(1)
+                .returning(move |_, _, _, _, _| {
+                    let component = ProtocolComponent::new(
+                        POOL,
+                        system,
+                        "pool",
+                        Chain::Ethereum,
+                        vec![token.clone()],
+                        vec![Bytes::from(contract)],
+                        HashMap::new(),
+                        ChangeType::Creation,
+                        Bytes::from("0x00"),
+                        NaiveDateTime::default(),
+                    );
+                    Box::pin(async { Ok(WithTotal { entity: vec![component], total: Some(1) }) })
+                });
+            gw.expect_get_protocol_states()
+                .withf(move |_, _, s, ids, _, _| {
+                    s.as_deref() == Some(system) && ids == &Some(&[POOL][..])
+                })
+                .times(1)
+                .returning(move |_, _, _, _, _, _| {
+                    let state = ProtocolComponentState::new(
+                        POOL,
+                        HashMap::from([("balance_owner".to_string(), Bytes::from(balance_owner))]),
+                        HashMap::new(),
+                    );
+                    Box::pin(async { Ok(WithTotal { entity: vec![state], total: Some(1) }) })
+                });
+        }
+
+        let candidates = holder_candidates(&Chain::Ethereum, &gw, owners)
+            .await
+            .expect("holder candidates failed");
+
+        let expected = |balance_owner: &str, contract: &str| {
+            vec![Bytes::from(balance_owner), Bytes::from(POOL), Bytes::from(contract)]
+        };
+        assert_eq!(
+            candidates,
+            HashMap::from([
+                (curve_token, expected("0x00000000000000000000000000000000000000c1", FACTORY)),
+                (v4_token, expected("0x00000000000000000000000000000000000000c2", POOL_MANAGER)),
+            ])
         );
     }
 
