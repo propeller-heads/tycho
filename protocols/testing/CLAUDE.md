@@ -32,6 +32,6 @@ package's; `build_wasm` in `src/utils.rs` shows how.
 ## Strict mode
 
 A test yaml can opt into `harness: strict`; without it the runner behaves as before. Strict mode
-rejects keys the runner does not read and reports every failed check of a test, not just the
-first. It is not required of any package yet, and new checks go into strict mode only.
+rejects keys the runner does not read, requires every skip to be written as its reason (a string;
+`true` and `false` are errors), and reports every failed check of a test, not just the first. It is not required of any package yet, and new checks go into strict mode only.
 `range --report <path>` writes each check's outcome as JSON. See `README.md`, "Strict mode".

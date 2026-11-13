@@ -81,6 +81,9 @@ pub enum Outcome {
 pub struct CheckResult {
     pub test: String,
     pub check: CheckId,
+    /// The component the result is about, when it is about one only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
     #[serde(flatten)]
     pub outcome: Outcome,
 }
@@ -109,11 +112,11 @@ impl Checks {
     ) -> miette::Result<Option<T>> {
         match check() {
             Ok(value) => {
-                self.record(id, Outcome::Pass);
+                self.record(id, None, Outcome::Pass);
                 Ok(Some(value))
             }
             Err(e) => {
-                self.record(id, Outcome::Fail { detail: format!("{e:#}") });
+                self.record(id, None, Outcome::Fail { detail: format!("{e:#}") });
                 match self.harness {
                     Harness::Legacy => Err(e),
                     Harness::Strict => {
@@ -127,17 +130,23 @@ impl Checks {
 
     /// Records a check the package's configuration turned off.
     pub fn skip(&mut self, id: CheckId, reason: &str) {
-        self.record(id, Outcome::Skipped { reason: reason.to_string() });
+        self.record(id, None, Outcome::Skipped { reason: reason.to_string() });
+    }
+
+    /// Records a check the package's configuration turned off for one component, by its lowercase
+    /// id, as the runner matches components.
+    pub fn skip_component(&mut self, id: CheckId, component: &str, reason: &str) {
+        self.record(id, Some(component), Outcome::Skipped { reason: reason.to_string() });
     }
 
     /// Records a check that could not run because `prerequisite` failed.
     pub fn not_run(&mut self, id: CheckId, prerequisite: CheckId) {
-        self.record(id, Outcome::NotRun { reason: format!("{prerequisite} failed") });
+        self.record(id, None, Outcome::NotRun { reason: format!("{prerequisite} failed") });
     }
 
     /// Records a failure that happened outside [`Checks::run`], such as an indexing error.
     pub fn fail(&mut self, id: CheckId, error: &miette::Report) {
-        self.record(id, Outcome::Fail { detail: format!("{error:#}") });
+        self.record(id, None, Outcome::Fail { detail: format!("{error:#}") });
     }
 
     /// Ends the test: an error naming every failed check if any failed, `Ok` otherwise, and the
@@ -157,9 +166,13 @@ impl Checks {
         (outcome, self.results)
     }
 
-    fn record(&mut self, check: CheckId, outcome: Outcome) {
-        self.results
-            .push(CheckResult { test: self.test.clone(), check, outcome });
+    fn record(&mut self, check: CheckId, component: Option<&str>, outcome: Outcome) {
+        self.results.push(CheckResult {
+            test: self.test.clone(),
+            check,
+            component: component.map(str::to_lowercase),
+            outcome,
+        });
     }
 }
 
@@ -241,12 +254,29 @@ mod tests {
     }
 
     #[test]
+    fn a_skipped_component_is_reported_by_its_lowercase_id() {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.skip_component(CheckId::ExecLadder, "0xAbC", "no fork state");
+        let (outcome, results) = checks.finish();
+        assert!(outcome.is_ok());
+        assert_eq!(
+            results,
+            vec![CheckResult {
+                test: "t".to_string(),
+                check: CheckId::ExecLadder,
+                component: Some("0xabc".to_string()),
+                outcome: Outcome::Skipped { reason: "no fork state".to_string() },
+            }]
+        );
+    }
+
+    #[test]
     fn a_test_whose_checks_all_pass_passes() {
         let mut checks = Checks::new(Harness::Strict, "t");
         checks
             .run(CheckId::StateComponents, || Ok(()))
             .unwrap();
-        checks.skip(CheckId::Balances, "skip_balance_check: true");
+        checks.skip(CheckId::Balances, "no address holds the pooled ether");
         assert!(checks.finish().0.is_ok());
     }
 
@@ -260,11 +290,13 @@ mod tests {
                 CheckResult {
                     test: "t".to_string(),
                     check: CheckId::SimLadder,
+                    component: None,
                     outcome: Outcome::Fail { detail: "boom".to_string() },
                 },
                 CheckResult {
                     test: "t".to_string(),
-                    check: CheckId::Balances,
+                    check: CheckId::ExecLadder,
+                    component: Some("0x01".to_string()),
                     outcome: Outcome::Skipped { reason: "off".to_string() },
                 },
             ],
@@ -274,6 +306,10 @@ mod tests {
         assert_eq!(json["results"][0]["check"], "sim.ladder");
         assert_eq!(json["results"][0]["outcome"], "fail");
         assert_eq!(json["results"][0]["detail"], "boom");
+        assert!(json["results"][0]
+            .get("component")
+            .is_none());
+        assert_eq!(json["results"][1]["component"], "0x01");
         assert_eq!(json["results"][1]["outcome"], "skipped");
         assert_eq!(json["results"][1]["reason"], "off");
     }
