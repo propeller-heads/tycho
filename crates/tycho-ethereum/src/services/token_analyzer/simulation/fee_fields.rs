@@ -427,3 +427,255 @@ fn fee_change(base: &Outcome, outcome: &Outcome) -> Option<String> {
         .collect();
     Some(format!("the legs made {} emit new events", emitters.join(", ")))
 }
+
+#[cfg(test)]
+mod tests {
+    use alloy::{
+        primitives::{keccak256, LogData},
+        rpc::types::Log,
+    };
+
+    use super::*;
+    use crate::services::token_analyzer::simulation::{
+        code::FunctionSummary,
+        scenario::tests::{legs, outcome},
+    };
+
+    const TOKEN: Address = Address::repeat_byte(7);
+    const POOL: Address = Address::repeat_byte(8);
+    const OWNER: Address = Address::repeat_byte(9);
+
+    fn context() -> TokenContext {
+        let rpc = crate::rpc::EthereumRpcClient::new("http://localhost:1").expect("client");
+        TokenContext::new(&rpc, TOKEN, POOL, U256::from(1000), (1, 1, 12))
+    }
+
+    fn selector(signature: &str) -> Bytes {
+        Bytes::copy_from_slice(&keccak256(signature)[..4])
+    }
+
+    fn function(signature: &str) -> FunctionSummary {
+        FunctionSummary {
+            selector: selector(signature),
+            arguments: None,
+            state_mutability: Some("nonpayable".to_string()),
+        }
+    }
+
+    fn field(slot: u8, offset: u8, abi_type: &str, writers: &[&str]) -> StorageField {
+        StorageField {
+            slot: B256::with_last_byte(slot),
+            offset,
+            r#type: abi_type.to_string(),
+            reads: vec![selector("transfer(address,uint256)")],
+            writes: writers
+                .iter()
+                .map(|w| selector(w))
+                .collect(),
+        }
+    }
+
+    /// A token with a packed fee next to a flag, an exemption mapping, a balance mapping, and
+    /// a field nothing writes.
+    fn token() -> CodeSummary {
+        CodeSummary {
+            functions: ["setFee(uint16)", "setExempt(address,bool)", "transfer(address,uint256)"]
+                .into_iter()
+                .map(function)
+                .collect(),
+            storage: vec![
+                field(1, 0, "bool", &["setFee(uint16)"]),
+                field(1, 1, "uint16", &["setFee(uint16)"]),
+                field(2, 0, "mapping(address => bool)", &["setExempt(address,bool)"]),
+                field(3, 0, "mapping(address => uint256)", &["transfer(address,uint256)"]),
+                field(4, 0, "uint256", &[]),
+            ],
+        }
+    }
+
+    fn callers(code: &CodeSummary, owner: Option<Address>) -> Callers {
+        owner_calls::find_callers(code, owner, &Default::default(), &[])
+    }
+
+    fn read_only(context: &TokenContext) -> BTreeMap<B256, B256> {
+        BTreeMap::from([
+            (B256::with_last_byte(1), B256::with_last_byte(1)),
+            (owner_calls::mapping_entry(context.pool, B256::with_last_byte(2)), B256::ZERO),
+            (owner_calls::mapping_entry(context.pool, B256::with_last_byte(3)), B256::ZERO),
+            (B256::with_last_byte(4), B256::ZERO),
+        ])
+    }
+
+    #[test]
+    fn finds_privileged_fields_the_transfer_reads() {
+        let context = context();
+        let code = token();
+        let fields = transfer_fields(
+            &code,
+            &context,
+            &callers(&code, Some(OWNER)),
+            &read_only(&context),
+            &BTreeSet::new(),
+        );
+        let labels: Vec<&str> = fields
+            .iter()
+            .map(|f| f.label.as_str())
+            .collect();
+        assert_eq!(labels.len(), 3, "{labels:?}");
+        assert!(labels[0].starts_with("bool at slot"));
+        assert!(labels[1].starts_with("uint16 at slot"));
+        assert!(labels[2].starts_with("mapping(address => bool)[pool]"));
+        assert_eq!(
+            fields[2].slot,
+            owner_calls::mapping_entry(context.pool, B256::with_last_byte(2))
+        );
+    }
+
+    #[test]
+    fn a_field_nobody_can_call_a_writer_of_is_left_out() {
+        let context = context();
+        let code = token();
+        let fields = transfer_fields(
+            &code,
+            &context,
+            &callers(&code, None),
+            &read_only(&context),
+            &BTreeSet::new(),
+        );
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn a_field_that_holds_the_implementation_is_left_out() {
+        let context = context();
+        let implementation = Address::repeat_byte(5);
+        let code = CodeSummary {
+            functions: vec![function("upgradeTo(address)"), function("setRouter(address)")],
+            storage: vec![
+                field(5, 0, "address", &["upgradeTo(address)"]),
+                field(6, 0, "address", &["setRouter(address)"]),
+            ],
+        };
+        let read_only = BTreeMap::from([
+            (B256::with_last_byte(5), implementation.into_word()),
+            (B256::with_last_byte(6), Address::repeat_byte(4).into_word()),
+        ]);
+        let callers = callers(&code, Some(OWNER));
+
+        let fields = transfer_fields(&code, &context, &callers, &read_only, &BTreeSet::new());
+        assert_eq!(fields.len(), 2);
+        let fields = transfer_fields(
+            &code,
+            &context,
+            &callers,
+            &read_only,
+            &BTreeSet::from([implementation]),
+        );
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].slot, B256::with_last_byte(6));
+    }
+
+    #[test]
+    fn writes_packed_fields_without_touching_their_neighbours() {
+        let context = context();
+        let code = token();
+        let read_only = read_only(&context);
+        let fields = transfer_fields(
+            &code,
+            &context,
+            &callers(&code, Some(OWNER)),
+            &read_only,
+            &BTreeSet::new(),
+        );
+        let probes = field_probes(&fields, &read_only);
+        let names: Vec<&str> = probes
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        // The flag is true, so only false is tried; the fee gets every value; the exemption
+        // is false, so only true; then everything together.
+        assert_eq!(probes.len(), 1 + 3 + 1 + 1, "{names:?}");
+        assert!(names[0].ends_with("=0"));
+
+        let together = probes.last().expect("together");
+        assert_eq!(together.name, "field:all");
+        let slots = together.slots(&read_only);
+        let mut packed = B256::ZERO;
+        packed[29..31].copy_from_slice(&5u16.to_be_bytes());
+        assert_eq!(slots[&B256::with_last_byte(1)], packed);
+        assert_eq!(slots[&fields[2].slot], B256::with_last_byte(1));
+    }
+
+    #[test]
+    fn number_values_fit_the_field() {
+        let field = TransferField {
+            slot: B256::ZERO,
+            offset: 0,
+            field_type: FieldType::Uint { bits: 8 },
+            label: String::new(),
+            writers: vec![],
+        };
+        assert_eq!(field.new_values(U256::ZERO), [U256::from(5), U256::from(50)]);
+        assert_eq!(field.new_values(U256::from(50)), [U256::from(5)]);
+    }
+
+    fn log(address: Address, topic: B256) -> Log {
+        Log {
+            inner: alloy::primitives::Log {
+                address,
+                data: LogData::new_unchecked(vec![topic], Default::default()),
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_fee_or_new_events_start_a_fee_and_failed_legs_do_not() {
+        let transfer = keccak256("Transfer(address,address,uint256)");
+        let mut base = outcome(Some(legs(true, true, 500)));
+        base.legs
+            .as_mut()
+            .expect("legs")
+            .transferReceived = U256::from(500);
+        base.sent = U256::from(1000);
+        base.leg_logs = vec![log(TOKEN, transfer)];
+
+        assert_eq!(fee_change(&base, &base), None);
+
+        let taxed = outcome(Some(legs(true, true, 450)));
+        assert!(fee_change(&base, &taxed).is_some_and(|c| c.contains("sell 1000 bp")));
+
+        let mut called = base.clone();
+        called
+            .leg_logs
+            .push(log(canary(), B256::ZERO));
+        assert!(fee_change(&base, &called).is_some_and(|c| c.contains("the written address")));
+
+        let mut blocked = called.clone();
+        blocked
+            .legs
+            .as_mut()
+            .expect("legs")
+            .sellOk = false;
+        assert_eq!(fee_change(&base, &blocked), None);
+
+        let mut taxed_then_blocked = taxed;
+        taxed_then_blocked
+            .legs
+            .as_mut()
+            .expect("legs")
+            .sellOk = false;
+        assert!(fee_change(&base, &taxed_then_blocked).is_some_and(|c| c.contains("buy 99 bp")));
+    }
+
+    #[test]
+    fn reads_address_mapping_value_types() {
+        assert_eq!(address_mapping_value("mapping(address => bool)"), Some(FieldType::Bool));
+        assert_eq!(
+            address_mapping_value("mapping(address => uint256)"),
+            Some(FieldType::Uint { bits: 256 })
+        );
+        assert_eq!(address_mapping_value("mapping(uint256 => bool)"), None);
+        assert_eq!(address_mapping_value("mapping(address => mapping(address => uint256))"), None);
+    }
+}
