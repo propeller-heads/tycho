@@ -5,12 +5,8 @@ use metrics::gauge;
 use tokio::{
     runtime::Handle,
     sync::{
-        mpsc::{
-            self,
-            error::{SendError, TrySendError},
-            Receiver, Sender,
-        },
-        oneshot, Mutex,
+        mpsc::{self, error::TrySendError, Receiver, Sender},
+        oneshot, watch, Mutex,
     },
     task::JoinHandle,
 };
@@ -106,6 +102,31 @@ pub enum ControlMessage {
     Subscribe { sender: Sender<DeltaCommand>, subscription_id: Uuid, user_identity: Option<String> },
 }
 
+/// Whether the supervisor of an extractor takes new subscribers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamState {
+    /// The supervisor takes new subscribers. It registers them as soon as it reads their request,
+    /// also while it builds or restarts the extractor.
+    Open,
+    /// The extractor's stream is not open on this process: it follows a leader that syncs the
+    /// extractor's history, and it opens the stream once the leader gets near the chain head.
+    WaitingForLeader,
+}
+
+/// Why a subscription to an extractor failed.
+#[derive(Debug, thiserror::Error)]
+pub enum SubscribeError {
+    #[error("The extractor's control channel is closed")]
+    ControlChannelClosed,
+    #[error("The extractor's control channel stayed full for {0:?}")]
+    Timeout(std::time::Duration),
+    #[error(
+        "The extractor does not stream on this instance yet: the leader syncs its history. \
+         Subscribe again later or on another instance."
+    )]
+    NotStreaming,
+}
+
 /// A trait for a message sender that can be used to subscribe to messages.
 ///
 /// Extracted out of [`ExtractorHandle`] to allow for easier testing.
@@ -115,18 +136,23 @@ pub trait MessageSender: Send + Sync {
         &self,
         subscription_id: Uuid,
         user_identity: Option<String>,
-    ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>>;
+    ) -> Result<Receiver<DeltaCommand>, SubscribeError>;
 }
 
 #[derive(Clone)]
 pub struct ExtractorHandle {
     id: ExtractorIdentity,
     control_tx: Sender<ControlMessage>,
+    stream_state: watch::Receiver<StreamState>,
 }
 
 impl ExtractorHandle {
-    pub fn new(id: ExtractorIdentity, control_tx: Sender<ControlMessage>) -> Self {
-        Self { id, control_tx }
+    pub fn new(
+        id: ExtractorIdentity,
+        control_tx: Sender<ControlMessage>,
+        stream_state: watch::Receiver<StreamState>,
+    ) -> Self {
+        Self { id, control_tx, stream_state }
     }
 
     pub fn get_id(&self) -> ExtractorIdentity {
@@ -140,30 +166,41 @@ impl ExtractorHandle {
             .await
             .map_err(|err| ExtractionError::Unknown(err.to_string()))
     }
+
+    /// Resolves once the extractor's supervisor has ended, at once if it ended already.
+    pub async fn stopped(&self) {
+        self.control_tx.closed().await;
+    }
 }
 
 #[async_trait]
 impl MessageSender for ExtractorHandle {
+    /// Queues a subscription to the extractor and returns its receiver at once.
+    ///
+    /// Does not wait for the supervisor to read the request: the supervisor can be busy for a
+    /// long time, for example while it builds the extractor. A request that the supervisor
+    /// reads after it starts to wait for the leader is dropped, which closes the receiver.
     #[instrument(skip(self))]
     async fn subscribe(
         &self,
         subscription_id: Uuid,
         user_identity: Option<String>,
-    ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
-        let (tx, rx) = mpsc::channel(CLIENT_SUBSCRIPTION_CHANNEL_SIZE);
-        // Define a timeout duration
-        let timeout_duration = std::time::Duration::from_secs(5); // 5 seconds timeout
-
-        // Wrap the send operation with a timeout
-        let send_result = tokio::time::timeout(
-            timeout_duration,
+    ) -> Result<Receiver<DeltaCommand>, SubscribeError> {
+        let stream_state = *self.stream_state.borrow();
+        match stream_state {
+            StreamState::Open => {}
+            StreamState::WaitingForLeader => return Err(SubscribeError::NotStreaming),
+        }
+        let timeout = std::time::Duration::from_secs(5);
+        let (sender, rx) = mpsc::channel(CLIENT_SUBSCRIPTION_CHANNEL_SIZE);
+        tokio::time::timeout(
+            timeout,
             self.control_tx
-                .send(ControlMessage::Subscribe { sender: tx, subscription_id, user_identity }),
+                .send(ControlMessage::Subscribe { sender, subscription_id, user_identity }),
         )
-        .await;
-
-        // TODO: use a better error type that lets us return this as an error.
-        send_result.unwrap_or_else(|_elapsed| panic!("Subscription timed out!"))?;
+        .await
+        .map_err(|_elapsed| SubscribeError::Timeout(timeout))?
+        .map_err(|_send_error| SubscribeError::ControlChannelClosed)?;
         Ok(rx)
     }
 }
@@ -224,6 +261,22 @@ pub(crate) fn slow_client_removals(id: &ExtractorIdentity) -> metrics::Counter {
     removals
 }
 
+/// Drops `value` on the blocking thread pool and logs how long that took.
+///
+/// For extractor state that takes seconds to free, so the freeing neither delays the task that
+/// owned it nor occupies an async worker thread.
+pub(crate) fn drop_in_background<T: Send + 'static>(
+    extractor: ExtractorIdentity,
+    owner: &'static str,
+    value: T,
+) {
+    tokio::task::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        drop(value);
+        info!(%extractor, owner, elapsed = ?started.elapsed(), "ExtractorStateFreed");
+    });
+}
+
 pub(crate) type SubscriptionsMap = HashMap<u64, Subscriber>;
 
 pub struct ExtractorRunner {
@@ -271,132 +324,159 @@ impl ExtractorRunner {
             .unwrap_or_else(|| Handle::current());
 
         runtime.spawn(async move {
-            let id = self.extractor.get_id();
-            let slow_client_removals = slow_client_removals(&id);
-            // Track the number of partials received for the current block != partial_index.
-            let mut partials_in_block: u32 = 0;
-            loop {
-                // this is the main info span of an extractor
-                let loop_span = info_span!(
-                    parent: None,  // don't attach this to the parent (builder) span to keep spans short
-                    "extractor",
-                    extractor_id = %id,
-                    sf_trace_id = tracing::field::Empty,
-                    block_number = tracing::field::Empty,
-                    otel.status_code = tracing::field::Empty,
-                );
+            let result = self.process_stream().await;
+            let ExtractorRunner { extractor, substreams, .. } = self;
+            // Close the substreams connection now, so a restart never holds two of them.
+            drop(substreams);
+            // The supervisor waits for this task to end before it reports the extractor stopped.
+            // Freeing a large extractor (e.g. the DCI caches) takes seconds and touches no
+            // external state.
+            drop_in_background(extractor.get_id(), "runner", extractor);
+            result
+        })
+    }
 
-                let should_continue = async {
-                    tokio::select! {
-                        _ = &mut self.stop_rx => {
-                            warn!("Stop signal received; exiting!");
-                            return Ok(false);
+    /// Feeds the stream's blocks to the extractor until a stop signal, the end of the stream or
+    /// an error. Shuts the extractor down on a stop signal.
+    async fn process_stream(&mut self) -> Result<(), ExtractionError> {
+        let id = self.extractor.get_id();
+        let slow_client_removals = slow_client_removals(&id);
+        // Track the number of partials received for the current block != partial_index.
+        let mut partials_in_block: u32 = 0;
+        loop {
+            // this is the main info span of an extractor
+            let loop_span = info_span!(
+                parent: None,  // don't attach this to the parent (builder) span to keep spans short
+                "extractor",
+                extractor_id = %id,
+                sf_trace_id = tracing::field::Empty,
+                block_number = tracing::field::Empty,
+                otel.status_code = tracing::field::Empty,
+            );
+
+            let should_continue = async {
+                let extractor = &self.extractor;
+                let substreams = &mut self.substreams;
+                let next_block = async {
+                    extractor.wait_for_capacity().await;
+                    substreams.next().await
+                };
+                tokio::select! {
+                    _ = &mut self.stop_rx => {
+                        warn!("Stop signal received; shutting the extractor down and exiting");
+                        if let Err(err) = extractor.shutdown().await {
+                            error!(
+                                error = %err,
+                                "Failed to shut the extractor down; the next writer resumes \
+                                 from the stream cursor"
+                            );
                         }
-                        val = self.substreams.next().instrument(info_span!("substreams_waiting")) => {
-                            match val {
-                                None => {
-                                    error!("stream ended");
-                                    tracing::Span::current().record("otel.status_code", "error");
-                                    return Err(ExtractionError::SubstreamsError(format!("{id}: stream ended")));
+                        return Ok(false);
+                    }
+                    val = next_block.instrument(info_span!("substreams_waiting")) => {
+                        match val {
+                            None => {
+                                error!("stream ended");
+                                tracing::Span::current().record("otel.status_code", "error");
+                                return Err(ExtractionError::SubstreamsError(format!("{id}: stream ended")));
+                            }
+                            Some(Ok(BlockResponse::New(data))) => {
+                                let block_number = data.clock.as_ref().map(|v| v.number).unwrap_or(0);
+                                tracing::Span::current().record("block_number", block_number);
+                                gauge!(
+                                    "extractor_current_block_number",
+                                    "chain" => id.chain.to_string(),
+                                    "extractor" => id.name.to_string()
+                                ).set(block_number as f64);
+
+                                if data.is_partial {
+                                    partials_in_block += 1;
                                 }
-                                Some(Ok(BlockResponse::New(data))) => {
-                                    let block_number = data.clock.as_ref().map(|v| v.number).unwrap_or(0);
-                                    tracing::Span::current().record("block_number", block_number);
+
+                                if data.is_last_partial == Some(true) || data.partial_index.is_none() {
                                     gauge!(
-                                        "extractor_current_block_number",
+                                        "extractor_partials_per_block",
                                         "chain" => id.chain.to_string(),
                                         "extractor" => id.name.to_string()
-                                    ).set(block_number as f64);
-
-                                    if data.is_partial {
-                                        partials_in_block += 1;
-                                    }
-
-                                    if data.is_last_partial == Some(true) || data.partial_index.is_none() {
-                                        gauge!(
-                                            "extractor_partials_per_block",
-                                            "chain" => id.chain.to_string(),
-                                            "extractor" => id.name.to_string()
-                                        )
-                                        .set(partials_in_block as f64);
-                                        partials_in_block = 0;
-                                    }
-
-                                    // Start measuring block processing time
-                                    let start_time = std::time::Instant::now();
-
-                                    let msgs = Self::process_block_data(
-                                        self.extractor.as_ref(),
-                                        &data,
-                                        self.partial_blocks,
                                     )
-                                    .await
-                                    .map_err(|err| {
-                                        error!(error = %err, "Error while processing block data");
-                                        tracing::Span::current().record("otel.status_code", "error");
-                                        err
-                                    })?;
-                                    for msg in msgs {
-                                        trace!("Propagating block data message.");
+                                    .set(partials_in_block as f64);
+                                    partials_in_block = 0;
+                                }
+
+                                // Start measuring block processing time
+                                let start_time = std::time::Instant::now();
+
+                                let msgs = Self::process_block_data(
+                                    self.extractor.as_ref(),
+                                    &data,
+                                    self.partial_blocks,
+                                )
+                                .await
+                                .map_err(|err| {
+                                    error!(error = %err, "Error while processing block data");
+                                    tracing::Span::current().record("otel.status_code", "error");
+                                    err
+                                })?;
+                                for msg in msgs {
+                                    trace!("Propagating block data message.");
+                                    Self::propagate_msg(&self.subscriptions, msg, &slow_client_removals).await;
+                                }
+
+                                let duration_ms = start_time.elapsed().as_millis() as f64;
+                                let block_type = match (data.is_partial, data.is_last_partial) {
+                                    (false, _) => "full",
+                                    (true, Some(true)) => "final_partial",
+                                    (true, _) => "partial",
+                                };
+
+                                gauge!(
+                                    "block_processing_time_ms",
+                                    "chain" => id.chain.to_string(),
+                                    "extractor" => id.name.to_string(),
+                                    "block_type" => block_type
+                                ).set(duration_ms);
+                            }
+                            Some(Ok(BlockResponse::Undo(undo_signal))) => {
+                                partials_in_block = 0;
+                                info!(block=?&undo_signal.last_valid_block, "Revert requested!");
+                                match self.extractor.handle_revert(undo_signal.clone()).await {
+                                    Ok(Some(msg)) => {
+                                        trace!("Propagating block undo message.");
                                         Self::propagate_msg(&self.subscriptions, msg, &slow_client_removals).await;
                                     }
-
-                                    let duration_ms = start_time.elapsed().as_millis() as f64;
-                                    let block_type = match (data.is_partial, data.is_last_partial) {
-                                        (false, _) => "full",
-                                        (true, Some(true)) => "final_partial",
-                                        (true, _) => "partial",
-                                    };
-
-                                    gauge!(
-                                        "block_processing_time_ms",
-                                        "chain" => id.chain.to_string(),
-                                        "extractor" => id.name.to_string(),
-                                        "block_type" => block_type
-                                    ).set(duration_ms);
-                                }
-                                Some(Ok(BlockResponse::Undo(undo_signal))) => {
-                                    partials_in_block = 0;
-                                    info!(block=?&undo_signal.last_valid_block, "Revert requested!");
-                                    match self.extractor.handle_revert(undo_signal.clone()).await {
-                                        Ok(Some(msg)) => {
-                                            trace!("Propagating block undo message.");
-                                            Self::propagate_msg(&self.subscriptions, msg, &slow_client_removals).await;
-                                        }
-                                        Ok(None) => {
-                                            trace!("No message to propagate.");
-                                        }
-                                        Err(err) => {
-                                            error!(error = %err, "Error while processing revert!");
-                                            tracing::Span::current().record("otel.status_code", "error");
-                                            return Err(err);
-                                        }
+                                    Ok(None) => {
+                                        trace!("No message to propagate.");
+                                    }
+                                    Err(err) => {
+                                        error!(error = %err, "Error while processing revert!");
+                                        tracing::Span::current().record("otel.status_code", "error");
+                                        return Err(err);
                                     }
                                 }
-                                Some(Ok(BlockResponse::Ended)) => {
-                                    tracing::Span::current().record("otel.status_code", "ok");
-                                    return Ok(false);
-                                }
-                                Some(Err(err)) => {
-                                    error!(error = %err, "Stream terminated with error.");
-                                    tracing::Span::current().record("otel.status_code", "error");
-                                    return Err(ExtractionError::SubstreamsError(err.to_string()));
-                                }
-                            };
-                        }
+                            }
+                            Some(Ok(BlockResponse::Ended)) => {
+                                tracing::Span::current().record("otel.status_code", "ok");
+                                return Ok(false);
+                            }
+                            Some(Err(err)) => {
+                                error!(error = %err, "Stream terminated with error.");
+                                tracing::Span::current().record("otel.status_code", "error");
+                                return Err(ExtractionError::SubstreamsError(err.to_string()));
+                            }
+                        };
                     }
-
-                    tracing::Span::current().record("otel.status_code", "ok");
-                    Ok(true) // Continue the loop
                 }
-                    .instrument(loop_span)
-                    .await?;
 
-                if !should_continue {
-                    break Ok(());
-                }
+                tracing::Span::current().record("otel.status_code", "ok");
+                Ok(true) // Continue the loop
             }
-        })
+                .instrument(loop_span)
+                .await?;
+
+            if !should_continue {
+                break Ok(());
+            }
+        }
     }
 
     /// Processes block-scoped data from the stream: always sends the input to the extractor,
@@ -558,6 +638,86 @@ mod test {
 
     fn one_msg() -> ExtractorMsg {
         Arc::new(BlockAggregatedChanges::default())
+    }
+
+    /// Blocks in `drop` until released, then reports that it was dropped.
+    struct SlowDrop {
+        release: std::sync::mpsc::Receiver<()>,
+        dropped: std::sync::mpsc::Sender<()>,
+    }
+
+    impl Drop for SlowDrop {
+        fn drop(&mut self) {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the test fails on its own timeout if the release never arrives"
+            )]
+            let _ = self.release.recv();
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the test may have stopped listening already"
+            )]
+            let _ = self.dropped.send(());
+        }
+    }
+
+    /// Reports when it is dropped.
+    struct DropSignal(std::sync::mpsc::Sender<()>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the test may have stopped listening already"
+            )]
+            let _ = self.0.send(());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_stopped_runner_closes_its_stream_and_ends_before_the_extractor_is_freed() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (extractor_dropped_tx, extractor_dropped_rx) = std::sync::mpsc::channel();
+        let (stream_dropped_tx, stream_dropped_rx) = std::sync::mpsc::channel();
+        let extractor_state = SlowDrop { release: release_rx, dropped: extractor_dropped_tx };
+        let stream_state = DropSignal(stream_dropped_tx);
+        let stream = SubstreamsStream::from_stream(futures03::stream::poll_fn(move |_| {
+            let _keep_until_dropped = &stream_state;
+            std::task::Poll::Pending
+        }));
+        let mut mock = MockExtractor::new();
+        mock.expect_get_id().returning(move || {
+            let _keep_until_dropped = &extractor_state;
+            ExtractorIdentity::new(Chain::Ethereum, "test")
+        });
+        mock.expect_wait_for_capacity()
+            .returning(|| ());
+        mock.expect_shutdown()
+            .once()
+            .returning(|| Ok(()));
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let runner = ExtractorRunner::new(
+            Arc::new(mock),
+            stream,
+            Arc::new(Mutex::new(HashMap::new())),
+            stop_rx,
+            None,
+            false,
+        );
+
+        let run_handle = runner.run();
+        stop_tx.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), run_handle)
+            .await
+            .expect("the runner waits for the extractor to be freed");
+
+        assert!(matches!(result, Ok(Ok(()))));
+        assert!(stream_dropped_rx.try_recv().is_ok(), "the stream is closed when the runner ends");
+        assert!(extractor_dropped_rx.try_recv().is_err(), "the extractor is still being freed");
+        release_tx.send(()).unwrap();
+        extractor_dropped_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the extractor is freed in the background");
     }
 
     #[tokio::test]

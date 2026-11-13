@@ -12,7 +12,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info, instrument, trace, warn, Level};
 use tycho_common::{
     models::{
-        blockchain::BlockAggregatedChanges,
+        blockchain::{Block, BlockAggregatedChanges},
         contract::Account,
         protocol::{ProtocolComponent, ProtocolComponentState},
         MergeError,
@@ -98,6 +98,10 @@ pub trait PendingDeltasBuffer {
         f: &dyn Fn(&BlockAggregatedChanges) -> bool,
         protocol_system: &str,
     ) -> Result<Option<BlockAggregatedChanges>>;
+
+    /// Returns the newest block received for each extractor, or `None` for an extractor without
+    /// a received block.
+    fn newest_blocks(&self) -> Result<HashMap<String, Option<Block>>>;
 }
 
 impl PendingDeltas {
@@ -531,6 +535,18 @@ impl PendingDeltasBuffer for PendingDeltas {
         })?;
 
         Ok(guard.commit_status(version))
+    }
+
+    /// Reads the tip of each window; see [`DeltaWindow::tip`].
+    fn newest_blocks(&self) -> Result<HashMap<String, Option<Block>>> {
+        let mut newest = HashMap::with_capacity(self.windows.len());
+        for (extractor, window) in &self.windows {
+            let guard = window
+                .lock()
+                .map_err(|err| PendingDeltasError::LockError(extractor.clone(), err.to_string()))?;
+            newest.insert(extractor.clone(), guard.tip());
+        }
+        Ok(newest)
     }
 
     fn search_block(

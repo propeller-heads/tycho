@@ -81,7 +81,10 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::services::rpc::health as health_endpoint;
+
+    async fn health_endpoint() -> HttpResponse {
+        HttpResponse::Ok().json(tycho_common::dto::Health::Ready)
+    }
 
     const JSON_BYTES: usize = 64 * 1024;
 

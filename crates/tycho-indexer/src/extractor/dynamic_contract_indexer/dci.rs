@@ -1896,6 +1896,84 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
+    async fn test_block_already_in_the_loaded_state_keeps_tracked_changes_without_a_trace() {
+        let mut entrypoint_tracer = MockEntryPointTracer::new();
+        entrypoint_tracer.expect_trace().never();
+        let mut dci = DynamicContractIndexer::new(
+            Chain::Ethereum,
+            "test".to_string(),
+            get_mock_gateway(),
+            MockAccountExtractor::new(),
+            entrypoint_tracer,
+        );
+        dci.initialize().await.unwrap();
+        let tracked_before = dci
+            .cache
+            .tracked_contracts
+            .get_full_permanent_state()
+            .clone();
+        // The block that first traced entrypoint 1 with params 1, which tracks contract 0x01.
+        let tracked_contract = Bytes::from("0x01");
+        let tracked_slot = Bytes::from("0x11");
+        let tx = get_transaction(3);
+        let mut block_changes = BlockChanges::new(
+            "test".to_string(),
+            Chain::Ethereum,
+            testing::block(3),
+            3,
+            false,
+            vec![TxWithChanges {
+                tx: tx.clone(),
+                entrypoints: HashMap::from([(
+                    "component_1".to_string(),
+                    HashSet::from([get_entrypoint(1)]),
+                )]),
+                entrypoint_params: HashMap::from([(
+                    "entrypoint_1".to_string(),
+                    HashSet::from([(get_tracing_params(1), "component_1".to_string())]),
+                )]),
+                ..Default::default()
+            }],
+            vec![TxWithContractChanges {
+                tx: tx.clone(),
+                contract_changes: HashMap::from([(
+                    tracked_contract.clone(),
+                    ContractChanges::new(
+                        tracked_contract.clone(),
+                        HashMap::from([(
+                            tracked_slot.clone(),
+                            ContractStorageChange::initial(Bytes::from(0x100_u16).lpad(32, 0)),
+                        )]),
+                        None,
+                    ),
+                )]),
+            }],
+        );
+
+        dci.process_block_update(&mut block_changes)
+            .await
+            .unwrap();
+
+        let delta = block_changes
+            .txs_with_update
+            .iter()
+            .find(|update| update.tx.hash == tx.hash)
+            .and_then(|update| {
+                update
+                    .account_deltas
+                    .get(&tracked_contract)
+            })
+            .expect("the storage change of a tracked contract stays in the block");
+        assert!(delta.slots.contains_key(&tracked_slot));
+        assert_eq!(
+            dci.cache
+                .tracked_contracts
+                .get_full_permanent_state(),
+            &tracked_before
+        );
+    }
+
+    #[test_log::test(tokio::test)]
     async fn test_process_block_update_new_entrypoints() {
         let gateway = get_mock_gateway();
         let mut account_extractor = MockAccountExtractor::new();

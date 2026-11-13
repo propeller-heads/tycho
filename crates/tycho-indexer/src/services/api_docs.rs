@@ -38,6 +38,7 @@ impl Modify for SecurityAddon {
     info(title = "Tycho-Indexer RPC",),
     paths(
         rpc::health,
+        rpc::ready,
         rpc::protocol_systems,
         rpc::tokens,
         rpc::protocol_components,

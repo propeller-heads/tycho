@@ -14,16 +14,17 @@ use std::{
     env,
     fs::File,
     io::Read,
-    process, slice,
+    slice,
     str::FromStr,
     sync::{mpsc, Arc},
+    time::Duration,
 };
 
 use actix_web::{dev::ServerHandle, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use chrono::{NaiveDateTime, Utc};
 use clap::Parser;
-use futures03::future::select_all;
+use futures03::future::{join_all, select_all};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use pyroscope::{
     backend::{pprof_backend, BackendConfig, PprofConfig},
@@ -33,8 +34,8 @@ use pyroscope::{
 use serde::Deserialize;
 use tokio::{
     runtime::Handle,
-    select,
     signal::unix::{signal, SignalKind},
+    sync::{oneshot, watch},
     task::JoinHandle,
 };
 use tracing::{debug, error, info, instrument, warn};
@@ -67,8 +68,10 @@ use tycho_indexer::{
         runner::ExtractorHandle,
         supervisor::{DCIType, ExtractorConfig, ExtractorSupervisor, ProtocolTypeConfig},
         token_analysis_cron::analyze_tokens,
+        writer_status::{Role, WriterStatus},
         ExtractionError,
     },
+    leadership,
     services::{
         EntityCache, EntityCacheMode, EntityCacheSetup, PlansConfig, ServicesBuilder, WindowConfig,
     },
@@ -425,27 +428,19 @@ fn run_indexer(global_args: &GlobalArgs, index_args: &IndexArgs) -> Result<(), E
             }
         }
 
-        if extractor_ctrl_tx.send(res).is_err() {
-            error!("Fatal: failed to communicate with main thread. Exiting the process...");
-            process::exit(1);
-        }
+        report_task_end(&extractor_ctrl_tx, IndexerTask::Extraction, res);
     });
 
     let services_ctrl_tx = control_tx;
     main_runtime.spawn(async move {
         let (res, _, _) = select_all(other_tasks).await;
-
-        if services_ctrl_tx.send(res.unwrap_or_else(|join_err| Err(ExtractionError::Unknown(format!("Task panicked: {join_err}"))))).is_err() {
-            error!("Fatal service task exited and failed trying to communicate with main thread. Exiting the process...");
-            process::exit(1);
-        }
+        let res = res.unwrap_or_else(|join_err| {
+            Err(ExtractionError::Unknown(format!("Task panicked: {join_err}")))
+        });
+        report_task_end(&services_ctrl_tx, IndexerTask::Services, res);
     });
 
-    let res = control_rx.recv().map_err(|_closed| {
-        ExtractionError::Unknown("Control channel unexpectedly closed".to_string())
-    })?;
-
-    match res {
+    match wait_for_indexer_end(&control_rx, SERVICES_STOP_TIMEOUT) {
         Ok(()) => Ok(()),
         Err(err) => {
             error!(error = %err, "Fatal error, shutting down");
@@ -561,7 +556,16 @@ async fn run_rpc(
             )
             .run()?;
     info!(server_url, "Http and Ws server started");
-    let shutdown_task = tokio::spawn(shutdown_handler(server_handle, vec![], None));
+    let shutdown_task = tokio::spawn(
+        Shutdown {
+            server: server_handle,
+            extractors: Vec::new(),
+            db_write_executor: None,
+            close_connections: None,
+            release_lead: None,
+        }
+        .run(),
+    );
     let (res, _, _) = select_all([server_task, shutdown_task]).await;
     res.map_err(|join_err| ExtractionError::Unknown(format!("Service task panicked: {join_err}")))?
 }
@@ -604,6 +608,21 @@ async fn create_indexing_tasks(
         .expect("No chain provided"); //TODO: handle multichain?
     let token_processor = EthereumTokenPreProcessor::new(&rpc_client, chain, settlement_contract);
 
+    let accounts_to_initialize: Vec<(Vec<Address>, u64)> = extractors_config
+        .extractors
+        .values()
+        .map(|config| (config.initialized_accounts.clone(), config.initialized_accounts_block))
+        .collect();
+    let (release_lead, lead_release) = oneshot::channel();
+    let (writer_status, election_task) =
+        leadership::elect(&global_args.database_url, cached_gw.clone(), chain, lead_release)
+            .await?;
+    // A process promoted later does not run this: the accounts are a testing aid to start
+    // indexing from a later block, and the first leader has written them already.
+    if writer_status.role() == Role::Leader {
+        initialize_all_accounts(accounts_to_initialize, &rpc_client, chain, &cached_gw).await;
+    }
+
     let (supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
         &extractors_config,
         chains,
@@ -616,6 +635,7 @@ async fn create_indexing_tasks(
         &rpc_client,
         extraction_runtime,
         substreams_args.enable_partial_blocks,
+        &writer_status,
     )
     .await
     .map_err(|e| ExtractionError::Setup(format!("Failed to create extractors: {e}")))?;
@@ -629,6 +649,7 @@ async fn create_indexing_tasks(
     // The load runs after the extractors are built and before the server and the pump start:
     // the snapshot sees the initialized accounts, nothing writes during the build, and no
     // request or fold can reach a half-built cache.
+    let (close_connections, connections_closed) = watch::channel(false);
     let entity_cache = match global_args.entity_cache_mode {
         EntityCacheMode::Off => EntityCacheSetup::Off,
         mode @ (EntityCacheMode::Shadow | EntityCacheMode::Serve) => {
@@ -665,11 +686,24 @@ async fn create_indexing_tasks(
                 .0
                 .clone(),
         )
+        .writer_status(writer_status.clone())
+        .ready_head_tolerance(chrono::Duration::seconds(i64::from(
+            global_args.ready_head_tolerance_secs,
+        )))
+        .close_connections_on(connections_closed)
         .run()?;
     info!(server_url, "Http and Ws server started");
 
-    let shutdown_task =
-        tokio::spawn(shutdown_handler(server_handle, extractor_handles, Some(gw_writer_handle)));
+    let shutdown_task = tokio::spawn(
+        Shutdown {
+            server: server_handle,
+            extractors: extractor_handles,
+            db_write_executor: Some(gw_writer_handle),
+            close_connections: Some(close_connections),
+            release_lead: Some(release_lead),
+        }
+        .run(),
+    );
 
     #[expect(
         clippy::disallowed_methods,
@@ -684,7 +718,27 @@ async fn create_indexing_tasks(
         .map(|supervisor| runtime.spawn(supervisor.run()))
         .collect::<Vec<_>>();
 
-    Ok((supervisor_tasks, vec![server_task, shutdown_task]))
+    let election_task = tokio::spawn(async move {
+        election_task
+            .await
+            .unwrap_or_else(|err| {
+                Err(ExtractionError::Unknown(format!("Leader election task panicked: {err}")))
+            })
+    });
+
+    Ok((supervisor_tasks, vec![server_task, shutdown_task, election_task]))
+}
+
+/// Writes the configured initial state of accounts. Only the database writer may call this.
+async fn initialize_all_accounts(
+    accounts: Vec<(Vec<Address>, u64)>,
+    rpc_client: &EthereumRpcClient,
+    chain: Chain,
+    cached_gw: &CachedGateway,
+) {
+    for (addresses, block) in accounts {
+        initialize_accounts(addresses, block, rpc_client, chain, cached_gw).await;
+    }
 }
 
 #[expect(
@@ -703,6 +757,7 @@ async fn build_all_extractors(
     rpc_client: &EthereumRpcClient,
     runtime: Option<&tokio::runtime::Handle>,
     partial_blocks: bool,
+    writer_status: &WriterStatus,
 ) -> Result<
     (
         Vec<ExtractorSupervisor>,
@@ -731,17 +786,6 @@ async fn build_all_extractors(
     protocol_cache.populate().await?;
 
     for extractor_config in config.extractors.values() {
-        initialize_accounts(
-            extractor_config
-                .initialized_accounts
-                .clone(),
-            extractor_config.initialized_accounts_block,
-            rpc_client,
-            chain,
-            cached_gw,
-        )
-        .await;
-
         #[expect(
             clippy::disallowed_methods,
             reason = "`run_spkg` passes no extraction runtime and runs inside `#[tokio::main]`'s multi-thread runtime"
@@ -764,7 +808,8 @@ async fn build_all_extractors(
             Some(runtime_handle),
             protocol_cache.clone(),
         )
-        .await?;
+        .await?
+        .with_writer_status(writer_status.clone());
 
         // Create dedicated PendingDeltas channel for this extractor
         let (pd_tx, pd_rx) = tokio::sync::mpsc::channel(PENDING_DELTAS_CHANNEL_SIZE);
@@ -893,34 +938,166 @@ async fn get_accounts_data(
     (block, extracted_accounts)
 }
 
-async fn shutdown_handler(
-    server_handle: ServerHandle,
-    extractors: Vec<ExtractorHandle>,
-    db_write_executor_handle: Option<JoinHandle<()>>,
-) -> Result<(), ExtractionError> {
-    let ctrl_c = tokio::signal::ctrl_c();
-    let mut sigterm =
-        signal(SignalKind::terminate()).map_err(|e| ExtractionError::Unknown(e.to_string()))?;
+/// How long a shutdown waits for the extractors to stop before it releases the leader lock anyway.
+///
+/// A stopping extractor commits its final blocks first. With a large
+/// `--database-insert-batch-size` that is a full batch per extractor, and the write executor runs
+/// these one after the other: about 16 s each for the largest extractors on Base. Set the grace
+/// period of the pods above this timeout, so the lock is released before the process is killed.
+/// A commit that is still running at the timeout fails on the writer fence of the new leader.
+const EXTRACTOR_STOP_TIMEOUT: Duration = Duration::from_secs(120);
 
-    tokio::select! {
-        _ = ctrl_c => {
-            info!("SIGINT (Ctrl+C) received. Cleaning up...");
-        },
-        _ = sigterm.recv() => {
-            info!("SIGTERM received. Cleaning up...");
-        },
-    }
+/// A task of the indexer that reports its end to the main thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexerTask {
+    /// The extractor supervisors. Ends when every supervisor ended, or at the first one that
+    /// failed.
+    Extraction,
+    /// The server, the shutdown sequence and the other service tasks. Ends first of them.
+    Services,
+}
 
-    for e in extractors.iter() {
-        if let Err(err) = e.stop().await {
-            warn!(error = %err, "Failed to stop extractor during shutdown");
+type TaskEnd = (IndexerTask, Result<(), ExtractionError>);
+
+/// How long the main thread waits for the services after the extractors ended cleanly.
+///
+/// In a shutdown, the extractors end first. The shutdown then still releases the leader lock and
+/// stops the server, which waits up to 30 s (the actix default) for the open requests.
+const SERVICES_STOP_TIMEOUT: Duration = Duration::from_secs(40);
+
+/// Sends the end of `task` to the main thread.
+///
+/// The main thread returns after the first end it receives, unless that is a clean end of the
+/// extraction. A later end then finds the channel closed while the process exits. It is logged
+/// and dropped: there is nothing left to stop.
+fn report_task_end(
+    control_tx: &mpsc::Sender<TaskEnd>,
+    task: IndexerTask,
+    result: Result<(), ExtractionError>,
+) {
+    if let Err(mpsc::SendError((task, result))) = control_tx.send((task, result)) {
+        match result {
+            Ok(()) => debug!(?task, "The task ended after the main thread; the process exits"),
+            Err(err) => error!(
+                ?task,
+                error = %err,
+                "The task failed after the main thread ended; the process exits"
+            ),
         }
     }
-    server_handle.stop(true).await;
-    if let Some(handle) = db_write_executor_handle {
-        handle.abort();
+}
+
+/// Blocks until the indexer should exit, and returns why.
+///
+/// - The first error of either task returns at once.
+/// - A clean end of the services returns: in a shutdown they end last.
+/// - A clean end of the extraction waits up to `services_timeout` for the services, so that a
+///   shutdown releases the leader lock and stops the server before the process exits. It returns
+///   `Ok` when they do not end in time.
+///
+/// # Errors
+/// Returns the error a task ended with, or an error when both tasks dropped their sender
+/// without a result.
+fn wait_for_indexer_end(
+    control_rx: &mpsc::Receiver<TaskEnd>,
+    services_timeout: Duration,
+) -> Result<(), ExtractionError> {
+    let closed = || ExtractionError::Unknown("Control channel unexpectedly closed".to_string());
+    let (task, result) = control_rx
+        .recv()
+        .map_err(|_disconnected| closed())?;
+    result?;
+    match task {
+        IndexerTask::Services => Ok(()),
+        IndexerTask::Extraction => match control_rx.recv_timeout(services_timeout) {
+            Ok((_, result)) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                warn!(
+                    timeout = ?services_timeout,
+                    "The services did not end after the extractors; exiting anyway"
+                );
+                Ok(())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(closed()),
+        },
     }
-    Ok(())
+}
+
+/// What a shutdown signal stops, in the order of [`Shutdown::run`].
+struct Shutdown {
+    server: ServerHandle,
+    extractors: Vec<ExtractorHandle>,
+    db_write_executor: Option<JoinHandle<()>>,
+    /// Closes every websocket connection, and each open HTTP/1 connection after its next
+    /// response.
+    close_connections: Option<watch::Sender<bool>>,
+    /// Releases the leader lock, or stops a follower from retrying it.
+    release_lead: Option<oneshot::Sender<()>>,
+}
+
+impl Shutdown {
+    /// Waits for SIGINT or SIGTERM, then hands the work to another instance and stops.
+    ///
+    /// The order makes the handover short, because the follower streams and serves already:
+    /// 1. Closes the websocket connections, and each HTTP/1 connection after its next response, so
+    ///    clients connect to another instance at once. The server stops to accept connections on
+    ///    the signal itself.
+    /// 2. Stops the extractors, and waits up to [`EXTRACTOR_STOP_TIMEOUT`] until they ended. A
+    ///    leader's extractors commit their final blocks before they end, so the next leader starts
+    ///    from a newer cursor.
+    /// 3. Releases the leader lock, so a follower takes over without waiting for this process to
+    ///    exit.
+    /// 4. Stops the server and the database write executor.
+    async fn run(self) -> Result<(), ExtractionError> {
+        let ctrl_c = tokio::signal::ctrl_c();
+        let mut sigterm =
+            signal(SignalKind::terminate()).map_err(|e| ExtractionError::Unknown(e.to_string()))?;
+
+        tokio::select! {
+            _ = ctrl_c => {
+                info!("SIGINT (Ctrl+C) received. Cleaning up...");
+            },
+            _ = sigterm.recv() => {
+                info!("SIGTERM received. Cleaning up...");
+            },
+        }
+
+        let signal_received = tokio::time::Instant::now();
+        if let Some(close_connections) = &self.close_connections {
+            close_connections.send_replace(true);
+        }
+        for e in self.extractors.iter() {
+            if let Err(err) = e.stop().await {
+                warn!(error = %err, "Failed to stop extractor during shutdown");
+            }
+        }
+        let all_stopped = join_all(
+            self.extractors
+                .iter()
+                .map(ExtractorHandle::stopped),
+        );
+        if tokio::time::timeout(EXTRACTOR_STOP_TIMEOUT, all_stopped)
+            .await
+            .is_ok()
+        {
+            info!(elapsed = ?signal_received.elapsed(), "ExtractorsStopped");
+        } else {
+            warn!(
+                timeout = ?EXTRACTOR_STOP_TIMEOUT,
+                "Extractors did not stop in time; releasing the leader lock anyway"
+            );
+        }
+        if let Some(release_lead) = self.release_lead {
+            if release_lead.send(()).is_err() {
+                info!("The election task ended already, and with it the leader lock session");
+            }
+        }
+        self.server.stop(true).await;
+        if let Some(handle) = self.db_write_executor {
+            handle.abort();
+        }
+        Ok(())
+    }
 }
 
 #[tokio::main]
@@ -931,20 +1108,13 @@ async fn run_analyze_tokens(
     let rpc_client = global_args.rpc.build_client()?;
 
     create_tracing_subscriber();
-    let (cached_gw, gw_writer_thread) = GatewayBuilder::new(&global_args.database_url)
+    // No write executor: the analysis writes only through `update_tokens`, which bypasses it, so
+    // it never becomes the database writer and never fences the running indexer.
+    let cached_gw = GatewayBuilder::new(&global_args.database_url)
         .set_chains(&[analyzer_args.chain])
-        .build()
+        .build_gw()
         .await?;
-    let cached_gw = Arc::new(cached_gw);
-    let analyze_thread = analyze_tokens(analyzer_args, &rpc_client, cached_gw.clone());
-    select! {
-         res = analyze_thread => {
-            res?;
-         },
-         res = gw_writer_thread => {
-            res?;
-        }
-    }
+    analyze_tokens(analyzer_args, &rpc_client, Arc::new(cached_gw)).await?;
     Ok(())
 }
 
@@ -965,6 +1135,70 @@ mod tests {
             18
         )
         .is_err());
+    }
+
+    mod wait_for_indexer_end {
+        use std::{sync::mpsc, time::Duration};
+
+        use tycho_indexer::extractor::ExtractionError;
+
+        use super::super::{wait_for_indexer_end, IndexerTask};
+
+        const SHORT: Duration = Duration::from_millis(50);
+
+        fn failure() -> ExtractionError {
+            ExtractionError::Unknown("boom".to_string())
+        }
+
+        #[test]
+        fn test_returns_after_the_services_end() {
+            let (tx, rx) = mpsc::channel();
+            tx.send((IndexerTask::Services, Ok(())))
+                .unwrap();
+
+            assert!(wait_for_indexer_end(&rx, SHORT).is_ok());
+        }
+
+        #[test]
+        fn test_waits_for_the_services_after_the_extraction_ends() {
+            let (tx, rx) = mpsc::channel();
+            tx.send((IndexerTask::Extraction, Ok(())))
+                .unwrap();
+            tx.send((IndexerTask::Services, Err(failure())))
+                .unwrap();
+
+            assert!(
+                wait_for_indexer_end(&rx, SHORT).is_err(),
+                "the result of the services must be the outcome"
+            );
+        }
+
+        #[test]
+        fn test_returns_the_first_error_at_once() {
+            let (tx, rx) = mpsc::channel();
+            tx.send((IndexerTask::Extraction, Err(failure())))
+                .unwrap();
+
+            assert!(wait_for_indexer_end(&rx, Duration::from_secs(3600)).is_err());
+        }
+
+        #[test]
+        fn test_returns_ok_when_the_services_do_not_end_in_time() {
+            let (tx, rx) = mpsc::channel();
+            tx.send((IndexerTask::Extraction, Ok(())))
+                .unwrap();
+
+            assert!(wait_for_indexer_end(&rx, SHORT).is_ok());
+            drop(tx);
+        }
+
+        #[test]
+        fn test_fails_when_every_sender_is_gone_without_a_result() {
+            let (tx, rx) = mpsc::channel::<super::super::TaskEnd>();
+            drop(tx);
+
+            assert!(wait_for_indexer_end(&rx, SHORT).is_err());
+        }
     }
 
     #[test]
@@ -1008,6 +1242,10 @@ mod test_serial_db {
                 .build()
                 .await
                 .expect("Failed to create Gateway");
+            cached_gw
+                .increment_writer_epoch()
+                .await
+                .expect("the epoch increment should succeed");
             initialize_accounts(accounts, block_id, &RPC, chain, &cached_gw).await;
 
             let contracts = cached_gw
@@ -1039,6 +1277,10 @@ mod test_serial_db {
                 .build()
                 .await
                 .expect("Failed to create Gateway");
+            cached_gw
+                .increment_writer_epoch()
+                .await
+                .expect("the epoch increment should succeed");
 
             initialize_accounts(accounts, block_id, &RPC, chain, &cached_gw).await;
 
@@ -1069,6 +1311,10 @@ mod test_serial_db {
                 .build()
                 .await
                 .expect("Failed to create Gateway");
+            cached_gw
+                .increment_writer_epoch()
+                .await
+                .expect("the epoch increment should succeed");
 
             initialize_accounts(accounts, block_id, &RPC, chain, &cached_gw).await;
             let accounts =
@@ -1104,6 +1350,10 @@ mod test_serial_db {
                 .build()
                 .await
                 .expect("Failed to create Gateway");
+            cached_gw
+                .increment_writer_epoch()
+                .await
+                .expect("the epoch increment should succeed");
 
             initialize_accounts(accounts, block_id, &rpc, chain, &cached_gw).await;
         })

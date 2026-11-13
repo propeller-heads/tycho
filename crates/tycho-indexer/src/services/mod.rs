@@ -19,11 +19,13 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
-    extractor::{runner::ExtractorHandle, ExtractionError},
+    extractor::{runner::ExtractorHandle, writer_status::WriterStatus, ExtractionError},
     services::{
         api_docs::ApiDoc,
         deltas_buffer::PendingDeltas,
-        middleware::{compression_middleware, rpc_metrics_middleware},
+        middleware::{
+            close_connection_on_shutdown, compression_middleware, rpc_metrics_middleware,
+        },
         state::{
             service::StateService,
             shadow::{self, Sampler, Shadow},
@@ -67,6 +69,8 @@ pub struct ServicesBuilder<G> {
     /// Pre-built receivers for PendingDeltas (one per extractor).
     pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
     window_config: WindowConfig,
+    /// Role of this process as database writer, read by the health endpoint.
+    writer_status: Option<WriterStatus>,
     /// `Off` makes the windows fold into a `DiscardSink` and every state request read the
     /// database.
     entity_cache: EntityCacheSetup<Arc<EntityCache>>,
@@ -74,6 +78,11 @@ pub struct ServicesBuilder<G> {
     shadow_sample_rate: f64,
     /// RPC response caches that stay off.
     disabled_rpc_caches: Vec<RpcCacheKind>,
+    /// How old the newest block of a streamed extractor may be on a ready follower.
+    ready_head_tolerance: chrono::Duration,
+    /// Turns `true` when the process shuts down, which closes every websocket connection and
+    /// ends the open HTTP/1 connections after their next response.
+    shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 /// Resolves with the first error either service task produces, or with `Ok` once both end
@@ -112,7 +121,17 @@ where
             entity_cache: EntityCacheSetup::Off,
             shadow_sample_rate: 0.0,
             disabled_rpc_caches: Vec::new(),
+            writer_status: None,
+            ready_head_tolerance: rpc::DEFAULT_READY_HEAD_TOLERANCE,
+            shutdown: None,
         }
+    }
+
+    /// Once `shutdown` turns `true`, closes every websocket connection and closes each open
+    /// HTTP/1 connection after its next response, so that clients connect to another instance.
+    pub fn close_connections_on(mut self, shutdown: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.shutdown = Some(shutdown);
+        self
     }
 
     /// Turns the given RPC response caches off. Requests to those endpoints always run the
@@ -142,6 +161,20 @@ where
     /// ignore it.
     pub fn shadow_sample_rate(mut self, rate: f64) -> Self {
         self.shadow_sample_rate = rate;
+        self
+    }
+
+    /// Makes the health endpoint fail while this process is the database writer and has stopped
+    /// confirming its leader lock.
+    pub fn writer_status(mut self, v: WriterStatus) -> Self {
+        self.writer_status = Some(v);
+        self
+    }
+
+    /// Sets how old the newest block of each streamed extractor may be for the readiness endpoint
+    /// to report a follower as ready.
+    pub fn ready_head_tolerance(mut self, tolerance: chrono::Duration) -> Self {
+        self.ready_head_tolerance = tolerance;
         self
     }
 
@@ -278,7 +311,11 @@ where
             );
         }
 
-        let ws_data = web::Data::new(ws::WsData::new(self.extractor_handles.clone()));
+        let mut ws_data = ws::WsData::new(self.extractor_handles.clone());
+        if let Some(shutdown) = &self.shutdown {
+            ws_data = ws_data.close_on_shutdown(shutdown.clone());
+        }
+        let ws_data = web::Data::new(ws_data);
         let (server_handle, server_task) = self.start_server(
             Some(ws_data),
             openapi,
@@ -312,8 +349,11 @@ where
                 self.plans_config,
                 self.dci_protocols,
                 self.protocol_systems,
+                self.writer_status,
             )
             .with_disabled_caches(&self.disabled_rpc_caches)
+            .with_ready_head_tolerance(self.ready_head_tolerance)
+            .with_shutdown_signal(self.shutdown.clone())
             .with_state_service(state_service),
         );
 
@@ -340,6 +380,9 @@ where
                 // Enable zstd compression while being backwards compatible with clients that do not
                 .wrap(compression_middleware())
                 .wrap(RequestTracing::new())
+                .wrap(actix_middleware::from_fn(
+                    close_connection_on_shutdown::<G, EVMEntrypointService, _>,
+                ))
                 .app_data(rpc_data.clone())
                 .service(
                     web::resource(format!("/{}/contract_state", self.prefix))
@@ -369,7 +412,11 @@ where
                 )
                 .service(
                     web::resource(format!("/{}/health", self.prefix))
-                        .route(web::get().to(rpc::health)),
+                        .route(web::get().to(rpc::health::<G, EVMEntrypointService>)),
+                )
+                .service(
+                    web::resource(format!("/{}/ready", self.prefix))
+                        .route(web::get().to(rpc::ready::<G, EVMEntrypointService>)),
                 )
                 .service(
                     web::resource(format!("/{}/protocol_systems", self.prefix))
