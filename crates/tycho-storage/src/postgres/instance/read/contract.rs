@@ -13,7 +13,10 @@ use tycho_common::{
     Bytes,
 };
 
-use super::version::check_current;
+use super::{
+    snapshot::{begin_snapshot, end_snapshot},
+    version::check_current,
+};
 use crate::postgres::{
     count_to_i64,
     instance::{
@@ -39,7 +42,11 @@ impl PostgresGatewayNew {
         conn: &mut AsyncPgConnection,
     ) -> Result<Account, StorageError> {
         let address = std::slice::from_ref(&id.address);
-        self.get_contracts(&id.chain, protocol_system, Some(address), at, include_slots, None, conn)
+        let snapshot = begin_snapshot(conn).await?;
+        let result = self
+            .get_contracts(&id.chain, protocol_system, Some(address), at, include_slots, None, conn)
+            .await;
+        end_snapshot(conn, snapshot, result)
             .await?
             .entity
             .pop()
@@ -76,155 +83,18 @@ impl PostgresGatewayNew {
     ) -> Result<WithTotal<Vec<Account>>, StorageError> {
         self.get_chain_id(chain)?;
         self.get_protocol_system_id(protocol_system)?;
-        let Some(instance) = active_instance(conn, protocol_system).await? else {
-            return Ok(WithTotal { entity: Vec::new(), total: Some(0) });
-        };
-        let ts = check_current(conn, instance, at)
-            .await?
-            .unwrap_or_else(|| Utc::now().naive_utc());
-
-        let filtered = || {
-            let mut query = account::table
-                .filter(account::instance_id.eq(instance))
-                .filter(
-                    account::created_at
-                        .is_null()
-                        .or(account::created_at.le(ts)),
-                )
-                .filter(
-                    account::deleted_at
-                        .is_null()
-                        .or(account::deleted_at.gt(ts)),
-                )
-                .into_boxed::<Pg>();
-            match addresses {
-                Some(addresses) => query = query.filter(account::address.eq_any(addresses)),
-                None => {
-                    query = query.filter(exists(
-                        contract_code::table
-                            .filter(contract_code::instance_id.eq(instance))
-                            .filter(contract_code::account_id.eq(account::id)),
-                    ))
-                }
-            }
-            query
-        };
-        let columns = (account::id, account::address, account::title);
-        let (accounts, total) = match pagination_params {
-            Some(pagination) => {
-                let total = filtered()
-                    .count()
-                    .get_result::<i64>(conn)
-                    .await
-                    .map_err(PostgresError::from)?;
-                let accounts: Vec<(i64, Address, String)> = filtered()
-                    .order_by(account::id)
-                    .limit(pagination.page_size)
-                    .offset(pagination.offset())
-                    .select(columns)
-                    .load(conn)
-                    .await
-                    .map_err(PostgresError::from)?;
-                (accounts, Some(total))
-            }
-            None => {
-                let accounts: Vec<(i64, Address, String)> = filtered()
-                    .order_by(account::id)
-                    .select(columns)
-                    .load(conn)
-                    .await
-                    .map_err(PostgresError::from)?;
-                (accounts, None)
-            }
-        };
-        let ids: Vec<i64> = accounts
-            .iter()
-            .map(|(id, _, _)| *id)
-            .collect();
-
-        let mut codes: HashMap<i64, (Bytes, Bytes, Bytes)> = contract_code::table
-            .filter(contract_code::instance_id.eq(instance))
-            .filter(contract_code::account_id.eq_any(&ids))
-            .select((
-                contract_code::account_id,
-                (contract_code::code, contract_code::hash, contract_code::modify_tx_hash),
-            ))
-            .load::<(i64, (Bytes, Bytes, Bytes))>(conn)
-            .await
-            .map_err(PostgresError::from)?
-            .into_iter()
-            .collect();
-        let missing: Vec<String> = accounts
-            .iter()
-            .filter(|(id, _, _)| !codes.contains_key(id))
-            .map(|(_, address, _)| hex::encode(address))
-            .collect();
-        if !missing.is_empty() {
-            warn!(
-                missing_count = missing.len(),
-                ?missing,
-                "Accounts missing contract_code at this version; skipping them"
-            );
-        }
-        let page_addresses: Vec<Address> = accounts
-            .iter()
-            .map(|(_, address, _)| address.clone())
-            .collect();
-        let mut balances =
-            load_account_balances(conn, chain, instance, Some(&page_addresses), true).await?;
-
-        let mut slots: HashMap<i64, HashMap<Bytes, Bytes>> = HashMap::new();
-        if include_slots {
-            let rows: Vec<(i64, Bytes, Option<Bytes>)> = contract_storage::table
-                .filter(contract_storage::instance_id.eq(instance))
-                .filter(contract_storage::account_id.eq_any(&ids))
-                .select((
-                    contract_storage::account_id,
-                    contract_storage::slot,
-                    contract_storage::value,
-                ))
-                .load(conn)
-                .await
-                .map_err(PostgresError::from)?;
-            for (account_id, slot, value) in rows {
-                slots
-                    .entry(account_id)
-                    .or_default()
-                    .insert(slot, value.unwrap_or_default());
-            }
-        }
-
-        let mut contracts = Vec::with_capacity(accounts.len());
-        for (id, address, title) in accounts {
-            let Some((code, hash, modify_tx_hash)) = codes.remove(&id) else {
-                continue;
-            };
-            let mut token_balances = balances
-                .remove(&address)
-                .ok_or_else(|| {
-                    StorageError::NotFound("account_balances".to_string(), address.to_string())
-                })?;
-            let native_balance = token_balances
-                .remove(&chain.native_token().address)
-                .ok_or_else(|| {
-                    StorageError::NotFound("native_balance".to_string(), address.to_string())
-                })?;
-            contracts.push(Account::new(
-                *chain,
-                address,
-                title,
-                slots.remove(&id).unwrap_or_default(),
-                native_balance.balance,
-                token_balances,
-                code,
-                hash,
-                Bytes::zero(32),
-                modify_tx_hash,
-                None,
-            ));
-        }
-        let total = total.unwrap_or_else(|| count_to_i64(contracts.len()));
-        Ok(WithTotal { entity: contracts, total: Some(total) })
+        let snapshot = begin_snapshot(conn).await?;
+        let result = contracts_of(
+            conn,
+            chain,
+            protocol_system,
+            addresses,
+            at,
+            include_slots,
+            pagination_params,
+        )
+        .await;
+        end_snapshot(conn, snapshot, result).await
     }
 
     /// Returns the token balances of the accounts of `protocol_system`'s active instance, by
@@ -249,12 +119,186 @@ impl PostgresGatewayNew {
     ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
         self.get_chain_id(chain)?;
         self.get_protocol_system_id(protocol_system)?;
-        let Some(instance) = active_instance(conn, protocol_system).await? else {
-            return Ok(HashMap::new());
-        };
-        check_current(conn, instance, at).await?;
-        load_account_balances(conn, chain, instance, accounts, include_native).await
+        let snapshot = begin_snapshot(conn).await?;
+        let result =
+            account_balances_of(conn, chain, protocol_system, accounts, at, include_native).await;
+        end_snapshot(conn, snapshot, result).await
     }
+}
+
+/// Reads the contracts of [`PostgresGatewayNew::get_contracts`] from the active instance of
+/// `protocol_system`, and the number of matching accounts on all pages.
+async fn contracts_of(
+    conn: &mut AsyncPgConnection,
+    chain: &Chain,
+    protocol_system: &str,
+    addresses: Option<&[Address]>,
+    at: Option<&Version>,
+    include_slots: bool,
+    pagination_params: Option<&PaginationParams>,
+) -> Result<WithTotal<Vec<Account>>, StorageError> {
+    let Some(instance) = active_instance(conn, protocol_system).await? else {
+        return Ok(WithTotal { entity: Vec::new(), total: Some(0) });
+    };
+    let ts = check_current(conn, instance, at)
+        .await?
+        .unwrap_or_else(|| Utc::now().naive_utc());
+
+    let filtered = || {
+        let mut query = account::table
+            .filter(account::instance_id.eq(instance))
+            .filter(
+                account::created_at
+                    .is_null()
+                    .or(account::created_at.le(ts)),
+            )
+            .filter(
+                account::deleted_at
+                    .is_null()
+                    .or(account::deleted_at.gt(ts)),
+            )
+            .into_boxed::<Pg>();
+        match addresses {
+            Some(addresses) => query = query.filter(account::address.eq_any(addresses)),
+            None => {
+                query = query.filter(exists(
+                    contract_code::table
+                        .filter(contract_code::instance_id.eq(instance))
+                        .filter(contract_code::account_id.eq(account::id)),
+                ))
+            }
+        }
+        query
+    };
+    let columns = (account::id, account::address, account::title);
+    let (accounts, total) = match pagination_params {
+        Some(pagination) => {
+            let total = filtered()
+                .count()
+                .get_result::<i64>(conn)
+                .await
+                .map_err(PostgresError::from)?;
+            let accounts: Vec<(i64, Address, String)> = filtered()
+                .order_by(account::id)
+                .limit(pagination.page_size)
+                .offset(pagination.offset())
+                .select(columns)
+                .load(conn)
+                .await
+                .map_err(PostgresError::from)?;
+            (accounts, Some(total))
+        }
+        None => {
+            let accounts: Vec<(i64, Address, String)> = filtered()
+                .order_by(account::id)
+                .select(columns)
+                .load(conn)
+                .await
+                .map_err(PostgresError::from)?;
+            (accounts, None)
+        }
+    };
+    let ids: Vec<i64> = accounts
+        .iter()
+        .map(|(id, _, _)| *id)
+        .collect();
+
+    let mut codes: HashMap<i64, (Bytes, Bytes, Bytes)> = contract_code::table
+        .filter(contract_code::instance_id.eq(instance))
+        .filter(contract_code::account_id.eq_any(&ids))
+        .select((
+            contract_code::account_id,
+            (contract_code::code, contract_code::hash, contract_code::modify_tx_hash),
+        ))
+        .load::<(i64, (Bytes, Bytes, Bytes))>(conn)
+        .await
+        .map_err(PostgresError::from)?
+        .into_iter()
+        .collect();
+    let missing: Vec<String> = accounts
+        .iter()
+        .filter(|(id, _, _)| !codes.contains_key(id))
+        .map(|(_, address, _)| hex::encode(address))
+        .collect();
+    if !missing.is_empty() {
+        warn!(
+            missing_count = missing.len(),
+            ?missing,
+            "Accounts missing contract_code at this version; skipping them"
+        );
+    }
+    let page_addresses: Vec<Address> = accounts
+        .iter()
+        .map(|(_, address, _)| address.clone())
+        .collect();
+    let mut balances =
+        load_account_balances(conn, chain, instance, Some(&page_addresses), true).await?;
+
+    let mut slots: HashMap<i64, HashMap<Bytes, Bytes>> = HashMap::new();
+    if include_slots {
+        let rows: Vec<(i64, Bytes, Option<Bytes>)> = contract_storage::table
+            .filter(contract_storage::instance_id.eq(instance))
+            .filter(contract_storage::account_id.eq_any(&ids))
+            .select((contract_storage::account_id, contract_storage::slot, contract_storage::value))
+            .load(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        for (account_id, slot, value) in rows {
+            slots
+                .entry(account_id)
+                .or_default()
+                .insert(slot, value.unwrap_or_default());
+        }
+    }
+
+    let mut contracts = Vec::with_capacity(accounts.len());
+    for (id, address, title) in accounts {
+        let Some((code, hash, modify_tx_hash)) = codes.remove(&id) else {
+            continue;
+        };
+        let mut token_balances = balances
+            .remove(&address)
+            .ok_or_else(|| {
+                StorageError::NotFound("account_balances".to_string(), address.to_string())
+            })?;
+        let native_balance = token_balances
+            .remove(&chain.native_token().address)
+            .ok_or_else(|| {
+                StorageError::NotFound("native_balance".to_string(), address.to_string())
+            })?;
+        contracts.push(Account::new(
+            *chain,
+            address,
+            title,
+            slots.remove(&id).unwrap_or_default(),
+            native_balance.balance,
+            token_balances,
+            code,
+            hash,
+            Bytes::zero(32),
+            modify_tx_hash,
+            None,
+        ));
+    }
+    let total = total.unwrap_or_else(|| count_to_i64(contracts.len()));
+    Ok(WithTotal { entity: contracts, total: Some(total) })
+}
+
+/// Reads the token balances of the matching accounts of the active instance of `protocol_system`,
+/// by account address and token address.
+async fn account_balances_of(
+    conn: &mut AsyncPgConnection,
+    chain: &Chain,
+    protocol_system: &str,
+    accounts: Option<&[Address]>,
+    at: Option<&Version>,
+    include_native: bool,
+) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
+    let Some(instance) = active_instance(conn, protocol_system).await? else {
+        return Ok(HashMap::new());
+    };
+    check_current(conn, instance, at).await?;
+    load_account_balances(conn, chain, instance, accounts, include_native).await
 }
 
 /// Loads the token balances of the accounts of `instance`, by account address and token address.
@@ -304,7 +348,7 @@ mod tests {
     use std::collections::HashMap;
 
     use chrono::{NaiveDate, NaiveDateTime};
-    use diesel_async::AsyncPgConnection;
+    use diesel_async::{AnsiTransactionManager, AsyncPgConnection, TransactionManager};
     use tycho_common::{
         models::{
             contract::{Account, AccountBalance},
@@ -843,5 +887,42 @@ mod tests {
             contracts(&s.gateway, &mut conn, "vm:curve", None, None, Some(&at(day(1)))).await;
 
         assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+    }
+
+    fn depth(conn: &mut AsyncPgConnection) -> Option<u32> {
+        AnsiTransactionManager::transaction_manager_status_mut(conn)
+            .transaction_depth()
+            .expect("a valid transaction manager")
+            .map(u32::from)
+    }
+
+    #[tokio::test]
+    async fn test_contract_reads_leave_no_transaction_open() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        contract(&mut conn, s.curve, "0xaa", "0xc0de", &[("0x01", "0x0a")]).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, day(2)).await;
+        let id = ContractId::new(Chain::Ethereum, b("0xaa"));
+        let before = depth(&mut conn);
+
+        s.gateway
+            .get_contract(&id, "vm:curve", Some(&at(day(2))), true, &mut conn)
+            .await
+            .unwrap();
+        assert_eq!(depth(&mut conn), before);
+        contracts(&s.gateway, &mut conn, "vm:curve", None, None, Some(&at(day(2))))
+            .await
+            .unwrap();
+        assert_eq!(depth(&mut conn), before);
+        balances(&s.gateway, &mut conn, "vm:curve", true, Some(&at(day(2))))
+            .await
+            .unwrap();
+        assert_eq!(depth(&mut conn), before);
+        let result = s
+            .gateway
+            .get_contract(&id, "vm:curve", Some(&at(day(1))), true, &mut conn)
+            .await;
+        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+        assert_eq!(depth(&mut conn), before);
     }
 }
