@@ -1586,6 +1586,64 @@ pub mod db_fixtures {
             .expect("inserting the account balance failed");
     }
 
+    /// Inserts the code of an account of the instance, valid from 2020-01-01 00:00 at transaction
+    /// index 0.
+    pub async fn insert_instance_code(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        account_id: i64,
+        code: Bytes,
+        hash: Bytes,
+        modify_tx_hash: Bytes,
+    ) {
+        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        diesel::insert_into(instance::schema::tycho::contract_code::table)
+            .values(instance::orm::NewContractCode {
+                instance_id,
+                account_id,
+                code,
+                hash,
+                modify_tx_hash,
+                valid_from,
+                tx_index: 0,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the contract code failed");
+    }
+
+    /// Inserts storage slots of an account of the instance, as `(slot, value)` pairs, valid from
+    /// 2020-01-01 00:00 at transaction index 0, with no previous value.
+    pub async fn insert_instance_slots(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        account_id: i64,
+        slots: &[(Bytes, Bytes)],
+    ) {
+        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        let rows: Vec<_> = slots
+            .iter()
+            .map(|(slot, value)| instance::orm::NewContractStorage {
+                instance_id,
+                account_id,
+                slot: slot.clone(),
+                value: Some(value.clone()),
+                previous_value: None,
+                valid_from,
+                tx_index: 0,
+            })
+            .collect();
+        diesel::insert_into(instance::schema::tycho::contract_storage::table)
+            .values(rows)
+            .execute(conn)
+            .await
+            .expect("inserting the contract slots failed");
+    }
+
     /// Inserts the extraction state of the instance at block 1, hash `0x01`, with the given block
     /// timestamp, no cursor and no attributes.
     pub async fn set_instance_head(
