@@ -60,6 +60,7 @@ INSERT INTO executors (chain, address, protocol_systems) VALUES
     ('base', '0x8ae978713c6952041d058d8a3fe3a2568f1e1ae1', ARRAY['native_wrapper', 'weth']),
     ('base', '0x8e0d294fc45fdfb6de21ae533132872e37f22b5b', ARRAY['rfq:metric']),
     ('base', '0x8fccdb466b71b715355919b3db0f6b14bfba9dd7', ARRAY['aerodrome_slipstreams']),
+    ('base', '0x997ada592ea5b2ef46c4d30a9c1ea3a59156f798', ARRAY['baibai']),
     ('base', '0xa2f2d75f08cdf36add125da906d42737527e4e30', ARRAY['weth']),
     ('base', '0xb8644a264a4b765e60c4a65fb8049eae1a791d97', ARRAY['rfq:metric']),
     ('base', '0xbf9b925b6f5f6a5919f70e62d56403948f27f882', ARRAY['pancakeswap_v3', 'uniswap_v3']),

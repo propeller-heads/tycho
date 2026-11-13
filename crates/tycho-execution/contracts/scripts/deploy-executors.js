@@ -58,6 +58,7 @@ const deploy_protocols = {
         "native_wrapper",
         "lunarbase",
         "biconomy",
+        "baibai",
         "rfq:metric",
         "rfq:native",
         "fallback",
