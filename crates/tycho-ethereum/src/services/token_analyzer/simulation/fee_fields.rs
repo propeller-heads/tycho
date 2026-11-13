@@ -317,6 +317,23 @@ pub(super) struct FeeStart {
 }
 
 impl FeeStart {
+    /// A start by writing 100 into a `uint16` at `slot` and `offset`, which `writer` writes.
+    #[cfg(test)]
+    pub fn for_test(slot: B256, offset: u8, writer: Bytes) -> Self {
+        let field = TransferField {
+            slot,
+            offset,
+            field_type: FieldType::Uint { bits: 16 },
+            label: format!("uint16 at slot {slot}, byte {offset}"),
+            writers: vec![writer],
+        };
+        let probe = FieldProbe {
+            name: "field:test".to_string(),
+            writes: vec![FieldWrite { field, value: U256::from(100) }],
+        };
+        Self { probe, change: "the legs charged buy 100 bp".to_string() }
+    }
+
     /// For the verdict's reason.
     pub fn describe(&self) -> String {
         let mut writes = Vec::new();
