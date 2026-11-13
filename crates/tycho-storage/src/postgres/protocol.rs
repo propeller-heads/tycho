@@ -4513,6 +4513,32 @@ mod test {
             EVMGateway::from_connection(conn).await
         }
 
+        /// Inserts an open pause of `SYSTEM` without going through `pause_components`.
+        async fn insert_open_pause(
+            gw: &EVMGateway,
+            conn: &mut AsyncPgConnection,
+            chain: &Chain,
+            component_id: &str,
+        ) {
+            let row = orm::NewComponentPause {
+                chain_id: gw
+                    .get_chain_id(chain)
+                    .expect("chain is set up"),
+                protocol_system_id: gw
+                    .get_protocol_system_id(&SYSTEM.to_owned())
+                    .expect("protocol system is set up"),
+                component_id,
+                reason: None,
+                actor: None,
+                evidence_url: None,
+            };
+            diesel::insert_into(schema::component_pause::table)
+                .values(&row)
+                .execute(conn)
+                .await
+                .expect("failed to insert an open pause");
+        }
+
         fn pause(component_id: &str, reason: &str) -> PauseRecord {
             PauseRecord {
                 component_id: component_id.to_owned(),
@@ -4649,9 +4675,7 @@ mod test {
             let mut conn = setup_db().await;
             let gw = setup_pause_gateway(&mut conn).await;
             for chain in [Chain::Ethereum, Chain::Starknet] {
-                gw.pause_components(&chain, SYSTEM, &[pause("pool_a", "r")], &mut conn)
-                    .await
-                    .expect("pause failed");
+                insert_open_pause(&gw, &mut conn, &chain, "pool_a").await;
             }
 
             gw.unpause_components(&Chain::Ethereum, &["pool_a"], &unpause(), &mut conn)
@@ -4669,14 +4693,9 @@ mod test {
         async fn test_unpause_components_twice() {
             let mut conn = setup_db().await;
             let gw = setup_pause_gateway(&mut conn).await;
-            gw.pause_components(
-                &Chain::Ethereum,
-                SYSTEM,
-                &[pause("pool_a", "r"), pause("pool_b", "r")],
-                &mut conn,
-            )
-            .await
-            .expect("pause failed");
+            for component_id in ["pool_a", "pool_b"] {
+                insert_open_pause(&gw, &mut conn, &Chain::Ethereum, component_id).await;
+            }
 
             let first = gw
                 .unpause_components(
@@ -4709,9 +4728,7 @@ mod test {
             use schema::component_pause::dsl as cp;
             let mut conn = setup_db().await;
             let gw = setup_pause_gateway(&mut conn).await;
-            gw.pause_components(&Chain::Ethereum, SYSTEM, &[pause("pool_a", "r")], &mut conn)
-                .await
-                .expect("pause failed");
+            insert_open_pause(&gw, &mut conn, &Chain::Ethereum, "pool_a").await;
 
             gw.unpause_components(&Chain::Ethereum, &["pool_a"], &unpause(), &mut conn)
                 .await
