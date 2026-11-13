@@ -3,6 +3,7 @@
 mod code;
 mod owner_calls;
 mod pool_funding;
+mod pool_seizure;
 mod runner;
 mod scenario;
 mod swap;
