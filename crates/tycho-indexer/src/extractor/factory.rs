@@ -265,6 +265,7 @@ impl ExtractorFactory {
         // Storage gateway for this extractor.
         let gw = ExtractorPgGateway::new(
             &self.config.name,
+            &self.config.name,
             self.config.chain,
             self.config.sync_batch_size,
             fresh_gw.clone(),

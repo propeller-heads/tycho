@@ -789,7 +789,7 @@ impl PostgresGateway {
         };
 
         let balances = if retrieve_balances {
-            self.get_component_balances(chain, ids, at.as_ref(), conn)
+            self.get_component_balances(chain, system.as_deref(), ids, at.as_ref(), conn)
                 .await?
         } else {
             HashMap::new()
@@ -1575,6 +1575,7 @@ impl PostgresGateway {
     pub async fn get_component_balances(
         &self,
         chain: &Chain,
+        system: Option<&str>,
         ids: Option<&[&str]>,
         at: Option<&Version>,
         conn: &mut AsyncPgConnection,
@@ -1600,6 +1601,15 @@ impl PostgresGateway {
         if let Some(external_ids) = ids {
             component_query =
                 component_query.filter(schema::protocol_component::external_id.eq_any(external_ids))
+        }
+        if let Some(system) = system {
+            component_query = component_query.filter(
+                schema::protocol_component::protocol_system_id.eq_any(
+                    schema::protocol_system::table
+                        .filter(schema::protocol_system::name.eq(system))
+                        .select(schema::protocol_system::id),
+                ),
+            );
         }
         let protocol_components: HashMap<i64, String> = component_query
             .get_results::<(i64, String)>(conn)
@@ -3969,11 +3979,85 @@ mod test {
         .collect();
 
         let res = gw
-            .get_component_balances(&Chain::Ethereum, Some(&["state1"]), None, &mut conn)
+            .get_component_balances(&Chain::Ethereum, None, Some(&["state1"]), None, &mut conn)
             .await
             .expect("retrieving balances failed!");
 
         assert_eq!(res, exp);
+    }
+
+    #[tokio::test]
+    async fn test_get_component_balances_of_one_protocol() {
+        let mut conn = setup_db().await;
+        setup_data(&mut conn).await;
+        let gw = EVMGateway::from_connection(&mut conn).await;
+        let chain_id = schema::chain::table
+            .filter(schema::chain::name.eq("ethereum"))
+            .select(schema::chain::id)
+            .first::<i64>(&mut conn)
+            .await
+            .expect("Failed to fetch chain id");
+        let zigzag_id = schema::protocol_system::table
+            .filter(schema::protocol_system::name.eq("zigzag"))
+            .select(schema::protocol_system::id)
+            .first::<i64>(&mut conn)
+            .await
+            .expect("Failed to fetch protocol system id");
+        let type_id = schema::protocol_type::table
+            .select(schema::protocol_type::id)
+            .first::<i64>(&mut conn)
+            .await
+            .expect("Failed to fetch protocol type id");
+        let tx_id = schema::transaction::table
+            .select(schema::transaction::id)
+            .order_by(schema::transaction::id)
+            .first::<i64>(&mut conn)
+            .await
+            .expect("Failed to fetch transaction id");
+        let weth_id = schema::token::table
+            .filter(schema::token::symbol.eq("WETH"))
+            .select(schema::token::id)
+            .first::<i64>(&mut conn)
+            .await
+            .expect("Failed to fetch token id");
+        let zigzag_component = db_fixtures::insert_protocol_component(
+            &mut conn,
+            "zigzag_pool",
+            chain_id,
+            zigzag_id,
+            type_id,
+            tx_id,
+            Some(vec![weth_id]),
+            None,
+        )
+        .await;
+        db_fixtures::insert_component_balance(
+            &mut conn,
+            Balance::from(1u8).lpad(32, 0),
+            Bytes::zero(32),
+            1.0,
+            weth_id,
+            tx_id,
+            zigzag_component,
+            None,
+        )
+        .await;
+
+        for (system, expected) in
+            [("ambient", vec!["state1", "state3"]), ("zigzag", vec!["zigzag_pool"])]
+        {
+            let balances = gw
+                .get_component_balances(&Chain::Ethereum, Some(system), None, None, &mut conn)
+                .await
+                .expect("retrieving balances failed");
+
+            let ids: Vec<&str> = balances
+                .keys()
+                .map(String::as_str)
+                .sorted()
+                .collect();
+            assert_eq!(ids, expected, "{system}");
+        }
     }
 
     #[tokio::test]
@@ -4086,6 +4170,7 @@ mod test {
         let res = gw
             .get_component_balances(
                 &Chain::Ethereum,
+                None,
                 Some(&["state3"]),
                 Some(&Version::from_block_number(Chain::Ethereum, 1)),
                 &mut conn,
