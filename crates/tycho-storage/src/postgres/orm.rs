@@ -1911,6 +1911,17 @@ pub struct NewComponentPause<'a> {
     pub evidence_url: Option<&'a str>,
 }
 
+impl NewComponentPause<'_> {
+    /// Number of fields in this struct for database insertion.
+    /// IMPORTANT: Update this if you add/remove fields!
+    /// Used to calculate MAX_BATCH_SIZE to avoid exceeding PostgreSQL's i16 parameter limit
+    /// (32767).
+    pub const FIELD_COUNT: usize = 6;
+    /// Maximum number of rows that can be inserted in a single batch.
+    /// PostgreSQL wire protocol uses i16 for parameter count (max 32767).
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
+}
+
 /// An open `component_pause` row joined with its protocol system name.
 #[derive(Queryable, Debug)]
 pub struct OpenComponentPause {
