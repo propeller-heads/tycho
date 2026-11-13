@@ -1,8 +1,8 @@
 use std::{
     any::Any,
     collections::HashMap,
-    fmt,
     str::FromStr,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -24,35 +24,122 @@ use tycho_common::{
     Bytes,
 };
 
-use super::{client::Aqua0Client, models::Aqua0Level};
-use crate::rfq::client::RFQClient;
+use crate::{
+    book::sim,
+    rfq::protocols::aqua0::{
+        client::{Aqua0Client, Aqua0Pool},
+        models::Aqua0Level,
+    },
+};
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Aqua0State {
-    pub token0: Token,
-    pub token1: Token,
-    pub fee_units: u32,
-    pub state_version: String,
-    pub expires_at: u64,
-    pub zero_for_one: Vec<Aqua0Level>,
-    pub one_for_zero: Vec<Aqua0Level>,
-    pub client: Aqua0Client,
+/// Gas for one Aqua0 fill: `PoolManager.swap` while the hook adds and removes each JIT range.
+/// Fitted to 40 Arbitrum fills since the 2026-10-07 hooks (one range: 536k to 837k per
+/// transaction, two ranges: 895k) and a 785k `PoolManager.swap` on Polygon.
+const SWAP_GAS_BASE: u64 = 500_000;
+const SWAP_GAS_PER_RANGE: u64 = 200_000;
+
+fn swap_gas(ranges: usize) -> BigUint {
+    BigUint::from(SWAP_GAS_BASE + SWAP_GAS_PER_RANGE * ranges.max(1) as u64)
 }
 
-impl fmt::Debug for Aqua0State {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Aqua0State")
-            .field("token0", &self.token0)
-            .field("token1", &self.token1)
-            .field("state_version", &self.state_version)
-            .field("zero_for_one_levels", &self.zero_for_one.len())
-            .field("one_for_zero_levels", &self.one_for_zero.len())
-            .finish_non_exhaustive()
+/// One fully backed sample: what the binding quote for `amount_in` signs, and how many JIT
+/// ranges it draws on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Point {
+    amount_in: BigUint,
+    amount_out: BigUint,
+    ranges: usize,
+}
+
+/// The fully backed levels of one direction, in rising input, checked to be monotonic.
+fn points(levels: &[Aqua0Level]) -> Result<Vec<Point>, String> {
+    let mut points = levels
+        .iter()
+        .filter(|level| level.fully_supported)
+        .map(|level| {
+            Ok(Point {
+                amount_in: BigUint::from_str(&level.amount_in)
+                    .map_err(|_| format!("invalid amountIn {}", level.amount_in))?,
+                amount_out: BigUint::from_str(&level.amount_out)
+                    .map_err(|_| format!("invalid amountOut {}", level.amount_out))?,
+                ranges: level.ranges.len(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    points.sort_by(|left, right| left.amount_in.cmp(&right.amount_in));
+    points.dedup_by(|left, right| left.amount_in == right.amount_in);
+    let mut previous = (BigUint::default(), BigUint::default());
+    for point in &points {
+        if point.amount_in == BigUint::default() || point.amount_out < previous.1 {
+            return Err("levels are not monotonic".into());
+        }
+        previous = (point.amount_in.clone(), point.amount_out.clone());
     }
+    Ok(points)
+}
+
+/// One Aqua0 market: a Uniswap V4 pool with Aqua0's hook, priced from the backend's sampled
+/// exact-input fills. A binding quote reserves LP backing for one fill and signs its hook data.
+#[derive(Clone, derive_more::Debug, Serialize, Deserialize)]
+pub struct Aqua0State {
+    pub(super) token0: Token,
+    pub(super) token1: Token,
+    pub(super) fee_units: u32,
+    pub(super) pool: Aqua0Pool,
+    pub(super) state_version: String,
+    pub(super) expires_at: u64,
+    #[debug(skip)]
+    zero_for_one: Vec<Aqua0Level>,
+    #[debug(skip)]
+    one_for_zero: Vec<Aqua0Level>,
+    #[serde(skip)]
+    #[debug(skip)]
+    client: Option<Arc<Aqua0Client>>,
 }
 
 impl Aqua0State {
+    /// Refuses levels that cannot be read, so a state that exists always prices.
+    #[expect(clippy::too_many_arguments, reason = "one field each, all from one answer")]
+    pub(super) fn new(
+        token0: Token,
+        token1: Token,
+        fee_units: u32,
+        pool: Aqua0Pool,
+        state_version: String,
+        expires_at: u64,
+        zero_for_one: Vec<Aqua0Level>,
+        one_for_zero: Vec<Aqua0Level>,
+        client: Arc<Aqua0Client>,
+    ) -> Result<Self, String> {
+        points(&zero_for_one)?;
+        points(&one_for_zero)?;
+        Ok(Self {
+            token0,
+            token1,
+            fee_units,
+            pool,
+            state_version,
+            expires_at,
+            zero_for_one,
+            one_for_zero,
+            client: Some(client),
+        })
+    }
+
+    /// The `(token sold, token bought)` pairs this market has a backed level for.
+    pub(super) fn directions(&self) -> Vec<(Bytes, Bytes)> {
+        sim::directions(
+            &self.token0,
+            &self.token1,
+            self.zero_for_one
+                .iter()
+                .any(|level| level.fully_supported),
+            self.one_for_zero
+                .iter()
+                .any(|level| level.fully_supported),
+        )
+    }
+
     fn ensure_fresh(&self) -> Result<(), SimulationError> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -81,22 +168,8 @@ impl Aqua0State {
         }
     }
 
-    fn parsed_points(levels: &[Aqua0Level]) -> Result<Vec<(BigUint, BigUint)>, SimulationError> {
-        let mut points = levels
-            .iter()
-            .filter(|level| level.fully_supported)
-            .map(|level| -> Result<_, SimulationError> {
-                let amount_in = BigUint::from_str(&level.amount_in).map_err(|_| {
-                    SimulationError::FatalError("Invalid Aqua0 amountIn in state".into())
-                })?;
-                let amount_out = BigUint::from_str(&level.amount_out).map_err(|_| {
-                    SimulationError::FatalError("Invalid Aqua0 amountOut in state".into())
-                })?;
-                Ok((amount_in, amount_out))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        points.sort_by(|left, right| left.0.cmp(&right.0));
-        points.dedup_by(|left, right| left.0 == right.0);
+    fn backed_points(levels: &[Aqua0Level]) -> Result<Vec<Point>, SimulationError> {
+        let points = points(levels).map_err(SimulationError::FatalError)?;
         if points.is_empty() {
             return Err(SimulationError::RecoverableError(
                 "Aqua0 has no fully backed levels".into(),
@@ -105,42 +178,38 @@ impl Aqua0State {
         Ok(points)
     }
 
+    /// Linear between backed samples, and the gas of the sample at or above `amount_in`.
     fn interpolate(
         &self,
         amount_in: &BigUint,
         levels: &[Aqua0Level],
-    ) -> Result<BigUint, SimulationError> {
-        let points = Self::parsed_points(levels)?;
+    ) -> Result<(BigUint, BigUint), SimulationError> {
+        let points = Self::backed_points(levels)?;
         if amount_in == &BigUint::default() {
-            return Ok(BigUint::default());
+            return Ok((BigUint::default(), swap_gas(points[0].ranges)));
         }
-
         let mut previous_in = BigUint::default();
         let mut previous_out = BigUint::default();
-        for (next_in, next_out) in &points {
-            if next_in <= &previous_in || next_out < &previous_out {
-                return Err(SimulationError::FatalError(
-                    "Aqua0 RFQ levels are not monotonic".into(),
-                ));
+        let mut previous_ranges = 1;
+        for point in &points {
+            if amount_in <= &point.amount_in {
+                let input_span = &point.amount_in - &previous_in;
+                let output_span = &point.amount_out - &previous_out;
+                let out = previous_out + ((amount_in - &previous_in) * output_span / input_span);
+                return Ok((out, swap_gas(point.ranges)));
             }
-            if amount_in <= next_in {
-                let input_span = next_in - &previous_in;
-                let output_span = next_out - &previous_out;
-                return Ok(previous_out + ((amount_in - &previous_in) * output_span / input_span));
-            }
-            previous_in = next_in.clone();
-            previous_out = next_out.clone();
+            previous_in = point.amount_in.clone();
+            previous_out = point.amount_out.clone();
+            previous_ranges = point.ranges;
         }
-
         let partial = GetAmountOutResult {
             amount: previous_out,
-            gas: BigUint::from(350_000u64),
+            gas: swap_gas(previous_ranges),
             new_state: self.clone_box(),
         };
         Err(SimulationError::InvalidInput(
             format!(
-                "Aqua0 amount {} exceeds the largest fully backed level {}",
-                amount_in, previous_in
+                "Aqua0 amount {amount_in} exceeds the largest fully backed level {previous_in}"
             ),
             Some(partial),
         ))
@@ -153,19 +222,17 @@ impl ProtocolSim for Aqua0State {
         self.fee_units as f64 / 1_000_000.0
     }
 
+    /// The price of the smallest backed sample, fee included.
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         self.ensure_fresh()?;
         let (levels, input, output) = self.direction(&base.address, &quote.address)?;
-        let points = Self::parsed_points(levels)?;
-        let (amount_in, amount_out) = &points[0];
-        let input_human = amount_in
-            .to_f64()
-            .ok_or_else(|| SimulationError::FatalError("Aqua0 amountIn does not fit f64".into()))? /
-            10f64.powi(input.decimals as i32);
-        let output_human = amount_out.to_f64().ok_or_else(|| {
-            SimulationError::FatalError("Aqua0 amountOut does not fit f64".into())
-        })? / 10f64.powi(output.decimals as i32);
-        Ok(output_human / input_human)
+        let first = &Self::backed_points(levels)?[0];
+        let human = |amount: &BigUint, decimals: u32| -> Result<f64, SimulationError> {
+            Ok(amount.to_f64().ok_or_else(|| {
+                SimulationError::FatalError("Aqua0 amount does not fit f64".into())
+            })? / 10f64.powi(decimals as i32))
+        };
+        Ok(human(&first.amount_out, output.decimals)? / human(&first.amount_in, input.decimals)?)
     }
 
     fn get_amount_out(
@@ -176,11 +243,8 @@ impl ProtocolSim for Aqua0State {
     ) -> Result<GetAmountOutResult, SimulationError> {
         self.ensure_fresh()?;
         let (levels, _, _) = self.direction(&token_in.address, &token_out.address)?;
-        Ok(GetAmountOutResult {
-            amount: self.interpolate(&amount_in, levels)?,
-            gas: BigUint::from(350_000u64),
-            new_state: self.clone_box(),
-        })
+        let (amount, gas) = self.interpolate(&amount_in, levels)?;
+        Ok(GetAmountOutResult { amount, gas, new_state: self.clone_box() })
     }
 
     fn get_limits(
@@ -190,10 +254,10 @@ impl ProtocolSim for Aqua0State {
     ) -> Result<(BigUint, BigUint), SimulationError> {
         self.ensure_fresh()?;
         let (levels, _, _) = self.direction(&sell_token, &buy_token)?;
-        Self::parsed_points(levels)?
-            .last()
-            .cloned()
-            .ok_or_else(|| SimulationError::RecoverableError("No Aqua0 liquidity".into()))
+        let last = Self::backed_points(levels)?
+            .pop()
+            .ok_or_else(|| SimulationError::RecoverableError("No Aqua0 liquidity".into()))?;
+        Ok((last.amount_in, last.amount_out))
     }
 
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
@@ -224,8 +288,7 @@ impl ProtocolSim for Aqua0State {
             output * &limit.denominator >= amount * &limit.numerator
         };
         let result = quote(maximum.clone())?;
-        // RFQ liquidity ends at the last backed sample. Unlike an AMM, it need not reach
-        // the requested slippage before that boundary. Return the usable capacity directly.
+        // RFQ liquidity ends at the last backed sample, which need not reach the price limit.
         if clears(&maximum, &result.amount) {
             return Ok(PoolSwap::new(maximum, result.amount, result.new_state, None));
         }
@@ -235,8 +298,8 @@ impl ProtocolSim for Aqua0State {
             .clone()
             .min(maximum);
         let result = quote(amount.clone())?;
-        // The generic floating-point search has a tolerance; never return a quote below
-        // the exact integer price limit or outside the caller's amount bounds.
+        // The floating-point search has a tolerance; never return a quote below the exact
+        // integer price limit or outside the caller's bounds.
         if amount < minimum || !clears(&amount, &result.amount) {
             return Err(SimulationError::InvalidInput(
                 "No Aqua0 trade satisfies the requested bounds".into(),
@@ -276,6 +339,7 @@ impl ProtocolSim for Aqua0State {
             .is_some_and(|other| {
                 self.token0 == other.token0 &&
                     self.token1 == other.token1 &&
+                    self.pool == other.pool &&
                     self.state_version == other.state_version
             })
     }
@@ -292,9 +356,8 @@ impl IndicativelyPriced for Aqua0State {
         params: GetAmountOutParams,
     ) -> Result<SignedQuote, SimulationError> {
         self.ensure_fresh()?;
-        Ok(self
-            .client
-            .request_binding_quote(&params)
+        Ok(sim::quoting_client(self.client.as_ref(), "Aqua0")?
+            .request_binding_quote(&params, &self.pool)
             .await?)
     }
 }
@@ -303,59 +366,57 @@ impl IndicativelyPriced for Aqua0State {
 mod tests {
     use std::time::Duration;
 
-    use tycho_common::models::Chain;
+    use tycho_common::{models::Chain, simulation::protocol_sim::Price};
 
     use super::*;
-    use crate::rfq::protocols::aqua0::{
-        client::Aqua0Client,
-        models::{Aqua0Market, Aqua0Range},
-    };
+    use crate::rfq::protocols::aqua0::models::Aqua0Range;
 
     fn token(address: &str, symbol: &str, decimals: u32) -> Token {
         Token::new(&Bytes::from_str(address).unwrap(), symbol, decimals, 0, &[], Chain::Base, 100)
     }
 
-    fn level(amount_in: &str, amount_out: &str) -> Aqua0Level {
+    fn level(amount_in: &str, amount_out: &str, ranges: usize) -> Aqua0Level {
         Aqua0Level {
-            requested_amount_in: amount_in.into(),
             amount_in: amount_in.into(),
             amount_out: amount_out.into(),
             fully_supported: true,
-            current_tick: 0,
-            sqrt_price_x96: "1".into(),
-            ranges: vec![Aqua0Range { tick_lower: -60, tick_upper: 60, liquidity: "10".into() }],
-            route_plan: serde_json::Value::Null,
+            ranges: vec![
+                Aqua0Range { tick_lower: -60, tick_upper: 60, liquidity: "10".into() };
+                ranges
+            ],
         }
+    }
+
+    fn state_with(zero_for_one: Vec<Aqua0Level>) -> Result<Aqua0State, String> {
+        Aqua0State::new(
+            token("0x4200000000000000000000000000000000000006", "WETH", 18),
+            token("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "USDC", 6),
+            3000,
+            Aqua0Pool {
+                component_id: "0x01".into(),
+                chain_id: 8453,
+                pool_id: format!("0x{}", "11".repeat(32)),
+                class_id: "1".into(),
+            },
+            "v1".into(),
+            u64::MAX,
+            zero_for_one,
+            vec![level("100", "25", 1)],
+            Arc::new(Aqua0Client::new(
+                "http://localhost",
+                8453,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            )),
+        )
     }
 
     fn state() -> Aqua0State {
-        let market = Aqua0Market {
-            pool_id: format!("0x{}", "11".repeat(32)),
-            class_id: "1".into(),
-            amount0_samples: vec!["100".into(), "200".into()],
-            amount1_samples: vec!["100".into()],
-        };
-        Aqua0State {
-            token0: token("0x4200000000000000000000000000000000000006", "WETH", 18),
-            token1: token("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "USDC", 6),
-            fee_units: 3000,
-            state_version: "v1".into(),
-            expires_at: u64::MAX,
-            zero_for_one: vec![level("100", "300"), level("200", "500")],
-            one_for_zero: vec![level("100", "25")],
-            client: Aqua0Client::new(
-                Chain::Base,
-                "http://localhost/api/tycho/rfq".into(),
-                market,
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-            )
-            .unwrap(),
-        }
+        state_with(vec![level("100", "300", 1), level("200", "500", 2)]).unwrap()
     }
 
     #[test]
-    fn interpolates_cumulative_backend_levels_without_reimplementing_the_pool() {
+    fn interpolates_between_backed_samples() {
         let state = state();
         let result = state
             .get_amount_out(BigUint::from(150u32), &state.token0, &state.token1)
@@ -364,7 +425,20 @@ mod tests {
     }
 
     #[test]
-    fn refuses_amounts_above_the_largest_fully_backed_level() {
+    fn gas_grows_with_the_ranges_the_fill_draws_on() {
+        let state = state();
+        let gas = |amount: u32| {
+            state
+                .get_amount_out(BigUint::from(amount), &state.token0, &state.token1)
+                .unwrap()
+                .gas
+        };
+        assert_eq!(gas(100), BigUint::from(700_000u32));
+        assert_eq!(gas(150), BigUint::from(900_000u32));
+    }
+
+    #[test]
+    fn refuses_amounts_above_the_largest_backed_level() {
         let state = state();
         assert!(matches!(
             state.get_amount_out(BigUint::from(201u32), &state.token0, &state.token1),
@@ -383,8 +457,22 @@ mod tests {
     }
 
     #[test]
+    fn malformed_levels_never_make_a_state() {
+        assert!(state_with(vec![level("x", "1", 1)]).is_err());
+        assert!(state_with(vec![level("100", "300", 1), level("200", "200", 1)]).is_err());
+    }
+
+    #[test]
+    fn a_one_sided_market_names_its_direction() {
+        let state = state_with(vec![]).unwrap();
+        assert_eq!(
+            state.directions(),
+            vec![(state.token1.address.clone(), state.token0.address.clone())]
+        );
+    }
+
+    #[test]
     fn trade_depth_is_capped_by_backed_liquidity_and_caller_bounds() {
-        use tycho_common::simulation::protocol_sim::Price;
         let state = state();
         for (minimum, maximum, expected) in [
             (None, None, Some(200u32)),

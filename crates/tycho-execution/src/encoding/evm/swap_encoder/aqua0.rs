@@ -9,7 +9,10 @@ use tycho_common::{
 use super::uniswap_v4::UniswapV4SwapEncoder;
 use crate::encoding::{
     errors::EncodingError,
-    evm::utils::{create_encoding_runtime, on_blocking_thread, SafeRuntime},
+    evm::utils::{
+        check_signed_quote, create_encoding_runtime, get_static_attribute, on_blocking_thread,
+        SafeRuntime,
+    },
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
 };
@@ -21,7 +24,10 @@ pub struct Aqua0SwapEncoder {
     executor_address: Bytes,
     v4: UniswapV4SwapEncoder,
     runtime_handle: Handle,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "owns the runtime behind `runtime_handle`; dropping it would shut the runtime down"
+    )]
     runtime: SafeRuntime,
 }
 
@@ -50,6 +56,12 @@ impl SwapEncoder for Aqua0SwapEncoder {
             ));
         }
 
+        // The V4 encoder reads the hook with `Address::from_slice`, which panics on any other
+        // length.
+        if get_static_attribute(swap, "hooks")?.len() != 20 {
+            return Err(EncodingError::FatalError("Aqua0 hooks attribute must be 20 bytes".into()));
+        }
+
         let protocol_state = swap
             .protocol_state()
             .as_ref()
@@ -76,18 +88,18 @@ impl SwapEncoder for Aqua0SwapEncoder {
             token_out: swap.token_out().address.clone(),
             sender: router.clone(),
             receiver: router,
+            origin: None,
         };
 
         let signed_quote = on_blocking_thread(|| {
             self.runtime_handle.block_on(async {
                 protocol_state
-                    .as_indicatively_priced()
-                    .map_err(|error| EncodingError::FatalError(error.to_string()))?
+                    .as_indicatively_priced()?
                     .request_signed_quote(params)
                     .await
-                    .map_err(|error| EncodingError::FatalError(error.to_string()))
             })
         })??;
+        check_signed_quote(swap, protocol_state.as_ref(), &signed_quote)?;
         if signed_quote.base_token != swap.token_in().address ||
             signed_quote.quote_token != swap.token_out().address ||
             signed_quote.amount_in != amount_in
@@ -163,7 +175,9 @@ mod tests {
             quote_amount_in: Some(amount_in.clone()),
             quote_amount_out: BigUint::from(2_000u32),
             quote_data: HashMap::from([("hook_data".into(), hook_data.clone())]),
+            level_amount_out: Some(BigUint::from(2_000u32)),
             delay: Default::default(),
+            received_origins: Default::default(),
         };
         let swap = Swap::new(
             component,
@@ -177,6 +191,7 @@ mod tests {
             router_address: Some(Bytes::from("0x9bA632d83e9eF57571256Cf4cc951b8aF1158e9C")),
             group_token_in: token_in,
             group_token_out: token_out,
+            origin: None,
         };
         let encoder = Aqua0SwapEncoder::new(
             Bytes::from("0x78db9684220541601E9215bB16b219e5DF6cF0fb"),
@@ -195,6 +210,54 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_hook_that_is_not_an_address_before_requesting_a_quote() {
+        let token_in = Bytes::from("0x4200000000000000000000000000000000000006");
+        let token_out = Bytes::from("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
+        let mut static_attributes = HashMap::new();
+        static_attributes.insert("hooks".into(), Bytes::from("0x1234"));
+        let component = ProtocolComponent {
+            protocol_system: "rfq:aqua0".into(),
+            static_attributes,
+            ..Default::default()
+        };
+        let state = MockRFQState {
+            quote_amount_in: Some(BigUint::from(1_000u32)),
+            quote_amount_out: BigUint::from(2_000u32),
+            quote_data: HashMap::from([("hook_data".into(), Bytes::from("0xdeadbeef"))]),
+            level_amount_out: Some(BigUint::from(2_000u32)),
+            delay: Default::default(),
+            received_origins: Default::default(),
+        };
+        let quotes = Arc::clone(&state.received_origins);
+        let swap = Swap::new(
+            component,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        )
+        .with_protocol_state(Arc::new(state))
+        .with_estimated_amount_in(BigUint::from(1_000u32));
+        let context = EncodingContext {
+            router_address: Some(Bytes::from("0x9bA632d83e9eF57571256Cf4cc951b8aF1158e9C")),
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
+        };
+        let encoder = Aqua0SwapEncoder::new(
+            Bytes::from("0x78db9684220541601E9215bB16b219e5DF6cF0fb"),
+            Chain::Base,
+            None,
+        )
+        .unwrap();
+        assert!(encoder
+            .encode_swap(&swap, &context)
+            .unwrap_err()
+            .to_string()
+            .contains("20 bytes"));
+        assert!(quotes.lock().unwrap().is_empty(), "no quote was requested");
+    }
+
+    #[test]
     fn rejects_a_dynamic_later_hop() {
         let token_in = Bytes::from("0x4200000000000000000000000000000000000006");
         let token_out = Bytes::from("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
@@ -208,6 +271,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: Bytes::from("0x0000000000000000000000000000000000000001"),
             group_token_out: token_out,
+            origin: None,
         };
         let encoder = Aqua0SwapEncoder::new(
             Bytes::from("0x78db9684220541601E9215bB16b219e5DF6cF0fb"),
