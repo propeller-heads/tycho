@@ -13,6 +13,7 @@ use tycho_common::{
     Bytes,
 };
 
+use super::snapshot::{begin_snapshot, end_snapshot};
 use crate::postgres::{
     instance::{
         active::active_instance_ids,
@@ -46,59 +47,10 @@ impl PostgresGatewayNew {
         conn: &mut AsyncPgConnection,
     ) -> Result<WithTotal<Vec<Token>>, StorageError> {
         self.get_chain_id(&chain)?;
-        let instances = match traded_n_days_ago {
-            Some(_) => active_instance_ids(conn).await?,
-            None => Vec::new(),
-        };
-        let filtered = || {
-            let mut query = token::table.into_boxed::<Pg>();
-            if let Some(address) = address {
-                query = query.filter(
-                    token::address
-                        .assume_not_null()
-                        .eq_any(address),
-                );
-            }
-            if let Some(min) = quality.min {
-                query = query.filter(token::quality.ge(min));
-            }
-            if let Some(max) = quality.max {
-                query = query.filter(token::quality.le(max));
-            }
-            if let Some(since) = traded_n_days_ago {
-                query = query.filter(exists(
-                    component_balance::table
-                        .filter(component_balance::instance_id.eq_any(&instances))
-                        .filter(component_balance::token.eq(token::address.assume_not_null()))
-                        .filter(component_balance::valid_from.gt(since)),
-                ));
-            }
-            query
-        };
-
-        let total = filtered()
-            .count()
-            .get_result::<i64>(conn)
-            .await
-            .map_err(PostgresError::from)?;
-        let mut query = filtered()
-            .order_by(token::id)
-            .select((orm::Token::as_select(), token::address.assume_not_null()));
-        if let Some(pagination) = pagination_params {
-            query = query
-                .limit(pagination.page_size)
-                .offset(pagination.offset());
-        }
-        let rows: Vec<(orm::Token, Address)> = query
-            .load(conn)
-            .await
-            .map_err(PostgresError::from)?;
-
-        let tokens = rows
-            .into_iter()
-            .map(|(row, address)| row.to_model(&address, chain))
-            .collect::<Result<_, _>>()?;
-        Ok(WithTotal { entity: tokens, total: Some(total) })
+        let snapshot = begin_snapshot(conn).await?;
+        let result =
+            tokens_of(conn, chain, address, quality, traded_n_days_ago, pagination_params).await;
+        end_snapshot(conn, snapshot, result).await
     }
 
     /// Returns the price of each token that has one, by token address.
@@ -110,12 +62,14 @@ impl PostgresGatewayNew {
         conn: &mut AsyncPgConnection,
     ) -> Result<HashMap<Bytes, f64>, StorageError> {
         self.get_chain_id(chain)?;
-        let prices: Vec<(Bytes, f64)> = token_price::table
+        let snapshot = begin_snapshot(conn).await?;
+        let result: Result<Vec<(Bytes, f64)>, StorageError> = token_price::table
             .inner_join(token::table)
             .select((token::address.assume_not_null(), token_price::price))
             .load(conn)
             .await
-            .map_err(PostgresError::from)?;
+            .map_err(|err| PostgresError::from(err).into());
+        let prices = end_snapshot(conn, snapshot, result).await?;
         Ok(prices.into_iter().collect())
     }
 
@@ -135,57 +89,132 @@ impl PostgresGatewayNew {
         conn: &mut AsyncPgConnection,
     ) -> Result<HashMap<Address, TokenOwner>, StorageError> {
         self.get_chain_id(chain)?;
-        let instances = active_instance_ids(conn).await?;
-        if instances.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let mut query = component_balance::table
-            .inner_join(
-                protocol_component::table.on(protocol_component::instance_id
-                    .eq(component_balance::instance_id)
-                    .and(protocol_component::id.eq(component_balance::protocol_component_id))),
-            )
-            .inner_join(
-                protocol_instance::table
-                    .on(protocol_instance::id.eq(protocol_component::instance_id)),
-            )
-            .inner_join(
-                protocol_system::table
-                    .on(protocol_system::id.eq(protocol_instance::protocol_system_id)),
-            )
-            .filter(component_balance::instance_id.eq_any(&instances))
-            .filter(protocol_component::instance_id.eq_any(&instances))
-            .filter(component_balance::token.eq_any(tokens))
-            .order_by((component_balance::instance_id, component_balance::protocol_component_id))
-            .select((
-                component_balance::token,
-                protocol_system::name,
-                protocol_component::external_id,
-                component_balance::new_balance,
-            ))
-            .into_boxed::<Pg>();
-        if let Some(min_balance) = min_balance {
-            query = query.filter(component_balance::balance_float.ge(min_balance));
-        }
-        let rows: Vec<(Address, String, ComponentId, Bytes)> = query
-            .load(conn)
-            .await
-            .map_err(PostgresError::from)?;
-
-        let mut owners: HashMap<Address, TokenOwner> = HashMap::new();
-        for (token, protocol_system, component_id, balance) in rows {
-            let larger = owners
-                .get(&token)
-                .is_none_or(|current| {
-                    compare_balances(&balance, &current.balance) == Ordering::Greater
-                });
-            if larger {
-                owners.insert(token, TokenOwner { protocol_system, component_id, balance });
-            }
-        }
-        Ok(owners)
+        let snapshot = begin_snapshot(conn).await?;
+        let result = owners_of(conn, tokens, min_balance).await;
+        end_snapshot(conn, snapshot, result).await
     }
+}
+
+/// Reads the tokens of [`PostgresGatewayNew::get_tokens`] and the number of matching tokens on
+/// all pages.
+async fn tokens_of(
+    conn: &mut AsyncPgConnection,
+    chain: Chain,
+    address: Option<&[&Address]>,
+    quality: QualityRange,
+    traded_n_days_ago: Option<NaiveDateTime>,
+    pagination_params: Option<&PaginationParams>,
+) -> Result<WithTotal<Vec<Token>>, StorageError> {
+    let instances = match traded_n_days_ago {
+        Some(_) => active_instance_ids(conn).await?,
+        None => Vec::new(),
+    };
+    let filtered = || {
+        let mut query = token::table.into_boxed::<Pg>();
+        if let Some(address) = address {
+            query = query.filter(
+                token::address
+                    .assume_not_null()
+                    .eq_any(address),
+            );
+        }
+        if let Some(min) = quality.min {
+            query = query.filter(token::quality.ge(min));
+        }
+        if let Some(max) = quality.max {
+            query = query.filter(token::quality.le(max));
+        }
+        if let Some(since) = traded_n_days_ago {
+            query = query.filter(exists(
+                component_balance::table
+                    .filter(component_balance::instance_id.eq_any(&instances))
+                    .filter(component_balance::token.eq(token::address.assume_not_null()))
+                    .filter(component_balance::valid_from.gt(since)),
+            ));
+        }
+        query
+    };
+
+    let total = filtered()
+        .count()
+        .get_result::<i64>(conn)
+        .await
+        .map_err(PostgresError::from)?;
+    let mut query = filtered()
+        .order_by(token::id)
+        .select((orm::Token::as_select(), token::address.assume_not_null()));
+    if let Some(pagination) = pagination_params {
+        query = query
+            .limit(pagination.page_size)
+            .offset(pagination.offset());
+    }
+    let rows: Vec<(orm::Token, Address)> = query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?;
+
+    let tokens = rows
+        .into_iter()
+        .map(|(row, address)| row.to_model(&address, chain))
+        .collect::<Result<_, _>>()?;
+    Ok(WithTotal { entity: tokens, total: Some(total) })
+}
+
+/// Reads the token owners of [`PostgresGatewayNew::get_token_owners`], by token address.
+async fn owners_of(
+    conn: &mut AsyncPgConnection,
+    tokens: &[Address],
+    min_balance: Option<f64>,
+) -> Result<HashMap<Address, TokenOwner>, StorageError> {
+    let instances = active_instance_ids(conn).await?;
+    if instances.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut query = component_balance::table
+        .inner_join(
+            protocol_component::table.on(protocol_component::instance_id
+                .eq(component_balance::instance_id)
+                .and(protocol_component::id.eq(component_balance::protocol_component_id))),
+        )
+        .inner_join(
+            protocol_instance::table.on(protocol_instance::id.eq(protocol_component::instance_id)),
+        )
+        .inner_join(
+            protocol_system::table
+                .on(protocol_system::id.eq(protocol_instance::protocol_system_id)),
+        )
+        .filter(component_balance::instance_id.eq_any(&instances))
+        .filter(protocol_component::instance_id.eq_any(&instances))
+        .filter(component_balance::token.eq_any(tokens))
+        .order_by((component_balance::instance_id, component_balance::protocol_component_id))
+        .select((
+            component_balance::token,
+            protocol_system::name,
+            protocol_component::external_id,
+            component_balance::new_balance,
+        ))
+        .into_boxed::<Pg>();
+    if let Some(min_balance) = min_balance {
+        query = query.filter(component_balance::balance_float.ge(min_balance));
+    }
+    let rows: Vec<(Address, String, ComponentId, Bytes)> = query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?;
+
+    let mut owners: HashMap<Address, TokenOwner> = HashMap::new();
+    for (token, protocol_system, component_id, balance) in rows {
+        let larger = owners
+            .get(&token)
+            .is_none_or(|current| {
+                compare_balances(&balance, &current.balance) == Ordering::Greater
+            });
+        if larger {
+            owners.insert(token, TokenOwner { protocol_system, component_id, balance });
+        }
+    }
+    Ok(owners)
 }
 
 #[cfg(test)]
@@ -194,7 +223,9 @@ mod tests {
 
     use chrono::{NaiveDate, NaiveDateTime};
     use diesel::prelude::*;
-    use diesel_async::{AsyncPgConnection, RunQueryDsl};
+    use diesel_async::{
+        AnsiTransactionManager, AsyncPgConnection, RunQueryDsl, TransactionManager,
+    };
     use tycho_common::{
         models::{
             protocol::QualityRange,
@@ -531,5 +562,41 @@ mod tests {
             .unwrap();
 
         assert_eq!(owners, HashMap::from([(b(A), owner("vm:curve", "pool", "0x01"))]));
+    }
+
+    fn depth(conn: &mut AsyncPgConnection) -> Option<u32> {
+        AnsiTransactionManager::transaction_manager_status_mut(conn)
+            .transaction_depth()
+            .expect("a valid transaction manager")
+            .map(u32::from)
+    }
+
+    #[tokio::test]
+    async fn test_token_reads_leave_no_transaction_open() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = token(&mut conn, s.chain_id, A, "A", 100).await;
+        db_fixtures::insert_token_prices(&[(a, 1.0)], &mut conn).await;
+        traded(&mut conn, s.active, A).await;
+        let since: NaiveDateTime = NaiveDate::from_ymd_opt(2019, 12, 31)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        let before = depth(&mut conn);
+
+        s.gateway
+            .get_tokens(Chain::Ethereum, None, QualityRange::None(), Some(since), None, &mut conn)
+            .await
+            .unwrap();
+        assert_eq!(depth(&mut conn), before);
+        s.gateway
+            .get_token_owners(&Chain::Ethereum, &[b(A)], None, &mut conn)
+            .await
+            .unwrap();
+        assert_eq!(depth(&mut conn), before);
+        s.gateway
+            .get_token_prices(&Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+        assert_eq!(depth(&mut conn), before);
     }
 }
