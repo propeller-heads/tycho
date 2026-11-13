@@ -41,7 +41,7 @@ use tycho_common::{
         token::{TokenAnalysis, TokenVerdict},
         Chain,
     },
-    traits::TokenOwnerFinding,
+    traits::{TokenAnalyzer, TokenOwnerFinding},
     Bytes,
 };
 
@@ -316,6 +316,19 @@ impl SimulationDetector {
     ) -> Result<Option<scenario::V2Pair>, String> {
         let Some(wrapped_native) = self.wrapped_native else { return Ok(None) };
         swap::detect_pair(&self.rpc, pool, token, wrapped_native, block).await
+    }
+}
+
+#[async_trait::async_trait]
+impl TokenAnalyzer for SimulationDetector {
+    type Error = String;
+
+    async fn analyze(&self, token: Bytes, block: BlockTag) -> Result<TokenAnalysis, String> {
+        let analysis = self
+            .analyze_at(Address::from_bytes(&token), block)
+            .await?;
+        debug!(?token, verdict = ?analysis.verdict, reason = ?analysis.reason, "Analysed token");
+        Ok(analysis)
     }
 }
 
