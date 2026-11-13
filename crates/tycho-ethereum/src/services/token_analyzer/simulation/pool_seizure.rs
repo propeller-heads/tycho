@@ -161,3 +161,124 @@ fn balance_writers(code: &CodeSummary) -> BTreeSet<Bytes> {
     }
     writers
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use alloy::primitives::{keccak256, B256};
+
+    use super::*;
+    use crate::services::token_analyzer::simulation::{
+        code::{FunctionSummary, StorageField},
+        owner_calls::find_callers,
+    };
+
+    const OWNER: Address = Address::repeat_byte(1);
+
+    fn selector(signature: &str) -> Bytes {
+        Bytes::copy_from_slice(&keccak256(signature)[..4])
+    }
+
+    fn function(
+        signature: &str,
+        arguments: Option<&str>,
+        mutability: Option<&str>,
+    ) -> FunctionSummary {
+        FunctionSummary {
+            selector: selector(signature),
+            arguments: arguments.map(str::to_string),
+            state_mutability: mutability.map(str::to_string),
+        }
+    }
+
+    fn context() -> TokenContext {
+        let rpc = crate::rpc::EthereumRpcClient::new("http://localhost:1").expect("client");
+        TokenContext::new(
+            &rpc,
+            Address::repeat_byte(7),
+            Address::repeat_byte(8),
+            U256::from(1_000_000),
+            (1, 1, 12),
+        )
+    }
+
+    /// A token whose balances `transfer` and `forceBurn(address,uint256)` write, with other
+    /// functions taking an address.
+    fn code() -> CodeSummary {
+        CodeSummary {
+            functions: vec![
+                function("transfer(address,uint256)", Some("address,uint256"), Some("nonpayable")),
+                function("approve(address,uint256)", Some("address,uint256"), Some("nonpayable")),
+                function("transferOwnership(address)", Some("address"), Some("nonpayable")),
+                function("balanceOf(address)", Some("address"), Some("view")),
+                function("setBot(address)", Some("address"), Some("nonpayable")),
+                function("forceBurn(address,uint256)", Some("address,uint256"), Some("nonpayable")),
+                function("sweep(address,address,uint256)", Some("address,address,uint256"), None),
+                function("setFee(uint256)", Some("uint256"), Some("nonpayable")),
+                function("mystery()", None, Some("nonpayable")),
+            ],
+            storage: vec![StorageField {
+                slot: B256::ZERO,
+                offset: 0,
+                r#type: "mapping(address => uint256)".to_string(),
+                reads: vec![selector("balanceOf(address)")],
+                writes: vec![
+                    selector("transfer(address,uint256)"),
+                    selector("forceBurn(address,uint256)"),
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn functions_taking_the_pool_or_an_amount_are_tried_balance_writers_first() {
+        let code = code();
+        let context = context();
+        let callers = find_callers(&code, Some(OWNER), &HashMap::new(), &[]);
+        let calls = candidate_seizures(&code, &context, &callers);
+        let selectors: Vec<Bytes> = calls
+            .iter()
+            .map(|c| c.selector.clone())
+            .collect();
+        assert_eq!(
+            selectors,
+            [
+                selector("forceBurn(address,uint256)"),
+                selector("setBot(address)"),
+                selector("sweep(address,address,uint256)"),
+                selector("setFee(uint256)"),
+                selector("setFee(uint256)"),
+            ]
+        );
+        let amounts: Vec<U256> = calls[3..]
+            .iter()
+            .map(|c| U256::from_be_slice(&c.tx.input.input().expect("calldata")[4..36]))
+            .collect();
+        assert_eq!(amounts, [context.pool_balance, MAX_POOL_SHARE_ARGUMENT]);
+        let burn = calls[0]
+            .tx
+            .input
+            .input()
+            .expect("calldata");
+        assert_eq!(&burn[4..36], context.pool.into_word().as_slice());
+        assert_eq!(U256::from_be_slice(&burn[36..68]), context.pool_balance);
+        assert_eq!(calls[0].tx.from, Some(OWNER));
+    }
+
+    #[test]
+    fn functions_without_a_caller_are_not_tried() {
+        let code = code();
+        let callers = find_callers(&code, None, &HashMap::new(), &[]);
+        assert!(candidate_seizures(&code, &context(), &callers).is_empty());
+    }
+
+    #[test]
+    fn only_a_drop_beyond_rounding_is_a_seizure() {
+        let before = U256::from(1_000_000);
+        assert!(lowered_beyond_rounding(before, U256::ZERO));
+        assert!(lowered_beyond_rounding(before, U256::from(998_999)));
+        assert!(!lowered_beyond_rounding(before, U256::from(999_000)));
+        assert!(!lowered_beyond_rounding(before, U256::from(2_000_000)));
+    }
+}
