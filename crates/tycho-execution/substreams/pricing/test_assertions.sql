@@ -69,6 +69,34 @@ BEGIN
         RAISE EXCEPTION 'base preferred pricing wrong: % %', v.volume_usd, v.price_source;
     END IF;
 
+    -- Decimals are token metadata, not part of a price: a token Tycho knows keeps them when its
+    -- price is stale, so a stable-valued trade of any age implies the other side's price.
+    -- 1000 USD for 500 units of a 6-decimal token is 2 USD each.
+    SELECT * INTO v FROM trades WHERE id = 'stale-out-implied';
+    IF v.volume_usd IS DISTINCT FROM 1000.0 OR v.price_source IS DISTINCT FROM 'in_stable'
+       OR v.decimals_out IS DISTINCT FROM 6 OR v.price_out_usd IS DISTINCT FROM 2.0
+       OR v.price_in_usd IS DISTINCT FROM 1.0 THEN
+        RAISE EXCEPTION 'a known token without a fresh price lost its decimals: % % % % %',
+            v.volume_usd, v.price_source, v.decimals_out, v.price_out_usd, v.price_in_usd;
+    END IF;
+
+    -- An 18 on a token that failed Tycho's analysis may be the default for a failed decimals()
+    -- call: the trade is valued, but no price is implied from it.
+    SELECT * INTO v FROM trades WHERE id = 'untrusted-decimals';
+    IF v.volume_usd IS DISTINCT FROM 1000.0 OR v.price_source IS DISTINCT FROM 'in_stable'
+       OR v.decimals_out IS NOT NULL OR v.price_out_usd IS NOT NULL THEN
+        RAISE EXCEPTION 'an untrusted 18 was used: % % % %',
+            v.volume_usd, v.price_source, v.decimals_out, v.price_out_usd;
+    END IF;
+
+    -- A token Tycho does not know keeps the decimals the trade already had.
+    SELECT * INTO v FROM trades WHERE id = 'kept-decimals';
+    IF v.volume_usd IS DISTINCT FROM 1000.0 OR v.decimals_out IS DISTINCT FROM 9
+       OR v.price_out_usd IS DISTINCT FROM 250.0 THEN
+        RAISE EXCEPTION 'decimals the trade already had were not kept: % % %',
+            v.volume_usd, v.decimals_out, v.price_out_usd;
+    END IF;
+
     -- A quote probe is priced like any other call that returned. Only trades_settled leaves it
     -- out, so quote activity stays readable in USD.
     IF (SELECT priced_at FROM trades WHERE id = 'discarded-call') IS NULL THEN
