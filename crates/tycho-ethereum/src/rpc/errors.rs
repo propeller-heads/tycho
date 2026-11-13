@@ -162,6 +162,28 @@ mod tests {
         assert_eq!(err.is_execution_reverted(), expected);
     }
 
+    #[rstest]
+    #[case::revert(3, "execution reverted", true)]
+    #[case::reth_invalid_jump(-32003, "EVM error: InvalidJump", true)]
+    #[case::reth_invalid_opcode(-32003, "EVM error: InvalidFEOpcode", true)]
+    #[case::geth_invalid_jump(-32000, "invalid jump destination", true)]
+    #[case::geth_invalid_opcode(-32000, "invalid opcode: INVALID", true)]
+    #[case::geth_out_of_gas(-32000, "out of gas", true)]
+    #[case::header_not_found(-32000, "header not found", false)]
+    #[case::rate_limited(429, "too many requests", false)]
+    fn is_execution_failure_classification(
+        #[case] code: i64,
+        #[case] message: &str,
+        #[case] expected: bool,
+    ) {
+        let payload = ErrorPayload { code, message: message.to_string().into(), data: None };
+        let err = RPCError::from_alloy(
+            "eth_call failed",
+            AlloyRpcError::<TransportErrorKind>::ErrorResp(payload),
+        );
+        assert_eq!(err.is_execution_failure(), expected);
+    }
+
     #[test]
     fn is_execution_reverted_false_for_non_request_errors() {
         assert!(!RPCError::SetupError("bad url".to_string()).is_execution_reverted());
