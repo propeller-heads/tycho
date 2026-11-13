@@ -4506,6 +4506,13 @@ mod test {
             }
         }
 
+        fn unpause() -> UnpauseRecord {
+            UnpauseRecord {
+                actor: Some("operator".to_owned()),
+                reason: Some("pool is healthy".to_owned()),
+            }
+        }
+
         /// All rows stored for a component, open or closed, as `unpaused_at` values.
         async fn stored_rows(conn: &mut AsyncPgConnection, id: &str) -> Vec<Option<NaiveDateTime>> {
             use schema::component_pause::dsl as cp;
@@ -4617,7 +4624,7 @@ mod test {
                     .expect("pause failed");
             }
 
-            gw.unpause_components(&Chain::Ethereum, &["pool_a"], &mut conn)
+            gw.unpause_components(&Chain::Ethereum, &["pool_a"], &unpause(), &mut conn)
                 .await
                 .expect("unpause failed");
 
@@ -4642,11 +4649,16 @@ mod test {
             .expect("pause failed");
 
             let first = gw
-                .unpause_components(&Chain::Ethereum, &["pool_a", "never_paused"], &mut conn)
+                .unpause_components(
+                    &Chain::Ethereum,
+                    &["pool_a", "never_paused"],
+                    &unpause(),
+                    &mut conn,
+                )
                 .await
                 .expect("first unpause failed");
             let second = gw
-                .unpause_components(&Chain::Ethereum, &["pool_a"], &mut conn)
+                .unpause_components(&Chain::Ethereum, &["pool_a"], &unpause(), &mut conn)
                 .await
                 .expect("second unpause failed");
 
@@ -4663,6 +4675,29 @@ mod test {
         }
 
         #[tokio::test]
+        async fn test_unpause_components_audit() {
+            use schema::component_pause::dsl as cp;
+            let mut conn = setup_db().await;
+            let gw = setup_pause_gateway(&mut conn).await;
+            gw.pause_components(&Chain::Ethereum, SYSTEM, &[pause("pool_a", "r")], &mut conn)
+                .await
+                .expect("pause failed");
+
+            gw.unpause_components(&Chain::Ethereum, &["pool_a"], &unpause(), &mut conn)
+                .await
+                .expect("unpause failed");
+
+            let audit: (Option<String>, Option<String>) = cp::component_pause
+                .filter(cp::component_id.eq("pool_a"))
+                .select((cp::unpause_actor, cp::unpause_reason))
+                .first(&mut conn)
+                .await
+                .expect("failed to read the closed pause");
+            let expected = unpause();
+            assert_eq!(audit, (expected.actor, expected.reason));
+        }
+
+        #[tokio::test]
         async fn test_pause_after_unpause() {
             let mut conn = setup_db().await;
             let gw = setup_pause_gateway(&mut conn).await;
@@ -4670,7 +4705,7 @@ mod test {
             gw.pause_components(&Chain::Ethereum, SYSTEM, &pauses, &mut conn)
                 .await
                 .expect("pause failed");
-            gw.unpause_components(&Chain::Ethereum, &["pool_a"], &mut conn)
+            gw.unpause_components(&Chain::Ethereum, &["pool_a"], &unpause(), &mut conn)
                 .await
                 .expect("unpause failed");
 
