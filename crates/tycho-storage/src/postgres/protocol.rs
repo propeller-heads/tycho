@@ -4501,13 +4501,13 @@ mod test {
             }
         }
 
-        /// All rows stored for a component, open or closed, as `valid_to` values.
+        /// All rows stored for a component, open or closed, as `unpaused_at` values.
         async fn stored_rows(conn: &mut AsyncPgConnection, id: &str) -> Vec<Option<NaiveDateTime>> {
             use schema::component_pause::dsl as cp;
             cp::component_pause
                 .filter(cp::component_id.eq(id))
                 .order_by(cp::id)
-                .select(cp::valid_to)
+                .select(cp::unpaused_at)
                 .load(conn)
                 .await
                 .expect("failed to read component_pause rows")
