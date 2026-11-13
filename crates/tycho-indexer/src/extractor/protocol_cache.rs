@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Local, NaiveDateTime};
 use deepsize::DeepSizeOf;
 use tokio::sync::RwLock;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, info_span, instrument, Instrument};
 use tycho_common::{
     models::{
         protocol::{ProtocolComponent, QualityRange},
@@ -130,19 +130,35 @@ impl ProtocolMemoryCache {
     }
 
     /// Returns the approximate size of the cache in bytes.
+    ///
+    /// Walks every cached entry under its read lock, one part at a time.
+    #[instrument(skip_all)]
     pub async fn size_of(&self) -> usize {
-        self.chain.deep_size_of() +
-            self.tokens.read().await.deep_size_of() +
+        let tokens = async { self.tokens.read().await.deep_size_of() }
+            .instrument(info_span!("size_of_tokens"))
+            .await;
+        let prices = async {
             self.token_prices
                 .read()
                 .await
                 .prices
-                .deep_size_of() +
-            size_of::<NaiveDateTime>() +
+                .deep_size_of()
+        }
+        .instrument(info_span!("size_of_prices"))
+        .await;
+        let components = async {
             self.components
                 .read()
                 .await
-                .deep_size_of() +
+                .deep_size_of()
+        }
+        .instrument(info_span!("size_of_components"))
+        .await;
+        self.chain.deep_size_of() +
+            tokens +
+            prices +
+            size_of::<NaiveDateTime>() +
+            components +
             size_of::<Duration>() +
             size_of_val(&self.gateway)
     }
@@ -205,6 +221,7 @@ impl ProtocolDataCache for ProtocolMemoryCache {
             .collect::<Vec<_>>())
     }
 
+    #[instrument(skip_all, fields(n_addresses = addresses.len()))]
     async fn has_token(&self, addresses: &[Address]) -> Vec<bool> {
         let guard = self.tokens.read().await;
         addresses
@@ -213,6 +230,7 @@ impl ProtocolDataCache for ProtocolMemoryCache {
             .collect()
     }
 
+    #[instrument(skip_all)]
     async fn add_tokens<T: IntoIterator<Item = Token> + Send + Sync>(
         &self,
         tokens: T,
@@ -278,6 +296,7 @@ impl ProtocolDataCache for ProtocolMemoryCache {
             .collect())
     }
 
+    #[instrument(skip_all)]
     async fn add_components<T: IntoIterator<Item = ProtocolComponent> + Send + Sync>(
         &self,
         components: T,
