@@ -284,7 +284,9 @@ pub struct MetricPrices {
 /// One pool's metadata and bid/ask quote.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MetricPoolPrice {
-    /// The pool's tokens, TVL and pause level.
+    /// The pool's tokens, TVL and pause level, as of the feed's last refresh of its pool list:
+    /// up to 15 s older than the quote, and up to 90 s while refreshes fail. The quote's own
+    /// status is current.
     pub metadata: MetricMetadata,
     /// The pool's quote.
     pub bid_ask: MetricBidAskResponse,
