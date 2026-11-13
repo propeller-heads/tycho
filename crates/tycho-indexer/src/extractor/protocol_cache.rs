@@ -205,6 +205,7 @@ impl ProtocolDataCache for ProtocolMemoryCache {
             .collect::<Vec<_>>())
     }
 
+    #[instrument(skip_all, fields(n_addresses = addresses.len()))]
     async fn has_token(&self, addresses: &[Address]) -> Vec<bool> {
         let guard = self.tokens.read().await;
         addresses
@@ -213,6 +214,7 @@ impl ProtocolDataCache for ProtocolMemoryCache {
             .collect()
     }
 
+    #[instrument(skip_all)]
     async fn add_tokens<T: IntoIterator<Item = Token> + Send + Sync>(
         &self,
         tokens: T,
@@ -278,6 +280,7 @@ impl ProtocolDataCache for ProtocolMemoryCache {
             .collect())
     }
 
+    #[instrument(skip_all)]
     async fn add_components<T: IntoIterator<Item = ProtocolComponent> + Send + Sync>(
         &self,
         components: T,
