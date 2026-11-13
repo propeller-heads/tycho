@@ -220,6 +220,12 @@ pub struct BlockAggregatedChanges {
     /// The index of the partial block. None if it's a full block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_block_index: Option<u32>,
+    /// Components paused in this block. Clients should stop tracking them.
+    #[serde(default)]
+    pub paused_components: HashSet<ComponentId>,
+    /// Components unpaused in this block. Clients may track them again.
+    #[serde(default)]
+    pub unpaused_components: HashSet<ComponentId>,
 }
 
 impl BlockAggregatedChanges {
@@ -261,6 +267,8 @@ impl BlockAggregatedChanges {
             component_tvl,
             dci_update,
             partial_block_index: None,
+            paused_components: HashSet::new(),
+            unpaused_components: HashSet::new(),
         }
     }
 
@@ -282,6 +290,8 @@ impl BlockAggregatedChanges {
             component_tvl: self.component_tvl.clone(),
             dci_update: self.dci_update.clone(),
             partial_block_index: self.partial_block_index,
+            paused_components: self.paused_components.clone(),
+            unpaused_components: self.unpaused_components.clone(),
         }
     }
 
@@ -364,6 +374,15 @@ impl BlockAggregatedChanges {
             .extend(other.new_protocol_components);
         self.deleted_protocol_components
             .extend(other.deleted_protocol_components);
+        // A later pause or unpause of the same component overrides the earlier one.
+        for id in other.paused_components {
+            self.unpaused_components.remove(&id);
+            self.paused_components.insert(id);
+        }
+        for id in other.unpaused_components {
+            self.paused_components.remove(&id);
+            self.unpaused_components.insert(id);
+        }
         self.revert = other.revert;
         self.block = other.block;
         self
@@ -528,6 +547,8 @@ impl From<dto::BlockAggregatedChanges> for BlockAggregatedChanges {
             component_tvl: value.component_tvl,
             dci_update: DCIUpdate::from(value.dci_update),
             partial_block_index: value.partial_block_index,
+            paused_components: value.paused_components,
+            unpaused_components: value.unpaused_components,
         }
     }
 }
@@ -1204,6 +1225,8 @@ impl BlockChanges {
                 trace_results: aggregated_trace_results,
             },
             partial_block_index: self.partial_block_index,
+            paused_components: HashSet::new(),
+            unpaused_components: HashSet::new(),
         })
     }
 
