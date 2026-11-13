@@ -216,7 +216,7 @@ error rather than a silent custom chain (`Chain::builtin_from_str` skips the reg
 |---|---|
 | `index` | Run all extractors from `extractors.yaml` + HTTP/WS server; `--chain-config` for custom chains |
 | `run` | Run a single extractor (testing / debugging); `--chain-config` for custom chains |
-| `analyze-tokens` | Token quality analysis cron job; accepts `--settlement-contract <ADDRESS>` (default: CoW Swap settlement `0xc9f2e6ea1637E499406986ac50ddC92401ce1f58`) and `--recovery-lookback-days <N>` (default 1: re-check quality-5 tokens traded within N days; Bad keeps 5) |
+| `analyze-tokens` | Token quality analysis cron job; accepts `--recovery-lookback-days <N>` (default 1: re-check quality 1–5 tokens traded within N days). `index`, `run` and `analyze-tokens` fail at startup when the RPC lacks `eth_simulateV1` or `debug_traceCall` |
 | `rpc` | HTTP RPC server only (no extractors); takes `--chain` and `--chain-config` |
 
 ### Feature flags

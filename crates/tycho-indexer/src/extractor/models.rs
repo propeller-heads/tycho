@@ -512,7 +512,7 @@ mod test {
             blockchain::{Block, Transaction, TxWithChanges},
             contract::AccountBalance,
             protocol::{ComponentBalance, ProtocolComponent},
-            token::Token,
+            token::{Token, TokenAnalysis, TokenVerdict},
             Address, Chain, ChangeType, MergeError,
         },
         Bytes,
@@ -1193,5 +1193,33 @@ mod test {
 
         assert_eq!(result.new_tokens[&shared_token_addr].symbol, "LATE");
         assert_eq!(result.new_tokens[&shared_token_addr].decimals, 18);
+    }
+
+    #[rstest]
+    #[case::merge_newer(0, 1)]
+    #[case::merge_older(1, 0)]
+    fn test_merge_partial_token_analysis_precedence(#[case] first_idx: u8, #[case] second_idx: u8) {
+        let mut first = partial_block_changes(first_idx);
+        let mut second = partial_block_changes(second_idx);
+        let shared = Address::from_str("0x5555555555555555555555555555555555555555").unwrap();
+        let only_early = Address::from_str("0x6666666666666666666666666666666666666666").unwrap();
+        let analysis = |verdict| TokenAnalysis::verdict_only(verdict, None, Some(1), "test");
+
+        let (early, late) =
+            if first_idx == 0 { (&mut first, &mut second) } else { (&mut second, &mut first) };
+        early
+            .new_token_analyses
+            .insert(shared.clone(), analysis(TokenVerdict::Blocked));
+        early
+            .new_token_analyses
+            .insert(only_early.clone(), analysis(TokenVerdict::Fee));
+        late.new_token_analyses
+            .insert(shared.clone(), analysis(TokenVerdict::Ok));
+
+        let result = first.merge_partial(second).unwrap();
+
+        assert_eq!(result.new_token_analyses.len(), 2);
+        assert_eq!(result.new_token_analyses[&shared].verdict, TokenVerdict::Ok);
+        assert_eq!(result.new_token_analyses[&only_early].verdict, TokenVerdict::Fee);
     }
 }

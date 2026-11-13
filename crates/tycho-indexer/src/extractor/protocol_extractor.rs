@@ -10,6 +10,7 @@ use chrono::{Duration, NaiveDateTime};
 use deepsize::DeepSizeOf;
 use metrics::{counter, gauge, histogram};
 use mockall::automock;
+use num_bigint::BigUint;
 use prost::Message;
 use tokio::{sync::Mutex, task::JoinHandle};
 use tracing::{debug, error, info, info_span, instrument, trace, warn, Instrument};
@@ -23,7 +24,7 @@ use tycho_common::{
             ComponentBalance, ProtocolComponent, ProtocolComponentState,
             ProtocolComponentStateDelta,
         },
-        token::{Token, TokenOwnerStore},
+        token::{AnalyzedToken, Token, TokenAnalysis, TokenOwnerStore},
         Address, Balance, BlockHash, Chain, ChangeType, ComponentId, EntryPointId, ExtractionState,
         ExtractorIdentity, ProtocolType, TxHash,
     },
@@ -76,6 +77,13 @@ struct GatewayInner<G> {
 /// When a full block signal arrives (`output == None`), the accumulated block
 /// is taken from the buffer and processed as a complete block.
 type PartialBlockBuffer = Option<BlockChanges>;
+
+/// The tokens of a message's components and the analyses of those analysed for it.
+#[derive(Debug, PartialEq)]
+struct CurrencyTokens {
+    tokens: HashMap<Address, Token>,
+    analyses: HashMap<Address, TokenAnalysis>,
+}
 
 pub struct ProtocolExtractor<G, T, E> {
     gateway: GatewayInner<G>,
@@ -649,10 +657,12 @@ where
     }
 
     #[instrument(skip_all, fields(new_tokens_count))]
+    /// The tokens of the message's new components, with the analyses of those that were not
+    /// known before.
     async fn construct_currency_tokens(
         &self,
         msg: &BlockChanges,
-    ) -> Result<HashMap<Address, Token>, StorageError> {
+    ) -> Result<CurrencyTokens, StorageError> {
         let new_token_addresses = msg
             .protocol_components()
             .into_iter()
@@ -676,54 +686,7 @@ where
             .into_iter()
             .map(|(addr, _)| addr)
             .collect::<Vec<_>>();
-        // Construct unkown tokens using rpc
-        let balance_map: HashMap<Address, (Address, Balance)> = msg
-            .txs_with_update
-            .iter()
-            .flat_map(|tx| {
-                tx.protocol_components
-                    .iter()
-                    // Filtering to keep only components with ChangeType::Creation
-                    .filter(|(_, c_change)| c_change.change == ChangeType::Creation)
-                    .filter_map(|(c_id, change)| {
-                        tx.state_updates
-                            .get(&change.id)
-                            .and_then(|state| {
-                                state
-                                    .updated_attributes
-                                    .get("balance_owner")
-                                    .cloned()
-                            })
-                            .or_else(|| {
-                                change
-                                    .contract_addresses
-                                    // TODO: Currently, it's assumed that the pool is always the
-                                    // first contract in the
-                                    // protocol component. This approach is a temporary
-                                    // workaround and needs to be revisited for a more robust
-                                    // solution.
-                                    .first()
-                                    .cloned()
-                                    .or_else(|| Bytes::from_str(&change.id).ok())
-                            })
-                            .map(|owner| (c_id, owner))
-                    })
-                    .filter_map(|(c_id, addr)| {
-                        tx.balance_changes
-                            .get(c_id)
-                            .map(|balances| {
-                                balances
-                                    .iter()
-                                    // We currently only keep the latest created pool for
-                                    // it's token
-                                    .map(move |(token, balance)| {
-                                        (token.clone(), (addr.clone(), balance.balance.clone()))
-                                    })
-                            })
-                    })
-                    .flatten()
-            })
-            .collect::<HashMap<_, _>>();
+        let balance_map = largest_new_pool_per_token(msg);
         let tf = TokenOwnerStore::new(balance_map);
         let existing_tokens = self
             .protocol_cache
@@ -738,15 +701,20 @@ where
             debug!(?unknown_tokens, block_number = msg.block.number, "NewTokens");
         }
 
-        let new_tokens: HashMap<Address, Token> = self
+        let analyzed = self
             .token_pre_processor
             .get_tokens(unknown_tokens, Arc::new(tf), BlockTag::Number(msg.block.number))
-            .await
-            .into_iter()
-            .map(|t| (t.address.clone(), t))
-            .chain(existing_tokens)
-            .collect();
-        Ok(new_tokens)
+            .await;
+        let mut analyses = HashMap::new();
+        let mut new_tokens = HashMap::new();
+        for AnalyzedToken { token, analysis } in analyzed {
+            if let Some(analysis) = analysis {
+                analyses.insert(token.address.clone(), analysis);
+            }
+            new_tokens.insert(token.address.clone(), token);
+        }
+        new_tokens.extend(existing_tokens);
+        Ok(CurrencyTokens { tokens: new_tokens, analyses })
     }
 
     /// Process a full block
@@ -1095,9 +1063,11 @@ where
                     .await?;
             }
 
-            msg.new_tokens = self
+            let currency_tokens = self
                 .construct_currency_tokens(&msg)
                 .await?;
+            msg.new_tokens = currency_tokens.tokens;
+            msg.new_token_analyses = currency_tokens.analyses;
             self.protocol_cache
                 .add_tokens(msg.new_tokens.values().cloned())
                 .await?;
@@ -2002,6 +1972,16 @@ impl ExtractorGateway for ExtractorPgGateway {
                 .add_tokens(&new_tokens)
                 .await?;
         }
+        if !changes.new_token_analyses.is_empty() {
+            let analyses: Vec<_> = changes
+                .new_token_analyses
+                .iter()
+                .map(|(address, analysis)| (address.clone(), analysis.clone()))
+                .collect();
+            self.state_gateway
+                .upsert_token_analyses(&analyses)
+                .await?;
+        }
 
         // Insert block
         self.state_gateway
@@ -2247,6 +2227,181 @@ impl ExtractorGateway for ExtractorPgGateway {
     }
 }
 
+/// For each token of a component the message creates, the address holding that component's
+/// balance and its token balance at the end of the message: the analyzers simulate trades
+/// against it. A token in several new components gets the one with the largest balance. A
+/// component without a balance change in the message gets an empty balance, which the analyzer
+/// can still fund.
+fn largest_new_pool_per_token(msg: &BlockChanges) -> HashMap<Address, (Address, Balance)> {
+    let mut balance_owners = HashMap::new();
+    let mut balances: HashMap<(&str, &Address), &Balance> = HashMap::new();
+    for tx in &msg.txs_with_update {
+        for (component_id, state) in &tx.state_updates {
+            if let Some(owner) = state
+                .updated_attributes
+                .get("balance_owner")
+            {
+                balance_owners.insert(component_id.as_str(), owner.clone());
+            }
+        }
+        for (component_id, token_balances) in &tx.balance_changes {
+            for (token, balance) in token_balances {
+                balances.insert((component_id.as_str(), token), &balance.balance);
+            }
+        }
+    }
+
+    let mut largest: HashMap<Address, (Address, Balance)> = HashMap::new();
+    for tx in &msg.txs_with_update {
+        for (component_id, component) in &tx.protocol_components {
+            if component.change != ChangeType::Creation {
+                continue;
+            }
+            // TODO: Currently, it's assumed that the pool is always the first contract in the
+            // protocol component. This approach is a temporary workaround and needs to be
+            // revisited for a more robust solution.
+            let Some(owner) = balance_owners
+                .get(component_id.as_str())
+                .cloned()
+                .or_else(|| {
+                    component
+                        .contract_addresses
+                        .first()
+                        .cloned()
+                })
+                .or_else(|| Bytes::from_str(component_id).ok())
+            else {
+                continue;
+            };
+            for token in &component.tokens {
+                let balance = balances
+                    .get(&(component_id.as_str(), token))
+                    .map(|balance| (*balance).clone())
+                    .unwrap_or_default();
+                let is_larger = largest
+                    .get(token)
+                    .is_none_or(|(_, current)| {
+                        BigUint::from_bytes_be(&balance) > BigUint::from_bytes_be(current)
+                    });
+                if is_larger {
+                    largest.insert(token.clone(), (owner.clone(), balance));
+                }
+            }
+        }
+    }
+    largest
+}
+
+#[cfg(test)]
+mod largest_new_pool_tests {
+    use tycho_common::models::blockchain::TxWithChanges;
+
+    use super::*;
+
+    const TOKEN: &str = "0x00000000000000000000000000000000000000aa";
+
+    fn token() -> Address {
+        Bytes::from_str(TOKEN).unwrap()
+    }
+
+    fn pool(byte: u8) -> Address {
+        Bytes::from([byte; 20])
+    }
+
+    fn created(id: &str, contract: Option<Address>) -> (ComponentId, ProtocolComponent) {
+        let component = ProtocolComponent {
+            id: id.to_string(),
+            tokens: vec![token()],
+            contract_addresses: contract.into_iter().collect(),
+            change: ChangeType::Creation,
+            ..Default::default()
+        };
+        (id.to_string(), component)
+    }
+
+    fn balance_of(id: &str, amount: u64) -> (ComponentId, HashMap<Address, ComponentBalance>) {
+        let balance = ComponentBalance {
+            token: token(),
+            balance: Bytes::from(amount.to_be_bytes().to_vec()),
+            balance_float: amount as f64,
+            modify_tx: Bytes::zero(32),
+            component_id: id.to_string(),
+        };
+        (id.to_string(), HashMap::from([(token(), balance)]))
+    }
+
+    fn message(txs: Vec<TxWithChanges>) -> BlockChanges {
+        BlockChanges { txs_with_update: txs, ..Default::default() }
+    }
+
+    #[test]
+    fn the_new_pool_with_the_largest_balance_is_used() {
+        let msg = message(vec![TxWithChanges {
+            protocol_components: HashMap::from([
+                created("small", Some(pool(1))),
+                created("large", Some(pool(2))),
+            ]),
+            balance_changes: HashMap::from([balance_of("small", 10), balance_of("large", 500)]),
+            ..Default::default()
+        }]);
+        let (owner, balance) = largest_new_pool_per_token(&msg)[&token()].clone();
+        assert_eq!(owner, pool(2));
+        assert_eq!(balance, Bytes::from(500u64.to_be_bytes().to_vec()));
+    }
+
+    #[test]
+    fn a_balance_from_a_later_transaction_counts() {
+        let msg = message(vec![
+            TxWithChanges {
+                protocol_components: HashMap::from([created("pair", Some(pool(1)))]),
+                ..Default::default()
+            },
+            TxWithChanges {
+                balance_changes: HashMap::from([balance_of("pair", 7)]),
+                ..Default::default()
+            },
+        ]);
+        let (_, balance) = largest_new_pool_per_token(&msg)[&token()].clone();
+        assert_eq!(balance, Bytes::from(7u64.to_be_bytes().to_vec()));
+    }
+
+    #[test]
+    fn a_new_pool_without_a_balance_change_gets_an_empty_balance() {
+        let msg = message(vec![TxWithChanges {
+            protocol_components: HashMap::from([created("pair", Some(pool(1)))]),
+            ..Default::default()
+        }]);
+        assert_eq!(largest_new_pool_per_token(&msg)[&token()], (pool(1), Bytes::new()));
+    }
+
+    #[test]
+    fn the_balance_owner_attribute_wins_over_the_contract_address() {
+        let state = ProtocolComponentStateDelta {
+            component_id: "pool".to_string(),
+            updated_attributes: HashMap::from([("balance_owner".to_string(), pool(9))]),
+            ..Default::default()
+        };
+        let msg = message(vec![TxWithChanges {
+            protocol_components: HashMap::from([created("pool", Some(pool(1)))]),
+            state_updates: HashMap::from([("pool".to_string(), state)]),
+            ..Default::default()
+        }]);
+        assert_eq!(largest_new_pool_per_token(&msg)[&token()].0, pool(9));
+    }
+
+    #[test]
+    fn updated_components_are_not_pools_for_new_tokens() {
+        let (id, mut component) = created("pool", Some(pool(1)));
+        component.change = ChangeType::Update;
+        let msg = message(vec![TxWithChanges {
+            protocol_components: HashMap::from([(id, component)]),
+            balance_changes: HashMap::from([balance_of("pool", 5)]),
+            ..Default::default()
+        }]);
+        assert!(largest_new_pool_per_token(&msg).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::{
@@ -2265,7 +2420,10 @@ mod test {
     use float_eq::assert_float_eq;
     use futures03::FutureExt;
     use mockall::mock;
-    use tycho_common::{models::blockchain::TxWithChanges, traits::TokenOwnerFinding};
+    use tycho_common::{
+        models::{blockchain::TxWithChanges, token::TokenVerdict},
+        traits::TokenOwnerFinding,
+    };
 
     use super::*;
     use crate::{
@@ -2284,7 +2442,7 @@ mod test {
                 addresses: Vec<Bytes>,
                 token_finder: Arc<dyn TokenOwnerFinding>,
                 block: BlockTag,
-            ) -> Vec<Token>;
+            ) -> Vec<AnalyzedToken>;
         }
     }
 
@@ -2980,7 +3138,8 @@ mod test {
             Chain::Ethereum,
             100,
         );
-        let ret = vec![t3.clone()];
+        let analysis = TokenAnalysis::verdict_only(TokenVerdict::Fee, None, Some(1), "test");
+        let ret = vec![AnalyzedToken { token: t3.clone(), analysis: Some(analysis.clone()) }];
         #[expect(
             clippy::disallowed_methods,
             reason = "the test runs on a multi-thread runtime (`flavor = \"multi_thread\"`)"
@@ -3060,6 +3219,7 @@ mod test {
         )
         .await
         .expect("Extractor init failed");
+        let exp_analyses = HashMap::from([(t3.address.clone(), analysis)]);
         let exp = HashMap::from([(t1.address.clone(), t1), (t3.address.clone(), t3)]);
 
         let res = extractor
@@ -3067,7 +3227,7 @@ mod test {
             .await
             .expect("construct_currency_tokens failed");
 
-        assert_eq!(res, exp);
+        assert_eq!(res, CurrencyTokens { tokens: exp, analyses: exp_analyses });
     }
 
     #[test_log::test(tokio::test)]
@@ -5376,7 +5536,7 @@ mod test_serial_db {
                 addresses: Vec<Bytes>,
                 token_finder: Arc<dyn TokenOwnerFinding>,
                 block: BlockTag,
-            ) -> Vec<Token>;
+            ) -> Vec<AnalyzedToken>;
         }
     }
 
@@ -5403,7 +5563,7 @@ mod test_serial_db {
     // SETUP
     fn get_mocked_token_pre_processor() -> MockTokenPreProcessor {
         let mut mock_processor = MockTokenPreProcessor::new();
-        let new_tokens = vec![
+        let new_tokens = [
             Token::new(
                 &Bytes::from_str(WETH_ADDRESS).expect("Invalid address"),
                 "WETH",
@@ -5445,7 +5605,12 @@ mod test_serial_db {
         ];
         mock_processor
             .expect_get_tokens()
-            .returning(move |_, _, _| new_tokens.clone());
+            .returning(move |_, _, _| {
+                new_tokens
+                    .iter()
+                    .map(|token| AnalyzedToken { token: token.clone(), analysis: None })
+                    .collect()
+            });
 
         mock_processor
     }

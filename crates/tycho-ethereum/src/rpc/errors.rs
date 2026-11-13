@@ -109,6 +109,32 @@ impl RPCError {
                 .to_lowercase()
                 .contains("execution reverted")
     }
+
+    /// Returns true when the EVM executed the call and it failed: a revert, or an exceptional
+    /// halt such as an invalid jump or opcode. Like a revert, a halt is a property of the called
+    /// code. Geth reports a halt under -32000 with the halt's name; Reth prefixes "EVM error".
+    pub fn is_execution_failure(&self) -> bool {
+        if self.is_execution_reverted() {
+            return true;
+        }
+        let RPCError::RequestError(RequestError::Reqwest(e)) = self else {
+            return false;
+        };
+        let AlloyRpcError::ErrorResp(payload) = &e.source else {
+            return false;
+        };
+        let message = payload.message.to_lowercase();
+        [
+            "evm error",
+            "invalid jump destination",
+            "invalid opcode",
+            "stack underflow",
+            "stack limit reached",
+            "out of gas",
+        ]
+        .iter()
+        .any(|halt| message.contains(halt))
+    }
 }
 
 #[cfg(test)]
@@ -134,6 +160,28 @@ mod tests {
             AlloyRpcError::<TransportErrorKind>::ErrorResp(payload),
         );
         assert_eq!(err.is_execution_reverted(), expected);
+    }
+
+    #[rstest]
+    #[case::revert(3, "execution reverted", true)]
+    #[case::reth_invalid_jump(-32003, "EVM error: InvalidJump", true)]
+    #[case::reth_invalid_opcode(-32003, "EVM error: InvalidFEOpcode", true)]
+    #[case::geth_invalid_jump(-32000, "invalid jump destination", true)]
+    #[case::geth_invalid_opcode(-32000, "invalid opcode: INVALID", true)]
+    #[case::geth_out_of_gas(-32000, "out of gas", true)]
+    #[case::header_not_found(-32000, "header not found", false)]
+    #[case::rate_limited(429, "too many requests", false)]
+    fn is_execution_failure_classification(
+        #[case] code: i64,
+        #[case] message: &str,
+        #[case] expected: bool,
+    ) {
+        let payload = ErrorPayload { code, message: message.to_string().into(), data: None };
+        let err = RPCError::from_alloy(
+            "eth_call failed",
+            AlloyRpcError::<TransportErrorKind>::ErrorResp(payload),
+        );
+        assert_eq!(err.is_execution_failure(), expected);
     }
 
     #[test]
