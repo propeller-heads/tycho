@@ -505,7 +505,11 @@ pub trait ProtocolGateway {
         ids: Option<&[&str]>,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<HashMap<String, f64>>, StorageError>;
+}
 
+/// Store and retrieve admin pauses of protocol components.
+#[async_trait]
+pub trait ComponentPauseGateway {
     /// Records admin pauses of components.
     ///
     /// Only records the pauses; it does not change how anything is indexed or sent. A component

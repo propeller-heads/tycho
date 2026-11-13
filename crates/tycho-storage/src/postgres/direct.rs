@@ -24,9 +24,9 @@ use tycho_common::{
         ProtocolType, TxHash,
     },
     storage::{
-        BlockIdentifier, BlockOrTimestamp, ChainGateway, ContractStateGateway, EntryPointFilter,
-        EntryPointGateway, ExtractionStateGateway, Gateway, ProtocolGateway, StorageError, Version,
-        WithTotal,
+        BlockIdentifier, BlockOrTimestamp, ChainGateway, ComponentPauseGateway,
+        ContractStateGateway, EntryPointFilter, EntryPointGateway, ExtractionStateGateway, Gateway,
+        ProtocolGateway, StorageError, Version, WithTotal,
     },
     Bytes,
 };
@@ -507,7 +507,10 @@ impl ProtocolGateway for DirectGateway {
             .get_component_tvls(chain, system, ids, pagination_params, &mut conn)
             .await
     }
+}
 
+#[async_trait]
+impl ComponentPauseGateway for DirectGateway {
     #[instrument(skip_all)]
     async fn pause_components(
         &self,
