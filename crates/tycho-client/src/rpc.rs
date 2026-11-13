@@ -1903,6 +1903,7 @@ impl RPCClient for HttpRPCClient {
         let component_tvl = if request.include_tvl && !component_ids.is_empty() {
             self.get_component_tvl_paginated(
                 ComponentTvlPaginatedParams::new(request.chain, concurrency)
+                    .with_protocol_system(request.protocol_system)
                     .with_component_ids(component_ids.clone()),
             )
             .await?
@@ -3501,6 +3502,52 @@ mod tests {
         assert!(response
             .vm_storage
             .contains_key(&contract_addr));
+    }
+
+    #[tokio::test]
+    async fn test_get_snapshots_requests_tvl_of_its_protocol() {
+        let mut server = Server::new_async().await;
+        let states_mock = server
+            .mock("POST", "/v1/protocol_state")
+            .expect_at_least(1)
+            .with_body(r#"{"states": [], "pagination": {"page": 0, "page_size": 100, "total": 0}}"#)
+            .create_async()
+            .await;
+        // A request without the protocol matches no mock, and the server answers it with 501.
+        let tvl_mock = server
+            .mock("POST", "/v1/component_tvl")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "protocol_system": "uniswap_v2"
+            })))
+            .expect(2)
+            .with_body(r#"{"tvl": {}, "pagination": {"page": 0, "page_size": 100, "total": 0}}"#)
+            .create_async()
+            .await;
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+        let components: HashMap<_, _> = (0..150)
+            .map(|i| {
+                let id = format!("component_{i}");
+                let component = tycho_common::models::protocol::ProtocolComponent {
+                    id: id.clone(),
+                    protocol_system: "uniswap_v2".to_string(),
+                    chain: Chain::Ethereum,
+                    ..Default::default()
+                };
+                (id, component)
+            })
+            .collect();
+        let request =
+            SnapshotParameters::new(Chain::Ethereum, "uniswap_v2", &components, &[], 12345)
+                .include_tvl(true);
+
+        client
+            .get_snapshots(&request, None, RPC_CLIENT_CONCURRENCY)
+            .await
+            .expect("get snapshots");
+
+        states_mock.assert_async().await;
+        tvl_mock.assert_async().await;
     }
 
     #[tokio::test]
