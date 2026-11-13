@@ -59,6 +59,7 @@ Covers all Rust crates under `crates/` and `protocols/testing/`. Triggered on PR
 - **`test-db`** — Tests requiring a live Postgres instance. Spins up a custom Postgres Docker image (built from `docker/postgres.Dockerfile`) with pg_cron. Runs parallel and serial DB test suites separately.
 - **`doc`** — `cargo doc` with broken intra-doc link detection.
 - **`check-no-default-features`** — Ensures the workspace compiles without default features enabled.
+- **`unused-dependencies`** — `cargo-machete` over every `Cargo.toml` in the repository, including the substreams packages. Runs on every PR, regardless of the Rust path filter.
 
 All jobs use `cargo nextest` and `--locked` to enforce lockfile consistency.
 

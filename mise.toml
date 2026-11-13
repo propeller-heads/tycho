@@ -35,9 +35,15 @@ buf = "1.75.0"
 # Cargo subcommands and database tooling
 "github:nextest-rs/nextest" = { version = "0.9.129", version_prefix = "cargo-nextest-" }
 "github:diesel-rs/diesel" = "2.3.14"
-"github:rustsec/rustsec" = { version = "0.22.2", version_prefix = "cargo-audit/v" }
 "github:bnjbvr/cargo-machete" = "0.9.2"
 "github:LukeMathWalker/cargo-chef" = "0.1.78"
+
+# Dependency advisories, for .github/workflows/security.yaml: osv-scanner and osv-reporter, which
+# compares two scans. Built from source, because the releases ship osv-scanner only; one entry
+# keeps both at the same version. Go is the toolchain `go install` needs, at least the version
+# osv-scanner's go.mod requires.
+go = "1.27.3"
+"go:github.com/google/osv-scanner/v2/cmd/..." = "2.7.0"
 
 # Scripts
 shellcheck = "0.11.0"

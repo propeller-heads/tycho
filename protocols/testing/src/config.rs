@@ -213,7 +213,7 @@ impl IntegrationTestsConfig {
     pub fn from_yaml(reader: impl Read, source: &str) -> miette::Result<Self> {
         let mut unknown_keys = Vec::new();
         let config: Self =
-            serde_ignored::deserialize(serde_yaml::Deserializer::from_reader(reader), |path| {
+            serde_ignored::deserialize(yaml_serde::Deserializer::from_reader(reader), |path| {
                 unknown_keys.push(path.to_string())
             })
             .into_diagnostic()

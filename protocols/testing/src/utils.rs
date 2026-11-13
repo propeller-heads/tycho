@@ -59,7 +59,7 @@ pub fn build_spkg(
     let content = fs::read_to_string(yaml_file_path)
         .into_diagnostic()
         .wrap_err_with(|| format!("Failed to read {}", yaml_file_path.display()))?;
-    let mut data: serde_yaml::Value = serde_yaml::from_str(&content)
+    let mut data: yaml_serde::Value = yaml_serde::from_str(&content)
         .into_diagnostic()
         .wrap_err_with(|| format!("Failed to parse {}", yaml_file_path.display()))?;
 
@@ -124,7 +124,7 @@ pub fn build_spkg(
         match initial_block {
             Some(initial_block) => {
                 modify_initial_block(&mut data, initial_block);
-                serde_yaml::to_writer(&mut stdin, &data).into_diagnostic()
+                yaml_serde::to_writer(&mut stdin, &data).into_diagnostic()
             }
             None => stdin
                 .write_all(content.as_bytes())
@@ -182,7 +182,7 @@ pub fn extract_initial_block(yaml: &str) -> miette::Result<u64> {
         initial_block: HashMap<String, u64>,
     }
 
-    let manifest: Manifest = serde_yaml::from_str(yaml)
+    let manifest: Manifest = yaml_serde::from_str(yaml)
         .into_diagnostic()
         .wrap_err("Failed to parse Substreams manifest")?;
 
@@ -226,7 +226,7 @@ pub fn extract_initial_block(yaml: &str) -> miette::Result<u64> {
 ///
 /// Modules leaving `initialBlock` implicit keep it that way: Substreams derives theirs from their
 /// inputs, which land on `start_block` anyway.
-pub fn modify_initial_block(manifest: &mut serde_yaml::Value, start_block: u64) {
+pub fn modify_initial_block(manifest: &mut yaml_serde::Value, start_block: u64) {
     if let Some(modules) = manifest
         .get_mut("modules")
         .and_then(|modules| modules.as_sequence_mut())
@@ -266,8 +266,8 @@ mod tests {
 
     #[test]
     fn test_modify_initial_block_normal_case() {
-        let mut manifest: serde_yaml::Value =
-            serde_yaml::from_str(EXAMPLE_MANIFEST).expect("Failed to parse YAML");
+        let mut manifest: yaml_serde::Value =
+            yaml_serde::from_str(EXAMPLE_MANIFEST).expect("Failed to parse YAML");
         let new_block = 12345;
 
         modify_initial_block(&mut manifest, new_block);
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn test_modify_initial_block_leaves_implicit_modules_alone() {
-        let mut manifest: serde_yaml::Value = serde_yaml::from_str(
+        let mut manifest: yaml_serde::Value = yaml_serde::from_str(
             r"
 modules:
   - name: map_a
@@ -309,7 +309,7 @@ modules:
     // declares a block inline, so an override that only looked at the modules did nothing.
     #[test]
     fn test_modify_initial_block_rewrites_network_blocks() {
-        let mut manifest: serde_yaml::Value = serde_yaml::from_str(
+        let mut manifest: yaml_serde::Value = yaml_serde::from_str(
             r"
 network: mainnet
 networks:

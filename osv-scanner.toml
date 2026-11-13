@@ -1,0 +1,144 @@
+# Exceptions for the osv-scanner gate in .github/workflows/security.yaml, which scans the crates the
+# workspace builds (.github/scripts/osv-package-list.sh) against OSV (RustSec and GitHub
+# advisories). Ignoring an ID also ignores its aliases.
+#
+# Every entry expires. After its `ignoreUntil` date the advisory fails the scheduled scan again and
+# the entry counts as unused, so it gets a fresh decision instead of living on unreviewed. An entry
+# that no longer matches the package list fails CI as well
+# (.github/scripts/check-osv-scanner-config.sh) and has to be deleted.
+#
+# Two review dates: 2027-02-08 where the fix is an upgrade on our side, 2027-05-10 where it waits on
+# an upstream release.
+#
+# `ignoreUntil` is the key osv-scanner 2.7.0 reads, the version mise.toml pins. 2.7.1 renames it to
+# `effectiveUntil` and warns on the old name, which fails the config check.
+
+# tonic 0.9, the tycho-indexer Substreams client, is the only root of rustls 0.21. Fixed by tonic
+# 0.14 with prost 0.14 and regenerated tycho-indexer protobuf code.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0098"
+ignoreUntil = 2027-02-08
+reason = "rustls-webpki 0.101.7: URI name constraints accepted; via rustls 0.21 from tonic 0.9"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0099"
+ignoreUntil = 2027-02-08
+reason = "rustls-webpki 0.101.7: wildcard name constraints accepted; via rustls 0.21 from tonic 0.9"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0104"
+ignoreUntil = 2027-02-08
+reason = "rustls-webpki 0.101.7: reachable panic parsing CRLs; via rustls 0.21 from tonic 0.9"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0382"
+ignoreUntil = 2027-02-08
+reason = "rustls-webpki 0.101.7: may accept distrusted intermediates; via rustls 0.21 from tonic 0.9"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0346"
+ignoreUntil = 2027-02-08
+reason = "rustls 0.21.12: Debug impls expose TLS session secrets; from tonic 0.9, no 0.21 fix"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0349"
+ignoreUntil = 2027-02-08
+reason = "rustls 0.21.12: ServerHello downgrade to classical key exchange; from tonic 0.9, no 0.21 fix"
+
+[[IgnoredVulns]]
+id = "GHSA-h2v8-394m-p7vv"
+ignoreUntil = 2027-02-08
+reason = "rustls 0.21.12: fixed only in 0.23.46; from tonic 0.9, no 0.21 fix"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0134"
+ignoreUntil = 2027-02-08
+reason = "rustls-pemfile 1.0.4 unmaintained; from tonic 0.9 and rustls-native-certs 0.6"
+
+# utoipa 4 pins utoipa-swagger-ui 6, whose build script depends on zip 0.6. Fixed by utoipa 6 with
+# utoipa-swagger-ui 10 (zip 9).
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0367"
+ignoreUntil = 2027-02-08
+reason = "zip 0.6.6: SUID/SGID bits kept on extraction; build-dependency of utoipa-swagger-ui 6, whose build script unpacks the Swagger UI archive bundled in the crate"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0368"
+ignoreUntil = 2027-02-08
+reason = "zip 0.6.6: extract creates symlinks outside the destination; build-time only, see RUSTSEC-2026-0367"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0369"
+ignoreUntil = 2027-02-08
+reason = "zip 0.6.6: extract applies permissions through symlinks; build-time only, see RUSTSEC-2026-0367"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0429"
+ignoreUntil = 2027-02-08
+reason = "zip 0.6.6: extract aborts on an oversized symlink entry; build-time only, see RUSTSEC-2026-0367"
+
+[[IgnoredVulns]]
+id = "GHSA-8hxf-qr8p-62x4"
+ignoreUntil = 2027-02-08
+reason = "zip 0.6.6: AES entry HMAC bypass on premature EOF; build-time only, see RUSTSEC-2026-0367"
+
+[[IgnoredVulns]]
+id = "GHSA-m665-v7pm-7grj"
+ignoreUntil = 2027-02-08
+reason = "zip 0.6.6: parser differential via dual headers (also affects zip <= 9.0.4); build-time only, see RUSTSEC-2026-0367"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+ignoreUntil = 2027-02-08
+reason = "proc-macro-error 1.0.4 unmaintained; proc macro of utoipa-gen 4"
+
+# Our own upgrades, each a separate change.
+
+[[IgnoredVulns]]
+id = "GHSA-w9wp-h8wv-79jx"
+ignoreUntil = 2027-02-08
+reason = "opentelemetry_sdk 0.22.1: unbounded allocation in W3C Baggage propagation; tycho-indexer tracing export, fixed by the opentelemetry 0.33 stack"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0012"
+ignoreUntil = 2027-02-08
+reason = "backoff 0.4.0 unmaintained; retry policy of tycho-client and tycho-ethereum, which re-exports its types, so replacing it changes the public API"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0384"
+ignoreUntil = 2027-02-08
+reason = "instant 0.1.13 unmaintained; only via backoff, see RUSTSEC-2025-0012"
+
+# Waiting on upstream releases.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0258"
+ignoreUntil = 2027-05-10
+reason = "h2 0.3.27: unbounded empty DATA frames (low-severity DoS); fixed only in 0.4.16, and actix-http 3 requires the 0.3 line"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0138"
+ignoreUntil = 2027-05-10
+reason = "diesel-async 0.7.4 unsound in the MySQL backend only; we use Postgres. Fixed in the breaking 0.9"
+
+[[IgnoredVulns]]
+id = "GHSA-ff9q-rm55-q7qr"
+ignoreUntil = 2027-05-10
+reason = "diesel-async 0.7.4: GitHub's record of RUSTSEC-2026-0138, which does not list it as an alias"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0387"
+ignoreUntil = 2027-05-10
+reason = "crypto-bigint 0.5.5: timing variability; via elliptic-curve 0.13 (alloy-signer, k256), fixed in 0.7.6, which no alloy 1.x release allows"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0253"
+ignoreUntil = 2027-05-10
+reason = "lru 0.16.4 unsound; alloy-provider 1.x requires ^0.16, fixed in 0.18.2"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+ignoreUntil = 2027-05-10
+reason = "paste 1.0.15 unmaintained; proc macro of alloy-primitives, including 1.7.3"

@@ -269,56 +269,6 @@ url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9
 url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/360383606"
 provenance = "github-attestations"
 
-[[tools."github:rustsec/rustsec"]]
-version = "0.22.2"
-backend = "github:rustsec/rustsec"
-specifiers = ["0.22.2"]
-
-[tools."github:rustsec/rustsec".options]
-version_prefix = "cargo-audit/v"
-
-[tools."github:rustsec/rustsec"."platforms.linux-arm64"]
-checksum = "sha256:c6603814ddaa45e51263dafd31c0ac98808f688d26f7395804f9670b0fd599dd"
-checksum_source = "mise-versions"
-url = "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-aarch64-unknown-linux-gnu-v0.22.2.tgz"
-url_api = "https://api.github.com/repos/rustsec/rustsec/releases/assets/439292355"
-
-[tools."github:rustsec/rustsec"."platforms.linux-arm64-musl"]
-checksum = "sha256:c6603814ddaa45e51263dafd31c0ac98808f688d26f7395804f9670b0fd599dd"
-checksum_source = "mise-versions"
-url = "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-aarch64-unknown-linux-gnu-v0.22.2.tgz"
-url_api = "https://api.github.com/repos/rustsec/rustsec/releases/assets/439292355"
-
-[tools."github:rustsec/rustsec"."platforms.linux-x64"]
-checksum = "sha256:ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39"
-checksum_source = "mise-versions"
-url = "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz"
-url_api = "https://api.github.com/repos/rustsec/rustsec/releases/assets/439291614"
-
-[tools."github:rustsec/rustsec"."platforms.linux-x64-musl"]
-checksum = "sha256:7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428"
-checksum_source = "mise-versions"
-url = "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz"
-url_api = "https://api.github.com/repos/rustsec/rustsec/releases/assets/439292222"
-
-[tools."github:rustsec/rustsec"."platforms.macos-arm64"]
-checksum = "sha256:ec7ca4263769593df4d909be85b94a6b79efa2897be5d2bb8ebd516e823175af"
-checksum_source = "mise-versions"
-url = "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-aarch64-apple-darwin-v0.22.2.tgz"
-url_api = "https://api.github.com/repos/rustsec/rustsec/releases/assets/439291477"
-
-[tools."github:rustsec/rustsec"."platforms.macos-x64"]
-checksum = "sha256:847831323de932155b226ab60ee4a180e13e5d007a019f0d4b7b4d89a6de2ab2"
-checksum_source = "mise-versions"
-url = "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-apple-darwin-v0.22.2.tgz"
-url_api = "https://api.github.com/repos/rustsec/rustsec/releases/assets/439292734"
-
-[tools."github:rustsec/rustsec"."platforms.windows-x64"]
-checksum = "sha256:0a7316540862c13d954f648917ceacca593747baed6eec180fafa590be2710ab"
-checksum_source = "mise-versions"
-url = "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-pc-windows-msvc-v0.22.2.zip"
-url_api = "https://api.github.com/repos/rustsec/rustsec/releases/assets/439294720"
-
 [[tools."github:streamingfast/substreams"]]
 version = "1.26.0"
 backend = "github:streamingfast/substreams"
@@ -400,6 +350,44 @@ checksum = "sha256:9d2ffaa59d7b86860dc3e75f7f8b0ce2917d7f3ed571bf95c4b2206c31a29
 checksum_source = "mise-versions"
 url = "https://github.com/streamingfast/substreams-sink-sql/releases/download/v4.13.1/substreams-sink-sql_darwin_x86_64.tar.gz"
 url_api = "https://api.github.com/repos/streamingfast/substreams-sink-sql/releases/assets/363062274"
+
+[[tools.go]]
+version = "1.27.3"
+backend = "core:go"
+specifiers = ["1.27.3"]
+
+[tools.go."platforms.linux-arm64"]
+checksum = "sha256:a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49"
+url = "https://dl.google.com/go/go1.27.3.linux-arm64.tar.gz"
+
+[tools.go."platforms.linux-arm64-musl"]
+checksum = "sha256:a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49"
+url = "https://dl.google.com/go/go1.27.3.linux-arm64.tar.gz"
+
+[tools.go."platforms.linux-x64"]
+checksum = "sha256:65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40"
+url = "https://dl.google.com/go/go1.27.3.linux-amd64.tar.gz"
+
+[tools.go."platforms.linux-x64-musl"]
+checksum = "sha256:65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40"
+url = "https://dl.google.com/go/go1.27.3.linux-amd64.tar.gz"
+
+[tools.go."platforms.macos-arm64"]
+checksum = "sha256:dd3908cf20959d798c1e06ebe5b72213f0505ce01373b40ce3110975a6cd99c2"
+url = "https://dl.google.com/go/go1.27.3.darwin-arm64.tar.gz"
+
+[tools.go."platforms.macos-x64"]
+checksum = "sha256:b6f8e931e4ab497fcde6da8ae4499a58f9d258e55c8a80824a516eae5950a750"
+url = "https://dl.google.com/go/go1.27.3.darwin-amd64.tar.gz"
+
+[tools.go."platforms.windows-x64"]
+checksum = "sha256:f26081f438319757f8a1b46d7d0b2c5ec7583d4038e485e0aa725cfde7885fff"
+url = "https://dl.google.com/go/go1.27.3.windows-amd64.zip"
+
+[[tools."go:github.com/google/osv-scanner/v2/cmd/..."]]
+version = "2.7.0"
+backend = "go:github.com/google/osv-scanner/v2/cmd/..."
+specifiers = ["2.7.0"]
 
 [[tools.jq]]
 version = "1.8.1"

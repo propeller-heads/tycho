@@ -292,7 +292,7 @@ impl ChainConfigRegistry {
     /// Parses a registry from a YAML string with a top-level `chains:` list.
     pub fn from_yaml_str(contents: &str) -> Result<Self, ChainConfigError> {
         let file: ChainConfigFile =
-            serde_yaml::from_str(contents).map_err(|e| ChainConfigError::Parse(e.to_string()))?;
+            yaml_serde::from_str(contents).map_err(|e| ChainConfigError::Parse(e.to_string()))?;
         Self::from_configs(file.chains)
     }
 

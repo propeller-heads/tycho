@@ -30,13 +30,6 @@ use std::{
 
 use async_trait::async_trait;
 use futures03::{stream::SplitSink, SinkExt, StreamExt};
-use hyper::{
-    header::{
-        AUTHORIZATION, CONNECTION, HOST, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE,
-        USER_AGENT,
-    },
-    Uri,
-};
 #[cfg(test)]
 use mockall::automock;
 use thiserror::Error;
@@ -54,6 +47,13 @@ use tokio_tungstenite::{
     tungstenite::{
         self,
         handshake::client::{generate_key, Request},
+        http::{
+            header::{
+                AUTHORIZATION, CONNECTION, HOST, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE,
+                USER_AGENT,
+            },
+            Uri,
+        },
     },
     MaybeTlsStream, WebSocketStream,
 };
