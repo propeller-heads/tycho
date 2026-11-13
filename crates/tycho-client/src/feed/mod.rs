@@ -260,8 +260,8 @@ impl Display for SynchronizerState {
 struct StaleLimits {
     /// How long a synchronizer may make no progress before it is marked stale.
     threshold: Duration,
-    /// How many blocks behind the round's tip a stale synchronizer's block may be and still
-    /// keep it stale. A replay further behind would hold every round if it went Delayed.
+    /// How many blocks a synchronizer's block may be behind the round's tip before it counts as
+    /// stale. A replay further behind would hold every round if it went Delayed.
     max_missed_blocks: u64,
 }
 
@@ -270,6 +270,12 @@ fn blocks_behind_tip(block_history: &BlockHistory, block: &BlockHeader) -> u64 {
     block_history
         .latest()
         .map_or(0, |tip| tip.number.saturating_sub(block.number))
+}
+
+/// Returns true when `block` is more than `max_missed_blocks` behind the tip of `block_history`.
+/// A stream that far behind cannot catch up within one round.
+fn is_replaying(block_history: &BlockHistory, block: &BlockHeader, max_missed_blocks: u64) -> bool {
+    blocks_behind_tip(block_history, block) > max_missed_blocks
 }
 
 pub struct SynchronizerStream {
@@ -531,8 +537,7 @@ impl SynchronizerStream {
     /// Updates the synchronizer's state according to the position of the received block:
     /// - Next expected block -> Ready state
     /// - Latest/Delayed block -> Either Delayed or Stale (if no progress for `stale.threshold`)
-    /// - Latest/Delayed block on a Stale stream more than `stale.max_missed_blocks` behind the tip
-    ///   -> stays Stale
+    /// - Latest/Delayed block more than `stale.max_missed_blocks` behind the tip -> Stale
     /// - Advanced block -> Advanced state (block ahead of expected position)
     fn transition(
         &mut self,
@@ -553,12 +558,12 @@ impl SynchronizerStream {
                 self.state = SynchronizerState::Ready(block);
             }
             BlockPosition::Latest | BlockPosition::Delayed
-                if self.is_stale() &&
-                    blocks_behind_tip(block_history, &block) > stale.max_missed_blocks =>
+                if is_replaying(block_history, &block, stale.max_missed_blocks) =>
             {
-                // A stream replaying blocks this old would hold every round while Delayed, so it
-                // catches up in the stale pass instead.
-                debug!(%extractor_id, %block, "Stale synchronizer still replaying old blocks");
+                // A replaying stream sends a message every round, so the stale timeout never
+                // fires. While Delayed it would hold every round, so it catches up in the stale
+                // pass instead.
+                debug!(%extractor_id, %block, "Synchronizer replaying old blocks");
                 self.state = SynchronizerState::Stale(block);
             }
             BlockPosition::Latest | BlockPosition::Delayed => {
@@ -879,7 +884,15 @@ where
         // latest one
         for stream in sync_streams.iter_mut() {
             if let SynchronizerState::Ready(header) = stream.state.clone() {
-                if header.number < start_header.number {
+                if is_replaying(&block_history, &header, self.max_missed_blocks) {
+                    debug!(
+                        extractor_id=%stream.extractor_id,
+                        synchronizer_block=header.number,
+                        current_block=start_header.number,
+                        "Marking synchronizer as stale during initialization"
+                    );
+                    stream.state = SynchronizerState::Stale(header);
+                } else if header.number < start_header.number {
                     debug!(
                         extractor_id=%stream.extractor_id,
                         synchronizer_block=header.number,

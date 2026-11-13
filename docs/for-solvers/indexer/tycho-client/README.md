@@ -273,8 +273,8 @@ This struct contains metadata about the extractor's block synchronization state.
 
 * `Ready`: the extractor is in sync with the expected block
 * `Advanced`: the extractor is ahead of the expected block
-* `Delayed`: the extractor has fallen behind on recent blocks but is still active and trying to catch up
-* `Stale`: the extractor has made no progress for a significant amount of time and is flagged to be deactivated
+* `Delayed`: the extractor is behind on recent blocks, but no more than `max_missed_blocks`, and is still active and trying to catch up
+* `Stale`: the extractor has made no progress for a significant amount of time, or it is more than `max_missed_blocks` behind the latest block (for example while it replays old blocks). The feed does not wait for a stale extractor, but it still delivers its messages
 * `Ended`: the synchronizer has ended, usually due to a termination or an error
 
 **StateSyncMessage** (`state_msgs` )
