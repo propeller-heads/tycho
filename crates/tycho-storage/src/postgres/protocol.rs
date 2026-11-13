@@ -4591,7 +4591,7 @@ mod test {
             assert_eq!(sorted(first), vec!["pool_a", "pool_b"]);
             assert_eq!(second, vec!["pool_c"]);
             let paused = gw
-                .get_paused_components(&Chain::Ethereum, &mut conn)
+                .get_component_pauses(&Chain::Ethereum, &mut conn)
                 .await
                 .expect("reading pauses failed");
             assert_eq!(paused_ids(&paused), vec!["pool_a", "pool_b", "pool_c"]);
@@ -4674,7 +4674,7 @@ mod test {
                 .expect("unpause failed");
 
             let paused = gw
-                .get_paused_components(&Chain::Starknet, &mut conn)
+                .get_component_pauses(&Chain::Starknet, &mut conn)
                 .await
                 .expect("reading pauses failed");
             assert_eq!(paused_ids(&paused), vec!["pool_a"]);
@@ -4710,7 +4710,7 @@ mod test {
             assert_eq!(first, vec!["pool_a"]);
             assert!(second.is_empty());
             let paused = gw
-                .get_paused_components(&Chain::Ethereum, &mut conn)
+                .get_component_pauses(&Chain::Ethereum, &mut conn)
                 .await
                 .expect("reading pauses failed");
             assert_eq!(paused_ids(&paused), vec!["pool_b"]);
@@ -4778,14 +4778,14 @@ mod test {
 
             assert_eq!(paused, vec!["not_indexed"]);
             let stored = gw
-                .get_paused_components(&Chain::Ethereum, &mut conn)
+                .get_component_pauses(&Chain::Ethereum, &mut conn)
                 .await
                 .expect("reading pauses failed");
             assert_eq!(paused_ids(&stored), vec!["not_indexed"]);
         }
 
         #[tokio::test]
-        async fn test_get_paused_components_other_chain() {
+        async fn test_get_component_pauses_other_chain() {
             let mut conn = setup_db().await;
             let gw = setup_pause_gateway(&mut conn).await;
             gw.pause_components(&Chain::Starknet, SYSTEM, &[pause("pool_a", "r")], &mut conn)
@@ -4793,7 +4793,7 @@ mod test {
                 .expect("pause failed");
 
             let paused = gw
-                .get_paused_components(&Chain::Ethereum, &mut conn)
+                .get_component_pauses(&Chain::Ethereum, &mut conn)
                 .await
                 .expect("reading pauses failed");
 
