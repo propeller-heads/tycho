@@ -71,4 +71,11 @@ INSERT INTO trades (
      true, true, '0x01', 'v3_1', 'single', 'transfer_from',
      '0x01', '0x01', '0x01', '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
      '0xdddddddddddddddddddddddddddddddddddddddd', 1000000000000000000, 0,
-     0, 1, 0, 1, '{}', false, false, false, 4000000);
+     0, 1, 0, 1, '{}', false, false, false, 4000000),
+    -- a stable prices a 30-day-old trade whose out token Tycho knows (6 decimals) but has no
+    -- fresh price for: the out side still takes the price this trade implies
+    ('stale-out-implied', 'base', 1, now() - interval '30 days', '0x0d', 0, 0,
+     true, true, '0x01', 'v3_1', 'single', 'transfer_from',
+     '0x01', '0x01', '0x01', '0xfff1111111111111111111111111111111111111',
+     '0xcccccccccccccccccccccccccccccccccccccccc', 1000000000, 0,
+     0, 1, 0, 1, '{}', true, false, false, 500000000);

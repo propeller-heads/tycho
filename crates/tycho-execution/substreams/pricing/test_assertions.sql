@@ -69,6 +69,16 @@ BEGIN
         RAISE EXCEPTION 'base preferred pricing wrong: % %', v.volume_usd, v.price_source;
     END IF;
 
+    -- Decimals are token metadata, not part of a price: a token Tycho knows keeps them when its
+    -- price is stale, so a stable-valued trade of any age implies the other side's price.
+    -- 1000 USD for 500 units of a 6-decimal token is 2 USD each.
+    SELECT * INTO v FROM trades WHERE id = 'stale-out-implied';
+    IF v.volume_usd IS DISTINCT FROM 1000.0 OR v.price_source IS DISTINCT FROM 'in_stable'
+       OR v.decimals_out IS DISTINCT FROM 6 OR v.price_out_usd IS DISTINCT FROM 2.0 THEN
+        RAISE EXCEPTION 'a known token without a fresh price lost its decimals: % % % %',
+            v.volume_usd, v.price_source, v.decimals_out, v.price_out_usd;
+    END IF;
+
     -- A quote probe is priced like any other call that returned. Only trades_settled leaves it
     -- out, so quote activity stays readable in USD.
     IF (SELECT priced_at FROM trades WHERE id = 'discarded-call') IS NULL THEN

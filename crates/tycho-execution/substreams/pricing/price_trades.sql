@@ -12,6 +12,8 @@
 --   2. otherwise any side Tycho happens to price
 -- The other side's unit price is then implied from the trade itself, which is the only way the
 -- long tail gets a price at all: Tycho prices 29 tokens on unichain and 126 on arbitrum.
+-- Implying it needs only that side's decimals, which are token metadata: they come from Tycho's
+-- token table whether or not the token has a fresh price.
 --
 -- Age. Tycho keeps one current price per token, not a history. A stablecoin is worth 1 USD
 -- whenever the trade happened, so a stable-anchored trade is valued at any age. Every other basis
@@ -52,6 +54,23 @@ prices AS (
     UNION ALL
     SELECT '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', power(10::numeric, 18), 18
 ),
+-- Decimals of every token Tycho knows, priced or not, for the side whose price is implied. A
+-- preferred token's pinned decimals win, as they do in `valued`.
+known_decimals AS (
+    SELECT DISTINCT ON (token) token, decimals
+    FROM (
+        SELECT pt.address AS token, pt.decimals, 0 AS rank
+        FROM preferred_tokens pt
+        WHERE pt.chain = :'chain'
+        UNION ALL
+        SELECT '0x' || encode(a.address, 'hex'), t.decimals, 1
+        FROM :schema.token t
+        JOIN :schema.account a ON a.id = t.account_id
+        UNION ALL
+        SELECT '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 18, 0
+    ) k
+    ORDER BY token, rank
+),
 anchor AS (
     SELECT percentile_cont(0.5) WITHIN GROUP (
                ORDER BY p.price_raw / power(10::numeric, pt.decimals)
@@ -86,14 +105,18 @@ sided AS (
            t.block_time,
            t.amount_in,
            t.amount_out,
-           i.unit_usd AS in_unit, i.price_raw AS in_price_raw, i.decimals AS in_decimals,
+           i.unit_usd AS in_unit, i.price_raw AS in_price_raw,
+           COALESCE(i.decimals, di.decimals) AS in_decimals,
            i.preferred AS in_preferred, i.is_stable AS in_stable, i.priority AS in_priority,
-           o.unit_usd AS out_unit, o.price_raw AS out_price_raw, o.decimals AS out_decimals,
+           o.unit_usd AS out_unit, o.price_raw AS out_price_raw,
+           COALESCE(o.decimals, do_.decimals) AS out_decimals,
            o.preferred AS out_preferred, o.is_stable AS out_stable, o.priority AS out_priority,
            COALESCE(i.native_usd, o.native_usd) AS native_usd
     FROM trades t
     LEFT JOIN valued i ON i.token = t.token_in
     LEFT JOIN valued o ON o.token = t.token_out
+    LEFT JOIN known_decimals di ON di.token = t.token_in
+    LEFT JOIN known_decimals do_ ON do_.token = t.token_out
     WHERE t.priced_at IS NULL
       AND t.chain = :'chain'
       AND t.tx_success
