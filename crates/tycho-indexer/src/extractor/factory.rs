@@ -174,7 +174,7 @@ pub struct ExtractorFactory {
     token_pre_processor: EthereumTokenPreProcessor,
     rpc_client: EthereumRpcClient,
     database_insert_batch_size: usize,
-    partial_blocks: bool,
+    pub(super) partial_blocks: bool,
     runtime_handle: Option<Handle>,
     protocol_cache: ProtocolMemoryCache,
     chain_state: ChainState,

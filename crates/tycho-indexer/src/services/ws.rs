@@ -262,6 +262,11 @@ impl WsActor {
         // Add the subscription_id to the current tracing span recorded fields
         tracing::Span::current().record("subscription_id", subscription_id.to_string());
 
+        let send_partials = partial_blocks && message_sender.partial_blocks();
+        if partial_blocks && !send_partials {
+            info!(extractor_id = %extractor_id, "Extractor runs without partial blocks; sending full blocks");
+        }
+
         info!(extractor_id = %extractor_id, "Subscribing to extractor");
 
         debug!(actor_id = %self.id, "About to call message_sender.subscribe() asynchronously");
@@ -298,13 +303,13 @@ impl WsActor {
                             if item.revert {
                                 // For reverts
                                 // Exclude partials if the client requested full blocks
-                                if !partial_blocks && item.is_partial() {
+                                if !send_partials && item.is_partial() {
                                     continue;
                                 }
                             } else {
                                 // For new blocks
                                 // Only forward items matching the partial/full preference
-                                if partial_blocks != item.is_partial() {
+                                if send_partials != item.is_partial() {
                                     continue;
                                 }
                             }
@@ -685,12 +690,13 @@ mod tests {
     pub struct MyMessageSender {
         extractor_id: ExtractorIdentity,
         block_template: BlockAggregatedChanges,
+        partial_blocks: bool,
     }
 
     impl MyMessageSender {
         pub fn new(extractor_id: ExtractorIdentity) -> Self {
             let block_template = Self::default_block(&extractor_id.name);
-            Self { extractor_id, block_template }
+            Self { extractor_id, block_template, partial_blocks: false }
         }
 
         /// Creates a default `BlockAggregatedChanges` for testing purposes.
@@ -716,6 +722,11 @@ mod tests {
         /// Set a custom block template to send instead of the default.
         pub fn with_block(mut self, block: BlockAggregatedChanges) -> Self {
             self.block_template = block;
+            self
+        }
+
+        pub fn with_partial_blocks(mut self, partial_blocks: bool) -> Self {
+            self.partial_blocks = partial_blocks;
             self
         }
     }
@@ -753,6 +764,10 @@ mod tests {
             });
 
             Ok(rx)
+        }
+
+        fn partial_blocks(&self) -> bool {
+            self.partial_blocks
         }
     }
 
@@ -1225,6 +1240,10 @@ mod tests {
 
             Ok(rx)
         }
+
+        fn partial_blocks(&self) -> bool {
+            false
+        }
     }
 
     #[actix_rt::test]
@@ -1550,43 +1569,61 @@ mod tests {
             // Always return an error to simulate subscription failure
             Err(SendError(ControlMessage::Stop))
         }
+
+        fn partial_blocks(&self) -> bool {
+            false
+        }
     }
 
     /// Test for partial_blocks subscription filter.
     ///
-    /// Filter logic:
+    /// The filter applies to extractors with partial blocks. A partial subscription to an
+    /// extractor without partial blocks receives full blocks.
+    ///
+    /// Filter logic for extractors with partial blocks:
     /// - Non-reverts: only delivered when `sub_partial_blocks == is_partial`
     /// - Reverts:
     ///   - Partial subscribers (`send_partials: true`): receive ALL reverts
     ///   - Full block subscribers (`send_partials: false`): only receive full block reverts
     #[rstest]
     // Non-revert blocks: only received when subscription partial_blocks matches is_partial
-    #[case::full_block_want_full(false, false, false, true)]
-    #[case::full_block_want_partial(false, false, true, false)]
-    #[case::partial_block_want_full(true, false, false, false)]
-    #[case::partial_block_want_partial(true, false, true, true)]
+    #[case::full_block_want_full(false, false, false, true, true)]
+    #[case::full_block_want_partial(false, false, true, true, false)]
+    #[case::partial_block_want_full(true, false, false, true, false)]
+    #[case::partial_block_want_partial(true, false, true, true, true)]
     // Revert blocks: partial subscribers get all reverts, full subscribers only get full reverts
-    #[case::revert_full_want_full(false, true, false, true)]
-    #[case::revert_full_want_partial(false, true, true, true)]
-    #[case::revert_partial_want_full(true, true, false, false)]
-    #[case::revert_partial_want_partial(true, true, true, true)]
+    #[case::revert_full_want_full(false, true, false, true, true)]
+    #[case::revert_full_want_partial(false, true, true, true, true)]
+    #[case::revert_partial_want_full(true, true, false, true, false)]
+    #[case::revert_partial_want_partial(true, true, true, true, true)]
+    // Extractor without partial blocks: every subscription receives full blocks
+    #[case::no_partials_full_block_want_partial(false, false, true, false, true)]
+    #[case::no_partials_revert_full_want_partial(false, true, true, false, true)]
+    #[case::no_partials_full_block_want_full(false, false, false, false, true)]
     #[actix_rt::test]
     async fn test_partial_blocks_filter(
         #[case] block_is_partial: bool,
         #[case] block_revert: bool,
         #[case] sub_partial_blocks: bool,
+        #[case] extractor_partial_blocks: bool,
         #[case] should_receive: bool,
     ) {
         // Create extractor with unique name based on test parameters
-        let extractor_name =
-            format!("test_p{}_r{}_s{}", block_is_partial, block_revert, sub_partial_blocks);
+        let extractor_name = format!(
+            "test_p{}_r{}_s{}_e{}",
+            block_is_partial, block_revert, sub_partial_blocks, extractor_partial_blocks
+        );
         let extractor_id = ExtractorIdentity::new(Chain::Ethereum, &extractor_name);
 
         let mut block = MyMessageSender::default_block(&extractor_name);
         block.partial_block_index = if block_is_partial { Some(0) } else { None };
         block.revert = block_revert;
 
-        let message_sender = Arc::new(MyMessageSender::new(extractor_id.clone()).with_block(block));
+        let message_sender = Arc::new(
+            MyMessageSender::new(extractor_id.clone())
+                .with_block(block)
+                .with_partial_blocks(extractor_partial_blocks),
+        );
 
         let mut subscribers_map = HashMap::new();
         subscribers_map
@@ -1655,6 +1692,144 @@ mod tests {
         );
 
         // Clean up
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort close at the end of the test; the server may have closed first"
+        )]
+        let _ = connection
+            .send(Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() })))
+            .await;
+    }
+
+    /// A sender that sends a fixed list of blocks once, in order, and keeps the channel open.
+    pub struct ScriptedMessageSender {
+        partial_blocks: bool,
+        blocks: Vec<BlockAggregatedChanges>,
+    }
+
+    #[async_trait]
+    impl MessageSender for ScriptedMessageSender {
+        async fn subscribe(
+            &self,
+            _subscription_id: Uuid,
+            _user_identity: Option<String>,
+        ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+            let (tx, rx) = mpsc::channel::<DeltaCommand>(self.blocks.len().max(1));
+            let blocks = self.blocks.clone();
+            tokio::spawn(async move {
+                for block in blocks {
+                    if tx
+                        .send(DeltaCommand::Block(Arc::new(block)))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                tx.closed().await;
+            });
+            Ok(rx)
+        }
+
+        fn partial_blocks(&self) -> bool {
+            self.partial_blocks
+        }
+    }
+
+    /// What a subscriber receives, as (block number, partial_block_index, revert), from the
+    /// messages the runner sends for blocks 1 and 2 and a revert to block 1.
+    #[rstest]
+    #[case::with_partials_partial_sub(true, true, vec![(1, Some(0), false), (2, Some(0), false), (1, None, true)])]
+    #[case::with_partials_full_sub(true, false, vec![(1, None, false), (2, None, false), (1, None, true)])]
+    #[case::without_partials_partial_sub(false, true, vec![(1, None, false), (2, None, false), (1, None, true)])]
+    #[case::without_partials_full_sub(false, false, vec![(1, None, false), (2, None, false), (1, None, true)])]
+    #[actix_rt::test]
+    async fn test_partial_blocks_subscription_receives(
+        #[case] extractor_partial_blocks: bool,
+        #[case] sub_partial_blocks: bool,
+        #[case] expected: Vec<(u64, Option<u32>, bool)>,
+    ) {
+        let extractor_name =
+            format!("test_sequence_e{}_s{}", extractor_partial_blocks, sub_partial_blocks);
+        let extractor_id = ExtractorIdentity::new(Chain::Ethereum, &extractor_name);
+
+        let make_block = |number: u64, partial_block_index: Option<u32>, revert: bool| {
+            let mut block = MyMessageSender::default_block(&extractor_name);
+            block.block.number = number;
+            block.partial_block_index = partial_block_index;
+            block.revert = revert;
+            block
+        };
+        let blocks = if extractor_partial_blocks {
+            vec![
+                make_block(1, Some(0), false),
+                make_block(1, None, false),
+                make_block(2, Some(0), false),
+                make_block(2, None, false),
+                make_block(1, None, true),
+            ]
+        } else {
+            vec![make_block(1, None, false), make_block(2, None, false), make_block(1, None, true)]
+        };
+        let message_sender =
+            Arc::new(ScriptedMessageSender { partial_blocks: extractor_partial_blocks, blocks });
+
+        let mut subscribers_map = HashMap::new();
+        subscribers_map
+            .insert(extractor_id.clone(), message_sender as Arc<dyn MessageSender + Send + Sync>);
+
+        let app_state = web::Data::new(WsData::new(subscribers_map));
+
+        let server = start_with(
+            TestServerConfig::default().client_request_timeout(Duration::from_secs(5)),
+            move || {
+                App::new()
+                    .wrap(RequestTracing::new())
+                    .app_data(app_state.clone())
+                    .service(web::resource("/ws/").route(web::get().to(WsActor::ws_index)))
+            },
+        );
+
+        let url = server
+            .url("/ws/")
+            .replacen("http://", "ws://", 1);
+
+        let (mut connection, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("Failed to connect");
+
+        let action = Command::Subscribe {
+            extractor_id: extractor_id.clone().into(),
+            include_state: true,
+            compression: false,
+            partial_blocks: sub_partial_blocks,
+        };
+        connection
+            .send(Message::Text(serde_json::to_string(&action).unwrap()))
+            .await
+            .expect("Failed to send subscribe message");
+
+        wait_for_new_subscription(&mut connection)
+            .await
+            .expect("Failed to get subscription confirmation");
+
+        let mut received = Vec::new();
+        loop {
+            match timeout(Duration::from_millis(500), connection.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    let DummyDelta { deltas, .. } = serde_json::from_str::<DummyDelta>(&text)
+                        .unwrap_or_else(|_| panic!("Unexpected text message: {text}"));
+                    received.push((deltas.block.number, deltas.partial_block_index, deltas.revert));
+                }
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(e))) => panic!("Connection error: {e}"),
+                Ok(None) => panic!("Connection closed"),
+                Err(_) => break,
+            }
+        }
+
+        assert_eq!(received, expected);
+
         #[expect(
             clippy::let_underscore_must_use,
             reason = "best-effort close at the end of the test; the server may have closed first"
@@ -1752,6 +1927,10 @@ mod tests {
             let (_tx, rx) = mpsc::channel::<DeltaCommand>(1);
             // _tx is dropped here, closing the channel immediately.
             Ok(rx)
+        }
+
+        fn partial_blocks(&self) -> bool {
+            false
         }
     }
 
@@ -1887,6 +2066,10 @@ mod tests {
                 tokio::time::sleep(Duration::from_secs(10)).await;
             });
             Ok(rx)
+        }
+
+        fn partial_blocks(&self) -> bool {
+            false
         }
     }
 

@@ -105,7 +105,7 @@ impl ExtractorSupervisor {
 
     /// Returns an [`ExtractorHandle`] that can be used to subscribe or stop this extractor.
     pub fn handle(&self) -> ExtractorHandle {
-        ExtractorHandle::new(self.id.clone(), self.ctrl_tx.clone())
+        ExtractorHandle::new(self.id.clone(), self.ctrl_tx.clone(), self.factory.partial_blocks)
     }
 
     /// Runs the supervision loop. Returns `Ok` when the extractor exited gracefully or was
