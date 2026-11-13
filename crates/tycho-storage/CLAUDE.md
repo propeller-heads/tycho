@@ -24,7 +24,7 @@ postgres/
 ├── schema.rs           — auto-generated Diesel table! macros
 └── instance/           — per-instance `tycho` schema, not yet read or written by the public gateways
     ├── mod.rs          — `InstanceId` newtype; joins with the shared `public` tables
-    ├── active.rs       — the active instance of one protocol (a lookup) and a SQL subselect for all active instances, read from `protocol_system.active_instance_id`
+    ├── active.rs       — the active instance of one protocol and of all protocols, looked up once per read from `protocol_system.active_instance_id`
     ├── gateway.rs      — PostgresGatewayNew, inner gateway on the instance tables (renamed to PostgresGateway at cut-over)
     ├── read/           — its read methods, one file per domain
     ├── orm.rs          — Diesel row and insert structs for every `tycho` table

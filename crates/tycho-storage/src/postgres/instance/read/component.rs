@@ -308,8 +308,7 @@ async fn load_active_components(
     pagination_params: Option<&PaginationParams>,
     conn: &mut AsyncPgConnection,
 ) -> Result<(Vec<(iorm::ProtocolComponent, String)>, i64), StorageError> {
-    // The filter's subselect reads `protocol_system` too; Diesel needs the outer one aliased.
-    let system = diesel::alias!(protocol_system as system);
+    let instances = active_instance_ids(conn).await?;
     let filtered = || {
         let mut query = protocol_component::table
             .inner_join(
@@ -317,16 +316,15 @@ async fn load_active_components(
                     .on(protocol_component::instance_id.eq(protocol_instance::id)),
             )
             .inner_join(
-                system.on(system
-                    .field(protocol_system::id)
-                    .eq(protocol_instance::protocol_system_id)),
+                protocol_system::table
+                    .on(protocol_system::id.eq(protocol_instance::protocol_system_id)),
             )
             .left_join(
                 component_tvl::table.on(component_tvl::instance_id
                     .eq(protocol_component::instance_id)
                     .and(component_tvl::protocol_component_id.eq(protocol_component::id))),
             )
-            .filter(protocol_component::instance_id.eq_any(active_instance_ids()))
+            .filter(protocol_component::instance_id.eq_any(&instances))
             .into_boxed::<Pg>();
         if let Some(min_tvl) = min_tvl {
             query = query.filter(component_tvl::tvl.gt(min_tvl));
@@ -340,8 +338,8 @@ async fn load_active_components(
         .await
         .map_err(PostgresError::from)?;
 
-    let mut query = filtered()
-        .select((iorm::ProtocolComponent::as_select(), system.field(protocol_system::name)));
+    let mut query =
+        filtered().select((iorm::ProtocolComponent::as_select(), protocol_system::name));
     if let Some(pagination) = pagination_params {
         query = query
             .order_by((protocol_component::instance_id, protocol_component::id))

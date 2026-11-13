@@ -2,10 +2,14 @@
 //!
 //! Readers see the instance that `public.protocol_system.active_instance_id` points to.
 //!
-//! - one protocol: look up the instance once per read with [`active_instance`] and filter
-//!   `instance_id.eq(id)`. Postgres prunes a subselect only during execution, so with one it would
-//!   plan and lock every leaf of each table.
-//! - all protocols: `instance_id.eq_any(active_instance_ids())`.
+//! Look up the instances once per read and filter every query of the read on the bound ids:
+//!
+//! - one protocol: [`active_instance`], then `instance_id.eq(id)`.
+//! - all protocols: [`active_instance_ids`], then `instance_id.eq_any(&ids)`.
+//!
+//! Postgres prunes a subselect only during execution, so with one it would plan and lock every
+//! leaf of each table. Each statement also takes a new snapshot, so a subselect in each query of a
+//! read could see a different pointer.
 //!
 //! A protocol with no active instance yields no rows, and so does an unknown protocol name:
 //! check the name first where it must exist.
@@ -34,23 +38,25 @@ pub async fn active_instance(
     Ok(id.flatten())
 }
 
-/// The active instance of every protocol system that has one, as a subselect.
+/// The active instance of every protocol system that has one.
 ///
 /// Instances no protocol system points to are absent, even when `ready`. Empty if no protocol
-/// system has an active instance. Loads as `Vec<InstanceId>`.
-#[diesel::dsl::auto_type]
-pub fn active_instance_ids() -> _ {
-    protocol_system::table
+/// system has an active instance.
+pub async fn active_instance_ids(
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<InstanceId>, StorageError> {
+    Ok(protocol_system::table
         .filter(protocol_system::active_instance_id.is_not_null())
         .select(protocol_system::active_instance_id.assume_not_null())
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::postgres::{
-        db_fixtures, instance::schema::tycho::protocol_instance, testing::instance_test_connection,
-    };
+    use crate::postgres::{db_fixtures, testing::instance_test_connection};
 
     struct Setup {
         curve_system_id: i64,
@@ -126,10 +132,9 @@ mod tests {
         let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
 
-        let mut ids: Vec<InstanceId> = active_instance_ids()
-            .load(&mut conn)
+        let mut ids = active_instance_ids(&mut conn)
             .await
-            .expect("loading the active instances failed");
+            .unwrap();
         ids.sort();
 
         let mut expected = vec![setup.uniswap_v4, setup.curve];
@@ -138,26 +143,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_active_instance_filters_compose_on_instance_tables() {
+    async fn test_active_instance_ids_is_empty_without_pointers() {
         let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
-
-        let active: i64 = protocol_instance::table
-            .filter(protocol_instance::id.eq_any(active_instance_ids()))
-            .count()
-            .get_result(&mut conn)
-            .await
-            .expect("counting the active instances failed");
-        assert_eq!(active, 2);
-
         db_fixtures::set_active_instance(&mut conn, setup.curve_system_id, None).await;
         db_fixtures::set_active_instance(&mut conn, setup.uniswap_v4_system_id, None).await;
-        let active: i64 = protocol_instance::table
-            .filter(protocol_instance::id.eq_any(active_instance_ids()))
-            .count()
-            .get_result(&mut conn)
-            .await
-            .expect("counting the active instances failed");
-        assert_eq!(active, 0);
+
+        assert_eq!(
+            active_instance_ids(&mut conn)
+                .await
+                .unwrap(),
+            Vec::new()
+        );
     }
 }
