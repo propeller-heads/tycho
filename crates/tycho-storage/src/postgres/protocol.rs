@@ -4505,22 +4505,11 @@ mod test {
         const SYSTEM: &str = "ambient";
         const OTHER_SYSTEM: &str = "zigzag";
 
+        /// Indexed component of `SYSTEM` on Ethereum, created by `setup_data`.
+        const INDEXED: &str = "state1";
+
         async fn setup_pause_gateway(conn: &mut AsyncPgConnection) -> EVMGateway {
-            // The gateway loads each chain's native token when it is built.
-            for chain in ["ethereum", "starknet"] {
-                let chain_id = db_fixtures::insert_chain(conn, chain).await;
-                db_fixtures::insert_token(
-                    conn,
-                    chain_id,
-                    "0000000000000000000000000000000000000000",
-                    "ETH",
-                    18,
-                    Some(100),
-                )
-                .await;
-            }
-            db_fixtures::insert_protocol_system(conn, SYSTEM.to_owned()).await;
-            db_fixtures::insert_protocol_system(conn, OTHER_SYSTEM.to_owned()).await;
+            setup_data(conn).await;
             EVMGateway::from_connection(conn).await
         }
 
@@ -4540,7 +4529,7 @@ mod test {
             }
         }
 
-        /// All rows stored for a component, open or closed, as `unpaused_at` values.
+        /// The `unpaused_at` of every row stored for a component, open or closed, oldest first.
         async fn stored_rows(conn: &mut AsyncPgConnection, id: &str) -> Vec<Option<NaiveDateTime>> {
             use schema::component_pause::dsl as cp;
             cp::component_pause
@@ -4559,21 +4548,16 @@ mod test {
                 .collect()
         }
 
-        fn sorted(mut ids: Vec<ComponentId>) -> Vec<ComponentId> {
-            ids.sort();
-            ids
-        }
-
         #[tokio::test]
         async fn test_pause_components_twice() {
             let mut conn = setup_db().await;
             let gw = setup_pause_gateway(&mut conn).await;
 
-            let first = gw
+            let mut first = gw
                 .pause_components(
                     &Chain::Ethereum,
                     SYSTEM,
-                    &[pause("pool_a", "first"), pause("pool_b", "first")],
+                    &[pause(INDEXED, "first"), pause("pool_b", "first")],
                     &mut conn,
                 )
                 .await
@@ -4582,26 +4566,27 @@ mod test {
                 .pause_components(
                     &Chain::Ethereum,
                     SYSTEM,
-                    &[pause("pool_a", "second"), pause("pool_c", "second")],
+                    &[pause(INDEXED, "second"), pause("pool_c", "second")],
                     &mut conn,
                 )
                 .await
                 .expect("second pause failed");
 
-            assert_eq!(sorted(first), vec!["pool_a", "pool_b"]);
+            first.sort();
+            assert_eq!(first, vec!["pool_b", INDEXED]);
             assert_eq!(second, vec!["pool_c"]);
             let paused = gw
                 .get_component_pauses(&Chain::Ethereum, &mut conn)
                 .await
                 .expect("reading pauses failed");
-            assert_eq!(paused_ids(&paused), vec!["pool_a", "pool_b", "pool_c"]);
-            assert_eq!(paused[0].protocol_system, SYSTEM);
-            assert_eq!(paused[0].record, pause("pool_a", "first"));
-            assert_eq!(stored_rows(&mut conn, "pool_a").await, vec![None]);
+            assert_eq!(paused_ids(&paused), vec!["pool_b", "pool_c", INDEXED]);
+            assert_eq!(paused[2].protocol_system, SYSTEM);
+            assert_eq!(paused[2].record, pause(INDEXED, "first"));
+            assert_eq!(stored_rows(&mut conn, INDEXED).await, vec![None]);
         }
 
         #[tokio::test]
-        async fn test_pause_components_duplicate_ids_in_one_call() {
+        async fn test_pause_components_duplicate_ids() {
             let mut conn = setup_db().await;
             let gw = setup_pause_gateway(&mut conn).await;
 
@@ -4767,7 +4752,7 @@ mod test {
         }
 
         #[tokio::test]
-        async fn test_pause_unknown_component() {
+        async fn test_pause_components_not_indexed() {
             let mut conn = setup_db().await;
             let gw = setup_pause_gateway(&mut conn).await;
 
