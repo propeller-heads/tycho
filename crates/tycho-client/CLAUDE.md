@@ -51,12 +51,17 @@ TychoStreamBuilder (stream.rs)
    snapshot. Results of tasks spawned before the backoff started neither reset nor lengthen it.
    When `partial_blocks` is enabled, brand-new components are held in `Deferred` state until the
    first message of the next block, then promoted to `InFlight`, or to `Backoff` while one runs.
-3. `BlockSynchronizer` waits for all active synchronizers, then emits a `FeedMessage` per block
-4. Synchronizers classified as `Started | Ready | Delayed | Stale | Advanced | Ended`; stale ones are polled after the active ones:
-   each round they only consume what queued while the active ones advanced, so a stale synchronizer
-   cannot hold the round to its `block_time` wait. They wait only when no synchronizer is active.
-   A stale synchronizer replaying blocks more than `max_missed_blocks` behind the tip stays stale,
-   so the replay never holds a round; it leaves stale once it is within that distance.
+3. `BlockSynchronizer` startup waits up to `startup_timeout` for the first message of any
+   synchronizer, then `startup_grace` (default 60 s) for the rest. Those without a first message
+   stay `Started` and join with their snapshot in the round it arrives.
+4. Each round emits one `FeedMessage`, then waits on the Ready and Delayed synchronizers (all
+   non-ended ones if none is) and closes `round_grace` (half `block_time`, at least 500 ms) after
+   the first block above the tip, or at `block_time + latency_buffer`. A drain phase then reads
+   what every synchronizer queued up to the next expected block, without waiting, and merges it.
+   A synchronizer that misses the round is `Delayed`; it never holds the round for the others.
+5. Synchronizers classified as `Started | Ready | Delayed | Stale | Advanced | Ended`. A stale
+   synchronizer replaying blocks more than `max_missed_blocks` behind the tip stays stale; it
+   leaves stale once it is within that distance.
 
 ## CLI
 

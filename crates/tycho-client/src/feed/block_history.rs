@@ -29,7 +29,7 @@ pub struct BlockHistory {
     size: usize,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BlockPosition {
     /// The next expected block
     NextExpected,
@@ -41,6 +41,19 @@ pub enum BlockPosition {
     Delayed,
     /// A detached block with a height above NextExpected
     Advanced,
+}
+
+impl BlockPosition {
+    /// True for a block above the history's tip: the next expected block, the next partial, or
+    /// an advanced block.
+    pub fn is_new_tip(self) -> bool {
+        match self {
+            BlockPosition::NextExpected | BlockPosition::NextPartial | BlockPosition::Advanced => {
+                true
+            }
+            BlockPosition::Latest | BlockPosition::Delayed => false,
+        }
+    }
 }
 
 /// BlockHistory

@@ -263,6 +263,8 @@ Tycho emits data in an easy-to-read JSON format. Get granular updates on each bl
 
 Each message includes block details to help you stay on track with the latest block data.
 
+The client emits one message per block and does not wait for a slow extractor. An extractor that misses a block shows as `Delayed`, and a later message carries its changes, merged. Use `sync_states` to tell which protocols are current: only a `Ready` extractor's state is at the message's block.
+
 **FeedMessage**
 
 The main outer message type. It contains both the individual SynchronizerState (one per extractor) and the StateSyncMessage (also one per extractor). Each extractor is supposed to emit one message per block (even if no changes happened in that block) and metadata about the extractor's block synchronization state. The latter allows consumers to handle delayed extractors gracefully.
@@ -271,6 +273,7 @@ The main outer message type. It contains both the individual SynchronizerState (
 
 This struct contains metadata about the extractor's block synchronization state. It allows consumers to handle delayed extractors gracefully. Extractors can have any of the following states:
 
+* `Started`: the extractor has not delivered its first message yet. Its first message, with the snapshot, arrives in a later message.
 * `Ready`: the extractor is in sync with the expected block
 * `Advanced`: the extractor is ahead of the expected block
 * `Delayed`: the extractor has fallen behind on recent blocks but is still active and trying to catch up
