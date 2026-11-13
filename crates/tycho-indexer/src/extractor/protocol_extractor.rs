@@ -1233,7 +1233,7 @@ where
         // hash-miss paths handled below. Safe today because DCI cannot run on
         // partial-block chains (its block-layer validation needs parent-hash linkage,
         // which ephemeral partial hashes break), so a DCI extractor never reaches those
-        // paths. Revisit when DCI supports a flashblocks chain (e.g. Base).
+        // paths. Revisit when DCI supports a partial-block chain.
         if let Some(dci_plugin) = &self.dci_plugin {
             dci_plugin
                 .lock()

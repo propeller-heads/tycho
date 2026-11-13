@@ -2,8 +2,8 @@
 
 Indexes LunarBase Prop AMM state on Base and BNB Smart Chain into Tycho-compatible
 `BlockChanges`. Both manifests use `base_lunarbase.wasm`. Changes carry absolute
-values at transaction level, including Base Flashblocks, so consumers can apply
-partial-block updates and Substreams rollback messages consistently.
+values at transaction level, so consumers can apply partial-block updates and
+Substreams rollback messages consistently.
 
 ## Configured pools
 

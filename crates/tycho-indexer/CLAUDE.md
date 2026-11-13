@@ -88,7 +88,7 @@ extension `E`. It is the single point that turns raw Substreams messages into ty
 
 ### Partial-block path
 
-Some chains (e.g. Base) emit multiple partial messages per block. While
+Some chains emit multiple partial messages per block. While
 `partial_block_index.is_some()`, each message is merged into `PartialBlockBuffer` (a single
 `Option<BlockChanges>`). An aggregated message is broadcast immediately for WebSocket consumers,
 but the block is **not** inserted into `ReorgBuffer` or written to DB until the full-block signal
