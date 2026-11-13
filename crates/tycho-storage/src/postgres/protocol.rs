@@ -4620,6 +4620,24 @@ mod test {
         }
 
         #[tokio::test]
+        async fn test_pause_components_over_parameter_limit() {
+            let mut conn = setup_db().await;
+            let gw = setup_pause_gateway(&mut conn).await;
+            // More pauses than one statement can bind, so only a batched insert succeeds.
+            let count = usize::from(u16::MAX) / orm::NewComponentPause::FIELD_COUNT + 1;
+            let pauses: Vec<_> = (0..count)
+                .map(|i| pause(&format!("pool_{i}"), "r"))
+                .collect();
+
+            let paused = gw
+                .pause_components(&Chain::Ethereum, SYSTEM, &pauses, &mut conn)
+                .await
+                .expect("pause failed");
+
+            assert_eq!(paused.len(), count);
+        }
+
+        #[tokio::test]
         async fn test_pause_components_other_system() {
             let mut conn = setup_db().await;
             let gw = setup_pause_gateway(&mut conn).await;
