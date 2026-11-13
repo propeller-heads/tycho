@@ -1919,7 +1919,7 @@ pub struct OpenComponentPause {
     pub reason: Option<String>,
     pub actor: Option<String>,
     pub evidence_url: Option<String>,
-    pub valid_from: NaiveDateTime,
+    pub paused_at: NaiveDateTime,
 }
 
 #[derive(Debug, DbEnum, Clone, PartialEq, Eq, Hash)]

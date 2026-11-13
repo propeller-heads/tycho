@@ -1,4 +1,4 @@
--- Admin pauses of protocol components. A pause is closed by setting valid_to, never deleted,
+-- Admin pauses of protocol components. A pause is closed by setting unpaused_at, never deleted,
 -- so closed rows keep the history of every pause.
 CREATE TABLE IF NOT EXISTS component_pause (
     id                 BIGSERIAL PRIMARY KEY,
@@ -10,8 +10,8 @@ CREATE TABLE IF NOT EXISTS component_pause (
     reason             TEXT,
     actor              TEXT,
     evidence_url       TEXT,
-    valid_from         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    valid_to           TIMESTAMPTZ,
+    paused_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    unpaused_at        TIMESTAMPTZ,
     inserted_ts        TIMESTAMPTZ NOT NULL DEFAULT now(),
     modified_ts        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS component_pause (
 -- system is not part of the key.
 CREATE UNIQUE INDEX IF NOT EXISTS component_pause_open_idx
     ON component_pause (chain_id, component_id)
-    WHERE valid_to IS NULL;
+    WHERE unpaused_at IS NULL;
 
 CREATE TRIGGER update_modtime_component_pause
     BEFORE UPDATE ON component_pause

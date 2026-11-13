@@ -2083,8 +2083,8 @@ impl PostgresGateway {
         diesel::update(cp::component_pause)
             .filter(cp::chain_id.eq(chain_id))
             .filter(cp::component_id.eq_any(component_ids))
-            .filter(cp::valid_to.is_null())
-            .set(cp::valid_to.eq(diesel::dsl::now))
+            .filter(cp::unpaused_at.is_null())
+            .set(cp::unpaused_at.eq(diesel::dsl::now))
             .returning(cp::component_id)
             .get_results(conn)
             .await
@@ -2105,7 +2105,7 @@ impl PostgresGateway {
         let rows: Vec<orm::OpenComponentPause> = cp::component_pause
             .inner_join(ps::protocol_system)
             .filter(cp::chain_id.eq(chain_id))
-            .filter(cp::valid_to.is_null())
+            .filter(cp::unpaused_at.is_null())
             .order_by((ps::name, cp::component_id))
             .select((
                 ps::name,
@@ -2113,7 +2113,7 @@ impl PostgresGateway {
                 cp::reason,
                 cp::actor,
                 cp::evidence_url,
-                cp::valid_from,
+                cp::paused_at,
             ))
             .load(conn)
             .await
@@ -2131,7 +2131,7 @@ impl PostgresGateway {
                     actor: row.actor,
                     evidence_url: row.evidence_url,
                 },
-                paused_since: row.valid_from,
+                paused_since: row.paused_at,
             })
             .collect())
     }

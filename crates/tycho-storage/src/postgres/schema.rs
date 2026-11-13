@@ -181,8 +181,8 @@ diesel::table! {
         reason -> Nullable<Text>,
         actor -> Nullable<Text>,
         evidence_url -> Nullable<Text>,
-        valid_from -> Timestamptz,
-        valid_to -> Nullable<Timestamptz>,
+        paused_at -> Timestamptz,
+        unpaused_at -> Nullable<Timestamptz>,
         inserted_ts -> Timestamptz,
         modified_ts -> Timestamptz,
     }
