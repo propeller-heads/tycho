@@ -2,19 +2,21 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     io::Read,
+    str::FromStr,
 };
 
 use colored::Colorize;
+use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, WrapErr};
 use serde::{
     de::{self, Visitor},
-    Deserialize, Deserializer, Serialize, Serializer,
+    Deserialize, Deserializer, Serialize,
 };
 use similar::{ChangeTag, TextDiff};
 use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
 /// Represents a ProtocolComponent with its main attributes
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ProtocolComponentExpectation {
     pub id: String,
     pub tokens: Vec<Bytes>,
@@ -24,13 +26,16 @@ pub struct ProtocolComponentExpectation {
 }
 
 /// Represents a ProtocolComponent with test configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(from = "ExpectedComponentEntry")]
 pub struct ProtocolComponentWithTestConfig {
     #[serde(flatten)]
     pub base: ProtocolComponentExpectation,
     pub skip_simulation: Skip,
     pub skip_execution: Skip,
+    /// What the component's limits are, overriding the package's
+    /// [`IntegrationTestsConfig::limits`].
+    pub limits: Option<LimitsDeclaration>,
 }
 
 /// An `expected_components` entry as written in the yaml, with every key at one level.
@@ -48,6 +53,8 @@ struct ExpectedComponentEntry {
     skip_simulation: Skip,
     #[serde(default)]
     skip_execution: Skip,
+    #[serde(default)]
+    limits: Option<LimitsDeclaration>,
 }
 
 impl ProtocolComponentWithTestConfig {
@@ -69,11 +76,13 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
             creation_tx,
             skip_simulation,
             skip_execution,
+            limits,
         } = entry;
         Self {
             base: ProtocolComponentExpectation { id, tokens, static_attributes, creation_tx },
             skip_simulation,
             skip_execution,
+            limits,
         }
     }
 }
@@ -152,16 +161,6 @@ impl<'de> Deserialize<'de> for Skip {
         }
 
         deserializer.deserialize_any(SkipVisitor)
-    }
-}
-
-impl Serialize for Skip {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Skip::No => serializer.serialize_bool(false),
-            Skip::Bool(skipped) => serializer.serialize_bool(*skipped),
-            Skip::Reason(reason) => serializer.serialize_str(reason),
-        }
     }
 }
 
@@ -259,8 +258,195 @@ impl ProtocolComponentExpectation {
     }
 }
 
+/// What kind of bound a direction's `get_limits` reports, which decides how strict mode tests it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LimitKind {
+    Hard,
+    Soft,
+    UnderCap,
+}
+
+impl fmt::Display for LimitKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            LimitKind::Hard => "hard",
+            LimitKind::Soft => "soft",
+            LimitKind::UnderCap => "under_cap",
+        })
+    }
+}
+
+/// What one direction's limit is. Every kind must be quotable and executable at the limit itself.
+///
+/// ```yaml
+/// {kind: hard}
+/// {kind: hard, rounding: 1}
+/// {kind: soft, reason: "constant product: any input trades, at a worse price"}
+/// {kind: under_cap, reason: "a keeper-set rate we do not index; gives up to 2% of the cap"}
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Limits {
+    /// The venue rejects any input above its bound (a vault cap, a redemption limit, the end of
+    /// the liquidity range), and the limit is that bound, or below it by at most `rounding` units
+    /// where `get_limits` derives it with a rounding division, such as an input from an
+    /// output-side bound. Past the bound, `get_amount_out` must error and execution must revert.
+    Hard {
+        #[serde(default)]
+        rounding: u64,
+    },
+    /// The venue has no bound on the input, so the limit is a recommended size, as the
+    /// `ProtocolSim::get_limits` documentation allows. The reason names the code that shows it.
+    /// Twice the limit must still quote.
+    Soft { reason: String },
+    /// The venue has a bound, and the limit stays below it on purpose because the exact bound
+    /// cannot be derived. The reason shows why, and what capacity the limit gives up. One unit
+    /// past the limit must still quote and execute.
+    UnderCap { reason: String },
+}
+
+impl Limits {
+    pub fn kind(&self) -> LimitKind {
+        match self {
+            Limits::Hard { .. } => LimitKind::Hard,
+            Limits::Soft { .. } => LimitKind::Soft,
+            Limits::UnderCap { .. } => LimitKind::UnderCap,
+        }
+    }
+
+    /// The declared reason, for the kinds that require one.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Limits::Hard { .. } => None,
+            Limits::Soft { reason } | Limits::UnderCap { reason } => Some(reason),
+        }
+    }
+}
+
+/// Which `limits` declaration a direction's limit comes from, most specific first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclaredBy {
+    /// The component's entry for the direction.
+    Component,
+    /// The component's `default`, or its one declaration for every direction.
+    ComponentDefault,
+    /// The package's entry for the direction.
+    Package,
+    /// The package's `default`, or its one declaration for every direction.
+    PackageDefault,
+}
+
+/// A swap direction, as a `limits` declaration keys it: `"0x<token in>->0x<token out>"`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Direction {
+    pub token_in: Bytes,
+    pub token_out: Bytes,
+}
+
+impl FromStr for Direction {
+    type Err = String;
+
+    fn from_str(key: &str) -> Result<Self, Self::Err> {
+        let (token_in, token_out) = key.split_once("->").ok_or_else(|| {
+            format!(
+                "`{key}` is not a direction: expected `default` or `0x<token in>->0x<token out>`"
+            )
+        })?;
+        let parse = |address: &str| {
+            Bytes::from_str(address.trim())
+                .map_err(|e| format!("`{key}`: `{}` is not an address: {e}", address.trim()))
+        };
+        let direction = Direction { token_in: parse(token_in)?, token_out: parse(token_out)? };
+        if direction.token_in == direction.token_out {
+            return Err(format!("`{key}` sells and buys the same token"));
+        }
+        Ok(direction)
+    }
+}
+
+impl fmt::Display for Direction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}->{}", self.token_in, self.token_out)
+    }
+}
+
+/// The `limits` of a package or a component: one [`Limits`] for every direction, or one per
+/// direction keyed by token address, with an optional `default` for the rest.
+///
+/// ```yaml
+/// limits: {kind: hard}
+/// limits:
+///   default: {kind: soft, reason: "..."}
+///   "0x<usdc>->0x<susdc>": {kind: hard}
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LimitsDeclaration {
+    /// The limit of every direction without its own entry.
+    default: Option<Limits>,
+    directions: HashMap<Direction, Limits>,
+}
+
+impl LimitsDeclaration {
+    /// Every declaration with its key, `default` first, then the directions in order.
+    fn entries(&self) -> Vec<(String, &Limits)> {
+        let mut entries: Vec<(String, &Limits)> = self
+            .default
+            .iter()
+            .map(|limits| ("default".to_string(), limits))
+            .collect();
+        let mut directions: Vec<_> = self.directions.iter().collect();
+        directions.sort_by(|a, b| a.0.cmp(b.0));
+        entries.extend(
+            directions
+                .into_iter()
+                .map(|(direction, limits)| (direction.to_string(), limits)),
+        );
+        entries
+    }
+}
+
+impl<'de> Deserialize<'de> for LimitsDeclaration {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let parse = |key: &str, value| {
+            serde_yaml::from_value::<Limits>(value)
+                .map_err(|e| de::Error::custom(format!("limits `{key}`: {e}")))
+        };
+        let serde_yaml::Value::Mapping(map) = serde_yaml::Value::deserialize(deserializer)? else {
+            return Err(de::Error::custom(
+                "`limits` is `{kind: ...}` or a map of `default` and directions to `{kind: ...}`",
+            ));
+        };
+        if map.contains_key("kind") {
+            return serde_yaml::from_value(serde_yaml::Value::Mapping(map))
+                .map(|limits| Self { default: Some(limits), directions: HashMap::new() })
+                .map_err(|e| de::Error::custom(format!("limits: {e}")));
+        }
+        let mut declaration = Self::default();
+        for (key, limits) in map {
+            let serde_yaml::Value::String(key) = key else {
+                return Err(de::Error::custom("a `limits` key is not a string"));
+            };
+            if key == "default" {
+                declaration.default = Some(parse(&key, limits)?);
+            } else {
+                let direction = Direction::from_str(&key).map_err(de::Error::custom)?;
+                // Keys that differ only in case or spacing are one direction.
+                if declaration
+                    .directions
+                    .insert(direction.clone(), parse(&key, limits)?)
+                    .is_some()
+                {
+                    return Err(de::Error::custom(format!("limits: {direction} is declared twice")));
+                }
+            }
+        }
+        Ok(declaration)
+    }
+}
+
 /// Configuration for an individual test
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct IntegrationTest {
     pub name: String,
     pub start_block: u64,
@@ -286,7 +472,7 @@ pub enum Harness {
 }
 
 /// Main integration test configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct IntegrationTestsConfig {
     #[serde(default)]
     pub harness: Harness,
@@ -297,6 +483,10 @@ pub struct IntegrationTestsConfig {
     pub initialized_accounts: Option<Vec<String>>,
     #[serde(default)]
     pub skip_balance_check: Skip,
+    /// What the components' limits are, unless a component declares its own. Strict mode requires
+    /// a declaration for every direction of every expected component, here or on the component.
+    #[serde(default)]
+    pub limits: Option<LimitsDeclaration>,
     pub protocol_type_names: Vec<String>,
     pub protocol_system: String,
     pub module_name: Option<String>,
@@ -309,7 +499,9 @@ impl IntegrationTestsConfig {
     /// Errors when the yaml does not parse, or a skip is an empty string or reads as yes or no. In
     /// strict mode it also errors, listing every problem at once, on keys the runner does not read
     /// and on skips written as `true` or `false` or that can have no effect. In legacy mode
-    /// unknown keys are a warning, and the package keeps running as before.
+    /// unknown keys are a warning, and the package keeps running as before. In both modes a
+    /// `limits` declaration must have the fields its kind requires, and in strict mode every
+    /// direction of every expected component needs one.
     pub fn from_yaml(reader: impl Read, source: &str) -> miette::Result<Self> {
         let mut unknown_keys = Vec::new();
         let config: Self =
@@ -328,13 +520,12 @@ impl IntegrationTestsConfig {
                         unknown_keys.join(", ")
                     ));
                 }
-                if problems.is_empty() {
-                    return Ok(config);
+                if !problems.is_empty() {
+                    return Err(miette!(
+                        "{source} declares `harness: strict`, but has {}.",
+                        problems.join("; ")
+                    ));
                 }
-                Err(miette!(
-                    "{source} declares `harness: strict`, but has {}.",
-                    problems.join("; ")
-                ))
             }
             Harness::Legacy => {
                 if !unknown_keys.is_empty() {
@@ -343,9 +534,110 @@ impl IntegrationTestsConfig {
                         unknown_keys.join(", ")
                     );
                 }
-                Ok(config)
             }
         }
+        config.check_limits(source)?;
+        Ok(config)
+    }
+
+    /// The limit declared for `direction` of `component`, from the most specific declaration:
+    /// the component's for that direction, the component's default, the package's for that
+    /// direction, then the package's default.
+    pub fn limits_for<'a>(
+        &'a self,
+        component: &'a ProtocolComponentWithTestConfig,
+        direction: &Direction,
+    ) -> Option<&'a Limits> {
+        self.declaration_for(component, direction)
+            .map(|(limits, _)| limits)
+    }
+
+    /// [`Self::limits_for`], with which declaration it comes from.
+    pub fn declaration_for<'a>(
+        &'a self,
+        component: &'a ProtocolComponentWithTestConfig,
+        direction: &Direction,
+    ) -> Option<(&'a Limits, DeclaredBy)> {
+        let lookup = |declaration: &'a Option<LimitsDeclaration>, own, default| {
+            let declaration = declaration.as_ref()?;
+            match declaration.directions.get(direction) {
+                Some(limits) => Some((limits, own)),
+                None => declaration
+                    .default
+                    .as_ref()
+                    .map(|limits| (limits, default)),
+            }
+        };
+        lookup(&component.limits, DeclaredBy::Component, DeclaredBy::ComponentDefault)
+            .or_else(|| lookup(&self.limits, DeclaredBy::Package, DeclaredBy::PackageDefault))
+    }
+
+    /// Every check on the `limits` declarations, in both modes:
+    ///
+    /// - each has the fields its kind requires;
+    /// - a component's direction is one of its token pairs, and a package's direction is one of
+    ///   some expected component's;
+    /// - in strict mode, every direction of every expected component that does not skip simulation
+    ///   has a declaration.
+    fn check_limits(&self, source: &str) -> miette::Result<()> {
+        let mut problems = Vec::new();
+        let mut undeclared = Vec::new();
+        let mut all_directions = HashSet::new();
+
+        for test in &self.tests {
+            for component in &test.expected_components {
+                let location = format!("test `{}`, component {}", test.name, component.base.id);
+                let directions = component_directions(component);
+                if let Some(declaration) = &component.limits {
+                    check_declaration(declaration, &location, &mut problems);
+                    for direction in declaration.directions.keys().sorted() {
+                        if !directions.contains(direction) {
+                            problems.push(format!(
+                                "{location}: {direction} is not one of its directions"
+                            ));
+                        }
+                    }
+                }
+                // A component that skips simulation tests none of its limits.
+                let tested = !component.skip_simulation.is_skipped();
+                for direction in &directions {
+                    if tested &&
+                        self.limits_for(component, direction)
+                            .is_none()
+                    {
+                        undeclared.push(format!("{location}, {direction}"));
+                    }
+                }
+                all_directions.extend(directions);
+            }
+        }
+        if let Some(declaration) = &self.limits {
+            check_declaration(declaration, "package", &mut problems);
+            for direction in declaration.directions.keys().sorted() {
+                if !all_directions.contains(direction) {
+                    problems.push(format!(
+                        "package: {direction} is not a direction of any expected component"
+                    ));
+                }
+            }
+        }
+
+        if !problems.is_empty() {
+            return Err(miette!(
+                "{source} has invalid `limits` declarations: {}",
+                problems.join("; ")
+            ));
+        }
+        if self.harness == Harness::Strict && !undeclared.is_empty() {
+            return Err(miette!(
+                "{source} declares `harness: strict`, where every direction of every component \
+                 declares its limit (`limits: {{kind: hard | soft | under_cap, ...}}`, on the \
+                 package or the component, for every direction or per direction), but these \
+                 have none: {}",
+                undeclared.join("; ")
+            ));
+        }
+        Ok(())
     }
 
     /// Strict mode's problems with the skips, one entry per kind of problem: a skip is written
@@ -398,6 +690,34 @@ impl IntegrationTestsConfig {
     }
 }
 
+/// Every swap direction between the component's expected tokens.
+pub fn component_directions(component: &ProtocolComponentWithTestConfig) -> Vec<Direction> {
+    let tokens = &component.base.tokens;
+    let mut directions = Vec::new();
+    for token_in in tokens {
+        for token_out in tokens {
+            if token_in != token_out {
+                directions
+                    .push(Direction { token_in: token_in.clone(), token_out: token_out.clone() });
+            }
+        }
+    }
+    directions
+}
+
+/// Records each entry of `declaration` whose reason is blank. serde already rejects a missing
+/// reason and a field the kind does not have.
+fn check_declaration(declaration: &LimitsDeclaration, location: &str, problems: &mut Vec<String>) {
+    for (key, limits) in declaration.entries() {
+        if limits
+            .reason()
+            .is_some_and(|reason| reason.trim().is_empty())
+        {
+            problems.push(format!("{location}, {key}: the reason is empty"));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +742,9 @@ tests:
 "#
         )
     }
+
+    /// Strict mode with every direction's limit declared, for tests about something else.
+    const STRICT_WITH_LIMITS: &str = "harness: strict\nlimits: {kind: hard}";
 
     fn parse(yaml: &str) -> miette::Result<IntegrationTestsConfig> {
         IntegrationTestsConfig::from_yaml(yaml.as_bytes(), "test.yaml")
@@ -450,7 +773,7 @@ tests:
     fn component_keys_reach_the_component() {
         let config = parse(&yaml(
             "harness: strict",
-            "        static_attributes: {fee: \"0x0bb8\"}\n        skip_execution: \"r\"",
+            "        static_attributes: {fee: \"0x0bb8\"}\n        skip_execution: \"r\"\n        limits: {kind: hard}",
         ))
         .unwrap();
         assert_eq!(config.harness, Harness::Strict);
@@ -458,6 +781,10 @@ tests:
         assert_eq!(component.base.static_attributes["fee"], Bytes::from("0x0bb8"));
         assert!(!component.skip_simulation.is_skipped());
         assert!(component.skip_execution.is_skipped());
+        assert_eq!(
+            component.limits,
+            Some(LimitsDeclaration { default: Some(hard()), directions: HashMap::new() })
+        );
     }
 
     #[test]
@@ -506,7 +833,7 @@ tests:
 
     #[test]
     fn a_skip_is_its_reason() {
-        for harness in ["", "harness: strict"] {
+        for harness in ["", STRICT_WITH_LIMITS] {
             let config =
                 parse(&yaml(harness, "        skip_execution: \"no fork state\"")).unwrap();
             let skip = &config.tests[0].expected_components[0].skip_execution;
@@ -633,5 +960,209 @@ tests:
                 assert!(err.contains(expected), "{component_extra} ({harness}): {err}");
             }
         }
+    }
+
+    fn hard() -> Limits {
+        Limits::Hard { rounding: 0 }
+    }
+
+    fn direction(key: &str) -> Direction {
+        Direction::from_str(key).unwrap()
+    }
+
+    /// The kind declared for each direction of the one expected component.
+    fn kinds(config: &IntegrationTestsConfig) -> Vec<(String, Option<LimitKind>)> {
+        let component = &config.tests[0].expected_components[0];
+        component_directions(component)
+            .into_iter()
+            .map(|direction| {
+                let kind = config
+                    .limits_for(component, &direction)
+                    .map(Limits::kind);
+                (direction.to_string(), kind)
+            })
+            .collect()
+    }
+
+    const UNDER_CAP: &str = "{kind: under_cap, reason: \"r; gives up 2%\"}";
+
+    #[test]
+    fn strict_mode_requires_a_declaration_for_every_direction() {
+        let err = parse(&yaml("harness: strict", ""))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("component 0xAbC, 0x01->0x02"), "{err}");
+        assert!(err.contains("component 0xAbC, 0x02->0x01"), "{err}");
+
+        let one_direction = "        limits: {\"0x01->0x02\": {kind: hard}}";
+        let err = parse(&yaml("harness: strict", one_direction))
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("0x01->0x02"), "{err}");
+        assert!(err.contains("component 0xAbC, 0x02->0x01"), "{err}");
+
+        // Legacy mode tests no limits, so it needs no declaration.
+        assert!(parse(&yaml("", "")).is_ok());
+    }
+
+    #[test]
+    fn a_component_that_skips_simulation_needs_no_declaration() {
+        assert!(
+            parse(&yaml("harness: strict", "        skip_simulation: \"no fork state\"")).is_ok()
+        );
+    }
+
+    #[test]
+    fn the_most_specific_declaration_applies() {
+        let soft = "{kind: soft, reason: \"constant product\"}";
+        // The package's default, and its entry for one direction.
+        let package =
+            format!("harness: strict\nlimits: {{default: {soft}, \"0x02->0x01\": {UNDER_CAP}}}");
+        assert_eq!(
+            kinds(&parse(&yaml(&package, "")).unwrap()),
+            vec![
+                ("0x01->0x02".to_string(), Some(LimitKind::Soft)),
+                ("0x02->0x01".to_string(), Some(LimitKind::UnderCap)),
+            ]
+        );
+
+        // A component's entry for a direction overrides the package.
+        let component = "        limits: {\"0x01->0x02\": {kind: hard}}";
+        assert_eq!(
+            kinds(&parse(&yaml(&package, component)).unwrap()),
+            vec![
+                ("0x01->0x02".to_string(), Some(LimitKind::Hard)),
+                ("0x02->0x01".to_string(), Some(LimitKind::UnderCap)),
+            ]
+        );
+
+        // So does a component's default, even over the package's entry for that direction.
+        let component = "        limits: {kind: hard}";
+        assert_eq!(
+            kinds(&parse(&yaml(&package, component)).unwrap()),
+            vec![
+                ("0x01->0x02".to_string(), Some(LimitKind::Hard)),
+                ("0x02->0x01".to_string(), Some(LimitKind::Hard)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_soft_or_under_cap_limit_requires_a_reason_in_both_modes() {
+        for (declaration, problem) in [
+            ("{kind: soft}", "missing field `reason`"),
+            ("{kind: under_cap}", "missing field `reason`"),
+            ("{kind: soft, reason: \" \"}", "component 0xAbC, default: the reason is empty"),
+            ("{\"0x01->0x02\": {kind: soft}}", "limits `0x01->0x02`: missing field `reason`"),
+        ] {
+            for harness in ["", "harness: strict"] {
+                let err = parse(&yaml(harness, &format!("        limits: {declaration}")))
+                    .unwrap_err()
+                    .chain()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(": ");
+                assert!(err.contains(problem), "{declaration}: {err}");
+            }
+        }
+        assert!(parse(&yaml("harness: strict", &format!("        limits: {UNDER_CAP}"))).is_ok());
+    }
+
+    #[test]
+    fn a_declaration_names_where_it_comes_from() {
+        let package = format!("limits: {{default: {{kind: hard}}, \"0x02->0x01\": {UNDER_CAP}}}");
+        let by = |component_limits: &str| {
+            let config = parse(&yaml(&package, component_limits)).unwrap();
+            let component = &config.tests[0].expected_components[0];
+            ["0x01->0x02", "0x02->0x01"].map(|key| {
+                config
+                    .declaration_for(component, &direction(key))
+                    .map(|(_, by)| by)
+            })
+        };
+        assert_eq!(by(""), [Some(DeclaredBy::PackageDefault), Some(DeclaredBy::Package)]);
+        assert_eq!(
+            by("        limits: {\"0x01->0x02\": {kind: hard}}"),
+            [Some(DeclaredBy::Component), Some(DeclaredBy::Package)]
+        );
+        assert_eq!(
+            by("        limits: {kind: hard}"),
+            [Some(DeclaredBy::ComponentDefault), Some(DeclaredBy::ComponentDefault)]
+        );
+    }
+
+    #[test]
+    fn a_hard_limit_can_declare_its_rounding() {
+        let config =
+            parse(&yaml("harness: strict", "        limits: {kind: hard, rounding: 2}")).unwrap();
+        let component = &config.tests[0].expected_components[0];
+        assert_eq!(
+            config.limits_for(component, &direction("0x01->0x02")),
+            Some(&Limits::Hard { rounding: 2 })
+        );
+        assert!(parse(&yaml("", "        limits: {kind: hard, rounding: -1}")).is_err());
+    }
+
+    #[test]
+    fn a_direction_must_be_one_the_components_trade() {
+        let err = parse(&yaml("", "        limits: {\"0x01->0x03\": {kind: hard}}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("component 0xAbC: 0x01->0x03 is not one of its directions"), "{err}");
+
+        let err = parse(&yaml("limits: {\"0x03->0x01\": {kind: hard}}", ""))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("package: 0x03->0x01 is not a direction of any expected component"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_declaration_is_an_error() {
+        for (declaration, expected) in [
+            ("{kind: exact}", "unknown variant `exact`"),
+            ("{kind: hard, because: \"x\"}", "unknown field `because`"),
+            ("{kind: under_cap, reason: \"r\", evidence: \"e\"}", "unknown field `evidence`"),
+            ("{1: {kind: hard}}", "a `limits` key is not a string"),
+            ("{\"0x01-0x02\": {kind: hard}}", "is not a direction"),
+            ("{\"0x01->0x01\": {kind: hard}}", "sells and buys the same token"),
+            ("{\"0x01->usdc\": {kind: hard}}", "is not an address"),
+            ("{\"0x01->0x02\": {kind: hard}, \"0x01 -> 0x02\": {kind: hard}}", "declared twice"),
+            ("hard", "`limits` is `{kind: ...}`"),
+        ] {
+            let err = parse(&yaml("", &format!("        limits: {declaration}")))
+                .unwrap_err()
+                .chain()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(": ");
+            assert!(err.contains(expected), "{declaration}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_field_the_kind_does_not_have_is_an_error() {
+        for declaration in [
+            "{kind: hard, reason: \"r\"}",
+            "{kind: soft, reason: \"r\", lost_capacity: \"2%\"}",
+            "{kind: under_cap, reason: \"r\", lost_capacity: \"2%\"}",
+        ] {
+            let err = parse(&yaml("", &format!("        limits: {declaration}")))
+                .unwrap_err()
+                .chain()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(": ");
+            assert!(err.contains("unknown field"), "{declaration}: {err}");
+        }
+    }
+
+    #[test]
+    fn directions_parse_and_print_as_addresses() {
+        let parsed = direction("0xAB->0x0c");
+        assert_eq!(parsed.token_in, Bytes::from("0xab"));
+        assert_eq!(parsed.to_string(), "0xab->0x0c");
     }
 }

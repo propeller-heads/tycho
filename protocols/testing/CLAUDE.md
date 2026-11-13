@@ -33,5 +33,20 @@ package's; `build_wasm` in `src/utils.rs` shows how.
 
 A test yaml can opt into `harness: strict`; without it the runner behaves as before. Strict mode
 rejects keys the runner does not read, requires every skip to be written as its reason (a string;
-`true` and `false` are errors), and reports every failed check of a test, not just the first. It is not required of any package yet, and new checks go into strict mode only.
+`true` and `false` are errors), and reports every failed check of a test, not just the first.
+It is not required of any package yet, and new checks go into strict mode only.
+Strict mode also tests each direction's declared limit (README, "Limits").
 `range --report <path>` writes each check's outcome as JSON. See `README.md`, "Strict mode".
+
+### Declaring limits
+
+Agents write these yamls, and a `soft` declaration passes with one line of text, so:
+
+- Choose the kind from the venue's contract, not from test results. Declare `soft` only when the
+  contract rejects no input by its amount, with the reason naming that code.
+- Never change a kind, or drop a declaration, to make a failing limit check pass. Fix
+  `get_limits` or `get_amount_out`, or declare `under_cap` with its evidence and the capacity it
+  gives up, or a hard limit's `rounding` with the division that causes it.
+- Declare no package-level `soft` when a component has a cap: declare that component's limits on
+  the component.
+- A PR that changes an existing kind says so in its description.

@@ -40,6 +40,7 @@ use tycho_simulation::{
             token::Token,
             Chain,
         },
+        simulation::protocol_sim::ProtocolSim,
         Bytes,
     },
 };
@@ -54,9 +55,12 @@ use tycho_test::{
 
 use crate::{
     adapter_builder::AdapterContractBuilder,
-    config::{IntegrationTest, IntegrationTestsConfig, ProtocolComponentWithTestConfig, Skip},
-    execution,
-    report::{CheckId, Checks, Report},
+    config::{
+        component_directions, DeclaredBy, Direction, Harness, IntegrationTest,
+        IntegrationTestsConfig, LimitKind, Limits, ProtocolComponentWithTestConfig, Skip,
+    },
+    execution, limits,
+    report::{CheckId, Checks, LimitReport, Outcome, Report},
     rpc::RPCProvider,
     state_registry::register_protocol,
     tycho_rpc::TychoClient,
@@ -128,22 +132,341 @@ fn check_execution_slippage(
     }
 }
 
-/// The largest input amount a swap can actually be executed with, given `limit`.
+/// Strict: the limit each direction of each expected component declares, keyed by lowercase
+/// component id and direction, with where the declaration comes from.
+type DeclaredLimits = HashMap<(String, Direction), (Limits, DeclaredBy)>;
+
+/// One direction of one component, as the router swaps it.
+struct Swap<'a> {
+    component: &'a ProtocolComponentModel,
+    token_in: &'a Token,
+    token_out: &'a Token,
+    protocol_system: &'a str,
+}
+
+/// What `run_simulation` hands to execution.
+#[derive(Default)]
+struct SimulationOutput {
+    /// The ladder's quotes: each execution must match its simulation.
+    executions: HashMap<String, TychoExecutionInput>,
+    /// Strict: the swaps at and past each direction's limit, keyed by the ids in
+    /// [`LimitDirection`]. The swap at the limit is executed like the ladder's; past a hard
+    /// limit's bound the swap must revert, and one unit past an under-cap limit it must execute.
+    limit_executions: HashMap<String, TychoExecutionInput>,
+    /// Strict: every direction whose limit was checked.
+    limit_directions: Vec<LimitDirection>,
+    /// Strict: every declared direction whose limit was not checked, and why.
+    unchecked_limits: Vec<UncheckedLimit>,
+}
+
+/// Strict: a declared direction of a simulated component whose limit was not checked.
+struct UncheckedLimit {
+    component: String,
+    direction: Direction,
+    limits: Limits,
+    declared_by: DeclaredBy,
+    /// Why not. A zero limit is a skip; a direction the runner never reached is a failure.
+    why: Unchecked,
+}
+
+enum Unchecked {
+    /// `get_limits` reports zero: the venue does not trade this direction at this block.
+    ZeroLimit,
+    /// The runner did not quote the direction, for example because the indexed tokens differ
+    /// from the yaml's.
+    NotQuoted,
+}
+
+/// Strict: the limit checks of one direction of one component, before execution.
+struct LimitDirection {
+    /// The component's id, as indexed.
+    component: String,
+    direction: Direction,
+    /// The declaration the direction is checked against, and where it comes from.
+    limits: Limits,
+    declared_by: DeclaredBy,
+    /// `get_limits`' max input, after the `int128` cap, and its max output.
+    max_input: BigUint,
+    max_output: BigUint,
+    /// Whether the limit is at or above `int128::MAX`, the cap the runner applies to every
+    /// protocol's executions.
+    capped: bool,
+    /// Whether `max_input` quoted. The past-limit swap and the max-output comparison need it.
+    quoted_at_limit: bool,
+    /// Why the component skips execution, if it does: the limit checks then run in simulation
+    /// only.
+    execution_skipped: Option<String>,
+    /// The checks that failed in simulation, with the reason.
+    failures: Vec<(CheckId, String)>,
+    /// The id of the swap at the limit in [`SimulationOutput::limit_executions`], when it was
+    /// queued.
+    at_limit_execution: Option<String>,
+    /// The id of the swap past the limit in [`SimulationOutput::limit_executions`], when it was
+    /// queued.
+    past_limit_execution: Option<String>,
+}
+
+impl LimitDirection {
+    /// The limit and its declaration, as every `limits.*` result of the direction reports them.
+    fn report(&self) -> LimitReport {
+        LimitReport::new(
+            &self.limits,
+            self.declared_by,
+            Some((&self.max_input, &self.max_output)),
+            self.capped,
+        )
+    }
+
+    fn failures_of(&self, check: CheckId) -> Vec<String> {
+        self.failures
+            .iter()
+            .filter(|(id, _)| *id == check)
+            .map(|(_, reason)| reason.clone())
+            .collect()
+    }
+
+    /// What `limits.at_limit` records when nothing failed: a pass once the quote at the limit
+    /// was executed, a skip when the component skips execution. Not run otherwise, which only a
+    /// failed quote leads to, and that is recorded as a failure first.
+    fn at_limit_unfailed(&self) -> Outcome {
+        match (&self.at_limit_execution, &self.execution_skipped) {
+            (Some(_), _) => Outcome::Pass,
+            (None, Some(reason)) => Outcome::Skipped {
+                reason: format!("the quote at the limit is not executed: {reason}"),
+            },
+            (None, None) => Outcome::NotRun { reason: "the limit did not quote".to_string() },
+        }
+    }
+
+    /// What `limits.past_limit` records when nothing failed.
+    ///
+    /// - Skipped for a limit at the `int128` cap, which is not the venue's bound.
+    /// - A pass for a soft limit, whose claim is checked in simulation alone: twice the limit
+    ///   quoted.
+    /// - Not run when the swap at the limit did not quote or did not execute: the swap past the
+    ///   limit takes its minimum output from that quote, and what happens past a limit that does
+    ///   not execute either proves nothing.
+    /// - Skipped when the component skips execution.
+    /// - A pass once the swap past the limit was executed, and did what the declaration claims.
+    fn past_limit_unfailed(&self, at_limit_executed: bool) -> Outcome {
+        if self.capped {
+            return Outcome::Skipped {
+                reason: "the limit is at the int128::MAX cap, which is not the venue's bound"
+                    .to_string(),
+            };
+        }
+        if let Limits::Soft { .. } = self.limits {
+            return Outcome::Pass;
+        }
+        let not_run = || Outcome::NotRun { reason: format!("{} failed", CheckId::LimitsAtLimit) };
+        match (&self.past_limit_execution, self.quoted_at_limit, &self.execution_skipped) {
+            (Some(_), _, _) if at_limit_executed => Outcome::Pass,
+            (Some(_), _, _) | (None, false, _) => not_run(),
+            (None, true, Some(reason)) => Outcome::Skipped {
+                reason: format!("the swap past the limit is not executed: {reason}"),
+            },
+            // Only a quote past the limit that contradicts the declaration leads here, and that is
+            // recorded as a failure first.
+            (None, true, None) => {
+                Outcome::NotRun { reason: "the swap past the limit was not queued".to_string() }
+            }
+        }
+    }
+
+    /// What `limits.max_output` records when nothing failed: not run when the limit did not
+    /// quote, since there is nothing to compare, and a pass otherwise.
+    fn max_output_unfailed(&self) -> Outcome {
+        if self.quoted_at_limit {
+            Outcome::Pass
+        } else {
+            Outcome::NotRun { reason: format!("{} failed", CheckId::LimitsAtLimit) }
+        }
+    }
+}
+
+/// Why the execution of `simulation_id` does not match its simulation, if it does not.
+fn execution_mismatch(
+    simulation_id: &str,
+    input: &TychoExecutionInput,
+    results: &HashMap<String, TychoExecutionResult>,
+) -> Option<String> {
+    let component = &input.component_id;
+    let mismatch = match results.get(simulation_id) {
+        Some(TychoExecutionResult::Success {
+            amount_out,
+            gas_used: _,
+            state_overwrites: _,
+            overwrite_metadata: _,
+        }) => {
+            info!(
+                "[{component}] Execution returned: {} {} -> {amount_out} {}",
+                input.solution.amount_in(),
+                input.token_in,
+                input.token_out
+            );
+            check_execution_slippage(&input.expected_amount_out, amount_out)
+                .err()
+                .map(|reason| {
+                    format!(
+                        "[{component}] Execution does not match simulation for {simulation_id}: \
+                         {reason} (simulation={}, execution={amount_out})",
+                        input.expected_amount_out
+                    )
+                })
+        }
+        Some(TychoExecutionResult::Revert {
+            reason,
+            state_overwrites: _,
+            overwrite_metadata: _,
+        }) => Some(format!("[{component}] Execution reverted for {simulation_id}: {reason}")),
+        Some(TychoExecutionResult::Failed { error_msg }) => {
+            Some(format!("[{component}] Execution failed for {simulation_id}: {error_msg}"))
+        }
+        None => Some(format!("[{component}] No result found for simulation {simulation_id}")),
+    };
+    if let Some(mismatch) = &mismatch {
+        error!("{mismatch}");
+    }
+    mismatch
+}
+
+/// Every execution in `inputs` matches its simulation.
+fn check_executions_match(
+    inputs: &HashMap<String, TychoExecutionInput>,
+    results: &HashMap<String, TychoExecutionResult>,
+) -> miette::Result<()> {
+    let failure_count = inputs
+        .iter()
+        .sorted_by(|a, b| a.0.cmp(b.0))
+        .filter_map(|(simulation_id, input)| execution_mismatch(simulation_id, input, results))
+        .count();
+    let success_count = inputs.len() - failure_count;
+    info!("Batch execution complete: {} successes, {} failures", success_count, failure_count);
+    ensure!(
+        failure_count.is_zero(),
+        "Execution validation failed: {success_count} successes, {failure_count} failures"
+    );
+    Ok(())
+}
+
+/// Why the execution of `simulation_id`, one unit past a hard limit, does not show the limit holds:
+/// it executed, or it could not be simulated. `None` when it reverted.
+fn missing_revert(
+    simulation_id: &str,
+    input: &TychoExecutionInput,
+    results: &HashMap<String, TychoExecutionResult>,
+) -> Option<String> {
+    let component = &input.component_id;
+    let amount_in = input.solution.amount_in();
+    let failure = match results.get(simulation_id) {
+        Some(TychoExecutionResult::Revert {
+            reason,
+            state_overwrites: _,
+            overwrite_metadata: _,
+        }) => {
+            info!(
+                "[{component}] {amount_in} {}, one unit past the hard limit, reverts: {reason}",
+                input.token_in
+            );
+            None
+        }
+        Some(TychoExecutionResult::Success {
+            amount_out,
+            gas_used: _,
+            state_overwrites: _,
+            overwrite_metadata: _,
+        }) => Some(format!(
+            "[{component}] {amount_in} {}, one unit past the declared hard limit, executes and \
+             pays {amount_out} {}",
+            input.token_in, input.token_out
+        )),
+        Some(TychoExecutionResult::Failed { error_msg }) => Some(format!(
+            "[{component}] {simulation_id} could not be simulated, so the revert past the limit \
+             is unproven: {error_msg}"
+        )),
+        None => Some(format!("[{component}] No result found for simulation {simulation_id}")),
+    };
+    if let Some(failure) = &failure {
+        error!("{failure}");
+    }
+    failure
+}
+
+/// Why the execution of `simulation_id`, one unit past an under-cap limit, does not show the
+/// venue's bound is above the limit: it reverted, or it could not be simulated. `None` when it
+/// executed.
+fn missing_execution(
+    simulation_id: &str,
+    input: &TychoExecutionInput,
+    results: &HashMap<String, TychoExecutionResult>,
+) -> Option<String> {
+    let component = &input.component_id;
+    let amount_in = input.solution.amount_in();
+    let failure = match results.get(simulation_id) {
+        Some(TychoExecutionResult::Success {
+            amount_out,
+            gas_used: _,
+            state_overwrites: _,
+            overwrite_metadata: _,
+        }) => {
+            info!(
+                "[{component}] {amount_in} {}, one unit past the under_cap limit, executes and \
+                 pays {amount_out} {}",
+                input.token_in, input.token_out
+            );
+            None
+        }
+        Some(TychoExecutionResult::Revert {
+            reason,
+            state_overwrites: _,
+            overwrite_metadata: _,
+        }) => Some(format!(
+            "[{component}] {amount_in} {}, one unit past the declared under_cap limit, \
+                 reverts: {reason}. The limit is the venue's bound: declare it hard",
+            input.token_in
+        )),
+        Some(TychoExecutionResult::Failed { error_msg }) => Some(format!(
+            "[{component}] {simulation_id} could not be simulated, so the venue's bound past the \
+             limit is unproven: {error_msg}"
+        )),
+        None => Some(format!("[{component}] No result found for simulation {simulation_id}")),
+    };
+    if let Some(failure) = &failure {
+        error!("{failure}");
+    }
+    failure
+}
+
+/// `limit`, capped at `int128::MAX`: the cap the runner applies to every protocol's executions.
 ///
-/// Uniswap V4 settles a swap through a `BalanceDelta` of two `int128`s, and the executor's
-/// `swapExactInputSingle` takes the amount as a `uint128` that v4-core casts to `int128`, so no
-/// amount above `int128::MAX` can be executed however deep the pool is. A limit above that
-/// ceiling is not executable, and the percentages the harness trades at must stay distinct sizes,
-/// so the cap belongs on the limit itself rather than on each amount derived from it.
+/// It comes from Uniswap V4, which settles a swap through a `BalanceDelta` of two `int128`s, and
+/// the executor's `swapExactInputSingle` takes the amount as a `uint128` that v4-core casts to
+/// `int128`, so no amount above `int128::MAX` can be executed however deep the pool is. A limit
+/// above that ceiling is not executable, and the percentages the harness trades at must stay
+/// distinct sizes, so the cap belongs on the limit itself rather than on each amount derived from
+/// it.
 ///
 /// Returns `limit` unchanged when it is at or below the ceiling.
 fn executable_max_input(limit: &BigUint) -> BigUint {
-    let ceiling = BigUint::from(i128::MAX as u128);
+    let ceiling = int128_ceiling();
     if *limit > ceiling {
         ceiling
     } else {
         limit.clone()
     }
+}
+
+/// `int128::MAX`, the cap the runner applies to every protocol's executions (see
+/// [`executable_max_input`]).
+fn int128_ceiling() -> BigUint {
+    BigUint::from(i128::MAX as u128)
+}
+
+/// Whether `limit` is at or above `int128::MAX`. Such a limit is the execution cap, not the venue's
+/// bound: even at exactly `int128::MAX`, one unit past it reverts in the executor's cast, whatever
+/// the venue allows.
+fn at_execution_cap(limit: &BigUint) -> bool {
+    *limit >= int128_ceiling()
 }
 
 pub enum TestType {
@@ -482,8 +805,9 @@ impl TestRunner {
                         &protocol_components,
                         &[], // No skip filters for live testing
                         &config.protocol_system,
+                        None,
                     ) {
-                        Ok(data) => data,
+                        Ok(output) => output.executions,
                         Err(e) => {
                             error!("Failed to run simulation: {:#}", e);
                             continue;
@@ -521,12 +845,7 @@ impl TestRunner {
 
                     // Step 3: Execute the batch against the real block
                     match self
-                        .run_execution(
-                            execution_data,
-                            &block,
-                            &config.protocol_system,
-                            &[], // No skip filters for live testing
-                        )
+                        .run_execution(execution_data, &block, &config.protocol_system)
                         .await
                     {
                         Ok(_) => {
@@ -713,6 +1032,11 @@ impl TestRunner {
             ] {
                 checks.not_run(id, CheckId::Index);
             }
+            if config.harness == Harness::Strict {
+                for id in CheckId::LIMITS {
+                    checks.not_run(id, CheckId::Index);
+                }
+            }
             return Ok(());
         };
 
@@ -758,6 +1082,15 @@ impl TestRunner {
         }
 
         let ladder_skips = record_ladder_skips(&test.expected_components, checks);
+        if config.harness == Harness::Strict {
+            for component in &test.expected_components {
+                if let Some(reason) = component.skip_simulation.reason() {
+                    for limit_check in CheckId::LIMITS {
+                        checks.skip_component(limit_check, &component.base.id, reason);
+                    }
+                }
+            }
+        }
 
         let Some(update) = checks.run(CheckId::Decode, || {
             let adapter_contract_path_str = self.get_adapter_contract_path(
@@ -786,44 +1119,102 @@ impl TestRunner {
         else {
             checks.not_run(CheckId::SimLadder, CheckId::Decode);
             checks.not_run(CheckId::ExecLadder, CheckId::Decode);
+            if config.harness == Harness::Strict {
+                for id in CheckId::LIMITS {
+                    checks.not_run(id, CheckId::Decode);
+                }
+            }
             return Ok(());
         };
 
         let protocol_components_simulation: HashMap<String, ProtocolComponentModel> =
             update.new_pairs.clone();
 
+        // Strict mode tests each direction's limit as declared; `from_yaml` made sure every
+        // direction of every expected component has a declaration.
+        let declared_limits: Option<DeclaredLimits> =
+            (config.harness == Harness::Strict).then(|| {
+                test.expected_components
+                    .iter()
+                    .flat_map(|component| {
+                        component_directions(component)
+                            .into_iter()
+                            .filter_map(move |direction| {
+                                let (limits, by) = config.declaration_for(component, &direction)?;
+                                let key = (component.base.id.to_lowercase(), direction);
+                                Some((key, (limits.clone(), by)))
+                            })
+                    })
+                    .collect()
+            });
+        if let Some(declared) = &declared_limits {
+            // A reviewer sees at a glance how many directions pass on a soft or under_cap claim.
+            let counts = declared
+                .values()
+                .counts_by(|(limits, _)| limits.kind());
+            info!(
+                "[{}] limits: {} hard, {} soft, {} under_cap",
+                test.name,
+                counts
+                    .get(&LimitKind::Hard)
+                    .unwrap_or(&0),
+                counts
+                    .get(&LimitKind::Soft)
+                    .unwrap_or(&0),
+                counts
+                    .get(&LimitKind::UnderCap)
+                    .unwrap_or(&0)
+            );
+        }
+
         if let Some(reason) = ladder_skips.simulation {
             checks.skip(CheckId::SimLadder, reason);
             checks.skip(CheckId::ExecLadder, reason);
+            if declared_limits.is_some() {
+                for id in CheckId::LIMITS {
+                    checks.skip(id, reason);
+                }
+            }
             return Ok(());
         }
 
-        let Some(execution_data) = checks.run(CheckId::SimLadder, || {
+        let Some(output) = checks.run(CheckId::SimLadder, || {
             self.run_simulation(
                 &update,
                 &protocol_components_simulation,
                 &test.expected_components,
                 &config.protocol_system,
+                declared_limits.as_ref(),
             )
         })?
         else {
             checks.not_run(CheckId::ExecLadder, CheckId::SimLadder);
+            if declared_limits.is_some() {
+                for id in CheckId::LIMITS {
+                    checks.not_run(id, CheckId::SimLadder);
+                }
+            }
             return Ok(());
         };
 
-        if let Some(reason) = ladder_skips.execution {
+        let execution_skip_reason = ladder_skips.execution;
+        if declared_limits.is_some() {
+            return self.check_strict_executions(
+                output,
+                &header,
+                &config.protocol_system,
+                execution_skip_reason,
+                checks,
+            );
+        }
+        if let Some(reason) = execution_skip_reason {
             checks.skip(CheckId::ExecLadder, reason);
             return Ok(());
         }
 
         checks.run(CheckId::ExecLadder, || {
             self.runtime
-                .block_on(self.run_execution(
-                    execution_data,
-                    &header,
-                    &config.protocol_system,
-                    &test.expected_components,
-                ))
+                .block_on(self.run_execution(output.executions, &header, &config.protocol_system))
         })?;
 
         Ok(())
@@ -1288,11 +1679,15 @@ impl TestRunner {
     /// # Arguments
     /// * `update` - The decoded protocol state containing all component data
     /// * `protocol_components` - Mapping of component IDs to their ProtocolComponent models
-    /// * `expected_components` - Test configuration to determine which components to skip
     /// * `protocol_system` - The protocol system identifier
+    /// * `declared_limits` - Strict mode: the limit each direction of each component declares,
+    ///   keyed by `(lowercase component id, direction)`
     ///
     /// # Returns
-    /// Returns a HashMap of simulation IDs to TychoExecutionInput data for execution.
+    /// The ladder's quotes, keyed by simulation id, for execution. With `declared_limits` also
+    /// each declared direction's limit checks, the quote at the limit, and for a hard limit the
+    /// input one unit past it, all for execution as well, and the declared directions whose limit
+    /// was not checked.
     ///
     /// # Errors
     /// Returns an error if:
@@ -1306,18 +1701,27 @@ impl TestRunner {
         update: &Update,
         protocol_components: &HashMap<String, ProtocolComponentModel>,
         expected_components: &[ProtocolComponentWithTestConfig],
-        protocol_system: &String,
-    ) -> miette::Result<HashMap<String, TychoExecutionInput>> {
+        protocol_system: &str,
+        declared_limits: Option<&DeclaredLimits>,
+    ) -> miette::Result<SimulationOutput> {
         let skip_simulation = skip_reasons(expected_components, |c| &c.skip_simulation);
         let skip_execution = skip_reasons(expected_components, |c| &c.skip_execution);
 
-        let mut execution_data = HashMap::new();
+        let mut output = SimulationOutput::default();
 
-        for (id, state) in update.states.iter() {
+        // Sorted, so the report lists components in the same order on every run.
+        for (id, state) in update
+            .states
+            .iter()
+            .sorted_by(|a, b| a.0.cmp(b.0))
+        {
+            // The skips and limits are keyed by lowercase id; the update keeps the id as indexed.
+            let key = id.to_lowercase();
             // The reason is logged once per component, where the skips are recorded.
-            if skip_simulation.contains_key(id) {
+            if skip_simulation.contains_key(&key) {
                 continue;
             }
+            let mut reached = HashSet::new();
             let component = protocol_components
                 .get(id)
                 .ok_or_else(|| miette!("Couldn't find protocol component {id}"))?;
@@ -1341,7 +1745,8 @@ impl TestRunner {
 
             let mut quoted_any_direction = false;
 
-            for (token_in, token_out) in &swap_directions {
+            for &(token_in, token_out) in &swap_directions {
+                let swap = Swap { component, token_in, token_out, protocol_system };
                 let (max_input, max_output) = state
                     .get_limits(token_in.address.clone(), token_out.address.clone())
                     .into_diagnostic()
@@ -1356,6 +1761,7 @@ impl TestRunner {
                 );
 
                 let executable_input = executable_max_input(&max_input);
+                let capped = at_execution_cap(&max_input);
                 if executable_input != max_input {
                     warn!(
                         "[{}] Limit of {max_input} {} exceeds what a swap can be executed with; \
@@ -1370,11 +1776,29 @@ impl TestRunner {
                 // rate limit with no capacity at this block. Skip the direction instead of
                 // failing the component; the guard below still requires that at least one
                 // direction was exercised.
+                let direction = Direction {
+                    token_in: token_in.address.clone(),
+                    token_out: token_out.address.clone(),
+                };
+                reached.insert(direction.clone());
                 if max_input.is_zero() {
                     warn!(
                         "[{}] Zero limit for {} -> {}, skipping direction",
                         id, token_in.symbol, token_out.symbol
                     );
+                    if let Some((limits, declared_by)) = declared_limits
+                        .and_then(|declared| declared.get(&(key.clone(), direction.clone())))
+                    {
+                        output
+                            .unchecked_limits
+                            .push(UncheckedLimit {
+                                component: id.clone(),
+                                direction,
+                                limits: limits.clone(),
+                                declared_by: *declared_by,
+                                why: Unchecked::ZeroLimit,
+                            });
+                    }
                     continue;
                 }
 
@@ -1433,53 +1857,64 @@ impl TestRunner {
 
                     quoted_any_direction = true;
 
-                    if skip_execution.contains_key(id) {
+                    if skip_execution.contains_key(&key) {
                         continue;
                     }
 
-                    // Swaps are grouped before their encoder is looked up, and grouping folds
-                    // `uniswap_v4_hooks` into `uniswap_v4` because both swap through the same
-                    // PoolManager. Registering the executor under both names lets the lookup
-                    // find it whichever of the two the group ends up carrying.
-                    let mut executors = serde_json::Map::new();
-                    executors.insert(protocol_system.to_string(), json!(EXECUTOR_ADDRESS));
-                    if protocol_system == "uniswap_v4_hooks" {
-                        executors.insert("uniswap_v4".to_string(), json!(EXECUTOR_ADDRESS));
-                    }
-                    let executors_json = json!({ (self.chain.to_string()): executors });
-                    let chain_model = self.chain;
-                    let (solution, calldata) = encode_swap(
-                        component,
-                        None,
-                        token_in,
-                        token_out,
-                        amount_in.clone(),
-                        chain_model,
-                        Some(executors_json.to_string()),
-                        amount_out_result.gas.clone(),
-                        amount_out_result.amount.clone(),
-                    )?;
-
-                    // Create unique simulation ID
                     let simulation_id = format!(
                         "test_{}_{}_{}_{}",
                         component.id, token_in.symbol, token_out.symbol, amount_in
                     );
-
-                    execution_data.insert(
-                        simulation_id,
-                        TychoExecutionInput {
-                            solution: solution.clone(),
-                            transaction: calldata.clone(),
-                            expected_amount_out: amount_out_result.amount.clone(),
-                            protocol_system: protocol_system.to_string(),
-                            component_id: component.id.to_string(),
-                            token_in: token_in.symbol.clone(),
-                            token_out: token_out.symbol.clone(),
-                            estimated_gas: amount_out_result.gas.clone(),
-                            account_overwrites: None,
+                    let input = self.execution_input(
+                        &swap,
+                        amount_in.clone(),
+                        limits::Quote {
+                            amount: amount_out_result.amount,
+                            gas: amount_out_result.gas,
                         },
-                    );
+                    )?;
+                    output
+                        .executions
+                        .insert(simulation_id, input);
+                }
+
+                if let Some(declared) = declared_limits
+                    .and_then(|declared| declared.get(&(key.clone(), direction.clone())))
+                {
+                    let direction_limits = self.check_declared_limit(
+                        &swap,
+                        state.as_ref(),
+                        declared,
+                        &limits::Limit { max_input: &max_input, max_output: &max_output, capped },
+                        skip_execution
+                            .get(&key)
+                            .map(|reason| reason.to_string()),
+                        &mut output.limit_executions,
+                    )?;
+                    output
+                        .limit_directions
+                        .push(direction_limits);
+                }
+            }
+
+            // A declared direction the loop above never reached has no limit result. Fail it
+            // rather than let it drop out of the report.
+            if let Some(declared) = declared_limits {
+                for ((declared_id, direction), (limits, declared_by)) in declared
+                    .iter()
+                    .sorted_by(|a, b| a.0.cmp(b.0))
+                {
+                    if *declared_id == key && !reached.contains(direction) {
+                        output
+                            .unchecked_limits
+                            .push(UncheckedLimit {
+                                component: id.clone(),
+                                direction: direction.clone(),
+                                limits: limits.clone(),
+                                declared_by: *declared_by,
+                                why: Unchecked::NotQuoted,
+                            });
+                    }
                 }
             }
 
@@ -1490,21 +1925,134 @@ impl TestRunner {
             }
         }
 
-        Ok(execution_data)
+        Ok(output)
+    }
+
+    /// Strict: checks the declared limit of `swap`'s direction in simulation, and queues its swaps
+    /// at and past the limit into `limit_executions`, unless the component skips execution.
+    fn check_declared_limit(
+        &self,
+        swap: &Swap<'_>,
+        state: &dyn ProtocolSim,
+        (declared, declared_by): &(Limits, DeclaredBy),
+        limit: &limits::Limit<'_>,
+        execution_skipped: Option<String>,
+        limit_executions: &mut HashMap<String, TychoExecutionInput>,
+    ) -> miette::Result<LimitDirection> {
+        let Swap { component, token_in, token_out, .. } = swap;
+        let id = &component.id;
+        let checked = limits::check_direction(
+            |amount| {
+                state
+                    .get_amount_out(amount, token_in, token_out)
+                    .map(|quote| limits::Quote { amount: quote.amount, gas: quote.gas })
+                    .map_err(|e| e.to_string())
+            },
+            &format!("{} -> {}", token_in.symbol, token_out.symbol),
+            limit,
+            declared,
+        );
+        if let Some(rejection) = &checked.past_limit_rejection {
+            info!(
+                "[{id}] {} -> {}: the quote past the limit errors: {rejection}",
+                token_in.symbol, token_out.symbol
+            );
+        }
+        let mut direction_limits = LimitDirection {
+            component: id.to_string(),
+            direction: Direction {
+                token_in: token_in.address.clone(),
+                token_out: token_out.address.clone(),
+            },
+            limits: declared.clone(),
+            declared_by: *declared_by,
+            max_input: limit.max_input.clone(),
+            max_output: limit.max_output.clone(),
+            capped: limit.capped,
+            quoted_at_limit: checked.at_limit_quote.is_some(),
+            execution_skipped,
+            failures: checked.failures,
+            at_limit_execution: None,
+            past_limit_execution: None,
+        };
+        let Some(quote) = checked.at_limit_quote else {
+            return Ok(direction_limits);
+        };
+        if direction_limits
+            .execution_skipped
+            .is_some()
+        {
+            return Ok(direction_limits);
+        }
+        // The swap past the limit takes its minimum output from the quote at the limit, so past a
+        // hard limit a venue that accepts the input executes the swap, and only a revert passes.
+        if let Some(past) = checked.past_limit_swap {
+            let past_id = format!("past_limit_{id}_{}", direction_limits.direction);
+            limit_executions.insert(
+                past_id.clone(),
+                self.execution_input(swap, past.amount_in, quote.clone())?,
+            );
+            direction_limits.past_limit_execution = Some(past_id);
+        }
+        let at_id = format!("at_limit_{id}_{}", direction_limits.direction);
+        limit_executions
+            .insert(at_id.clone(), self.execution_input(swap, limit.max_input.clone(), quote)?);
+        direction_limits.at_limit_execution = Some(at_id);
+        Ok(direction_limits)
+    }
+
+    /// Encodes the router swap that executes `quote` for `amount_in`.
+    fn execution_input(
+        &self,
+        swap: &Swap<'_>,
+        amount_in: BigUint,
+        quote: limits::Quote,
+    ) -> miette::Result<TychoExecutionInput> {
+        let Swap { component, token_in, token_out, protocol_system } = *swap;
+        // Swaps are grouped before their encoder is looked up, and grouping folds
+        // `uniswap_v4_hooks` into `uniswap_v4` because both swap through the same PoolManager.
+        // Registering the executor under both names lets the lookup find it whichever of the two
+        // the group ends up carrying.
+        let mut executors = serde_json::Map::new();
+        executors.insert(protocol_system.to_string(), json!(EXECUTOR_ADDRESS));
+        if protocol_system == "uniswap_v4_hooks" {
+            executors.insert("uniswap_v4".to_string(), json!(EXECUTOR_ADDRESS));
+        }
+        let executors_json = json!({ (self.chain.to_string()): executors });
+        let (solution, calldata) = encode_swap(
+            component,
+            None,
+            token_in,
+            token_out,
+            amount_in,
+            self.chain,
+            Some(executors_json.to_string()),
+            quote.gas.clone(),
+            quote.amount.clone(),
+        )?;
+        Ok(TychoExecutionInput {
+            solution,
+            transaction: calldata,
+            expected_amount_out: quote.amount,
+            protocol_system: protocol_system.to_string(),
+            component_id: component.id.to_string(),
+            token_in: token_in.symbol.clone(),
+            token_out: token_out.symbol.clone(),
+            estimated_gas: quote.gas,
+            account_overwrites: None,
+        })
     }
 
     /// Simulates executing trades through RPC requests using historical block data
     /// and validates the accuracy of the Tycho simulation predictions.
     ///
-    /// This method processes large execution sets using batching (batch size: 30) to avoid
-    /// RPC request size limits caused by large state overwrites. Each batch is processed
-    /// sequentially to maintain stability and provide detailed progress reporting.
+    /// tycho-test splits the executions into JSON-RPC batches of at most 30 calls, a few in flight
+    /// at once, to stay under the RPC's request size limit with large state overwrites.
     ///
     /// # Arguments
     /// * `execution_data` - HashMap of simulation IDs to TychoExecutionInput data
     /// * `block` - The historical block to use for execution testing
     /// * `protocol_system` - The protocol system identifier
-    /// * `expected_components` - Test configuration to determine which components to skip
     ///
     /// # Returns
     /// Returns `Ok(())` if all executions complete successfully within tolerance.
@@ -1514,116 +2062,187 @@ impl TestRunner {
     /// - Execution simulation fails or reverts
     /// - Difference between simulation and execution exceeds 0.5% tolerance
     /// - Any critical execution failures occur
-    ///
-    /// Components can be skipped using `skip_execution` flag in the test configuration.
     async fn run_execution(
         &self,
         execution_data: HashMap<String, TychoExecutionInput>,
         block: &Block,
         protocol_system: &str,
-        expected_components: &[ProtocolComponentWithTestConfig],
     ) -> miette::Result<()> {
         if execution_data.is_empty() {
             info!("No execution data to process");
             return Ok(());
         }
 
-        let skip_execution = skip_reasons(expected_components, |c| &c.skip_execution);
+        let results = self
+            .simulate_executions(execution_data.clone(), block, protocol_system)
+            .await?;
+        check_executions_match(&execution_data, &results)
+    }
 
-        // Filter out skipped components
-        let filtered_execution_data: HashMap<_, _> = execution_data
-            .into_iter()
-            .filter(|(_, input)| !skip_execution.contains_key(&input.component_id.to_lowercase()))
-            .collect();
-
-        if filtered_execution_data.is_empty() {
-            info!("All components skipped execution");
-            return Ok(());
+    /// Simulates executing every input at `block`, keyed like the inputs. tycho-test splits them
+    /// into JSON-RPC batches.
+    async fn simulate_executions(
+        &self,
+        inputs: HashMap<String, TychoExecutionInput>,
+        block: &Block,
+        protocol_system: &str,
+    ) -> miette::Result<HashMap<String, TychoExecutionResult>> {
+        if inputs.is_empty() {
+            return Ok(HashMap::new());
         }
-
-        let chain_model = self.chain;
-        let rpc_tools = RPCTools::new(self.rpc_provider.url.as_ref(), &chain_model).await?;
-
-        // Prepare router overwrites data
+        let rpc_tools = RPCTools::new(self.rpc_provider.url.as_ref(), &self.chain).await?;
         let router_overwrites_data =
             execution::create_router_overwrites_data(self.chain, protocol_system)?;
 
-        info!("Executing {} simulations ...", filtered_execution_data.len());
+        info!("Executing {} simulations ...", inputs.len());
 
-        let results = simulate_swap_transaction(
-            &rpc_tools,
-            filtered_execution_data.clone(),
-            block,
-            router_overwrites_data,
-            None,
-        )
-        .await
-        .map_err(|(error, _, _)| error)?;
+        simulate_swap_transaction(&rpc_tools, inputs, block, router_overwrites_data, None)
+            .await
+            .map_err(|(error, _, _)| error)
+    }
 
-        let mut success_count = 0;
-        let mut failure_count = 0;
+    /// Strict mode's execution checks: the ladder, then per direction the quote at the limit,
+    /// the revert one unit past a hard limit, and the max output. Every execution is simulated in
+    /// one call to [`Self::simulate_executions`], which splits them into JSON-RPC batches, and each
+    /// limit check is recorded per component and direction. With `execution_skip_reason`, the
+    /// reason every component skips execution, the ladder is recorded as skipped.
+    fn check_strict_executions(
+        &self,
+        output: SimulationOutput,
+        block: &Block,
+        protocol_system: &str,
+        execution_skip_reason: Option<&str>,
+        checks: &mut Checks,
+    ) -> miette::Result<()> {
+        let SimulationOutput { executions, limit_executions, limit_directions, unchecked_limits } =
+            output;
 
-        for (simulation_id, expected_input) in &filtered_execution_data {
-            let success = match results.get(simulation_id) {
-                Some(TychoExecutionResult::Success { amount_out, .. }) => {
-                    info!(
-                        "[{}] Execution returned: {} {} -> {} {}",
-                        expected_input.component_id,
-                        expected_input.solution.amount_in(),
-                        expected_input.token_in,
-                        amount_out,
-                        expected_input.token_out
-                    );
-
-                    match check_execution_slippage(&expected_input.expected_amount_out, amount_out)
-                    {
-                        Ok(()) => true,
-                        Err(reason) => {
-                            error!(
-                                "[{}] Execution does not match simulation for {}: {} (simulation={}, execution={})",
-                                expected_input.component_id, simulation_id, reason, expected_input.expected_amount_out, amount_out
-                            );
-                            false
-                        }
+        let mut inputs = executions.clone();
+        inputs.extend(limit_executions.clone());
+        let executed = self
+            .runtime
+            .block_on(self.simulate_executions(inputs, block, protocol_system));
+        let no_results = HashMap::new();
+        let results = match &executed {
+            Ok(results) => {
+                match execution_skip_reason {
+                    Some(reason) => checks.skip(CheckId::ExecLadder, reason),
+                    None => {
+                        checks.run(CheckId::ExecLadder, || {
+                            check_executions_match(&executions, results)
+                        })?;
                     }
                 }
-                Some(TychoExecutionResult::Revert { reason, .. }) => {
-                    error!(
-                        "[{}] Execution reverted for {}: {}",
-                        expected_input.component_id, simulation_id, reason
-                    );
-                    false
-                }
-                Some(TychoExecutionResult::Failed { error_msg }) => {
-                    error!(
-                        "[{}] Execution failed for {}: {}",
-                        expected_input.component_id, simulation_id, error_msg
-                    );
-                    false
-                }
-                None => {
-                    error!(
-                        "[{}] No result found for simulation {}",
-                        expected_input.component_id, simulation_id
-                    );
-                    false
-                }
+                results
+            }
+            Err(e) => {
+                checks.fail(CheckId::ExecLadder, e);
+                &no_results
+            }
+        };
+        // When the batch could not run, every execution a limit check needs fails with its error.
+        let batch_error = executed
+            .as_ref()
+            .err()
+            .map(|e| format!("the executions could not be simulated: {e:#}"));
+        let execution_failure =
+            |id: &Option<String>, judge: &dyn Fn(&str, &TychoExecutionInput) -> Option<String>| {
+                let id = id.as_ref()?;
+                let input = limit_executions.get(id)?;
+                batch_error
+                    .clone()
+                    .or_else(|| judge(id, input))
             };
 
-            if success {
-                success_count += 1;
-            } else {
-                failure_count += 1;
+        for direction_limits in &limit_directions {
+            let direction = direction_limits.direction.to_string();
+            let report = direction_limits.report();
+
+            let mut at_limit_failures = direction_limits.failures_of(CheckId::LimitsAtLimit);
+            at_limit_failures
+                .extend(execution_failure(&direction_limits.at_limit_execution, &|id, input| {
+                    execution_mismatch(id, input, results)
+                }));
+            checks.record_direction(
+                CheckId::LimitsAtLimit,
+                &direction_limits.component,
+                &direction,
+                &report,
+                direction_limits.at_limit_unfailed(),
+                &at_limit_failures,
+            );
+
+            // What happens past the limit proves the claim only if the swap at the limit executes.
+            let at_limit_executed = batch_error.is_none() &&
+                direction_limits
+                    .at_limit_execution
+                    .as_ref()
+                    .is_some_and(|id| {
+                        matches!(results.get(id), Some(TychoExecutionResult::Success { .. }))
+                    });
+            let mut past_limit_failures = direction_limits.failures_of(CheckId::LimitsPastLimit);
+            if at_limit_executed {
+                past_limit_failures.extend(execution_failure(
+                    &direction_limits.past_limit_execution,
+                    &|id, input| match direction_limits.limits {
+                        Limits::UnderCap { .. } => missing_execution(id, input, results),
+                        Limits::Hard { .. } | Limits::Soft { .. } => {
+                            missing_revert(id, input, results)
+                        }
+                    },
+                ));
+            }
+            checks.record_direction(
+                CheckId::LimitsPastLimit,
+                &direction_limits.component,
+                &direction,
+                &report,
+                direction_limits.past_limit_unfailed(at_limit_executed),
+                &past_limit_failures,
+            );
+
+            checks.record_direction(
+                CheckId::LimitsMaxOutput,
+                &direction_limits.component,
+                &direction,
+                &report,
+                direction_limits.max_output_unfailed(),
+                &direction_limits.failures_of(CheckId::LimitsMaxOutput),
+            );
+        }
+        for UncheckedLimit { component, direction, limits, declared_by, why } in &unchecked_limits {
+            let direction = direction.to_string();
+            let report = match why {
+                Unchecked::ZeroLimit => {
+                    let zero = BigUint::zero();
+                    LimitReport::new(limits, *declared_by, Some((&zero, &zero)), false)
+                }
+                Unchecked::NotQuoted => LimitReport::new(limits, *declared_by, None, false),
+            };
+            for check in CheckId::LIMITS {
+                match why {
+                    Unchecked::ZeroLimit => checks.record_direction(
+                        check,
+                        component,
+                        &direction,
+                        &report,
+                        Outcome::Skipped { reason: "the limit is zero at this block".to_string() },
+                        &[],
+                    ),
+                    Unchecked::NotQuoted => checks.record_direction(
+                        check,
+                        component,
+                        &direction,
+                        &report,
+                        Outcome::Pass,
+                        &[format!(
+                            "{direction} declares a limit, but the runner did not quote it: the \
+                             indexed tokens differ from the expected ones"
+                        )],
+                    ),
+                }
             }
         }
-
-        info!("Batch execution complete: {} successes, {} failures", success_count, failure_count);
-
-        ensure!(
-            failure_count.is_zero(),
-            "Execution validation failed: {success_count} successes, {failure_count} failures"
-        );
-
         Ok(())
     }
 
@@ -1817,7 +2436,9 @@ mod tests {
 
     use dotenvy::dotenv;
     use glob::glob;
+    use tycho_execution::encoding::models::Solution;
     use tycho_simulation::tycho_common::{models::protocol::ProtocolComponentState, Bytes};
+    use tycho_test::execution::models::Transaction;
 
     use super::*;
     use crate::{
@@ -1839,6 +2460,7 @@ mod tests {
             },
             skip_simulation,
             skip_execution,
+            limits: None,
         }
     }
 
@@ -1984,7 +2606,7 @@ mod tests {
     /// size the venue reported, untouched.
     #[test]
     fn execution_trades_are_sized_within_uniswap_v4s_int128_range() {
-        let ceiling = BigUint::from(i128::MAX as u128);
+        let ceiling = int128_ceiling();
 
         assert_eq!(executable_max_input(&BigUint::from(1_000u32)), BigUint::from(1_000u32));
         assert_eq!(executable_max_input(&ceiling), ceiling);
@@ -1992,6 +2614,201 @@ mod tests {
         // The limit the deep Pons pool reports, some 12 orders of magnitude past the ceiling.
         let pons_limit = BigUint::from_str("1693513416259416009682992155640660564186233").unwrap();
         assert_eq!(executable_max_input(&pons_limit), ceiling);
+    }
+
+    #[test]
+    fn a_limit_at_or_above_int128_max_is_the_execution_cap() {
+        let ceiling = int128_ceiling();
+
+        assert!(!at_execution_cap(&(&ceiling - 1u32)));
+        // Exactly the ceiling: one unit past it reverts in the cast, not at the venue's bound.
+        assert!(at_execution_cap(&ceiling));
+        assert!(at_execution_cap(&(&ceiling + 1u32)));
+    }
+
+    /// A hard limit's direction, with every check passing in simulation unless `quoted_at_limit`
+    /// is false, and its swaps queued unless `execution_skipped` gives a reason.
+    fn hard_limit(quoted_at_limit: bool, execution_skipped: Option<&str>) -> LimitDirection {
+        let queued = quoted_at_limit && execution_skipped.is_none();
+        LimitDirection {
+            component: "0x01".to_string(),
+            direction: Direction { token_in: Bytes::from("0x0a"), token_out: Bytes::from("0x0b") },
+            limits: Limits::Hard { rounding: 0 },
+            declared_by: DeclaredBy::Component,
+            max_input: BigUint::from(1000u32),
+            max_output: BigUint::from(2000u32),
+            capped: false,
+            quoted_at_limit,
+            execution_skipped: execution_skipped.map(str::to_string),
+            failures: Vec::new(),
+            at_limit_execution: queued.then(|| "at_limit".to_string()),
+            past_limit_execution: queued.then(|| "past_limit".to_string()),
+        }
+    }
+
+    fn at_limit_failed() -> Outcome {
+        Outcome::NotRun { reason: "limits.at_limit failed".to_string() }
+    }
+
+    #[test]
+    fn limit_checks_pass_once_executed() {
+        let executed = hard_limit(true, None);
+        assert_eq!(executed.at_limit_unfailed(), Outcome::Pass);
+        assert_eq!(executed.past_limit_unfailed(true), Outcome::Pass);
+        assert_eq!(executed.max_output_unfailed(), Outcome::Pass);
+    }
+
+    #[test]
+    fn a_revert_past_the_limit_proves_nothing_when_the_limit_does_not_execute() {
+        assert_eq!(hard_limit(true, None).past_limit_unfailed(false), at_limit_failed());
+    }
+
+    #[test]
+    fn limit_checks_of_a_component_that_skips_execution_are_skipped() {
+        let skipped = hard_limit(true, Some("no fork state"));
+        assert_eq!(
+            skipped.at_limit_unfailed(),
+            Outcome::Skipped {
+                reason: "the quote at the limit is not executed: no fork state".to_string()
+            }
+        );
+        assert_eq!(
+            skipped.past_limit_unfailed(false),
+            Outcome::Skipped {
+                reason: "the swap past the limit is not executed: no fork state".to_string()
+            }
+        );
+        // The comparison runs in simulation alone.
+        assert_eq!(skipped.max_output_unfailed(), Outcome::Pass);
+    }
+
+    #[test]
+    fn checks_that_need_the_quote_at_the_limit_are_not_run_without_it() {
+        let unquoted = hard_limit(false, None);
+        assert_eq!(unquoted.past_limit_unfailed(false), at_limit_failed());
+        assert_eq!(unquoted.max_output_unfailed(), at_limit_failed());
+        // A failed quote is recorded as a failure, which outranks this.
+        assert!(matches!(unquoted.at_limit_unfailed(), Outcome::NotRun { .. }));
+    }
+
+    #[test]
+    fn a_capped_limit_skips_the_past_limit_check() {
+        let capped = LimitDirection { capped: true, ..hard_limit(true, None) };
+        assert_eq!(
+            capped.past_limit_unfailed(true),
+            Outcome::Skipped {
+                reason: "the limit is at the int128::MAX cap, which is not the venue's bound"
+                    .to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_soft_limit_passes_past_the_limit_on_its_simulation_alone() {
+        let soft = LimitDirection {
+            limits: Limits::Soft { reason: "constant product".to_string() },
+            past_limit_execution: None,
+            ..hard_limit(true, None)
+        };
+        assert_eq!(soft.past_limit_unfailed(false), Outcome::Pass);
+    }
+
+    #[test]
+    fn an_under_cap_limit_passes_past_the_limit_once_executed() {
+        let under_cap = LimitDirection {
+            limits: Limits::UnderCap { reason: "keeper-set rate; gives up 2%".to_string() },
+            ..hard_limit(true, None)
+        };
+        assert_eq!(under_cap.past_limit_unfailed(true), Outcome::Pass);
+        assert_eq!(under_cap.past_limit_unfailed(false), at_limit_failed());
+    }
+
+    fn past_limit_input() -> TychoExecutionInput {
+        TychoExecutionInput {
+            solution: Solution::new(
+                Bytes::default(),
+                Bytes::default(),
+                Bytes::from("0x01"),
+                Bytes::from("0x02"),
+                BigUint::from(101u32),
+                BigUint::from(50u32),
+                BigUint::from(50u32),
+                Vec::new(),
+            ),
+            transaction: Transaction::new(
+                Bytes::default(),
+                BigUint::zero(),
+                Vec::new(),
+                BigUint::zero(),
+            ),
+            expected_amount_out: BigUint::from(50u32),
+            protocol_system: "vault".to_string(),
+            component_id: "0xaa".to_string(),
+            token_in: "A".to_string(),
+            token_out: "B".to_string(),
+            estimated_gas: BigUint::zero(),
+            account_overwrites: None,
+        }
+    }
+
+    fn revert(reason: &str) -> TychoExecutionResult {
+        TychoExecutionResult::Revert {
+            reason: reason.to_string(),
+            state_overwrites: None,
+            overwrite_metadata: None,
+        }
+    }
+
+    #[test]
+    fn only_a_revert_from_the_chain_proves_a_hard_limit() {
+        let judge = |result: Option<TychoExecutionResult>| {
+            let results: HashMap<String, TychoExecutionResult> = result
+                .into_iter()
+                .map(|result| ("past".to_string(), result))
+                .collect();
+            missing_revert("past", &past_limit_input(), &results)
+        };
+        assert_eq!(judge(Some(revert("ERC4626: deposit more than max"))), None);
+        let executed = judge(Some(TychoExecutionResult::Success {
+            amount_out: BigUint::from(50u32),
+            gas_used: 0,
+            state_overwrites: None,
+            overwrite_metadata: None,
+        }))
+        .unwrap();
+        assert!(executed.contains("executes and pays 50 B"), "{executed}");
+        let failed =
+            judge(Some(TychoExecutionResult::Failed { error_msg: "decode".to_string() })).unwrap();
+        assert!(failed.contains("could not be simulated"), "{failed}");
+        assert!(judge(None)
+            .unwrap()
+            .contains("No result found"));
+    }
+
+    #[test]
+    fn only_an_execution_from_the_chain_proves_an_under_cap_limit() {
+        let judge = |result: Option<TychoExecutionResult>| {
+            let results: HashMap<String, TychoExecutionResult> = result
+                .into_iter()
+                .map(|result| ("past".to_string(), result))
+                .collect();
+            missing_execution("past", &past_limit_input(), &results)
+        };
+        let executed = TychoExecutionResult::Success {
+            amount_out: BigUint::from(50u32),
+            gas_used: 0,
+            state_overwrites: None,
+            overwrite_metadata: None,
+        };
+        assert_eq!(judge(Some(executed)), None);
+        let reverted = judge(Some(revert("ERC4626: deposit more than max"))).unwrap();
+        assert!(reverted.contains("declare it hard"), "{reverted}");
+        let failed =
+            judge(Some(TychoExecutionResult::Failed { error_msg: "decode".to_string() })).unwrap();
+        assert!(failed.contains("could not be simulated"), "{failed}");
+        assert!(judge(None)
+            .unwrap()
+            .contains("No result found"));
     }
 
     #[test]

@@ -340,6 +340,10 @@ async fn simulate_swap_transaction_on(
                     TychoExecutionResult::Revert { reason, state_overwrites, overwrite_metadata },
                 );
             }
+            SimulationResult::Failed { error_msg } => {
+                tycho_execution_results
+                    .insert(simulation_id, TychoExecutionResult::Failed { error_msg });
+            }
         }
     }
 

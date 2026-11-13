@@ -85,6 +85,8 @@ In strict mode:
   `no` would otherwise turn the check off.
 - Every check of a test runs, and the test fails at the end listing every failed check, instead of
   stopping at the first. A check that needs the result of a failed one is reported as not run.
+- Every direction of every expected component declares what kind of limit `get_limits` reports,
+  and the limit is tested as declared (below).
 - New checks are added to strict mode only, so a legacy package never starts failing because the
   harness grew.
 
@@ -92,6 +94,82 @@ A missing executor deployment is not a reason to skip execution, in either mode,
 protocol's executor has a runtime bytecode fixture in `src/execution.rs`: the harness overrides the
 executor address with that bytecode, so execution runs either way. A protocol without one needs a
 fixture added first.
+
+### Limits
+
+The ladder trades at most 10% of a direction's limit, so on its own it passes a limit ten times too
+high. Strict mode also tests the limit itself, per direction, after the `int128` cap the runner
+applies for execution. Every direction of every expected component declares the kind of limit
+`get_limits` reports, unless the component skips simulation. A `limits` value is one declaration for every direction, or a map from
+directions to declarations, keyed `0x<token in>->0x<token out>`, with an optional `default` for the
+directions it does not list. A package declares limits for all its components, and a component can
+override them:
+
+```yaml
+harness: strict
+limits: {kind: soft, reason: "constant product: any input trades, at a worse price"}
+tests:
+  - name: ...
+    expected_components:
+      - id: "0x..."                    # a pool: soft, from the package
+      - id: "0x..."                    # a vault: a deposit cap one way, redemptions the other
+        limits:
+          "0x<asset>->0x<share>": {kind: hard}
+          "0x<share>->0x<asset>":
+            kind: under_cap
+            reason: "the redemption limit depends on a keeper-set rate we do not index (cast call 0x... 'maxRedeem(address)' -b 21000000 returns ...); gives up to 2% of the vault's redeemable shares"
+```
+
+For each direction the most specific declaration applies: the component's entry for that direction,
+the component's default, the package's entry for that direction, then the package's default. A
+direction must be one of the component's token pairs (for a package entry, of some expected
+component's).
+
+| Kind | Meaning | Required | Tested |
+|---|---|---|---|
+| `hard` | the venue rejects any input above its bound, and the limit is that bound | optional `rounding` | at the limit; past the bound, the quote errors and the swap reverts |
+| `soft` | the venue has no bound on the input; the limit is a recommended size, as the `ProtocolSim::get_limits` documentation allows | `reason`, naming the code that shows it | at the limit; twice the limit still quotes |
+| `under_cap` | the venue has a bound, and the limit stays below it because the exact bound cannot be derived | `reason`: why, such as a command and its output, and the capacity given up | at the limit; one unit past it, the quote and the swap succeed |
+
+- **At the limit** (`limits.at_limit`): `get_amount_out(max_input)` succeeds, and executing it
+  does not revert and matches the simulation.
+- **Max output** (`limits.max_output`): the quote at `max_input` pays no more than `max_output`.
+- **Past the limit** (`limits.past_limit`): the venue behaves as the kind claims, so a wrong
+  declaration fails.
+  - `hard`: `get_amount_out(max_input + rounding + 1)` errors, and executing it reverts.
+    `rounding` is 0 unless declared: where `get_limits` derives the input from an output-side
+    bound with a rounding division, the bound can exceed the limit by a few units, and
+    `{kind: hard, rounding: 2}` probes past them. The swap's minimum output is set from the quote
+    at the limit, so a venue that accepts the input executes the swap and fails the check. The
+    check accepts any revert from the chain, but not a node error on the call, which proves
+    nothing.
+  - `under_cap`: `get_amount_out(max_input + 1)` succeeds, and executing it does not revert, so
+    the bound is above the limit.
+  - `soft`: `get_amount_out(2 × max_input)` succeeds, so the venue has no bound near the limit.
+    Nothing past it is executed.
+
+  When the limit is at or above the `int128` cap, the cap is not the venue's bound, and nothing is
+  probed past it.
+
+Each of the three checks is reported per component and direction, with `component` and
+`direction` keys in the report. A check passes only once everything it tests ran. Unless the
+simulation already failed it:
+
+- `limits.past_limit` is skipped for a limit at the cap.
+- When the quote at the limit fails, `limits.max_output` is `not_run`, and so is
+  `limits.past_limit` for a hard or under-cap limit. When the swap at the limit does not execute,
+  `limits.past_limit` is `not_run` too: what happens past a limit that does not execute either
+  proves nothing.
+- A component with `skip_execution` runs the checks in simulation only: `limits.at_limit` and
+  `limits.past_limit` are skipped with its reason.
+- A component with `skip_simulation` has all three skipped.
+- A direction whose limit is zero at the tested block has all three skipped. A declared direction
+  the runner never quotes, because the indexed tokens differ from the expected ones, fails all
+  three.
+
+A declaration missing a required field, or with a field its kind does not read, or naming a
+direction its component does not have, or naming one direction twice, is an error in both modes.
+Legacy mode reads the declarations but runs none of these checks.
 
 ### Test report
 
@@ -107,7 +185,9 @@ fixture added first.
     { "test": "first", "check": "balances", "outcome": "pass" },
     { "test": "first", "check": "exec.ladder", "component": "0xabc...", "outcome": "skipped", "reason": "range predates Shanghai; the router needs PUSH0" },
     { "test": "first", "check": "sim.ladder", "outcome": "fail", "detail": "Error calculating amount out ..." },
-    { "test": "first", "check": "exec.ladder", "outcome": "not_run", "reason": "sim.ladder failed" }
+    { "test": "first", "check": "exec.ladder", "outcome": "not_run", "reason": "sim.ladder failed" },
+    { "test": "second", "check": "limits.past_limit", "component": "0x...", "direction": "0x...->0x...", "outcome": "pass",
+      "limit": { "kind": "soft", "reason": "constant product: ...", "declared_by": "package_default", "max_input": "2162000", "max_output": "68309", "capped": false } }
   ]
 }
 ```
@@ -121,6 +201,15 @@ fixture added first.
 | `decode` | the snapshot decodes, and so does every expected component |
 | `sim.ladder` | limits, spot prices and quotes at 0.1%, 1% and 10% of the limit, every direction |
 | `exec.ladder` | executing each quote on chain matches the simulation |
+| `limits.at_limit` | strict: every direction quotes and executes at its limit |
+| `limits.past_limit` | strict: past the limit, the venue behaves as the declared kind claims |
+| `limits.max_output` | strict: the quote at the limit pays no more than the limit's max output |
+
+Every `limits.*` result carries its `limit`, whatever the outcome: the declared `kind`, its
+`reason` (and a hard limit's `rounding`), which declaration applies (`declared_by`: `component`,
+`component_default`, `package` or `package_default`), and `get_limits`' `max_input` (after the
+`int128` cap) and `max_output`, with `capped` saying whether the cap applied. The run also logs a
+count per test, such as `limits: 3 hard, 8 soft, 1 under_cap`.
 
 A skipped check is reported with its reason, per component (by lowercase id) for
 `skip_simulation` and `skip_execution`; a legacy `true` reads "no reason given". A test-wide
