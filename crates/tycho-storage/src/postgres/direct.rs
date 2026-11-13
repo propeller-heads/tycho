@@ -16,8 +16,8 @@ use tycho_common::{
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
-            ComponentBalance, ProtocolComponent, ProtocolComponentState,
-            ProtocolComponentStateDelta, QualityRange,
+            ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
+            ProtocolComponentState, ProtocolComponentStateDelta, QualityRange,
         },
         token::Token,
         Address, Chain, ComponentId, ContractId, EntryPointId, ExtractionState, PaginationParams,
@@ -505,6 +505,43 @@ impl ProtocolGateway for DirectGateway {
         let mut conn = self.checkout().await?;
         self.state_gateway
             .get_component_tvls(chain, system, ids, pagination_params, &mut conn)
+            .await
+    }
+
+    #[instrument(skip_all)]
+    async fn pause_components(
+        &self,
+        chain: &Chain,
+        system: &str,
+        pauses: &[PauseRecord],
+    ) -> Result<Vec<ComponentId>, StorageError> {
+        let mut conn = self.checkout().await?;
+        self.state_gateway
+            .pause_components(chain, system, pauses, &mut conn)
+            .await
+    }
+
+    #[instrument(skip_all)]
+    async fn unpause_components(
+        &self,
+        chain: &Chain,
+        system: &str,
+        component_ids: &[&str],
+    ) -> Result<Vec<ComponentId>, StorageError> {
+        let mut conn = self.checkout().await?;
+        self.state_gateway
+            .unpause_components(chain, system, component_ids, &mut conn)
+            .await
+    }
+
+    #[instrument(skip_all)]
+    async fn get_paused_components(
+        &self,
+        chain: &Chain,
+    ) -> Result<Vec<ComponentPause>, StorageError> {
+        let mut conn = self.checkout().await?;
+        self.state_gateway
+            .get_paused_components(chain, &mut conn)
             .await
     }
 }

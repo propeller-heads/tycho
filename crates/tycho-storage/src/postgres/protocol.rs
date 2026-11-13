@@ -15,8 +15,8 @@ use tracing::{debug_span, error, instrument, trace, warn, Instrument, Level};
 use tycho_common::{
     models::{
         protocol::{
-            ComponentBalance, ProtocolComponent, ProtocolComponentState,
-            ProtocolComponentStateDelta, QualityRange,
+            ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
+            ProtocolComponentState, ProtocolComponentStateDelta, QualityRange,
         },
         token::Token,
         Address, Balance, Chain, ChangeType, ComponentId, FinancialType, ImplementationType,
@@ -2023,6 +2023,118 @@ impl PostgresGateway {
             .collect::<HashMap<_, _>>();
 
         Ok(WithTotal { entity: result, total: Some(count) })
+    }
+
+    /// Inserts one open pause row per record, skipping components that already have one.
+    ///
+    /// Returns the ids of the rows inserted.
+    pub async fn pause_components(
+        &self,
+        chain: &Chain,
+        system: &str,
+        pauses: &[PauseRecord],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<ComponentId>, StorageError> {
+        use schema::component_pause::dsl as cp;
+
+        let chain_id = self.get_chain_id(chain)?;
+        let system_id = self.get_protocol_system_id(&system.to_string())?;
+        if pauses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows: Vec<_> = pauses
+            .iter()
+            .map(|pause| orm::NewComponentPause {
+                chain_id,
+                protocol_system_id: system_id,
+                component_id: &pause.component_id,
+                reason: pause.reason.as_deref(),
+                actor: pause.actor.as_deref(),
+                evidence_url: pause.evidence_url.as_deref(),
+            })
+            .collect();
+
+        // The only unique index besides the primary key allows one open row per component, so
+        // a conflict means the component is already paused.
+        diesel::insert_into(cp::component_pause)
+            .values(&rows)
+            .on_conflict_do_nothing()
+            .returning(cp::component_id)
+            .get_results(conn)
+            .await
+            .map_err(|err| storage_error_from_diesel(err, "ComponentPause", system, None).into())
+    }
+
+    /// Closes the open pause rows of the given components.
+    ///
+    /// Returns the ids of the rows closed.
+    pub async fn unpause_components(
+        &self,
+        chain: &Chain,
+        system: &str,
+        component_ids: &[&str],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<ComponentId>, StorageError> {
+        use schema::component_pause::dsl as cp;
+
+        let chain_id = self.get_chain_id(chain)?;
+        let system_id = self.get_protocol_system_id(&system.to_string())?;
+        if component_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        diesel::update(cp::component_pause)
+            .filter(cp::chain_id.eq(chain_id))
+            .filter(cp::protocol_system_id.eq(system_id))
+            .filter(cp::component_id.eq_any(component_ids))
+            .filter(cp::valid_to.is_null())
+            .set(cp::valid_to.eq(diesel::dsl::now))
+            .returning(cp::component_id)
+            .get_results(conn)
+            .await
+            .map_err(|err| storage_error_from_diesel(err, "ComponentPause", system, None).into())
+    }
+
+    /// Loads the open pause rows of a chain, ordered by protocol system and component id.
+    pub async fn get_paused_components(
+        &self,
+        chain: &Chain,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<ComponentPause>, StorageError> {
+        use schema::{component_pause::dsl as cp, protocol_system::dsl as ps};
+
+        let chain_id = self.get_chain_id(chain)?;
+        let rows: Vec<orm::OpenComponentPause> = cp::component_pause
+            .inner_join(ps::protocol_system)
+            .filter(cp::chain_id.eq(chain_id))
+            .filter(cp::valid_to.is_null())
+            .order_by((ps::name, cp::component_id))
+            .select((
+                ps::name,
+                cp::component_id,
+                cp::reason,
+                cp::actor,
+                cp::evidence_url,
+                cp::valid_from,
+            ))
+            .load(conn)
+            .await
+            .map_err(|err| {
+                storage_error_from_diesel(err, "ComponentPause", &chain.to_string(), None)
+            })?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| ComponentPause {
+                protocol_system: row.protocol_system,
+                record: PauseRecord {
+                    component_id: row.component_id,
+                    reason: row.reason,
+                    actor: row.actor,
+                    evidence_url: row.evidence_url,
+                },
+                paused_since: row.valid_from,
+            })
+            .collect())
     }
 }
 
@@ -4354,5 +4466,226 @@ mod test {
 
         let expected_price = 10.0_f64.powi(18);
         assert_eq!(prices.get(&native.address).copied(), Some(expected_price));
+    }
+
+    mod pause_serial_db {
+        use super::*;
+
+        const SYSTEM: &str = "ambient";
+
+        async fn setup_pause_gateway(conn: &mut AsyncPgConnection) -> EVMGateway {
+            // The gateway loads each chain's native token when it is built.
+            for chain in ["ethereum", "starknet"] {
+                let chain_id = db_fixtures::insert_chain(conn, chain).await;
+                db_fixtures::insert_token(
+                    conn,
+                    chain_id,
+                    "0000000000000000000000000000000000000000",
+                    "ETH",
+                    18,
+                    Some(100),
+                )
+                .await;
+            }
+            db_fixtures::insert_protocol_system(conn, SYSTEM.to_owned()).await;
+            EVMGateway::from_connection(conn).await
+        }
+
+        fn pause(component_id: &str, reason: &str) -> PauseRecord {
+            PauseRecord {
+                component_id: component_id.to_owned(),
+                reason: Some(reason.to_owned()),
+                actor: Some("watcher".to_owned()),
+                evidence_url: Some("https://example.com/evidence".to_owned()),
+            }
+        }
+
+        /// All rows stored for a component, open or closed, as `valid_to` values.
+        async fn stored_rows(conn: &mut AsyncPgConnection, id: &str) -> Vec<Option<NaiveDateTime>> {
+            use schema::component_pause::dsl as cp;
+            cp::component_pause
+                .filter(cp::component_id.eq(id))
+                .order_by(cp::id)
+                .select(cp::valid_to)
+                .load(conn)
+                .await
+                .expect("failed to read component_pause rows")
+        }
+
+        fn paused_ids(pauses: &[ComponentPause]) -> Vec<&str> {
+            pauses
+                .iter()
+                .map(|p| p.record.component_id.as_str())
+                .collect()
+        }
+
+        fn sorted(mut ids: Vec<ComponentId>) -> Vec<ComponentId> {
+            ids.sort();
+            ids
+        }
+
+        #[tokio::test]
+        async fn test_pause_components_twice() {
+            let mut conn = setup_db().await;
+            let gw = setup_pause_gateway(&mut conn).await;
+
+            let first = gw
+                .pause_components(
+                    &Chain::Ethereum,
+                    SYSTEM,
+                    &[pause("pool_a", "first"), pause("pool_b", "first")],
+                    &mut conn,
+                )
+                .await
+                .expect("first pause failed");
+            let second = gw
+                .pause_components(
+                    &Chain::Ethereum,
+                    SYSTEM,
+                    &[pause("pool_a", "second"), pause("pool_c", "second")],
+                    &mut conn,
+                )
+                .await
+                .expect("second pause failed");
+
+            assert_eq!(sorted(first), vec!["pool_a", "pool_b"]);
+            assert_eq!(second, vec!["pool_c"]);
+            let paused = gw
+                .get_paused_components(&Chain::Ethereum, &mut conn)
+                .await
+                .expect("reading pauses failed");
+            assert_eq!(paused_ids(&paused), vec!["pool_a", "pool_b", "pool_c"]);
+            assert_eq!(paused[0].protocol_system, SYSTEM);
+            assert_eq!(paused[0].record, pause("pool_a", "first"));
+            assert_eq!(stored_rows(&mut conn, "pool_a").await, vec![None]);
+        }
+
+        #[tokio::test]
+        async fn test_pause_components_duplicate_ids_in_one_call() {
+            let mut conn = setup_db().await;
+            let gw = setup_pause_gateway(&mut conn).await;
+
+            let paused = gw
+                .pause_components(
+                    &Chain::Ethereum,
+                    SYSTEM,
+                    &[pause("pool_a", "first"), pause("pool_a", "second")],
+                    &mut conn,
+                )
+                .await
+                .expect("pause failed");
+
+            assert_eq!(paused, vec!["pool_a"]);
+            assert_eq!(stored_rows(&mut conn, "pool_a").await, vec![None]);
+        }
+
+        #[tokio::test]
+        async fn test_unpause_components_twice() {
+            let mut conn = setup_db().await;
+            let gw = setup_pause_gateway(&mut conn).await;
+            gw.pause_components(
+                &Chain::Ethereum,
+                SYSTEM,
+                &[pause("pool_a", "r"), pause("pool_b", "r")],
+                &mut conn,
+            )
+            .await
+            .expect("pause failed");
+
+            let first = gw
+                .unpause_components(
+                    &Chain::Ethereum,
+                    SYSTEM,
+                    &["pool_a", "never_paused"],
+                    &mut conn,
+                )
+                .await
+                .expect("first unpause failed");
+            let second = gw
+                .unpause_components(&Chain::Ethereum, SYSTEM, &["pool_a"], &mut conn)
+                .await
+                .expect("second unpause failed");
+
+            assert_eq!(first, vec!["pool_a"]);
+            assert!(second.is_empty());
+            let paused = gw
+                .get_paused_components(&Chain::Ethereum, &mut conn)
+                .await
+                .expect("reading pauses failed");
+            assert_eq!(paused_ids(&paused), vec!["pool_b"]);
+            let rows = stored_rows(&mut conn, "pool_a").await;
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].is_some(), "the unpaused row is kept as history");
+        }
+
+        #[tokio::test]
+        async fn test_pause_after_unpause() {
+            let mut conn = setup_db().await;
+            let gw = setup_pause_gateway(&mut conn).await;
+            let pauses = [pause("pool_a", "r")];
+            gw.pause_components(&Chain::Ethereum, SYSTEM, &pauses, &mut conn)
+                .await
+                .expect("pause failed");
+            gw.unpause_components(&Chain::Ethereum, SYSTEM, &["pool_a"], &mut conn)
+                .await
+                .expect("unpause failed");
+
+            let repaused = gw
+                .pause_components(&Chain::Ethereum, SYSTEM, &pauses, &mut conn)
+                .await
+                .expect("second pause failed");
+
+            assert_eq!(repaused, vec!["pool_a"]);
+            let rows = stored_rows(&mut conn, "pool_a").await;
+            assert_eq!(rows.len(), 2);
+            assert!(rows[0].is_some());
+            assert!(rows[1].is_none());
+        }
+
+        #[tokio::test]
+        async fn test_pause_unknown_component() {
+            let mut conn = setup_db().await;
+            let gw = setup_pause_gateway(&mut conn).await;
+
+            let paused = gw
+                .pause_components(&Chain::Ethereum, SYSTEM, &[pause("not_indexed", "r")], &mut conn)
+                .await
+                .expect("pause failed");
+
+            assert_eq!(paused, vec!["not_indexed"]);
+            let stored = gw
+                .get_paused_components(&Chain::Ethereum, &mut conn)
+                .await
+                .expect("reading pauses failed");
+            assert_eq!(paused_ids(&stored), vec!["not_indexed"]);
+        }
+
+        #[tokio::test]
+        async fn test_get_paused_components_other_chain() {
+            let mut conn = setup_db().await;
+            let gw = setup_pause_gateway(&mut conn).await;
+            gw.pause_components(&Chain::Starknet, SYSTEM, &[pause("pool_a", "r")], &mut conn)
+                .await
+                .expect("pause failed");
+
+            let paused = gw
+                .get_paused_components(&Chain::Ethereum, &mut conn)
+                .await
+                .expect("reading pauses failed");
+
+            assert!(paused.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_pause_components_unknown_system() {
+            let mut conn = setup_db().await;
+            let gw = setup_pause_gateway(&mut conn).await;
+
+            let res = gw
+                .pause_components(&Chain::Ethereum, "unknown", &[pause("pool_a", "r")], &mut conn)
+                .await;
+
+            assert!(matches!(res, Err(StorageError::NotFound(..))), "got {res:?}");
+        }
     }
 }

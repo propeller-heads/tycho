@@ -34,7 +34,9 @@ All public DB operations go through one of two gateway structs:
   `token_cache` when enabled), `get_protocol_components` (counted and paged by `component_index`
   when enabled) and `get_delta` (small LRU). The executor runs a batch up to
   three times when Postgres reports a transaction conflict (deadlock or serialization
-  failure); each attempt re-runs from scratch with a fresh snapshot.
+  failure); each attempt re-runs from scratch with a fresh snapshot. Admin pause writes
+  (`pause_components`, `unpause_components`) skip the executor and run on their own connection,
+  because they are not block data.
 - **`DirectGateway`** (testing / low-throughput): same trait surface, no buffering.
 
 `GatewayBuilder::build` requires **exactly one** chain (`ensure_chain`) — an instance is

@@ -172,6 +172,23 @@ diesel::table! {
 }
 
 diesel::table! {
+    component_pause (id) {
+        id -> Int8,
+        chain_id -> Int8,
+        protocol_system_id -> Int8,
+        #[max_length = 255]
+        component_id -> Varchar,
+        reason -> Nullable<Text>,
+        actor -> Nullable<Text>,
+        evidence_url -> Nullable<Text>,
+        valid_from -> Timestamptz,
+        valid_to -> Nullable<Timestamptz>,
+        inserted_ts -> Timestamptz,
+        modified_ts -> Timestamptz,
+    }
+}
+
+diesel::table! {
     component_tvl (id) {
         id -> Int8,
         protocol_component_id -> Int8,
@@ -384,6 +401,8 @@ diesel::joinable!(account_balance -> account (account_id));
 diesel::joinable!(account_balance -> token (token_id));
 diesel::joinable!(account_balance -> transaction (modify_tx));
 diesel::joinable!(block -> chain (chain_id));
+diesel::joinable!(component_pause -> chain (chain_id));
+diesel::joinable!(component_pause -> protocol_system (protocol_system_id));
 diesel::joinable!(component_tvl -> protocol_component (protocol_component_id));
 diesel::joinable!(contract_code -> account (account_id));
 diesel::joinable!(contract_code -> transaction (modify_tx));
@@ -422,6 +441,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     account_balance,
     block,
     chain,
+    component_pause,
     component_tvl,
     contract_code,
     entry_point,
