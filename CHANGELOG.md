@@ -1,3 +1,11 @@
+## [0.518.0](https://github.com/propeller-heads/tycho/compare/0.517.1...0.518.0) (2026-11-13)
+
+
+### Features
+
+* **execution:** add Metric executors and fallbacks on Elysium ([#1791](https://github.com/propeller-heads/tycho/issues/1791)) ([4f6a000](https://github.com/propeller-heads/tycho/commit/4f6a0000409c9a10e2fcb91f367176bffe19b7c9))
+* **execution:** prepare Metric executors and fallbacks on Elysium ([166906d](https://github.com/propeller-heads/tycho/commit/166906d2df9f7ed9e6f12f36e52677dcc6b47a1e))
+
 ## [0.517.1](https://github.com/propeller-heads/tycho/compare/0.517.0...0.517.1) (2026-11-13)
 
 
