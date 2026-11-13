@@ -782,6 +782,31 @@ mod tests {
         assert!(matches!(res, Err(ExtractionError::Setup(_))));
     }
 
+    // The node of `test_extractors_starting_at_different_blocks_stamp_the_same` in
+    // `protocol_extractor.rs`: there every extractor stamps block 8 at S and block 10 at S + 2 µs.
+
+    #[tokio::test]
+    async fn test_stamped_block_first_in_its_second() {
+        let (_server, rpc) = node(&[(7, SECOND - 1), (8, SECOND)]).await;
+
+        let stamped = stamped_block(&rpc, Chain::Ethereum, 8)
+            .await
+            .unwrap();
+
+        assert_eq!(stamped, block(8, ts_at(SECOND, 0)));
+    }
+
+    #[tokio::test]
+    async fn test_stamped_block_with_two_earlier_blocks() {
+        let (_server, rpc) = node(&[(7, SECOND - 1), (8, SECOND), (9, SECOND), (10, SECOND)]).await;
+
+        let stamped = stamped_block(&rpc, Chain::Ethereum, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(stamped, block(10, ts_at(SECOND, 2)));
+    }
+
     #[test]
     fn test_extractor_config_without_dci_plugin() {
         let yaml = r#"
