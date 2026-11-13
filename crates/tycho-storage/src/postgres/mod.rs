@@ -1584,6 +1584,33 @@ pub mod db_fixtures {
             .expect("inserting the component balance failed");
     }
 
+    /// Inserts the state attribute `attribute_name` of a component of the instance, valid from
+    /// 2020-01-01 00:00 at transaction index 0, with no previous value.
+    pub async fn insert_instance_state(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        attribute_name: &str,
+        value: Bytes,
+    ) {
+        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        diesel::insert_into(instance::schema::tycho::protocol_state::table)
+            .values(instance::orm::NewProtocolState {
+                instance_id,
+                protocol_component_id: component_id,
+                attribute_name: attribute_name.to_string(),
+                attribute_value: value,
+                previous_value: None,
+                valid_from,
+                tx_index: 0,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the protocol state failed");
+    }
+
     /// Inserts the TVL of a component of the instance.
     pub async fn insert_instance_tvl(
         conn: &mut AsyncPgConnection,
