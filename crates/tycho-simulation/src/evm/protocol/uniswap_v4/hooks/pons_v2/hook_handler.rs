@@ -294,6 +294,7 @@ mod tests {
                 I128::try_from(amount1).expect("i128 fits I128"),
             ),
             hook_data: Bytes::new(),
+            pool_state: None,
         }
     }
 

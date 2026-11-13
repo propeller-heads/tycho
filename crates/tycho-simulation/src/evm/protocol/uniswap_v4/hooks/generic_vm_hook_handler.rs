@@ -1,7 +1,7 @@
 use std::{any::Any, collections::HashMap, fmt::Debug, str::FromStr, sync::Arc};
 
 use alloy::{
-    primitives::{keccak256, Address, Signed, Uint, I128, U256},
+    primitives::{keccak256, Address, Signed, Uint, I128, I256, U256},
     sol_types::SolType,
 };
 use revm::{
@@ -27,7 +27,7 @@ use crate::evm::{
                 models::{
                     AfterSwapDelta, AfterSwapParameters, AfterSwapSolReturn, AmountRanges,
                     BeforeSwapOutput, BeforeSwapParameters, BeforeSwapSolOutput,
-                    GetLimitsSolReturn, SwapParams, WithGasEstimate,
+                    GetLimitsSolReturn, PoolStateAfterSwap, SwapParams, WithGasEstimate,
                 },
             },
             state::UniswapV4State,
@@ -91,6 +91,69 @@ where
             is_euler,
             pending_overrides: None,
         })
+    }
+
+    /// Sets the pool at `slot0_slot` to `pool_state` in `storage`, the storage overwrites of the
+    /// `afterSwap` call: its price, tick and liquidity, and the fee growth outside each crossed
+    /// tick. The swap math runs outside the VM, so the PoolManager's storage still holds the pool
+    /// from before the swap.
+    ///
+    /// The fee growth of the swap itself is not added, so a crossed tick flips around the fee
+    /// growth from before the swap. This keeps the fee growth inside every range consistent with
+    /// the new tick.
+    fn set_pool_state(
+        &self,
+        storage: &mut HashMap<Address, HashMap<U256, U256>>,
+        slot0_slot: U256,
+        pool_state: &PoolStateAfterSwap,
+    ) -> Result<(), SimulationError> {
+        let slot0 = self.pool_manager_slot(storage, slot0_slot)?;
+        let mut updates = vec![
+            (
+                slot0_slot,
+                slot0_with_price_and_tick(slot0, pool_state.sqrt_price_x96, pool_state.tick),
+            ),
+            (slot0_slot + U256::from(LIQUIDITY_OFFSET), U256::from(pool_state.liquidity)),
+        ];
+        // The fee growth global of token 0 and token 1 follow slot0.
+        for token in [0u8, 1] {
+            let fee_growth_global =
+                self.pool_manager_slot(storage, slot0_slot + U256::from(1 + token))?;
+            for &tick in &pool_state.crossed_ticks {
+                let outside_slot = tick_info_slot(slot0_slot, tick) + U256::from(1 + token);
+                let outside = self.pool_manager_slot(storage, outside_slot)?;
+                updates.push((outside_slot, fee_growth_global.wrapping_sub(outside)));
+            }
+        }
+        storage
+            .entry(self.pool_manager)
+            .or_default()
+            .extend(updates);
+        Ok(())
+    }
+
+    /// A PoolManager storage slot: its value in `storage` if set there, otherwise its value in the
+    /// engine's database.
+    fn pool_manager_slot(
+        &self,
+        storage: &HashMap<Address, HashMap<U256, U256>>,
+        slot: U256,
+    ) -> Result<U256, SimulationError> {
+        if let Some(value) = storage
+            .get(&self.pool_manager)
+            .and_then(|slots| slots.get(&slot))
+        {
+            return Ok(*value);
+        }
+        self.contract
+            .engine
+            .state
+            .storage_ref(self.pool_manager, slot)
+            .map_err(|e| {
+                SimulationError::FatalError(format!(
+                    "Failed to read PoolManager storage slot {slot}: {e:?}"
+                ))
+            })
     }
 
     pub fn unlock_pool_manager(&self) -> HashMap<Address, HashMap<U256, U256>> {
@@ -204,17 +267,23 @@ where
         if let Some(input_params) = transient_storage {
             transient_storage_params.extend(input_params);
         }
+        let pool_key: PoolKey = (
+            params.context.currency_0,
+            params.context.currency_1,
+            Uint::<24, 1>::from(params.context.fees.lp_fee),
+            Signed::<24, 1>::try_from(params.context.tick_spacing).map_err(|e| {
+                SimulationError::FatalError(format!("Failed to convert tick: {e:?}"))
+            })?,
+            self.address,
+        );
+        let mut storage = over_pending_storage(pending_overrides, overwrites.unwrap_or_default());
+        if let Some(pool_state) = params.pool_state {
+            let slot0_slot = pool_slot0_slot(&pool_key);
+            self.set_pool_state(&mut storage, slot0_slot, &pool_state)?;
+        }
         let args = (
             params.sender,
-            (
-                params.context.currency_0,
-                params.context.currency_1,
-                Uint::<24, 1>::from(params.context.fees.lp_fee),
-                Signed::<24, 1>::try_from(params.context.tick_spacing).map_err(|e| {
-                    SimulationError::FatalError(format!("Failed to convert tick: {e:?}"))
-                })?,
-                self.address,
-            ),
+            pool_key,
             (
                 params.swap_params.zero_for_one,
                 params.swap_params.amount_specified,
@@ -228,7 +297,7 @@ where
         let res = self.contract.call(
             selector,
             args,
-            Some(over_pending_storage(pending_overrides, overwrites.unwrap_or_default())),
+            Some(storage),
             Some(self.pool_manager),
             U256::from(0u64),
             Some(transient_storage_params),
@@ -396,6 +465,43 @@ where
     fn is_equal(&self, other: &dyn HookHandler) -> bool {
         other.as_any().downcast_ref::<Self>() == Some(self)
     }
+}
+
+/// The PoolManager's storage slot of its `pools` mapping.
+const POOLS_SLOT: u64 = 6;
+/// The offset of `liquidity` from `slot0` in a pool's `Pool.State`.
+const LIQUIDITY_OFFSET: u64 = 3;
+/// The offset of the `ticks` mapping from `slot0` in a pool's `Pool.State`.
+const TICKS_OFFSET: u64 = 4;
+/// The bits of a pool's `slot0` that hold `sqrtPriceX96` (160 bits) and `tick` (24 bits). The
+/// protocol fee and the LP fee use the bits above them.
+const PRICE_AND_TICK_BITS: usize = 184;
+const SQRT_PRICE_BITS: usize = 160;
+
+/// A pool's `PoolKey`: currency0, currency1, fee, tick spacing and hooks.
+type PoolKey = (Address, Address, Uint<24, 1>, Signed<24, 1>, Address);
+
+/// The PoolManager's storage slot of the `slot0` of the pool with `pool_key`.
+fn pool_slot0_slot(pool_key: &PoolKey) -> U256 {
+    use alloy::sol_types::SolValue;
+    let pool_id = keccak256(pool_key.abi_encode());
+    U256::from_be_bytes(keccak256((pool_id, U256::from(POOLS_SLOT)).abi_encode()).0)
+}
+
+/// The PoolManager's storage slot of the `TickInfo` of `tick` in the pool whose `slot0` is at
+/// `slot0_slot`. Its fee growth outside the tick for token 0 and token 1 follow in the next two
+/// slots.
+fn tick_info_slot(slot0_slot: U256, tick: i32) -> U256 {
+    use alloy::sol_types::SolValue;
+    let tick = I256::try_from(tick).expect("an i32 always fits an I256");
+    U256::from_be_bytes(keccak256((tick, slot0_slot + U256::from(TICKS_OFFSET)).abi_encode()).0)
+}
+
+/// `slot0` with its price and tick set to `sqrt_price_x96` and `tick`. The fee bits do not change.
+fn slot0_with_price_and_tick(slot0: U256, sqrt_price_x96: U256, tick: i32) -> U256 {
+    let price_and_tick_mask = (U256::from(1u8) << PRICE_AND_TICK_BITS) - U256::from(1u8);
+    let tick_bits = U256::from(tick.cast_unsigned() & 0xFF_FFFF) << SQRT_PRICE_BITS;
+    (slot0 & !price_and_tick_mask) | sqrt_price_x96 | tick_bits
 }
 
 /// `overwrites` slot by slot over the pending block's storage, so a hook call sees the pending
@@ -639,6 +745,7 @@ mod tests {
                     .unwrap(),
             ),
             hook_data: Bytes::new(),
+            pool_state: None,
         };
 
         let result = hook_handler.after_swap(after_swap_params, None, None);
@@ -729,6 +836,7 @@ mod tests {
                     .unwrap(),
             ),
             hook_data: Bytes::new(),
+            pool_state: None,
         };
 
         transient_storage.extend(result.result.transient_storage);
@@ -889,6 +997,56 @@ mod tests {
             "the pending block's other slot of the same account survives"
         );
         assert_eq!(layered[&other][&U256::from(1)], U256::from(30));
+    }
+
+    #[test]
+    fn test_pool_slot0_slot() {
+        // The ETH/cbBTC pool 0x8514…2203: its slot0 sits at this PoolManager slot on mainnet.
+        let pool_key: PoolKey = (
+            Address::ZERO,
+            Address::from_str("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf").unwrap(),
+            Uint::<24, 1>::from(0x800000u32),
+            Signed::<24, 1>::try_from(10).unwrap(),
+            Address::from_str("0x0ce2adeedcc62493cb3853a6f551426fd8b048c4").unwrap(),
+        );
+
+        assert_eq!(
+            pool_slot0_slot(&pool_key),
+            U256::from_str("0x3411256eb99e84d9e9170aadf4ae5a0f3537fcb3510407c58776c92b67930323")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_tick_info_slot() {
+        // Tick -276362 of the BOLD/USDC pool 0x0257…d2ac on mainnet.
+        let slot0_slot =
+            U256::from_str("0x06349ddeda945499fabc5a4308bed36a89c7dd307947625d0377a50cf9af5c96")
+                .unwrap();
+
+        assert_eq!(
+            tick_info_slot(slot0_slot, -276362),
+            U256::from_str("0x74f8896d0f21c21d59e9a5c1978feb0a496cd111e19ed89fac638bac5e8ad7c0")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_slot0_with_price_and_tick_keeps_fee_bits() {
+        // Protocol fee 0x0a0b and LP fee 3000 above the price and tick -265980.
+        let slot0 =
+            U256::from_str("0xbb8000a0bfbf104000000000000000000001c23fbab3d04018f94ae").unwrap();
+
+        let updated = slot0_with_price_and_tick(
+            slot0,
+            U256::from_str("132889895374457276413430").unwrap(),
+            -265981,
+        );
+
+        assert_eq!(
+            updated,
+            U256::from_str("0xbb8000a0bfbf103000000000000000000001c23f9c5123a47af35f6").unwrap()
+        );
     }
 
     #[test]
