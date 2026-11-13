@@ -112,6 +112,18 @@ pub struct GlobalArgs {
     #[clap(long, env = "COMPONENT_INDEX", default_value_t = true, action = clap::ArgAction::Set)]
     pub component_index: bool,
 
+    /// Report `protocol_cache_size`, the memory size of the token and component cache, once a
+    /// minute per extractor. The size walk visits every cached entry under the cache's read
+    /// lock, which takes about 1 s on chains with several GB of cache. On by default; `false`
+    /// skips the walk and stops reporting the metric.
+    #[clap(
+        long,
+        env = "PROTOCOL_CACHE_SIZE_METRIC",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub protocol_cache_size_metric: bool,
+
     /// Name of the s3 bucket used to retrieve spkgs
     #[clap(env = "TYCHO_S3_BUCKET", long, default_value = "repo.propellerheads-propellerheads")]
     //Default is for backward compatibility but needs to be removed later

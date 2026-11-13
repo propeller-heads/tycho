@@ -56,6 +56,7 @@ pub struct ProtocolMemoryCache {
     components: Arc<RwLock<ProtocolComponentStore>>,
     max_price_age: chrono::Duration,
     gateway: Arc<dyn ProtocolGateway + Send + Sync>,
+    size_metric: bool,
 }
 
 #[derive(Default)]
@@ -77,7 +78,19 @@ impl ProtocolMemoryCache {
             tokens: Arc::new(RwLock::new(HashMap::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
             token_prices: Arc::new(RwLock::new(TokenPrices::default())),
+            size_metric: true,
         }
+    }
+
+    /// Sets whether extractors report the size of this cache (on by default). See
+    /// [`ProtocolMemoryCache::size_of`].
+    pub fn with_size_metric(mut self, enabled: bool) -> Self {
+        self.size_metric = enabled;
+        self
+    }
+
+    pub fn size_metric_enabled(&self) -> bool {
+        self.size_metric
     }
 
     #[instrument(skip_all)]

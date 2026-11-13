@@ -385,11 +385,16 @@ where
             .set(partial_block_buffer_size as f64);
 
             // As the protocol cache is shared with other extractors, we only index it by chain
-            gauge!(
-                "protocol_cache_size",
-                "chain" => self.chain.to_string(),
-            )
-            .set(self.protocol_cache.size_of().await as f64);
+            if self
+                .protocol_cache
+                .size_metric_enabled()
+            {
+                gauge!(
+                    "protocol_cache_size",
+                    "chain" => self.chain.to_string(),
+                )
+                .set(self.protocol_cache.size_of().await as f64);
+            }
 
             if let Some(dci_plugin) = &self.dci_plugin {
                 async {

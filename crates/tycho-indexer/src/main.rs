@@ -646,6 +646,7 @@ async fn create_indexing_tasks(
         &rpc_client,
         extraction_runtime,
         substreams_args.enable_partial_blocks,
+        global_args.protocol_cache_size_metric,
     )
     .await
     .map_err(|e| ExtractionError::Setup(format!("Failed to create extractors: {e}")))?;
@@ -733,6 +734,7 @@ async fn build_all_extractors(
     rpc_client: &EthereumRpcClient,
     runtime: Option<&tokio::runtime::Handle>,
     partial_blocks: bool,
+    protocol_cache_size_metric: bool,
 ) -> Result<
     (
         Vec<ExtractorSupervisor>,
@@ -757,7 +759,8 @@ async fn build_all_extractors(
         chain,
         chrono::Duration::seconds(900),
         Arc::new(cached_gw.clone()),
-    );
+    )
+    .with_size_metric(protocol_cache_size_metric);
     protocol_cache.populate().await?;
 
     for extractor_config in config.extractors.values() {
