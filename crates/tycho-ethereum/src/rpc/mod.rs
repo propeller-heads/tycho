@@ -12,6 +12,7 @@ use alloy::{
         client::{ClientBuilder, ReqwestClient},
         types::{
             debug::{StorageMap, StorageRangeResult, StorageResult},
+            simulate::SimulatePayload,
             state::{AccountOverride, StateOverride},
             trace::geth::{
                 GethDebugBuiltInTracerType, GethDebugTracerType, GethDebugTracingCallOptions,
@@ -699,6 +700,30 @@ impl EthereumRpcClient {
             .map_err(|e| RPCError::from_alloy("eth_call with state overrides failed", e))
     }
 
+    /// Executes `eth_simulateV1` on top of `block`.
+    ///
+    /// Returns one entry per simulated block, deserialized as `T`; callers pick the shape so
+    /// provider-specific fields such as revert data in `error.data` are not lost. A reverting
+    /// call does not abort the simulation; later calls see the state as if it had not happened.
+    #[instrument(level = "debug", skip(self, payload))]
+    pub(crate) async fn eth_simulate_v1<T: alloy::rpc::json_rpc::RpcRecv>(
+        &self,
+        payload: &SimulatePayload,
+        block: BlockNumberOrTag,
+    ) -> Result<Vec<T>, RPCError> {
+        let payload = with_spec_block_override_names(payload, "eth_simulateV1 payload")?;
+        self.retry_policy
+            .call_with_retry(|| async {
+                self.inner
+                    .request("eth_simulateV1", (&payload, block))
+                    .await
+            })
+            .await
+            .map_err(|e| {
+                RPCError::from_alloy(format!("eth_simulateV1 failed on top of block {block}"), e)
+            })
+    }
+
     #[instrument(level = "debug", skip(self, access_list_params, trace_call_params))]
     pub(crate) async fn trace_and_access_list(
         &self,
@@ -1111,6 +1136,40 @@ fn normalize_access_list_result(
         err,
         text: "Failed to deserialize AccessListResult".into(),
     })
+}
+
+/// `params` as JSON with each block override's `random` renamed to `prevRandao`, the name in
+/// the `eth_simulateV1` spec. alloy writes `random`, which Geth rejects in `eth_simulateV1` and
+/// ignores in `debug_traceCall`; Reth reads both names.
+fn with_spec_block_override_names<T: serde::Serialize>(
+    params: &T,
+    description: &str,
+) -> Result<Value, RPCError> {
+    let mut value = serde_json::to_value(params)
+        .map_err(|e| RPCError::UnknownError(format!("serializing the {description}: {e}")))?;
+    rename_random_in_block_overrides(&mut value);
+    Ok(value)
+}
+
+fn rename_random_in_block_overrides(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            if let Some(Value::Object(overrides)) = fields.get_mut("blockOverrides") {
+                if let Some(random) = overrides.remove("random") {
+                    overrides.insert("prevRandao".to_string(), random);
+                }
+            }
+            for field in fields.values_mut() {
+                rename_random_in_block_overrides(field);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                rename_random_in_block_overrides(item);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }
 
 #[cfg(test)]

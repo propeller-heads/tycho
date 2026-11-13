@@ -109,6 +109,32 @@ impl RPCError {
                 .to_lowercase()
                 .contains("execution reverted")
     }
+
+    /// Returns true when the EVM executed the call and it failed: a revert, or an exceptional
+    /// halt such as an invalid jump or opcode. Like a revert, a halt is a property of the called
+    /// code. Geth reports a halt under -32000 with the halt's name; Reth prefixes "EVM error".
+    pub fn is_execution_failure(&self) -> bool {
+        if self.is_execution_reverted() {
+            return true;
+        }
+        let RPCError::RequestError(RequestError::Reqwest(e)) = self else {
+            return false;
+        };
+        let AlloyRpcError::ErrorResp(payload) = &e.source else {
+            return false;
+        };
+        let message = payload.message.to_lowercase();
+        [
+            "evm error",
+            "invalid jump destination",
+            "invalid opcode",
+            "stack underflow",
+            "stack limit reached",
+            "out of gas",
+        ]
+        .iter()
+        .any(|halt| message.contains(halt))
+    }
 }
 
 #[cfg(test)]
