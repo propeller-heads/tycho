@@ -7,20 +7,19 @@ use crate::evm::protocol::utils::slipstreams::observations::Observation;
 const TICK_SPACING_FEE: u32 = 500;
 const OTHER_HOOK: [u8; 20] = [0x77; 20];
 
-fn observation(index: i32, block_timestamp: u32, tick_cumulative: i64) -> Observation {
+fn observation(block_timestamp: u32, tick_cumulative: i64) -> Observation {
     Observation {
         block_timestamp,
         tick_cumulative,
         seconds_per_liquidity_cumulative_x128: U256::ZERO,
         initialized: true,
-        index,
     }
 }
 
 /// Two observations 600s apart whose tick cumulative fell by 7: a TWAP tick of -7/600, which
 /// floors to -1 (truncation would give 0).
 fn observations() -> Observations {
-    Observations::new(vec![observation(0, 1_000, 0), observation(1, 1_600, -7)])
+    Observations::new(vec![observation(1_000, 0), observation(1_600, -7)])
 }
 
 fn oracle(observations: &Observations, tick: i32) -> PoolOracle<'_> {
@@ -129,7 +128,7 @@ fn oracle_younger_than_the_window_adds_no_dynamic_fee() {
 
 #[test]
 fn uninitialized_next_slot_reads_the_oldest_observation_at_index_zero() {
-    let observations = Observations::new(vec![observation(0, 1_000, 0), observation(1, 1_600, -7)]);
+    let observations = Observations::new(vec![observation(1_000, 0), observation(1_600, -7)]);
     // Cardinality 3: slot 2 was never written, so the oldest observation is slot 0.
     let pool = PoolOracle { observation_cardinality: 3, ..oracle(&observations, 10) };
 
@@ -138,6 +137,51 @@ fn uninitialized_next_slot_reads_the_oldest_observation_at_index_zero() {
         .unwrap();
 
     assert!(fee.observed_twap);
+}
+
+#[test]
+fn missing_current_observation_fails_the_quote() {
+    // Index 5 is the pool's newest slot but holds nothing: missing data here, which the chain
+    // cannot have, so it must not pass for a reverting `observe`.
+    let observations = observations();
+    let pool = PoolOracle {
+        observation_index: 5,
+        observation_cardinality: 8,
+        ..oracle(&observations, 10)
+    };
+
+    let result = configured(300, 5_000, 1_000_000).resolve(&pool, TICK_SPACING_FEE, execution(10));
+
+    assert!(result.is_err(), "got {result:?}");
+}
+
+#[rstest]
+#[case::dynamic_fee(1_000_000, None)]
+#[case::zero_scaling(
+    0,
+    Some(HookFee { fee: 300, block_fee_to_store: Some(300), observed_twap: true })
+)]
+fn ring_missing_the_slots_around_the_target(
+    #[case] scaling_factor: u64,
+    #[case] expected: Option<HookFee>,
+) {
+    // Slot 1 is current and slot 2 the oldest, 700 s back, but slots 3-7, which bracket the
+    // target (1,000), are missing: the binary search cannot answer. Only a zero scaling factor,
+    // which makes the fee independent of the oracle, still quotes.
+    let observations = Observations::new(vec![
+        observation(1_100, -3),
+        observation(1_600, -7),
+        observation(900, 0),
+    ]);
+    let pool = PoolOracle { observation_cardinality: 8, ..oracle(&observations, 10) };
+
+    let result =
+        configured(300, 5_000, scaling_factor).resolve(&pool, TICK_SPACING_FEE, execution(10));
+
+    match expected {
+        Some(fee) => assert_eq!(result.expect("quotes"), fee),
+        None => assert!(result.is_err(), "got {result:?}"),
+    }
 }
 
 #[test]

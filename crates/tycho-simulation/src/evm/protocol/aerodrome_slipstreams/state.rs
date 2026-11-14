@@ -29,7 +29,7 @@ use crate::{
                 slipstreams::{
                     aero_hook_fee::{AeroHookFee, Execution, HookFee, PoolOracle},
                     dynamic_fee_module::{get_dynamic_fee, DynamicFeeConfig, ResolvedFee},
-                    observations::{Observation, Observations},
+                    observations::{observation_slot, Observation, Observations},
                     oracle_timestamp, raw_target_price,
                 },
                 uniswap::{
@@ -65,9 +65,9 @@ const LOOP_GAS_COST: u64 = 12_500;
 // Warm ticks (previously crossed, non-zero SSTORE slots) cost ~22k; cold ticks ~76k.
 // We bias toward the cold end to prefer overestimation: 70k.
 const TICK_CROSSING_GAS_COST: u64 = 70_000;
-// When dfc.scaling_factor != 0, fee() does a TWAP binary search on the observation ring
-// buffer (~77k–91k gas) instead of a simple slot read (~18k–27k gas). This extra cost is
-// added once per swap on top of the base.
+// When the module reads the oracle (`observed_twap`, whatever the scaling factor), fee() does a
+// TWAP binary search on the observation ring buffer (~77k–91k gas) instead of a simple slot read
+// (~18k–27k gas). This extra cost is added once per swap on top of the base.
 const TWAP_FEE_OVERHEAD: u64 = 65_000;
 // Pre/post loop overhead: fee(), slot0 reads, end-of-swap writes.
 const SWAP_BASE_GAS: u64 = 125_000;
@@ -773,13 +773,11 @@ impl ProtocolSim for AerodromeSlipstreamsState {
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
             }
 
-            // observations keys are in the format "observations/{observation_index}"
-            if let Some(idx_str) = key.strip_prefix("observations/") {
-                if let Ok(idx) = idx_str.parse::<i32>() {
-                    self.observations
-                        .upsert_observation(idx, value)
-                        .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
-                }
+            if let Some(slot) = observation_slot(key) {
+                let slot = slot.map_err(TransitionError::DecodeError)?;
+                self.observations
+                    .upsert_observation(slot, value)
+                    .map_err(|err| TransitionError::DecodeError(format!("{key}: {err}")))?;
             }
         }
         // delete ticks - ignores deletes for attributes other than tick liquidity
@@ -797,13 +795,11 @@ impl ProtocolSim for AerodromeSlipstreamsState {
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
             }
 
-            // observations keys are in the format "observations/{observation_index}"
-            if let Some(idx_str) = key.strip_prefix("observations/") {
-                if let Ok(idx) = idx_str.parse::<i32>() {
-                    self.observations
-                        .upsert_observation(idx, &[])
-                        .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
-                }
+            if let Some(slot) = observation_slot(key) {
+                let slot = slot.map_err(TransitionError::DecodeError)?;
+                self.observations
+                    .upsert_observation(slot, &[])
+                    .map_err(|err| TransitionError::DecodeError(format!("{key}: {err}")))?;
             }
         }
         Ok(())
@@ -969,7 +965,6 @@ mod tests {
         pool.observations = Observations::new(vec![Observation {
             block_timestamp: last_observation_ts,
             initialized: true,
-            index: 0,
             ..Default::default()
         }]);
         pool
@@ -989,9 +984,9 @@ mod tests {
     /// index must match the chain (213 -> 214: exactly one observation written).
     #[test]
     fn replays_base_block_50166683_swap_pair_wei_exact() {
-        let mut observations: Vec<Observation> = (0..213)
-            .map(|index| Observation { index, ..Default::default() })
-            .collect();
+        // The fixture carries only the newest slot: at a zero scaling factor the module's fee does
+        // not depend on the oracle, and the swap's `write` reads only the current slot.
+        let mut observations = vec![Observation::default(); 213];
         observations.push(Observation {
             block_timestamp: 1_787_122_711, // == parent block ts: the pool traded in that block
             tick_cumulative: -18_995_710_863_218,
@@ -1000,7 +995,6 @@ mod tests {
             )
             .unwrap(),
             initialized: true,
-            index: 213,
         });
 
         let mut pool = AerodromeSlipstreamsState::new(
@@ -1304,6 +1298,51 @@ mod tests {
             .expect("partial dynamic fee update should be valid");
 
         assert_eq!(pool.dfc, DynamicFeeConfig::new(500, 10_000, 1, false, 0));
+    }
+
+    #[test]
+    fn applies_a_cardinality_increase() {
+        // `increaseObservationCardinalityNext(4)` prefills slots 1-3 with timestamp 1, which the
+        // stream sends as the single byte 0x01. Lookups read them as uninitialized whether stored
+        // or not, so the ring is left as it was.
+        let mut pool = create_basic_test_pool();
+        let ring = Observations::new(vec![Observation {
+            block_timestamp: 999_990,
+            initialized: true,
+            ..Default::default()
+        }]);
+        pool.observations = ring.clone();
+        let delta = ProtocolStateDelta {
+            component_id: "test-pool".to_string(),
+            updated_attributes: (1..4)
+                .map(|index| (format!("observations/{index}"), Bytes::from([0x01_u8])))
+                .collect(),
+            ..Default::default()
+        };
+
+        pool.delta_transition(delta, &HashMap::new(), &Balances::default())
+            .expect("prefilled observation slots should be valid");
+
+        assert_eq!(pool.observations, ring);
+    }
+
+    #[rstest]
+    #[case::not_a_number("observations/next")]
+    #[case::past_the_ring("observations/65535")]
+    fn malformed_observation_key_fails_the_transition(#[case] key: &str) {
+        let mut pool = create_basic_test_pool();
+        let delta = ProtocolStateDelta {
+            component_id: "test-pool".to_string(),
+            updated_attributes: HashMap::from([(key.to_string(), Bytes::from([0x01_u8]))]),
+            ..Default::default()
+        };
+
+        let result = pool.delta_transition(delta, &HashMap::new(), &Balances::default());
+
+        let Err(TransitionError::DecodeError(message)) = result else {
+            panic!("expected a DecodeError, got {result:?}");
+        };
+        assert!(message.starts_with(key), "{message}");
     }
 
     #[test]

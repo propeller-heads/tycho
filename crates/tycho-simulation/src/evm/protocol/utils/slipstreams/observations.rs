@@ -10,14 +10,16 @@ pub struct Observation {
     pub(crate) tick_cumulative: i64,
     pub(crate) seconds_per_liquidity_cumulative_x128: U256,
     pub(crate) initialized: bool,
-    pub(crate) index: i32,
 }
 
 impl Observation {
-    pub fn from_attribute(index: i32, bytes: &[u8]) -> Result<Self, SimulationError> {
-        if bytes.len() != 32 {
+    /// Decodes an observation storage word. The word arrives as a big-endian integer without
+    /// its leading zero bytes, so a slot whose `initialized` byte is clear, such as one that
+    /// `increaseObservationCardinalityNext` prefilled with timestamp 1, is shorter than 32 bytes.
+    pub fn from_attribute(bytes: &[u8]) -> Result<Self, SimulationError> {
+        if bytes.len() > 32 {
             return Err(SimulationError::FatalError(format!(
-                "Invalid observation length: expected 32 bytes, got {}",
+                "Invalid observation length: expected at most 32 bytes, got {}",
                 bytes.len()
             )));
         }
@@ -57,8 +59,40 @@ impl Observation {
             tick_cumulative,
             seconds_per_liquidity_cumulative_x128,
             initialized,
-            index,
         })
+    }
+}
+
+/// Slots in the pool's oracle, `Observation[65535]`: `Oracle.grow` only writes below its `uint16`
+/// `next`, so the last slot is 65,534.
+const RING_SLOTS: u16 = u16::MAX;
+
+/// The ring slot of an `observations/<slot>` attribute key, or `None` for any other key. Errs,
+/// naming the key, when the slot is not a number or lies past the ring.
+pub fn observation_slot(key: &str) -> Option<Result<u16, String>> {
+    let slot = key.strip_prefix("observations/")?;
+    Some(match slot.parse::<u16>() {
+        Ok(slot) if slot < RING_SLOTS => Ok(slot),
+        Ok(slot) => Err(format!("{key}: slot {slot} is past the {RING_SLOTS}-slot ring")),
+        Err(err) => Err(format!("{key}: {err}")),
+    })
+}
+
+/// Why [`Observations::observe`] returned no value.
+#[derive(Debug)]
+pub enum ObserveError {
+    /// `Oracle.observe` reverts with `OLD`: the target is older than the oldest observation. The
+    /// fee modules and the AERO swap hook catch that revert and charge no dynamic fee.
+    TooOld,
+    /// This copy of the oracle cannot answer: an observation is missing or inconsistent, or the
+    /// execution context is. The chain never fails this way, so a caller must not read it as a
+    /// revert.
+    Data(SimulationError),
+}
+
+impl From<SimulationError> for ObserveError {
+    fn from(err: SimulationError) -> Self {
+        Self::Data(err)
     }
 }
 
@@ -82,40 +116,52 @@ impl Observations {
         ))
     }
 
-    pub fn upsert_observation(&mut self, index: i32, bytes: &[u8]) -> Result<(), SimulationError> {
-        let idx = usize::try_from(index).map_err(|e| {
-            SimulationError::FatalError(format!("Invalid observation index {index}: {e}"))
-        })?;
-        if bytes.is_empty() {
-            return if idx < self.observations.len() {
-                self.observations.remove(idx);
-                Ok(())
-            } else {
-                Err(SimulationError::FatalError(format!(
-                    "Cannot delete: index {} out of bounds (len={})",
-                    index,
-                    self.observations.len()
-                )))
-            };
+    /// Builds a ring from a snapshot's observation storage words, keyed by slot index.
+    ///
+    /// Uninitialized words, such as the slots `increaseObservationCardinalityNext` prefilled, are
+    /// not stored: lookups read a slot not stored as uninitialized, and every quote clones the
+    /// ring.
+    pub(crate) fn from_words<'a>(
+        words: impl IntoIterator<Item = (u16, &'a [u8])>,
+    ) -> Result<Self, SimulationError> {
+        let mut ring = Self::new(Vec::new());
+        for (slot, word) in words {
+            let observation = Observation::from_attribute(word).map_err(|err| {
+                SimulationError::FatalError(format!("Observation slot {slot}: {err}"))
+            })?;
+            if observation.initialized {
+                ring.place(usize::from(slot), observation);
+            }
         }
-        let mut obs = Observation::from_attribute(index, bytes)?;
-        obs.index = index;
-        if idx < self.observations.len() {
-            self.observations[idx] = obs;
-            return Ok(());
-        }
-        if idx >= self.observations.capacity() {
-            self.observations
-                .reserve(idx - self.observations.len() + 1);
-        }
+        Ok(ring)
+    }
 
-        while self.observations.len() < idx {
-            self.observations
-                .push(Observation::default());
-        }
+    /// The ring's slots, in index order.
+    pub(crate) fn into_slots(self) -> Vec<Observation> {
+        self.observations
+    }
 
-        self.observations.push(obs);
+    /// Writes the storage word of ring slot `slot`, as parsed by [`observation_slot`].
+    pub fn upsert_observation(&mut self, slot: u16, bytes: &[u8]) -> Result<(), SimulationError> {
+        // A deleted attribute is a zeroed storage word, which decodes as an uninitialized slot.
+        // Removing the slot instead would shift every later slot off its ring index.
+        self.place(usize::from(slot), Observation::from_attribute(bytes)?);
         Ok(())
+    }
+
+    /// Stores `observation` at ring slot `idx`. Lookups only read initialized slots, so every
+    /// uninitialized one is stored as the default, and one past the end is not stored at all.
+    fn place(&mut self, idx: usize, observation: Observation) {
+        let observation =
+            if observation.initialized { observation } else { Observation::default() };
+        if idx >= self.observations.len() {
+            if !observation.initialized {
+                return;
+            }
+            self.observations
+                .resize_with(idx + 1, Observation::default);
+        }
+        self.observations[idx] = observation;
     }
 
     /// Mirrors `Oracle.write`: appends the observation the pool would record for a swap
@@ -145,8 +191,7 @@ impl Observations {
         }
 
         let next_index = (index + 1) % cardinality;
-        let mut observation = transform(&last, timestamp, tick, liquidity)?;
-        observation.index = next_index as i32;
+        let observation = transform(&last, timestamp, tick, liquidity)?;
 
         let next_idx = next_index as usize;
         while self.observations.len() <= next_idx {
@@ -180,7 +225,9 @@ impl Observations {
         Ok(self.observations[idx].block_timestamp)
     }
 
-    pub fn observe(
+    /// Mirrors `Oracle.observe`: the tick and seconds-per-liquidity cumulatives `seconds_agos`
+    /// before `time`. On `Ok`, both vectors hold one entry per `seconds_agos` element, in order.
+    pub(crate) fn observe(
         &self,
         time: u32,
         seconds_agos: &[u32],
@@ -188,9 +235,9 @@ impl Observations {
         index: u16,
         liquidity: u128,
         cardinality: u16,
-    ) -> Result<(Vec<i64>, Vec<U256>), SimulationError> {
+    ) -> Result<(Vec<i64>, Vec<U256>), ObserveError> {
         if cardinality == 0 {
-            return Err(SimulationError::FatalError("Cardinality must be > 0".to_string()));
+            return Err(SimulationError::FatalError("Cardinality must be > 0".to_string()).into());
         }
         let mut tick_cumulatives = Vec::with_capacity(seconds_agos.len());
         let mut seconds_per_liquidity_cumulative_x128s = Vec::with_capacity(seconds_agos.len());
@@ -211,9 +258,9 @@ impl Observations {
         target: u32,
         index: u16,
         cardinality: u16,
-    ) -> Result<(Observation, Observation), SimulationError> {
+    ) -> Result<(Observation, Observation), ObserveError> {
         if self.observations.is_empty() {
-            return Err(SimulationError::FatalError("No observations available".to_string()));
+            return Err(SimulationError::FatalError("No observations available".to_string()).into());
         }
         let mut l = (index as usize + 1) % cardinality as usize;
         let mut r = l + cardinality as usize - 1;
@@ -246,7 +293,8 @@ impl Observations {
 
         Err(SimulationError::FatalError(
             "Binary search failed — inconsistent oracle data".to_string(),
-        ))
+        )
+        .into())
     }
 
     pub fn get_surrounding_observations(
@@ -257,10 +305,12 @@ impl Observations {
         index: u16,
         liquidity: u128,
         cardinality: u16,
-    ) -> Result<(Observation, Observation), SimulationError> {
+    ) -> Result<(Observation, Observation), ObserveError> {
         let idx = index as usize;
         if idx >= self.observations.len() {
-            return Err(self.observation_index_err(idx, index, cardinality));
+            return Err(self
+                .observation_index_err(idx, index, cardinality)
+                .into());
         }
         let mut before_or_at = self.observations[idx];
 
@@ -276,10 +326,9 @@ impl Observations {
             before_or_at = self.slot(0);
         }
 
+        // `require(lte(time, beforeOrAt.blockTimestamp, target), "OLD")`
         if !lte(time, before_or_at.block_timestamp, target) {
-            return Err(SimulationError::FatalError(
-                "Target too old (after oldest observation)".to_string(),
-            ));
+            return Err(ObserveError::TooOld);
         }
 
         self.binary_search(time, target, index, cardinality)
@@ -293,11 +342,13 @@ impl Observations {
         index: u16,
         liquidity: u128,
         cardinality: u16,
-    ) -> Result<(i64, U256), SimulationError> {
+    ) -> Result<(i64, U256), ObserveError> {
         if seconds_ago == 0 {
             let idx = index as usize;
             if idx >= self.observations.len() {
-                return Err(self.observation_index_err(idx, index, cardinality));
+                return Err(self
+                    .observation_index_err(idx, index, cardinality)
+                    .into());
             }
             let mut last = self.observations[idx];
             if last.block_timestamp != time {
@@ -306,7 +357,9 @@ impl Observations {
             return Ok((last.tick_cumulative, last.seconds_per_liquidity_cumulative_x128));
         }
 
-        let target = time - seconds_ago;
+        // `Oracle.observeSingle` computes this in unchecked uint32 arithmetic (Solidity 0.7), and
+        // `lte` and the deltas below already treat timestamps as wrapping.
+        let target = time.wrapping_sub(seconds_ago);
         let (before_or_at, at_or_after) =
             self.get_surrounding_observations(time, target, tick, index, liquidity, cardinality)?;
 
@@ -394,7 +447,6 @@ fn transform(
         tick_cumulative,
         seconds_per_liquidity_cumulative_x128,
         initialized: true,
-        index: before.index,
     })
 }
 
@@ -403,6 +455,7 @@ mod tests {
     use std::str::FromStr;
 
     use hex_literal::hex;
+    use rstest::rstest;
 
     use super::*;
 
@@ -411,7 +464,6 @@ mod tests {
             block_timestamp: timestamp,
             tick_cumulative: 100,
             initialized: true,
-            index: 0,
             ..Default::default()
         }])
     }
@@ -442,14 +494,13 @@ mod tests {
         // 100 + pre-swap tick 50 * 10 seconds
         assert_eq!(written.tick_cumulative, 600);
         assert!(written.initialized);
-        assert_eq!(written.index, 1);
     }
 
     #[test]
     fn write_wraps_at_cardinality() {
         let mut observations = Observations::new(vec![
-            Observation { block_timestamp: 900, initialized: true, index: 0, ..Default::default() },
-            Observation { block_timestamp: 950, initialized: true, index: 1, ..Default::default() },
+            Observation { block_timestamp: 900, initialized: true, ..Default::default() },
+            Observation { block_timestamp: 950, initialized: true, ..Default::default() },
         ]);
 
         let index = observations
@@ -468,7 +519,10 @@ mod tests {
             .observe_single(900, 0, 0, 0, 1, 1)
             .expect_err("a target behind the last observation must not wrap");
 
-        assert!(matches!(err, SimulationError::InvalidInput(_, _)), "got {err:?}");
+        assert!(
+            matches!(err, ObserveError::Data(SimulationError::InvalidInput(_, _))),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -495,7 +549,6 @@ mod tests {
             tick_cumulative: 10,
             seconds_per_liquidity_cumulative_x128: U256::from(0),
             initialized: true,
-            index: 0,
         };
 
         let tick = 5;
@@ -507,7 +560,6 @@ mod tests {
         assert_eq!(result.tick_cumulative, 60);
         assert_eq!(result.block_timestamp, target);
         assert!(result.initialized);
-        assert_eq!(result.index, before.index);
 
         assert!(
             result.seconds_per_liquidity_cumulative_x128 >
@@ -522,7 +574,6 @@ mod tests {
             tick_cumulative: 10,
             seconds_per_liquidity_cumulative_x128: U256::from(1234),
             initialized: true,
-            index: 0,
         };
 
         let tick = 3;
@@ -542,7 +593,6 @@ mod tests {
             tick_cumulative: 0,
             seconds_per_liquidity_cumulative_x128: U256::from(0),
             initialized: true,
-            index: 1,
         };
         let result = transform(&before, 100_000, 1, 1000).unwrap();
         assert_eq!(result.tick_cumulative, 100_000);
@@ -573,11 +623,30 @@ mod tests {
     }
 
     #[test]
+    fn from_attribute_reads_a_word_without_its_leading_zero_bytes() {
+        // A slot `increaseObservationCardinalityNext` prefilled holds timestamp 1 and nothing
+        // else, so the indexer sends the word as the single byte 0x01.
+        let observation = Observation::from_attribute(&[0x01]).expect("short word");
+
+        assert_eq!(observation, Observation { block_timestamp: 1, ..Default::default() });
+        let word = encode_observation_bytes(7, -5, U256::from(9), false);
+        assert_eq!(word[0], 0, "an uninitialized word starts with a zero byte");
+        assert_eq!(
+            Observation::from_attribute(&word[1..]).expect("leading zero dropped"),
+            Observation::from_attribute(&word).expect("full word")
+        );
+    }
+
+    #[test]
+    fn from_attribute_rejects_a_word_longer_than_32_bytes() {
+        assert!(Observation::from_attribute(&[0; 33]).is_err());
+    }
+
+    #[test]
     fn test_from_attribute_and_upsert() {
         let bytes = encode_observation_bytes(100, 10, U256::from(123456), true);
 
-        let obs = Observation::from_attribute(5, &bytes).unwrap();
-        assert_eq!(obs.index, 5);
+        let obs = Observation::from_attribute(&bytes).unwrap();
         assert_eq!(obs.block_timestamp, 100);
 
         // Upsert basic insert
@@ -598,7 +667,132 @@ mod tests {
         obs_vec
             .upsert_observation(0, &[])
             .unwrap();
-        assert_eq!(obs_vec.observations.len(), 0);
+        assert_eq!(obs_vec.observations, vec![Observation::default()]);
+    }
+
+    #[test]
+    fn deleting_a_slot_keeps_later_slots_at_their_index() {
+        let newest = Observation { block_timestamp: 30, initialized: true, ..Default::default() };
+        let mut observations = Observations::new(vec![
+            Observation { block_timestamp: 10, initialized: true, ..Default::default() },
+            Observation { block_timestamp: 20, initialized: true, ..Default::default() },
+            newest,
+        ]);
+
+        observations
+            .upsert_observation(1, &[])
+            .expect("delete");
+
+        assert!(!observations.slot(1).initialized);
+        assert_eq!(observations.slot(2), newest);
+    }
+
+    #[test]
+    fn uninitialized_slots_past_the_end_are_not_stored() {
+        let mut observations = Observations::new(vec![Observation {
+            block_timestamp: 10,
+            initialized: true,
+            ..Default::default()
+        }]);
+
+        observations
+            .upsert_observation(500, &[0x01])
+            .expect("prefilled slot");
+        observations
+            .upsert_observation(600, &[])
+            .expect("deleted slot");
+
+        assert_eq!(observations.observations.len(), 1);
+        assert!(!observations.slot(500).initialized);
+    }
+
+    #[rstest]
+    #[case::first_slot("observations/0", Some(Ok(0)))]
+    #[case::last_slot("observations/65534", Some(Ok(65_534)))]
+    #[case::past_the_ring(
+        "observations/65535",
+        Some(Err("observations/65535: slot 65535 is past the 65535-slot ring".to_string()))
+    )]
+    #[case::past_u16("observations/65536", Some(Err("observations/65536: number too large to fit in target type".to_string())))]
+    #[case::not_a_number("observations/next", Some(Err("observations/next: invalid digit found in string".to_string())))]
+    #[case::other_attribute("tick", None)]
+    fn observation_slot_accepts_only_the_rings_slots(
+        #[case] key: &str,
+        #[case] expected: Option<Result<u16, String>>,
+    ) {
+        assert_eq!(observation_slot(key), expected);
+    }
+
+    #[test]
+    fn prefilled_word_inside_the_ring_is_stored_like_an_unwritten_slot() {
+        let written = encode_observation_bytes(10, 0, U256::ZERO, true);
+        let mut observations =
+            Observations::from_words([(0, written.as_slice()), (2, &written)]).expect("ring");
+        let snapshot = observations.clone();
+
+        observations
+            .upsert_observation(1, &[0x01])
+            .expect("prefilled slot");
+
+        assert_eq!(observations, snapshot);
+    }
+
+    #[test]
+    fn ring_rebuilt_from_stream_words_observes_like_the_chain() {
+        // Robinhood pool 0x8132252bd65e7c03f7b57739e1db1c58d6ee792f at block 61,011,933 (ts
+        // 1,789,206,560), as the stream sends it: slots 0-2 written, then the slots
+        // `increaseObservationCardinalityNext` prefilled up to cardinality 500, each the byte 0x01.
+        // The expected cumulatives are the pool's own `observe([600, 0])` at that block.
+        let mut observations = Observations::new(Vec::new());
+        let written = [
+            (1_789_205_466, -3_753_782_792, "4871078707023353428616415205"),
+            (1_789_206_050, -3_869_381_504, "4943578347386704671325331035"),
+            (1_789_206_560, -3_970_336_004, "5006891389484836749718391092"),
+        ];
+        for (index, (timestamp, tick_cumulative, seconds_per_liquidity)) in (0..).zip(written) {
+            let word = encode_observation_bytes(
+                timestamp,
+                tick_cumulative,
+                U256::from_str(seconds_per_liquidity).expect("decimal cumulative"),
+                true,
+            );
+            observations
+                .upsert_observation(index, &word)
+                .expect("written slot");
+        }
+        for index in 3..500 {
+            observations
+                .upsert_observation(index, &[0x01])
+                .expect("prefilled slot");
+        }
+
+        let (tick_cumulatives, seconds_per_liquidity_cumulatives) = observations
+            .observe(1_789_206_560, &[600, 0], -197_954, 2, 2_741_046_731_899_156, 500)
+            .expect("the chain answers this window");
+
+        assert_eq!(tick_cumulatives, vec![-3_851_566_634, -3_970_336_004]);
+        assert_eq!(
+            seconds_per_liquidity_cumulatives,
+            vec![
+                U256::from_str("4932405457604681363373614554").expect("decimal cumulative"),
+                U256::from_str("5006891389484836749718391092").expect("decimal cumulative"),
+            ]
+        );
+    }
+
+    #[test]
+    fn window_reaching_before_time_zero_wraps_and_reverts_old() {
+        // `seconds_ago > time` (#1744). Solidity 0.7 wraps the target instead of reverting, and
+        // `lte` then finds the only observation newer than it, so the oracle reverts with `OLD`.
+        let observations = Observations::new(vec![Observation {
+            block_timestamp: 50,
+            initialized: true,
+            ..Default::default()
+        }]);
+
+        let result = observations.observe(100, &[600, 0], 0, 0, 1, 1);
+
+        assert!(matches!(result, Err(ObserveError::TooOld)), "got {result:?}");
     }
 
     #[test]
@@ -629,7 +823,7 @@ mod tests {
     #[test]
     fn test_observe_multiple() {
         // Pool: 0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59
-        let items: &[(i32, [u8; 32])] = &[
+        let items: &[(u16, [u8; 32])] = &[
             (534, hex!("01000006a0000001485073e3b9c1b1ba599e933717fff778eb3ff056690b05a1")),
             (535, hex!("01000006a0000001485072f3c785d8212da7414577fff77952e1b5ec690ae2d7")),
             (2039, hex!("01000006a00000014850737217b73678a71c3a98fdfff7791d60d77e690af4cd")),
