@@ -135,6 +135,7 @@ pub const UNISWAP_V3_FORKS: &[&str] = &[
     "sushiswap_v3",
     "robinswap_v3",
     "gigadex_v3",
+    "swaphood_v3",
     "kleos_v3",
     "elyspump_v3",
     "stockiumswap_v3",
