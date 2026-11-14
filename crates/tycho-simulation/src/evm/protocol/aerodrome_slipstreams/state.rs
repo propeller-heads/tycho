@@ -112,7 +112,10 @@ pub struct AerodromeSlipstreamsState {
     /// those fields must do the same.
     #[serde(skip)]
     step_cache: SwapStepCache,
-    observations: Observations,
+    /// The oracle observations, shared by this state, its clones and the states its swaps return,
+    /// so a quote does not copy them. Change them only through `Arc::make_mut`, which copies the
+    /// array while another state shares it.
+    observations: Arc<Observations>,
     dfc: DynamicFeeConfig,
     /// Fee settings of an AERO v1.1 pool, whose swap hook sets the fee instead of a fee module.
     /// When set, `dfc` is unused.
@@ -175,7 +178,7 @@ impl AerodromeSlipstreamsState {
             tick,
             ticks: Arc::new(tick_list),
             step_cache: SwapStepCache::default(),
-            observations: Observations::new(observations),
+            observations: Arc::new(Observations::new(observations)),
             dfc,
             aero_hook: None,
             position_assumption: BlockPositionAssumption::default(),
@@ -242,7 +245,7 @@ impl AerodromeSlipstreamsState {
         if post_swap_tick == self.tick {
             return Ok(());
         }
-        self.observation_index = self.observations.write(
+        self.observation_index = Arc::make_mut(&mut self.observations).write(
             self.observation_index,
             oracle_timestamp(self.execution_block_timestamp),
             self.tick,
@@ -776,7 +779,7 @@ impl ProtocolSim for AerodromeSlipstreamsState {
             // observations keys are in the format "observations/{observation_index}"
             if let Some(idx_str) = key.strip_prefix("observations/") {
                 if let Ok(idx) = idx_str.parse::<i32>() {
-                    self.observations
+                    Arc::make_mut(&mut self.observations)
                         .upsert_observation(idx, value)
                         .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
                 }
@@ -800,7 +803,7 @@ impl ProtocolSim for AerodromeSlipstreamsState {
             // observations keys are in the format "observations/{observation_index}"
             if let Some(idx_str) = key.strip_prefix("observations/") {
                 if let Ok(idx) = idx_str.parse::<i32>() {
-                    self.observations
+                    Arc::make_mut(&mut self.observations)
                         .upsert_observation(idx, &[])
                         .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
                 }
@@ -966,12 +969,12 @@ mod tests {
         let mut pool = create_basic_test_pool();
         pool.dfc = DynamicFeeConfig::new(2700, 30_000, 0, true, 750);
         pool.position_assumption = BlockPositionAssumption::First;
-        pool.observations = Observations::new(vec![Observation {
+        pool.observations = Arc::new(Observations::new(vec![Observation {
             block_timestamp: last_observation_ts,
             initialized: true,
             index: 0,
             ..Default::default()
-        }]);
+        }]));
         pool
     }
 
