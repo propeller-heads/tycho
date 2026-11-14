@@ -680,6 +680,33 @@ impl Chain {
             Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.block_time_secs,
         })
     }
+
+    /// Returns the expected block interval in milliseconds for the chain. Panics if a custom
+    /// chain has no registered config; use [`Chain::try_block_time_ms`] for a non-panicking
+    /// variant.
+    pub fn block_time_ms(&self) -> u64 {
+        expect_registered(self.try_block_time_ms())
+    }
+
+    /// Like [`Chain::block_time_ms`] but returns [`ChainConfigError::UnknownChain`] when a custom
+    /// chain has no registered config.
+    pub fn try_block_time_ms(&self) -> Result<u64, ChainConfigError> {
+        Ok(match self {
+            Chain::Ethereum => 12_000,
+            Chain::Starknet => 2_000,
+            Chain::ZkSync => 3_000,
+            Chain::Arbitrum => 250,
+            Chain::Base => 200,
+            Chain::Bsc => 450,
+            Chain::Unichain => 1_000,
+            Chain::Polygon => 1_500,
+            Chain::Plasma => 1_000,
+            Chain::Robinhood => 100,
+            Chain::Arc => 500,
+            Chain::Elysium => 100,
+            Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.block_time_ms(),
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -924,6 +951,7 @@ mod tests {
         let chain = Chain::custom("testchain").unwrap();
         assert_eq!(chain.try_id().unwrap(), 9999);
         assert_eq!(chain.try_block_time_secs().unwrap(), 5);
+        assert_eq!(chain.try_block_time_ms().unwrap(), 5_000);
         assert_eq!(
             chain
                 .try_default_tvl_threshold(TvlThresholdTier::Low)
@@ -1075,6 +1103,44 @@ mod tests {
     #[test]
     fn test_robinhood_block_time_secs() {
         assert_eq!(Chain::Robinhood.block_time_secs(), 1);
+    }
+
+    #[rstest::rstest]
+    #[case::ethereum(Chain::Ethereum, 12_000)]
+    #[case::starknet(Chain::Starknet, 2_000)]
+    #[case::zksync(Chain::ZkSync, 3_000)]
+    #[case::arbitrum(Chain::Arbitrum, 250)]
+    #[case::base(Chain::Base, 200)]
+    #[case::bsc(Chain::Bsc, 450)]
+    #[case::unichain(Chain::Unichain, 1_000)]
+    #[case::polygon(Chain::Polygon, 1_500)]
+    #[case::plasma(Chain::Plasma, 1_000)]
+    #[case::robinhood(Chain::Robinhood, 100)]
+    #[case::arc(Chain::Arc, 500)]
+    #[case::elysium(Chain::Elysium, 100)]
+    fn test_block_time_ms(#[case] chain: Chain, #[case] expected: u64) {
+        assert_eq!(chain.block_time_ms(), expected);
+    }
+
+    #[test]
+    fn test_block_time_ms_fits_block_time_secs() {
+        for chain in [
+            Chain::Ethereum,
+            Chain::Starknet,
+            Chain::ZkSync,
+            Chain::Arbitrum,
+            Chain::Base,
+            Chain::Bsc,
+            Chain::Unichain,
+            Chain::Polygon,
+            Chain::Plasma,
+            Chain::Robinhood,
+            Chain::Arc,
+            Chain::Elysium,
+        ] {
+            assert!(chain.block_time_ms() > 0, "{chain}");
+            assert!(chain.block_time_ms() <= chain.block_time_secs() * 1000, "{chain}");
+        }
     }
 
     #[test]
