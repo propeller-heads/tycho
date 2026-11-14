@@ -1578,6 +1578,127 @@ mod tick_list_sharing_tests {
 }
 
 #[cfg(test)]
+mod observation_sharing_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use tycho_common::{dto::ProtocolStateDelta, hex_bytes::Bytes};
+
+    use super::*;
+    use crate::evm::protocol::utils::uniswap::tick_math::get_sqrt_ratio_at_tick;
+
+    fn pool_with_observations() -> AerodromeSlipstreamsState {
+        let observations = (0..3)
+            .map(|index| Observation {
+                block_timestamp: 1_000 + u32::try_from(index).unwrap(),
+                initialized: true,
+                index,
+                ..Default::default()
+            })
+            .collect();
+        let mut pool = AerodromeSlipstreamsState::new(
+            "test-pool".to_string(),
+            1_000_000,
+            100_000_000_000_000_000_000u128,
+            get_sqrt_ratio_at_tick(0).unwrap(),
+            0,
+            3,
+            3000,
+            1,
+            0,
+            vec![TickInfo::new(-120, 10000).unwrap(), TickInfo::new(120, -10000).unwrap()],
+            observations,
+            DynamicFeeConfig::new(3000, 10_000, 1, false, 0),
+        )
+        .unwrap();
+        pool.execution_block_timestamp = 2_000;
+        pool
+    }
+
+    #[test]
+    fn clone_shares_observations() {
+        let original = pool_with_observations();
+
+        let copy = original.clone();
+
+        assert!(Arc::ptr_eq(&original.observations, &copy.observations));
+    }
+
+    #[test]
+    fn delta_transition_leaves_clones_observations_unchanged() {
+        let original = pool_with_observations();
+        let mut updated = original.clone();
+        // Observations are packed with the timestamp in the low bits and `initialized` at bit 248.
+        let mut packed = [0u8; 32];
+        packed[28..].copy_from_slice(&5_000u32.to_be_bytes());
+        packed[0] = 1;
+        let delta = ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: HashMap::from([(
+                "observations/1".to_string(),
+                Bytes::from(packed.to_vec()),
+            )]),
+            deleted_attributes: HashSet::new(),
+        };
+
+        updated
+            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(
+            updated
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            5_000
+        );
+        assert_eq!(
+            original
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            1_001
+        );
+        assert!(!Arc::ptr_eq(&original.observations, &updated.observations));
+    }
+
+    #[test]
+    fn swap_that_moves_the_tick_leaves_the_source_states_observations_unchanged() {
+        let original = pool_with_observations();
+
+        let (after_swap, written) =
+            original.clone_post_swap(get_sqrt_ratio_at_tick(60).unwrap(), 60, 1);
+
+        written.unwrap();
+        assert_eq!(after_swap.observation_index, 1);
+        assert_eq!(
+            after_swap
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            2_000
+        );
+        assert_eq!(original.observation_index, 0);
+        assert_eq!(
+            original
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            1_001
+        );
+    }
+
+    #[test]
+    fn swap_that_keeps_the_tick_keeps_sharing_observations() {
+        let original = pool_with_observations();
+
+        let (after_swap, written) = original.clone_post_swap(original.sqrt_price, original.tick, 1);
+
+        written.unwrap();
+        assert!(Arc::ptr_eq(&original.observations, &after_swap.observations));
+    }
+}
+
+#[cfg(test)]
 mod step_cache_tests {
     use std::{
         collections::{HashMap, HashSet},
