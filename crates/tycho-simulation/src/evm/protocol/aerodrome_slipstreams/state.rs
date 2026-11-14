@@ -1590,6 +1590,7 @@ mod observation_sharing_tests {
         let observations = (0..3)
             .map(|index| Observation {
                 block_timestamp: 1_000 + u32::try_from(index).unwrap(),
+                tick_cumulative: 10 * i64::from(index),
                 initialized: true,
                 index,
                 ..Default::default()
@@ -1614,6 +1615,39 @@ mod observation_sharing_tests {
         pool
     }
 
+    /// The state after a swap at `timestamp` that moved the tick to `tick`.
+    fn swapped(
+        pool: &AerodromeSlipstreamsState,
+        timestamp: u64,
+        tick: i32,
+    ) -> AerodromeSlipstreamsState {
+        let mut source = pool.clone();
+        source.execution_block_timestamp = timestamp;
+        let (state, written) =
+            source.clone_post_swap(get_sqrt_ratio_at_tick(tick).unwrap(), tick, 1);
+        written.unwrap();
+        state
+    }
+
+    fn observation_bytes(timestamp: u32) -> Bytes {
+        // Packed as on chain: timestamp in the low 32 bits, `initialized` at bit 248.
+        let mut packed = [0u8; 32];
+        packed[28..].copy_from_slice(&timestamp.to_be_bytes());
+        packed[0] = 1;
+        Bytes::from(packed.to_vec())
+    }
+
+    fn observation_delta(timestamp: u32) -> ProtocolStateDelta {
+        ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: HashMap::from([(
+                "observations/1".to_string(),
+                observation_bytes(timestamp),
+            )]),
+            deleted_attributes: HashSet::new(),
+        }
+    }
+
     #[test]
     fn clone_shares_observations() {
         let original = pool_with_observations();
@@ -1626,24 +1660,120 @@ mod observation_sharing_tests {
     }
 
     #[test]
+    fn chain_of_tick_moving_swaps_never_copies_the_ring() {
+        let original = pool_with_observations();
+
+        let first = swapped(&original, 2_000, 60);
+        let second = swapped(&first, 2_010, -60);
+        let third = swapped(&second, 2_020, 30);
+
+        for state in [&first, &second, &third] {
+            assert!(original
+                .observations
+                .shares_ring_with(&state.observations));
+        }
+        assert_eq!(third.observation_index, 0);
+        assert_eq!(
+            third
+                .observations
+                .timestamp_at(0, 3)
+                .unwrap(),
+            2_020
+        );
+        assert_eq!(
+            second
+                .observations
+                .timestamp_at(2, 3)
+                .unwrap(),
+            2_010
+        );
+        assert_eq!(
+            first
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            2_000
+        );
+    }
+
+    #[test]
+    fn swap_leaves_the_source_states_observations_unchanged() {
+        let original = pool_with_observations();
+
+        let after_swap = swapped(&original, 2_000, 60);
+
+        assert_eq!(after_swap.observation_index, 1);
+        assert_eq!(
+            after_swap
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            2_000
+        );
+        assert_eq!(original.observation_index, 0);
+        assert_eq!(
+            original
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            1_001
+        );
+    }
+
+    #[test]
+    fn second_swap_in_the_same_block_writes_nothing() {
+        let original = pool_with_observations();
+        let first = swapped(&original, 2_000, 60);
+
+        let second = swapped(&first, 2_000, -60);
+
+        assert_eq!(second.observation_index, first.observation_index);
+        assert_eq!(second.observations, first.observations);
+    }
+
+    #[test]
+    fn swap_that_keeps_the_tick_writes_nothing() {
+        let original = pool_with_observations();
+
+        let after_swap = swapped(&original, 2_000, original.tick);
+
+        assert_eq!(after_swap.observation_index, 0);
+        assert_eq!(after_swap.observations, original.observations);
+    }
+
+    #[test]
+    fn fee_and_observations_match_a_state_rebuilt_from_the_merged_observations() {
+        let original = pool_with_observations();
+        let chained = swapped(&swapped(&original, 2_000, 60), 2_010, -60);
+        let copied: AerodromeSlipstreamsState =
+            serde_json::from_str(&serde_json::to_string(&chained).unwrap()).unwrap();
+
+        assert!(!chained
+            .observations
+            .shares_ring_with(&copied.observations));
+        assert_eq!(chained.observations, copied.observations);
+        assert_eq!(chained.get_fee().unwrap().fee, copied.get_fee().unwrap().fee);
+        for seconds_ago in [0, 5, 10, 15] {
+            assert_eq!(
+                chained
+                    .observations
+                    .observe_single(2_020, seconds_ago, -60, 2, 1, 3)
+                    .unwrap(),
+                copied
+                    .observations
+                    .observe_single(2_020, seconds_ago, -60, 2, 1, 3)
+                    .unwrap(),
+            );
+        }
+    }
+
+    #[test]
     fn delta_transition_leaves_clones_observations_unchanged() {
         let original = pool_with_observations();
         let mut updated = original.clone();
-        // Observations are packed with the timestamp in the low bits and `initialized` at bit 248.
-        let mut packed = [0u8; 32];
-        packed[28..].copy_from_slice(&5_000u32.to_be_bytes());
-        packed[0] = 1;
-        let delta = ProtocolStateDelta {
-            component_id: "State1".to_owned(),
-            updated_attributes: HashMap::from([(
-                "observations/1".to_string(),
-                Bytes::from(packed.to_vec()),
-            )]),
-            deleted_attributes: HashSet::new(),
-        };
 
         updated
-            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .delta_transition(observation_delta(5_000), &HashMap::new(), &Balances::default())
             .unwrap();
 
         assert_eq!(
@@ -1666,22 +1796,28 @@ mod observation_sharing_tests {
     }
 
     #[test]
-    fn swap_that_moves_the_tick_leaves_the_source_states_observations_unchanged() {
+    fn delta_transition_after_simulated_writes_reads_the_chain_values() {
         let original = pool_with_observations();
+        let mut simulated = swapped(&original, 2_000, 60);
 
-        let (after_swap, written) =
-            original.clone_post_swap(get_sqrt_ratio_at_tick(60).unwrap(), 60, 1);
+        simulated
+            .delta_transition(observation_delta(5_000), &HashMap::new(), &Balances::default())
+            .unwrap();
 
-        written.unwrap();
-        assert_eq!(after_swap.observation_index, 1);
         assert_eq!(
-            after_swap
+            simulated
                 .observations
                 .timestamp_at(1, 3)
                 .unwrap(),
-            2_000
+            5_000
         );
-        assert_eq!(original.observation_index, 0);
+        assert_eq!(
+            simulated
+                .observations
+                .timestamp_at(2, 3)
+                .unwrap(),
+            1_002
+        );
         assert_eq!(
             original
                 .observations
@@ -1692,15 +1828,34 @@ mod observation_sharing_tests {
     }
 
     #[test]
-    fn swap_that_keeps_the_tick_keeps_sharing_observations() {
+    fn delta_transition_keeps_simulated_writes_the_chain_did_not_touch() {
         let original = pool_with_observations();
+        let mut simulated = swapped(&swapped(&original, 2_000, 60), 2_010, -60);
+        let mut delta = observation_delta(5_000);
+        delta.updated_attributes.clear();
+        delta
+            .deleted_attributes
+            .insert("observations/0".to_string());
 
-        let (after_swap, written) = original.clone_post_swap(original.sqrt_price, original.tick, 1);
+        simulated
+            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap();
 
-        written.unwrap();
-        assert!(original
-            .observations
-            .shares_ring_with(&after_swap.observations));
+        // Deleting slot 0 shifts the later slots down by one, as the ring is a plain array.
+        assert_eq!(
+            simulated
+                .observations
+                .timestamp_at(0, 3)
+                .unwrap(),
+            2_000
+        );
+        assert_eq!(
+            simulated
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            2_010
+        );
     }
 }
 
