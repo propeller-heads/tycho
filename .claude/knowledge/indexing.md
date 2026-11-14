@@ -25,7 +25,7 @@ Applies: substreams
 Checked by: repo-script `substreams-version-agreement`; pr-script `substreams-pr-version-bump`
 
 ### watch-repointable-addresses
-Every address the protocol can re-point (vault, maker, engine, implementation, per-pool pointer slots) is watched rather than hard-coded or frozen into a component at creation: a change is either followed (fanned out to every existing component's mutable attributes, or left to DCI discovery; for a balance owner, every tracked token's balance re-read at the new owner) or pauses the affected components.
+Every address the protocol can re-point (vault, maker, engine, implementation, per-pool pointer slots) is watched rather than hard-coded or frozen into a component at creation: a change is either followed (fanned out to every existing component's mutable attributes, or left to DCI discovery when the pointer is held in storage the trace reads (`dependency-change-emits-new-entrypoint`); for a balance owner, every tracked token's balance re-read at the new owner) or pauses the affected components.
 Why: Contract sets and creation-time attributes are immutable, so after a rotation simulation calls the old address, or an account the indexer never published (a MissingAccount database error the adapter's try/catch cannot catch), and the venue silently stops quoting.
 Spot: An address from params/config used for contracts or `balance_owner` while the ABI has a `*Updated`/`*Set` event for it; `ChangeType::Creation` as the only write site for an address attribute; `with_contracts` including a movable address; a pool contract storing another contract's address in its own slot while only a global/config copy of that pointer is checked. balanceOf seeding triggered only by newly seen tokens while the balance owner is mutable on chain.
 Applies: substreams
@@ -202,12 +202,6 @@ Source: `crates/tycho-indexer/CLAUDE.md` § Why extractor messages must be broad
 Spot: New RPC/state code combining gateway reads with DeltaWindow contents without a db_committed bound.
 Applies: rust, rust-test · look first at lines matching `window|delta|db_committed|committed|gateway|merge`
 
-### trace-runtime-branch
-An entrypoint traced once per component must be traced on the code path that runtime takes; time- or state-dependent branches need a trigger or retrace that covers the other branch.
-Why: A one-shot trace on the wrong branch misses the storage the simulation later needs.
-Spot: Substreams emitting entrypoints only on first interaction for contracts with block.timestamp-dependent branches.
-Applies: substreams · look first at lines matching `entrypoint|entry_point|trace|dci|timestamp|retrace`
-
 ### token-analysis-pool-transfer-path
 Token behaviour analysis exercises the transfer path a swap takes (the pool as sender and recipient, per pool), not a shared holder whose transfers the token never taxes.
 Why: Pair-only transfer taxes stay invisible, so quality-100 tokens make swaps revert on K or fill short.
@@ -225,12 +219,6 @@ For a VM-simulated component, the indexed balance of each token equals the holde
 Why: The VM overwrites the token's balance with the indexed component balance, so a balance net of retained fees makes the contract's own input/inventory validation fail ('insufficient funds') or price from the wrong reserves.
 Spot: A substreams package that computes balances from the pool's internal reserve/accounting getters or events while the adapter/contract calls `IERC20(token).balanceOf(pool)`; a README or comment saying the package reports 'tradable' or 'net of fees' balances.
 Applies: substreams · look first at lines matching `balance|reserve|tvl|fee|accounting|tradable`
-
-### vm-swap-path-contracts-attached
-Every contract a VM adapter's swap path touches (helper/store contracts, delegatecall implementation libraries, price helpers) is attached to the component's contracts or reached through DCI, and the integration test exercises a swap that loads each of them.
-Why: The production engine database has no RPC fallback, so an unindexed account makes every quote fail with MissingAccount.
-Spot: A new adapter or contract upgrade that adds calls to another address (a store, an ExtraImpl library, a helper the adapter constructor takes) without a matching entry in the component's `contracts` or a DCI entrypoint.
-Applies: substreams, solidity, integration-test · look first at lines matching `contract|address|entrypoint|dci|call|library|delegatecall|helper|store`
 
 ### modules-survive-external-values
 A Substreams module never returns Err, panics or asserts on a condition that the indexed contract or a permissionless on-chain action can produce (an unusually large jump, an unseen id, a fee set past its typical range, a missing companion write); it emits the value or skips the entity, leaves validation to simulation, and reserves fatal errors for violated invariants of the package's own data.
@@ -368,3 +356,69 @@ A package does not emit an attribute only so a client-side filter can drop compo
 Why: A client-side filter runs only on snapshots, so a pool that meets the condition later stays in the stream with every quote reverting. A grouping attribute exists only for cross-state synchronization, which the consumer's routing cannot drive.
 Spot: A new attribute whose only reader is a client inclusion filter; a static attribute added only to group components that share inventory.
 Applies: substreams · look first at lines matching `attribute|static|filter|incentive|group|shared|inventory|vault`
+
+## DCI
+
+Dynamic Contract Indexing (DCI) indexes contracts that a component's simulation calls but whose
+creation the package never sees: dependencies deployed before the start block, or ones the
+protocol can re-point (oracles, rate providers, base pools, resolvers). A package emits, per
+component, an entrypoint (target and signature) with trace params (calldata, optional caller)
+through `tycho_substreams::entrypoint::create_entrypoint`, and every block's storage writes through
+`tycho_substreams::block_storage::get_block_storage_changes`. The indexer traces each new
+(entrypoint, params) pair over RPC (`eth_createAccessList`, `debug_traceCall`), fetches each new
+contract's code and full storage with `debug_storageRangeAt` (tokens and `DCI_BLACKLIST_ADDRESSES`
+get only the traced slots), and follows it from then on through the package's storage changes. It
+retraces an entrypoint when it gets new params, or when a retrigger slot changes: a storage slot the
+trace read whose value holds the address of a contract the trace called. Packages using it:
+`ethereum-balancer-v2`, `ethereum-balancer-v3`, `ethereum-curve`, `ethereum-erc4626`,
+`ethereum-fluid`; Uniswap V4 hooks use the `HooksDCI` variant, which generates entrypoints in the
+indexer. The emission steps are in
+`docs/for-dexs/protocol-integration/indexing/common-problems-and-patterns/dynamic-contract-indexing-dci/README.md`.
+
+### trace-runtime-branch
+An entrypoint traced once per component must be traced on the code path that runtime takes; time- or state-dependent branches need a trigger or retrace that covers the other branch.
+Why: A one-shot trace on the wrong branch misses the storage the simulation later needs.
+Spot: Substreams emitting entrypoints only on first interaction for contracts with block.timestamp-dependent branches.
+Applies: substreams · look first at lines matching `entrypoint|entry_point|trace|dci|timestamp|retrace`
+
+### vm-swap-path-contracts-attached
+Every contract a VM adapter's swap path touches (helper/store contracts, delegatecall implementation libraries, price helpers) is attached to the component's contracts or reached through DCI, and the integration test exercises a swap that loads each of them.
+Why: The production engine database has no RPC fallback, so an unindexed account makes every quote fail with MissingAccount.
+Spot: A new adapter or contract upgrade that adds calls to another address (a store, an ExtraImpl library, a helper the adapter constructor takes) without a matching entry in the component's `contracts` or a DCI entrypoint.
+Applies: substreams, solidity, integration-test · look first at lines matching `contract|address|entrypoint|dci|call|library|delegatecall|helper|store`
+
+### dci-only-where-rpc-serves-storage-range
+A package emits entrypoints only from manifests for chains whose archive RPC serves `debug_storageRangeAt`: Ethereum and Polygon as of November 2026 (Base and Unichain nodes run reth and return `null`, BSC's Geth fails with a missing trie node, Robinhood's Nitro crashes). On any other chain, a component that would need DCI is either not created, through a manifest param (`skip_rate_provider_pools` in `ethereum-balancer-v3`), or has its dependency's values decoded from storage writes or events into attributes and is priced natively (the Robinhood Pons manifest of `ethereum-uniswap-v4/with-hooks`); a client-side filter is not a substitute.
+Why: DCI fetches every contract it finds with `debug_storageRangeAt`; where the node returns `null` or an error, the fetch fails after its retries with `AccountExtractionError` and stops the extractor, and the test harness cannot snapshot `initialized_accounts` either.
+Spot: `create_entrypoint` reachable from a manifest for a chain other than Ethereum or Polygon with no param that turns it off; a design note or README that relies on DCI, or on a client filter such as `curve_filter`, on such a chain.
+Applies: substreams, config, integration-test · look first at lines matching `entrypoint|chain|skip|params|initialized_accounts`
+
+### dci-emits-block-storage-changes
+A package that emits entrypoints sets `storage_changes: get_block_storage_changes(&block)` on every `BlockChanges` its output module returns.
+Why: DCI fetches a contract over RPC once, when a trace first finds it, and follows it afterwards only through `storage_changes`; without them the dependency stays frozen at discovery and quotes go stale with no error.
+Spot: `add_entrypoint` in a package whose output module returns `storage_changes: vec![]` or leaves the field at its default.
+Applies: substreams · look first at lines matching `storage_changes|get_block_storage_changes|BlockChanges|entrypoint`
+
+### entrypoint-linked-per-component
+Each component that reaches a dependency gets its own entrypoint and params carrying its own component id, emitted in the transaction that created the component or the one that introduced the dependency (Curve's `set_oracle` call). A shared entrypoint is re-emitted for every component; a store is kept only when the params need values the creation transaction lacks (erc4626 traces on a vault's first `Deposit` or `Withdraw` to use real amounts), never only to avoid emitting duplicates.
+Why: DCI attaches the contracts a trace finds to the components linked to that entrypoint, so an unlinked component simulates without them; the indexer already deduplicates entrypoints, so a store kept for that adds per-block work and nothing else.
+Spot: An entrypoint emitted once per protocol or per target instead of per component; a `component_id` argument formatted differently from the component's id; a store keyed by entrypoint id or target.
+Applies: substreams · look first at lines matching `entrypoint|component_id|store|emitted`
+
+### trace-params-exercise-swap-path
+Trace params reach the external calls a real quote reaches: realistic non-zero amounts (taken from the triggering event where there is one, as erc4626 does), a real token and direction, one params set per direction or branch that calls different contracts, and a `caller` wherever the call depends on `msg.sender` (Curve traces `balanceOf(pool)` and `get_virtual_price` with the pool as caller). A call DCI cannot replay (amounts that must be generated, Permit2-style signatures, calldata derived from another trace or an outside source) gets a different design: attach the contract another way, or record the path as unsupported.
+Why: DCI replays only the params it is given; a zero amount, the wrong direction or a reverting caller returns before the dependency is called, so the trace finds nothing and the simulation later hits an unindexed account.
+Spot: Hard-coded zero amounts in trace calldata; `caller: None` for a target that checks or reads `msg.sender`; one params set for a call whose path depends on direction.
+Applies: substreams · look first at lines matching `calldata|caller|TraceData|RpcTraceData|amount`
+
+### dependency-change-emits-new-entrypoint
+When a dependency's address can change and is not held in a storage slot the trace reads (the entrypoint's own target, or an address passed in calldata or set through an event or call), the package decodes the change and emits a new entrypoint and params for the new address, as Curve does on `set_oracle`.
+Why: The tracer marks as retriggers only storage slots whose value holds the address of a contract the trace called (`detect_retrigger` in `tycho-ethereum`'s entrypoint tracer); an address outside traced storage never causes a retrace, so the new contract is never indexed and quotes fail with `MissingAccount`.
+Spot: A `*Set`/`*Updated` event or setter for an entrypoint target that the package decodes for attributes but not for entrypoints; a design note leaving a calldata-passed address to DCI discovery.
+Applies: substreams · look first at lines matching `entrypoint|set|update|oracle|provider|target`
+
+### dci-test-proves-discovery
+The integration test of a DCI package lists in `initialized_accounts` only contracts the package does not reach through an entrypoint (a vault or factory deployed before the start block), and runs a swap on a component that loads each contract DCI is meant to find.
+Why: A contract seeded through `initialized_accounts` is indexed whether or not a trace finds it, so the test passes while a broken entrypoint leaves production without the account.
+Spot: An oracle, rate provider, resolver or other entrypoint target in `initialized_accounts`; a DCI package whose tests set `skip_simulation: true` on every component that has an entrypoint.
+Applies: integration-test · look first at lines matching `initialized_accounts|skip_simulation|start_block`
