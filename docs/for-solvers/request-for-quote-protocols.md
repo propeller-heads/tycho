@@ -4,11 +4,12 @@ Some venues price off the chain. Instead of pool state Tycho reads from the chai
 
 Two kinds share that shape, and the difference shows at execution:
 
-* **RFQ market makers** — Bebop, Hashflow, Liquorice and Native. The streamed book prices **indicatively**, for simulation; at encoding time the maker signs a **binding** quote, firm for a few seconds, and may decline the trade.
+* **RFQ market makers** — Aqua0, Bebop, Hashflow, Liquorice and Native. The streamed book prices **indicatively**, for simulation; at encoding time the maker signs a **binding** quote, firm for a few seconds, and may decline the trade.
 * **Off-chain-priced pAMMs** — Metric. The book prices a pool you execute against directly: there is no quote to request and nothing to sign.
 
 | Protocol    | Kind | Simulation Time | Credentials | Chains                                            | Protocol system  |
 |-------------|------|-----------------|-------------|---------------------------------------------------|------------------|
+| `aqua0`     | RFQ  | -               | None        | Base, Arbitrum, Polygon, Robinhood                | `rfq:aqua0`      |
 | `bebop`     | RFQ  | 0.5 µs          | Required    | Ethereum, BSC, Polygon, Base, Arbitrum, Robinhood | `rfq:bebop`      |
 | `hashflow`  | RFQ  | 0.4 µs          | Required    | Ethereum, BSC, Polygon, Base, Arbitrum            | `rfq:hashflow`   |
 | `liquorice` | RFQ  | 0.4 µs          | Required    | Ethereum, Arbitrum                                | `rfq:liquorice`  |
@@ -23,7 +24,7 @@ On Ethereum, Metric is also available as a pAMM venue on the [pAMM price level s
 
 The book-feed quickstart is similar to the other protocols [quickstart](../).
 
-See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples/book_quickstart" target="_blank" rel="noopener noreferrer">here</a>. As of now, <a href="https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-api-intro" target="_blank" rel="noopener noreferrer">Bebop</a>, <a href="https://docs.hashflow.com/hashflow/taker/getting-started-api-v3" target="_blank" rel="noopener noreferrer">Hashflow</a>, <a href="https://liquorice.tech/" target="_blank" rel="noopener noreferrer">Liquorice</a>, <a href="https://docs.native.org/" target="_blank" rel="noopener noreferrer">Native</a> and <a href="https://docs.metric.xyz/" target="_blank" rel="noopener noreferrer">Metric</a> are the only supported providers.
+See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples/book_quickstart" target="_blank" rel="noopener noreferrer">here</a>. As of now, Aqua0, <a href="https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-api-intro" target="_blank" rel="noopener noreferrer">Bebop</a>, <a href="https://docs.hashflow.com/hashflow/taker/getting-started-api-v3" target="_blank" rel="noopener noreferrer">Hashflow</a>, <a href="https://liquorice.tech/" target="_blank" rel="noopener noreferrer">Liquorice</a>, <a href="https://docs.native.org/" target="_blank" rel="noopener noreferrer">Native</a> and <a href="https://docs.metric.xyz/" target="_blank" rel="noopener noreferrer">Metric</a> are the only supported providers.
 
 The feed builders take credentials as plain arguments; how you obtain them is up to your application. The example reads them from the environment, so set the ones for the providers you want, plus your private key if you wish to execute against the Tycho Router:
 
@@ -80,7 +81,7 @@ To get token information from Tycho Indexer RPC please use [load\_all\_tokens](s
 
 ### Book feeds
 
-Each venue has its own feed type (`BebopFeed`, `HashflowFeed`, `LiquoriceFeed`, `NativeFeed`, `MetricFeed`), built from a shared `BookFeedConfig` plus provider-specific credentials and options. Every feed implements the `SnapshotFeed` trait — a live price feed that publishes the provider's latest complete set of books, or withdraws when nothing is servable (before the first set arrives, and after one goes stale). You read it through `BookFeedStreams`, which owns the channels and the feed tasks: each feed runs in its own task and hands you the newest set through a watch channel, so falling behind costs you skipped snapshots rather than a stalled venue connection. Binding quotes are not part of the feed — for the RFQ venues, the states it emits request them at encoding time through their embedded client.
+Each venue has its own feed type (`Aqua0Feed`, `BebopFeed`, `HashflowFeed`, `LiquoriceFeed`, `NativeFeed`, `MetricFeed`), built from a shared `BookFeedConfig` plus provider-specific credentials and options. Every feed implements the `SnapshotFeed` trait — a live price feed that publishes the provider's latest complete set of books, or withdraws when nothing is servable (before the first set arrives, and after one goes stale). You read it through `BookFeedStreams`, which owns the channels and the feed tasks: each feed runs in its own task and hands you the newest set through a watch channel, so falling behind costs you skipped snapshots rather than a stalled venue connection. Binding quotes are not part of the feed — for the RFQ venues, the states it emits request them at encoding time through their embedded client.
 
 Example setup for Bebop:
 

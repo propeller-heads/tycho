@@ -9,6 +9,8 @@ use tycho_common::{
 };
 use tycho_execution::encoding::{
     evm::{
+        encoder_builders::TychoRouterEncoderBuilder,
+        swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
         testing_utils::MockRFQState,
         utils::{biguint_to_u256, write_calldata_to_file},
     },
@@ -1216,6 +1218,92 @@ fn test_single_encoding_strategy_bebop_partial_fill() {
         "test_single_encoding_strategy_bebop_partial_fill",
         hex::encode(calldata).as_str(),
     );
+}
+
+#[test]
+fn test_single_encoding_strategy_aqua0() {
+    // Note: This test does not assert anything. It is only used to obtain integration test data
+    // for the Solidity test that replays it at a pinned Arbitrum block.
+    //
+    // 10 USDG -> USDC through Aqua0's live V4 hook, with a binding quote Aqua0 signed for the
+    // live Arbitrum Tycho Router at block 523932429 (deadline 1794591921). Never executed on chain.
+    //
+    //   USDG ───(rfq:aqua0)──> USDC
+
+    let usdg = Bytes::from_str("0x004B506865409877C9fA29bfb1ebA929984B9bbC").unwrap();
+    let usdc = Bytes::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831").unwrap();
+    let router = Bytes::from_str("0x924F147c50eA59f5180a26031A8b65B2aA1e81Cd").unwrap();
+    let amount_in = BigUint::from(10_000_000u64);
+    let amount_out = BigUint::from(9_971_227u64);
+    let hook_data = Bytes::from_str(
+        "0x02dfe74a2cb04a2c6a71d638e9f410dd0f3b846e3cf9c99f3239274c7fb4345b000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000002c00000000000000000000000000000000000000000000000000000000000000380000000000000000000000000000000000000000000000000000000000000022000000000000000000000000000000000000000000000000000000000000000206b81aecb2cbd52f7d155ea12f5fd142fcf5d8e86710810b4627661cec9fc338ed0c66cc0582655963e82a87d65ceb484e6125a90aec30c92bddf839ae129fa05d0c66cc0582655963e82a87d65ceb484e6125a90aec30c92bddf839ae129fa050000000000000000000000000000000000000000000000000000000000000001ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff67698000000000000000000000000000000000000000000000000000000001000276a40000000000000000000000000000000000000000fffbb0454eade14e1c185ac2dc5688d47e5fc0b5e1049dd4014f445c26434e85b62931e81acd7c3476ce844d000000000000000000000000000000000000000000000000000000006af74cb1000000000000000000000000924f147c50ea59f5180a26031a8b65b2aa1e81cd00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000180000000000000000000000000000000000000000000000000000000000000004199afa184961e51d8a79081144dfe56c6ff58bed72a538be096b114b289cf221d0e0cf31029520782a00d39def5958cb0bba3a6da03ca656c30500dd349620bf21b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000009b080ef51af94d120ce7b23b9a375bc7b0f8a0440000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffc9fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe00000000000000000000000000000000000000000000000000000000e68dcf610000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .unwrap();
+
+    let component = ProtocolComponent {
+        id: "0xbf028d2f0703dfdca04c3acfa262018f07aeb37bf21470c64c4d7fec55b8d525".into(),
+        protocol_system: "rfq:aqua0".into(),
+        static_attributes: HashMap::from([
+            ("key_lp_fee".into(), Bytes::from(100u32.to_be_bytes().to_vec())),
+            ("tick_spacing".into(), Bytes::from(1i32.to_be_bytes().to_vec())),
+            (
+                "hooks".into(),
+                Bytes::from_str("0x90a99a9c0B2Fe748e6600dc4A9A8b814292428C0").unwrap(),
+            ),
+        ]),
+        ..Default::default()
+    };
+    let state = MockRFQState {
+        quote_amount_in: Some(amount_in.clone()),
+        quote_amount_out: amount_out.clone(),
+        quote_data: HashMap::from([("hook_data".to_string(), hook_data)]),
+        level_amount_out: Some(amount_out.clone()),
+        ..Default::default()
+    };
+    let swap = Swap::new(
+        component,
+        default_token(usdg.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
+    )
+    .with_estimated_amount_in(amount_in.clone())
+    .with_protocol_state(Arc::new(state));
+
+    let registry = SwapEncoderRegistry::new_with_defaults(Chain::Arbitrum).unwrap();
+    let encoder = TychoRouterEncoderBuilder::new()
+        .chain(Chain::Arbitrum)
+        .swap_encoder_registry(registry)
+        .router_address(router)
+        .build()
+        .unwrap();
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        usdg,
+        usdc,
+        amount_in,
+        amount_out.clone(),
+        amount_out,
+        vec![swap],
+    );
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+    let calldata = encode_tycho_router_call(
+        Chain::Arbitrum.id(),
+        &encoded_solution,
+        &solution,
+        &Bytes::zero(20),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+
+    write_calldata_to_file("test_single_encoding_strategy_aqua0", encode(&calldata).as_str());
 }
 
 #[test]

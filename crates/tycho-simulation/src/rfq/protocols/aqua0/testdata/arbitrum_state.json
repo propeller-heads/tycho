@@ -1,0 +1,55 @@
+{
+ "schemaVersion": "aqua0-rfq-state-v1",
+ "componentId": "0xbf028d2f0703dfdca04c3acfa262018f07aeb37bf21470c64c4d7fec55b8d525",
+ "protocolSystem": "rfq:aqua0",
+ "protocolTypeName": "aqua0_jit_pool",
+ "chainId": 42161,
+ "poolId": "0xd0c66cc0582655963e82a87d65ceb484e6125a90aec30c92bddf839ae129fa05",
+ "classId": "94431658798343993845680158105738677744077089452389695736664801547485817993733",
+ "poolManager": "0x360E68faCcca8cA495c1B759Fd9EEe466db9FB32",
+ "tokens": [
+  "0x004B506865409877C9fA29bfb1ebA929984B9bbC",
+  "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+ ],
+ "fee": 100,
+ "tickSpacing": 1,
+ "hooks": "0x90a99a9c0B2Fe748e6600dc4A9A8b814292428C0",
+ "directions": {
+  "zeroForOne": [
+   {
+    "requestedAmountIn": "10000000",
+    "amountIn": "10000000",
+    "amountOut": "9971227",
+    "fullySupported": true,
+    "currentTick": -2,
+    "sqrtPriceX96": "79223394083240670476986991571",
+    "ranges": [
+     {
+      "tickLower": -55,
+      "tickUpper": -2,
+      "liquidity": "3868053345"
+     }
+    ]
+   },
+   {
+    "requestedAmountIn": "100000000",
+    "amountIn": "100000000",
+    "amountOut": "97451120",
+    "fullySupported": true,
+    "currentTick": -2,
+    "sqrtPriceX96": "79223394083240670476986991571",
+    "ranges": [
+     {
+      "tickLower": -514,
+      "tickUpper": -2,
+      "liquidity": "3868053345"
+     }
+    ]
+   }
+  ],
+  "oneForZero": []
+ },
+ "generatedAt": 1794583838,
+ "expiresAt": 1794583848,
+ "stateVersion": "0x0b47ffa77919d74d69075c4e5dc3b3776053b5d3a5f4739d0fd74bdb9ca12b2d"
+}
