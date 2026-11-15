@@ -1,7 +1,7 @@
 # Tycho Execution
 
 DeFi swap execution framework: Solidity smart contracts (TychoRouterV3) + Rust encoding library. Multi-protocol token
-swaps with fee-taking, transient delta accounting, and 20+ DEX integrations.
+swaps with fee-taking and 20+ DEX integrations.
 
 **Docs**: https://docs.propellerheads.xyz/tycho
 **License**: Fynd License 1.1 (Solidity and Rust). See [LICENSING.md](../../LICENSING.md).
@@ -12,8 +12,7 @@ swaps with fee-taking, transient delta accounting, and 20+ DEX integrations.
 TychoRouterV3 (entry point)
   inherits AccessControl           -- role-based admin (add executors, set fees)
   inherits Dispatcher              -- executor dispatch via delegatecall
-    inherits TransferManager       -- input/output transfers, Permit2/ERC20 funding
-      inherits DeltaAccounting     -- transient storage deltas, reentrancy guard, pause
+    inherits TransferManager       -- input/output transfers, Permit2/ERC20 funding, reentrancy guard, pause
   inherits EIP712                  -- client fee signature verification
 
 FeeCalculator (separate contract, called via staticcall -- read only)
@@ -31,8 +30,7 @@ Entry (e.g. splitSwap)
       → amountOut = diff (single source of truth)
       → if outputToRouter: forward to receiver via _transferOut
   → _takeFees (deduct client fee + router fees, transfer each fee to its receiver)
-  → _settleOutput (transfer final amount to receiver)
-  → _finalizeBalances (verify all transient deltas settled)
+  → _settleOutput (transfer final amount to receiver, check it against minAmountOut)
 ```
 
 ### Core Contracts (`contracts/src/`)
@@ -40,9 +38,8 @@ Entry (e.g. splitSwap)
 | Contract                       | Purpose                                                                                                                                                                                                                                                        |
 |--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `TychoRouterV3.sol`              | Entry point. 3 swap strategies (single/sequential/split) x 2 funding modes (transferFrom/Permit2) = 6 public methods. `_takeFees()` transfers fees to their receivers, `_settleOutput()` transfers the final output to the receiver. The receiver can not be the router |
-| `DeltaAccounting.sol`          | Transient per-token deltas of the router (see subsection below)                                                                                                                                                                                               |
 | `Dispatcher.sol`               | Executor dispatch. 1-day timelock on new executors. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
-| `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 6 transfer scenarios depending on context                                                                                  |
+| `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 5 transfer scenarios depending on context                                                                                  |
 | `FeeCalculator.sol`            | Dual fee system: router fee on output + router fee on client fee. Per-client custom rates. Upgradeable without redeploying router                                                                                                                              |
 | `SubsidyPayer.sol`             | Holds the subsidy budget (ERC20 and native ETH) and pays one EIP-712-signed `Subsidy` per nonce (unordered bitmap). Only the router may call `pay`. Any other failed check emits `SubsidySkipped` with a `SkipReason` and returns false. `boundTo` must be the router's caller or `tx.origin`. ETH goes out with a capped gas stipend |
 | `fallback/TychoFallbackRouter.sol` | Abstract standalone contract (not an executor, never delegatecalled). Holds `tokenIn` for one leg, quotes a primary venue against the caller's chosen fallback protocol and runs whichever quotes more; a primary that wins the quote but fails still falls through. `fallback/PropAMMFallbackRouter.sol` is the pAMM primary. See "Protocol fallback" below. |
@@ -56,23 +53,17 @@ getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]
 client, tokenIn, tokenOut → (routerFeeOnOutputBps, routerFeeOnClientFeeBps)]). Also
 `IPropAMM` (the pAMM standard), `IUniversalRouter` and `ISubsidyPayer` (`pay`, the `Subsidy` struct, `SkipReason`).
 
-### Delta accounting (`DeltaAccounting.sol`)
+### Router balances and output check
 
-**Transient storage** (tload/tstore, ~100 gas per op): Tracks per-token deltas (credits/debits) during a swap. Positive
-delta when tokens arrive at the router, negative when they leave. `nonZeroDeltaCount` tracks unsettled deltas.
+The router holds no user balances. Tokens left in the router after a swap (dust, mistaken transfers, an unspent
+`msg.value`) are lost: any later swap can spend them.
 
-**Settlement** (`_finalizeBalances`): Called at the end of every swap. Reverts
-`DeltaAccounting__UnexpectedNonZeroCount` unless every delta is zero. The router holds no user balances, so a swap can
-never spend tokens the router held before it started.
+**Output check** (`_settleOutput`): the only check on a swap's result. The output amount is a balance difference at
+the receiver, measured by the Dispatcher or, for output the router intercepts for fees, by `_transferOut`. The swap
+reverts with `TychoRouter__NegativeSlippage` when it is below `minAmountOut`.
 
 **Fee accounting**: `_takeFees()` transfers each fee to its receiver (`safeTransfer`, or `sendValue` for native ETH).
 A receiver that cannot accept the token reverts the swap.
-
-**Why transient storage is kept** (even with balance-diff verification): The delta system is a cheap (~100 gas per op)
-safety guardrail that catches routing logic bugs and exploits. Example: a malicious encoder inserts a third split
-through a compromised protocol whose callback tells TransferManager to transfer PEPE instead of the expected token. The
-router would lose PEPE, but transient storage detects the negative PEPE delta and reverts. It also stops a swap from
-spending tokens the router already holds (dust, mistaken transfers).
 
 ### Fee System (`FeeCalculator.sol`)
 
@@ -387,7 +378,7 @@ caller keeps it there. `EncodedSolution::write_subsidy_signature` documents the 
 
 **Balance-diff verification**: The Dispatcher independently verifies every swap output. It
 measures `balanceOf(measureAt, tokenOut)` before and after every `swap()` delegatecall. The measured diff becomes the
-single source of truth for fees, delta accounting, and sequential chaining. This eliminates trust in protocol-reported
+single source of truth for fees, the output check, and sequential chaining. This eliminates trust in protocol-reported
 amounts and handles fee-on-transfer/rebasing tokens for every executor the Dispatcher pays directly. `FallbackExecutor`
 is the exception: `TychoFallbackRouter` transfers to the protocol itself, outside this measurement.
 
@@ -434,10 +425,10 @@ enum TransferType {
 
 **Transfer resolution** (`_callSwapOnExecutor`): Before every swap, the Dispatcher **staticcalls** `getTransferData()`
 on the current executor. Returns a hardcoded `TransferType`, receiver address, `tokenIn`, `tokenOut`,
-and `outputToRouter`. `_transfer()` handles 6 scenarios based on (TransferType, isFirstSwap, isSplitSwap, isCallback).
+and `outputToRouter`. `_transfer()` handles 5 scenarios based on (TransferType, isFirstSwap, isSplitSwap, isCallback).
 
 **Output settlement** (in TychoRouterV3): After all swaps complete, `_takeFees()` deducts fees and transfers them to the
-fee receivers. Then `_settleOutput()` updates delta accounting and transfers tokens to the receiver.
+fee receivers. Then `_settleOutput()` transfers tokens to the receiver and checks the amount against `minAmountOut`.
 
 **Receiver resolution** (`_sequentialSwap`): For sequential routes (A -> Pool1 -> Pool2 -> D), the Dispatcher determines
 each swap's output receiver by peeking ahead and **staticcalling** `fundsExpectedAddress()` on the **next** executor.

@@ -286,8 +286,8 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
         } else {
             // _LOCKED_SELECTOR
             if (tokenIn == ETH_ADDRESS) {
-                // ETH transfers are handled in the Executor, so we need to set the
-                // transferType to TransferNativeInExecutor to update delta accounting.
+                // The executor sends the ETH itself, so the router makes no
+                // transfer for it.
                 transferType =
                 TransferManager.TransferType.TransferNativeInExecutor;
             } else {

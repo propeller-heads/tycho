@@ -2,21 +2,21 @@
 pragma solidity ^0.8.26;
 
 import {TychoRouter__InvalidReceiver} from "@src/TychoRouterV3.sol";
-import {
-    DeltaAccounting__UnexpectedNonZeroCount
-} from "@src/DeltaAccounting.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {
+    IAllowanceTransfer
+} from "@permit2/src/interfaces/IAllowanceTransfer.sol";
 import {
     IUniswapV2Pair
 } from "@uniswap-v2/contracts/interfaces/IUniswapV2Pair.sol";
 import "./TychoRouterTestSetup.sol";
 
 /**
- * @title TychoRouterDeltaAccountingTest
- * @notice Swaps that the transient delta checks accept or reject, and the
- *         router's own token balance that a swap must not use
+ * @title TychoRouterChecksTest
+ * @notice Entry checks of the router, and swaps that must leave the router's
+ *         own balance untouched
  */
-contract TychoRouterDeltaAccountingTest is TychoRouterTestSetup {
+contract TychoRouterChecksTest is TychoRouterTestSetup {
     function getForkBlock() public pure override returns (uint256) {
         return 24480104;
     }
@@ -49,7 +49,96 @@ contract TychoRouterDeltaAccountingTest is TychoRouterTestSetup {
         vm.stopPrank();
     }
 
-    function testReceiverIsRouterReverts() public {
+    function testMsgValueWithErc20Input() public {
+        // Alice sends ETH with a WETH input. The router would keep the ETH, so
+        // it reverts.
+        uint256 amountIn = 1 ether;
+        deal(ALICE, amountIn);
+        deal(WETH_ADDR, ALICE, amountIn);
+
+        bytes memory swap = encodeSingleSwap(
+            address(usv2Executor),
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
+        );
+
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoRouter__MsgValueDoesNotMatchAmountIn.selector, amountIn, 0
+            )
+        );
+        tychoRouter.singleSwap{value: amountIn}(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            1, // expected amount out
+            1, // min amount out
+            ALICE, // receiver
+            noClientFee(),
+            swap
+        );
+        vm.stopPrank();
+    }
+
+    function testNativeInputWithoutMsgValue() public {
+        // Alice declares an ETH input but sends no ETH. The swap would spend
+        // ETH the router holds, so it reverts.
+        uint256 amountIn = 1 ether;
+        deal(tychoRouterAddr, amountIn);
+
+        vm.startPrank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoRouter__MsgValueDoesNotMatchAmountIn.selector, 0, amountIn
+            )
+        );
+        tychoRouter.singleSwap(
+            amountIn,
+            ETH_ADDR,
+            RETH_ADDR,
+            1, // expected amount out
+            1, // min amount out
+            ALICE, // receiver
+            noClientFee(),
+            _rocketpoolEthRethSwap()
+        );
+        vm.stopPrank();
+
+        assertEq(tychoRouterAddr.balance, amountIn);
+    }
+
+    function testPermit2NativeInput() public {
+        // The Permit2 methods are not payable, so a native ETH input would
+        // spend ETH the router holds. They revert instead.
+        uint256 amountIn = 1 ether;
+        deal(tychoRouterAddr, amountIn);
+        IAllowanceTransfer.PermitSingle memory permitSingle;
+
+        vm.startPrank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoRouter__MsgValueDoesNotMatchAmountIn.selector, 0, amountIn
+            )
+        );
+        tychoRouter.singleSwapPermit2(
+            amountIn,
+            ETH_ADDR,
+            RETH_ADDR,
+            1, // expected amount out
+            1, // min amount out
+            ALICE, // receiver
+            noClientFee(),
+            permitSingle,
+            "",
+            _rocketpoolEthRethSwap()
+        );
+        vm.stopPrank();
+
+        assertEq(tychoRouterAddr.balance, amountIn);
+    }
+
+    function testReceiverIsRouter() public {
         uint256 amountIn = 1 ether;
         deal(WETH_ADDR, ALICE, amountIn);
 
@@ -78,7 +167,6 @@ contract TychoRouterDeltaAccountingTest is TychoRouterTestSetup {
         vm.stopPrank();
     }
 
-    // ==================== Native Transfer tests ====================
     function _rocketpoolEthRethSwap() private view returns (bytes memory swap) {
         swap = encodeSingleSwap(
             address(rocketpoolExecutor),
@@ -114,33 +202,7 @@ contract TychoRouterDeltaAccountingTest is TychoRouterTestSetup {
         assertEq(tychoRouterAddr.balance, routerEthBalance);
     }
 
-    function testTransferNativeInExecutorForgotToSendETH() public {
-        // Alice swaps ETH but sends no msg.value. The router holds ETH, but the
-        // swap may not spend it: the negative ETH delta reverts the swap.
-        uint256 amountIn = 1 ether;
-        deal(tychoRouterAddr, 2 ether);
-
-        vm.startPrank(ALICE);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                DeltaAccounting__UnexpectedNonZeroCount.selector, 1
-            )
-        );
-        tychoRouter.singleSwap(
-            // No msg.value sent!
-            amountIn,
-            ETH_ADDR,
-            RETH_ADDR,
-            1, // expected amount out
-            1, // min amount out
-            ALICE, // receiver
-            noClientFee(),
-            _rocketpoolEthRethSwap()
-        );
-        vm.stopPrank();
-    }
-
-    function testSequentialSwapNativeETHCredit() public {
+    function testSequentialSwapNativeETHIntermediate() public {
         // Output of first swap is native ETH. Second swap uses that ETH for a
         // native ETH input swap without touching the ETH the router already holds.
         // Sequential swap: USDC --(USV4)--> ETH --(rocket)--> rETH
@@ -187,7 +249,7 @@ contract TychoRouterDeltaAccountingTest is TychoRouterTestSetup {
         );
         vm.stopPrank();
 
-        assertGt(amountOut, 0);
+        assertEq(amountOut, 431378612147468451);
         assertEq(IERC20(RETH_ADDR).balanceOf(ALICE), amountOut);
         assertEq(tychoRouterAddr.balance, routerEthBalance);
     }
@@ -196,7 +258,7 @@ contract TychoRouterDeltaAccountingTest is TychoRouterTestSetup {
         // Profitable arbitrage: USDC -> WETH (USV3) -> USDC (USV2).
         // Extra USDC in the USV2 pool makes WETH worth more USDC there.
         uint256 amountIn = 1_000_000_000; // 1000 USDC
-        uint256 expectedAmountOut = 1050886787; // 1050.8 USDC
+        uint256 poolAmountOut = 1050886787; // 1050.8 USDC
 
         deal(
             USDC_ADDR,
@@ -231,8 +293,8 @@ contract TychoRouterDeltaAccountingTest is TychoRouterTestSetup {
         );
         vm.stopPrank();
 
-        assertEq(amountOut, expectedAmountOut);
-        assertEq(IERC20(USDC_ADDR).balanceOf(ALICE), expectedAmountOut);
+        assertEq(amountOut, poolAmountOut);
+        assertEq(IERC20(USDC_ADDR).balanceOf(ALICE), poolAmountOut);
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
     }
 }

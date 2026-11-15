@@ -20,12 +20,6 @@ use crate::{address::Address, model::executors::TransferData};
 ///
 /// TODO this list is incomplete.
 pub enum Event {
-    UpdateDeltaAccounting {
-        token: Address,
-        delta_change: i64,
-        nonzero_delta_count_after: u64,
-        context_hint: &'static str,
-    },
     TransferOut {
         receiver: Address,
         token: Address,
@@ -54,7 +48,6 @@ pub enum Event {
 impl Event {
     fn context_hint(&self) -> &'static str {
         match self {
-            Self::UpdateDeltaAccounting { context_hint, .. } => context_hint,
             Self::TransferOut { context_hint, .. } => context_hint,
             Self::EthSendValue { context_hint, .. } => context_hint,
             Self::Erc20SafeTransfer { context_hint, .. } => context_hint,
@@ -66,12 +59,6 @@ impl Event {
 impl std::fmt::Display for Event {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UpdateDeltaAccounting {
-                token, delta_change, nonzero_delta_count_after, ..
-            } => write!(
-                f,
-                "`_updateDeltaAccounting(token={token:?}, deltaChange={delta_change})` after which `_getNonZeroDeltaCount() == {nonzero_delta_count_after}`"
-            ),
             Self::TransferOut { receiver, token, amount, .. } => {
                 write!(f, "_transferOut(token={token:?}, to={receiver:?}, amount={amount})")
             }

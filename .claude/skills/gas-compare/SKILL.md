@@ -50,7 +50,7 @@ Check whether `crates/tycho-execution/.gas-compare/test_metadata.json` exists in
 - `TychoRouterSequentialSwap.t.sol`
 - `TychoRouterSplitSwap.t.sol`
 - `TychoRouterFees.t.sol`
-- `TychoRouterDeltaAccounting.t.sol`
+- `TychoRouterChecks.t.sol`
 - `TychoRouterProtocolIntegration.t.sol`
 
 For each `function test...` in these files, record:

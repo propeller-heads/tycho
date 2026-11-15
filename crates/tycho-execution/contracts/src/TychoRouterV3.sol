@@ -19,6 +19,10 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {
     SignatureChecker
 } from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
+import {
+    ReentrancyGuard
+} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Dispatcher} from "./Dispatcher.sol";
 import {LibSwap} from "../lib/LibSwap.sol";
 import {ETH_ADDRESS} from "../lib/NativeETH.sol";
@@ -69,7 +73,7 @@ error TychoRouter__AddressZero();
 error TychoRouter__NotAContract(address addr);
 error TychoRouter__EmptySwaps();
 error TychoRouter__MsgValueDoesNotMatchAmountIn(
-    uint256 msgValue, uint256 amountIn
+    uint256 msgValue, uint256 expectedMsgValue
 );
 error TychoRouter__NegativeSlippage(uint256 amount, uint256 minAmount);
 error TychoRouter__AmountOutZero();
@@ -99,7 +103,13 @@ error TychoRouter__TimelockNotExpired(
 error TychoRouter__NoPendingFeeCalculator();
 error TychoRouter__FeesExceedOutput(uint256 totalFees, uint256 actualAmountOut);
 
-contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
+contract TychoRouterV3 is
+    AccessControl,
+    ReentrancyGuard,
+    Pausable,
+    Dispatcher,
+    EIP712
+{
     address private _feeCalculator; // Fee calculator contract
     address private _pendingFeeCalculator;
     uint48 private _feeCalculatorActivationTimestamp;
@@ -123,9 +133,6 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         "uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)"
     );
 
-    event Withdrawal(
-        address indexed token, uint256 amount, address indexed receiver
-    );
     event FeeCalculatorSet(
         address indexed feeCalculator, uint256 timelockExpiresAt
     );
@@ -203,7 +210,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             receiver,
             swaps
         );
-        _updateNativeDeltaAccounting(amountIn);
+        _validateMsgValue(tokenIn, amountIn);
         _tstoreTransferFromInfo(tokenIn, amountIn, false);
 
         return _splitSwapChecked(
@@ -265,10 +272,8 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             receiver,
             swaps
         );
-        // For native ETH, assume funds already in our router. Else, handle approval.
-        if (tokenIn != ETH_ADDRESS) {
-            permit2.permit(msg.sender, permitSingle, signature);
-        }
+        _validateMsgValue(tokenIn, amountIn);
+        permit2.permit(msg.sender, permitSingle, signature);
         _tstoreTransferFromInfo(tokenIn, amountIn, true);
 
         return _splitSwapChecked(
@@ -324,7 +329,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             receiver,
             swaps
         );
-        _updateNativeDeltaAccounting(amountIn);
+        _validateMsgValue(tokenIn, amountIn);
         _tstoreTransferFromInfo(tokenIn, amountIn, false);
 
         return _sequentialSwapChecked(
@@ -382,10 +387,8 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             receiver,
             swaps
         );
-        // For native ETH, assume funds already in our router. Else, handle approval.
-        if (tokenIn != ETH_ADDRESS) {
-            permit2.permit(msg.sender, permitSingle, signature);
-        }
+        _validateMsgValue(tokenIn, amountIn);
+        permit2.permit(msg.sender, permitSingle, signature);
 
         _tstoreTransferFromInfo(tokenIn, amountIn, true);
 
@@ -440,7 +443,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             receiver,
             swapData
         );
-        _updateNativeDeltaAccounting(amountIn);
+        _validateMsgValue(tokenIn, amountIn);
         _tstoreTransferFromInfo(tokenIn, amountIn, false);
 
         return _singleSwap(
@@ -498,10 +501,8 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             receiver,
             swapData
         );
-        // For native ETH, assume funds already in our router. Else, handle approval.
-        if (tokenIn != ETH_ADDRESS) {
-            permit2.permit(msg.sender, permitSingle, signature);
-        }
+        _validateMsgValue(tokenIn, amountIn);
+        permit2.permit(msg.sender, permitSingle, signature);
         _tstoreTransferFromInfo(tokenIn, amountIn, true);
 
         return _singleSwap(
@@ -749,30 +750,31 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             : feeInput.actualAmountOut;
 
         amountOutAfterFees = _settleOutput(
-            amountOutAfterFees, minAmountOut, feeInput.tokenOut, receiver
+            amountOutAfterFees,
+            minAmountOut,
+            feeInput.tokenOut,
+            receiver,
+            intercepting
         );
     }
 
     /**
-     * @dev Transfers output tokens to receiver, finalizes transient deltas,
-     *      and checks slippage.
+     * @dev Transfers intercepted output tokens to the receiver and checks
+     *      that the receiver got at least `minAmountOut`. `amountOut` is
+     *      always measured at the receiver: by the Dispatcher's balance
+     *      difference, or by `_transferOut` for intercepted output.
      */
     function _settleOutput(
         uint256 amountOut,
         uint256 minAmountOut,
         address tokenOut,
-        address receiver
+        address receiver,
+        bool intercepting
     ) internal returns (uint256) {
-        int256 outputDelta = _getDelta(tokenOut);
-        if (outputDelta > 0) {
-            // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-            _updateDeltaAccounting(tokenOut, -int256(amountOut));
-            // out tokens are still in the Router and need to be sent to the final receiver.
-            // the amountOut might actually be lower at this point (if fee/rebasing token)
+        if (intercepting) {
+            // the amountOut might be lower after the transfer (fee/rebasing token)
             amountOut = _transferOut(tokenOut, receiver, amountOut);
         }
-
-        _finalizeBalances();
 
         // Check final amount to account for fee tokens or rebasing tokens
         if (amountOut < minAmountOut) {
@@ -1066,16 +1068,6 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
 
         for (uint256 i = 0; i < fees.length; i++) {
             if (fees[i].feeAmount > 0) {
-                // We still need to update the delta accounting to ensure the funds are
-                // in the router after the final swap and have not bypassed the router
-                // due to incorrect or malicious encoding. Updating the delta
-                // accounting without funds will result in an additional negative
-                // delta, and cause the _finalizeBalances method to revert.
-                _updateDeltaAccounting(
-                    feeInput.tokenOut,
-                    // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                    -int256(fees[i].feeAmount)
-                );
                 _transferFee(
                     feeInput.tokenOut, fees[i].recipient, fees[i].feeAmount
                 );
@@ -1113,20 +1105,19 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     }
 
     /**
-     * @dev Updates delta accounting for native ETH received via msg.value
-     * @notice This should be called at each entry point to credit the delta when ETH is sent
+     * @dev Reverts unless `msg.value` equals `amountIn` for native ETH input,
+     *      and is zero for any other input. The Permit2 entry points are not
+     *      payable, so they reject native ETH input.
      */
-    function _updateNativeDeltaAccounting(uint256 amountIn) internal {
-        if (msg.value > 0) {
-            // prevent unpredictable scenarios where the amountIn does not match exactly
-            // what the caller sent
-            if (msg.value != amountIn) {
-                revert TychoRouter__MsgValueDoesNotMatchAmountIn(
-                    msg.value, amountIn
-                );
-            }
-            // forge-lint: disable-next-line(unsafe-typecast) msg.value is native currency the caller sent; no chain's native supply comes near 2^255.
-            _updateDeltaAccounting(ETH_ADDRESS, int256(msg.value));
+    function _validateMsgValue(address tokenIn, uint256 amountIn)
+        internal
+        view
+    {
+        uint256 expectedMsgValue = tokenIn == ETH_ADDRESS ? amountIn : 0;
+        if (msg.value != expectedMsgValue) {
+            revert TychoRouter__MsgValueDoesNotMatchAmountIn(
+                msg.value, expectedMsgValue
+            );
         }
     }
 

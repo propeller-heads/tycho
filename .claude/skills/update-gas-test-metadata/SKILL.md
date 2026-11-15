@@ -33,7 +33,7 @@ Read each of these files in parallel:
 - `crates/tycho-execution/contracts/test/TychoRouterSequentialSwap.t.sol`
 - `crates/tycho-execution/contracts/test/TychoRouterSplitSwap.t.sol`
 - `crates/tycho-execution/contracts/test/TychoRouterFees.t.sol`
-- `crates/tycho-execution/contracts/test/TychoRouterDeltaAccounting.t.sol`
+- `crates/tycho-execution/contracts/test/TychoRouterChecks.t.sol`
 - `crates/tycho-execution/contracts/test/TychoRouterProtocolIntegration.t.sol`
 
 For each `function test...` found, determine:

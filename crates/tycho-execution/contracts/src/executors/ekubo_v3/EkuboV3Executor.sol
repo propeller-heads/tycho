@@ -213,8 +213,8 @@ contract EkuboV3Executor is IExecutor, ICallback {
         receiver = CORE_ADDRESS;
 
         if (tokenIn == ETH_ADDRESS) {
-            // Native ETH: Dispatcher updates delta accounting; actual transfer
-            // happens inside _pay() via safeTransferETH.
+            // Native ETH: the router makes no transfer; _pay() sends the ETH
+            // with safeTransferETH.
             transferType = TransferManager.TransferType.TransferNativeInExecutor;
         } else {
             transferType = TransferManager.TransferType.Transfer;

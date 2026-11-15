@@ -529,13 +529,14 @@ ClientFee(uint32 clientFeeBps, address clientFeeReceiver, uint256 deadline,
 * An output below `minAmountOut` always reverts with `TychoRouter__NegativeSlippage`. No client
   contribution covers the shortfall.
 * The `receiver` can not be the router. The router reverts with `TychoRouter__InvalidReceiver`.
+* The only check on the result is that the receiver got at least `minAmountOut` of `tokenOut`. Tokens
+  that a route leaves in the router, including an unspent `msg.value`, are lost.
 
 #### Revert Reasons
 
-| Error                                                   | Cause                                    |
-|---------------------------------------------------------|------------------------------------------|
-| `TychoRouter__InvalidReceiver(receiver)`                | `receiver` is the TychoRouterV3 address  |
-| `DeltaAccounting__UnexpectedNonZeroCount(nonZeroCount)` | Replaces `Vault__UnexpectedNonZeroCount` |
+| Error                                    | Cause                                   |
+|------------------------------------------|-----------------------------------------|
+| `TychoRouter__InvalidReceiver(receiver)` | `receiver` is the TychoRouterV3 address |
 
-`Vault__UnexpectedInputDelta`, `Vault__InsufficientBalance` and `TychoRouter__NegativeOutputDelta` are
-removed.
+`Vault__UnexpectedNonZeroCount`, `Vault__UnexpectedInputDelta`, `Vault__InsufficientBalance` and
+`TychoRouter__NegativeOutputDelta` are removed.

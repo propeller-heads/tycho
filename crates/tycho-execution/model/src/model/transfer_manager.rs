@@ -6,7 +6,6 @@ use crate::{
     error::Error,
     log::{Event, Log},
     math::checked_subtract,
-    model::delta_accounting::DeltaAccounting,
     state::State,
 };
 
@@ -38,7 +37,6 @@ pub fn _tstore_transfer_from_info(
 )]
 pub fn _transfer(
     state: &mut State,
-    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     receiver: Address,
     transfer_type: TransferType,
@@ -49,33 +47,15 @@ pub fn _transfer(
     in_callback: bool,
 ) -> Result<i64, Error> {
     match transfer_type {
-        TransferType::None => Ok(amount),
-        TransferType::TransferNativeInExecutor => {
-            delta_accounting._update_delta_accounting(token_in, -amount);
-            log.append(Event::UpdateDeltaAccounting {
-                token: token_in,
-                delta_change: -amount,
-                nonzero_delta_count_after: delta_accounting._get_nonzero_delta_count(),
-                context_hint: "_transfer: TransferNativeInExecutor",
-            });
-            Ok(amount)
-        }
+        TransferType::None | TransferType::TransferNativeInExecutor => Ok(amount),
         TransferType::ProtocolWillDebit => {
-            if is_first_swap {
-                let amount = _transfer_from_user(state, token_in, Address::Router, amount)?;
-                _approve_if_needed(state, token_in, receiver, amount)?;
-                Ok(amount)
+            let amount = if is_first_swap {
+                _transfer_from_user(state, token_in, Address::Router, amount)?
             } else {
-                delta_accounting._update_delta_accounting(token_in, -amount);
-                log.append(Event::UpdateDeltaAccounting {
-                    token: token_in,
-                    delta_change: -amount,
-                    nonzero_delta_count_after: delta_accounting._get_nonzero_delta_count(),
-                    context_hint: "_transfer: ProtocolWillDebit && !is_first_swap",
-                });
-                _approve_if_needed(state, token_in, receiver, amount)?;
-                Ok(amount)
-            }
+                amount
+            };
+            _approve_if_needed(state, token_in, receiver, amount)?;
+            Ok(amount)
         }
         TransferType::Transfer => {
             let can_use_sequential_swap_optimization =
@@ -88,13 +68,6 @@ pub fn _transfer(
             if is_first_swap {
                 _transfer_from_user(state, token_in, receiver, amount)
             } else {
-                delta_accounting._update_delta_accounting(token_in, -amount);
-                log.append(Event::UpdateDeltaAccounting {
-                    token: token_in,
-                    delta_change: -amount,
-                    nonzero_delta_count_after: delta_accounting._get_nonzero_delta_count(),
-                    context_hint: "_transfer: Transfer && !is_first_swap",
-                });
                 let amount = _transfer_out(state, token_in, receiver, amount)?;
                 log.append(Event::TransferOut {
                     token: token_in,

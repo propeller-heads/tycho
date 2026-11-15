@@ -118,10 +118,6 @@ contract TychoRouterExposed is TychoRouterV3 {
         return _sequentialSwap(amountIn, swaps, receiver);
     }
 
-    function exposedDeltaAccounting(address token, uint256 amount) external {
-        _updateDeltaAccounting(token, int256(amount));
-    }
-
     function exposedGetFeeCalculator() external view returns (address) {
         return this.getFeeCalculator();
     }

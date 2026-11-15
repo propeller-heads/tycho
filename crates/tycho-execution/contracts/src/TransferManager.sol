@@ -10,7 +10,6 @@ import {
     IAllowanceTransfer
 } from "@permit2/src/interfaces/IAllowanceTransfer.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
-import {DeltaAccounting} from "./DeltaAccounting.sol";
 import {ETH_ADDRESS} from "../lib/NativeETH.sol";
 
 error TransferManager__NotAContract(address addr);
@@ -24,11 +23,11 @@ error TransferManager__UnknownTransferType();
 
 /**
  * @title TransferManager
- * @dev Orchestrates all token transfers during swap execution. Inherits from
- * DeltaAccounting and sits between TychoRouterV3 and Dispatcher in the inheritance chain.
+ * @dev Orchestrates all token transfers during swap execution. Sits between
+ * TychoRouterV3 and Dispatcher in the inheritance chain.
  *
  * Responsibilities:
- * - Routes each transfer through one of 6 scenarios based on: TransferType returned
+ * - Routes each transfer through one of 5 scenarios based on: TransferType returned
  *   by the executor, whether it is the first swap, whether it is a split swap,
  *   and whether the call is inside a callback.
  * - Caps `transferFrom` to the declared input amount (stored in transient storage at
@@ -43,7 +42,7 @@ error TransferManager__UnknownTransferType();
  * Permit2 flag and original sender. These are written once at
  * swap entry (`_tstoreTransferFromInfo`) and consumed throughout the swap.
  */
-contract TransferManager is DeltaAccounting {
+contract TransferManager {
     // One directive per slot type: Slither 0.11.6 can fail to analyse a
     // contract that uses `using TransientSlot for *`.
     using TransientSlot for TransientSlot.AddressSlot;
@@ -104,13 +103,12 @@ contract TransferManager is DeltaAccounting {
      * - isSplitSwap: Whether this is part of a split swap strategy
      * - inCallback: Whether being called from within a callback (e.g., UniswapV3)
      *
-     * Handles 6 transfer scenarios (in order of execution):
-     * 1. None - no transfer needed
-     * 2. Native ETH sent via executor - perform accounting but do no transfers
-     * 3. TransferFrom user wallet to router, then approve protocol to debit
-     * 4. Protocol debits from router (with approval if needed). No transferFrom needed
-     * 5. TransferFrom user wallet directly to protocol
-     * 6. Transfer from router balance to protocol (previous swap funds)
+     * Handles 5 transfer scenarios (in order of execution):
+     * 1. None, or native ETH sent by the executor - no transfer here
+     * 2. TransferFrom user wallet to router, then approve protocol to debit
+     * 3. Protocol debits from router (with approval if needed). No transferFrom needed
+     * 4. TransferFrom user wallet directly to protocol
+     * 5. Transfer from router balance to protocol (previous swap funds)
      */
     function _transfer(
         address receiver,
@@ -121,34 +119,24 @@ contract TransferManager is DeltaAccounting {
         bool isSplitSwap,
         bool inCallback
     ) internal returns (uint256) {
-        // Scenario 1: No transfer needed. Likely called from outside the callback,
-        // when funds are only transferred in callback for this protocol (e.g.
-        // UniswapV3).
-        if (transferType == TransferType.None) {
+        // Scenario 1: No transfer here. The protocol is paid inside a callback
+        // (e.g. UniswapV3), or the executor sends native ETH as msg.value
+        // when it calls the protocol (e.g. Fluid, Lido).
+        if (
+            transferType == TransferType.None
+                || transferType == TransferType.TransferNativeInExecutor
+        ) {
             return amount;
         }
 
-        // Scenario 2: Native ETH sent via executor - accounting only
-        if (transferType == TransferType.TransferNativeInExecutor) {
-            // Protocols like Fluid or Lido require us to send the ETH as
-            // msg.value when calling the swap function from inside the executor.
-            // forge-lint: disable-next-line(unsafe-typecast) amount is sent as native currency; no chain's native supply comes near 2^255.
-            _updateDeltaAccounting(tokenIn, -int256(amount));
-            return amount;
-        }
-
-        // Scenario 3 & 4: Protocol will debit tokens from router
+        // Scenario 2 & 3: Protocol will debit tokens from router
         if (transferType == TransferType.ProtocolWillDebit) {
+            // Scenario 2: the first swap pulls the user's funds into the router.
+            // Scenario 3: a later swap uses the funds the previous swap left.
             if (isFirstSwap) {
-                // Scenario 3: First swap with user funds - transfer to router, then approve
                 amount = _transferFromUser(tokenIn, address(this), amount);
-                _approveIfNeeded(tokenIn, receiver, amount);
-            } else {
-                // Scenario 4: Funds already in router (from previous swap)
-                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                _updateDeltaAccounting(tokenIn, -int256(amount));
-                _approveIfNeeded(tokenIn, receiver, amount);
             }
+            _approveIfNeeded(tokenIn, receiver, amount);
             return amount;
         }
 
@@ -166,13 +154,11 @@ contract TransferManager is DeltaAccounting {
             }
 
             if (isFirstSwap) {
-                // Scenario 5: First swap with user funds - transfer directly to pool
+                // Scenario 4: First swap with user funds - transfer directly to pool
                 amount = _transferFromUser(tokenIn, receiver, amount);
             } else {
-                // Scenario 6: Transfer from router balance to pool. The funds are
+                // Scenario 5: Transfer from router balance to pool. The funds are
                 // in the router from the previous swap.
-                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                _updateDeltaAccounting(tokenIn, -int256(amount));
                 amount = _transferOut(tokenIn, receiver, amount);
             }
             return amount;

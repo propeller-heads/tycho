@@ -1,42 +1,52 @@
 use serde::{Serialize, ser::SerializeMap};
 
-use crate::{Address, State, log::Log, model::DeltaAccounting, params::Params};
+use crate::{Address, State, log::Log, params::Params};
 
 /// Combines all elements of a successful [Result] of [simulate](crate::simulate::simulate):
-/// The input [Params] and the output [State], [DeltaAccounting] and [Log].
+/// The input [Params] and the output [State] and [Log].
 /// Serialized into the YAML that's written to stdout for every suspicious state.
 pub struct Outcome<T> {
     params: Params,
     state: State,
-    delta_accounting: DeltaAccounting,
     log: T,
 }
 
 impl<T: Log> Outcome<T> {
-    pub fn new(
-        params: Params,
-        mut state: State,
-        mut delta_accounting: DeltaAccounting,
-        log: T,
-    ) -> Self {
+    pub fn new(params: Params, mut state: State, log: T) -> Self {
         // in order to keep the serialized output readable and compact
         // remove zero valued entries in various maps
         state.drop_zero_entries();
-        delta_accounting.drop_zero_entries();
 
-        Self { params, state, delta_accounting, log }
+        Self { params, state, log }
     }
 
-    /// The [Outcome] is considered suspicious if:
-    /// 1. The caller ends up with more ETH or WETH on the addresses they control
-    ///    ([Address::is_sender_controlled]) than they had before the transaction (stealing assets).
-    /// 2. The router loses ETH or WETH it held before the transaction.
+    /// The [Outcome] is considered suspicious if the caller ends up with more ETH or WETH on the
+    /// addresses they control ([Address::is_sender_controlled]) than the router lost or approved to
+    /// them.
+    ///
+    /// Tokens held by the router are considered lost, so taking them is not suspicious. Any gain
+    /// beyond them came from someone else, for example the router fee receiver.
     pub fn is_suspicious(&self) -> bool {
         let msg_value: i64 = self
             .params
             .get("msg_value")
             .unwrap_or(0);
-        self.final_caller_eth_balance() > msg_value || self.final_router_eth_balance() < 0
+        let caller_gain = self.final_caller_eth_balance() - msg_value;
+        caller_gain > self.router_eth_given_up()
+    }
+
+    /// ETH and WETH the router lost or approved to addresses the caller controls.
+    fn router_eth_given_up(&self) -> i64 {
+        let mut total = -self.final_router_eth_balance();
+        for ((token, owner, spender), allowance) in self.state.allowances() {
+            if *owner == Address::Router &&
+                spender.is_sender_controlled() &&
+                *token == Address::WETH
+            {
+                total += allowance;
+            }
+        }
+        total.max(0)
     }
 
     /// On-chain ETH and WETH balance delta of [Address::Router].
@@ -100,7 +110,7 @@ impl<T: Log + Serialize> Serialize for Outcome<T> {
             s.serialize_entry("final_caller_eth_balance", &final_caller_eth_balance)?;
         }
         let final_router_eth_balance = self.final_router_eth_balance();
-        if final_router_eth_balance < 0 {
+        if final_router_eth_balance != 0 {
             s.serialize_entry("final_router_eth_balance", &final_router_eth_balance)?;
         }
 
@@ -114,27 +124,6 @@ impl<T: Log + Serialize> Serialize for Outcome<T> {
 
         if !self.state.allowances().is_empty() {
             s.serialize_entry("erc20_allowance", self.state.allowances())?;
-        }
-
-        if self
-            .delta_accounting
-            ._get_nonzero_delta_count() >
-            0
-        {
-            s.serialize_entry(
-                "nonzero_delta_count",
-                &self
-                    .delta_accounting
-                    ._get_nonzero_delta_count(),
-            )?;
-        }
-
-        if !self
-            .delta_accounting
-            .deltas()
-            .is_empty()
-        {
-            s.serialize_entry("delta", self.delta_accounting.deltas())?;
         }
 
         if !self.log.is_empty() {

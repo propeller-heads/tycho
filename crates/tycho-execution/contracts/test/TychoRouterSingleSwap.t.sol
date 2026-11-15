@@ -253,11 +253,8 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         // Without the fix:
         // 1. singleSwap(amountIn=0) with Slipstreams - fake pool
         // 2. Callback manipulates data to transfer USDC to the fake pool
-        // 3. Creates negative USDC delta (nonZeroDeltaCount=1)
         //
-        // Blocked by two independent checks:
-        //   a) amountIn == 0 reverts (TychoRouter__ZeroInput)
-        //   b) the negative USDC delta would otherwise revert in _finalizeBalances
+        // Blocked: amountIn == 0 reverts (TychoRouter__ZeroInput)
 
         uint256 stolenAmount = 1_000_000e6;
         deal(USDC_ADDR, tychoRouterAddr, stolenAmount);

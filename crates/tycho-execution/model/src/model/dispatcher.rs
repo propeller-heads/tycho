@@ -4,7 +4,6 @@ use crate::{
     log::{Event, Log},
     math::checked_subtract,
     model::{
-        delta_accounting::DeltaAccounting,
         executors::Executor,
         transfer_manager::{
             _balance_of, _revoke_unconsumed_approval, _transfer, _transfer_out, TransferType,
@@ -21,7 +20,6 @@ use crate::{
 pub fn _call_swap_on_executor(
     params: &Params,
     state: &mut State,
-    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     executor: Executor,
     amount: i64,
@@ -66,7 +64,6 @@ pub fn _call_swap_on_executor(
 
     let amount = _transfer(
         state,
-        delta_accounting,
         log,
         transfer_data.receiver,
         transfer_data.transfer_type,
@@ -77,7 +74,7 @@ pub fn _call_swap_on_executor(
         false,
     )?;
 
-    executor.swap(params, state, delta_accounting, log, amount, receiver, swap_index)?;
+    executor.swap(params, state, log, amount, receiver, swap_index)?;
 
     state.tdelete("currently_swapping_executor");
     state.tstore("is_first_swap", false);
@@ -118,16 +115,6 @@ pub fn _call_swap_on_executor(
         });
     }
 
-    if receiver == Address::Router {
-        delta_accounting._update_delta_accounting(transfer_data.token_out, amount_out);
-        log.append(Event::UpdateDeltaAccounting {
-            token: transfer_data.token_out,
-            delta_change: amount_out,
-            nonzero_delta_count_after: delta_accounting._get_nonzero_delta_count(),
-            context_hint: "_call_swap_on_executor: receiver == Address::Router",
-        });
-    }
-
     Ok(amount_out)
 }
 
@@ -135,7 +122,6 @@ pub fn _call_swap_on_executor(
 pub fn _call_handle_callback_on_executor(
     params: &Params,
     state: &mut State,
-    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     swap_index: u8,
 ) -> Result<(), Error> {
@@ -149,7 +135,6 @@ pub fn _call_handle_callback_on_executor(
 
     _transfer(
         state,
-        delta_accounting,
         log,
         callback_transfer_data.receiver,
         callback_transfer_data.transfer_type,

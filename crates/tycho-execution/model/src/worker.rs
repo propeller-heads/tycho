@@ -171,7 +171,7 @@ pub fn worker_thread(
         }
 
         match result {
-            Ok((state, delta_accounting, log)) => {
+            Ok((state, log)) => {
                 counters.success.increment();
                 for (key, value) in params.0.iter() {
                     telemetry.param_success(key, value);
@@ -179,7 +179,7 @@ pub fn worker_thread(
                 let executors = params.executors();
                 telemetry.executors_success(executors.clone());
 
-                let outcome = Outcome::new(params, state, delta_accounting, log);
+                let outcome = Outcome::new(params, state, log);
 
                 if outcome.is_suspicious() {
                     let mut stdout = std::io::stdout().lock();

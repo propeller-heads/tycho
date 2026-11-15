@@ -189,12 +189,6 @@ contract Dispatcher is TransferManager {
         if (outputToRouter && receiver != address(this)) {
             amountOut = _transferOut(tokenOut, receiver, amountOut);
         }
-
-        // Delta accounting if tokens stay at router
-        if (receiver == address(this)) {
-            // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-            _updateDeltaAccounting(tokenOut, int256(amountOut));
-        }
     }
 
     function _callHandleCallbackOnExecutor(bytes calldata data, address caller)

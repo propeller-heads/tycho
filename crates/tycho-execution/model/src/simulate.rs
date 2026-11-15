@@ -3,7 +3,7 @@ use serde::Serialize;
 use crate::{
     Address, Error, State,
     log::{Log, VecLog},
-    model::{DeltaAccounting, tycho_router::*},
+    model::tycho_router::*,
     params::Params,
 };
 
@@ -22,11 +22,8 @@ use crate::{
 /// If you're wondering about the `+ use<>` in the return type:
 /// Without it compilation fails and you can find more information here:
 /// <https://doc.rust-lang.org/std/keyword.use.html#precise-capturing>
-pub fn simulate(
-    params: &Params,
-) -> Result<(State, DeltaAccounting, impl Log + use<> + Serialize), Error> {
+pub fn simulate(params: &Params) -> Result<(State, impl Log + use<> + Serialize), Error> {
     let mut state = State::default();
-    let mut delta_accounting = DeltaAccounting::default();
     let mut log = VecLog::default();
 
     // assumption: all swap methods revert if `amount_in = 0`.
@@ -80,7 +77,6 @@ pub fn simulate(
             single_swap(
                 params,
                 &mut state,
-                &mut delta_accounting,
                 &mut log,
                 amount_in,
                 token_in,
@@ -94,7 +90,6 @@ pub fn simulate(
             single_swap_permit2(
                 params,
                 &mut state,
-                &mut delta_accounting,
                 &mut log,
                 amount_in,
                 token_in,
@@ -108,7 +103,6 @@ pub fn simulate(
             sequential_swap(
                 params,
                 &mut state,
-                &mut delta_accounting,
                 &mut log,
                 amount_in,
                 token_in,
@@ -122,7 +116,6 @@ pub fn simulate(
             sequential_swap_permit2(
                 params,
                 &mut state,
-                &mut delta_accounting,
                 &mut log,
                 amount_in,
                 token_in,
@@ -136,7 +129,6 @@ pub fn simulate(
             split_swap(
                 params,
                 &mut state,
-                &mut delta_accounting,
                 &mut log,
                 amount_in,
                 token_in,
@@ -151,7 +143,6 @@ pub fn simulate(
             split_swap_permit2(
                 params,
                 &mut state,
-                &mut delta_accounting,
                 &mut log,
                 amount_in,
                 token_in,
@@ -165,5 +156,5 @@ pub fn simulate(
         function => return Err(Error::warning(format!("function {function} is not implemented"))),
     }
 
-    Ok((state, delta_accounting, log))
+    Ok((state, log))
 }
