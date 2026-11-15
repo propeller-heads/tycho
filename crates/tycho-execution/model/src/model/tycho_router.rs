@@ -31,7 +31,7 @@ pub fn split_swap(
     n_tokens: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    _validate_msg_value(params, state, amount_in)?;
+    _validate_msg_value(params, state, token_in, amount_in)?;
     _tstore_transfer_from_info(state, token_in, amount_in, false);
 
     _split_swap_checked(
@@ -61,9 +61,11 @@ pub fn split_swap_permit2(
     n_tokens: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    if token_in != Address::NativeETH {
-        state.permit2_permit(state.msg_sender());
+    // The Permit2 entry points are not payable, so `_validateMsgValue` rejects native ETH input.
+    if token_in == Address::NativeETH {
+        return Err(Error::revert("_validate_msg_value: native ETH input without msg_value"));
     }
+    state.permit2_permit(state.msg_sender());
     _tstore_transfer_from_info(state, token_in, amount_in, true);
 
     _split_swap_checked(
@@ -92,7 +94,7 @@ pub fn sequential_swap(
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    _validate_msg_value(params, state, amount_in)?;
+    _validate_msg_value(params, state, token_in, amount_in)?;
     _tstore_transfer_from_info(state, token_in, amount_in, false);
 
     _sequential_swap_checked(
@@ -120,9 +122,11 @@ pub fn sequential_swap_permit2(
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    if token_in != Address::NativeETH {
-        state.permit2_permit(state.msg_sender());
+    // The Permit2 entry points are not payable, so `_validateMsgValue` rejects native ETH input.
+    if token_in == Address::NativeETH {
+        return Err(Error::revert("_validate_msg_value: native ETH input without msg_value"));
     }
+    state.permit2_permit(state.msg_sender());
     _tstore_transfer_from_info(state, token_in, amount_in, true);
 
     _sequential_swap_checked(
@@ -150,7 +154,7 @@ pub fn single_swap(
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    _validate_msg_value(params, state, amount_in)?;
+    _validate_msg_value(params, state, token_in, amount_in)?;
     _tstore_transfer_from_info(state, token_in, amount_in, false);
 
     if crate::config::INTRODUCE_FAULT {
@@ -187,9 +191,11 @@ pub fn single_swap_permit2(
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    if token_in != Address::NativeETH {
-        state.permit2_permit(state.msg_sender());
+    // The Permit2 entry points are not payable, so `_validateMsgValue` rejects native ETH input.
+    if token_in == Address::NativeETH {
+        return Err(Error::revert("_validate_msg_value: native ETH input without msg_value"));
     }
+    state.permit2_permit(state.msg_sender());
     _tstore_transfer_from_info(state, token_in, amount_in, true);
 
     _single_swap(
@@ -396,7 +402,7 @@ fn _validate_addresses(
 }
 
 /// Mirrors `TychoRouter._finalizeSwap` in Solidity: shared post-swap
-/// finalization (fees, output settlement).
+/// finalization (fees, output transfer, output check).
 fn _finalize_swap(
     params: &Params,
     state: &mut State,
@@ -410,10 +416,9 @@ fn _finalize_swap(
     receiver: Address,
     client_fee_bps: i64,
 ) -> Result<(), Error> {
-    let amount_out = if !must_output_through_router {
-        actual_amount_out
-    } else {
-        _take_fees(
+    let mut amount_out = actual_amount_out;
+    if must_output_through_router {
+        let amount_after_fees = _take_fees(
             params,
             state,
             log,
@@ -422,46 +427,20 @@ fn _finalize_swap(
             actual_amount_out,
             expected_amount_out,
             client_fee_bps,
-        )?
-    };
-
-    _settle_output(
-        state,
-        log,
-        amount_out,
-        min_amount_out,
-        token_out,
-        receiver,
-        must_output_through_router,
-    )?;
-    Ok(())
-}
-
-/// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TychoRouter.sol#L773>
-fn _settle_output(
-    state: &mut State,
-    log: &mut impl Log,
-    mut amount_out: i64,
-    min_amount_out: i64,
-    token_out: Address,
-    receiver: Address,
-    intercepting: bool,
-) -> Result<i64, Error> {
-    if intercepting {
-        amount_out = _transfer_out(state, token_out, receiver, amount_out)?;
+        )?;
+        amount_out = _transfer_out(state, token_out, receiver, amount_after_fees)?;
         log.append(Event::TransferOut {
             token: token_out,
             receiver,
             amount: amount_out,
-            context_hint: "_settle_output: intercepting",
+            context_hint: "_finalize_swap: must_output_through_router",
         });
     }
 
     if amount_out < min_amount_out {
-        return Err(Error::revert("_settle_output: slippage exceeded"));
+        return Err(Error::revert("_finalize_swap: slippage exceeded"));
     }
-
-    Ok(amount_out)
+    Ok(())
 }
 
 /// Converts a non-negative model value into a vector index.
@@ -657,13 +636,18 @@ fn _transfer_fee(
 
 /// Mirrors `TychoRouter._validateMsgValue` in Solidity. The model also moves the ETH the caller
 /// sends with the call.
-fn _validate_msg_value(params: &Params, state: &mut State, amount_in: i64) -> Result<(), Error> {
-    // assumption: reverts unless `msg_value > 0 -> msg_value == amount_in`
+fn _validate_msg_value(
+    params: &Params,
+    state: &mut State,
+    token_in: Address,
+    amount_in: i64,
+) -> Result<(), Error> {
     let msg_value = params.request("msg_value", vec![0, amount_in])?;
+    let expected_msg_value = if token_in == Address::NativeETH { amount_in } else { 0 };
+    if msg_value != expected_msg_value {
+        return Err(Error::revert("_validate_msg_value: msg_value != expected_msg_value"));
+    }
     if msg_value > 0 {
-        if msg_value != amount_in {
-            return Err(Error::revert("_validate_msg_value: msg_value != amount_in"));
-        }
         state.eth_send_value(Address::Sender, Address::Router, msg_value)?;
     }
     Ok(())

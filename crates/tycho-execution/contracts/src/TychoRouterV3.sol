@@ -541,25 +541,19 @@ contract TychoRouterV3 is
         _validateAddresses(receiver, tokenIn, tokenOut);
 
         address client = clientFeeParams.clientFeeReceiver;
-        // Stack pressure in this function prevents keeping finalReceiver in scope
-        // outside the block, so we cache the interception decision as a bool instead.
         // On the next router deployment, pass tokenIn and tokenOut here.
         // Without them, any token pair fee makes every swap output pass
         // through the router, which costs gas on swaps that pay no fee.
         bool intercepting = IFeeCalculator(_feeCalculator)
             .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
 
-        uint256 actualAmountOut;
-        {
-            address finalReceiver = intercepting ? address(this) : receiver;
-            actualAmountOut = _splitSwap(
-                amountIn,
-                nTokens,
-                swaps,
-                finalReceiver,
-                tokenIn == tokenOut // isCyclical
-            );
-        }
+        uint256 actualAmountOut = _splitSwap(
+            amountIn,
+            nTokens,
+            swaps,
+            intercepting ? address(this) : receiver,
+            tokenIn == tokenOut // isCyclical
+        );
 
         amountOutAfterFees = _finalizeSwap(
             FeeInput({
@@ -732,56 +726,31 @@ contract TychoRouterV3 is
     }
 
     /**
-     * @dev Shared post-swap finalization for all swap strategies: takes fees
-     *      (when the output was intercepted by the router) and settles the
-     *      final amount to the receiver.
+     * @dev Shared post-swap finalization for all swap strategies. When the
+     *      router intercepted the output, it takes the fees and transfers the
+     *      rest to the receiver. Then it checks that the receiver got at
+     *      least `minAmountOut`. It does not check the router's own balances:
+     *      tokens that a route leaves in the router are lost to the user, and
+     *      any later swap can spend them.
      *      `feeInput` doubles as the carrier for the swap context (amounts,
      *      tokens, client), keeping caller stacks flat.
-     * @return amountOutAfterFees The settled output amount.
+     * @return amountOut The amount the receiver got.
      */
     function _finalizeSwap(
         FeeInput memory feeInput,
         bool intercepting,
         uint256 minAmountOut,
         address receiver
-    ) internal returns (uint256 amountOutAfterFees) {
-        amountOutAfterFees = intercepting
-            ? _takeFees(feeInput)
-            : feeInput.actualAmountOut;
-
-        amountOutAfterFees = _settleOutput(
-            amountOutAfterFees,
-            minAmountOut,
-            feeInput.tokenOut,
-            receiver,
-            intercepting
-        );
-    }
-
-    /**
-     * @dev Transfers intercepted output tokens to the receiver and checks
-     *      that the receiver got at least `minAmountOut`. `amountOut` is
-     *      always measured at the receiver: by the Dispatcher's balance
-     *      difference, or by `_transferOut` for intercepted output.
-     */
-    function _settleOutput(
-        uint256 amountOut,
-        uint256 minAmountOut,
-        address tokenOut,
-        address receiver,
-        bool intercepting
-    ) internal returns (uint256) {
+    ) internal returns (uint256 amountOut) {
+        amountOut = feeInput.actualAmountOut;
         if (intercepting) {
-            // the amountOut might be lower after the transfer (fee/rebasing token)
-            amountOut = _transferOut(tokenOut, receiver, amountOut);
+            amountOut =
+                _transferOut(feeInput.tokenOut, receiver, _takeFees(feeInput));
         }
 
-        // Check final amount to account for fee tokens or rebasing tokens
         if (amountOut < minAmountOut) {
             revert TychoRouter__NegativeSlippage(amountOut, minAmountOut);
         }
-
-        return amountOut;
     }
 
     /**
@@ -1051,7 +1020,6 @@ contract TychoRouterV3 is
     {
         FeeRecipient[] memory fees =
             IFeeCalculator(_feeCalculator).calculateFee(feeInput);
-        amountOutAfterFees = feeInput.actualAmountOut;
 
         uint256 totalFees = 0;
         for (uint256 i = 0; i < fees.length; i++) {
@@ -1062,6 +1030,7 @@ contract TychoRouterV3 is
                 totalFees, feeInput.actualAmountOut
             );
         }
+        amountOutAfterFees = feeInput.actualAmountOut - totalFees;
         if (fees.length > 0) {
             emit FeesTaken(feeInput.tokenOut, fees);
         }
@@ -1071,7 +1040,6 @@ contract TychoRouterV3 is
                 _transferFee(
                     feeInput.tokenOut, fees[i].recipient, fees[i].feeAmount
                 );
-                amountOutAfterFees -= fees[i].feeAmount;
             }
         }
     }

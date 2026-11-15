@@ -29,15 +29,16 @@ Entry (e.g. splitSwap)
       balance snapshot (balanceOf after)
       → amountOut = diff (single source of truth)
       → if outputToRouter: forward to receiver via _transferOut
-  → _takeFees (deduct client fee + router fees, transfer each fee to its receiver)
-  → _settleOutput (transfer final amount to receiver, check it against minAmountOut)
+  → _finalizeSwap:
+      → if intercepting: _takeFees (transfer each fee to its receiver), then _transferOut to receiver
+      → check the receiver's amount against minAmountOut
 ```
 
 ### Core Contracts (`contracts/src/`)
 
 | Contract                       | Purpose                                                                                                                                                                                                                                                        |
 |--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `TychoRouterV3.sol`              | Entry point. 3 swap strategies (single/sequential/split) x 2 funding modes (transferFrom/Permit2) = 6 public methods. `_takeFees()` transfers fees to their receivers, `_settleOutput()` transfers the final output to the receiver. The receiver can not be the router |
+| `TychoRouterV3.sol`              | Entry point. 3 swap strategies (single/sequential/split) x 2 funding modes (transferFrom/Permit2) = 6 public methods. `_finalizeSwap()` takes fees, transfers the final output to the receiver and checks it against `minAmountOut`. The receiver cannot be the router |
 | `Dispatcher.sol`               | Executor dispatch. 1-day timelock on new executors. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
 | `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 5 transfer scenarios depending on context                                                                                  |
 | `FeeCalculator.sol`            | Dual fee system: router fee on output + router fee on client fee. Per-client custom rates. Upgradeable without redeploying router                                                                                                                              |
@@ -58,7 +59,7 @@ client, tokenIn, tokenOut → (routerFeeOnOutputBps, routerFeeOnClientFeeBps)]).
 The router holds no user balances. Tokens left in the router after a swap (dust, mistaken transfers, an unspent
 `msg.value`) are lost: any later swap can spend them.
 
-**Output check** (`_settleOutput`): the only check on a swap's result. The output amount is a balance difference at
+**Output check** (`_finalizeSwap`): the only check on a swap's result. The output amount is a balance difference at
 the receiver, measured by the Dispatcher or, for output the router intercepts for fees, by `_transferOut`. The swap
 reverts with `TychoRouter__NegativeSlippage` when it is below `minAmountOut`.
 
@@ -88,7 +89,7 @@ Three fee layers, deducted from swap output:
 **Fee receiver**: `FeeCalculator(routerFeeSetter, routerFeeReceiver)` takes the receiver as a constructor argument
 and emits `RouterFeeReceiverUpdated(address(0), routerFeeReceiver)` at deployment; `setRouterFeeReceiver` changes it
 later. It is explicit rather than defaulted to `msg.sender` because deployment goes through the CREATE2 factory
-(`0x4e59b448…`), which can not move the fees it receives.
+(`0x4e59b448…`), which cannot move the fees it receives.
 
 **Per-client overrides**: Both router fees can be overridden per client address via `_customRouterFees`
 mapping (`CustomFees` struct, single storage slot). If set, the custom rate replaces the default for that client. Can be
@@ -122,7 +123,7 @@ that stops capture for every client: a global router positive slippage bps of ze
 bps of zero leaves the surplus in the swap output, fees compute on `actualAmountOut`, and a client with no fees skips
 the forced router hop.
 Per-client shares (`setClientPositiveSlippageShare`, `_clientPositiveSlippageShareBps` mapping, fee units) give the
-resolved client part of the captured surplus, credited with its client fee; the router keeps the rest, rounded in its
+resolved client part of the captured surplus, transferred with its client fee; the router keeps the rest, rounded in its
 favour. The default share of zero leaves the full surplus to the router.
 Per-client caps (`setPositiveSlippageCap`, `_positiveSlippageCaps` mapping of `{isSet, capBps}`, fee units of
 `actualAmountOut`) limit the captured surplus of the resolved client's swaps, after the router positive slippage bps,
@@ -132,9 +133,9 @@ to `actualAmountOut * capBps / MAX_BPS`. The surplus above the cap stays in the 
 **Deduction order**: client fee calculated first, then router's cut of client fee subtracted from it, then router fee on
 output. `amountOut = amountIn - clientPortion - totalRouterFee`.
 
-**Accounting**: FeeCalculator only computes amounts (called via staticcall). Actual distribution happens in
-TychoRouterV3's `_takeFees()`, which transfers each fee to its receiver. `_settleOutput()` then
-transfers the remaining output to the receiver.
+**Accounting**: FeeCalculator only computes amounts (called via staticcall). When the router intercepted the
+output, TychoRouterV3's `_finalizeSwap()` calls `_takeFees()`, which transfers each fee to its receiver, and then
+transfers the rest to the receiver. `_finalizeSwap()` then checks the receiver's amount against `minAmountOut`.
 
 ### Executors (`contracts/src/executors/`)
 
@@ -427,8 +428,8 @@ enum TransferType {
 on the current executor. Returns a hardcoded `TransferType`, receiver address, `tokenIn`, `tokenOut`,
 and `outputToRouter`. `_transfer()` handles 5 scenarios based on (TransferType, isFirstSwap, isSplitSwap, isCallback).
 
-**Output settlement** (in TychoRouterV3): After all swaps complete, `_takeFees()` deducts fees and transfers them to the
-fee receivers. Then `_settleOutput()` transfers tokens to the receiver and checks the amount against `minAmountOut`.
+**Output settlement** (in TychoRouterV3): After all swaps complete, `_finalizeSwap()` takes fees and transfers the rest
+to the receiver when the router intercepted the output, then checks the receiver's amount against `minAmountOut`.
 
 **Receiver resolution** (`_sequentialSwap`): For sequential routes (A -> Pool1 -> Pool2 -> D), the Dispatcher determines
 each swap's output receiver by peeking ahead and **staticcalling** `fundsExpectedAddress()` on the **next** executor.
