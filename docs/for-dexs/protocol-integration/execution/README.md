@@ -159,7 +159,7 @@ Each executor must return a hardcoded `TransferManager.TransferType` from `getTr
 Before each swap, the Dispatcher:
 
 1. Calls `getTransferData` on the executor to get the `TransferType`, `receiver`, token addresses, and whether the protocol sends out tokens back to the router automatically.
-2. Determines the transfer strategy based on the swap context (first swap vs. subsequent, split swap, vault-funded, etc.).
+2. Determines the transfer strategy based on the swap context (first swap vs. subsequent, split swap, inside a callback).
 3. Performs the input token transfer via the `TransferManager`.
 
 After each swap, the Dispatcher:
@@ -195,7 +195,7 @@ Balance checks before and after token transfers mean fee-on-transfer tokens and 
 
 ## Security Requirements
 
-TychoRouterV3 calls executors via `delegatecall`, so executor code runs within TychoRouterV3's context — it can freely transfer the router's assets and write to the router's storage, including users' vault balances. Follow this checklist when building or reviewing an executor.
+TychoRouterV3 calls executors via `delegatecall`, so executor code runs within TychoRouterV3's context — it can freely transfer the router's assets and write to the router's storage. Follow this checklist when building or reviewing an executor.
 
 {% hint style="danger" %}
 **Executors run with TychoRouterV3's full privileges.** A bug or malicious executor can steal all router assets.
