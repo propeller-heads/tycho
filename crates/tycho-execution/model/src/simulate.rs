@@ -3,7 +3,7 @@ use serde::Serialize;
 use crate::{
     Address, Error, State,
     log::{Log, VecLog},
-    model::{Vault, tycho_router::*},
+    model::{DeltaAccounting, tycho_router::*},
     params::Params,
 };
 
@@ -22,9 +22,11 @@ use crate::{
 /// If you're wondering about the `+ use<>` in the return type:
 /// Without it compilation fails and you can find more information here:
 /// <https://doc.rust-lang.org/std/keyword.use.html#precise-capturing>
-pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Serialize), Error> {
+pub fn simulate(
+    params: &Params,
+) -> Result<(State, DeltaAccounting, impl Log + use<> + Serialize), Error> {
     let mut state = State::default();
-    let mut vault = Vault::default();
+    let mut delta_accounting = DeltaAccounting::default();
     let mut log = VecLog::default();
 
     // assumption: all swap methods revert if `amount_in = 0`.
@@ -54,19 +56,12 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
     if crate::config::ENABLE_SINGLE_SWAP_FUNCTIONS && crate::config::ENABLE_BASE_SWAP_FUNCTIONS {
         functions.push("singleSwap");
     }
-    if crate::config::ENABLE_SINGLE_SWAP_FUNCTIONS && crate::config::ENABLE_VAULT_SWAP_FUNCTIONS {
-        functions.push("singleSwapUsingVault");
-    }
     if crate::config::ENABLE_SINGLE_SWAP_FUNCTIONS && crate::config::ENABLE_PERMIT2_SWAP_FUNCTIONS {
         functions.push("singleSwapPermit2");
     }
     if crate::config::ENABLE_SEQUENTIAL_SWAP_FUNCTIONS && crate::config::ENABLE_BASE_SWAP_FUNCTIONS
     {
         functions.push("sequentialSwap");
-    }
-    if crate::config::ENABLE_SEQUENTIAL_SWAP_FUNCTIONS && crate::config::ENABLE_VAULT_SWAP_FUNCTIONS
-    {
-        functions.push("sequentialSwapUsingVault");
     }
     if crate::config::ENABLE_SEQUENTIAL_SWAP_FUNCTIONS &&
         crate::config::ENABLE_PERMIT2_SWAP_FUNCTIONS
@@ -75,9 +70,6 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
     }
     if crate::config::ENABLE_SPLIT_SWAP_FUNCTIONS && crate::config::ENABLE_BASE_SWAP_FUNCTIONS {
         functions.push("splitSwap");
-    }
-    if crate::config::ENABLE_SPLIT_SWAP_FUNCTIONS && crate::config::ENABLE_VAULT_SWAP_FUNCTIONS {
-        functions.push("splitSwapUsingVault");
     }
     if crate::config::ENABLE_SPLIT_SWAP_FUNCTIONS && crate::config::ENABLE_PERMIT2_SWAP_FUNCTIONS {
         functions.push("splitSwapPermit2");
@@ -88,21 +80,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
             single_swap(
                 params,
                 &mut state,
-                &mut vault,
-                &mut log,
-                amount_in,
-                token_in,
-                token_out,
-                expected_amount_out,
-                min_amount_out,
-                receiver,
-            )?;
-        }
-        "singleSwapUsingVault" => {
-            single_swap_using_vault(
-                params,
-                &mut state,
-                &mut vault,
+                &mut delta_accounting,
                 &mut log,
                 amount_in,
                 token_in,
@@ -116,7 +94,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
             single_swap_permit2(
                 params,
                 &mut state,
-                &mut vault,
+                &mut delta_accounting,
                 &mut log,
                 amount_in,
                 token_in,
@@ -130,21 +108,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
             sequential_swap(
                 params,
                 &mut state,
-                &mut vault,
-                &mut log,
-                amount_in,
-                token_in,
-                token_out,
-                expected_amount_out,
-                min_amount_out,
-                receiver,
-            )?;
-        }
-        "sequentialSwapUsingVault" => {
-            sequential_swap_using_vault(
-                params,
-                &mut state,
-                &mut vault,
+                &mut delta_accounting,
                 &mut log,
                 amount_in,
                 token_in,
@@ -158,7 +122,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
             sequential_swap_permit2(
                 params,
                 &mut state,
-                &mut vault,
+                &mut delta_accounting,
                 &mut log,
                 amount_in,
                 token_in,
@@ -172,22 +136,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
             split_swap(
                 params,
                 &mut state,
-                &mut vault,
-                &mut log,
-                amount_in,
-                token_in,
-                token_out,
-                expected_amount_out,
-                min_amount_out,
-                params.request("n_tokens", [1, 2])?,
-                receiver,
-            )?;
-        }
-        "splitSwapUsingVault" => {
-            split_swap_using_vault(
-                params,
-                &mut state,
-                &mut vault,
+                &mut delta_accounting,
                 &mut log,
                 amount_in,
                 token_in,
@@ -202,7 +151,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
             split_swap_permit2(
                 params,
                 &mut state,
-                &mut vault,
+                &mut delta_accounting,
                 &mut log,
                 amount_in,
                 token_in,
@@ -216,5 +165,5 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
         function => return Err(Error::warning(format!("function {function} is not implemented"))),
     }
 
-    Ok((state, vault, log))
+    Ok((state, delta_accounting, log))
 }

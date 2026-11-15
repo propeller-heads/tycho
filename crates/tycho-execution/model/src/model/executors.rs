@@ -21,7 +21,8 @@ use crate::{
     error::Error,
     log::Log,
     model::{
-        dispatcher::_call_handle_callback_on_executor, transfer_manager::TransferType, vault::Vault,
+        delta_accounting::DeltaAccounting, dispatcher::_call_handle_callback_on_executor,
+        transfer_manager::TransferType,
     },
     params::{ParamKey, Params},
     state::State,
@@ -374,7 +375,7 @@ impl Executor {
         &self,
         params: &Params,
         state: &mut State,
-        vault: &mut Vault,
+        delta_accounting: &mut DeltaAccounting,
         log: &mut impl Log,
         amount: i64,
         _receiver: Address,
@@ -473,7 +474,13 @@ impl Executor {
                 if !is_native_sell {
                     state.tstore("fluid_v1_current_dex", dex);
                     state.enter_callback(dex);
-                    _call_handle_callback_on_executor(params, state, vault, log, swap_index)?;
+                    _call_handle_callback_on_executor(
+                        params,
+                        state,
+                        delta_accounting,
+                        log,
+                        swap_index,
+                    )?;
                     state.leave_callback();
                 } else {
                     state.eth_send_value(Address::Router, dex, amount)?;
@@ -510,7 +517,13 @@ impl Executor {
                 )?;
                 if pool.is_sender_controlled() {
                     state.enter_callback(pool);
-                    _call_handle_callback_on_executor(params, state, vault, log, swap_index)?;
+                    _call_handle_callback_on_executor(
+                        params,
+                        state,
+                        delta_accounting,
+                        log,
+                        swap_index,
+                    )?;
                     state.leave_callback();
                     Ok(())
                 } else {
@@ -552,7 +565,13 @@ impl Executor {
                     // the actual swap logic doesn't matter
                     // TODO theoretically it doesn't have to be the target that does the callback
                     state.enter_callback(target);
-                    _call_handle_callback_on_executor(params, state, vault, log, swap_index)?;
+                    _call_handle_callback_on_executor(
+                        params,
+                        state,
+                        delta_accounting,
+                        log,
+                        swap_index,
+                    )?;
                     state.leave_callback();
                     Ok(())
                 } else {
@@ -677,7 +696,7 @@ impl Executor {
             Self::TychoSubsidizing => {
                 let inner = subsidizing_inner(params, swap_index)?;
                 state.tstore("currently_swapping_executor", inner);
-                inner.swap(params, state, vault, log, amount, _receiver, swap_index)?;
+                inner.swap(params, state, delta_accounting, log, amount, _receiver, swap_index)?;
                 state.tdelete("currently_swapping_executor");
                 Ok(())
             }

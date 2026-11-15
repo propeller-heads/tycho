@@ -1,55 +1,42 @@
 use serde::{Serialize, ser::SerializeMap};
 
-use crate::{Address, State, log::Log, model::Vault, params::Params};
+use crate::{Address, State, log::Log, model::DeltaAccounting, params::Params};
 
 /// Combines all elements of a successful [Result] of [simulate](crate::simulate::simulate):
-/// The input [Params] and the output [State], [Vault] and [Log].
+/// The input [Params] and the output [State], [DeltaAccounting] and [Log].
 /// Serialized into the YAML that's written to stdout for every suspicious state.
 pub struct Outcome<T> {
     params: Params,
     state: State,
-    vault: Vault,
+    delta_accounting: DeltaAccounting,
     log: T,
 }
 
 impl<T: Log> Outcome<T> {
-    pub fn new(params: Params, mut state: State, mut vault: Vault, log: T) -> Self {
+    pub fn new(
+        params: Params,
+        mut state: State,
+        mut delta_accounting: DeltaAccounting,
+        log: T,
+    ) -> Self {
         // in order to keep the serialized output readable and compact
         // remove zero valued entries in various maps
         state.drop_zero_entries();
-        vault.drop_zero_entries();
+        delta_accounting.drop_zero_entries();
 
-        Self { params, state, vault, log }
+        Self { params, state, delta_accounting, log }
     }
 
     /// The [Outcome] is considered suspicious if:
     /// 1. The caller ends up with more ETH or WETH on the addresses they control
     ///    ([Address::is_sender_controlled]) than they had before the transaction (stealing assets).
-    /// 2. The router's on-chain ETH/WETH loss exceeds the reduction in vault balances. A client
-    ///    contribution that debits a vault balance to cover the router's outflow is not suspicious
-    ///    — the client paid for it.
+    /// 2. The router loses ETH or WETH it held before the transaction.
     pub fn is_suspicious(&self) -> bool {
         let msg_value: i64 = self
             .params
             .get("msg_value")
             .unwrap_or(0);
-        self.final_caller_eth_balance() > msg_value ||
-            self.final_router_eth_balance() < self.sender_vault_eth_change()
-    }
-
-    /// ETH/WETH vault balance change for sender-controlled addresses.
-    /// These parties consented: msg.sender by calling the function,
-    /// ClientFeeReceiver by signing the client fee params.
-    fn sender_vault_eth_change(&self) -> i64 {
-        let mut total = 0;
-        for ((owner, token), balance) in self.vault.token_balances() {
-            if owner.is_sender_controlled() &&
-                (*token == Address::NativeETH || *token == Address::WETH)
-            {
-                total += balance;
-            }
-        }
-        total
+        self.final_caller_eth_balance() > msg_value || self.final_router_eth_balance() < 0
     }
 
     /// On-chain ETH and WETH balance delta of [Address::Router].
@@ -97,16 +84,6 @@ impl<T: Log> Outcome<T> {
                 }
             }
         }
-        for ((owner, token), balance) in self.vault.token_balances() {
-            if owner.is_sender_controlled() {
-                // TODO if you introduce other value holding erc20 tokens,
-                // make sure to add code for them here and introduce
-                // some fixed conversion rate to eth
-                if *token == Address::NativeETH || *token == Address::WETH {
-                    total_eth += balance;
-                }
-            }
-        }
         total_eth
     }
 }
@@ -139,16 +116,25 @@ impl<T: Log + Serialize> Serialize for Outcome<T> {
             s.serialize_entry("erc20_allowance", self.state.allowances())?;
         }
 
-        if !self.vault.token_balances().is_empty() {
-            s.serialize_entry("vault_balance", self.vault.token_balances())?;
+        if self
+            .delta_accounting
+            ._get_nonzero_delta_count() >
+            0
+        {
+            s.serialize_entry(
+                "nonzero_delta_count",
+                &self
+                    .delta_accounting
+                    ._get_nonzero_delta_count(),
+            )?;
         }
 
-        if self.vault._get_nonzero_delta_count() > 0 {
-            s.serialize_entry("nonzero_delta_count", &self.vault._get_nonzero_delta_count())?;
-        }
-
-        if !self.vault.deltas().is_empty() {
-            s.serialize_entry("vault_delta", self.vault.deltas())?;
+        if !self
+            .delta_accounting
+            .deltas()
+            .is_empty()
+        {
+            s.serialize_entry("delta", self.delta_accounting.deltas())?;
         }
 
         if !self.log.is_empty() {

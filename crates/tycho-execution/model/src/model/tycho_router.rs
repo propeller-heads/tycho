@@ -9,11 +9,11 @@ use crate::{
     log::{Event, Log},
     math::checked_subtract,
     model::{
+        delta_accounting::DeltaAccounting,
         dispatcher::_call_swap_on_executor,
         executors::Executor,
         fee_calculator::{calculate_fee, must_output_through_router},
         transfer_manager::{_transfer_out, _tstore_transfer_from_info},
-        vault::Vault,
     },
     params::{ParamKey, Params},
     state::State,
@@ -23,7 +23,7 @@ use crate::{
 pub fn split_swap(
     params: &Params,
     state: &mut State,
-    vault: &mut Vault,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     amount_in: i64,
     token_in: Address,
@@ -33,44 +33,13 @@ pub fn split_swap(
     n_tokens: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    _update_native_delta_accounting(params, state, vault, log, amount_in)?;
-    _tstore_transfer_from_info(state, token_in, amount_in, false, false);
+    _update_native_delta_accounting(params, state, delta_accounting, log, amount_in)?;
+    _tstore_transfer_from_info(state, token_in, amount_in, false);
 
     _split_swap_checked(
         params,
         state,
-        vault,
-        log,
-        amount_in,
-        token_in,
-        token_out,
-        expected_amount_out,
-        min_amount_out,
-        n_tokens,
-        receiver,
-    )
-}
-
-/// <https://github.com/propeller-heads/tycho-execution/blob/9b0512c9580617224c7a0d7de781674a2cdc6b62/foundry/src/TychoRouter.sol#L227>
-pub fn split_swap_using_vault(
-    params: &Params,
-    state: &mut State,
-    vault: &mut Vault,
-    log: &mut impl Log,
-    amount_in: i64,
-    token_in: Address,
-    token_out: Address,
-    expected_amount_out: i64,
-    min_amount_out: i64,
-    n_tokens: i64,
-    receiver: Address,
-) -> Result<(), Error> {
-    _tstore_transfer_from_info(state, token_in, amount_in, false, true);
-
-    _split_swap_checked(
-        params,
-        state,
-        vault,
+        delta_accounting,
         log,
         amount_in,
         token_in,
@@ -86,7 +55,7 @@ pub fn split_swap_using_vault(
 pub fn split_swap_permit2(
     params: &Params,
     state: &mut State,
-    vault: &mut Vault,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     amount_in: i64,
     token_in: Address,
@@ -99,12 +68,12 @@ pub fn split_swap_permit2(
     if token_in != Address::NativeETH {
         state.permit2_permit(state.msg_sender());
     }
-    _tstore_transfer_from_info(state, token_in, amount_in, true, false);
+    _tstore_transfer_from_info(state, token_in, amount_in, true);
 
     _split_swap_checked(
         params,
         state,
-        vault,
+        delta_accounting,
         log,
         amount_in,
         token_in,
@@ -120,7 +89,7 @@ pub fn split_swap_permit2(
 pub fn sequential_swap(
     params: &Params,
     state: &mut State,
-    vault: &mut Vault,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     amount_in: i64,
     token_in: Address,
@@ -129,42 +98,13 @@ pub fn sequential_swap(
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    _update_native_delta_accounting(params, state, vault, log, amount_in)?;
-    _tstore_transfer_from_info(state, token_in, amount_in, false, false);
+    _update_native_delta_accounting(params, state, delta_accounting, log, amount_in)?;
+    _tstore_transfer_from_info(state, token_in, amount_in, false);
 
     _sequential_swap_checked(
         params,
         state,
-        vault,
-        log,
-        amount_in,
-        token_in,
-        token_out,
-        expected_amount_out,
-        min_amount_out,
-        receiver,
-    )
-}
-
-/// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TychoRouter.sol#L366>
-pub fn sequential_swap_using_vault(
-    params: &Params,
-    state: &mut State,
-    vault: &mut Vault,
-    log: &mut impl Log,
-    amount_in: i64,
-    token_in: Address,
-    token_out: Address,
-    expected_amount_out: i64,
-    min_amount_out: i64,
-    receiver: Address,
-) -> Result<(), Error> {
-    _tstore_transfer_from_info(state, token_in, amount_in, false, true);
-
-    _sequential_swap_checked(
-        params,
-        state,
-        vault,
+        delta_accounting,
         log,
         amount_in,
         token_in,
@@ -179,7 +119,7 @@ pub fn sequential_swap_using_vault(
 pub fn sequential_swap_permit2(
     params: &Params,
     state: &mut State,
-    vault: &mut Vault,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     amount_in: i64,
     token_in: Address,
@@ -191,12 +131,12 @@ pub fn sequential_swap_permit2(
     if token_in != Address::NativeETH {
         state.permit2_permit(state.msg_sender());
     }
-    _tstore_transfer_from_info(state, token_in, amount_in, true, false);
+    _tstore_transfer_from_info(state, token_in, amount_in, true);
 
     _sequential_swap_checked(
         params,
         state,
-        vault,
+        delta_accounting,
         log,
         amount_in,
         token_in,
@@ -211,7 +151,7 @@ pub fn sequential_swap_permit2(
 pub fn single_swap(
     params: &Params,
     state: &mut State,
-    vault: &mut Vault,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     amount_in: i64,
     token_in: Address,
@@ -220,8 +160,8 @@ pub fn single_swap(
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    _update_native_delta_accounting(params, state, vault, log, amount_in)?;
-    _tstore_transfer_from_info(state, token_in, amount_in, false, false);
+    _update_native_delta_accounting(params, state, delta_accounting, log, amount_in)?;
+    _tstore_transfer_from_info(state, token_in, amount_in, false);
 
     if crate::config::INTRODUCE_FAULT {
         state.erc20_safe_transfer(Address::WETH, Address::Router, Address::Sender, 1000)?;
@@ -230,36 +170,7 @@ pub fn single_swap(
     _single_swap(
         params,
         state,
-        vault,
-        log,
-        amount_in,
-        token_in,
-        token_out,
-        expected_amount_out,
-        min_amount_out,
-        receiver,
-    )
-}
-
-/// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TychoRouter.sol#L499>
-pub fn single_swap_using_vault(
-    params: &Params,
-    state: &mut State,
-    vault: &mut Vault,
-    log: &mut impl Log,
-    amount_in: i64,
-    token_in: Address,
-    token_out: Address,
-    expected_amount_out: i64,
-    min_amount_out: i64,
-    receiver: Address,
-) -> Result<(), Error> {
-    _tstore_transfer_from_info(state, token_in, amount_in, false, true);
-
-    _single_swap(
-        params,
-        state,
-        vault,
+        delta_accounting,
         log,
         amount_in,
         token_in,
@@ -274,7 +185,7 @@ pub fn single_swap_using_vault(
 pub fn single_swap_permit2(
     params: &Params,
     state: &mut State,
-    vault: &mut Vault,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     amount_in: i64,
     token_in: Address,
@@ -286,12 +197,12 @@ pub fn single_swap_permit2(
     if token_in != Address::NativeETH {
         state.permit2_permit(state.msg_sender());
     }
-    _tstore_transfer_from_info(state, token_in, amount_in, true, false);
+    _tstore_transfer_from_info(state, token_in, amount_in, true);
 
     _single_swap(
         params,
         state,
-        vault,
+        delta_accounting,
         log,
         amount_in,
         token_in,
@@ -306,7 +217,7 @@ pub fn single_swap_permit2(
 fn _split_swap_checked(
     params: &Params,
     state: &mut State,
-    vault: &mut Vault,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     amount_in: i64,
     token_in: Address,
@@ -335,7 +246,7 @@ fn _split_swap_checked(
     let actual_amount_out = _split_swap(
         params,
         state,
-        vault,
+        delta_accounting,
         log,
         amount_in,
         n_tokens,
@@ -346,12 +257,11 @@ fn _split_swap_checked(
     _finalize_swap(
         params,
         state,
-        vault,
+        delta_accounting,
         log,
         must_output_through_router,
         actual_amount_out,
         expected_amount_out,
-        amount_in,
         min_amount_out,
         token_in,
         token_out,
@@ -364,7 +274,7 @@ fn _split_swap_checked(
 fn _single_swap(
     params: &Params,
     state: &mut State,
-    vault: &mut Vault,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     amount_in: i64,
     token_in: Address,
@@ -395,7 +305,7 @@ fn _single_swap(
     let actual_amount_out = _call_swap_on_executor(
         params,
         state,
-        vault,
+        delta_accounting,
         log,
         executor,
         amount_in,
@@ -408,12 +318,11 @@ fn _single_swap(
     _finalize_swap(
         params,
         state,
-        vault,
+        delta_accounting,
         log,
         must_output_through_router,
         actual_amount_out,
         expected_amount_out,
-        amount_in,
         min_amount_out,
         token_in,
         token_out,
@@ -426,7 +335,7 @@ fn _single_swap(
 fn _sequential_swap_checked(
     params: &Params,
     state: &mut State,
-    vault: &mut Vault,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     amount_in: i64,
     token_in: Address,
@@ -451,17 +360,17 @@ fn _sequential_swap_checked(
 
     let final_receiver = if must_output_through_router { Address::Router } else { receiver };
 
-    let actual_amount_out = _sequential_swap(params, state, vault, log, amount_in, final_receiver)?;
+    let actual_amount_out =
+        _sequential_swap(params, state, delta_accounting, log, amount_in, final_receiver)?;
 
     _finalize_swap(
         params,
         state,
-        vault,
+        delta_accounting,
         log,
         must_output_through_router,
         actual_amount_out,
         expected_amount_out,
-        amount_in,
         min_amount_out,
         token_in,
         token_out,
@@ -497,20 +406,22 @@ fn _validate_addresses(
     if receiver == Address::Zero || token_in == Address::Zero || token_out == Address::Zero {
         return Err(Error::revert("_validate_addresses: address(0)"));
     }
+    if receiver == Address::Router {
+        return Err(Error::revert("_validate_addresses: receiver == Address::Router"));
+    }
     Ok(())
 }
 
 /// Mirrors `TychoRouter._finalizeSwap` in Solidity: shared post-swap
-/// finalization (fees, client contribution top-up, output settlement).
+/// finalization (fees, output settlement).
 fn _finalize_swap(
     params: &Params,
     state: &mut State,
-    vault: &mut Vault,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     must_output_through_router: bool,
     actual_amount_out: i64,
     expected_amount_out: i64,
-    amount_in: i64,
     min_amount_out: i64,
     token_in: Address,
     token_out: Address,
@@ -522,7 +433,8 @@ fn _finalize_swap(
     } else {
         _take_fees(
             params,
-            vault,
+            state,
+            delta_accounting,
             log,
             token_in,
             token_out,
@@ -532,72 +444,39 @@ fn _finalize_swap(
         )?
     };
 
-    let amount_out = _maybe_add_client_contribution(
-        params,
-        state,
-        vault,
-        log,
-        amount_out,
-        min_amount_out,
-        token_out,
-        receiver,
-    )?;
-
-    _settle_output(
-        state,
-        vault,
-        log,
-        amount_out,
-        min_amount_out,
-        amount_in,
-        token_in,
-        token_out,
-        receiver,
-    )?;
+    _settle_output(state, delta_accounting, log, amount_out, min_amount_out, token_out, receiver)?;
     Ok(())
 }
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TychoRouter.sol#L773>
 fn _settle_output(
     state: &mut State,
-    vault: &mut Vault,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     mut amount_out: i64,
     min_amount_out: i64,
-    amount_in: i64,
-    token_in: Address,
     token_out: Address,
     receiver: Address,
 ) -> Result<i64, Error> {
-    let output_delta = vault._get_delta(token_out);
+    let output_delta = delta_accounting._get_delta(token_out);
     if output_delta > 0 {
-        vault._update_delta_accounting(token_out, -amount_out);
+        delta_accounting._update_delta_accounting(token_out, -amount_out);
         log.append(Event::UpdateDeltaAccounting {
             token: token_out,
             delta_change: -amount_out,
-            nonzero_delta_count_after: vault._get_nonzero_delta_count(),
+            nonzero_delta_count_after: delta_accounting._get_nonzero_delta_count(),
             context_hint: "_settle_output: output_delta > 0",
         });
-        if receiver == Address::Router {
-            vault._credit_vault(state.msg_sender(), token_out, amount_out)?;
-            log.append(Event::CreditVault {
-                owner: state.msg_sender(),
-                token: token_out,
-                amount: amount_out,
-                context_hint: "_settle_output: output_delta > 0 && receiver == Address::Router",
-            });
-        } else {
-            amount_out = _transfer_out(state, token_out, receiver, amount_out)?;
-            log.append(Event::TransferOut {
-                token: token_out,
-                receiver,
-                amount: amount_out,
-                context_hint: "_settle_output: output_delta > 0 && receiver != Address::Router",
-            });
-        }
+        amount_out = _transfer_out(state, token_out, receiver, amount_out)?;
+        log.append(Event::TransferOut {
+            token: token_out,
+            receiver,
+            amount: amount_out,
+            context_hint: "_settle_output: output_delta > 0",
+        });
     }
 
-    vault._finalize_balances(state, state.msg_sender(), token_in, amount_in)?;
+    delta_accounting._finalize_balances()?;
 
     if amount_out < min_amount_out {
         return Err(Error::revert("_settle_output: slippage exceeded"));
@@ -617,7 +496,7 @@ fn to_index(value: i64) -> Result<usize, Error> {
 fn _split_swap(
     params: &Params,
     state: &mut State,
-    vault: &mut Vault,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     amount_in: i64,
     n_tokens: i64,
@@ -664,7 +543,7 @@ fn _split_swap(
         let current_amount_out = _call_swap_on_executor(
             params,
             state,
-            vault,
+            delta_accounting,
             log,
             executor,
             current_amount_in,
@@ -694,7 +573,7 @@ fn _split_swap(
 fn _sequential_swap(
     params: &Params,
     state: &mut State,
-    vault: &mut Vault,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     amount_in: i64,
     final_receiver: Address,
@@ -722,7 +601,7 @@ fn _sequential_swap(
         calculated_amount = _call_swap_on_executor(
             params,
             state,
-            vault,
+            delta_accounting,
             log,
             executor,
             calculated_amount,
@@ -739,7 +618,8 @@ fn _sequential_swap(
 /// <https://github.com/propeller-heads/tycho-execution/blob/d27e2a6f4d9ea6f4cba53b2fc1f54cd6676b60d2/foundry/src/TychoRouter.sol#L1058>
 fn _take_fees(
     params: &Params,
-    vault: &mut Vault,
+    state: &mut State,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     token_in: Address,
     token: Address,
@@ -760,21 +640,15 @@ fn _take_fees(
     let mut total_fees = 0i64;
     for fee in &fees {
         if fee.fee_amount > 0 {
-            vault._update_delta_accounting(token, -fee.fee_amount);
+            delta_accounting._update_delta_accounting(token, -fee.fee_amount);
             log.append(Event::UpdateDeltaAccounting {
                 token,
                 delta_change: -fee.fee_amount,
-                nonzero_delta_count_after: vault._get_nonzero_delta_count(),
+                nonzero_delta_count_after: delta_accounting._get_nonzero_delta_count(),
                 context_hint: "_take_fees: fee_amount > 0",
             });
 
-            vault._credit_vault_for_fees(fee.recipient, token, fee.fee_amount)?;
-            log.append(Event::CreditVault {
-                token,
-                owner: fee.recipient,
-                amount: fee.fee_amount,
-                context_hint: "_take_fees: fee_amount > 0",
-            });
+            _transfer_fee(state, log, token, fee.recipient, fee.fee_amount)?;
 
             total_fees += fee.fee_amount;
         }
@@ -783,11 +657,43 @@ fn _take_fees(
     checked_subtract(actual_amount_out, total_fees)
 }
 
+/// Mirrors `TychoRouter._transferFee` in Solidity.
+fn _transfer_fee(
+    state: &mut State,
+    log: &mut impl Log,
+    token: Address,
+    recipient: Address,
+    amount: i64,
+) -> Result<(), Error> {
+    if recipient == Address::Zero {
+        return Err(Error::revert("_transfer_fee: recipient == address(0)"));
+    }
+    if token == Address::NativeETH {
+        state.eth_send_value(Address::Router, recipient, amount)?;
+        log.append(Event::EthSendValue {
+            sender: Address::Router,
+            receiver: recipient,
+            amount,
+            context_hint: "_transfer_fee: token == ETH",
+        });
+    } else {
+        state.erc20_safe_transfer(token, Address::Router, recipient, amount)?;
+        log.append(Event::Erc20SafeTransfer {
+            token,
+            sender: Address::Router,
+            receiver: recipient,
+            amount,
+            context_hint: "_transfer_fee: token != ETH",
+        });
+    }
+    Ok(())
+}
+
 /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TychoRouter.sol#L1063>
 fn _update_native_delta_accounting(
     params: &Params,
     state: &mut State,
-    vault: &mut Vault,
+    delta_accounting: &mut DeltaAccounting,
     log: &mut impl Log,
     amount_in: i64,
 ) -> Result<(), Error> {
@@ -798,94 +704,13 @@ fn _update_native_delta_accounting(
             return Err(Error::revert("update_native_delta_accounting: msg_value != amount_in"));
         }
         state.eth_send_value(Address::Sender, Address::Router, msg_value)?;
-        vault._update_delta_accounting(Address::NativeETH, msg_value);
+        delta_accounting._update_delta_accounting(Address::NativeETH, msg_value);
         log.append(Event::UpdateDeltaAccounting {
             token: Address::NativeETH,
             delta_change: msg_value,
-            nonzero_delta_count_after: vault._get_nonzero_delta_count(),
+            nonzero_delta_count_after: delta_accounting._get_nonzero_delta_count(),
             context_hint: "_update_native_delta_accounting: msg_value > 0",
         });
     }
     Ok(())
-}
-
-/// <https://github.com/propeller-heads/tycho-execution/blob/9b0512c9580617224c7a0d7de781674a2cdc6b62/foundry/src/TychoRouter.sol#L1093>
-fn _maybe_add_client_contribution(
-    params: &Params,
-    state: &mut State,
-    vault: &mut Vault,
-    log: &mut impl Log,
-    amount_out: i64,
-    min_amount_out: i64,
-    token_out: Address,
-    receiver: Address,
-) -> Result<i64, Error> {
-    if amount_out < min_amount_out {
-        let required_contribution = checked_subtract(min_amount_out, amount_out)?;
-        // assumption: reverts if `required_contribution > max_client_contribution`
-        let max_client_contribution = params.request(
-            "max_client_contribution",
-            [required_contribution, required_contribution + 1],
-        )?;
-        if required_contribution > max_client_contribution {
-            return Err(Error::revert(
-                "_maybe_add_client_contribution: required_contribution > max_client_contribution",
-            ));
-        }
-        vault._debit_vault(Address::ClientFeeReceiver, token_out, required_contribution)?;
-        log.append(Event::DebitVault {
-            token: token_out,
-            owner: Address::ClientFeeReceiver,
-            amount: required_contribution,
-            context_hint: "_maybe_add_client_contribution: amount_out < min_amount_out",
-        });
-        let output_delta = vault._get_delta(token_out);
-        if output_delta > 0 {
-            vault._update_delta_accounting(token_out, required_contribution);
-            log.append(Event::UpdateDeltaAccounting {
-                token: token_out,
-                delta_change: required_contribution,
-                nonzero_delta_count_after: vault._get_nonzero_delta_count(),
-                context_hint: "_maybe_add_client_contribution: amount_out < min_amount_out && output_delta > 0",
-            });
-        } else if output_delta == 0 {
-            if receiver == Address::Router {
-                vault._credit_vault(state.msg_sender(), token_out, required_contribution)?;
-                log.append(Event::CreditVault {
-                    token: token_out,
-                    owner: state.msg_sender(),
-                    amount: required_contribution,
-                    context_hint: "_maybe_add_client_contribution: amount_out < min_amount_out && output_delta == 0 && receiver == Address::Router",
-                });
-            } else if token_out == Address::NativeETH {
-                state.eth_send_value(Address::Router, receiver, required_contribution)?;
-                log.append(Event::EthSendValue {
-                    sender: Address::Router,
-                    receiver,
-                    amount: required_contribution,
-                    context_hint: "_maybe_add_client_contribution: amount_out < min_amount_out && output_delta == 0 && receiver == Address::Router && token_out == address(0)",
-                });
-            } else {
-                state.erc20_safe_transfer(
-                    token_out,
-                    Address::Router,
-                    receiver,
-                    required_contribution,
-                )?;
-                log.append(Event::Erc20SafeTransfer {
-                    token: token_out,
-                    sender: Address::Router,
-                    receiver,
-                    amount: required_contribution,
-                    context_hint: "_maybe_add_client_contribution: amount_out < min_amount_out && output_delta == 0 && receiver == Address::Router && token_out != address(0)",
-                });
-            }
-        } else {
-            return Err(Error::revert("_maybe_add_client_contribution: negative output delta"));
-        }
-
-        Ok(min_amount_out)
-    } else {
-        Ok(amount_out)
-    }
 }
