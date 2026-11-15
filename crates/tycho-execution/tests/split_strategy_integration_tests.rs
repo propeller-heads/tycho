@@ -103,7 +103,6 @@ fn test_evm_split_swap_strategy_encoder() {
         Some(get_signer()),
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -212,14 +211,13 @@ fn test_evm_split_input_cyclic_swap() {
         Some(get_signer()),
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
 
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
-        "9b676069", // selector (splitSwapPermit2)
+        "bd4b19cf", // selector (splitSwapPermit2)
         "0000000000000000000000000000000000000000000000000000000005f5e100", // amount in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
@@ -268,7 +266,7 @@ fn test_evm_split_input_cyclic_swap() {
     ]
     .join("");
     assert_eq!(hex_calldata[..456], expected_input);
-    assert_eq!(hex_calldata[1672..], expected_swaps);
+    assert_eq!(hex_calldata[1608..], expected_swaps);
     write_calldata_to_file("test_split_input_cyclic_swap", hex_calldata.as_str());
 }
 
@@ -366,14 +364,13 @@ fn test_evm_split_output_cyclic_swap() {
         Some(get_signer()),
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
 
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
-        "9b676069", // selector (splitSwapPermit2)
+        "bd4b19cf", // selector (splitSwapPermit2)
         "0000000000000000000000000000000000000000000000000000000005f5e100", // amount in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
@@ -423,7 +420,7 @@ fn test_evm_split_output_cyclic_swap() {
     .join("");
 
     assert_eq!(hex_calldata[..456], expected_input);
-    assert_eq!(hex_calldata[1672..], expected_swaps);
+    assert_eq!(hex_calldata[1608..], expected_swaps);
     write_calldata_to_file("test_split_output_cyclic_swap", hex_calldata.as_str());
 }
 
@@ -509,7 +506,6 @@ fn test_evm_split_swap_strategy_with_fees() {
         Some(get_signer()),
         1_000_000,
         &client_fee_receiver(),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -602,7 +598,6 @@ fn test_evm_split_swap_native_and_wrapped_branches() {
         Some(get_signer()),
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;

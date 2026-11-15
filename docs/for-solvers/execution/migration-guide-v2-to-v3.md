@@ -275,7 +275,7 @@ The TychoRouterV3 now includes an ERC6909 vault. Key changes:
 * Deposit tokens via `router.deposit(token, amount)` before swapping with vault funds.
 * Fees (both client and router fees) are credited to the receiver's vault balance rather than transferred immediately.
 
-For more see [Vault](vault.md).
+V3.2 removes the vault again — see [V3.1 to V3.2](#v3.1-to-v3.2).
 
 #### No More Wrap/Unwrap Flags
 
@@ -454,3 +454,88 @@ struct FeeInput {
 | `TychoRouter__FeesExceedOutput(totalFees, actualAmountOut)`          | Calculated fees exceed the swap output                    |
 
 `TychoRouter__UndefinedMinAmountOut` is removed — the first two errors replace it.
+
+## V3.1 to V3.2
+
+{% hint style="info" %}
+Router V3.1 stays available on the `tycho-execution` releases that precede this change. Pin your
+dependency to the last of those releases to keep using it. All later versions target V3.2.
+{% endhint %}
+
+V3.2 removes the vault. The router holds no user balances between transactions.
+
+### Encoding Changes
+
+#### UserTransferType
+
+`UserTransferType::UseVaultsFunds` is removed. Use `TransferFrom` or `TransferFromPermit2`.
+
+#### ClientFeeParams Struct
+
+`max_client_contribution` and `.with_max_client_contribution()` are removed. `into_abi_params` returns
+four values instead of five:
+
+```rust
+// V3.1
+let (bps, receiver, max_contribution, deadline, signature) = params.into_abi_params();
+
+// V3.2
+let (bps, receiver, deadline, signature) = params.into_abi_params();
+```
+
+### Execution Changes
+
+#### Router Function Signatures
+
+`singleSwapUsingVault`, `sequentialSwapUsingVault`, `splitSwapUsingVault`, `deposit`, `withdraw` and the
+ERC6909 methods are removed. `ClientFeeParams` loses `maxClientContribution`, so the selectors of the six
+remaining swap methods change:
+
+```solidity
+// V3.1
+struct ClientFeeParams {
+    uint32 clientFeeBps;
+    address clientFeeReceiver;
+    uint256 maxClientContribution;
+    uint256 deadline;
+    bytes clientSignature;
+}
+
+// V3.2
+struct ClientFeeParams {
+    uint32 clientFeeBps;
+    address clientFeeReceiver;
+    uint256 deadline;
+    bytes clientSignature;
+}
+```
+
+#### Client Fee Signature
+
+The `ClientFee` typehash loses `maxClientContribution`, so every V3.1 signature fails verification
+against V3.2:
+
+```solidity
+// V3.2
+ClientFee(uint32 clientFeeBps, address clientFeeReceiver, uint256 deadline,
+          uint256 amountIn, address tokenIn, address tokenOut,
+          uint256 expectedAmountOut, uint256 minAmountOut, address receiver, bytes swaps)
+```
+
+#### Fees and Output
+
+* The router transfers each fee to its receiver during the swap. A fee receiver that cannot accept the
+  token reverts the swap.
+* An output below `minAmountOut` always reverts with `TychoRouter__NegativeSlippage`. No client
+  contribution covers the shortfall.
+* The `receiver` can not be the router. The router reverts with `TychoRouter__InvalidReceiver`.
+
+#### Revert Reasons
+
+| Error                                                   | Cause                                    |
+|---------------------------------------------------------|------------------------------------------|
+| `TychoRouter__InvalidReceiver(receiver)`                | `receiver` is the TychoRouterV3 address  |
+| `DeltaAccounting__UnexpectedNonZeroCount(nonZeroCount)` | Replaces `Vault__UnexpectedNonZeroCount` |
+
+`Vault__UnexpectedInputDelta`, `Vault__InsufficientBalance` and `TychoRouter__NegativeOutputDelta` are
+removed.

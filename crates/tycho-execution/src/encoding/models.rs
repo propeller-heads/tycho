@@ -26,16 +26,11 @@ use crate::encoding::{errors::EncodingError, evm::subsidy::SUBSIDY_SIGNATURE_LEN
 /// - `TransferFrom`: Use standard ERC-20 approval and `transferFrom`.
 ///     - You must approve the Tycho Router contract to spend your tokens via standard `approve()`
 ///       calls.
-///
-/// - `UseVaultsFunds`: No transfer will be performed and the Vault's funds will be used
-///     - Assumes the tokens are already present in the Tycho Router.
-///     - The tokens must be deposited into the TychoRouterV3 before performing the swap
 #[derive(Clone, Debug, PartialEq, ValueEnum, Serialize, Deserialize, Default)]
 pub enum UserTransferType {
     TransferFromPermit2,
     #[default]
     TransferFrom,
-    UseVaultsFunds,
 }
 
 /// Client fee parameters passed to the router, matching the Solidity `ClientFeeParams` struct.
@@ -48,10 +43,6 @@ pub struct ClientFeeParams {
     client_fee_bps: u32,
     /// Address that identifies the client and receives any client fee.
     client_fee_receiver: Bytes,
-    /// Maximum amount the client will contribute from their vault if the output falls below the
-    /// router's `minAmountOut` argument.
-    #[serde(with = "biguint_string")]
-    max_client_contribution: BigUint,
     /// Deadline for the fee signature as a unix timestamp.
     #[serde(with = "biguint_string")]
     deadline: BigUint,
@@ -67,13 +58,7 @@ impl ClientFeeParams {
         deadline: BigUint,
         client_fee_bps: u32,
     ) -> Self {
-        Self {
-            client_fee_bps,
-            client_fee_receiver,
-            max_client_contribution: BigUint::ZERO,
-            deadline,
-            client_signature,
-        }
+        Self { client_fee_bps, client_fee_receiver, deadline, client_signature }
     }
 
     /// Creates params that identify the client for router fee discounts without charging a fee.
@@ -82,25 +67,14 @@ impl ClientFeeParams {
         client_signature: Bytes,
         deadline: BigUint,
     ) -> Self {
-        Self {
-            client_fee_bps: 0,
-            client_fee_receiver,
-            max_client_contribution: BigUint::ZERO,
-            deadline,
-            client_signature,
-        }
-    }
-
-    pub fn with_max_client_contribution(mut self, max_client_contribution: BigUint) -> Self {
-        self.max_client_contribution = max_client_contribution;
-        self
+        Self { client_fee_bps: 0, client_fee_receiver, deadline, client_signature }
     }
 }
 
 #[cfg(feature = "evm")]
 impl ClientFeeParams {
     /// Converts into the ABI-encodable tuple matching the Solidity `ClientFeeParams` struct.
-    pub fn into_abi_params(self) -> (u32, Address, U256, U256, Vec<u8>) {
+    pub fn into_abi_params(self) -> (u32, Address, U256, Vec<u8>) {
         let receiver = if self.client_fee_receiver.is_empty() {
             Address::ZERO
         } else {
@@ -109,11 +83,6 @@ impl ClientFeeParams {
         (
             self.client_fee_bps,
             receiver,
-            U256::from_be_slice(
-                &self
-                    .max_client_contribution
-                    .to_bytes_be(),
-            ),
             U256::from_be_slice(&self.deadline.to_bytes_be()),
             self.client_signature.to_vec(),
         )
@@ -504,17 +473,14 @@ impl EncodedSolution {
             .next()
             .unwrap_or("");
         let head_params = match name {
-            "singleSwap" |
-            "singleSwapUsingVault" |
-            "sequentialSwap" |
-            "sequentialSwapUsingVault" => 8,
-            "splitSwap" | "splitSwapUsingVault" => 9,
+            "singleSwap" | "sequentialSwap" => 8,
+            "splitSwap" => 9,
             "singleSwapPermit2" | "sequentialSwapPermit2" => 15,
             "splitSwapPermit2" => 16,
             _ => 0,
         };
         // selector (4) + ABI head + offset to signature data within ClientFeeParams tuple
-        4 + head_params * 32 + 192
+        4 + head_params * 32 + 160
     }
 }
 

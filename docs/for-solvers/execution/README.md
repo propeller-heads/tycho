@@ -15,11 +15,10 @@ The source code for **Tycho Execution** lives at <a href="https://github.com/pro
 
 ## Token transfers
 
-You can transfer tokens in one of three ways with Tycho Execution:
+You can transfer tokens in one of two ways with Tycho Execution:
 
 * Permit2
 * Standard ERC20 Approvals
-* Using Vault funds
 
 See how to change between these options when encoding [here](encoding/#models).
 
@@ -34,16 +33,6 @@ For more details on Permit2 and how to use it, see the <a href="https://docs.uni
 ### **Standard ERC20 Approvals**
 
 Tycho also supports traditional ERC20 approvals. In this model, you explicitly call `approve` on the token contract to grant the router permission to transfer tokens on your behalf. This is widely supported and may be preferred in environments where Permit2 is not yet available.
-
-### Using the Vault
-
-The TychoRouterV3 includes a built-in vault (<a href="https://eips.ethereum.org/EIPS/eip-6909" target="_blank" rel="noopener noreferrer">ERC6909</a>) that lets you deposit, hold, and withdraw tokens directly in the router contract. The vault tracks per-user balances, so your tokens are only accessible by you.
-
-The router draws from your deposited balance instead of performing a `transferFrom` on your wallet. This saves gas (no approval or external transfer needed) and lets you use fees, proceeds from previous trades, or pre-positioned liquidity directly.
-
-Fees earned through the fee-taking system are automatically credited to the fee receiver's vault balance, making them immediately available for future swaps or withdrawals.
-
-More on the Vault [here](vault.md).
 
 ## Security and Audits
 

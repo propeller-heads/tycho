@@ -46,7 +46,7 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 | Crate | Description |
 |---|---|
 | `tycho-simulation` | DEX swap simulation library: protocol-specific state machines (`ProtocolSim`) for 20+ DEXs; all protocol implementations live under `evm/protocol/`, `rfq` for request-for-quote protocols, `price_level_stream` for the Titan pAMM price level stream |
-| `tycho-execution` | Swap encoding and execution: Solidity TychoRouterV3 contract + Rust encoding library; multi-hop swaps with fee-taking, vault-based accounting, delegatecall executor dispatch |
+| `tycho-execution` | Swap encoding and execution: Solidity TychoRouterV3 contract + Rust encoding library; multi-hop swaps with fee-taking, transient delta accounting, delegatecall executor dispatch |
 | `tycho-execution/model` (`tycho-router-model`) | Rust security model of the caller-controlled executors, used to reason about router invariants |
 
 ### Consumer SDK
@@ -128,7 +128,7 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
     - Selects the appropriate executor contract for each DEX hop
     - Batches consecutive hops on the same groupable protocol into `SwapGroup`s
 14. Consumer submits the encoded transaction to one of the router's 9 entry points —
-    `{single,sequential,split}Swap` × `{plain, Permit2, UsingVault}`
+    `{single,sequential,split}Swap` × `{plain, Permit2}`
 
 ## Key Architectural Patterns
 

@@ -14,7 +14,6 @@ import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {
     IAllowanceTransfer
 } from "@permit2/src/interfaces/IAllowanceTransfer.sol";
-import {ERC6909} from "@openzeppelin/contracts/token/ERC6909/ERC6909.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {
@@ -78,7 +77,7 @@ error TychoRouter__InvalidMinAmountOut(
     uint256 minAmountOut, uint256 expectedAmountOut
 );
 error TychoRouter__InvalidClientSignature();
-error TychoRouter__NegativeOutputDelta(int256 amount);
+error TychoRouter__InvalidReceiver(address receiver);
 error TychoRouter__ExpiredClientSignature(
     uint256 deadline, uint256 blockTimestamp
 );
@@ -87,7 +86,6 @@ error TychoRouter__ZeroInput();
 struct ClientFeeParams {
     uint32 clientFeeBps;
     address clientFeeReceiver;
-    uint256 maxClientContribution;
     uint256 deadline;
     // EIP-712 signature by clientFeeReceiver: a 65-byte ECDSA signature when
     // the receiver is an EOA, or an ERC-1271 signature of any length when it
@@ -120,8 +118,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     uint256 public constant DELAY_FEE_CALCULATOR_ACTIVATION = 1 days;
 
     bytes32 public constant CLIENT_FEE_TYPEHASH = keccak256(
-        "ClientFee(uint32 clientFeeBps,address clientFeeReceiver,"
-        "uint256 maxClientContribution,uint256 deadline,"
+        "ClientFee(uint32 clientFeeBps,address clientFeeReceiver,uint256 deadline,"
         "uint256 amountIn,address tokenIn,address tokenOut,"
         "uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)"
     );
@@ -165,20 +162,6 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     }
 
     /**
-     * @notice Override supportsInterface to resolve conflict between AccessControl and ERC6909
-     */
-    function supportsInterface(bytes4 interfaceId)
-        public
-        view
-        virtual
-        override(AccessControl, ERC6909)
-        returns (bool)
-    {
-        return AccessControl.supportsInterface(interfaceId)
-            || ERC6909.supportsInterface(interfaceId);
-    }
-
-    /**
      * @notice Executes a swap operation based on a predefined swap graph, supporting internal token amount splits.
      *         This function enables multi-step swaps and validates the output amount against a user-specified minimum.
      *         Takes funds from the user's wallet using transferFrom.
@@ -194,7 +177,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, deadline and signature.
      * @param swaps Encoded swap graph data containing details of each swap.
      *
      * @return The total amount of the output token received by the receiver.
@@ -221,64 +204,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             swaps
         );
         _updateNativeDeltaAccounting(amountIn);
-        _tstoreTransferFromInfo(tokenIn, amountIn, false, false);
-
-        return _splitSwapChecked(
-            amountIn,
-            tokenIn,
-            tokenOut,
-            expectedAmountOut,
-            minAmountOut,
-            nTokens,
-            receiver,
-            clientFeeParams,
-            swaps
-        );
-    }
-
-    /**
-     * @notice Executes a swap operation based on a predefined swap graph, supporting internal token amount splits.
-     *         This function enables multi-step swaps and validates the output amount against a user-specified minimum.
-     *         Takes funds from the user's vault balance.
-     *
-     * @dev
-     * - Swaps are executed sequentially using the `_swap` function.
-     * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`.
-     *
-     * @param amountIn The input token amount to be swapped.
-     * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
-     * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
-     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
-     * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
-     * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
-     * @param swaps Encoded swap graph data containing details of each swap.
-     *
-     * @return The total amount of the output token received by the receiver.
-     */
-    function splitSwapUsingVault(
-        uint256 amountIn,
-        address tokenIn,
-        address tokenOut,
-        uint256 expectedAmountOut,
-        uint256 minAmountOut,
-        uint256 nTokens,
-        address receiver,
-        ClientFeeParams calldata clientFeeParams,
-        bytes calldata swaps
-    ) public nonReentrant whenNotPaused returns (uint256) {
-        _verifyClientSignature(
-            clientFeeParams,
-            amountIn,
-            tokenIn,
-            tokenOut,
-            expectedAmountOut,
-            minAmountOut,
-            receiver,
-            swaps
-        );
-        _tstoreTransferFromInfo(tokenIn, amountIn, false, true);
+        _tstoreTransferFromInfo(tokenIn, amountIn, false);
 
         return _splitSwapChecked(
             amountIn,
@@ -309,7 +235,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
      * @param signature A valid signature authorizing the Permit2 approval.
      * @param swaps Encoded swap graph data containing details of each swap.
@@ -343,7 +269,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         if (tokenIn != ETH_ADDRESS) {
             permit2.permit(msg.sender, permitSingle, signature);
         }
-        _tstoreTransferFromInfo(tokenIn, amountIn, true, false);
+        _tstoreTransferFromInfo(tokenIn, amountIn, true);
 
         return _splitSwapChecked(
             amountIn,
@@ -373,7 +299,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, deadline and signature.
      * @param swaps Encoded swap graph data containing details of each swap.
      *
      * @return The total amount of the output token received by the receiver.
@@ -399,61 +325,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             swaps
         );
         _updateNativeDeltaAccounting(amountIn);
-        _tstoreTransferFromInfo(tokenIn, amountIn, false, false);
-
-        return _sequentialSwapChecked(
-            amountIn,
-            tokenIn,
-            tokenOut,
-            expectedAmountOut,
-            minAmountOut,
-            receiver,
-            clientFeeParams,
-            swaps
-        );
-    }
-
-    /**
-     * @notice Executes a swap operation based on a predefined swap graph with no split routes.
-     *         This function enables multi-step swaps and validates the output amount against a user-specified minimum.
-     *         Takes funds from the user's vault balance.
-     *
-     * @dev
-     * - Swaps are executed sequentially using the `_swap` function.
-     * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`.
-     *
-     * @param amountIn The input token amount to be swapped.
-     * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
-     * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
-     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
-     * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
-     * @param swaps Encoded swap graph data containing details of each swap.
-     *
-     * @return The total amount of the output token received by the receiver.
-     */
-    function sequentialSwapUsingVault(
-        uint256 amountIn,
-        address tokenIn,
-        address tokenOut,
-        uint256 expectedAmountOut,
-        uint256 minAmountOut,
-        address receiver,
-        ClientFeeParams calldata clientFeeParams,
-        bytes calldata swaps
-    ) public nonReentrant whenNotPaused returns (uint256) {
-        _verifyClientSignature(
-            clientFeeParams,
-            amountIn,
-            tokenIn,
-            tokenOut,
-            expectedAmountOut,
-            minAmountOut,
-            receiver,
-            swaps
-        );
-        _tstoreTransferFromInfo(tokenIn, amountIn, false, true);
+        _tstoreTransferFromInfo(tokenIn, amountIn, false);
 
         return _sequentialSwapChecked(
             amountIn,
@@ -481,7 +353,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
      * @param signature A valid signature authorizing the Permit2 approval.
      * @param swaps Encoded swap graph data containing details of each swap.
@@ -515,7 +387,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             permit2.permit(msg.sender, permitSingle, signature);
         }
 
-        _tstoreTransferFromInfo(tokenIn, amountIn, true, false);
+        _tstoreTransferFromInfo(tokenIn, amountIn, true);
 
         return _sequentialSwapChecked(
             amountIn,
@@ -543,7 +415,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, deadline and signature.
      * @param swapData Encoded swap details.
      *
      * @return The total amount of the output token received by the receiver.
@@ -569,60 +441,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             swapData
         );
         _updateNativeDeltaAccounting(amountIn);
-        _tstoreTransferFromInfo(tokenIn, amountIn, false, false);
-
-        return _singleSwap(
-            amountIn,
-            tokenIn,
-            tokenOut,
-            expectedAmountOut,
-            minAmountOut,
-            receiver,
-            clientFeeParams,
-            swapData
-        );
-    }
-
-    /**
-     * @notice Executes a single swap operation.
-     *         This function validates the output amount against a user-specified minimum.
-     *         Takes funds from the user's vault balance.
-     *
-     * @dev
-     * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`.
-     *
-     * @param amountIn The input token amount to be swapped.
-     * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
-     * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
-     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
-     * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
-     * @param swapData Encoded swap details.
-     *
-     * @return The total amount of the output token received by the receiver.
-     */
-    function singleSwapUsingVault(
-        uint256 amountIn,
-        address tokenIn,
-        address tokenOut,
-        uint256 expectedAmountOut,
-        uint256 minAmountOut,
-        address receiver,
-        ClientFeeParams calldata clientFeeParams,
-        bytes calldata swapData
-    ) public nonReentrant whenNotPaused returns (uint256) {
-        _verifyClientSignature(
-            clientFeeParams,
-            amountIn,
-            tokenIn,
-            tokenOut,
-            expectedAmountOut,
-            minAmountOut,
-            receiver,
-            swapData
-        );
-        _tstoreTransferFromInfo(tokenIn, amountIn, false, true);
+        _tstoreTransferFromInfo(tokenIn, amountIn, false);
 
         return _singleSwap(
             amountIn,
@@ -650,7 +469,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
      * @param signature A valid signature authorizing the Permit2 approval.
      * @param swapData Encoded swap details.
@@ -683,7 +502,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         if (tokenIn != ETH_ADDRESS) {
             permit2.permit(msg.sender, permitSingle, signature);
         }
-        _tstoreTransferFromInfo(tokenIn, amountIn, true, false);
+        _tstoreTransferFromInfo(tokenIn, amountIn, true);
 
         return _singleSwap(
             amountIn,
@@ -753,7 +572,6 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             }),
             intercepting,
             minAmountOut,
-            clientFeeParams.maxClientContribution,
             receiver
         );
     }
@@ -813,7 +631,6 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             }),
             intercepting,
             minAmountOut,
-            clientFeeParams.maxClientContribution,
             receiver
         );
     }
@@ -866,7 +683,6 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             }),
             intercepting,
             minAmountOut,
-            clientFeeParams.maxClientContribution,
             receiver
         );
     }
@@ -896,25 +712,28 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
 
     /**
      * @dev Validates the address inputs shared by all swap strategies.
+     *      The router holds no balances, so it cannot be the receiver.
      */
     function _validateAddresses(
         address receiver,
         address tokenIn,
         address tokenOut
-    ) internal pure {
+    ) internal view {
         if (
             receiver == address(0) || tokenIn == address(0)
                 || tokenOut == address(0)
         ) {
             revert TychoRouter__AddressZero();
         }
+        if (receiver == address(this)) {
+            revert TychoRouter__InvalidReceiver(receiver);
+        }
     }
 
     /**
      * @dev Shared post-swap finalization for all swap strategies: takes fees
-     *      (when the output was intercepted by the router), tops the output
-     *      up with a client contribution if it fell below `minAmountOut`,
-     *      and settles the final amount to the receiver.
+     *      (when the output was intercepted by the router) and settles the
+     *      final amount to the receiver.
      *      `feeInput` doubles as the carrier for the swap context (amounts,
      *      tokens, client), keeping caller stacks flat.
      * @return amountOutAfterFees The settled output amount.
@@ -923,41 +742,24 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         FeeInput memory feeInput,
         bool intercepting,
         uint256 minAmountOut,
-        uint256 maxClientContribution,
         address receiver
     ) internal returns (uint256 amountOutAfterFees) {
         amountOutAfterFees = intercepting
             ? _takeFees(feeInput)
             : feeInput.actualAmountOut;
 
-        amountOutAfterFees = _maybeAddClientContribution(
-            amountOutAfterFees,
-            minAmountOut,
-            maxClientContribution,
-            feeInput.tokenOut,
-            receiver,
-            feeInput.client
-        );
-
         amountOutAfterFees = _settleOutput(
-            amountOutAfterFees,
-            minAmountOut,
-            feeInput.amountIn,
-            feeInput.tokenIn,
-            feeInput.tokenOut,
-            receiver
+            amountOutAfterFees, minAmountOut, feeInput.tokenOut, receiver
         );
     }
 
     /**
-     * @dev Transfers output tokens to receiver (or credits vault),
-     *      finalizes transient deltas, and checks slippage.
+     * @dev Transfers output tokens to receiver, finalizes transient deltas,
+     *      and checks slippage.
      */
     function _settleOutput(
         uint256 amountOut,
         uint256 minAmountOut,
-        uint256 amountIn,
-        address tokenIn,
         address tokenOut,
         address receiver
     ) internal returns (uint256) {
@@ -965,17 +767,12 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         if (outputDelta > 0) {
             // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
             _updateDeltaAccounting(tokenOut, -int256(amountOut));
-            // out tokens are still in the Router and need to be sent to the final receiver
-            // or credited to the vault
-            if (receiver == address(this)) {
-                _creditVault(msg.sender, tokenOut, amountOut);
-            } else {
-                // the amountOut might actually be lower at this point (if fee/rebasing token)
-                amountOut = _transferOut(tokenOut, receiver, amountOut);
-            }
+            // out tokens are still in the Router and need to be sent to the final receiver.
+            // the amountOut might actually be lower at this point (if fee/rebasing token)
+            amountOut = _transferOut(tokenOut, receiver, amountOut);
         }
 
-        _finalizeBalances(msg.sender, tokenIn, amountIn);
+        _finalizeBalances();
 
         // Check final amount to account for fee tokens or rebasing tokens
         if (amountOut < minAmountOut) {
@@ -1263,6 +1060,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                 totalFees, feeInput.actualAmountOut
             );
         }
+        if (fees.length > 0) {
+            emit FeesTaken(feeInput.tokenOut, fees);
+        }
 
         for (uint256 i = 0; i < fees.length; i++) {
             if (fees[i].feeAmount > 0) {
@@ -1276,14 +1076,30 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                     // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
                     -int256(fees[i].feeAmount)
                 );
-                _creditVaultForFees(
-                    fees[i].recipient, feeInput.tokenOut, fees[i].feeAmount
+                _transferFee(
+                    feeInput.tokenOut, fees[i].recipient, fees[i].feeAmount
                 );
                 amountOutAfterFees -= fees[i].feeAmount;
             }
         }
-        if (fees.length > 0) {
-            emit FeesTaken(feeInput.tokenOut, fees);
+    }
+
+    /**
+     * @dev Sends a fee to its recipient. A recipient that cannot receive the
+     *      token reverts the swap.
+     */
+    function _transferFee(address token, address recipient, uint256 amount)
+        internal
+    {
+        if (recipient == address(0)) {
+            // forge-lint: disable-next-line(require-revert-in-loop) A fee sent to address(0) would be lost, so the swap fails.
+            revert TychoRouter__AddressZero();
+        }
+        if (token == ETH_ADDRESS) {
+            // forge-lint: disable-next-line(arbitrary-send-eth) Pays a fee to the recipient the fee calculator returned; a failing recipient fails the swap.
+            Address.sendValue(payable(recipient), amount);
+        } else {
+            IERC20(token).safeTransfer(recipient, amount);
         }
     }
 
@@ -1315,62 +1131,6 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     }
 
     /**
-     * @dev If the amountOut is below the minAmountOut, it tries to add a client contribution (if within limits).
-     * If it can't, it raises NegativeSlippage.
-     *   - If the out tokens are still in the Tycho Router, it adds the contribution to the amount out
-     *     (the transfer will be done later)
-     *   - If the out tokens are already in the receiver, it transfers the contribution separately
-     */
-    function _maybeAddClientContribution(
-        uint256 amountOut,
-        uint256 minAmountOut,
-        uint256 maxClientContribution,
-        address tokenOut,
-        address receiver,
-        address client
-    ) internal returns (uint256 amount) {
-        if (amountOut < minAmountOut) {
-            uint256 requiredContribution =
-                minAmountOut - amountOut;
-            if (requiredContribution > maxClientContribution) {
-                revert TychoRouter__NegativeSlippage(amountOut, minAmountOut);
-            }
-            // Debit the client's vault balance
-            _debitVault(client, tokenOut, requiredContribution);
-            int256 outputDelta = _getDelta(tokenOut);
-            if (outputDelta > 0) {
-                // Output tokens are still in the Router. This could be because no
-                // output transfer has been performed yet, or the user has specified the
-                // receiver to be the router in order to rebalance their vault.
-                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                _updateDeltaAccounting(tokenOut, int256(requiredContribution));
-            } else if (outputDelta == 0) {
-                if (receiver == address(this)) {
-                    _creditVault(msg.sender, tokenOut, requiredContribution);
-                } else if (tokenOut == ETH_ADDRESS) {
-                    // forge-lint: disable-next-line(arbitrary-send-eth) Pays the client's contribution to the swap's receiver.
-                    Address.sendValue(payable(receiver), requiredContribution);
-                } else {
-                    // Measure user balance before and after required contribution to
-                    // account for fee tokens
-                    uint256 balanceBefore = IERC20(tokenOut).balanceOf(receiver);
-                    IERC20(tokenOut)
-                        .safeTransfer(receiver, requiredContribution);
-                    uint256 actualContribution =
-                        IERC20(tokenOut).balanceOf(receiver) - balanceBefore;
-                    return amountOut + actualContribution;
-                }
-            } else {
-                // Negative output delta indicates unprofitable arbitrage.
-                revert TychoRouter__NegativeOutputDelta(outputDelta);
-            }
-            amount = minAmountOut;
-        } else {
-            amount = amountOut;
-        }
-    }
-
-    /**
      * @dev Verifies the client's EIP-712 signature over the fee parameters,
      *      the core swap parameters, and the encoded swap routing bytes.
      *      When clientFeeReceiver is address(0), no signature is required.
@@ -1398,7 +1158,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         bytes calldata swapData
     ) internal view {
         if (p.clientFeeReceiver == address(0)) {
-            if (p.maxClientContribution > 0 || p.clientFeeBps > 0) {
+            if (p.clientFeeBps > 0) {
                 revert TychoRouter__AddressZero();
             }
             return;
@@ -1415,7 +1175,6 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                     CLIENT_FEE_TYPEHASH,
                     p.clientFeeBps,
                     p.clientFeeReceiver,
-                    p.maxClientContribution,
                     p.deadline,
                     amountIn,
                     tokenIn,

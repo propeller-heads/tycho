@@ -22,7 +22,6 @@
   * [Executing](for-solvers/execution/executing.md)
   * [Contract Addresses](for-solvers/execution/contract-addresses.md)
   * [Execution Venues](for-solvers/execution/execution-venues.md)
-  * [Vault](for-solvers/execution/vault.md)
   * [Migration Guide](for-solvers/execution/migration-guide-v2-to-v3.md)
 * [Hosted Endpoints](for-solvers/hosted-endpoints.md)
 * [Self-Hosted EVM Chain](for-solvers/self-hosted-evm-chain.md)

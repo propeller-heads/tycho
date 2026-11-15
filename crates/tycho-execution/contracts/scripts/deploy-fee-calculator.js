@@ -10,10 +10,10 @@ async function main() {
     // ROUTER_FEE_SETTER_ROLE to manage fee configuration.
     const networkRoles = resolveRolesNetwork(network);
     const routerFeeSetter = networkRoles.ROUTER_FEE_SETTER[0];
-    // The routerFeeReceiver owns the vault balance every router fee is credited
-    // to. It must be an address that can call withdraw() on the router — the
-    // CREATE2 factory below deploys the contract but cannot withdraw, which is
-    // why the receiver is a constructor argument rather than the deployer.
+    // The router transfers every router fee to the routerFeeReceiver. The
+    // CREATE2 factory below deploys the contract but cannot move the fees it
+    // receives, which is why the receiver is a constructor argument rather
+    // than the deployer.
     const routerFeeReceiver = networkRoles.ROUTER_FEE_RECEIVER[0];
 
     console.log(`Deploying FeeCalculator to ${network} with:`);

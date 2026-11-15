@@ -32,6 +32,7 @@ pub(crate) struct TychoRouterEncoder {
     sequential_swap_strategy: SequentialSwapStrategyEncoder,
     split_swap_strategy: SplitSwapStrategyEncoder,
     swap_encoder_registry: SwapEncoderRegistry,
+    router_address: Bytes,
 }
 
 impl TychoRouterEncoder {
@@ -47,9 +48,10 @@ impl TychoRouterEncoder {
             ),
             split_swap_strategy: SplitSwapStrategyEncoder::new(
                 swap_encoder_registry.clone(),
-                router_address,
+                router_address.clone(),
             ),
             swap_encoder_registry,
+            router_address,
         }
     }
 
@@ -118,6 +120,7 @@ impl TychoEncoder for TychoRouterEncoder {
     ///
     /// A solution is considered valid if all the following conditions are met:
     /// * The solution has at least one swap.
+    /// * The receiver is not the router (the router rejects it).
     /// * The quoted `expected_amount_out` is non-zero (the router rejects a zero
     ///   `expectedAmountOut`).
     /// * The token cannot appear more than once in the solution unless it is the first and last
@@ -127,6 +130,13 @@ impl TychoEncoder for TychoRouterEncoder {
     fn validate_solution(&self, solution: &Solution) -> Result<(), EncodingError> {
         if solution.swaps().is_empty() {
             return Err(EncodingError::FatalError("No swaps found in solution".to_string()));
+        }
+        if solution.receiver() == &self.router_address {
+            return Err(EncodingError::InvalidInput(
+                "Solution receiver must not be the router: the router reverts with \
+                 TychoRouter__InvalidReceiver"
+                    .to_string(),
+            ));
         }
         if solution.expected_amount_out() == &BigUint::ZERO {
             return Err(EncodingError::FatalError(
@@ -581,6 +591,41 @@ mod tests {
                 EncodingError::FatalError(
                     "Solution expected_amount_out must be non-zero: the router rejects a zero \
                      expectedAmountOut"
+                        .to_string()
+                )
+            );
+        }
+
+        #[test]
+        fn test_validate_fails_receiver_is_router() {
+            let encoder = get_tycho_router_encoder();
+            let swap = Swap::new(
+                ProtocolComponent {
+                    protocol_system: "uniswap_v2".to_string(),
+                    ..Default::default()
+                },
+                default_token(weth()),
+                default_token(dai()),
+                BigUint::ZERO,
+            );
+            let solution = Solution::new(
+                Bytes::default(),
+                router_address(),
+                weth(),
+                dai(),
+                BigUint::from(1u64),
+                BigUint::from(1u64),
+                BigUint::from(1u64),
+                vec![swap],
+            );
+
+            let result = encoder.validate_solution(&solution);
+
+            assert_eq!(
+                result.err().unwrap(),
+                EncodingError::InvalidInput(
+                    "Solution receiver must not be the router: the router reverts with \
+                     TychoRouter__InvalidReceiver"
                         .to_string()
                 )
             );

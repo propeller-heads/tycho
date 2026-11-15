@@ -75,7 +75,7 @@ Checked by: ast-grep `sol-router-setup-non-router-test`; ast-grep `sol-router-te
 
 ### executor-transfer-type-per-hop
 An executor's transfer classification matches how the venue ingests tokenIn and is traced through Dispatcher/TransferManager for single, first and later hops (with and without the sequential-transfer optimization): `Transfer` with receiver = pool only for venues that need tokens at the pool before the call (IN_TRANSFER_REQUIRED_PROTOCOLS), `None` for callback venues (CALLBACK_CONSTRAINED_PROTOCOLS), `ProtocolWillDebit` with receiver = the contract that actually consumes the input when the venue pulls or wraps it; each gets a sequential-route test.
-Why: Misclassification breaks multi-hop routing in ways single-hop tests do not show: `fundsExpectedAddress == msg.sender` with `TransferType.Transfer` reverts with `Vault__UnexpectedNonZeroCount` or forwards a zero `amountIn` as a later hop.
+Why: Misclassification breaks multi-hop routing in ways single-hop tests do not show: `fundsExpectedAddress == msg.sender` with `TransferType.Transfer` reverts with `DeltaAccounting__UnexpectedNonZeroCount` or forwards a zero `amountIn` as a later hop.
 Spot: A new executor whose `fundsExpectedAddress` returns `msg.sender`/router or an intermediate (wrapper) contract combined with `TransferType.Transfer`; changes to IN_TRANSFER_REQUIRED_PROTOCOLS / CALLBACK_CONSTRAINED_PROTOCOLS or `fundsExpectedAddress` without a sequential test; executor tests covering only single-hop.
 Applies: solidity, solidity-test, rust, rust-test · look first at lines matching `transfer|fundsExpectedAddress|callback|PROTOCOLS|hop|sequential|receiver`
 Checked by: ast-grep `sol-transfer-to-router-receiver`; pr-script `executor-transfer-type-per-hop`

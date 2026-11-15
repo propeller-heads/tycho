@@ -20,7 +20,7 @@ The `Solution` struct defines your order and how it should be filled. This is th
 <thead><tr><th width="210" align="center">Attribute</th><th width="210" align="center">Type</th><th width="280">Description</th></tr></thead>
 <tbody>
 <tr><td align="center"><strong>sender</strong></td><td align="center"><code>Bytes</code></td><td>Address of the sender of the token in</td></tr>
-<tr><td align="center"><strong>receiver</strong></td><td align="center"><code>Bytes</code></td><td>Address that receives the output token. If set to the TychoRouterV3 address, the output is credited to the <strong>sender's</strong> <a href="../vault.md#crediting-output-to-the-vault">vault balance</a> instead of being transferred out.</td></tr>
+<tr><td align="center"><strong>receiver</strong></td><td align="center"><code>Bytes</code></td><td>Address that receives the output token. It can not be the TychoRouterV3 address.</td></tr>
 <tr><td align="center"><strong>token_in</strong></td><td align="center"><code>Bytes</code></td><td>The input token</td></tr>
 <tr><td align="center"><strong>amount_in</strong></td><td align="center"><code>BigUint</code></td><td>Amount of the input token</td></tr>
 <tr><td align="center"><strong>token_out</strong></td><td align="center"><code>Bytes</code></td><td>The output token</td></tr>
@@ -52,7 +52,7 @@ quote.
 {% tab title="UserTransferType" %}
 Specifies how user funds (the input token) enter the router:
 
-<table><thead><tr><th width="210.01953125" align="center">Variant</th><th>Description</th></tr></thead><tbody><tr><td align="center"><strong>TransferFromPermit2</strong></td><td>Use Permit2 for token transfer. You must approve the Permit2 contract and sign the permit externally.</td></tr><tr><td align="center"><strong>TransferFrom</strong> <em>(default)</em></td><td>Use standard ERC-20 approve + transferFrom. You must approve the TychoRouterV3 to spend your tokens.</td></tr><tr><td align="center"><strong>UseVaultsFunds</strong></td><td>No transfer is performed. Uses tokens already deposited in the TychoRouterV3 vault.</td></tr></tbody></table>
+<table><thead><tr><th width="210.01953125" align="center">Variant</th><th>Description</th></tr></thead><tbody><tr><td align="center"><strong>TransferFromPermit2</strong></td><td>Use Permit2 for token transfer. You must approve the Permit2 contract and sign the permit externally.</td></tr><tr><td align="center"><strong>TransferFrom</strong> <em>(default)</em></td><td>Use standard ERC-20 approve + transferFrom. You must approve the TychoRouterV3 to spend your tokens.</td></tr></tbody></table>
 {% endtab %}
 
 {% tab title="Swap" %}
@@ -160,7 +160,7 @@ Encoding produces an `EncodedSolution` with these attributes:
 <tbody>
 <tr><td align="center"><strong>swaps</strong></td><td align="center"><code>Vec&#x3C;u8></code></td><td>The encoded calldata for the swaps</td></tr>
 <tr><td align="center"><strong>interacting_with</strong></td><td align="center"><code>Bytes</code></td><td>The address of the contract to be called (e.g. the Tycho Router or an Executor)</td></tr>
-<tr><td align="center"><strong>function_signature</strong></td><td align="center"><code>String</code></td><td>Full signature of the router method to call, e.g. <code>splitSwapUsingVault(uint256,address,...)</code>. It reflects both the swap strategy and the funding mode</td></tr>
+<tr><td align="center"><strong>function_signature</strong></td><td align="center"><code>String</code></td><td>Full signature of the router method to call, e.g. <code>splitSwapPermit2(uint256,address,...)</code>. It reflects both the swap strategy and the funding mode</td></tr>
 <tr><td align="center"><strong>n_tokens</strong></td><td align="center"><code>usize</code></td><td>The number of tokens in the trade (relevant for split swaps only)</td></tr>
 <tr><td align="center"><strong>estimated_gas</strong></td><td align="center"><code>BigUint</code></td><td>Estimated gas usage for the encoded solution</td></tr>
 </tbody>
@@ -224,9 +224,9 @@ The full method call includes the following parameters, which act as **execution
 * `amountIn` and `tokenIn` — the amount and token you transfer into the TychoRouterV3. For native ETH, use `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE`. The router reverts if the token is `address(0)` or the amount is zero.
 * `expectedAmountOut` — your quoted output amount, taken from `solution.expected_amount_out()`. The router measures positive slippage against it and caps `minAmountOut` at it (see [Slippage bounds](#slippage-bounds)). It must be greater than zero.
 * `minAmountOut` and `tokenOut` — the smallest output you are willing to accept once fees are deducted, taken from `solution.min_amount_out()`. The same native ETH address rule applies. For maximum security, derive the underlying quote from a **third-party source**.
-* `receiver` — who receives the final output. Set this to the TychoRouterV3 address to credit output tokens to the vault.
+* `receiver` — who receives the final output. The router reverts with `TychoRouter__InvalidReceiver` if it is the TychoRouterV3 address.
 * `nTokens` — _(split swaps only)_ the number of distinct tokens in the split routing graph.
-* `clientFeeParams` — controls fee-taking and client contribution (see [Client Fee Signature](#client-fee-signature)). Pass all-zero values if you don't need fees.
+* `clientFeeParams` — controls fee-taking (see [Client Fee Signature](#client-fee-signature)). Pass all-zero values if you don't need fees.
 
 The `ClientFeeParams` struct is defined as:
 
@@ -234,8 +234,7 @@ The `ClientFeeParams` struct is defined as:
 <thead><tr><th width="210">Field</th><th width="490">Description</th></tr></thead>
 <tbody>
 <tr><td><code>clientFeeBps</code></td><td>Client fee as a <code>uint32</code> in fee units, where <code>100_000_000</code> = 100% (see <a href="#fee-units">Fee units</a>). Set to <code>0</code> to take no fee</td></tr>
-<tr><td><code>clientFeeReceiver</code></td><td>Address that identifies the client and receives the client fee (credited to their vault balance). The router resolves negotiated fee rates and positive-slippage exemptions against it, so a signed receiver is worth passing even with <code>clientFeeBps</code> set to <code>0</code></td></tr>
-<tr><td><code>maxClientContribution</code></td><td>Maximum amount the client is willing to pay out of pocket if slippage causes the output to fall below <code>minAmountOut</code>. If the shortfall exceeds this value, the transaction reverts. Set to <code>0</code> if the client should not subsidize</td></tr>
+<tr><td><code>clientFeeReceiver</code></td><td>Address that identifies the client and receives the client fee by transfer. The router resolves negotiated fee rates and positive-slippage exemptions against it, so a signed receiver is worth passing even with <code>clientFeeBps</code> set to <code>0</code></td></tr>
 <tr><td><code>deadline</code></td><td>Unix timestamp after which the signature is no longer valid</td></tr>
 <tr><td><code>clientSignature</code></td><td>EIP-712 signature over the fee fields <strong>and</strong> the full swap intent, signed by <code>clientFeeReceiver</code>: a 65-byte ECDSA signature when that address is an EOA, or an ERC-1271 signature of any length when it is a contract</td></tr>
 </tbody>
@@ -269,9 +268,7 @@ let params = ClientFeeParams::default().into_abi_params();
 let params = ClientFeeParams::new_without_fee(receiver, signature, deadline).into_abi_params();
 
 // With a 1 BPS fee (10_000 fee units)
-let params = ClientFeeParams::new(receiver, signature, deadline, 10_000u32)
-    .with_max_client_contribution(max_contribution)
-    .into_abi_params();
+let params = ClientFeeParams::new(receiver, signature, deadline, 10_000u32).into_abi_params();
 ```
 
 These **execution guardrails** protect against MEV exploits. Setting them correctly gives you full control over swap
@@ -315,13 +312,13 @@ Your swaps must connect `token_in` to `token_out`, so a missing wrap swap is rej
 
 #### Client Fee Signature <a href="#client-fee-signature" id="client-fee-signature"></a>
 
-Only required when charging a fee or allowing a client contribution. The `clientFeeReceiver` must sign
+Only required when charging a fee or identifying the client. The `clientFeeReceiver` must sign
 using EIP-712 — this prevents third parties from spoofing fee configurations. The signature covers the
 fee parameters **and** the full swap intent:
 
 ```solidity
-ClientFee(uint32 clientFeeBps, address clientFeeReceiver, uint256 maxClientContribution,
-          uint256 deadline, uint256 amountIn, address tokenIn, address tokenOut,
+ClientFee(uint32 clientFeeBps, address clientFeeReceiver, uint256 deadline,
+          uint256 amountIn, address tokenIn, address tokenOut,
           uint256 expectedAmountOut, uint256 minAmountOut, address receiver, bytes swaps)
 ```
 
@@ -357,11 +354,10 @@ the contract's validation state changes, for example after an owner rotation.
 {% endhint %}
 
 {% hint style="warning" %}
-**Replay attack risk.** The signature contains no nonce. Once a signed `ClientFeeParams` appears on-chain, anyone who sees it can reuse it for a swap with identical input parameters — same `amountIn`, tokens, `expectedAmountOut`, `minAmountOut`, `receiver`, and encoded route — until `deadline` expires. If `maxClientContribution > 0`, the swap's `receiver` can repeatedly replay the transaction — each replay debits the client's vault balance by up to `maxClientContribution` — until the balance is exhausted or the deadline passes.
+**Replay attack risk.** The signature contains no nonce. Once a signed `ClientFeeParams` appears on-chain, anyone who sees it can reuse it for a swap with identical input parameters — same `amountIn`, tokens, `expectedAmountOut`, `minAmountOut`, `receiver`, and encoded route — until `deadline` expires.
 
 To minimise exposure:
 * Set `deadline` as close to the current block timestamp as practical (e.g., a few minutes ahead).
-* Set `maxClientContribution` as low as the intended use case allows.
 {% endhint %}
 
 <details>
@@ -393,15 +389,13 @@ fn sign_client_fee(
     router_address: Address,
     client_fee_bps: u32,
     client_fee_receiver: Address,
-    max_client_contribution: U256,
     deadline: U256,
     intent: &SwapIntent,
     signer: &PrivateKeySigner,
 ) -> Vec<u8> {
     // Must match CLIENT_FEE_TYPEHASH in TychoRouterV3.sol
     let type_hash: B256 = keccak256(
-        b"ClientFee(uint32 clientFeeBps,address clientFeeReceiver,\
-          uint256 maxClientContribution,uint256 deadline,\
+        b"ClientFee(uint32 clientFeeBps,address clientFeeReceiver,uint256 deadline,\
           uint256 amountIn,address tokenIn,address tokenOut,\
           uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
     );
@@ -428,7 +422,6 @@ fn sign_client_fee(
             type_hash,
             U256::from(client_fee_bps),
             client_fee_receiver,
-            max_client_contribution,
             deadline,
             intent.amount_in,
             intent.token_in,

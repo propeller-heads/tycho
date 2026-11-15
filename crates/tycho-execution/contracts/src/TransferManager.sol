@@ -10,7 +10,7 @@ import {
     IAllowanceTransfer
 } from "@permit2/src/interfaces/IAllowanceTransfer.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
-import {Vault} from "./Vault.sol";
+import {DeltaAccounting} from "./DeltaAccounting.sol";
 import {ETH_ADDRESS} from "../lib/NativeETH.sol";
 
 error TransferManager__NotAContract(address addr);
@@ -24,13 +24,13 @@ error TransferManager__UnknownTransferType();
 
 /**
  * @title TransferManager
- * @dev Orchestrates all token transfers during swap execution. Inherits from Vault
- * (ERC6909) and sits between TychoRouterV3 and Dispatcher in the inheritance chain.
+ * @dev Orchestrates all token transfers during swap execution. Inherits from
+ * DeltaAccounting and sits between TychoRouterV3 and Dispatcher in the inheritance chain.
  *
  * Responsibilities:
  * - Routes each transfer through one of 6 scenarios based on: TransferType returned
  *   by the executor, whether it is the first swap, whether it is a split swap,
- *   whether the call is inside a callback, and whether vault funds are in use.
+ *   and whether the call is inside a callback.
  * - Caps `transferFrom` to the declared input amount (stored in transient storage at
  *   swap start). This prevents maliciously encoded split swaps from withdrawing more
  *   than the user authorised. Reverts if the cap is exceeded or a different token is
@@ -38,14 +38,12 @@ error TransferManager__UnknownTransferType();
  * - Supports both standard ERC20 `transferFrom` and Permit2's `transferFrom`.
  * - Handles native ETH accounting for executors that forward ETH as `msg.value`
  *   directly to the protocol (e.g. Fluid, Rocketpool, Lido).
- * - When vault-funded, skips `transferFrom` entirely and relies on vault delta
- *   accounting (`_updateDeltaAccounting`) to settle balances at the end of the swap.
  *
  * Per-swap state is kept in transient storage (EIP-1153): token in, allowed amount,
- * Permit2 flag, original sender, and vault-in-use flag. These are written once at
+ * Permit2 flag and original sender. These are written once at
  * swap entry (`_tstoreTransferFromInfo`) and consumed throughout the swap.
  */
-contract TransferManager is Vault {
+contract TransferManager is DeltaAccounting {
     // One directive per slot type: Slither 0.11.6 can fail to analyse a
     // contract that uses `using TransientSlot for *`.
     using TransientSlot for TransientSlot.AddressSlot;
@@ -88,15 +86,12 @@ contract TransferManager is Vault {
     function _tstoreTransferFromInfo(
         address tokenIn,
         uint256 amountIn,
-        bool isPermit2,
-        bool useVault
+        bool isPermit2
     ) internal {
-        uint256 amountAllowed = useVault ? 0 : amountIn;
         _TOKEN_IN_SLOT.tstore(tokenIn);
-        _AMOUNT_ALLOWED_SLOT.tstore(amountAllowed);
+        _AMOUNT_ALLOWED_SLOT.tstore(amountIn);
         _IS_PERMIT2_SLOT.tstore(isPermit2);
         _SENDER_SLOT.tstore(msg.sender);
-        _USE_VAULT_SLOT.tstore(useVault);
     }
 
     /**
@@ -108,15 +103,14 @@ contract TransferManager is Vault {
      * - isFirstSwap: Whether this is the first swap or subsequent
      * - isSplitSwap: Whether this is part of a split swap strategy
      * - inCallback: Whether being called from within a callback (e.g., UniswapV3)
-     * - useVault: Whether using vault funds
      *
      * Handles 6 transfer scenarios (in order of execution):
      * 1. None - no transfer needed
      * 2. Native ETH sent via executor - perform accounting but do no transfers
      * 3. TransferFrom user wallet to router, then approve protocol to debit
-     * 4. Protocol debits from router/vault (with approval if needed). No transferFrom needed
+     * 4. Protocol debits from router (with approval if needed). No transferFrom needed
      * 5. TransferFrom user wallet directly to protocol
-     * 6. Transfer from router balance to protocol (either from vault or previous swap funds)
+     * 6. Transfer from router balance to protocol (previous swap funds)
      */
     function _transfer(
         address receiver,
@@ -143,19 +137,14 @@ contract TransferManager is Vault {
             return amount;
         }
 
-        // Determine if we need to transfer from user wallet (first swap + not using vault)
-        bool useVault;
-        useVault = _USE_VAULT_SLOT.tload();
-        bool needsTransferFromUser = isFirstSwap && !useVault;
-
         // Scenario 3 & 4: Protocol will debit tokens from router
         if (transferType == TransferType.ProtocolWillDebit) {
-            if (needsTransferFromUser) {
+            if (isFirstSwap) {
                 // Scenario 3: First swap with user funds - transfer to router, then approve
                 amount = _transferFromUser(tokenIn, address(this), amount);
                 _approveIfNeeded(tokenIn, receiver, amount);
             } else {
-                // Scenario 4: Funds already in router (from vault or previous swap)
+                // Scenario 4: Funds already in router (from previous swap)
                 // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
                 _updateDeltaAccounting(tokenIn, -int256(amount));
                 _approveIfNeeded(tokenIn, receiver, amount);
@@ -176,13 +165,12 @@ contract TransferManager is Vault {
                 return amount;
             }
 
-            if (needsTransferFromUser) {
+            if (isFirstSwap) {
                 // Scenario 5: First swap with user funds - transfer directly to pool
                 amount = _transferFromUser(tokenIn, receiver, amount);
             } else {
-                // Scenario 6: Transfer from router balance to pool
-                // This could mean the funds come from the user's vault (first swap with vault)
-                // or funds are in the router from the previous swap.
+                // Scenario 6: Transfer from router balance to pool. The funds are
+                // in the router from the previous swap.
                 // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
                 _updateDeltaAccounting(tokenIn, -int256(amount));
                 amount = _transferOut(tokenIn, receiver, amount);

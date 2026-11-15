@@ -139,10 +139,10 @@ pub const ROUTER_FEES_ACTIVE: bool = true;
 /// - **Router overhead**: the user input transfer and — when `ROUTER_FEES_ACTIVE` — the extra
 ///   output transfer from the fee path. For non-split swaps, callback protocols already include a
 ///   regular `transferFrom` in their pool gas, so only the Permit2 delta (`USER_PERMIT2_TRANSFER -
-///   DEFAULT_TOKEN_TRANSFER_GAS`) is added for Permit2 users; regular transferFrom and vault users
-///   pay nothing extra. Non-callback protocols add the full user transfer cost. For split swaps,
-///   funds always go through the router first, so the full user input transfer is always added
-///   regardless of protocol type.
+///   DEFAULT_TOKEN_TRANSFER_GAS`) is added for Permit2 users; regular transferFrom users pay
+///   nothing extra. Non-callback protocols add the full user transfer cost. For split swaps, funds
+///   always go through the router first, so the full user input transfer is always added regardless
+///   of protocol type.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "public API; taking `&Strategy` is a breaking change"
@@ -209,10 +209,7 @@ pub fn estimate_user_transfer_gas(
 ) -> BigUint {
     let full_transfer = match user_transfer_type {
         UserTransferType::TransferFromPermit2 => USER_PERMIT2_TRANSFER,
-        // TransferFrom and UseVaultsFunds have similar overheads.
-        UserTransferType::TransferFrom | UserTransferType::UseVaultsFunds => {
-            DEFAULT_TOKEN_TRANSFER_GAS
-        }
+        UserTransferType::TransferFrom => DEFAULT_TOKEN_TRANSFER_GAS,
     };
     let included_in_swap =
         *strategy != Strategy::Split && PROTOCOLS_CALLBACK.contains(&first_protocol_system);
@@ -545,7 +542,7 @@ mod tests {
         80_000
     )]
     // split funds go through the router first: DEFAULT_TOKEN_TRANSFER_GAS 40_000
-    #[case::split_callback("uniswap_v3", UserTransferType::UseVaultsFunds, Strategy::Split, 40_000)]
+    #[case::split_callback("uniswap_v3", UserTransferType::TransferFrom, Strategy::Split, 40_000)]
     fn test_user_transfer_gas(
         #[case] first_protocol_system: &str,
         #[case] user_transfer_type: UserTransferType,

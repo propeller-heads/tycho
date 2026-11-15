@@ -463,7 +463,6 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
 
         ClientFeeParams memory clientFee = makeClientFeeParams(
             clientFeeBps,
-            0,
             amountIn,
             USDC_ADDR,
             ETH_ADDR,
@@ -484,13 +483,8 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
         assertEq(payer.lastTo(), tychoRouterAddr);
         assertEq(amountOut, total - fee);
         assertEq(BOB.balance, total - fee);
-        assertEq(
-            tychoRouter.balanceOf(
-                clientFeeReceiver, uint256(uint160(ETH_ADDR))
-            ),
-            fee
-        );
-        assertEq(tychoRouterAddr.balance, fee);
+        assertEq(clientFeeReceiver.balance, fee);
+        assertEq(tychoRouterAddr.balance, 0);
     }
 
     function _splitWethToDai(bool subsidizeLargerLeg)
@@ -721,7 +715,6 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
         uint256 expectedAmountOut = baseline + DAI_SUBSIDY;
         ClientFeeParams memory clientFee = makeClientFeeParams(
             clientFeeBps,
-            0,
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
@@ -746,11 +739,10 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
         );
 
         uint256 fee = expectedAmountOut * clientFeeBps / 100_000_000;
-        uint256 daiId = uint256(uint160(DAI_ADDR));
         assertEq(amountOut, expectedAmountOut - fee);
         assertEq(IERC20(DAI_ADDR).balanceOf(BOB), expectedAmountOut - fee);
-        assertEq(tychoRouter.balanceOf(clientFeeReceiver, daiId), fee);
-        assertEq(tychoRouter.balanceOf(routerFeeReceiver, daiId), 0);
+        assertEq(IERC20(DAI_ADDR).balanceOf(clientFeeReceiver), fee);
+        assertEq(IERC20(DAI_ADDR).balanceOf(routerFeeReceiver), 0);
     }
 
     function testSlippageCaptureQuoteExcludingSubsidy() public {
@@ -782,12 +774,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
 
         assertEq(amountOut, baseline);
         assertEq(IERC20(DAI_ADDR).balanceOf(BOB), baseline);
-        assertEq(
-            tychoRouter.balanceOf(
-                routerFeeReceiver, uint256(uint160(DAI_ADDR))
-            ),
-            DAI_SUBSIDY
-        );
+        assertEq(IERC20(DAI_ADDR).balanceOf(routerFeeReceiver), DAI_SUBSIDY);
     }
 
     function testUnwrapAfterSubsidizedHop() public {
@@ -886,35 +873,6 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
         assertEq(amountOut, baseline + WETH_SUBSIDY);
         assertEq(ALICE.balance - aliceEthBefore, baseline + WETH_SUBSIDY);
         assertEq(IERC20(WETH_ADDR).balanceOf(tychoRouterAddr), 0);
-    }
-
-    function testVaultCreditIncludesSubsidy() public {
-        uint256 amountIn = 1 ether;
-        bytes memory innerData = _usv2(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-
-        uint256 baseline = _baselineSingleSwap(
-            WETH_ADDR,
-            DAI_ADDR,
-            amountIn,
-            tychoRouterAddr,
-            encodeSingleSwap(address(usv2Executor), innerData)
-        );
-
-        _singleSwap(
-            WETH_ADDR,
-            DAI_ADDR,
-            amountIn,
-            tychoRouterAddr,
-            encodeSingleSwap(
-                address(wrapper),
-                _subsidized(address(usv2Executor), innerData, DAI_SUBSIDY)
-            )
-        );
-
-        uint256 vaultBalance =
-            tychoRouter.balanceOf(ALICE, uint256(uint160(DAI_ADDR)));
-        assertEq(vaultBalance, baseline + DAI_SUBSIDY);
-        assertEq(IERC20(DAI_ADDR).balanceOf(tychoRouterAddr), vaultBalance);
     }
 
     function testSubsidyLiftsOutputAboveMinAmountOut() public {
@@ -1135,7 +1093,6 @@ contract TestIntegrator {
             ClientFeeParams({
                 clientFeeBps: 0,
                 clientFeeReceiver: address(0),
-                maxClientContribution: 0,
                 deadline: 0,
                 clientSignature: ""
             }),
@@ -1506,7 +1463,6 @@ contract TychoSubsidizingWithPayerTest is TychoSubsidizingTestBase {
         uint256 expectedAmountOut = _usdcToEthBaseline(amountIn) + ETH_SUBSIDY;
         ClientFeeParams memory clientFee = makeClientFeeParams(
             clientFeeBps,
-            0,
             amountIn,
             USDC_ADDR,
             ETH_ADDR,

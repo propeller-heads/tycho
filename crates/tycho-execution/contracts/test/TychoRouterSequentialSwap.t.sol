@@ -30,20 +30,17 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
 
     function testSequentialSwapPermit2() public {
         // Trade 1 WETH for USDC through DAI - see _getSequentialSwaps for more info
-        // Make sure DAI vault funds are unaffected
+        // Make sure DAI the router already holds is unaffected
         uint256 amountIn = 1 ether;
-        uint256 existingDAIVaultBalance = 10_000 ether;
+        uint256 existingRouterDAIBalance = 10_000 ether;
         deal(WETH_ADDR, ALICE, amountIn);
-        deal(DAI_ADDR, ALICE, existingDAIVaultBalance);
+        deal(DAI_ADDR, tychoRouterAddr, existingRouterDAIBalance);
 
         vm.startPrank(ALICE);
         (
             IAllowanceTransfer.PermitSingle memory permitSingle,
             bytes memory signature
         ) = handlePermit2Approval(WETH_ADDR, tychoRouterAddr, amountIn);
-
-        IERC20(DAI_ADDR).approve(tychoRouterAddr, existingDAIVaultBalance);
-        tychoRouter.deposit(DAI_ADDR, existingDAIVaultBalance);
 
         bytes[] memory swaps = _getSequentialSwaps();
         tychoRouter.sequentialSwapPermit2(
@@ -63,13 +60,9 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
         assertEq(usdcBalance, 2005810530);
         assertEq(IERC20(WETH_ADDR).balanceOf(tychoRouterAddr), 0);
 
-        // Vault balances untouched
         assertEq(
-            IERC20(DAI_ADDR).balanceOf(tychoRouterAddr), existingDAIVaultBalance
-        );
-        assertEq(
-            tychoRouter.balanceOf(ALICE, uint256(uint160(DAI_ADDR))),
-            existingDAIVaultBalance
+            IERC20(DAI_ADDR).balanceOf(tychoRouterAddr),
+            existingRouterDAIBalance
         );
     }
 
@@ -96,35 +89,6 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
         uint256 usdcBalance = IERC20(USDC_ADDR).balanceOf(ALICE);
         assertEq(usdcBalance, 2005810530);
         assertEq(IERC20(WETH_ADDR).balanceOf(tychoRouterAddr), 0);
-    }
-
-    function testSequentialSwapIntoVault() public {
-        // Trade 1 WETH for USDC through DAI, crediting output into vault
-        // WETH -> DAI -> USDC (same route as _getSequentialSwaps)
-        uint256 amountIn = 1 ether;
-        deal(WETH_ADDR, ALICE, amountIn);
-
-        vm.startPrank(ALICE);
-        IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
-
-        bytes[] memory swaps = _getSequentialSwaps();
-        tychoRouter.sequentialSwap(
-            amountIn,
-            WETH_ADDR,
-            USDC_ADDR,
-            1000_000000, // expected amount out
-            1000_000000 * 9800 / 10000, // min amount out
-            tychoRouterAddr, // output goes to vault
-            noClientFee(),
-            pleEncode(swaps)
-        );
-
-        uint256 vaultUsdc =
-            tychoRouter.balanceOf(ALICE, uint256(uint160(USDC_ADDR)));
-        assertEq(vaultUsdc, 2005810530);
-        assertEq(IERC20(USDC_ADDR).balanceOf(ALICE), 0);
-        assertEq(IERC20(WETH_ADDR).balanceOf(tychoRouterAddr), 0);
-        vm.stopPrank();
     }
 
     function testSequentialSwapUndefinedMinAmount() public {

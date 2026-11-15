@@ -49,7 +49,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
     uint32 private _routerFeeOnOutputBps; // Router fee on output amount in fee units
     uint32 private _routerFeeOnClientFeeBps; // Router fee on client fee in fee units
-    address private _routerFeeReceiver; // Address whose vault balance receives router fees
+    address private _routerFeeReceiver; // Address that receives router fees
     // Part of the surplus the router captures, in fee units (MAX_BPS = all).
     // It shares the slot above, which every fee calculation reads anyway.
     uint32 private _routerPositiveSlippageBps;
@@ -118,10 +118,10 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
     /**
      * @param routerFeeSetter Address granted ROUTER_FEE_SETTER_ROLE
-     * @param routerFeeReceiver Address whose vault balance receives router fees
+     * @param routerFeeReceiver Address that receives router fees
      * @dev The receiver is explicit rather than defaulted to `msg.sender`: when
      *      the calculator is deployed through a CREATE2 factory, the factory is
-     *      the sender, and fees credited to it can never be withdrawn.
+     *      the sender, and fees sent to it cannot be moved.
      *      The router captures 100% of the surplus to start, since that is
      *      how every deployment is operated.
      */

@@ -32,7 +32,7 @@ Running all tests at once with `--gas-report` aggregates ALL invocations of a fu
 
 - Router tests: `TychoRouterSingleSwap.t.sol`, `TychoRouterSequentialSwap.t.sol`, `TychoRouterSplitSwap.t.sol`
 - Fee tests: `TychoRouterFees.t.sol`
-- Vault tests: `TychoRouterVault.t.sol`
+- Router entry-check tests: `TychoRouterChecks.t.sol`
 - Integration tests: `TychoRouterProtocolIntegration.t.sol`
 - Protocol tests in `protocols/` dir: `*ExecutorTest` (direct) vs `TychoRouterFor*Test` (integration through router)
 - Fork tests need `RPC_URL` env var — check `crates/tycho-execution/contracts/.env` for it
