@@ -1,7 +1,7 @@
 # Migration Guide
 
 This guide covers the breaking changes between Router versions from the perspective of users who consume the Rust
-encoding library or interact with the TychoRouterV3 contracts. Migrating from V2 means working through both sections in
+encoding library or interact with the TychoRouterV3 contracts. Migrating from V2 means working through all sections in
 order.
 
 ## V2 to V3
@@ -468,11 +468,11 @@ V3.2 removes the vault. The router holds no user balances between transactions.
 
 #### UserTransferType
 
-`UserTransferType::UseVaultsFunds` is removed. Use `TransferFrom` or `TransferFromPermit2`.
+V3.2 removes `UserTransferType::UseVaultsFunds`. Use `TransferFrom` or `TransferFromPermit2`.
 
 #### ClientFeeParams Struct
 
-`max_client_contribution` and `.with_max_client_contribution()` are removed. `into_abi_params` returns
+V3.2 removes `max_client_contribution` and `.with_max_client_contribution()`. `into_abi_params` returns
 four values instead of five:
 
 ```rust
@@ -487,8 +487,8 @@ let (bps, receiver, deadline, signature) = params.into_abi_params();
 
 #### Router Function Signatures
 
-`singleSwapUsingVault`, `sequentialSwapUsingVault`, `splitSwapUsingVault`, `deposit`, `withdraw` and the
-ERC6909 methods are removed. `ClientFeeParams` loses `maxClientContribution`, so the selectors of the six
+V3.2 removes `singleSwapUsingVault`, `sequentialSwapUsingVault`, `splitSwapUsingVault`, `deposit`,
+`withdraw` and the ERC6909 methods. `ClientFeeParams` loses `maxClientContribution`, so the selectors of the six
 remaining swap methods change:
 
 ```solidity
@@ -528,15 +528,22 @@ ClientFee(uint32 clientFeeBps, address clientFeeReceiver, uint256 deadline,
   token reverts the swap.
 * An output below `minAmountOut` always reverts with `TychoRouter__NegativeSlippage`. No client
   contribution covers the shortfall.
-* The `receiver` can not be the router. The router reverts with `TychoRouter__InvalidReceiver`.
-* The only check on the result is that the receiver got at least `minAmountOut` of `tokenOut`. Tokens
-  that a route leaves in the router, including an unspent `msg.value`, are lost.
+* The `receiver` cannot be the router. The router reverts with `TychoRouter__InvalidReceiver`.
+* The only check on the result is that the receiver got at least `minAmountOut` of `tokenOut`. You lose
+  the tokens that a route leaves in the router, including an unspent `msg.value`: any later swap can
+  spend them.
+* `msg.value` must equal `amountIn` for native ETH input and must be zero for any other input. V3.1
+  credited a mismatched `msg.value` to the vault, which then reverted the swap.
+* The Permit2 methods reject native ETH input, because they are not payable. Use `singleSwap`,
+  `sequentialSwap` or `splitSwap` with `msg.value` instead.
+* A Permit2 `amountIn` above `type(uint160).max` reverts. V3.1 truncated it to the lower 160 bits.
 
 #### Revert Reasons
 
-| Error                                    | Cause                                   |
-|------------------------------------------|-----------------------------------------|
-| `TychoRouter__InvalidReceiver(receiver)` | `receiver` is the TychoRouterV3 address |
+| Error                                              | Cause                                          |
+|----------------------------------------------------|------------------------------------------------|
+| `TychoRouter__InvalidReceiver(receiver)`           | `receiver` is the TychoRouterV3 address        |
+| `TransferManager__Permit2AmountTooLarge(amountIn)` | A Permit2 `amountIn` above `type(uint160).max` |
+| `TychoRouter__MsgValueDoesNotMatchAmountIn(msgValue, expectedMsgValue)` | `msg.value` differs from `amountIn` for native ETH input, or is non-zero for any other input |
 
-`Vault__UnexpectedNonZeroCount`, `Vault__UnexpectedInputDelta`, `Vault__InsufficientBalance` and
-`TychoRouter__NegativeOutputDelta` are removed.
+The router no longer raises any `Vault__*` or `ERC6909*` error, or `TychoRouter__NegativeOutputDelta`.

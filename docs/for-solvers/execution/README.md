@@ -47,6 +47,7 @@ Follow this checklist when using TychoRouterV3. It covers essential security req
   * `minAmountOut` must be non-zero and no greater than `expectedAmountOut` — see [Slippage bounds](encoding/#slippage-bounds).
   * The router sets no lower bound, so a `minAmountOut` far below your quote still passes: a faulty swap sequence, slippage or an attack can then leave you with far less than you quoted.
 * **Verify the price data behind `minAmountOut`** against at least one other independent price source. A `minAmountOut` derived from a bad quote can sit far below the fair output, so the guardrail fails to protect you and the losses can be large.
+* **Never leave tokens in the router.** The router holds no user balances. Its only check on a swap's result is that the receiver got at least `minAmountOut` of `tokenOut`. You lose any tokens left in the router, because any later swap can spend them. This includes tokens sent to the router directly, and ETH sent as `msg.value` that your swap sequence does not spend.
 * **Never approve infinite allowances**, including those for Permit2.
 * **Set Permit2 allowance and deadline as low as is practical.**
 
