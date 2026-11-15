@@ -1,3 +1,11 @@
+## [0.519.2](https://github.com/propeller-heads/tycho/compare/0.519.1...0.519.2) (2026-11-15)
+
+
+### Bug Fixes
+
+* **indexer:** use clock milliseconds in substreams lag metric ([16f4b3d](https://github.com/propeller-heads/tycho/commit/16f4b3d17b357e703dc51bba1b57597ae182d3cf))
+* **indexer:** use clock milliseconds in substreams lag metric ([#1812](https://github.com/propeller-heads/tycho/issues/1812)) ([52ae8a1](https://github.com/propeller-heads/tycho/commit/52ae8a1e407627fe0f82debc28334e1ce5cbb490))
+
 ## [0.519.1](https://github.com/propeller-heads/tycho/compare/0.519.0...0.519.1) (2026-11-13)
 
 
