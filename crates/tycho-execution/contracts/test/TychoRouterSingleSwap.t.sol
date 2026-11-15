@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 import {TychoRouterV3, ClientFeeParams} from "@src/TychoRouterV3.sol";
 import {Dispatcher__UnsupportedSingleHopCycle} from "@src/Dispatcher.sol";
 import "./TychoRouterTestSetup.sol";
+import {TransferManager__Permit2AmountTooLarge} from "@src/TransferManager.sol";
 import {UniswapV4Executor} from "@src/executors/UniswapV4Executor.sol";
 import {UniswapV4Utils} from "./protocols/UniswapV4Utils.sol";
 
@@ -84,6 +85,42 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         assertEq(daiBalance, 2018817438608734439722);
         assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), 0);
 
+        vm.stopPrank();
+    }
+
+    function testPermit2AmountInAboveUint160() public {
+        // Permit2 moves uint160 amounts. A larger input amount must revert
+        // instead of pulling a truncated amount.
+        uint256 amountIn = uint256(type(uint160).max) + 1;
+        deal(WETH_ADDR, ALICE, 1 ether);
+
+        bytes memory swap = encodeSingleSwap(
+            address(usv2Executor),
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
+        );
+
+        vm.startPrank(ALICE);
+        (
+            IAllowanceTransfer.PermitSingle memory permitSingle,
+            bytes memory signature
+        ) = handlePermit2Approval(WETH_ADDR, tychoRouterAddr, type(uint160).max);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TransferManager__Permit2AmountTooLarge.selector, amountIn
+            )
+        );
+        tychoRouter.singleSwapPermit2(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            1, // expected amount out
+            1, // min amount out
+            ALICE,
+            noClientFee(),
+            permitSingle,
+            signature,
+            swap
+        );
         vm.stopPrank();
     }
 

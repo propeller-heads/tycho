@@ -20,6 +20,7 @@ error TransferManager__DifferentTokenIn(
     address tokenIn, address tokenInStorage
 );
 error TransferManager__UnknownTransferType();
+error TransferManager__Permit2AmountTooLarge(uint256 amount);
 
 /**
  * @title TransferManager
@@ -237,7 +238,12 @@ contract TransferManager {
         // Perform the actual transfer
         if (isPermit2) {
             // Permit2.permit is already called from the TychoRouterV3
-            // forge-lint: disable-next-line(calls-loop, unsafe-typecast) Each split from the input token pulls its share from the user; a failing pull fails the route. Permit2 amounts are uint160, and the balance diff below measures what arrived.
+            // Permit2 amounts are uint160: a larger amount reverts instead of truncating.
+            if (amount > type(uint160).max) {
+                // forge-lint: disable-next-line(require-revert-in-loop) An amount Permit2 cannot carry fails the route.
+                revert TransferManager__Permit2AmountTooLarge(amount);
+            }
+            // forge-lint: disable-next-line(calls-loop, unsafe-typecast) Each split from the input token pulls its share from the user; a failing pull fails the route. The check above keeps the amount within uint160.
             permit2.transferFrom(sender, receiver, uint160(amount), token);
         } else {
             // forge-lint: disable-next-line(arbitrary-send-erc20) sender is the router's msg.sender, stored by the entry point.

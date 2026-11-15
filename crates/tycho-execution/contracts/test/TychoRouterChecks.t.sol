@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {TychoRouter__InvalidReceiver} from "@src/TychoRouterV3.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {TransferManager__DifferentTokenIn} from "@src/TransferManager.sol";
 import {
     IAllowanceTransfer
 } from "@permit2/src/interfaces/IAllowanceTransfer.sol";
@@ -165,6 +166,50 @@ contract TychoRouterChecksTest is TychoRouterTestSetup {
             swap
         );
         vm.stopPrank();
+    }
+
+    function testSplitSwapDifferentTokenIn() public {
+        // The router holds USDC that no swap owns. A caller with no funds names
+        // a token they do not hold as tokenIn, while the hop pulls USDC. The
+        // first hop can only pull the declared tokenIn from the caller's
+        // wallet, so the swap reverts and the router's USDC stays put.
+        uint256 routerUsdc = 9_226_944_590;
+        deal(USDC_ADDR, tychoRouterAddr, routerUsdc);
+        uint256 amountIn = routerUsdc;
+        address bogusToken = address(0xbEEF);
+
+        bytes[] memory swaps = new bytes[](1);
+        swaps[0] = encodeSplitSwap(
+            uint8(0),
+            uint8(1),
+            uint24(0),
+            address(usv2Executor),
+            encodeUniswapV2Swap(USDC_WETH_USV2, USDC_ADDR, WETH_ADDR)
+        );
+
+        vm.startPrank(BOB);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TransferManager__DifferentTokenIn.selector,
+                USDC_ADDR,
+                bogusToken
+            )
+        );
+        tychoRouter.splitSwap(
+            amountIn,
+            bogusToken,
+            USDC_ADDR,
+            routerUsdc, // expected amount out
+            routerUsdc, // min amount out
+            2,
+            BOB,
+            noClientFee(),
+            pleEncode(swaps)
+        );
+        vm.stopPrank();
+
+        assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), routerUsdc);
+        assertEq(IERC20(USDC_ADDR).balanceOf(BOB), 0);
     }
 
     function _rocketpoolEthRethSwap() private view returns (bytes memory swap) {
