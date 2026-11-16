@@ -51,7 +51,9 @@ The FeeCalculator must be deployed **before** the TychoRouterV3, as the router r
    the constructor and owns the vault balance every router fee is credited to, so it must be an
    address that can call `withdraw()` on the router. It is a constructor argument because the
    deployment goes through the CREATE2 factory, which can never withdraw.
-3. Deploy: `npx hardhat run scripts/deploy-fee-calculator.js --network NETWORK`
+3. Deploy: `npx hardhat run scripts/deploy-fee-calculator.js --network NETWORK`. The deployer holds
+   `ROUTER_FEE_SETTER_ROLE` at construction, sets the initial fees defined at the top of the script,
+   grants the role to `ROUTER_FEE_SETTER` and renounces it.
 4. Record the deployed address as the chain's `fee_calculator` in
    `config/deployment_registry.json`. The router deploy script reads it from there.
 
@@ -80,10 +82,6 @@ Executors must be deployed **before** the TychoRouterV3: the router approves eve
    calculator and these executors are active at deployment. The router address depends on both,
    so a different executor set gives a different address.
 4. Fill in the router address in `config/router_addresses.json`
-
-Via the safe wallet UI:
-
-5. Set fee amounts in FeeCalculator
 
 Executors added after deployment with `setExecutors`, and fee calculators set with
 `setFeeCalculator`, wait 1 day before they take effect.
