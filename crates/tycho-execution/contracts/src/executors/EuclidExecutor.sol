@@ -12,8 +12,8 @@ import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 ///      (fillOrderRFQTo). The firm quote carries the full fill calldata; this
 ///      executor forwards it to the pinned router, after lowering the filled
 ///      taker amount when an earlier route leg delivered less than quoted. The
-///      output goes to the target signed into the calldata, which is the
-///      router that runs this executor.
+///      output goes to the target the gateway writes into the calldata, which
+///      the quote check requires to be the router that runs this executor.
 /// @dev Only supports single token in to single token out swaps
 contract EuclidExecutor is IExecutor {
     using Address for address;
@@ -61,7 +61,8 @@ contract EuclidExecutor is IExecutor {
     /// @notice Executes a swap through Euclid's RFQ system
     /// @param amountIn The amount of input token to swap
     /// @param data Encoded swap data containing tokens and settlement calldata
-    /// @dev The output goes to the target signed into the calldata, so the
+    /// @dev The output goes to the target the gateway writes into the
+    ///      calldata, which the quote check requires to be this router, so the
     ///      receiver argument is not read.
     function swap(
         uint256 amountIn,

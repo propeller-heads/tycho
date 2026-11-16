@@ -103,7 +103,7 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_onchain: bool,
 
-    /// Disable the RFQ book feeds (Bebop, Hashflow, Liquorice, Native)
+    /// Disable the RFQ book feeds (Bebop, Hashflow, Liquorice, Native, Euclid)
     #[arg(long, default_value_t = false)]
     disable_rfq: bool,
 

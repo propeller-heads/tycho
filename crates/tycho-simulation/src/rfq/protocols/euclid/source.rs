@@ -216,27 +216,19 @@ impl EuclidBookAssembler {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
     use tokio::time::Duration;
     use tycho_common::models::Chain;
 
     use super::*;
     use crate::{
         book::{all_pairs::QuoteRule, assert_same_books, test_token_map},
-        rfq::protocols::euclid::client::EUCLID_API_URL,
+        rfq::protocols::euclid::{
+            client::EUCLID_API_URL,
+            test_support::{bytes, LEVELS_FRAME, USDC, WETH},
+        },
     };
 
-    /// A levels frame recorded from Euclid's gateway on Ethereum: WETH/USDC.
-    const LEVELS_FRAME: &str = include_str!("test_responses/levels_frame.json");
-
-    const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
-    const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
     const WBTC: &str = "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599";
-
-    fn bytes(value: &str) -> Bytes {
-        Bytes::from_str(value).unwrap()
-    }
 
     /// A WETH/WBTC/USDC assembler with USDC as the only USD quote token.
     fn test_assembler(min_tvl_usd: f64, all_pairs: bool) -> EuclidBookAssembler {

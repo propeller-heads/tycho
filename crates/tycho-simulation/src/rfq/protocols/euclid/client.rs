@@ -194,7 +194,8 @@ impl EuclidClient {
                 Ok(SignedQuote {
                     base_token: params.token_in.clone(),
                     quote_token: params.token_out.clone(),
-                    amount_in: quote.amount_in,
+                    // The signed fill, which `amount_out` checked is the amount requested.
+                    amount_in: params.amount_in.clone(),
                     amount_out,
                     quote_attributes,
                 })
@@ -214,47 +215,15 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use alloy::{primitives::U256, sol_types::SolCall};
     use num_bigint::BigUint;
 
     use super::*;
     use crate::{
-        rfq::protocols::euclid::models::fillOrderRFQToCall,
+        rfq::protocols::euclid::test_support::{
+            live_firm_quote, recorded_params, RECORDED_AMOUNT_OUT, ROUTER, USDC, WETH,
+        },
         snapshot_feed::http::test_support::{spawn_http_server, MockResponse},
     };
-
-    /// A binding quote recorded from Euclid's gateway on Ethereum.
-    const FIRM_QUOTE: &str = include_str!("test_responses/firm_quote.json");
-
-    const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
-    const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
-    /// The TychoRouter the recorded quote was requested for, as sender and receiver.
-    const ROUTER: &str = "0x6bc529dc7b81a031828ddce2bc419d01ff268c66";
-    /// What the recorded order pays for its 0.003 WETH, in USDC.
-    const RECORDED_AMOUNT_OUT: &str = "6241692";
-
-    /// The recorded quote with its order's expiry moved far ahead: the recording lasted thirty
-    /// seconds. The expiry sits in the 64 bits above the nonce of the order's `info`.
-    fn live_firm_quote() -> String {
-        let mut quote: serde_json::Value = serde_json::from_str(FIRM_QUOTE).unwrap();
-        let recorded: Bytes = serde_json::from_value(quote["calldata"].clone()).unwrap();
-        let mut call = fillOrderRFQToCall::abi_decode(recorded.as_ref()).unwrap();
-        call.order.info =
-            (call.order.info & U256::from(u64::MAX)) | (U256::from(u64::MAX) << 64usize);
-        quote["calldata"] = serde_json::json!(Bytes::from(call.abi_encode()));
-        quote.to_string()
-    }
-
-    fn recorded_params() -> GetAmountOutParams {
-        GetAmountOutParams {
-            amount_in: BigUint::from_str("3000000000000000").unwrap(),
-            token_in: Bytes::from_str(WETH).unwrap(),
-            token_out: Bytes::from_str(USDC).unwrap(),
-            sender: Bytes::from_str(ROUTER).unwrap(),
-            receiver: Bytes::from_str(ROUTER).unwrap(),
-            origin: None,
-        }
-    }
 
     fn client_for(api_url: &str, quote_timeout: Duration) -> EuclidClient {
         EuclidClient::new(EuclidSupportedChain::Ethereum, api_url, quote_timeout)

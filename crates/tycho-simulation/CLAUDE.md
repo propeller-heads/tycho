@@ -112,7 +112,7 @@ for any protocol indexed by Tycho.
     the maker behind each book, `SignedByVenue` where it signs its own quotes and so has no rule
     to pick, which is why only the first pair of builders takes one. A venue's `<Venue>AllPairsState` is a newtype over `AllPairs<P, T>`,
     because `#[typetag::serde]` registers concrete types; the `all_pairs_state!` macro declares it
-    from those two types, so the four differ only in them and in what a venue refuses before a
+    from those two types, so the five differ only in them and in what a venue refuses before a
     book is picked (`RefusesQuote::check_amount`). A book reporting no direction is left out of
     the state, so its tokens and its directions agree
   - **Prices feed and book assembler (Bebop, Euclid, Hashflow, Metric)**: `<Venue>PricesFeed` in

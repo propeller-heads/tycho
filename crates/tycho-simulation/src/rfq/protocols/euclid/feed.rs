@@ -274,15 +274,13 @@ mod tests {
             levels::{Levels, PriceLevel},
             test_token_map, BookFeedEvent, BookFeedStream,
         },
-        rfq::protocols::euclid::{models::EuclidBook, PROTOCOL_SYSTEM},
+        rfq::protocols::euclid::{
+            models::EuclidBook,
+            test_support::{LEVELS_FRAME, USDC, WETH},
+            PROTOCOL_SYSTEM,
+        },
         snapshot_feed::{SnapshotFeedEvent, SnapshotFeedStream},
     };
-
-    /// A levels frame recorded from Euclid's gateway on Ethereum: WETH/USDC.
-    const LEVELS_FRAME: &str = include_str!("test_responses/levels_frame.json");
-
-    const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
-    const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
 
     fn book_config(chain: Chain) -> BookFeedConfig {
         let (weth, usdc) = (Bytes::from_str(WETH).unwrap(), Bytes::from_str(USDC).unwrap());

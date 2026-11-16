@@ -8,6 +8,8 @@ pub mod feed;
 mod models;
 mod source;
 pub mod state;
+#[cfg(test)]
+mod test_support;
 
 pub use feed::EuclidBookAssemblerBuilder;
 pub use models::{EuclidBook, EuclidPrices};

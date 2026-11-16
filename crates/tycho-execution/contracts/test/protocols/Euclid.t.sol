@@ -491,12 +491,14 @@ contract TychoRouterForEuclidTest is TychoRouterTestSetup {
     }
 
     /// @dev Half the quoted amount reaches the executor: it lowers the fill
-    ///      word and 1inch pays the maker's amount pro rata, rounded down.
+    ///      word and 1inch pays the maker's amount pro rata. Half divides
+    ///      exactly; the rounding is pinned by the Rust test
+    ///      a_partial_fill_pays_pro_rata_rounded_down.
     function testEuclidPartialFillThroughRouter() public {
         uint256 usdcReceived = _swapThroughRouter(
             QUOTED_AMOUNT_IN / 2,
             "test_single_encoding_strategy_euclid_partial_fill"
         );
-        assertEq(usdcReceived, QUOTED_AMOUNT_OUT / 2, "usdc received");
+        assertEq(usdcReceived, 3120846, "usdc received");
     }
 }

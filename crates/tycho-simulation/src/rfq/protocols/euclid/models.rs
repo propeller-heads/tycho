@@ -20,6 +20,7 @@ use crate::{
         levels::{InvalidLevel, Levels, PriceLevel},
         wire::{EntryReader, SkipInvalidEntries},
     },
+    evm::protocol::u256_num::u256_to_biguint,
     rfq::errors::RFQError,
     snapshot_feed::errors::FeedError,
 };
@@ -185,13 +186,10 @@ pub enum EuclidFirmResponse {
 /// A binding quote: `calldata` fills a maker-signed 1inch limit-order-protocol v3 RFQ order
 /// through `tx_to`. Everything the fill pays, admits and expires at is in the signed order, so
 /// it is read from there rather than from the fields beside it.
-#[serde_as]
 #[derive(Debug, Clone, Deserialize)]
 pub struct EuclidFirmQuote {
     pub tx_to: Bytes,
     pub calldata: Bytes,
-    #[serde_as(as = "DisplayFromStr")]
-    pub amount_in: BigUint,
     /// How the gateway records the fill.
     pub order_hash: Bytes,
 }
@@ -204,20 +202,15 @@ pub struct EuclidDeclined {
 
 impl EuclidFirmQuote {
     /// What the signed order pays for the trade `params` asked for on `chain`, once the quote
-    /// is checked to be that trade: the amount, the router and call the executor allows, the
-    /// assets, the fill amount the executor patches, the recipient, the filler the order admits,
-    /// and an expiry still ahead. A quote that fails here would only revert on chain.
+    /// is checked to be that trade: the router and call the executor allows, the assets, the
+    /// fill amount the executor patches, the recipient, the filler the order admits, and an
+    /// expiry still ahead. A quote that fails here would only revert on chain, except an
+    /// expired one, which is no quote: asking again gets a fresh order.
     pub fn amount_out(
         &self,
         chain: EuclidSupportedChain,
         params: &GetAmountOutParams,
     ) -> Result<BigUint, RFQError> {
-        if self.amount_in != params.amount_in {
-            return Err(RFQError::FatalError(format!(
-                "Euclid quoted amount_in {}, requested {}",
-                self.amount_in, params.amount_in
-            )));
-        }
         if self.tx_to.as_ref() != chain.settlement_router().as_slice() {
             return Err(RFQError::FatalError(format!(
                 "Euclid order settles through {}, not the 1inch Aggregation Router v5",
@@ -241,14 +234,14 @@ impl EuclidFirmQuote {
             )));
         }
         // A plain amount: the router fills exactly this much of the taker asset.
-        let fill = to_biguint(call.flagsAndAmount);
+        let fill = u256_to_biguint(call.flagsAndAmount);
         if fill != params.amount_in {
             return Err(RFQError::FatalError(format!(
                 "Euclid calldata fills {fill}, requested {}",
                 params.amount_in
             )));
         }
-        let taking_amount = to_biguint(order.takingAmount);
+        let taking_amount = u256_to_biguint(order.takingAmount);
         if fill.is_zero() || fill > taking_amount {
             return Err(RFQError::FatalError(format!(
                 "Euclid calldata fills {fill} of an order taking {taking_amount}"
@@ -275,17 +268,13 @@ impl EuclidFirmQuote {
             })?
             .as_secs();
         if expiry <= now {
-            return Err(RFQError::FatalError(format!(
+            return Err(RFQError::QuoteNotFound(format!(
                 "Euclid order expired at {expiry}, now {now}"
             )));
         }
         // What the router pays for `fill`: the maker's amount, pro rata, rounded down.
-        Ok(to_biguint(order.makingAmount) * fill / taking_amount)
+        Ok(u256_to_biguint(order.makingAmount) * fill / taking_amount)
     }
-}
-
-fn to_biguint(value: U256) -> BigUint {
-    BigUint::from_bytes_be(&value.to_be_bytes::<32>())
 }
 
 #[cfg(test)]
@@ -295,52 +284,9 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-
-    /// A levels frame and a binding quote recorded from Euclid's gateway on Ethereum.
-    const LEVELS_FRAME: &str = include_str!("test_responses/levels_frame.json");
-    const FIRM_QUOTE: &str = include_str!("test_responses/firm_quote.json");
-
-    const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
-    const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
-    /// The TychoRouter the recorded quote was requested for, as sender and receiver: the one the
-    /// router tests deploy, so the same recording fills through it on a fork.
-    const ROUTER: &str = "0x6bc529dc7b81a031828ddce2bc419d01ff268c66";
-    /// What the recorded order pays for its 0.003 WETH, in USDC.
-    const RECORDED_AMOUNT_OUT: &str = "6241692";
-
-    fn bytes(value: &str) -> Bytes {
-        Bytes::from_str(value).unwrap()
-    }
-
-    /// The request the recorded quote answers: 0.003 WETH for USDC, to the router.
-    fn recorded_params() -> GetAmountOutParams {
-        GetAmountOutParams {
-            amount_in: BigUint::from_str("3000000000000000").unwrap(),
-            token_in: bytes(WETH),
-            token_out: bytes(USDC),
-            sender: bytes(ROUTER),
-            receiver: bytes(ROUTER),
-            origin: None,
-        }
-    }
-
-    fn recorded_quote() -> EuclidFirmQuote {
-        match serde_json::from_str::<EuclidFirmResponse>(FIRM_QUOTE).unwrap() {
-            EuclidFirmResponse::Quote(quote) => quote,
-            EuclidFirmResponse::Declined(declined) => panic!("recorded a decline: {declined:?}"),
-        }
-    }
-
-    /// The recorded quote with its order changed by `change` and re-encoded; the original's
-    /// expiry is moved far ahead first, since the recording lasted thirty seconds.
-    fn quote_with(change: impl FnOnce(&mut fillOrderRFQToCall)) -> EuclidFirmQuote {
-        let quote = recorded_quote();
-        let mut call = fillOrderRFQToCall::abi_decode(quote.calldata.as_ref()).unwrap();
-        call.order.info =
-            (call.order.info & U256::from(u64::MAX)) | (U256::from(u64::MAX) << 64usize);
-        change(&mut call);
-        EuclidFirmQuote { calldata: call.abi_encode().into(), ..quote }
-    }
+    use crate::rfq::protocols::euclid::test_support::{
+        bytes, quote_with, recorded_params, LEVELS_FRAME, RECORDED_AMOUNT_OUT, USDC, WETH,
+    };
 
     #[test]
     fn a_recorded_frame_parses_into_validated_books() {
@@ -476,18 +422,20 @@ mod tests {
         assert_eq!(amount_out, BigUint::from_str(RECORDED_AMOUNT_OUT).unwrap());
     }
 
-    /// A smaller fill of the same order pays pro rata, rounded down, as the router does.
-    #[test]
-    fn a_partial_fill_pays_pro_rata() {
-        let half = BigUint::from_str("1500000000000000").unwrap();
-        let quote = quote_with(|call| call.flagsAndAmount = U256::from(1_500_000_000_000_000u64));
-        let quote = EuclidFirmQuote { amount_in: half.clone(), ..quote };
-        let params = GetAmountOutParams { amount_in: half, ..recorded_params() };
+    /// A smaller fill of the same order pays pro rata, rounded down, as the router does. Half
+    /// the order divides exactly; a third of it and one wei pays 6241692 * (1e15 + 1) / 3e15 =
+    /// 2080564.000...002, which only rounding down turns into 2080564.
+    #[rstest]
+    #[case::half(1_500_000_000_000_000, 3_120_846)]
+    #[case::a_third_and_a_wei(1_000_000_000_000_001, 2_080_564)]
+    fn a_partial_fill_pays_pro_rata_rounded_down(#[case] fill: u64, #[case] expected: u64) {
+        let quote = quote_with(|call| call.flagsAndAmount = U256::from(fill));
+        let params = GetAmountOutParams { amount_in: BigUint::from(fill), ..recorded_params() };
         assert_eq!(
             quote
                 .amount_out(EuclidSupportedChain::Ethereum, &params)
                 .unwrap(),
-            BigUint::from_str(RECORDED_AMOUNT_OUT).unwrap() / 2u8
+            BigUint::from(expected)
         );
     }
 
@@ -496,7 +444,7 @@ mod tests {
     #[rstest]
     #[case::amount(
         |p: &mut GetAmountOutParams, _: &mut fillOrderRFQToCall| p.amount_in = BigUint::from(1u8),
-        "quoted amount_in"
+        "calldata fills 3000000000000000, requested 1"
     )]
     #[case::token_in(
         |p: &mut GetAmountOutParams, _: &mut fillOrderRFQToCall| p.token_in = bytes(USDC),
@@ -518,12 +466,6 @@ mod tests {
         |_: &mut GetAmountOutParams, c: &mut fillOrderRFQToCall| c.flagsAndAmount = U256::from(1u8),
         "calldata fills 1,"
     )]
-    #[case::expired(
-        |_: &mut GetAmountOutParams, c: &mut fillOrderRFQToCall| {
-            c.order.info = c.order.info & U256::from(u64::MAX) | (U256::from(1u8) << 64usize);
-        },
-        "expired at 1,"
-    )]
     fn a_quote_that_disagrees_with_the_request_fails(
         #[case] tamper: fn(&mut GetAmountOutParams, &mut fillOrderRFQToCall),
         #[case] reason: &str,
@@ -539,6 +481,21 @@ mod tests {
         );
     }
 
+    /// An expired order is no quote rather than a fatal error: asking again gets a fresh one.
+    #[test]
+    fn an_expired_order_is_no_quote() {
+        let quote = quote_with(|call| {
+            call.order.info = call.order.info & U256::from(u64::MAX) | (U256::from(1u8) << 64usize);
+        });
+        let error = quote
+            .amount_out(EuclidSupportedChain::Ethereum, &recorded_params())
+            .unwrap_err();
+        assert!(
+            matches!(&error, RFQError::QuoteNotFound(message) if message.contains("expired at 1,")),
+            "{error:?}"
+        );
+    }
+
     /// A fill of more than the order takes would revert at the router, so it fails here; so
     /// does a fill of nothing, which the router would read as the whole order.
     #[rstest]
@@ -548,9 +505,8 @@ mod tests {
         let mut params = recorded_params();
         let quote = quote_with(|call| {
             call.flagsAndAmount = fill(call.order.takingAmount);
-            params.amount_in = to_biguint(call.flagsAndAmount);
+            params.amount_in = u256_to_biguint(call.flagsAndAmount);
         });
-        let quote = EuclidFirmQuote { amount_in: params.amount_in.clone(), ..quote };
         let error = quote
             .amount_out(EuclidSupportedChain::Ethereum, &params)
             .unwrap_err();

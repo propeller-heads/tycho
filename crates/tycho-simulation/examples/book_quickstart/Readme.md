@@ -8,8 +8,8 @@ This quickstart guide enables you to:
 
 ## How to run
 
-The example loads the chain's token list from Tycho, and each venue needs its own credentials to
-serve live pricing data:
+The example loads the chain's token list from Tycho, and each venue but Euclid needs its own
+credentials to serve live pricing data:
 
 ```bash
 export TYCHO_URL=<tycho-api-url-for-chain>
@@ -84,7 +84,7 @@ export RPC_URL=<your-rpc-url>
 
 The example will:
 
-1. Open a feed per venue you have credentials for
+1. Open a feed per venue you have credentials for, and Euclid's when `EUCLID_ENABLED=true`
 2. Stream each venue's complete book for your specified token pair, republished whenever it
    changes
 3. Display the best available quotes with pricing information
