@@ -19,7 +19,11 @@
 
 #[cfg_attr(not(test), expect(dead_code, reason = "no read of the instance tables uses them yet"))]
 pub mod active;
+#[cfg_attr(not(test), expect(dead_code, reason = "no public gateway calls it until cut-over"))]
+pub mod gateway;
 pub mod orm;
+#[cfg_attr(not(test), expect(dead_code, reason = "no public gateway calls it until cut-over"))]
+mod read;
 pub mod schema;
 
 use std::fmt;
@@ -62,14 +66,16 @@ impl FromSql<Int4, Pg> for InstanceId {
 // generated schema already does.
 mod shared_tables {
     use super::schema::tycho::{
-        account_balance, component_balance, protocol_component, protocol_component_holds_token,
-        protocol_instance,
+        account_balance, component_balance, component_tvl, protocol_component,
+        protocol_component_holds_token, protocol_instance,
     };
     use crate::postgres::schema::{protocol_system, protocol_type, token};
 
     diesel::joinable!(protocol_instance -> protocol_system (protocol_system_id));
 
     diesel::allow_tables_to_appear_in_same_query!(protocol_instance, protocol_system);
+    diesel::allow_tables_to_appear_in_same_query!(protocol_component, protocol_system);
+    diesel::allow_tables_to_appear_in_same_query!(component_tvl, protocol_system);
     diesel::allow_tables_to_appear_in_same_query!(protocol_component, protocol_type);
     diesel::allow_tables_to_appear_in_same_query!(protocol_component_holds_token, token);
     diesel::allow_tables_to_appear_in_same_query!(component_balance, token);
