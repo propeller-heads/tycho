@@ -262,8 +262,8 @@ contract TransferManager is Vault {
         // Perform the actual transfer
         if (isPermit2) {
             // Permit2.permit is already called from the TychoRouterV3
-            // forge-lint: disable-next-line(calls-loop, unsafe-typecast) Each split from the input token pulls its share from the user; a failing pull fails the route. Permit2 amounts are uint160, and the balance diff below measures what arrived.
-            permit2.transferFrom(sender, receiver, uint160(amount), token);
+            // forge-lint: disable-next-line(calls-loop) Each split from the input token pulls its share from the user; a failing pull fails the route.
+            permit2.transferFrom(sender, receiver, amount.toUint160(), token);
         } else {
             // forge-lint: disable-next-line(arbitrary-send-erc20) sender is the router's msg.sender, stored by the entry point.
             IERC20(token).safeTransferFrom(sender, receiver, amount);
