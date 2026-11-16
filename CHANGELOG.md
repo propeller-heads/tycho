@@ -1,3 +1,20 @@
+## [0.524.0](https://github.com/propeller-heads/tycho/compare/0.523.0...0.524.0) (2026-11-16)
+
+
+### Features
+
+* **indexer:** add spans for protocol cache locks and memory report ([601bde6](https://github.com/propeller-heads/tycho/commit/601bde642f2994a0797e7925f823f88d1cc82e53))
+* **indexer:** warn when the extraction runtime stalls ([c7d8dc6](https://github.com/propeller-heads/tycho/commit/c7d8dc6608fb69e70d7717dd7023e5758179c55a))
+
+
+### Bug Fixes
+
+* **indexer:** bound and expose the background token price refresh ([b21e7b1](https://github.com/propeller-heads/tycho/commit/b21e7b1ea8fd57d43f14c38055ff7fd2e76d6e28))
+* **indexer:** refresh token prices without stopping the extractors ([bb01aa3](https://github.com/propeller-heads/tycho/commit/bb01aa3db969dde837355e703738f1cb3bfd50e2))
+* **indexer:** report protocol cache entry counts instead of its size ([c4173c9](https://github.com/propeller-heads/tycho/commit/c4173c9b7ce3489c6cdbb4d0e5cb377bbbd920d1))
+* **indexer:** skip the cache write lock when there is nothing to add ([4f261a9](https://github.com/propeller-heads/tycho/commit/4f261a9d2f2047c98dacbb013ca07a67b47398c6))
+* **indexer:** stop the cache size walk and price refresh from stalling extractors ([#1813](https://github.com/propeller-heads/tycho/issues/1813)) ([9db4502](https://github.com/propeller-heads/tycho/commit/9db4502c77f1398ef0d0fc32e6f3d30c215732a8))
+
 ## [0.523.0](https://github.com/propeller-heads/tycho/compare/0.522.0...0.523.0) (2026-11-16)
 
 
