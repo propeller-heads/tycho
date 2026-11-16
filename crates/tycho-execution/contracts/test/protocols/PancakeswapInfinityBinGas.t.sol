@@ -25,7 +25,7 @@ interface IBinSlot0 {
 /// nothing for the user's transfer and the quote has to carry it. The constants are the least
 /// squares fit to this test's output; run with `-vv` to see the measurements.
 contract PancakeswapInfinityBinGasTest is TychoRouterTestSetup {
-    uint256 constant SWAP_BASE_GAS = 202_000;
+    uint256 constant SWAP_BASE_GAS = 205_000;
     uint256 constant GAS_PER_BIN_CROSSED = 12_100;
     /// Residual the fit allows per swap. The USDC side costs about 6k more than the USDT side,
     /// which the one base absorbs. The bins on this pool are contiguous, so the active id before

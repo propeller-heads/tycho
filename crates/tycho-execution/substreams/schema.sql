@@ -36,8 +36,10 @@ CREATE TABLE IF NOT EXISTS trades (
     -- amount_out + total fees taken, i.e. what the swaps produced before fee deduction.
     gross_amount_out           NUMERIC(78, 0),
     -- gross_amount_out - expected_amount_out, floored at zero: the surplus the swaps produced.
-    -- The router captured it only when positive_slippage_enabled AND NOT positive_slippage_exempt;
-    -- otherwise the receiver kept it. Read router_fee_amount for what was actually taken.
+    -- When positive_slippage_enabled, the router captured router_positive_slippage_bps of it and
+    -- the receiver kept the rest; otherwise the receiver kept all of it. The client got
+    -- client_positive_slippage_share_bps of the captured amount. Read router_fee_amount for what
+    -- was actually taken.
     positive_slippage          NUMERIC(78, 0),
     native_value               NUMERIC(78, 0) NOT NULL,
     gas_used                   BIGINT NOT NULL,
@@ -53,11 +55,16 @@ CREATE TABLE IF NOT EXISTS trades (
     router_fee_on_client_fee_bps BIGINT,
     custom_fee_on_output       BOOLEAN,
     custom_fee_on_client_fee   BOOLEAN,
+    -- False only when an older calculator turned capture off with PositiveSlippageToggled. A
+    -- calculator with a router positive slippage bps has no switch and reports true.
     positive_slippage_enabled  BOOLEAN,
-    -- Whether this trade's client is exempt from positive slippage capture. The client is the
-    -- signed client_fee_receiver, or eoa (tx.origin) when that is zero. NULL on a row indexed
-    -- before this column existed.
-    positive_slippage_exempt   BOOLEAN,
+    -- Part of the surplus the router captures for this trade's client, in fee units (100000000 =
+    -- all of it): the client's custom value if set, otherwise the calculator's global one. The client
+    -- is the signed client_fee_receiver, or eoa (tx.origin) when that is zero. An exemption on an
+    -- older calculator reads as 0. NULL on a row indexed before this column existed.
+    router_positive_slippage_bps BIGINT,
+    -- The client's share of the captured surplus, in fee units. The router keeps the rest.
+    client_positive_slippage_share_bps BIGINT,
     fee_bps_scale              BIGINT,
     router_fee_amount          NUMERIC(78, 0),
     client_fee_amount          NUMERIC(78, 0),

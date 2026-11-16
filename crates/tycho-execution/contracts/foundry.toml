@@ -24,6 +24,10 @@ fs_permissions = [
     # `script/WriteRuntimeBytecodeFixtures.s.sol` writes them.
     { access = "read", path = "../config/executor_deployments.json" },
     { access = "read-write", path = "../../../protocols/testing/fixtures" },
+    # `test/protocols/EkuboV3MevCaptureV21Gas.t.sol` checks the swaps that
+    # tycho-simulation's MEVCapture v2.1 gas model is fitted to, and rewrites
+    # them when MEV_CAPTURE_V21_GAS_WRITE is set.
+    { access = "read-write", path = "../../tycho-simulation/src/evm/protocol/ekubo_v3/assets/mev_capture_v21_gas.json" },
 ]
 
 [profile.production]

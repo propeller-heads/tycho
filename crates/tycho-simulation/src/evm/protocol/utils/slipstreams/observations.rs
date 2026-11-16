@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use alloy::primitives::U256;
 use serde::{Deserialize, Serialize};
 use tycho_common::simulation::errors::SimulationError;
@@ -62,21 +64,130 @@ impl Observation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The oracle's observation ring, as a pool state sees it.
+///
+/// The ring is shared by a state, its clones and the states its swaps return, so cloning a state
+/// does not copy it. A simulated swap records its observation in `overlay`, which belongs to the
+/// state alone and shadows the ring slot of the same index; every read looks at the overlay
+/// first. `upsert_observation`, which applies on-chain updates, merges the overlay into the ring
+/// (copying the ring only while another state shares it) and then writes the chain's value.
+#[derive(Clone, Debug)]
 pub struct Observations {
+    ring: Arc<Vec<Observation>>,
+    overlay: Vec<(usize, Observation)>,
+}
+
+/// The wire form of [`Observations`]: the merged view as one array.
+#[derive(Clone, Serialize, Deserialize)]
+struct ObservationsData {
     observations: Vec<Observation>,
 }
 
+impl From<ObservationsData> for Observations {
+    fn from(data: ObservationsData) -> Self {
+        Self::new(data.observations)
+    }
+}
+
+impl From<Observations> for ObservationsData {
+    fn from(observations: Observations) -> Self {
+        let merged = (0..observations.len())
+            .map(|idx| observations.slot(idx))
+            .collect();
+        Self { observations: merged }
+    }
+}
+
+impl Serialize for Observations {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ObservationsData::from(self.clone()).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Observations {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ObservationsData::deserialize(deserializer).map(Self::from)
+    }
+}
+
+impl PartialEq for Observations {
+    fn eq(&self, other: &Self) -> bool {
+        if self.shares_ring_with(other) && self.overlay == other.overlay {
+            return true;
+        }
+        self.len() == other.len() && (0..self.len()).all(|idx| self.slot(idx) == other.slot(idx))
+    }
+}
+
+impl Eq for Observations {}
+
 impl Observations {
     pub fn new(observations: Vec<Observation>) -> Self {
-        Self { observations }
+        Self { ring: Arc::new(observations), overlay: Vec::new() }
+    }
+
+    /// Whether both views read from the same ring allocation.
+    pub fn shares_ring_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.ring, &other.ring)
+    }
+
+    /// The number of ring slots, counting slots only the overlay has written.
+    fn len(&self) -> usize {
+        let overlaid = self
+            .overlay
+            .iter()
+            .map(|(idx, _)| idx + 1)
+            .max()
+            .unwrap_or(0);
+        self.ring.len().max(overlaid)
+    }
+
+    /// The observation at ring position `idx`, overlay first; `None` past the last slot. A slot
+    /// below it that was never written reads as uninitialized, as zeroed storage does on chain.
+    fn at(&self, idx: usize) -> Option<Observation> {
+        if let Some((_, observation)) = self
+            .overlay
+            .iter()
+            .find(|(slot, _)| *slot == idx)
+        {
+            return Some(*observation);
+        }
+        if let Some(observation) = self.ring.get(idx) {
+            return Some(*observation);
+        }
+        (idx < self.len()).then(Observation::default)
+    }
+
+    /// Records `observation` at ring position `idx` in the overlay, leaving the ring untouched.
+    fn overlay_write(&mut self, idx: usize, observation: Observation) {
+        match self
+            .overlay
+            .iter_mut()
+            .find(|(slot, _)| *slot == idx)
+        {
+            Some((_, existing)) => *existing = observation,
+            None => self.overlay.push((idx, observation)),
+        }
+    }
+
+    /// Moves the overlay into the ring, copying the ring only if another state shares it.
+    fn merge_overlay(&mut self) {
+        if self.overlay.is_empty() {
+            return;
+        }
+        let len = self.len();
+        let ring = Arc::make_mut(&mut self.ring);
+        ring.resize(len, Observation::default());
+        for (idx, observation) in self.overlay.drain(..) {
+            ring[idx] = observation;
+        }
     }
 
     fn observation_index_err(&self, idx: usize, index: u16, cardinality: u16) -> SimulationError {
         SimulationError::FatalError(format!(
             "Observation index {} out of bounds (len={}), index={} cardinality={}",
             idx,
-            self.observations.len(),
+            self.len(),
             index,
             cardinality
         ))
@@ -87,39 +198,34 @@ impl Observations {
             SimulationError::FatalError(format!("Invalid observation index {index}: {e}"))
         })?;
         if bytes.is_empty() {
-            return if idx < self.observations.len() {
-                self.observations.remove(idx);
+            return if idx < self.len() {
+                self.merge_overlay();
+                Arc::make_mut(&mut self.ring).remove(idx);
                 Ok(())
             } else {
                 Err(SimulationError::FatalError(format!(
                     "Cannot delete: index {} out of bounds (len={})",
                     index,
-                    self.observations.len()
+                    self.len()
                 )))
             };
         }
         let mut obs = Observation::from_attribute(index, bytes)?;
         obs.index = index;
-        if idx < self.observations.len() {
-            self.observations[idx] = obs;
+        self.merge_overlay();
+        let ring = Arc::make_mut(&mut self.ring);
+        if idx < ring.len() {
+            ring[idx] = obs;
             return Ok(());
         }
-        if idx >= self.observations.capacity() {
-            self.observations
-                .reserve(idx - self.observations.len() + 1);
-        }
-
-        while self.observations.len() < idx {
-            self.observations
-                .push(Observation::default());
-        }
-
-        self.observations.push(obs);
+        ring.resize(idx, Observation::default());
+        ring.push(obs);
         Ok(())
     }
 
-    /// Mirrors `Oracle.write`: appends the observation the pool would record for a swap
-    /// executing at `timestamp`, and returns the new observation index.
+    /// Mirrors `Oracle.write`: records the observation the pool would write for a swap
+    /// executing at `timestamp` in the overlay, and returns the new observation index. The
+    /// shared ring is not copied or changed.
     ///
     /// `tick` and `liquidity` are the pool's values *before* the swap, matching
     /// `CLPool.swap`, which passes `slot0Start.tick` and `cache.liquidityStart`. A repeat write
@@ -136,10 +242,9 @@ impl Observations {
             return Err(SimulationError::FatalError("Cardinality must be > 0".to_string()));
         }
         let idx = index as usize;
-        if idx >= self.observations.len() {
+        let Some(last) = self.at(idx) else {
             return Err(self.observation_index_err(idx, index, cardinality));
-        }
-        let last = self.observations[idx];
+        };
         if last.block_timestamp == timestamp {
             return Ok(index);
         }
@@ -147,37 +252,27 @@ impl Observations {
         let next_index = (index + 1) % cardinality;
         let mut observation = transform(&last, timestamp, tick, liquidity)?;
         observation.index = next_index as i32;
-
-        let next_idx = next_index as usize;
-        while self.observations.len() <= next_idx {
-            self.observations
-                .push(Observation::default());
-        }
-        self.observations[next_idx] = observation;
+        self.overlay_write(usize::from(next_index), observation);
         Ok(next_index)
     }
 
     /// The observation stored at ring index `index`, if any has been written there.
-    pub fn get(&self, index: u16) -> Option<&Observation> {
-        self.observations.get(index as usize)
+    pub fn get(&self, index: u16) -> Option<Observation> {
+        self.at(index as usize)
     }
 
     /// The observation at ring position `idx`; a slot never written reads as uninitialized, as
     /// zeroed storage does on chain.
     fn slot(&self, idx: usize) -> Observation {
-        self.observations
-            .get(idx)
-            .copied()
-            .unwrap_or_default()
+        self.at(idx).unwrap_or_default()
     }
 
     pub fn timestamp_at(&self, index: u16, cardinality: u16) -> Result<u32, SimulationError> {
         let idx = index as usize;
-        if idx >= self.observations.len() {
-            return Err(self.observation_index_err(idx, index, cardinality));
+        match self.at(idx) {
+            Some(observation) => Ok(observation.block_timestamp),
+            None => Err(self.observation_index_err(idx, index, cardinality)),
         }
-
-        Ok(self.observations[idx].block_timestamp)
     }
 
     pub fn observe(
@@ -212,7 +307,7 @@ impl Observations {
         index: u16,
         cardinality: u16,
     ) -> Result<(Observation, Observation), SimulationError> {
-        if self.observations.is_empty() {
+        if self.len() == 0 {
             return Err(SimulationError::FatalError("No observations available".to_string()));
         }
         let mut l = (index as usize + 1) % cardinality as usize;
@@ -259,10 +354,9 @@ impl Observations {
         cardinality: u16,
     ) -> Result<(Observation, Observation), SimulationError> {
         let idx = index as usize;
-        if idx >= self.observations.len() {
+        let Some(mut before_or_at) = self.at(idx) else {
             return Err(self.observation_index_err(idx, index, cardinality));
-        }
-        let mut before_or_at = self.observations[idx];
+        };
 
         if lte(time, before_or_at.block_timestamp, target) {
             if before_or_at.block_timestamp == target {
@@ -296,10 +390,9 @@ impl Observations {
     ) -> Result<(i64, U256), SimulationError> {
         if seconds_ago == 0 {
             let idx = index as usize;
-            if idx >= self.observations.len() {
+            let Some(mut last) = self.at(idx) else {
                 return Err(self.observation_index_err(idx, index, cardinality));
-            }
-            let mut last = self.observations[idx];
+            };
             if last.block_timestamp != time {
                 last = transform(&last, time, tick, liquidity)?;
             }
@@ -425,7 +518,7 @@ mod tests {
             .expect("write should succeed");
 
         assert_eq!(index, 0);
-        assert_eq!(observations.observations.len(), 1);
+        assert_eq!(observations.len(), 1);
     }
 
     #[test]
@@ -437,7 +530,7 @@ mod tests {
             .expect("write should succeed");
 
         assert_eq!(index, 1);
-        let written = observations.observations[1];
+        let written = observations.slot(1);
         assert_eq!(written.block_timestamp, 1_010);
         // 100 + pre-swap tick 50 * 10 seconds
         assert_eq!(written.tick_cumulative, 600);
@@ -457,7 +550,7 @@ mod tests {
             .expect("write should succeed");
 
         assert_eq!(index, 0);
-        assert_eq!(observations.observations[0].block_timestamp, 1_000);
+        assert_eq!(observations.slot(0).block_timestamp, 1_000);
     }
 
     #[test]
@@ -585,20 +678,20 @@ mod tests {
         obs_vec
             .upsert_observation(0, &bytes)
             .unwrap();
-        assert_eq!(obs_vec.observations.len(), 1);
+        assert_eq!(obs_vec.len(), 1);
 
         // Update existing
         let bytes2 = encode_observation_bytes(200, 50, U256::from(9999), true);
         obs_vec
             .upsert_observation(0, &bytes2)
             .unwrap();
-        assert_eq!(obs_vec.observations[0].block_timestamp, 200);
+        assert_eq!(obs_vec.slot(0).block_timestamp, 200);
 
         // Delete existing
         obs_vec
             .upsert_observation(0, &[])
             .unwrap();
-        assert_eq!(obs_vec.observations.len(), 0);
+        assert_eq!(obs_vec.len(), 0);
     }
 
     #[test]

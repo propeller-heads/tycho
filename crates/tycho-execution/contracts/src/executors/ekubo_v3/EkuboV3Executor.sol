@@ -43,14 +43,24 @@ address payable constant CORE_ADDRESS =
 ICore constant CORE = ICore(CORE_ADDRESS);
 address constant MEV_CAPTURE_ADDRESS =
     0x5555fF9Ff2757500BF4EE020DcfD0210CFfa41Be;
+// MEVCapture v2.1, deployed with the deterministic CREATE2 deployer, so any
+// chain that gets it (only Ethereum so far) gets it at this address. Like
+// MEVCapture, it only accepts swaps forwarded through Core with
+// `abi.encode(poolKey, params)` and returns `abi.encode(balanceUpdate,
+// stateAfter)`. Core only initializes pools on an extension that registered
+// itself, which the extension's constructor does, so no pool matches this
+// address on a chain without the deployment.
+address constant MEV_CAPTURE_V21_ADDRESS =
+    0x51f831c23fa4051862881Ef8EfC0c3C37905Ce49;
 
-/// Chain-agnostic Ekubo V3 executor. The MEVCapture extension, deployed at the
-/// same deterministic address on every chain, is handled here.
+/// Chain-agnostic Ekubo V3 executor. MEVCapture and MEVCapture v2.1, each at
+/// one deterministic address on every chain it is deployed to, are handled
+/// here.
 /// SignedExclusiveSwap is deployed per chain, so its address is a constructor
-/// argument. Deployment-specific extensions (Ve33) live in per-chain
-/// executors, which override `_swapHop` — and `_hopEnd` when their hops carry
-/// a self-describing tail — so a deployed executor only contains extra code
-/// reachable on its chain.
+/// argument. Extensions whose address differs per deployment (Ve33) live in
+/// per-chain executors, which override `_swapHop` — and `_hopEnd` when their
+/// hops carry a self-describing tail — so a deployed executor only contains
+/// extra code reachable on its chain.
 contract EkuboV3Executor is IExecutor, ICallback {
     error EkuboV3Executor__InvalidDataLength();
     error EkuboV3Executor__CoreOnly();
@@ -259,11 +269,12 @@ contract EkuboV3Executor is IExecutor, ICallback {
                 ),
                 (PoolBalanceUpdate, PoolState)
             );
-        } else if (extension == MEV_CAPTURE_ADDRESS) {
+        } else if (
+            extension == MEV_CAPTURE_ADDRESS
+                || extension == MEV_CAPTURE_V21_ADDRESS
+        ) {
             (balanceUpdate,) = abi.decode(
-                CORE.forward(
-                    MEV_CAPTURE_ADDRESS, abi.encode(poolKey, swapParameters)
-                ),
+                CORE.forward(extension, abi.encode(poolKey, swapParameters)),
                 (PoolBalanceUpdate, PoolState)
             );
             nextOffset = offset;
