@@ -202,7 +202,7 @@ jobs:
       # run.Dockerfile builds the EVM adapter against its lib/ submodules, fetched the way the
       # adapter's Foundry CI job fetches them.
       - name: Checkout EVM adapter submodules (shallow)
-        run: git submodule update --init --depth 1 --recursive -- protocols/adapter-integration/evm/lib
+        run: git -c submodule.fetchJobs=0 submodule update --init --depth 1 --recursive -- protocols/adapter-integration/evm/lib
 
       - name: Generate cache key
         id: cache-key
