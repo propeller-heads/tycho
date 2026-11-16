@@ -62,7 +62,7 @@ use tycho_indexer::{
         SubstreamsArgs,
     },
     extractor::{
-        factory::ExtractorFactory,
+        factory::{earlier_blocks_in_second, ExtractorFactory},
         protocol_cache::ProtocolMemoryCache,
         runner::ExtractorHandle,
         supervisor::{DCIType, ExtractorConfig, ExtractorSupervisor, ProtocolTypeConfig},
@@ -874,12 +874,13 @@ async fn get_accounts_data(
     rpc: &EthereumRpcClient,
     chain: Chain,
 ) -> (Block, HashMap<Bytes, AccountDelta>) {
-    let account_extractor = EVMAccountExtractor::new(rpc, chain);
-
-    let block = account_extractor
-        .get_block_data(block_id)
+    let block = earlier_blocks_in_second(rpc, chain, block_id)
         .await
-        .expect("Failed to get block data");
+        .expect("Failed to get block data")
+        .pop()
+        .expect("The blocks end with the init block");
+
+    let account_extractor = EVMAccountExtractor::new(rpc, chain);
 
     let requests = accounts
         .iter()

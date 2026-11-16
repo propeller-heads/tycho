@@ -3,6 +3,7 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 use anyhow::{format_err, Context};
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3::Client;
+use chrono::Duration;
 use prost::Message;
 use serde::Deserialize;
 use tokio::{
@@ -11,7 +12,10 @@ use tokio::{
 };
 use tracing::info;
 use tycho_common::{
-    models::{Address, Chain, ExtractorIdentity, FinancialType, ImplementationType, ProtocolType},
+    models::{
+        blockchain::Block, Address, Chain, ExtractorIdentity, FinancialType, ImplementationType,
+        ProtocolType,
+    },
     Bytes,
 };
 use tycho_ethereum::{
@@ -380,6 +384,27 @@ impl ExtractorFactory {
                 config_start_block = self.config.start_block,
                 "Fresh start: resuming from block after last committed"
             );
+        } else {
+            // A new extractor stamps its first block against the block before it, like the
+            // extractors that already processed that block.
+            let first_block = u64::try_from(start_block).map_err(|_negative| {
+                ExtractionError::Setup(format!("start block {start_block} must not be negative"))
+            })?;
+            let blocks =
+                earlier_blocks_in_second(&self.rpc_client, self.config.chain, first_block).await?;
+            let Some((_first, earlier)) = blocks.split_last() else {
+                return Err(ExtractionError::Setup(format!("No block {first_block} on the node")));
+            };
+            if let Some(before) = earlier.last() {
+                info!(
+                    start_block,
+                    reference_ts = %before.ts,
+                    "New extractor: stamps its first block after the block before it"
+                );
+                extractor
+                    .update_last_processed_block(before.clone())
+                    .await;
+            }
         }
 
         let stream = SubstreamsStream::new(
@@ -459,6 +484,51 @@ impl ExtractorFactory {
 
         Ok(rpc_dci)
     }
+}
+
+/// Most blocks before a block that [`earlier_blocks_in_second`] reads in its second.
+const MAX_BLOCKS_PER_SECOND: usize = 1_000;
+
+/// Reads from the node the blocks of the second of block `number`, up to and including
+/// `number`, oldest first, with the timestamp every extractor stamps on them.
+///
+/// On a fast chain several blocks share one second. Each extractor stamps such a block one
+/// microsecond after the block before it, so the i-th block of a second gets the second plus
+/// i µs. The stamp depends only on the chain, never on what is stored.
+pub async fn earlier_blocks_in_second(
+    rpc: &EthereumRpcClient,
+    chain: Chain,
+    number: u64,
+) -> Result<Vec<Block>, ExtractionError> {
+    let read = |number| async move {
+        rpc.get_block(number, chain)
+            .await
+            .map_err(|err| ExtractionError::Setup(err.to_string()))
+    };
+    let last = read(number).await?;
+    let second = last.ts;
+
+    let mut blocks = vec![last];
+    for earlier in (0..number).rev() {
+        let block = read(earlier).await?;
+        if block.ts != second {
+            break;
+        }
+        if blocks.len() > MAX_BLOCKS_PER_SECOND {
+            return Err(ExtractionError::Setup(format!(
+                "More than {MAX_BLOCKS_PER_SECOND} blocks share the second of block {number}"
+            )));
+        }
+        blocks.push(block);
+    }
+    blocks.reverse();
+
+    let mut ts = second;
+    for block in &mut blocks {
+        block.ts = ts;
+        ts += Duration::microseconds(1);
+    }
+    Ok(blocks)
 }
 
 async fn ensure_spkg(spkg_path: &str, s3_bucket: Option<&str>) -> Result<(), ExtractionError> {
