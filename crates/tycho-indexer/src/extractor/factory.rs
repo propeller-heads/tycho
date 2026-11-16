@@ -31,7 +31,7 @@ use crate::{
         },
         post_processors::POST_PROCESSOR_REGISTRY,
         protocol_cache::ProtocolMemoryCache,
-        protocol_extractor::{ExtractorPgGateway, ProtocolExtractor},
+        protocol_extractor::{ExtractorPgGateway, ProtocolExtractor, ResumeFrom},
         runner::{compute_start_block, DCIPlugin, ExtractorRunner, SubscriptionsMap},
         writer_status::WriterStatus,
         ExtractionError, Extractor,
@@ -180,6 +180,9 @@ pub struct ExtractorFactory {
     protocol_cache: ProtocolMemoryCache,
     chain_state: ChainState,
     writer_status: WriterStatus,
+    /// Where the next build resumes, taken by that build. Every later build reads its cursor
+    /// from the database.
+    first_resume: std::sync::Mutex<Option<ResumeFrom>>,
 }
 
 impl ExtractorFactory {
@@ -232,7 +235,25 @@ impl ExtractorFactory {
             protocol_cache,
             chain_state,
             writer_status: WriterStatus::leader(),
+            first_resume: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Makes the first extractor this factory builds resume from `resume` instead of the cursor
+    /// in the database. A later build, after a failure or a takeover, reads the database again.
+    pub fn with_first_resume(mut self, resume: ResumeFrom) -> Self {
+        self.first_resume = std::sync::Mutex::new(Some(resume));
+        self
+    }
+
+    /// Takes the resume point set with [`Self::with_first_resume`], or [`ResumeFrom::Database`]
+    /// once it is taken.
+    fn take_first_resume(&self) -> ResumeFrom {
+        self.first_resume
+            .lock()
+            .expect("first resume lock poisoned")
+            .take()
+            .unwrap_or(ResumeFrom::Database)
     }
 
     /// Makes every extractor this factory builds commit or follow according to
@@ -317,6 +338,7 @@ impl ExtractorFactory {
                 self.token_pre_processor.clone(),
                 post_processor,
                 self.writer_status.clone(),
+                self.take_first_resume(),
             )
             .await?;
 

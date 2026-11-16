@@ -2933,6 +2933,7 @@ mod tests {
                 state: loaded_component(),
                 updated_at: at,
             }],
+            cursors: HashMap::new(),
         });
         let windows = new_windows(["ex"], WindowConfig::default());
         let address = Bytes::from(1u64).lpad(20, 0);

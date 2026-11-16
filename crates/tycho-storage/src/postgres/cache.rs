@@ -1474,7 +1474,11 @@ impl StateSnapshotGateway for CachedGateway {
                         .state_gateway
                         .component_snapshots(chain, conn)
                         .await?;
-                    Result::<_, PostgresError>::Ok(StateSnapshot { accounts, components })
+                    let cursors = self
+                        .state_gateway
+                        .get_extractor_cursors(chain, conn)
+                        .await?;
+                    Result::<_, PostgresError>::Ok(StateSnapshot { accounts, components, cursors })
                 }
                 .scope_boxed()
             })

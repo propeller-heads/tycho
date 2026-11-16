@@ -29,7 +29,7 @@ use tycho_common::{
     },
     storage::{
         BlockIdentifier, ChainGateway, ContractStateGateway, EntryPointGateway,
-        ExtractionStateGateway, ProtocolGateway, StorageError,
+        ExtractionStateGateway, ExtractorCursor, ProtocolGateway, StorageError,
     },
     traits::TokenPreProcessor,
     Bytes,
@@ -51,6 +51,43 @@ use crate::{
         v1::Clock,
     },
 };
+
+/// Where a new extractor resumes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResumeFrom {
+    /// The extractor reads the writer role and then its cursor from the database when it is
+    /// built.
+    Database,
+    /// A cursor read earlier, and the writer role read before it. `cursor` is `None` when the
+    /// extractor had committed nothing.
+    Snapshot { role: Role, cursor: Option<ExtractorCursor> },
+}
+
+/// Reads the writer role and then the cursor of the extractor of `gateway`.
+///
+/// The role comes first. A role only changes from follower to leader, so a leader role here
+/// means the epoch increment came first, and the cursor is final. A process that becomes the
+/// leader after the role read builds the extractor as a follower; it takes over on its next block
+/// and reads the cursor again then.
+async fn read_resume_point<G: ExtractorGateway>(
+    gateway: &G,
+    writer: &WriterStatus,
+) -> Result<(Role, Option<ExtractorCursor>), ExtractionError> {
+    let role = writer.role();
+    match gateway.get_cursor().await {
+        Err(StorageError::NotFound(_, _)) => Ok((role, None)),
+        Ok((cursor, block_hash)) => {
+            let block = gateway
+                .get_block(block_hash)
+                .await
+                .map_err(|err| {
+                    ExtractionError::Setup(format!("Failed to fetch latest block: {err}"))
+                })?;
+            Ok((role, Some(ExtractorCursor { cursor, block })))
+        }
+        Err(err) => Err(ExtractionError::Setup(err.to_string())),
+    }
+}
 
 pub struct Inner {
     cursor: Vec<u8>,
@@ -206,7 +243,8 @@ where
     E: ExtractorExtension,
 {
     /// Builds an extractor that resumes after the block of its cursor, and commits or follows
-    /// according to `writer`.
+    /// according to the writer role read before that cursor. `resume` gives the cursor and the
+    /// role, or tells the extractor to read both now.
     #[expect(
         clippy::too_many_arguments,
         reason = "takes each dependency of the extractor as a separate argument"
@@ -223,12 +261,13 @@ where
         token_pre_processor: T,
         post_processor: Option<fn(BlockChanges) -> BlockChanges>,
         writer: WriterStatus,
+        resume: ResumeFrom,
     ) -> Result<Self, ExtractionError> {
-        // Read the role before the cursor. A role only changes from follower to leader. A leader
-        // role here means the epoch increment came first, so the cursor below is final. A process
-        // that becomes the leader after this read builds the extractor as a follower; it takes
-        // over on its next block and reads the cursor again then.
-        let commit_mode = match writer.role() {
+        let (role, stored) = match resume {
+            ResumeFrom::Database => read_resume_point(&gateway, &writer).await?,
+            ResumeFrom::Snapshot { role, cursor } => (role, cursor),
+        };
+        let commit_mode = match role {
             Role::Leader => CommitMode::Committing { floor: None },
             Role::Follower => CommitMode::Following,
         };
@@ -245,89 +284,54 @@ where
             .increment(0);
         }
 
-        // check if this extractor has state
-        let res = match gateway.get_cursor().await {
-            Err(StorageError::NotFound(_, _)) => {
+        let (cursor, last_processed_block) = match stored {
+            None => {
                 warn!(?name, ?chain, "No cursor found, starting from the beginning");
-                ProtocolExtractor {
-                    gateway: GatewayInner {
-                        inner: Arc::new(gateway),
-                        commit_handle: Default::default(),
-                        committed_block_height: Default::default(),
-                        commit_batch_size: database_insert_batch_size,
-                    },
-                    name: name.to_string(),
-                    chain,
-                    chain_state,
-                    protocol_system,
-                    token_pre_processor,
-                    protocol_cache,
-                    inner: Arc::new(Mutex::new(Inner {
-                        cursor: vec![],
-                        last_processed_block: None,
-                        final_block_height: None,
-                        last_report_ts: chrono::Utc::now().naive_utc(),
-                        last_report_block_number: 0,
-                        first_message_processed: false,
-                    })),
-                    protocol_types,
-                    post_processor,
-                    reorg_buffer: Mutex::new(ReorgBuffer::new()),
-                    partial_block_buffer: Mutex::new(None),
-                    dci_plugin: None,
-                    writer,
-                    commit_mode: Mutex::new(commit_mode),
-                }
+                (vec![], None)
             }
-            Ok((cursor, block_hash)) => {
-                let last_processed_block = gateway
-                    .get_block(block_hash)
-                    .await
-                    .map_err(|err| {
-                        ExtractionError::Setup(format!("Failed to fetch latest block: {err}"))
-                    })?;
-
-                let cursor_str = String::from_utf8_lossy(&cursor);
+            Some(ExtractorCursor { cursor, block }) => {
                 info!(
                     ?name,
                     ?chain,
-                    cursor = %cursor_str,
-                    block_number = last_processed_block.number,
+                    cursor = %String::from_utf8_lossy(&cursor),
+                    block_number = block.number,
                     "Found existing cursor! Resuming extractor.."
                 );
-                ProtocolExtractor {
-                    gateway: GatewayInner {
-                        inner: Arc::new(gateway),
-                        commit_handle: Default::default(),
-                        committed_block_height: Arc::new(Mutex::new(Some(
-                            last_processed_block.number,
-                        ))),
-                        commit_batch_size: database_insert_batch_size,
-                    },
-                    name: name.to_string(),
-                    chain,
-                    chain_state,
-                    inner: Arc::new(Mutex::new(Inner {
-                        cursor,
-                        last_processed_block: Some(last_processed_block),
-                        final_block_height: None,
-                        last_report_ts: chrono::Local::now().naive_utc(),
-                        last_report_block_number: 0,
-                        first_message_processed: false,
-                    })),
-                    protocol_system,
-                    protocol_cache,
-                    token_pre_processor,
-                    protocol_types,
-                    post_processor,
-                    reorg_buffer: Mutex::new(ReorgBuffer::new()),
-                    partial_block_buffer: Mutex::new(None),
-                    dci_plugin: None,
-                    writer,
-                    commit_mode: Mutex::new(commit_mode),
-                }
+                (cursor, Some(block))
             }
-            Err(err) => return Err(ExtractionError::Setup(err.to_string())),
+        };
+        let res = ProtocolExtractor {
+            gateway: GatewayInner {
+                inner: Arc::new(gateway),
+                commit_handle: Default::default(),
+                committed_block_height: Arc::new(Mutex::new(
+                    last_processed_block
+                        .as_ref()
+                        .map(|block| block.number),
+                )),
+                commit_batch_size: database_insert_batch_size,
+            },
+            name: name.to_string(),
+            chain,
+            chain_state,
+            protocol_system,
+            token_pre_processor,
+            protocol_cache,
+            inner: Arc::new(Mutex::new(Inner {
+                cursor,
+                last_processed_block,
+                final_block_height: None,
+                last_report_ts: chrono::Utc::now().naive_utc(),
+                last_report_block_number: 0,
+                first_message_processed: false,
+            })),
+            protocol_types,
+            post_processor,
+            reorg_buffer: Mutex::new(ReorgBuffer::new()),
+            partial_block_buffer: Mutex::new(None),
+            dci_plugin: None,
+            writer,
+            commit_mode: Mutex::new(commit_mode),
         };
 
         res.ensure_protocol_types().await?;
@@ -2790,6 +2794,17 @@ mod test {
         writer: WriterStatus,
     ) -> ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>
     {
+        create_resuming_extractor(gw, batch_size, chain, writer, ResumeFrom::Database).await
+    }
+
+    async fn create_resuming_extractor(
+        gw: MockExtractorGateway,
+        batch_size: usize,
+        chain: Chain,
+        writer: WriterStatus,
+        resume: ResumeFrom,
+    ) -> ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>
+    {
         let protocol_types = HashMap::from([("pt_1".to_string(), ProtocolType::default())]);
         let protocol_cache = ProtocolMemoryCache::new(
             chain,
@@ -2812,6 +2827,7 @@ mod test {
             preprocessor,
             None,
             writer,
+            resume,
         )
         .await
         .expect("Failed to create extractor")
@@ -3451,6 +3467,94 @@ mod test {
                 Ok(())
             });
         let extractor = create_extractor_with_writer(gw, 1, Chain::Ethereum, writer).await;
+
+        process_trailing_blocks(&extractor, 2..=6).await;
+        wait_for_commits(&extractor).await;
+
+        assert_eq!(*committed.lock().unwrap(), vec![4]);
+    }
+
+    #[tokio::test]
+    async fn test_extractor_resumes_from_the_snapshot_cursor_without_reading_the_database() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor().never();
+        gw.expect_get_block().never();
+        let resume = ResumeFrom::Snapshot {
+            role: Role::Leader,
+            cursor: Some(ExtractorCursor {
+                cursor: b"snapshot".to_vec(),
+                block: crate::testing::block(5),
+            }),
+        };
+
+        let extractor =
+            create_resuming_extractor(gw, 1, Chain::Ethereum, WriterStatus::leader(), resume).await;
+
+        assert_eq!(extractor.get_cursor().await, "snapshot");
+        assert_eq!(
+            extractor
+                .get_last_processed_block()
+                .await,
+            Some(crate::testing::block(5))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extractor_without_a_snapshot_cursor_starts_from_the_beginning() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor().never();
+        let resume = ResumeFrom::Snapshot { role: Role::Leader, cursor: None };
+
+        let extractor =
+            create_resuming_extractor(gw, 1, Chain::Ethereum, WriterStatus::leader(), resume).await;
+
+        assert_eq!(extractor.get_cursor().await, "");
+        assert_eq!(
+            extractor
+                .get_last_processed_block()
+                .await,
+            None
+        );
+    }
+
+    /// The snapshot was read while the process was a follower, and the process became the leader
+    /// before the build. The extractor follows from the snapshot cursor and takes over from the
+    /// newer database cursor on its first block, so it does not commit a block again.
+    #[tokio::test]
+    async fn test_extractor_read_as_a_follower_in_the_snapshot_takes_over_from_the_database_cursor()
+    {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .returning(|| Ok((b"cursor".to_vec(), crate::testing::block(3).hash)));
+        gw.expect_get_block()
+            .returning(|_| Ok(crate::testing::block(3)));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        let committed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let committed_clone = committed.clone();
+        gw.expect_advance()
+            .returning(move |changes, _, _, _| {
+                committed_clone
+                    .lock()
+                    .unwrap()
+                    .push(changes.block.number);
+                Ok(())
+            });
+        let resume = ResumeFrom::Snapshot {
+            role: Role::Follower,
+            cursor: Some(ExtractorCursor {
+                cursor: b"snapshot".to_vec(),
+                block: crate::testing::block(1),
+            }),
+        };
+        let extractor =
+            create_resuming_extractor(gw, 1, Chain::Ethereum, WriterStatus::leader(), resume).await;
 
         process_trailing_blocks(&extractor, 2..=6).await;
         wait_for_commits(&extractor).await;
@@ -4414,6 +4518,7 @@ mod test {
             preprocessor,
             None,
             WriterStatus::leader(),
+            ResumeFrom::Database,
         )
         .await
         .expect("Extractor init failed");
@@ -4548,6 +4653,7 @@ mod test {
             preprocessor,
             None,
             WriterStatus::leader(),
+            ResumeFrom::Database,
         )
         .await
         .expect("extractor init failed");
@@ -7310,6 +7416,7 @@ mod test_serial_db {
                 get_mocked_token_pre_processor(),
                 None,
                 WriterStatus::leader(),
+                ResumeFrom::Database,
             )
                 .await
                 .expect("Failed to create extractor");
@@ -7507,6 +7614,7 @@ mod test_serial_db {
                 preprocessor,
                 None,
                 WriterStatus::leader(),
+                ResumeFrom::Database,
             )
                 .await
                 .expect("Failed to create extractor");
@@ -7722,6 +7830,7 @@ mod test_serial_db {
                 preprocessor,
                 None,
                 WriterStatus::leader(),
+                ResumeFrom::Database,
             )
             .await
             .expect("Failed to create extractor");

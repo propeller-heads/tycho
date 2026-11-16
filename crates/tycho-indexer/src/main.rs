@@ -17,7 +17,7 @@ use std::{
     slice,
     str::FromStr,
     sync::{mpsc, Arc},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use actix_web::{dev::ServerHandle, web, App, HttpResponse, HttpServer, Responder};
@@ -47,7 +47,10 @@ use tycho_common::{
         contract::AccountDelta,
         Address, Chain, ExtractionState, ImplementationType,
     },
-    storage::{ChainGateway, ContractStateGateway, ExtractionStateGateway},
+    storage::{
+        ChainGateway, ContractStateGateway, ExtractionStateGateway, ExtractorCursor,
+        StateSnapshotGateway,
+    },
     traits::{AccountExtractor, StorageSnapshotRequest},
     Bytes,
 };
@@ -65,6 +68,7 @@ use tycho_indexer::{
     extractor::{
         factory::ExtractorFactory,
         protocol_cache::ProtocolMemoryCache,
+        protocol_extractor::ResumeFrom,
         runner::ExtractorHandle,
         supervisor::{DCIType, ExtractorConfig, ExtractorSupervisor, ProtocolTypeConfig},
         token_analysis_cron::analyze_tokens,
@@ -623,6 +627,9 @@ async fn create_indexing_tasks(
         initialize_all_accounts(accounts_to_initialize, &rpc_client, chain, &cached_gw).await;
     }
 
+    let (entity_cache, snapshot_cursors) =
+        load_entity_cache(global_args.entity_cache_mode, &rpc_gw, &chain, &writer_status).await?;
+
     let (supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
         &extractors_config,
         chains,
@@ -636,6 +643,7 @@ async fn create_indexing_tasks(
         extraction_runtime,
         substreams_args.enable_partial_blocks,
         &writer_status,
+        snapshot_cursors.as_ref(),
     )
     .await
     .map_err(|e| ExtractionError::Setup(format!("Failed to create extractors: {e}")))?;
@@ -646,24 +654,7 @@ async fn create_indexing_tasks(
     })?;
     let plans_config = PlansConfig::from_yaml("./plans.yaml").map_err(ExtractionError::Setup)?;
 
-    // The load runs after the extractors are built and before the server and the pump start:
-    // the snapshot sees the initialized accounts, nothing writes during the build, and no
-    // request or fold can reach a half-built cache.
     let (close_connections, connections_closed) = watch::channel(false);
-    let entity_cache = match global_args.entity_cache_mode {
-        EntityCacheMode::Off => EntityCacheSetup::Off,
-        mode @ (EntityCacheMode::Shadow | EntityCacheMode::Serve) => {
-            info!(?mode, "Loading the entity cache");
-            let cache = EntityCache::load(&rpc_gw, &chain)
-                .await
-                .map_err(|e| ExtractionError::Setup(format!("Entity cache load failed: {e}")))?;
-            if mode == EntityCacheMode::Shadow {
-                EntityCacheSetup::Shadow(cache)
-            } else {
-                EntityCacheSetup::Serve(cache)
-            }
-        }
-    };
 
     let (server_handle, server_task) = ServicesBuilder::new(rpc_gw, rpc_client.clone(), api_key)
         .prefix(&global_args.server_version_prefix)
@@ -741,6 +732,71 @@ async fn initialize_all_accounts(
     }
 }
 
+/// The extractor cursors of the entity cache snapshot, and the writer role read before the
+/// snapshot.
+struct SnapshotCursors {
+    role: Role,
+    cursors: HashMap<String, ExtractorCursor>,
+}
+
+impl SnapshotCursors {
+    /// Where the extractor `name` resumes: right after the newest block the snapshot holds for
+    /// it.
+    fn resume_from(&self, name: &str) -> ResumeFrom {
+        ResumeFrom::Snapshot { role: self.role, cursor: self.cursors.get(name).cloned() }
+    }
+}
+
+/// Builds the entity cache from one state snapshot, unless `mode` is `off`.
+///
+/// The snapshot also holds the extractor cursors. Each extractor resumes from its cursor in the
+/// snapshot, so it streams every block the cache does not hold, and none twice. The role is read
+/// before the snapshot: a leader role then means that no other process commits during the read,
+/// so the cursors are final. Run it after the initial accounts are written, so the snapshot holds
+/// them, and before the server and the pump start, so no request or fold reaches a half-built
+/// cache.
+///
+/// # Errors
+///
+/// `ExtractionError::Setup` when the snapshot read fails.
+async fn load_entity_cache(
+    mode: EntityCacheMode,
+    gateway: &impl StateSnapshotGateway,
+    chain: &Chain,
+    writer_status: &WriterStatus,
+) -> Result<(EntityCacheSetup<EntityCache>, Option<SnapshotCursors>), ExtractionError> {
+    if mode == EntityCacheMode::Off {
+        return Ok((EntityCacheSetup::Off, None));
+    }
+    info!(?mode, "Loading the entity cache");
+    let started = Instant::now();
+    let role = writer_status.role();
+    let mut snapshot = gateway
+        .state_snapshot(chain)
+        .await
+        .map_err(|e| ExtractionError::Setup(format!("Entity cache load failed: {e}")))?;
+    let cursors = SnapshotCursors { role, cursors: std::mem::take(&mut snapshot.cursors) };
+    let accounts = snapshot.accounts.len();
+    let components = snapshot.components.len();
+    let cache = EntityCache::from_snapshot(snapshot);
+    let elapsed = started.elapsed();
+    metrics::gauge!("entity_cache_load_duration_seconds").set(elapsed.as_secs_f64());
+    info!(
+        accounts,
+        components,
+        extractors = cursors.cursors.len(),
+        ?role,
+        ?elapsed,
+        "Entity cache loaded"
+    );
+    let setup = if mode == EntityCacheMode::Shadow {
+        EntityCacheSetup::Shadow(cache)
+    } else {
+        EntityCacheSetup::Serve(cache)
+    };
+    Ok((setup, Some(cursors)))
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "forwards the process-wide dependencies of every extractor"
@@ -758,6 +814,7 @@ async fn build_all_extractors(
     runtime: Option<&tokio::runtime::Handle>,
     partial_blocks: bool,
     writer_status: &WriterStatus,
+    snapshot_cursors: Option<&SnapshotCursors>,
 ) -> Result<
     (
         Vec<ExtractorSupervisor>,
@@ -810,6 +867,12 @@ async fn build_all_extractors(
         )
         .await?
         .with_writer_status(writer_status.clone());
+        let factory = match snapshot_cursors {
+            Some(snapshot_cursors) => {
+                factory.with_first_resume(snapshot_cursors.resume_from(&extractor_config.name))
+            }
+            None => factory,
+        };
 
         // Create dedicated PendingDeltas channel for this extractor
         let (pd_tx, pd_rx) = tokio::sync::mpsc::channel(PENDING_DELTAS_CHANNEL_SIZE);

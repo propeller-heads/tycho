@@ -17,9 +17,9 @@ postgres/
 ├── token_cache.rs      — in-memory token store answering get_tokens without SQL (opt-in)
 ├── component_index.rs  — in-memory id/TVL index counting and paging get_protocol_components
 ├── entry_point.rs      — entry point + tracing param/result persistence
-├── extraction_state.rs — extractor checkpoint (cursor, block hash) persistence; committed block per extractor
+├── extraction_state.rs — extractor checkpoint (cursor, block hash) persistence; committed block and cursor per extractor
 ├── leader_lock.rs      — LeaderLock: session advisory lock electing the single database writer
-├── snapshot.rs         — one-transaction read of all live contracts and components for the entity cache (StateSnapshotGateway)
+├── snapshot.rs         — one-transaction read of all live contracts and components, and each extractor's cursor, for the entity cache (StateSnapshotGateway)
 ├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
 ├── writer_epoch.rs     — single-writer fencing: increment / verify the `writer_epoch` row
 ├── orm.rs              — Diesel Queryable/Insertable structs for every table

@@ -7,9 +7,9 @@
 //!
 //! # How a state request is served
 //!
-//! The cache is built at startup by [`cache::EntityCache::load`] when the mode is not `off`, and
-//! the windows fold into it. In `serve`, a response is `cached entry ⊕ window changes up to the
-//! requested version`, where `⊕` applies each change only when it is newer than the value it
+//! The cache is built at startup by [`cache::EntityCache::from_snapshot`] when the mode is not
+//! `off`, and the windows fold into it. In `serve`, a response is `cached entry ⊕ window changes up
+//! to the requested version`, where `⊕` applies each change only when it is newer than the value it
 //! writes — the rule folds use. An entity the cache and the window do not hold does not exist.
 //!
 //! The cache keeps no history. A version it cannot rebuild — below the window, or older than a

@@ -42,7 +42,7 @@ use std::{
 };
 
 use metrics::{counter, gauge, histogram};
-use tracing::{info, warn};
+use tracing::warn;
 use tycho_common::{
     keccak256,
     models::{
@@ -53,8 +53,8 @@ use tycho_common::{
         ProtocolSystem, StoreKey, StoreVal, TxHash,
     },
     storage::{
-        AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StateSnapshot,
-        StateSnapshotGateway, StorageError, WriteTimestamp,
+        AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StateSnapshot, StorageError,
+        WriteTimestamp,
     },
     Bytes,
 };
@@ -536,32 +536,13 @@ impl EntityCache {
         self.folds.load(Ordering::Relaxed)
     }
 
-    /// Builds the cache from the live state of `chain` in one snapshot read through `gateway`.
-    ///
-    /// # Errors
-    ///
-    /// `StorageError` when the snapshot read fails.
-    pub async fn load(
-        gateway: &impl StateSnapshotGateway,
-        chain: &Chain,
-    ) -> Result<Self, StorageError> {
-        let started = Instant::now();
-        let snapshot = gateway.state_snapshot(chain).await?;
-        let accounts = snapshot.accounts.len();
-        let components = snapshot.components.len();
-        let cache = Self::from_snapshot(snapshot);
-        let elapsed = started.elapsed();
-        gauge!("entity_cache_load_duration_seconds").set(elapsed.as_secs_f64());
-        gauge!("entity_cache_accounts").set(accounts as f64);
-        gauge!("entity_cache_components").set(components as f64);
-        info!(accounts, components, ?elapsed, "Entity cache loaded");
-        Ok(cache)
-    }
-
     /// Builds the cache from one snapshot: every account and component becomes an entry
-    /// timestamped with the block that wrote it.
-    pub(crate) fn from_snapshot(snapshot: StateSnapshot) -> Self {
-        let StateSnapshot { accounts, components } = snapshot;
+    /// timestamped with the block that wrote it. The extractor cursors of the snapshot are not
+    /// part of the cache.
+    pub fn from_snapshot(snapshot: StateSnapshot) -> Self {
+        let StateSnapshot { accounts, components, cursors: _ } = snapshot;
+        gauge!("entity_cache_accounts").set(accounts.len() as f64);
+        gauge!("entity_cache_components").set(components.len() as f64);
         let mut account_entries = HashMap::with_capacity(accounts.len());
         for AccountSnapshot { account, written_at } in accounts {
             account_entries.insert(
@@ -777,7 +758,6 @@ impl FoldSink for EntityCache {
 mod test {
     use std::str::FromStr;
 
-    use async_trait::async_trait;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
     use rstest::rstest;
     use tycho_common::models::protocol::ProtocolComponent;
@@ -1840,6 +1820,7 @@ mod test {
         let snapshot = StateSnapshot {
             accounts: vec![account_snapshot(5)],
             components: vec![component_snapshot(5)],
+            cursors: HashMap::new(),
         };
 
         let cache = EntityCache::from_snapshot(snapshot);
@@ -1850,7 +1831,11 @@ mod test {
 
     #[test]
     fn from_snapshot_timestamps_entries_with_the_row_timestamp() {
-        let snapshot = StateSnapshot { accounts: vec![], components: vec![component_snapshot(5)] };
+        let snapshot = StateSnapshot {
+            accounts: vec![],
+            components: vec![component_snapshot(5)],
+            cursors: HashMap::new(),
+        };
         let cache = EntityCache::from_snapshot(snapshot);
         let x =
             |cache: &EntityCache| cached_component(cache, "c1").map(|c| c.attributes["x"].clone());
@@ -1866,42 +1851,5 @@ mod test {
         same_ts.block.ts = testing::block(5).ts;
         cache.fold(&same_ts).unwrap();
         assert_eq!(x(&cache), Some(Bytes::from(1u64)), "an equal timestamp is block 5 again");
-    }
-
-    /// Answers every `state_snapshot` call with the same result.
-    struct FixedGateway(Result<StateSnapshot, StorageError>);
-
-    #[async_trait]
-    impl StateSnapshotGateway for FixedGateway {
-        async fn state_snapshot(&self, _chain: &Chain) -> Result<StateSnapshot, StorageError> {
-            self.0.clone()
-        }
-    }
-
-    #[tokio::test]
-    async fn load_builds_the_cache_the_gateway_describes() {
-        let gateway = FixedGateway(Ok(StateSnapshot {
-            accounts: vec![account_snapshot(5)],
-            components: vec![component_snapshot(5)],
-        }));
-
-        let cache = EntityCache::load(&gateway, &Chain::Ethereum)
-            .await
-            .unwrap();
-
-        assert_eq!(cached_account(&cache, &addr(1)), Some(account_snapshot(5).account));
-        assert_eq!(cached_component(&cache, "c1"), Some(component_snapshot(5).state));
-    }
-
-    #[tokio::test]
-    async fn load_reports_a_failed_snapshot_read() {
-        let gateway = FixedGateway(Err(StorageError::Unexpected("boom".to_string())));
-
-        let err = EntityCache::load(&gateway, &Chain::Ethereum)
-            .await
-            .err()
-            .expect("the load must fail");
-
-        assert_eq!(err, StorageError::Unexpected("boom".to_string()));
     }
 }

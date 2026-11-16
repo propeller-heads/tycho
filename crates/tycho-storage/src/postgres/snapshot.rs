@@ -377,7 +377,7 @@ mod test_serial_db {
 
     use super::*;
     use crate::postgres::{
-        cache::CachedGateway, db_fixtures, testing::run_against_db, PostgresGateway,
+        cache::CachedGateway, db_fixtures, orm, testing::run_against_db, PostgresGateway,
     };
 
     const C0: &str = "6B175474E89094C44Da98b954EedeAC495271d0F";
@@ -789,6 +789,30 @@ mod test_serial_db {
             let mut conn = pool.get().await.unwrap();
             let f = setup_accounts(&mut conn).await;
             setup_components(&mut conn, &f).await;
+            let (block_id, block_number): (i64, i64) = schema::block::table
+                .order_by(schema::block::number.desc())
+                .select((schema::block::id, schema::block::number))
+                .first(&mut conn)
+                .await
+                .unwrap();
+            let chain_id: i64 = schema::chain::table
+                .select(schema::chain::id)
+                .first(&mut conn)
+                .await
+                .unwrap();
+            diesel::insert_into(schema::extraction_state::table)
+                .values(&orm::NewExtractionState {
+                    name: "ambient",
+                    chain_id,
+                    attributes: None,
+                    cursor: Some("cursor".as_bytes()),
+                    version: "0.1.0",
+                    modified_ts: chrono::Utc::now().naive_utc(),
+                    block_id,
+                })
+                .execute(&mut conn)
+                .await
+                .unwrap();
             let gw = PostgresGateway::from_connection(&mut conn).await;
             drop(conn);
 
@@ -799,6 +823,9 @@ mod test_serial_db {
 
             assert_eq!(snapshot.accounts.len(), 2);
             assert_eq!(snapshot.components.len(), 3);
+            let ambient = &snapshot.cursors["ambient"];
+            assert_eq!(ambient.cursor, "cursor".as_bytes());
+            assert_eq!(ambient.block.number, u64::try_from(block_number).unwrap());
         })
         .await;
     }
@@ -827,6 +854,7 @@ mod test_serial_db {
 
             assert!(snapshot.accounts.is_empty());
             assert!(snapshot.components.is_empty());
+            assert!(snapshot.cursors.is_empty());
         })
         .await;
     }

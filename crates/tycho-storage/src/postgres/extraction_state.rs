@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
-use diesel::{ExpressionMethods, QueryDsl};
+use diesel::{ExpressionMethods, QueryDsl, SelectableHelper};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use tycho_common::models::{Chain, ExtractionState};
+use tycho_common::{
+    models::{blockchain::Block, Chain, ExtractionState},
+    storage::ExtractorCursor,
+};
 
 use super::{
     cache::CommittedBlock, orm, schema, storage_error_from_diesel, PostgresGateway, StorageError,
@@ -63,6 +66,41 @@ impl PostgresGateway {
             blocks.insert(name, CommittedBlock { number, ts });
         }
         Ok(blocks)
+    }
+
+    /// Returns the cursor of each extraction state of `chain` and the block it points to, keyed
+    /// by the state's name.
+    pub async fn get_extractor_cursors(
+        &self,
+        chain: &Chain,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<HashMap<String, ExtractorCursor>, StorageError> {
+        let chain_id = self.get_chain_id(chain)?;
+        let rows: Vec<(String, Option<Vec<u8>>, orm::Block)> = schema::extraction_state::table
+            .inner_join(schema::block::table)
+            .filter(schema::extraction_state::chain_id.eq(chain_id))
+            .select((
+                schema::extraction_state::name,
+                schema::extraction_state::cursor,
+                orm::Block::as_select(),
+            ))
+            .load(conn)
+            .await
+            .map_err(|err| {
+                storage_error_from_diesel(err, "ExtractionState", &chain.to_string(), None)
+            })?;
+        let mut cursors = HashMap::with_capacity(rows.len());
+        for (name, cursor, block) in rows {
+            let number = u64::try_from(block.number).map_err(|_negative| {
+                StorageError::Unexpected(format!(
+                    "Extraction state {name} points to a block with negative number {}",
+                    block.number
+                ))
+            })?;
+            let block = Block::new(number, *chain, block.hash, block.parent_hash, block.ts);
+            cursors.insert(name, ExtractorCursor { cursor: cursor.unwrap_or_default(), block });
+        }
+        Ok(cursors)
     }
 
     pub async fn save_state(
@@ -130,7 +168,6 @@ impl PostgresGateway {
 mod test {
     use std::str::FromStr;
 
-    use diesel::prelude::*;
     use diesel_async::{AsyncConnection, RunQueryDsl};
     use tycho_common::Bytes;
 
@@ -293,6 +330,65 @@ mod test {
             .unwrap();
 
         assert!(committed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_extractor_cursors() {
+        let mut conn = setup_db().await;
+        let gateway = get_dgw(&mut conn).await;
+        let blocks: Vec<orm::Block> = schema::block::table
+            .order_by(schema::block::number)
+            .select(orm::Block::as_select())
+            .load(&mut conn)
+            .await
+            .unwrap();
+        let chain_id = gateway
+            .get_chain_id(&Chain::Ethereum)
+            .unwrap();
+        diesel::insert_into(schema::extraction_state::table)
+            .values(&orm::NewExtractionState {
+                name: "no_cursor_extractor",
+                chain_id,
+                attributes: None,
+                cursor: None,
+                version: "0.1.0",
+                modified_ts: chrono::Utc::now().naive_utc(),
+                block_id: blocks[0].id,
+            })
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        let block = |row: &orm::Block| {
+            Block::new(
+                u64::try_from(row.number).unwrap(),
+                Chain::Ethereum,
+                row.hash.clone(),
+                row.parent_hash.clone(),
+                row.ts,
+            )
+        };
+
+        let cursors = gateway
+            .get_extractor_cursors(&Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            cursors,
+            HashMap::from([
+                (
+                    "setup_extractor".to_string(),
+                    ExtractorCursor {
+                        cursor: "10".as_bytes().to_vec(),
+                        block: block(blocks.last().unwrap()),
+                    }
+                ),
+                (
+                    "no_cursor_extractor".to_string(),
+                    ExtractorCursor { cursor: vec![], block: block(&blocks[0]) }
+                ),
+            ])
+        );
     }
 
     #[tokio::test]

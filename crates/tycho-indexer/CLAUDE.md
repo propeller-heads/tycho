@@ -49,7 +49,7 @@ services/
   deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor
   state/
     window.rs               DeltaWindow — fixed-depth block window; retention, fold-on-eviction
-    cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::load builds it from one StateSnapshotGateway read at startup
+    cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::from_snapshot builds it from one StateSnapshotGateway read at startup
     service.rs              StateService — answers contract/protocol state from cache ⊕ window, or names a FallbackReason; EntityCacheSetup (the routing itself is in rpc.rs)
     shadow.rs               Shadow mode — samples state requests, runs the cache path next to the DB path, compares the normalized answers, records metrics
     cache/view.rs           AccountView / ComponentView — views of cache entries plus window changes;
@@ -237,9 +237,10 @@ tries the `LeaderLock` once:
 
 Each extractor has a `CommitMode` driven by its `WriterStatus` (given to `ProtocolExtractor::new`
 by the factory, set by `ExtractorFactory::with_writer_status`; `WriterStatus::leader()` for the
-only writer). `new` reads the role before the cursor: a role only changes from follower to leader,
-so a process that becomes the leader after that read follows and then takes over from the cursor
-the former leader left, instead of committing again from an old cursor:
+only writer). `new` reads the role before the cursor, or takes both from the entity cache
+snapshot (`ResumeFrom::Snapshot`, role read before the snapshot). A role only changes from
+follower to leader, so a process that becomes the leader after that read follows and then takes
+over from the cursor the former leader left, instead of committing again from an old cursor:
 
 - **Committing** (leader): the path above.
 - **Following**: drained blocks go into the committing section but are never written. They are
@@ -331,11 +332,16 @@ Metrics, labelled by `extractor`: `delta_window_fold_duration_ms` (summary, one 
 folded block), `delta_window_blocks` and `delta_window_tip_block` (gauges, set after every insert
 and every restart clear; an empty window reports 0 blocks and keeps its last tip).
 
-With `--entity-cache-mode shadow|serve`, `main.rs` builds the `EntityCache` from one database
-snapshot after the extractors are built and before the server starts (`EntityCache::load` in
-`services/state/cache.rs`), and hands it to the services. The windows fold into it, under the
-window lock. A failed load is a setup error and ends the process. `off` (the default) skips the
-load, and the windows fold into `DiscardSink`.
+With `--entity-cache-mode shadow|serve`, `main.rs` (`load_entity_cache`) reads the writer role and
+then one database snapshot through `StateSnapshotGateway`, before the extractors are built and the
+server starts. `EntityCache::from_snapshot` (`services/state/cache.rs`) builds the cache from it,
+and the services get the cache. The snapshot also holds each extractor's cursor and its block. The
+first build of each extractor resumes from that cursor (`ResumeFrom::Snapshot`, set with
+`ExtractorFactory::with_first_resume`), so it streams every block the cache does not hold, also when
+a leader commits during the read. A later build reads the database cursor. The windows fold into
+the cache, under the window lock. A failed load is a setup error and ends the process. `off` (the
+default) skips the load, every extractor reads its database cursor, and the windows fold into
+`DiscardSink`.
 A fold copies an entry that a reader still holds. Two metrics count these copies, labelled by
 `entity`: `entity_cache_shared_copies_total` (counter, one per copy) and
 `entity_cache_shared_copy_duration_ms` (histogram, the time of each copy).

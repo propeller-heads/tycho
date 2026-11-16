@@ -883,18 +883,30 @@ pub struct ComponentSnapshot {
     pub updated_at: WriteTimestamp,
 }
 
-/// All live contracts and components of one chain, read from one database snapshot.
+/// The stream cursor an extractor saved last, and the block that cursor points to. The extractor
+/// resumes after that block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtractorCursor {
+    pub cursor: Vec<u8>,
+    pub block: Block,
+}
+
+/// All live contracts and components of one chain, and the cursor of each extractor, read from
+/// one database snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateSnapshot {
     pub accounts: Vec<AccountSnapshot>,
     pub components: Vec<ComponentSnapshot>,
+    /// By extractor name. An extractor that has committed nothing has no entry. The snapshot
+    /// holds every block of an extractor up to the block of its cursor and no later block.
+    pub cursors: HashMap<String, ExtractorCursor>,
 }
 
 /// Reads all live contracts and components of a chain from one database snapshot.
 #[async_trait]
 pub trait StateSnapshotGateway {
     /// All live accounts and components of `chain`, every value timestamped with the block
-    /// that wrote its row.
+    /// that wrote its row, and the cursor of each extractor of `chain`.
     ///
     /// Implementations must read everything from one database snapshot: a row committed after
     /// the read starts is invisible to every part of the result. In SQL terms, a read-only
