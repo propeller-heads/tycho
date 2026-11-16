@@ -108,6 +108,32 @@ jobs:
         if: matrix.project.path == 'crates/tycho-execution/contracts'
         run: forge lint --report-unused-suppressions --deny notes
 
+      # Forge recompiles whatever differs from the restored entry, whichever
+      # commit or forge version saved it.
+      - name: Restore build cache
+        id: build-cache-restore
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: |
+            ${{ matrix.project.path }}/out
+            ${{ matrix.project.path }}/cache
+          key: forge-build-${{ matrix.project.path }}-${{ github.sha }}
+          restore-keys: forge-build-${{ matrix.project.path }}-
+
+      - name: Build
+        run: forge build --no-lint
+
+      # Only pushes to main save, so PR code cannot plant entries. Saved before
+      # the tests, so a failing test keeps the artifacts.
+      - name: Save build cache
+        if: github.event_name == 'push' && steps.build-cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: |
+            ${{ matrix.project.path }}/out
+            ${{ matrix.project.path }}/cache
+          key: ${{ steps.build-cache-restore.outputs.cache-primary-key }}
+
       - name: Run tests
         run: forge test -vvv
 
