@@ -617,7 +617,10 @@ mod tests {
     use chrono::NaiveDateTime;
 
     use super::*;
-    use crate::testing::mock_node::{block_response, node};
+    use crate::testing::{
+        mock_node::{block_response, node},
+        MockGateway,
+    };
 
     const SECOND: i64 = 1_700_000_000;
 
@@ -720,6 +723,51 @@ mod tests {
         let res = earlier_blocks_in_second(&rpc, Chain::Ethereum, 10).await;
 
         assert!(matches!(res, Err(ExtractionError::Setup(_))));
+    }
+
+    /// A gateway whose `get_block` returns `stored`.
+    fn gateway(stored: Result<Block, StorageError>) -> MockGateway {
+        let mut gateway = MockGateway::new();
+        gateway
+            .expect_get_block()
+            .return_once(move |_| stored);
+        gateway
+    }
+
+    #[tokio::test]
+    async fn test_check_stored_block_not_stored() {
+        let gateway = gateway(Err(StorageError::NotFound("Block".into(), "10".into())));
+
+        let res = check_stored_block(&gateway, &block(10, ts_at(SECOND, 2))).await;
+
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_check_stored_block_with_same_timestamp() {
+        let gateway = gateway(Ok(block(10, ts_at(SECOND, 2))));
+
+        let res = check_stored_block(&gateway, &block(10, ts_at(SECOND, 2))).await;
+
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_check_stored_block_with_other_timestamp_fails() {
+        let gateway = gateway(Ok(block(10, ts_at(SECOND, 0))));
+
+        let res = check_stored_block(&gateway, &block(10, ts_at(SECOND, 2))).await;
+
+        assert!(matches!(res, Err(ExtractionError::Setup(_))));
+    }
+
+    #[tokio::test]
+    async fn test_check_stored_block_storage_error_fails() {
+        let gateway = gateway(Err(StorageError::Unexpected("connection lost".into())));
+
+        let res = check_stored_block(&gateway, &block(10, ts_at(SECOND, 2))).await;
+
+        assert!(matches!(res, Err(ExtractionError::Storage(_))));
     }
 
     #[test]
