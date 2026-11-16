@@ -16,6 +16,7 @@ use tycho_common::{
         blockchain::Block, Address, Chain, ExtractorIdentity, FinancialType, ImplementationType,
         ProtocolType,
     },
+    storage::{BlockIdentifier, ChainGateway, StorageError},
     Bytes,
 };
 use tycho_ethereum::{
@@ -392,9 +393,10 @@ impl ExtractorFactory {
             })?;
             let blocks =
                 earlier_blocks_in_second(&self.rpc_client, self.config.chain, first_block).await?;
-            let Some((_first, earlier)) = blocks.split_last() else {
+            let Some((first, earlier)) = blocks.split_last() else {
                 return Err(ExtractionError::Setup(format!("No block {first_block} on the node")));
             };
+            check_stored_block(&fresh_gw, first).await?;
             if let Some(before) = earlier.last() {
                 info!(
                     start_block,
@@ -529,6 +531,30 @@ pub async fn earlier_blocks_in_second(
         ts += Duration::microseconds(1);
     }
     Ok(blocks)
+}
+
+/// Fails when `block` is stored with another timestamp.
+///
+/// A new extractor and account initialisation stamp their first block from the node. Versions refer
+/// to their block by timestamp, so a stored row with another timestamp would make them refer to a
+/// timestamp that no stored block has. The blocks after the first one are stamped from it, so one
+/// check at start is enough.
+pub async fn check_stored_block(
+    gateway: &(impl ChainGateway + Sync),
+    block: &Block,
+) -> Result<(), ExtractionError> {
+    match gateway
+        .get_block(&BlockIdentifier::Hash(block.hash.clone()))
+        .await
+    {
+        Ok(stored) if stored.ts != block.ts => Err(ExtractionError::Setup(format!(
+            "Block {} ({}) is stored with timestamp {}, but the chain gives it {}: correct the \
+             stored timestamp",
+            block.number, block.hash, stored.ts, block.ts
+        ))),
+        Ok(_) | Err(StorageError::NotFound(..)) => Ok(()),
+        Err(err) => Err(ExtractionError::Storage(err)),
+    }
 }
 
 async fn ensure_spkg(spkg_path: &str, s3_bucket: Option<&str>) -> Result<(), ExtractionError> {
