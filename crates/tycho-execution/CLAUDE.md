@@ -73,6 +73,9 @@ delta when tokens arrive at the router, negative when they leave. `nonZeroDeltaC
 
 **External methods**: `deposit(token, amount)` and `withdraw(token, amount)`. Supports native ETH via `address(0)`.
 
+**Delta casts**: every `uint256` amount enters the deltas through `SafeCast.toInt256`, which reverts above
+`type(int256).max`. A raw cast would turn an amount near 2^256 into a credit for a token the router never received.
+
 **Fee accounting**: Fees credited directly to fee receivers' vault balances via `_creditVault()` -- persistent storage
 writes (~22k gas each) but no ERC20 transfers.
 

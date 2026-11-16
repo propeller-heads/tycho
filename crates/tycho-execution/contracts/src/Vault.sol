@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
     SafeERC20
@@ -37,6 +38,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
     using TransientSlot for TransientSlot.Int256Slot;
     using TransientSlot for TransientSlot.Uint256Slot;
     using SafeERC20 for IERC20;
+    using SafeCast for uint256;
 
     // Vault balances - using our own mapping to avoid expensive Transfer events from ERC6909
     mapping(address => mapping(uint256 => uint256)) private _vaultBalances;
@@ -339,8 +341,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
                 revert Vault__UnexpectedNonZeroCount(nonZeroCount);
             } else if (nonZeroCount == 1) {
                 int256 inputDelta = _getDelta(inputToken);
-                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                if (inputDelta == 0 || inputDelta != -int256(inputAmount)) {
+                if (inputDelta == 0 || inputDelta != -inputAmount.toInt256()) {
                     revert Vault__UnexpectedInputDelta(inputDelta);
                 }
                 uint256 id = _toId(inputToken);

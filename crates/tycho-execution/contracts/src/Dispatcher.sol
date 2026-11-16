@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {LowLevelCall} from "@openzeppelin/contracts/utils/LowLevelCall.sol";
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
@@ -42,6 +43,7 @@ contract Dispatcher is TransferManager {
     using TransientSlot for TransientSlot.BooleanSlot;
     using TransientSlot for TransientSlot.Uint256Slot;
     using SafeERC20 for IERC20;
+    using SafeCast for uint256;
 
     mapping(address => uint256) public executorsActivationTimestamp;
 
@@ -192,8 +194,7 @@ contract Dispatcher is TransferManager {
 
         // Delta accounting if tokens stay at router
         if (receiver == address(this)) {
-            // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-            _updateDeltaAccounting(tokenOut, int256(amountOut));
+            _updateDeltaAccounting(tokenOut, amountOut.toInt256());
         }
     }
 

@@ -11,6 +11,7 @@ import {
     SafeERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {
     IAllowanceTransfer
 } from "@permit2/src/interfaces/IAllowanceTransfer.sol";
@@ -107,6 +108,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     uint48 private _feeCalculatorActivationTimestamp;
 
     using SafeERC20 for IERC20;
+    using SafeCast for uint256;
     using LibPrefixLengthEncodedByteArray for bytes;
     using LibSwap for bytes;
 
@@ -963,8 +965,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     ) internal returns (uint256) {
         int256 outputDelta = _getDelta(tokenOut);
         if (outputDelta > 0) {
-            // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-            _updateDeltaAccounting(tokenOut, -int256(amountOut));
+            _updateDeltaAccounting(tokenOut, -amountOut.toInt256());
             // out tokens are still in the Router and need to be sent to the final receiver
             // or credited to the vault
             if (receiver == address(this)) {
@@ -1272,9 +1273,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                 // accounting without funds will result in an additional negative
                 // delta, and cause the _finalizeBalances method to revert.
                 _updateDeltaAccounting(
-                    feeInput.tokenOut,
-                    // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                    -int256(fees[i].feeAmount)
+                    feeInput.tokenOut, -fees[i].feeAmount.toInt256()
                 );
                 _creditVaultForFees(
                     fees[i].recipient, feeInput.tokenOut, fees[i].feeAmount
@@ -1309,8 +1308,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                     msg.value, amountIn
                 );
             }
-            // forge-lint: disable-next-line(unsafe-typecast) msg.value is native currency the caller sent; no chain's native supply comes near 2^255.
-            _updateDeltaAccounting(ETH_ADDRESS, int256(msg.value));
+            _updateDeltaAccounting(ETH_ADDRESS, msg.value.toInt256());
         }
     }
 
@@ -1342,8 +1340,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                 // Output tokens are still in the Router. This could be because no
                 // output transfer has been performed yet, or the user has specified the
                 // receiver to be the router in order to rebalance their vault.
-                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                _updateDeltaAccounting(tokenOut, int256(requiredContribution));
+                _updateDeltaAccounting(
+                    tokenOut, requiredContribution.toInt256()
+                );
             } else if (outputDelta == 0) {
                 if (receiver == address(this)) {
                     _creditVault(msg.sender, tokenOut, requiredContribution);
