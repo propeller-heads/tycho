@@ -145,6 +145,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param executors Executors approved from deployment, without the
      *  timelock that applies to executors added later with `setExecutors`.
      * @param pauserAdmin Initial holder of `PAUSER_ROLE`.
+     * @param pausers Further holders of `PAUSER_ROLE`.
      * @param unpauserAdmin Initial holder of `UNPAUSER_ROLE`.
      * @param executorSetterAdmin Initial holder of `EXECUTOR_SETTER_ROLE`.
      * @param routerFeeSetterAdmin Initial holder of `ROUTER_FEE_SETTER_ROLE`.
@@ -155,6 +156,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address feeCalculator,
         address[] memory executors,
         address pauserAdmin,
+        address[] memory pausers,
         address unpauserAdmin,
         address executorSetterAdmin,
         address routerFeeSetterAdmin
@@ -175,6 +177,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
 
         // Grant initial roles - only these ones are admin of the corresponding role
         _grantRole(PAUSER_ROLE, pauserAdmin);
+        for (uint256 i = 0; i < pausers.length; i++) {
+            _grantRole(PAUSER_ROLE, pausers[i]);
+        }
         _grantRole(UNPAUSER_ROLE, unpauserAdmin);
         _grantRole(EXECUTOR_SETTER_ROLE, executorSetterAdmin);
         _grantRole(ROUTER_FEE_SETTER_ROLE, routerFeeSetterAdmin);

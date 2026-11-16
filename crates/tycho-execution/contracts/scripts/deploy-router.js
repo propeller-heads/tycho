@@ -49,6 +49,10 @@ async function main() {
 
     const networkRoles = resolveRolesNetwork(network);
     const unpauser = networkRoles.UNPAUSER_ROLE[0];
+    const pausers = networkRoles.PAUSER_ROLE;
+    if (!pausers || pausers.length === 0) {
+        throw new Error(`No PAUSER_ROLE wallets for network "${network}" in roles.json`);
+    }
     const executorSetter = networkRoles.EXECUTOR_SETTER_ROLE[0];
     const routerFeeSetter = networkRoles.ROUTER_FEE_SETTER[0];
     const executors = resolveExecutors(network);
@@ -60,6 +64,8 @@ async function main() {
     console.log(`- executors (${executors.length}):`);
     executors.forEach((executor) => console.log(`    ${executor}`));
     console.log(`- pauserAdmin: ${unpauser}`);
+    console.log(`- pausers (${pausers.length}):`);
+    pausers.forEach((pauser) => console.log(`    ${pauser}`));
     console.log(`- unpauserAdmin: ${unpauser}`);
     console.log(`- executorSetterAdmin: ${executorSetter}`);
     console.log(`- routerFeeSetterAdmin: ${routerFeeSetter}`);
@@ -80,6 +86,7 @@ async function main() {
         feeCalculator,
         executors,
         unpauser,
+        pausers,
         unpauser,
         executorSetter,
         routerFeeSetter
@@ -141,6 +148,7 @@ async function main() {
                 feeCalculator,
                 executors,
                 unpauser,
+                pausers,
                 unpauser,
                 executorSetter,
                 routerFeeSetter,

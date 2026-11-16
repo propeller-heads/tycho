@@ -62,6 +62,7 @@ contract TychoRouterExposed is TychoRouterV3 {
         address feeCalculator,
         address[] memory executors,
         address pauser,
+        address[] memory pausers,
         address unpauser,
         address executorSetter,
         address routerFeeSetter
@@ -71,6 +72,7 @@ contract TychoRouterExposed is TychoRouterV3 {
             feeCalculator,
             executors,
             pauser,
+            pausers,
             unpauser,
             executorSetter,
             routerFeeSetter
@@ -230,6 +232,7 @@ contract TychoRouterTestSetup is
             placeholderFeeCalculator,
             new address[](0),
             PAUSER,
+            new address[](0),
             UNPAUSER,
             EXECUTOR_SETTER,
             FEE_SETTER

@@ -227,6 +227,7 @@ contract TychoRouterTest is TychoRouterTestSetup {
             nonContract,
             new address[](0),
             PAUSER,
+            new address[](0),
             UNPAUSER,
             EXECUTOR_SETTER,
             FEE_SETTER
@@ -248,10 +249,35 @@ contract TychoRouterTest is TychoRouterTestSetup {
             address(newFeeCalculator),
             new address[](0),
             PAUSER,
+            new address[](0),
             UNPAUSER,
             EXECUTOR_SETTER,
             FEE_SETTER
         );
+    }
+
+    function testConstructorPausersCanPause() public {
+        address[] memory pausers = new address[](2);
+        pausers[0] = makeAddr("pauserA");
+        pausers[1] = makeAddr("pauserB");
+        TychoRouterExposed router = new TychoRouterExposed(
+            PERMIT2_ADDRESS,
+            address(feeCalculator),
+            new address[](0),
+            PAUSER,
+            pausers,
+            UNPAUSER,
+            EXECUTOR_SETTER,
+            FEE_SETTER
+        );
+
+        assertTrue(router.hasRole(PAUSER_ROLE, PAUSER));
+        assertTrue(router.hasRole(PAUSER_ROLE, pausers[0]));
+        assertTrue(router.hasRole(PAUSER_ROLE, pausers[1]));
+
+        vm.prank(pausers[1]);
+        router.pause();
+        assertTrue(router.paused());
     }
 
     function testRoleHolderCanTransferOwnRole() public {
@@ -309,6 +335,7 @@ contract TychoRouterTest is TychoRouterTestSetup {
             address(feeCalculator),
             executors,
             PAUSER,
+            new address[](0),
             UNPAUSER,
             EXECUTOR_SETTER,
             FEE_SETTER
