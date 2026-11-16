@@ -3,6 +3,7 @@ const {ethers} = require("hardhat");
 const hre = require("hardhat");
 const {resolveRolesNetwork, verifyOnExplorer} = require("./utils");
 const executorAddresses = require("../../config/executor_addresses.json");
+const deploymentRegistry = require("../../config/deployment_registry.json");
 
 // The executors the router approves at deployment, without the timelock that
 // applies to executors added later.
@@ -45,7 +46,16 @@ async function main() {
     const network = hre.network.name;
     // Permit2 is deployed at the same address on all EVM chains
     const permit2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
-    let feeCalculator = process.env.FEE_CALCULATOR;
+    // FEE_CALCULATOR overrides the chain's active FeeCalculator in
+    // config/deployment_registry.json.
+    const registryChain = deploymentRegistry.chains[network.replace(/^tenderly_/, "")];
+    const feeCalculator =
+        process.env.FEE_CALCULATOR || registryChain?.fee_calculator?.address;
+    if (!feeCalculator) {
+        throw new Error(
+            `No FeeCalculator for network "${network}": set FEE_CALCULATOR or add it to deployment_registry.json`
+        );
+    }
 
     const networkRoles = resolveRolesNetwork(network);
     const unpauser = networkRoles.UNPAUSER_ROLE[0];

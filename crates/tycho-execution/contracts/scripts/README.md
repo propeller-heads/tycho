@@ -52,7 +52,8 @@ The FeeCalculator must be deployed **before** the TychoRouterV3, as the router r
    address that can call `withdraw()` on the router. It is a constructor argument because the
    deployment goes through the CREATE2 factory, which can never withdraw.
 3. Deploy: `npx hardhat run scripts/deploy-fee-calculator.js --network NETWORK`
-4. Note the deployed address — you will need it in the next step.
+4. Record the deployed address as the chain's `fee_calculator` in
+   `config/deployment_registry.json`. The router deploy script reads it from there.
 
 ### Deploy executors
 
@@ -67,16 +68,17 @@ Executors must be deployed **before** the TychoRouterV3: the router approves eve
 
 1. Define the accounts to grant roles to in `scripts/roles.json`. For each role, the first address
    receives the role in the constructor.
-2. Set environment variables:
+2. The script uses the chain's `fee_calculator` from `config/deployment_registry.json`. To use
+   another FeeCalculator, set it explicitly:
    ```
-   export FEE_CALCULATOR=<fee-calculator-address-from-previous-step>
+   export FEE_CALCULATOR=<fee-calculator-address>
    ```
 3. Deploy router: `npx hardhat run scripts/deploy-router.js --network NETWORK`. The script
    passes the network's executors from `config/executor_addresses.json`, deduplicated and
    sorted, and stops if any of them has no code. It grants `PAUSER_ROLE` to the network's
-   `PAUSER_ROLE` wallets in `scripts/roles.json`, and stops if the list is empty. The fee calculator and these executors are
-   active at deployment. The router address depends on both, so a different executor set gives
-   a different address.
+   `PAUSER_ROLE` wallets in `scripts/roles.json`, and stops if the list is empty. The fee
+   calculator and these executors are active at deployment. The router address depends on both,
+   so a different executor set gives a different address.
 4. Fill in the router address in `config/router_addresses.json`
 
 Via the safe wallet UI:
