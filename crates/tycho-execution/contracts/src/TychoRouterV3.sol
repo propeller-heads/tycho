@@ -169,8 +169,10 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             _setExecutor(executors[i], 0);
         }
 
-        // Make each role its own admin so role holders can manage their own role
-        _setRoleAdmin(PAUSER_ROLE, PAUSER_ROLE);
+        // Make each role its own admin so role holders can manage their own
+        // role. Only unpausers grant and revoke PAUSER_ROLE, so a pauser key
+        // cannot add pausers or remove the other pausers.
+        _setRoleAdmin(PAUSER_ROLE, UNPAUSER_ROLE);
         _setRoleAdmin(UNPAUSER_ROLE, UNPAUSER_ROLE);
         _setRoleAdmin(EXECUTOR_SETTER_ROLE, EXECUTOR_SETTER_ROLE);
         _setRoleAdmin(ROUTER_FEE_SETTER_ROLE, ROUTER_FEE_SETTER_ROLE);

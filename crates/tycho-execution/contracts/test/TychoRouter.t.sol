@@ -280,10 +280,23 @@ contract TychoRouterTest is TychoRouterTestSetup {
         assertTrue(router.paused());
     }
 
-    function testRoleHolderCanTransferOwnRole() public {
+    function testPauserCannotGrantPauserRole() public {
+        address newPauser = makeAddr("newPauser");
+        vm.prank(PAUSER);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector,
+                PAUSER,
+                keccak256("UNPAUSER_ROLE")
+            )
+        );
+        tychoRouter.grantRole(PAUSER_ROLE, newPauser);
+    }
+
+    function testUnpauserManagesPauserRole() public {
         address newPauser = makeAddr("newPauser");
 
-        vm.startPrank(PAUSER);
+        vm.startPrank(UNPAUSER);
         tychoRouter.grantRole(PAUSER_ROLE, newPauser);
         tychoRouter.revokeRole(PAUSER_ROLE, PAUSER);
         vm.stopPrank();
