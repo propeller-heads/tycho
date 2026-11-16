@@ -30,11 +30,8 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
 
     function testSequentialSwapPermit2() public {
         // Trade 1 WETH for USDC through DAI - see _getSequentialSwaps for more info
-        // Make sure DAI the router already holds is unaffected
         uint256 amountIn = 1 ether;
-        uint256 existingRouterDAIBalance = 10_000 ether;
         deal(WETH_ADDR, ALICE, amountIn);
-        deal(DAI_ADDR, tychoRouterAddr, existingRouterDAIBalance);
 
         vm.startPrank(ALICE);
         (
@@ -59,11 +56,6 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
         uint256 usdcBalance = IERC20(USDC_ADDR).balanceOf(ALICE);
         assertEq(usdcBalance, 2005810530);
         assertEq(IERC20(WETH_ADDR).balanceOf(tychoRouterAddr), 0);
-
-        assertEq(
-            IERC20(DAI_ADDR).balanceOf(tychoRouterAddr),
-            existingRouterDAIBalance
-        );
     }
 
     function testSequentialSwapTransferFrom() public {

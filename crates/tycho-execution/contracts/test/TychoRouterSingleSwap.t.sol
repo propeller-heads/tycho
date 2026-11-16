@@ -553,8 +553,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
         return 22689128;
     }
 
-    // TODO(ENG-6054): skip until ENG-6054 is merged
-    function skip_testFinalFeeBelowMinAmount() public {
+    function testFinalFeeBelowMinAmount() public {
         // Swap USDC → TWIF (6% fee-on-transfer) via UniswapV4.
         // A small client fee forces the output through the router instead of going
         // directly to ALICE, causing an extra TWIF transfer (and an extra 6% tax).
@@ -597,13 +596,13 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
         // Output after the UniswapV4 swap is 107508473722887877019425641400
         // The user has correctly calculated this and set their min amount to be
         // 106000000000000000000000000000, which is even enough to account for the
-        // client fee. They however forgot to account for the final transfer fee, so
-        // they only end up with 101057965299514598220586024960 in their wallet.
-        // TychoRouterV3 reverts.
+        // client fee. They however forgot to account for the 6% tax on the
+        // router's final transfer, so they would only end up with
+        // 101057964288934951403114058934 in their wallet. TychoRouterV3 reverts.
         vm.expectRevert(
             abi.encodeWithSelector(
                 TychoRouter__NegativeSlippage.selector,
-                101047859502984652937820276907,
+                101057964288934951403114058934,
                 106000000000000000000000000000
             )
         );

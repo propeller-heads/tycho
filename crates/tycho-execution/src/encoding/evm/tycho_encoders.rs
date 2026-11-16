@@ -597,7 +597,7 @@ mod tests {
         }
 
         #[test]
-        fn test_validate_fails_receiver_is_router() {
+        fn test_validate_receiver_is_router() {
             let encoder = get_tycho_router_encoder();
             let swap = Swap::new(
                 ProtocolComponent {

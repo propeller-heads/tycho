@@ -420,8 +420,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             0x5c6ee304399dbdb9c8ef030ab642b10820db8f56000200000000000000000014;
 
         deal(WETH_ADDR, ALICE, amountIn);
-        // Simulate funds already in the router - we must make sure
-        // these are untouched after our swap.
+        // Funds already in the router must stay untouched after the swap.
         deal(WETH_ADDR, tychoRouterAddr, existingRouterBalance);
         vm.startPrank(ALICE);
 

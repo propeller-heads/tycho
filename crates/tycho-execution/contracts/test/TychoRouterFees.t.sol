@@ -12,6 +12,11 @@ import {FeeRecipient, FeeInput} from "../lib/FeeStructs.sol";
 import {IFeeCalculator, CustomFees} from "@interfaces/IFeeCalculator.sol";
 import {ERC1271Wallet, NonERC1271Wallet} from "./ClientFeeTestHelper.sol";
 import {RevertingReceiver} from "./SubsidyPayer.t.sol";
+import {Address} from "@openzeppelin/contracts/utils/Address.sol";
+import {Dispatcher__UnapprovedExecutor} from "@src/Dispatcher.sol";
+import {
+    ReentrancyGuard
+} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @dev Malicious FeeCalculator that claims one wei more in fees than the
 ///      swap produced. Mirrors the real implementation's [router, client]
@@ -98,6 +103,22 @@ contract FixedFeeCalculator is IFeeCalculator {
         returns (uint32, uint32)
     {
         return (0, 0);
+    }
+}
+
+/// @dev Fee recipient that calls back into the router when it receives ETH
+///      and lets the router's revert, if any, fail the transfer.
+contract ReenteringFeeRecipient {
+    address private immutable _router;
+    bytes private _reentryCall;
+
+    constructor(address router, bytes memory reentryCall) {
+        _router = router;
+        _reentryCall = reentryCall;
+    }
+
+    receive() external payable {
+        Address.functionCall(_router, _reentryCall);
     }
 }
 
@@ -210,7 +231,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             IERC20(DAI_ADDR).balanceOf(clientFeeReceiver);
         assertEq(clientFeeReceiverBalance, expectedClientFee);
 
-        // Check ALICE received correct amount in her address
+        // Check ALICE received the output after fees
         uint256 userBalance = IERC20(DAI_ADDR).balanceOf(ALICE);
         assertEq(userBalance, expectedAmountOut);
     }
@@ -996,6 +1017,52 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         _unwrapWethExpectRevert(
             1 ether, abi.encodeWithSignature("Error(string)", "no ETH")
+        );
+    }
+
+    function testFeeRecipientReentersSwap() public {
+        bytes memory reentryCall = abi.encodeCall(
+            tychoRouter.singleSwap,
+            (1, WETH_ADDR, DAI_ADDR, 1, 1, ALICE, noClientFee(), "")
+        );
+        _activateFeeCalculator(
+            address(
+                new FixedFeeCalculator(
+                    address(
+                        new ReenteringFeeRecipient(tychoRouterAddr, reentryCall)
+                    ),
+                    1
+                )
+            )
+        );
+
+        _unwrapWethExpectRevert(
+            1 ether,
+            abi.encodeWithSelector(
+                ReentrancyGuard.ReentrancyGuardReentrantCall.selector
+            )
+        );
+    }
+
+    function testFeeRecipientReentersCallback() public {
+        _activateFeeCalculator(
+            address(
+                new FixedFeeCalculator(
+                    address(
+                        new ReenteringFeeRecipient(
+                            tychoRouterAddr, hex"12345678"
+                        )
+                    ),
+                    1
+                )
+            )
+        );
+
+        _unwrapWethExpectRevert(
+            1 ether,
+            abi.encodeWithSelector(
+                Dispatcher__UnapprovedExecutor.selector, address(0)
+            )
         );
     }
 

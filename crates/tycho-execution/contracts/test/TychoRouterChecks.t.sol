@@ -32,9 +32,7 @@ contract TychoRouterChecksTest is TychoRouterTestSetup {
         vm.startPrank(ALICE);
         vm.expectRevert(
             abi.encodeWithSelector(
-                TychoRouter__InvalidMsgValue.selector,
-                amountIn - 1,
-                amountIn
+                TychoRouter__InvalidMsgValue.selector, amountIn - 1, amountIn
             )
         );
         tychoRouter.singleSwap{value: amountIn - 1}(
@@ -110,8 +108,9 @@ contract TychoRouterChecksTest is TychoRouterTestSetup {
     }
 
     function testPermit2NativeInput() public {
-        // The Permit2 methods are not payable, so a native ETH input would
-        // spend ETH the router holds. They revert instead.
+        // The Permit2 methods are not payable, so a native ETH input could
+        // only be paid from ETH the router holds. They revert instead of
+        // spending it.
         uint256 amountIn = 1 ether;
         deal(tychoRouterAddr, amountIn);
         IAllowanceTransfer.PermitSingle memory permitSingle;
@@ -164,6 +163,68 @@ contract TychoRouterChecksTest is TychoRouterTestSetup {
             tychoRouterAddr, // receiver
             noClientFee(),
             swap
+        );
+        vm.stopPrank();
+    }
+
+    function testSequentialSwapReceiverIsRouter() public {
+        uint256 amountIn = 1 ether;
+        deal(WETH_ADDR, ALICE, amountIn);
+        bytes[] memory swaps = new bytes[](1);
+        swaps[0] = encodeSequentialSwap(
+            address(usv2Executor),
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
+        );
+
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoRouter__InvalidReceiver.selector, tychoRouterAddr
+            )
+        );
+        tychoRouter.sequentialSwap(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            1, // expected amount out
+            1, // min amount out
+            tychoRouterAddr, // receiver
+            noClientFee(),
+            pleEncode(swaps)
+        );
+        vm.stopPrank();
+    }
+
+    function testSplitSwapReceiverIsRouter() public {
+        uint256 amountIn = 1 ether;
+        deal(WETH_ADDR, ALICE, amountIn);
+        bytes[] memory swaps = new bytes[](1);
+        swaps[0] = encodeSplitSwap(
+            uint8(0),
+            uint8(1),
+            uint24(0),
+            address(usv2Executor),
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
+        );
+
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoRouter__InvalidReceiver.selector, tychoRouterAddr
+            )
+        );
+        tychoRouter.splitSwap(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            1, // expected amount out
+            1, // min amount out
+            2, // nTokens
+            tychoRouterAddr, // receiver
+            noClientFee(),
+            pleEncode(swaps)
         );
         vm.stopPrank();
     }
@@ -248,8 +309,8 @@ contract TychoRouterChecksTest is TychoRouterTestSetup {
     }
 
     function testSequentialSwapNativeETHIntermediate() public {
-        // Output of first swap is native ETH. Second swap uses that ETH for a
-        // native ETH input swap without touching the ETH the router already holds.
+        // The first swap outputs native ETH. The second swap spends that ETH
+        // and leaves the ETH the router already held untouched.
         // Sequential swap: USDC --(USV4)--> ETH --(rocket)--> rETH
         bytes[] memory swaps = new bytes[](2);
 
@@ -341,5 +402,36 @@ contract TychoRouterChecksTest is TychoRouterTestSetup {
         assertEq(amountOut, poolAmountOut);
         assertEq(IERC20(USDC_ADDR).balanceOf(ALICE), poolAmountOut);
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
+    }
+
+    function testCyclicalSwapLoss() public {
+        // USDC -> WETH (USV3) -> USDC (USV2) without a price gap returns
+        // less USDC than it took, after both pool fees.
+        uint256 amountIn = 1_000_000_000; // 1000 USDC
+        deal(USDC_ADDR, ALICE, amountIn);
+        bytes[] memory swaps = new bytes[](2);
+        swaps[0] = encodeSequentialSwap(
+            address(usv3Executor),
+            encodeUniswapV3Swap(USDC_ADDR, WETH_ADDR, USDC_WETH_USV3, true)
+        );
+        swaps[1] = encodeSequentialSwap(
+            address(usv2Executor),
+            encodeUniswapV2Swap(USDC_WETH_USV2, WETH_ADDR, USDC_ADDR)
+        );
+
+        vm.startPrank(ALICE);
+        IERC20(USDC_ADDR).approve(address(tychoRouterAddr), amountIn);
+        vm.expectPartialRevert(TychoRouter__NegativeSlippage.selector);
+        tychoRouter.sequentialSwap(
+            amountIn,
+            USDC_ADDR,
+            USDC_ADDR,
+            amountIn, // expected amount out
+            amountIn, // min amount out
+            ALICE, // receiver
+            noClientFee(),
+            pleEncode(swaps)
+        );
+        vm.stopPrank();
     }
 }
