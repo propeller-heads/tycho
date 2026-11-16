@@ -541,11 +541,10 @@ contract TychoRouterV3 is
         _validateAddresses(receiver, tokenIn, tokenOut);
 
         address client = clientFeeParams.clientFeeReceiver;
-        // On the next router deployment, pass tokenIn and tokenOut here.
-        // Without them, any token pair fee makes every swap output pass
-        // through the router, which costs gas on swaps that pay no fee.
         bool intercepting = IFeeCalculator(_feeCalculator)
-            .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
+            .mustOutputThroughRouter(
+                clientFeeParams.clientFeeBps, client, tokenIn, tokenOut
+            );
 
         uint256 actualAmountOut = _splitSwap(
             amountIn,
@@ -594,11 +593,10 @@ contract TychoRouterV3 is
         _validateAddresses(receiver, tokenIn, tokenOut);
 
         address client = clientFeeParams.clientFeeReceiver;
-        // On the next router deployment, pass tokenIn and tokenOut here.
-        // Without them, any token pair fee makes every swap output pass
-        // through the router, which costs gas on swaps that pay no fee.
         bool intercepting = IFeeCalculator(_feeCalculator)
-            .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
+            .mustOutputThroughRouter(
+                clientFeeParams.clientFeeBps, client, tokenIn, tokenOut
+            );
 
         uint256 actualAmountOut;
         {
@@ -656,11 +654,10 @@ contract TychoRouterV3 is
         }
 
         address client = clientFeeParams.clientFeeReceiver;
-        // On the next router deployment, pass tokenIn and tokenOut here.
-        // Without them, any token pair fee makes every swap output pass
-        // through the router, which costs gas on swaps that pay no fee.
         bool intercepting = IFeeCalculator(_feeCalculator)
-            .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
+            .mustOutputThroughRouter(
+                clientFeeParams.clientFeeBps, client, tokenIn, tokenOut
+            );
 
         uint256 actualAmountOut = _sequentialSwap(
             amountIn, swaps, intercepting ? address(this) : receiver

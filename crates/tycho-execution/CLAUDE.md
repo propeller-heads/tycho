@@ -49,7 +49,7 @@ Entry (e.g. splitSwap)
 Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
 getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRouter],
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
-calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client → bool],
+calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client, tokenIn, tokenOut → bool],
 getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)], getEffectiveRouterFees [takes
 client, tokenIn, tokenOut → (routerFeeOnOutputBps, routerFeeOnClientFeeBps)]). Also
 `IPropAMM` (the pAMM standard), `IUniversalRouter` and `ISubsidyPayer` (`pay`, the `Subsidy` struct, `SkipReason`).
@@ -99,8 +99,8 @@ applies to a client and token pair, pair fee included, so integrators can model 
 **Token pair fees** (`_tokenPairFees`, set via `setTokenPairFee`, removed via `removeTokenPairFee`, read via
 `getTokenPairFee`): a router fee on output for swaps between two tokens, in both directions. A set pair fee replaces
 the default router fee on output, so it can raise or lower it, and zero removes it for the pair. For a client with a
-custom fee on output, the lower of the custom fee and the pair fee applies. The router does not pass the swap tokens
-to `mustOutputThroughRouter`, so it returns true while any pair fee is set (`_tokenPairFeeCount > 0`).
+custom fee on output, the lower of the custom fee and the pair fee applies. `mustOutputThroughRouter` applies the pair
+fee for the swap's tokens, so a pair fee routes only that pair's output through the router.
 
 **Client resolution** (`_resolveClient`): When `client == address(0)` (no EIP-712 signature supplied),
 `calculateFee`, `mustOutputThroughRouter` and `getEffectiveRouterFees` fall back to `tx.origin` for the custom fee

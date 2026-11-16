@@ -522,6 +522,20 @@ ClientFee(uint32 clientFeeBps, address clientFeeReceiver, uint256 deadline,
           uint256 expectedAmountOut, uint256 minAmountOut, address receiver, bytes swaps)
 ```
 
+#### FeeCalculator Interface
+
+`mustOutputThroughRouter` takes the swap's tokens, so a token pair fee routes only that pair's output
+through the router:
+
+```solidity
+// V3.1
+function mustOutputThroughRouter(uint32 clientFeeBps, address client) external view returns (bool);
+
+// V3.2
+function mustOutputThroughRouter(uint32 clientFeeBps, address client, address tokenIn, address tokenOut)
+    external view returns (bool);
+```
+
 #### Fees and Output
 
 * The router transfers each fee to its receiver during the swap. A fee receiver that cannot accept the

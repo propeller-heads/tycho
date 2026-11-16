@@ -17,11 +17,10 @@ struct FeeInfo {
     client_positive_slippage_share_bps: i64,
     /// The client's cap on captured surplus; `None` when it has none.
     positive_slippage_cap_bps: Option<i64>,
-    has_any_token_pair_fee: bool,
 }
 
 fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
-    let (router_fee_on_output_bps, router_fee_on_client_fee_bps, has_any_token_pair_fee) =
+    let (router_fee_on_output_bps, router_fee_on_client_fee_bps) =
         if crate::config::ENABLE_NONZERO_FEE_BPS {
             let has_client_custom_fee_on_input =
                 params.request("has_client_custom_fee_on_input", vec![true, false])?;
@@ -33,9 +32,6 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
                 } else {
                     None
                 };
-            let has_any_token_pair_fee = pair_fee_bps.is_some() ||
-                params.request("has_other_token_pair_fee", vec![true, false])?;
-
             let router_fee_on_output_bps = match (has_client_custom_fee_on_input, pair_fee_bps) {
                 (true, Some(pair_fee_bps)) => params
                     .request("client_fee_bps_on_output", vec![0, MAX_BPS])?
@@ -53,9 +49,9 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
                 params.request("router_fee_on_client_fee_bps", vec![0, MAX_BPS])?
             };
 
-            (router_fee_on_output_bps, router_fee_on_client_fee_bps, has_any_token_pair_fee)
+            (router_fee_on_output_bps, router_fee_on_client_fee_bps)
         } else {
-            (0, 0, false)
+            (0, 0)
         };
 
     // A model run has one client, so this is that client's router positive slippage bps: its custom
@@ -87,7 +83,6 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
         router_positive_slippage_bps,
         client_positive_slippage_share_bps,
         positive_slippage_cap_bps,
-        has_any_token_pair_fee,
     })
 }
 
@@ -142,14 +137,8 @@ pub fn must_output_through_router(params: &Params, client_fee_bps: i64) -> Resul
     if client_fee_bps > 0 {
         return Ok(true);
     }
-    if fee_info.router_fee_on_output_bps > 0 {
-        return Ok(true);
-    }
-    if fee_info.has_any_token_pair_fee {
-        return Ok(true);
-    }
-
-    Ok(false)
+    // The swap's own token pair fee is already part of the router fee on output.
+    Ok(fee_info.router_fee_on_output_bps > 0)
 }
 
 /// Narrows an intermediate 128-bit fee amount to the `i64` fee type, reverting when it does not

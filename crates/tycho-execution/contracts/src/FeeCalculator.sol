@@ -80,7 +80,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     // A set pair fee replaces the default router fee on output, so it can
     // be zero.
     mapping(address => mapping(address => TokenPairFee)) private _tokenPairFees;
-    uint256 private _tokenPairFeeCount;
 
     bytes32 public constant ROUTER_FEE_SETTER_ROLE =
         keccak256("ROUTER_FEE_SETTER_ROLE");
@@ -198,14 +197,17 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @notice Whether funds must pass through the router after the final swap instead of going directly to the receiver
      * @param clientFeeBps Client fee in basis points
      * @param client The client address to check
+     * @param tokenIn The swap's input token
+     * @param tokenOut The swap's output token
      * @return True if funds must pass through the router after the
      *         final swap instead of going directly to the receiver
      */
-    function mustOutputThroughRouter(uint32 clientFeeBps, address client)
-        external
-        view
-        returns (bool)
-    {
+    function mustOutputThroughRouter(
+        uint32 clientFeeBps,
+        address client,
+        address tokenIn,
+        address tokenOut
+    ) external view returns (bool) {
         address resolvedClient = _resolveClient(client);
 
         // Slippage direction is unknown before the swap, so we always
@@ -213,15 +215,14 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         // captured.
         if (_getRouterPositiveSlippageBps(resolvedClient) > 0) return true;
 
-        (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps) =
-            _getFeeInfo(resolvedClient);
-
         if (clientFeeBps > 0) return true;
-        if (routerFeeOnOutputBps > 0) return true;
-        // The swap tokens are not known here, so any pair fee might apply.
-        if (_tokenPairFeeCount > 0) return true;
 
-        return false;
+        // Without a client fee, the router's cut of it is zero.
+        (uint32 routerFeeOnOutputBps,) = _getFeeInfo(resolvedClient);
+        routerFeeOnOutputBps = _applyTokenPairFee(
+            routerFeeOnOutputBps, resolvedClient, tokenIn, tokenOut
+        );
+        return routerFeeOnOutputBps > 0;
     }
 
     /**
@@ -530,7 +531,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     {
         if (feeBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
         (address token0, address token1) = _sortTokens(tokenA, tokenB);
-        if (!_tokenPairFees[token0][token1].isSet) ++_tokenPairFeeCount;
         _tokenPairFees[token0][token1] =
             TokenPairFee({isSet: true, feeBps: feeBps});
         emit TokenPairFeeUpdated(token0, token1, feeBps);
@@ -546,7 +546,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     {
         (address token0, address token1) = _sortTokens(tokenA, tokenB);
         if (!_tokenPairFees[token0][token1].isSet) return;
-        --_tokenPairFeeCount;
         delete _tokenPairFees[token0][token1];
         emit TokenPairFeeRemoved(token0, token1);
     }
