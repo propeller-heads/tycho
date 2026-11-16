@@ -40,6 +40,14 @@ const STREAM_NEED_POLL_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const STREAM_NEED_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+/// How often a follower that waits for the leader to sync an extractor's history catches the
+/// entity cache up for that extractor's system. The catch-up at the end of the wait then reads at
+/// most this much.
+#[cfg(not(test))]
+const WAITING_CATCH_UP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+#[cfg(test)]
+const WAITING_CATCH_UP_INTERVAL: Duration = Duration::from_millis(50);
+
 /// What [`ExtractorSupervisor::wait_until_stream_is_needed`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamNeed {
@@ -68,7 +76,9 @@ enum StreamWait {
 }
 
 /// Waits until `writer` says that this process needs the stream of `extractor`, or until a
-/// `Stop` arrives on `control_rx`.
+/// `Stop` arrives on `control_rx`. With `cache_catch_up`, catches the cache up for the extractor's
+/// system every [`WAITING_CATCH_UP_INTERVAL`] meanwhile, so the catch-up at the end of the wait is
+/// small. A failed catch-up is logged and tried again at the next interval.
 ///
 /// Drops every subscription that arrives meanwhile, which closes its receiver: the stream is
 /// closed, so a subscriber would receive nothing until the leader gets near the head. Only a
@@ -77,25 +87,61 @@ async fn wait_for_stream_need(
     writer: &WriterStatus,
     extractor: &str,
     control_rx: &mut Receiver<ControlMessage>,
+    cache_catch_up: Option<&CacheCatchUp>,
 ) -> StreamWait {
+    let mut next_catch_up = tokio::time::Instant::now() + WAITING_CATCH_UP_INTERVAL;
     loop {
         if writer.needs_stream(extractor, chrono::Utc::now().naive_utc()) {
             return StreamWait::Needed;
         }
+        let due = cache_catch_up.filter(|_| tokio::time::Instant::now() >= next_catch_up);
+        let work = async {
+            let Some(cache_catch_up) = due else {
+                tokio::time::sleep(STREAM_NEED_POLL_INTERVAL).await;
+                return false;
+            };
+            if let Err(err) = cache_catch_up.catch_up(extractor).await {
+                warn!(extractor, error = %err, "Scheduled entity cache catch-up failed");
+            }
+            true
+        };
+        let Some(caught_up) = reject_subscriptions_until(extractor, control_rx, work).await else {
+            return StreamWait::Stopped;
+        };
+        if caught_up {
+            next_catch_up = tokio::time::Instant::now() + WAITING_CATCH_UP_INTERVAL;
+        }
+    }
+}
+
+/// Drives `work` to its end while it drops every subscription that arrives on `control_rx`.
+/// Returns the output of `work`, or `None` when a `Stop` arrives first.
+async fn reject_subscriptions_until<F: Future>(
+    extractor: &str,
+    control_rx: &mut Receiver<ControlMessage>,
+    work: F,
+) -> Option<F::Output> {
+    tokio::pin!(work);
+    loop {
         tokio::select! {
-            _ = tokio::time::sleep(STREAM_NEED_POLL_INTERVAL) => {}
+            output = &mut work => return Some(output),
             Some(ctrl) = control_rx.recv() => match ctrl {
-                ControlMessage::Stop => return StreamWait::Stopped,
-                ControlMessage::Subscribe { sender: _, subscription_id, user_identity: _ } => {
-                    info!(
-                        extractor,
-                        %subscription_id,
-                        "SubscriptionRejected: the leader syncs history, the stream is closed"
-                    );
+                ControlMessage::Stop => return None,
+                ControlMessage::Subscribe { subscription_id, .. } => {
+                    reject_subscription(extractor, subscription_id);
                 }
             },
         }
     }
+}
+
+/// Logs a subscription dropped because the stream is closed while the leader syncs history.
+fn reject_subscription(extractor: &str, subscription_id: impl std::fmt::Display) {
+    info!(
+        extractor,
+        %subscription_id,
+        "SubscriptionRejected: the leader syncs history, the stream is closed"
+    );
 }
 
 /// Exponential backoff for restarts: 60s, 120s, 240s, ... capped at [`MAX_RESTART_BACKOFF`].
@@ -265,8 +311,13 @@ impl ExtractorSupervisor {
         );
         self.stream_state
             .send_replace(StreamState::WaitingForLeader);
-        let wait =
-            wait_for_stream_need(&self.writer_status, &self.id.name, &mut self.control_rx).await;
+        let wait = wait_for_stream_need(
+            &self.writer_status,
+            &self.id.name,
+            &mut self.control_rx,
+            self.cache_catch_up.as_deref(),
+        )
+        .await;
         self.stream_state
             .send_replace(StreamState::Open);
         match wait {
@@ -594,14 +645,20 @@ mod tests {
         MetricKind,
     };
     use tokio::sync::watch;
-    use tycho_common::models::Chain;
+    use tycho_common::{
+        models::Chain,
+        storage::{CatchUpRead, CommitWatermark, StateSnapshot, StateSnapshotGateway},
+    };
     use tycho_storage::postgres::cache::CommittedBlock;
     use uuid::Uuid;
 
     use super::*;
-    use crate::extractor::{
-        runner::{MessageSender, SubscribeError},
-        writer_status::Role,
+    use crate::{
+        extractor::{
+            runner::{MessageSender, SubscribeError},
+            writer_status::Role,
+        },
+        services::EntityCache,
     };
 
     fn restarts_series(snapshotter: &Snapshotter) -> Vec<(BTreeMap<String, String>, u64)> {
@@ -696,7 +753,7 @@ mod tests {
 
         let wait = tokio::time::timeout(
             STILL_WAITING,
-            wait_for_stream_need(&WriterStatus::leader(), EXTRACTOR, &mut control_rx),
+            wait_for_stream_need(&WriterStatus::leader(), EXTRACTOR, &mut control_rx, None),
         )
         .await;
 
@@ -708,7 +765,8 @@ mod tests {
         let (channels, writer) = WriterChannels::follower();
         let (_ctrl_tx, mut control_rx) = mpsc::channel(1);
         channels.leader_committed_block_of_age(chrono::Duration::days(30));
-        let mut wait = std::pin::pin!(wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx));
+        let mut wait =
+            std::pin::pin!(wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx, None));
 
         let syncing = tokio::time::timeout(STILL_WAITING, &mut wait).await;
         channels.leader_committed_block_of_age(chrono::Duration::minutes(15));
@@ -716,6 +774,128 @@ mod tests {
 
         assert!(syncing.is_err(), "a follower must not stream while the leader syncs");
         assert!(matches!(near_head, Ok(StreamWait::Needed)));
+    }
+
+    /// Answers every `catch_up_read` call with an empty read, or with an error, and counts the
+    /// calls. A read waits for a permit of `gate`.
+    struct CountingGateway {
+        calls: std::sync::atomic::AtomicUsize,
+        fail: bool,
+        gate: tokio::sync::Semaphore,
+    }
+
+    #[async_trait::async_trait]
+    impl StateSnapshotGateway for CountingGateway {
+        async fn state_snapshot(&self, _chain: &Chain) -> Result<StateSnapshot, StorageError> {
+            Err(StorageError::Unexpected("not used".to_string()))
+        }
+
+        async fn catch_up_read(
+            &self,
+            _chain: &Chain,
+            since: CommitWatermark,
+            _system: &str,
+        ) -> Result<CatchUpRead, StorageError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.gate
+                .acquire()
+                .await
+                .unwrap()
+                .forget();
+            if self.fail {
+                return Err(StorageError::Unexpected("read failed".to_string()));
+            }
+            Ok(CatchUpRead {
+                accounts: vec![],
+                changes: HashMap::new(),
+                components: vec![],
+                cursors: HashMap::new(),
+                watermark: since,
+            })
+        }
+    }
+
+    fn catch_up_reading_from(gateway: Arc<CountingGateway>) -> CacheCatchUp {
+        let cache = Arc::new(EntityCache::from_snapshot(StateSnapshot {
+            accounts: vec![],
+            components: vec![],
+            cursors: HashMap::new(),
+            watermark: CommitWatermark::new(1),
+        }));
+        CacheCatchUp::new(cache, gateway, Chain::Ethereum, CommitWatermark::new(1))
+    }
+
+    fn counting_gateway(fail: bool, permits: usize) -> Arc<CountingGateway> {
+        Arc::new(CountingGateway {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail,
+            gate: tokio::sync::Semaphore::new(permits),
+        })
+    }
+
+    #[rstest::rstest]
+    #[case::successful_reads(false)]
+    #[case::failed_reads(true)]
+    #[tokio::test]
+    async fn test_waiting_follower_catches_the_cache_up_on_a_schedule(#[case] fail: bool) {
+        let (channels, writer) = WriterChannels::follower();
+        let (_ctrl_tx, mut control_rx) = mpsc::channel(1);
+        channels.leader_committed_block_of_age(chrono::Duration::days(30));
+        let gateway = counting_gateway(fail, 100);
+        let cache_catch_up = catch_up_reading_from(gateway.clone());
+        let mut wait = std::pin::pin!(wait_for_stream_need(
+            &writer,
+            EXTRACTOR,
+            &mut control_rx,
+            Some(&cache_catch_up)
+        ));
+
+        let syncing = tokio::time::timeout(WAITING_CATCH_UP_INTERVAL * 5, &mut wait).await;
+        channels.leader_committed_block_of_age(chrono::Duration::minutes(15));
+        let near_head = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+
+        assert!(syncing.is_err(), "the follower keeps waiting, also after a failed catch-up");
+        assert!(
+            gateway
+                .calls
+                .load(std::sync::atomic::Ordering::SeqCst) >=
+                2
+        );
+        assert!(matches!(near_head, Ok(StreamWait::Needed)));
+    }
+
+    #[tokio::test]
+    async fn test_stop_ends_the_wait_during_a_scheduled_catch_up() {
+        let (channels, writer) = WriterChannels::follower();
+        let (ctrl_tx, mut control_rx) = mpsc::channel(1);
+        channels.leader_committed_block_of_age(chrono::Duration::days(30));
+        let gateway = counting_gateway(false, 0);
+        let cache_catch_up = catch_up_reading_from(gateway.clone());
+        let mut wait = std::pin::pin!(wait_for_stream_need(
+            &writer,
+            EXTRACTOR,
+            &mut control_rx,
+            Some(&cache_catch_up)
+        ));
+
+        let reading =
+            tokio::time::timeout(WAITING_CATCH_UP_INTERVAL + STILL_WAITING, &mut wait).await;
+        ctrl_tx
+            .send(ControlMessage::Stop)
+            .await
+            .unwrap();
+        let stopped = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+
+        assert!(reading.is_err());
+        assert_eq!(
+            gateway
+                .calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the catch-up read is held open"
+        );
+        assert!(matches!(stopped, Ok(StreamWait::Stopped)));
     }
 
     #[rstest::rstest]
@@ -745,7 +925,8 @@ mod tests {
     async fn test_follower_needs_the_stream_once_promoted() {
         let (channels, writer) = WriterChannels::follower();
         let (_ctrl_tx, mut control_rx) = mpsc::channel(1);
-        let mut wait = std::pin::pin!(wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx));
+        let mut wait =
+            std::pin::pin!(wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx, None));
 
         let first_sync = tokio::time::timeout(STILL_WAITING, &mut wait).await;
         channels
@@ -771,7 +952,8 @@ mod tests {
             })
             .await
             .unwrap();
-        let mut wait = std::pin::pin!(wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx));
+        let mut wait =
+            std::pin::pin!(wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx, None));
 
         let still_waiting = tokio::time::timeout(STILL_WAITING, &mut wait).await;
         let subscriber_message = subscriber_rx.recv().await;

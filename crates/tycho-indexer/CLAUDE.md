@@ -15,7 +15,7 @@ testing.rs                  Test utilities
 extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
   runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control; waits for internal subscribers (`PendingDeltas`) but removes a websocket client whose channel is full, counted in `extractor_slow_clients_removed_total` (registered at zero)
-  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero); a fenced writer (`StorageError::Fenced`) ends supervision instead of restarting; `RestartToTakeOver` rebuilds at once, without backoff; on a follower, waits to build the extractor while the leader syncs history; catches the entity cache up before every build but an immediate first one
+  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero); a fenced writer (`StorageError::Fenced`) ends supervision instead of restarting; `RestartToTakeOver` rebuilds at once, without backoff; on a follower, waits to build the extractor while the leader syncs history; catches the entity cache up before every build but an immediate first one, and every hour while it waits
   factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
@@ -356,7 +356,11 @@ read. `EntityCache::apply_catch_up` then replaces the system's components and wr
 value with the fold rule (`AccountWrites`), all under one hold of the write lock. The watermark
 lock is held for the whole catch-up, so one catch-up runs at a time. A failed catch-up ends
 supervision, like a failed build.
-Metrics: `entity_cache_catch_ups_total`, `entity_cache_catch_up_duration_seconds`.
+While a follower waits for the leader to sync an extractor's history, its supervisor also catches
+the cache up for that system every hour (`WAITING_CATCH_UP_INTERVAL`), so the catch-up at the end
+of the wait reads at most an hour of commits. A failed scheduled catch-up is logged and tried again
+at the next interval. Metrics: `entity_cache_catch_ups_total`,
+`entity_cache_catch_up_duration_seconds`.
 A fold copies an entry that a reader still holds. Two metrics count these copies, labelled by
 `entity`: `entity_cache_shared_copies_total` (counter, one per copy) and
 `entity_cache_shared_copy_duration_ms` (histogram, the time of each copy).
