@@ -1267,7 +1267,9 @@ contract FeeCalculatorSlippageTest is Constants {
         FeeRecipient[] memory fees = feeCalculator.calculateFee(_surplusInput());
 
         assertEq(fees[0].feeAmount, 0);
-        assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
+        assertFalse(
+            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, DAI_ADDR)
+        );
     }
 
     function testNegativeSlippageNoSurplus() public {
@@ -1505,23 +1507,62 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(customLower[0].feeAmount, 0.01 ether);
     }
 
-    function testMustOutputThroughRouterWhileAnyTokenPairFeeIsSet() public {
+    function testMustOutputThroughRouterTokenPairFee() public {
         vm.startPrank(FEE_SETTER);
         feeCalculator.setRouterPositiveSlippageBps(0);
-        assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
-
-        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, 0);
-        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _1_PCT);
         feeCalculator.setTokenPairFee(USDC_ADDR, WETH_ADDR, _1_PCT);
-        assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
-
-        feeCalculator.removeTokenPairFee(USDC_ADDR, DAI_ADDR);
-        feeCalculator.removeTokenPairFee(DAI_ADDR, USDC_ADDR);
-        assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
-
-        feeCalculator.removeTokenPairFee(WETH_ADDR, USDC_ADDR);
-        assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
         vm.stopPrank();
+
+        bool otherPair =
+            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, DAI_ADDR);
+        bool feePair =
+            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, WETH_ADDR);
+        bool feePairReversed =
+            feeCalculator.mustOutputThroughRouter(0, BOB, WETH_ADDR, USDC_ADDR);
+
+        assertFalse(otherPair);
+        assertTrue(feePair);
+        assertTrue(feePairReversed);
+    }
+
+    function testMustOutputThroughRouterZeroTokenPairFee() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterPositiveSlippageBps(0);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, 0);
+        vm.stopPrank();
+
+        bool freePair =
+            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, DAI_ADDR);
+        bool otherPair =
+            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, WETH_ADDR);
+
+        assertFalse(freePair);
+        assertTrue(otherPair);
+    }
+
+    function testMustOutputThroughRouterCustomFeeBelowTokenPairFee() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterPositiveSlippageBps(0);
+        feeCalculator.setTokenPairFee(USDC_ADDR, DAI_ADDR, _1_PCT);
+        feeCalculator.setCustomRouterFeeOnOutput(BOB, 0);
+        vm.stopPrank();
+
+        bool mustOutput =
+            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, DAI_ADDR);
+
+        assertFalse(mustOutput);
+    }
+
+    function testMustOutputThroughRouterClientFee() public {
+        vm.prank(FEE_SETTER);
+        feeCalculator.setRouterPositiveSlippageBps(0);
+
+        bool mustOutput = feeCalculator.mustOutputThroughRouter(
+            _1_PCT, BOB, USDC_ADDR, DAI_ADDR
+        );
+
+        assertTrue(mustOutput);
     }
 
     function testMustOutputThroughRouterWithZeroCustomRouterPositiveSlippageBps()
@@ -1529,17 +1570,23 @@ contract FeeCalculatorSlippageTest is Constants {
     {
         // Positive slippage is enabled in setUp, so a client with a non-zero
         // router positive slippage bps must route output through the router
-        assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
+        assertTrue(
+            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, DAI_ADDR)
+        );
 
         // A client with a zero router positive slippage bps and no fees may skip the router hop
         vm.prank(FEE_SETTER);
         feeCalculator.setCustomRouterPositiveSlippageBps(BOB, 0);
-        assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
+        assertFalse(
+            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, DAI_ADDR)
+        );
 
         // Any fee still forces the router hop for that client
         vm.prank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
-        assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
+        assertTrue(
+            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, DAI_ADDR)
+        );
     }
 
     function testClientShareOfPositiveSlippage() public {
