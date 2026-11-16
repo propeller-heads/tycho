@@ -24,6 +24,7 @@ error Vault__UnexpectedNonZeroCount(uint256 nonZeroCount);
 error Vault__UnexpectedInputDelta(int256 inputDelta);
 error Vault__ValueMismatch(uint256 msgValue, uint256 amount);
 error Vault__EthNotAccepted(uint256 msgValue);
+error Vault__Paused();
 
 /**
  * @title Vault - ERC6909-compliant multi-token vault
@@ -49,6 +50,37 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
             .wrap(keccak256("TychoVault#NON_ZERO_DELTA_COUNT_SLOT"));
     TransientSlot.BooleanSlot internal constant _USE_VAULT_SLOT =
         TransientSlot.BooleanSlot.wrap(keccak256("Vault#USE_VAULT_SLOT"));
+
+    bool private _vaultPaused;
+
+    event VaultPaused(address indexed account);
+    event VaultUnpaused(address indexed account);
+
+    /**
+     * @dev Rejects deposits and swaps funded from vault balances while the
+     * vault is paused. Withdrawals are never paused.
+     */
+    modifier whenVaultNotPaused() {
+        require(!_vaultPaused, Vault__Paused());
+        _;
+    }
+
+    /**
+     * @notice Whether deposits and swaps funded from vault balances are paused.
+     */
+    function vaultPaused() external view returns (bool) {
+        return _vaultPaused;
+    }
+
+    function _pauseVault() internal {
+        _vaultPaused = true;
+        emit VaultPaused(msg.sender);
+    }
+
+    function _unpauseVault() internal {
+        _vaultPaused = false;
+        emit VaultUnpaused(msg.sender);
+    }
 
     // ============ ERC6909 Overrides and Extensions ============
 
@@ -133,6 +165,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         payable
         nonReentrant
         whenNotPaused
+        whenVaultNotPaused
     {
         if (token == address(0)) {
             revert Vault__AddressZero();

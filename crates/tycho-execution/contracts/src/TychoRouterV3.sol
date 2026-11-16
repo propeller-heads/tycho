@@ -269,7 +269,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
-    ) public nonReentrant whenNotPaused returns (uint256) {
+    ) public nonReentrant whenNotPaused whenVaultNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -444,7 +444,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
-    ) public nonReentrant whenNotPaused returns (uint256) {
+    ) public nonReentrant whenNotPaused whenVaultNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -613,7 +613,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swapData
-    ) public nonReentrant whenNotPaused returns (uint256) {
+    ) public nonReentrant whenNotPaused whenVaultNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -1153,6 +1153,21 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      */
     function unpause() external onlyRole(UNPAUSER_ROLE) {
         _unpause();
+    }
+
+    /**
+     * @notice Pauses deposits and swaps funded from vault balances (the
+     * `*UsingVault` entry points). Other swaps and withdrawals keep working.
+     */
+    function pauseVault() external onlyRole(PAUSER_ROLE) {
+        _pauseVault();
+    }
+
+    /**
+     * @notice Resumes deposits and swaps funded from vault balances.
+     */
+    function unpauseVault() external onlyRole(UNPAUSER_ROLE) {
+        _unpauseVault();
     }
 
     /**
