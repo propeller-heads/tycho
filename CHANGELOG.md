@@ -1,3 +1,12 @@
+## [0.523.0](https://github.com/propeller-heads/tycho/compare/0.522.0...0.523.0) (2026-11-16)
+
+
+### Features
+
+* **execution:** list the new FeeCalculator on every chain ([37e95a7](https://github.com/propeller-heads/tycho/commit/37e95a7af65659b699806846309e52e590dd0cb5))
+* list the new FeeCalculator and index slippage caps and pair fees ([#1803](https://github.com/propeller-heads/tycho/issues/1803)) ([3c3ea2f](https://github.com/propeller-heads/tycho/commit/3c3ea2f1b4f1f0cbbb9b8d3aa80b984ac622429c))
+* **router-trades:** index positive slippage caps and token pair fees ([6ebb7de](https://github.com/propeller-heads/tycho/commit/6ebb7de4057601e3ed83ac5212cedea6d83cfff3))
+
 ## [0.522.0](https://github.com/propeller-heads/tycho/compare/0.521.0...0.522.0) (2026-11-16)
 
 
