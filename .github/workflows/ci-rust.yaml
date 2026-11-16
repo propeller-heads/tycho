@@ -24,10 +24,11 @@ env:
 
 jobs:
   # Detects whether any Rust-relevant paths changed in the PR.
-  # Real CI jobs run only when this outputs rust == 'true', or when triggered
-  # outside a PR (push/workflow_call/workflow_dispatch). The matching skip-*
-  # jobs run otherwise, producing green checks so branch protection rules that
-  # require "Rust CI / <job-name>" are satisfied on every PR.
+  # On a PR, the matching skip-* jobs run in place of the real CI jobs only
+  # when this outputs rust == 'false', producing green checks so branch
+  # protection rules that require "Rust CI / <job-name>" are satisfied. An
+  # empty output (detection failed) runs the real jobs. Outside a PR
+  # (push/workflow_call/workflow_dispatch) the real jobs always run.
   changes:
     name: Detect Rust changes
     runs-on: ubuntu-latest
@@ -57,7 +58,7 @@ jobs:
   lint:
     name: Lint (fmt + clippy)
     needs: [changes]
-    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
+    if: needs.changes.outputs.rust != 'false' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -86,7 +87,7 @@ jobs:
   lint-skip:
     name: Lint (fmt + clippy)
     needs: [changes]
-    if: needs.changes.outputs.rust != 'true' && github.event_name == 'pull_request'
+    if: needs.changes.outputs.rust == 'false' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Rust changes detected, skipping lint"
@@ -94,7 +95,7 @@ jobs:
   test-unit:
     name: Unit tests (no external deps)
     needs: [changes]
-    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
+    if: needs.changes.outputs.rust != 'false' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -128,7 +129,7 @@ jobs:
   test-unit-skip:
     name: Unit tests (no external deps)
     needs: [changes]
-    if: needs.changes.outputs.rust != 'true' && github.event_name == 'pull_request'
+    if: needs.changes.outputs.rust == 'false' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Rust changes detected, skipping unit tests"
@@ -136,7 +137,7 @@ jobs:
   test-db:
     name: DB tests (postgres)
     needs: [changes]
-    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
+    if: needs.changes.outputs.rust != 'false' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -224,7 +225,7 @@ jobs:
   test-db-skip:
     name: DB tests (postgres)
     needs: [changes]
-    if: needs.changes.outputs.rust != 'true' && github.event_name == 'pull_request'
+    if: needs.changes.outputs.rust == 'false' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Rust changes detected, skipping DB tests"
@@ -232,7 +233,7 @@ jobs:
   doc:
     name: Rustdoc
     needs: [changes]
-    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
+    if: needs.changes.outputs.rust != 'false' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -255,7 +256,7 @@ jobs:
   doc-skip:
     name: Rustdoc
     needs: [changes]
-    if: needs.changes.outputs.rust != 'true' && github.event_name == 'pull_request'
+    if: needs.changes.outputs.rust == 'false' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Rust changes detected, skipping doc check"
@@ -263,7 +264,7 @@ jobs:
   check-no-default-features:
     name: Check (no default features)
     needs: [changes]
-    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
+    if: needs.changes.outputs.rust != 'false' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -286,7 +287,7 @@ jobs:
   check-no-default-features-skip:
     name: Check (no default features)
     needs: [changes]
-    if: needs.changes.outputs.rust != 'true' && github.event_name == 'pull_request'
+    if: needs.changes.outputs.rust == 'false' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Rust changes detected, skipping no-default-features check"

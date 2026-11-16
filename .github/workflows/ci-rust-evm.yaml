@@ -62,7 +62,7 @@ jobs:
   test-evm:
     name: EVM tests (requires RPC)
     needs: [changes]
-    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request_target'
+    if: needs.changes.outputs.rust != 'false' || github.event_name != 'pull_request_target'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Runs fork code (cargo build/test) with RPC secrets in scope; gate fork PRs
@@ -102,7 +102,7 @@ jobs:
   test-evm-skip:
     name: EVM tests (requires RPC)
     needs: [changes]
-    if: needs.changes.outputs.rust != 'true' && github.event_name == 'pull_request_target'
+    if: needs.changes.outputs.rust == 'false' && github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Rust changes detected, skipping EVM tests"
