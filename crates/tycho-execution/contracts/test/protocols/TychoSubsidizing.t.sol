@@ -1179,6 +1179,7 @@ contract TychoSubsidizingWithPayerTest is TychoSubsidizingTestBase {
             SubsidyPayer.Roles({
                 signerSetter: makeAddr("signerSetter"),
                 budgetManager: budgetManager,
+                routerSetter: makeAddr("routerSetter"),
                 pauserAdmin: makeAddr("pauserAdmin"),
                 unpauser: makeAddr("unpauser"),
                 pausers: pausers

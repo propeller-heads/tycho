@@ -28,6 +28,7 @@ async function main() {
     const roles = {
         signerSetter: networkRoles.EXECUTOR_SETTER_ROLE[0],
         budgetManager: networkRoles.EXECUTOR_SETTER_ROLE[0],
+        routerSetter: networkRoles.EXECUTOR_SETTER_ROLE[0],
         pauserAdmin: networkRoles.UNPAUSER_ROLE[0],
         unpauser: networkRoles.UNPAUSER_ROLE[0],
         pausers: networkRoles.PAUSER_ROLE,
@@ -38,6 +39,7 @@ async function main() {
     console.log(`- signer: ${signer}`);
     console.log(`- signerSetter: ${roles.signerSetter}`);
     console.log(`- budgetManager: ${roles.budgetManager}`);
+    console.log(`- routerSetter: ${roles.routerSetter}`);
     console.log(`- pauserAdmin: ${roles.pauserAdmin}`);
     console.log(`- unpauser: ${roles.unpauser}`);
     console.log(`- pausers: ${roles.pausers.join(", ")}`);

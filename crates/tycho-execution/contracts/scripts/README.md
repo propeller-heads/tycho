@@ -89,11 +89,12 @@ Executors added after deployment with `setExecutors`, and fee calculators set wi
 ### Deploy subsidies
 
 The `SubsidyPayer` must be deployed **before** the `TychoSubsidizingExecutor`, as the executor requires its address.
-The payer only accepts `pay` from the router in `config/router_addresses.json`, so a new router needs a new payer and
-a new executor.
+The payer only accepts `pay` from its router, which starts as the router in `config/router_addresses.json`. After a
+later router redeploy, `ROUTER_SETTER_ROLE` points the payer at the new router with `setRouter`, and the payer and
+executor carry over.
 
 1. Check the roles in `scripts/roles.json`. The payer takes `SUBSIDY_SIGNER` as its signer and these role holders:
-   - `SIGNER_SETTER_ROLE` and `BUDGET_ROLE`: the first `EXECUTOR_SETTER_ROLE` address
+   - `SIGNER_SETTER_ROLE`, `BUDGET_ROLE` and `ROUTER_SETTER_ROLE`: the first `EXECUTOR_SETTER_ROLE` address
    - `PAUSER_ADMIN_ROLE` and `UNPAUSER_ROLE`: the first `UNPAUSER_ROLE` address
    - `PAUSER_ROLE`: every `PAUSER_ROLE` address
 2. Deploy the payer: `npx hardhat run scripts/deploy-subsidy-payer.js --network NETWORK`
