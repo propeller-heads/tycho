@@ -134,8 +134,8 @@ pub struct VecLog {
 }
 
 impl Log for VecLog {
-    fn append(&mut self, entry: Event) {
-        self.events.push(entry);
+    fn append(&mut self, event: Event) {
+        self.events.push(event);
     }
     fn is_empty(&self) -> bool {
         self.events.is_empty()

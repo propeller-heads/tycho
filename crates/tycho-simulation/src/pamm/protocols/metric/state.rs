@@ -657,7 +657,9 @@ mod tests {
             SimulationError::InvalidInput(msg, Some(_)) => {
                 assert!(msg.contains("depth exhausted"), "unexpected message: {msg}");
             }
-            other => panic!("expected InvalidInput, got {other:?}"),
+            other @ (SimulationError::FatalError(_) |
+            SimulationError::InvalidInput(..) |
+            SimulationError::RecoverableError(_)) => panic!("expected InvalidInput, got {other:?}"),
         }
     }
 
@@ -692,7 +694,9 @@ mod tests {
                 // Exact cap, not the f64-reconstructed 6575581573690662912.
                 assert_eq!(res.amount, BigUint::from_str(cap).unwrap());
             }
-            other => panic!("expected InvalidInput, got {other:?}"),
+            other @ (SimulationError::FatalError(_) |
+            SimulationError::InvalidInput(..) |
+            SimulationError::RecoverableError(_)) => panic!("expected InvalidInput, got {other:?}"),
         }
     }
 

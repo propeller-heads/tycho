@@ -2,6 +2,10 @@
 
 ## Local Development
 
+### Tools
+
+Install <a href="https://rustup.rs/" target="_blank" rel="noopener noreferrer">rustup</a> and <a href="https://mise.jdx.dev/getting-started.html" target="_blank" rel="noopener noreferrer">mise</a>, <a href="https://mise.jdx.dev/getting-started.html#activate-mise" target="_blank" rel="noopener noreferrer">activate it</a> in your shell, and run `mise install` in the repository. mise provides the tools and environment variables CI uses, pinned in `mise.toml`. rustup installs the Rust toolchains that the `rust-toolchain.toml` files pin. The commands on this page assume an activated mise.
+
 ### Changing Rust Code
 
 Please make sure that the following commands pass if you have changed the code:
@@ -9,11 +13,11 @@ Please make sure that the following commands pass if you have changed the code:
 ```sh
 cargo check --all
 cargo test --all --all-features
-cargo +nightly fmt -- --check
-cargo +nightly clippy --workspace --all-features --all-targets -- -D warnings
+cargo +"$RUST_NIGHTLY" fmt -- --check
+cargo +"$RUST_NIGHTLY" clippy --workspace --all-features --all-targets -- -D warnings
 ```
 
-We are using the stable toolchain for building and testing, but the nightly toolchain for formatting and linting, as it allows us to use the latest features of `rustfmt` and `clippy`.
+Builds and tests use the stable toolchain from `rust-toolchain.toml`. Formatting and linting use the nightly toolchain in `RUST_NIGHTLY`, because `rustfmt.toml` relies on unstable `rustfmt` options.
 
 If you are working in VSCode, we recommend you install the <a href="https://rust-analyzer.github.io/" target="_blank" rel="noopener noreferrer">rust-analyzer</a> extension, and use the following VSCode user settings:
 
@@ -35,15 +39,6 @@ If you are working in VSCode, we recommend you install the <a href="https://rust
 ```
 
 ### Changing Solidity code
-
-#### Setup <a href="#setup" id="setup"></a>
-
-Install foudryup and foundry
-
-```bash
-curl -L https://foundry.paradigm.xyz | bash
-foundryup
-```
 
 #### Executors <a href="#running-tests" id="running-tests"></a>
 
@@ -79,13 +74,9 @@ Please **minimize** use of assembly for security reasons.
 
 We use <a href="https://github.com/crytic/slither" target="_blank" rel="noopener noreferrer">Slither</a> to detect any potential vulnerabilities in our contracts.
 
-To run locally, simply install Slither in your conda env and run it inside the contracts directory.
+To run it locally, run it inside the contracts directory:
 
 ```bash
-conda create --name tycho-execution python=3.10
-conda activate tycho-execution
-
-pip install slither-analyzer
 cd crates/tycho-execution/contracts
 slither .
 ```

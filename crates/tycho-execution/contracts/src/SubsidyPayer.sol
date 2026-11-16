@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {SafeTransferLib} from "@solady/utils/SafeTransferLib.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
@@ -108,6 +109,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         _grantRole(PAUSER_ADMIN_ROLE, roles.pauserAdmin);
         for (uint256 i = 0; i < roles.pausers.length; i++) {
             if (roles.pausers[i] == address(0)) {
+                // forge-lint: disable-next-line(require-revert-in-loop) Deployment fails on a zero pauser, as on any other zero role.
                 revert SubsidyPayer__AddressZero();
             }
             _grantRole(PAUSER_ROLE, roles.pausers[i]);
@@ -147,7 +149,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         // Emitted after the transfer on purpose: only then is it paid. A
         // re-entering receiver cannot pay twice, because the nonce is
         // marked first and only the nonReentrant router can call `pay`.
-        // slither-disable-next-line reentrancy-events
+        // slither-disable-next-line reentrancy-events The event follows the transfer on purpose, see above.
         emit SubsidyPaid(
             nonce, subsidy.boundTo, to, subsidy.token, subsidy.amount
         );
@@ -178,6 +180,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         if (to == address(0)) revert SubsidyPayer__AddressZero();
         emit Withdrawal(token, amount, to);
         if (token == ETH_ADDRESS) {
+            // forge-lint: disable-next-line(arbitrary-send-eth) Only BUDGET_ROLE withdraws, to the recipient it names.
             Address.sendValue(payable(to), amount);
         } else {
             IERC20(token).safeTransfer(to, amount);
@@ -217,7 +220,6 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         returns (uint256 word, uint256 bit)
     {
         word = nonce >> 8;
-        // forge-lint: disable-next-line(incorrect-shift)
         bit = 1 << (nonce & 0xff);
     }
 
@@ -237,8 +239,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         if (paused()) {
             return SkipReason.Paused;
         }
-        // A few seconds of validator drift on the deadline is harmless
-        // slither-disable-next-line timestamp
+        // forge-lint: disable-next-line(block-timestamp) A signed deadline expires to the second; seconds of block-time drift are harmless.
         if (block.timestamp > subsidy.deadline) {
             return SkipReason.Expired;
         }
@@ -254,9 +255,8 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         // - `tx.origin` covers a user EOA that calls the router through an
         //   integrator contract, so the router's caller is the integrator.
         // A copied signature sent by anyone else matches neither and is
-        // skipped without using the nonce. tx.origin only decides who earns
-        // the subsidy; it guards no funds.
-        // slither-disable-next-line tx-origin
+        // skipped without using the nonce.
+        // forge-lint: disable-next-line(tx-origin) tx.origin only decides who earns the subsidy; it guards no funds.
         if (subsidy.boundTo != routerMsgSender && subsidy.boundTo != tx.origin)
         {
             return SkipReason.CallerMismatch;
@@ -278,9 +278,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         // Every Subsidy field is static, so `abi.encode` lays them out in
         // order, as EIP-712 `encodeData` requires
         bytes32 structHash = keccak256(abi.encode(SUBSIDY_TYPEHASH, subsidy));
-        // The ignored third return value only adds detail to `err`; `err`
-        // alone decides the rejection
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The third return value only adds detail to err, and err alone decides.
         (address recovered, ECDSA.RecoverError err,) =
             ECDSA.tryRecoverCalldata(_hashTypedDataV4(structHash), signature);
         return err == ECDSA.RecoverError.NoError && recovered == signer;
@@ -295,23 +293,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         returns (uint256 tokenBalance)
     {
         if (token == ETH_ADDRESS) return address(this).balance;
-        bytes4 selector = IERC20.balanceOf.selector;
-        bool success;
-        uint256 returnSize;
-        // Assembly, because a Solidity call copies all return data into
-        // memory, and memory gas grows quadratically. Copying at most 32
-        // bytes means a token returning a huge payload cannot make `pay`
-        // spend its gas on that copy.
-        // slither-disable-next-line assembly
-        assembly ("memory-safe") {
-            let ptr := mload(0x40)
-            mstore(ptr, selector)
-            mstore(add(ptr, 0x04), address())
-            success := staticcall(gas(), token, ptr, 0x24, 0x00, 0x20)
-            returnSize := returndatasize()
-            tokenBalance := mload(0x00)
-        }
-        if (!success || returnSize < 32) return 0;
+        return SafeTransferLib.balanceOf(token, address(this));
     }
 
     /// @dev Sends `amount` of `token` to `to`; returns false instead of
@@ -327,7 +309,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         // huge payload only loses its subsidy: it cannot spend more than the
         // cap, which also bounds the return data copied back
         // (testPayEthFailingReceiver measures that copy).
-        // slither-disable-next-line low-level-calls,arbitrary-send-eth,return-bomb
+        // forge-lint: disable-next-line(arbitrary-send-eth, low-level-calls, return-bomb) Only the router calls pay, and `to` is where it measures the hop's output.
         (success,) = to.call{value: amount, gas: _ETH_TRANSFER_GAS}("");
     }
 }

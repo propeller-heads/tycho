@@ -1,5 +1,3 @@
-#![allow(dead_code)] // TODO: Remove this once the setup is fully implemented
-
 use std::sync::Arc;
 
 use tycho_common::{
@@ -36,7 +34,7 @@ use crate::extractor::{
 };
 
 /// Builder for creating a fully configured UniswapV4HookDCI
-pub(crate) struct UniswapV4HookDCIBuilder<AE, T, G>
+pub struct UniswapV4HookDCIBuilder<AE, T, G>
 where
     AE: AccountExtractor + Send + Sync,
     T: EntryPointTracer + Send + Sync,
@@ -96,6 +94,7 @@ where
     }
 
     /// Sets the RPC batch size limit
+    #[cfg(test)]
     pub(super) fn rpc_batch_size(mut self, batch_size: usize) -> Self {
         self.rpc_batch_size = batch_size;
         self
@@ -133,6 +132,16 @@ where
         let router_code = match self.chain {
             Chain::Ethereum => Bytes::from(V4_MINI_ROUTER_BYTECODE),
             Chain::Unichain => Bytes::from(UNICHAIN_V4_MINI_ROUTER_BYTECODE),
+            Chain::Starknet |
+            Chain::ZkSync |
+            Chain::Arbitrum |
+            Chain::Base |
+            Chain::Bsc |
+            Chain::Polygon |
+            Chain::Plasma |
+            Chain::Robinhood |
+            Chain::Arc |
+            Chain::Custom(_) |
             _ => {
                 return Err(ExtractionError::Unknown(format!(
                     "Unsupported chain for UniswapV4 Hooks DCI: {}",

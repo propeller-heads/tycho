@@ -32,7 +32,7 @@ fn main() {
                     .to_string()
                     .parse::<f64>()
                     .unwrap() /
-                    10f64.powi(token_out.decimals as i32);
+                    10f64.powf(f64::from(token_out.decimals));
                 println!(
                     "  Amount Out: {} ({:.3} {})",
                     result.amount, amount_out_human, token_out.symbol

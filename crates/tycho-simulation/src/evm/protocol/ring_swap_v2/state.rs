@@ -62,7 +62,7 @@ impl RingSwapV2State {
         Self { component_id, reserve0, reserve1, backing0, backing1, token0, token1 }
     }
 
-    fn zero_to_one(&self, token_in: &Token, token_out: &Token) -> bool {
+    fn zero_to_one(token_in: &Token, token_out: &Token) -> bool {
         token_in.address < token_out.address
     }
 
@@ -104,12 +104,12 @@ impl RingSwapV2State {
 
     fn capped_limits(
         &self,
-        sell_token: Bytes,
-        buy_token: Bytes,
+        sell_token: &Bytes,
+        buy_token: &Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let (soft_input, _) = cpmm_get_limits(
-            sell_token.clone(),
-            buy_token.clone(),
+            sell_token,
+            buy_token,
             self.reserve0,
             self.reserve1,
             RING_SWAP_V2_FEE_BPS,
@@ -175,7 +175,7 @@ impl ProtocolSim for RingSwapV2State {
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
         let amount_in = biguint_to_u256(&amount_in);
-        let zero_to_one = self.zero_to_one(token_in, token_out);
+        let zero_to_one = Self::zero_to_one(token_in, token_out);
         let (reserve_in, reserve_out) = if zero_to_one {
             (self.reserve0, self.reserve1)
         } else {
@@ -216,7 +216,7 @@ impl ProtocolSim for RingSwapV2State {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        self.capped_limits(sell_token, buy_token)
+        self.capped_limits(&sell_token, &buy_token)
     }
 
     fn delta_transition(
@@ -257,7 +257,7 @@ impl ProtocolSim for RingSwapV2State {
                 min_amount_in: _,
                 max_amount_in: _,
             } => {
-                let zero_to_one = self.zero_to_one(params.token_in(), params.token_out());
+                let zero_to_one = Self::zero_to_one(params.token_in(), params.token_out());
                 let (reserve_in, reserve_out) = if zero_to_one {
                     (self.reserve0, self.reserve1)
                 } else {

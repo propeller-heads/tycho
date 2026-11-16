@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
+import {LowLevelCall} from "@openzeppelin/contracts/utils/LowLevelCall.sol";
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ISubsidyPayer, Subsidy} from "@interfaces/ISubsidyPayer.sol";
 import {CURRENTLY_SWAPPING_EXECUTOR_SLOT, Dispatcher} from "../Dispatcher.sol";
@@ -20,6 +22,9 @@ error TychoSubsidizingExecutor__UnapprovedInnerExecutor(address executor);
  *      [signature: 65][innerExecutor: 20][innerData: ...]
  */
 contract TychoSubsidizingExecutor is IExecutor {
+    // One directive per slot type: Slither 0.11.6 can fail to analyse a
+    // contract that uses `using TransientSlot for *`.
+    using TransientSlot for TransientSlot.AddressSlot;
     ISubsidyPayer public immutable payer;
     address private immutable _self;
 
@@ -41,35 +46,24 @@ contract TychoSubsidizingExecutor is IExecutor {
     {
         (IExecutor inner, bytes calldata innerData) = _decodeInner(data);
         _checkInnerExecutorApproval(address(inner), address(this));
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return Only tokenOut and outputToRouter decide where the subsidy is paid.
         (,,, address tokenOut, bool outputToRouter) =
             inner.getTransferData(innerData);
 
-        // slither-disable-next-line assembly
-        assembly {
-            tstore(CURRENTLY_SWAPPING_EXECUTOR_SLOT, inner)
-        }
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.tstore(address(inner));
 
         // The router approved the inner executor, and the Dispatcher sets
         // receiver.
-        // slither-disable-next-line controlled-delegatecall,low-level-calls,missing-zero-check
-        (bool success, bytes memory result) = address(inner)
-            .delegatecall(
+        if (!LowLevelCall.delegatecallNoReturn(
+                address(inner),
                 abi.encodeCall(IExecutor.swap, (amountIn, innerData, receiver))
-            );
-        if (!success) {
-            // slither-disable-next-line assembly
-            assembly {
-                revert(add(result, 0x20), mload(result))
-            }
+            )) {
+            LowLevelCall.bubbleRevert();
         }
 
         // The payer calls out to `subsidyReceiver`; nothing may reach the inner
         // executor through the router's fallback from there.
-        // slither-disable-next-line assembly
-        assembly {
-            tstore(CURRENTLY_SWAPPING_EXECUTOR_SLOT, 0)
-        }
+        CURRENTLY_SWAPPING_EXECUTOR_SLOT.tstore(address(0));
 
         // Must equal the Dispatcher's measureAt in _callSwapOnExecutor, so the
         // Dispatcher counts the subsidy as hop output.
@@ -131,12 +125,10 @@ contract TychoSubsidizingExecutor is IExecutor {
         // msg.sender is the router's caller: the router delegatecalls swap.
         // The payer only matches it against the signed boundTo; the subsidy
         // goes to receiver.
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return A skipped subsidy is not an error: the payer emits SubsidySkipped and the swap fills.
         try payer.pay(subsidy, amountIn, msg.sender, receiver, data[122:187]) {}
         catch (bytes memory reason) {
-            // Reentrancy cannot happen: every router entry point is
-            // nonReentrant.
-            // slither-disable-next-line reentrancy-events
+            // slither-disable-next-line reentrancy-events Reentrancy cannot happen: every router entry point is nonReentrant.
             emit SubsidyPayerReverted(subsidy.nonce, reason);
         }
     }
@@ -161,11 +153,10 @@ contract TychoSubsidizingExecutor is IExecutor {
     {
         uint256 activation =
             Dispatcher(router).executorsActivationTimestamp(inner);
-        // slither-disable-next-line incorrect-equality
         if (activation == 0 || inner == _self) {
             revert TychoSubsidizingExecutor__UnapprovedInnerExecutor(inner);
         }
-        // slither-disable-next-line timestamp
+        // forge-lint: disable-next-line(block-timestamp) A one-day timelock is unaffected by seconds of block-time drift.
         if (block.timestamp < activation) {
             revert TychoSubsidizingExecutor__UnapprovedInnerExecutor(inner);
         }

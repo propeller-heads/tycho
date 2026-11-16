@@ -491,7 +491,7 @@ mod test {
         exp_history[2].revert = true;
 
         history
-            .push(revert_block.clone())
+            .push(revert_block)
             .expect("push failed");
         history
             .push(new_block)
@@ -582,7 +582,7 @@ mod test {
     #[test]
     fn test_push_detached_block() {
         let blocks = generate_blocks(3, 0, None);
-        let mut history = BlockHistory::new(blocks.clone(), 5).expect("failed to create history");
+        let mut history = BlockHistory::new(blocks, 5).expect("failed to create history");
         let detached = BlockHeader {
             number: 2,
             hash: random_hash(),
@@ -740,7 +740,7 @@ mod test {
         // classify as Delayed rather than flip the tip; recovery to the canonical branch happens
         // via the Advanced -> reinit path once a higher block arrives.
         let blocks = generate_blocks(10, 0, None);
-        let mut history = BlockHistory::new(blocks.clone(), 15).expect("failed to create history");
+        let mut history = BlockHistory::new(blocks, 15).expect("failed to create history");
 
         // Tip is a block 10 built on block 9.
         let tip = BlockHeader {
@@ -813,7 +813,7 @@ mod test {
     /// Creates history with full blocks 0..(block_num-1) and partials 0..=partial_idx for
     /// block_num.
     fn history_with_partial(block_num: u64, partial_idx: u32) -> (BlockHistory, Bytes) {
-        let full_blocks = generate_blocks(block_num as usize, 0, None);
+        let full_blocks = generate_blocks(usize::try_from(block_num).unwrap(), 0, None);
         let parent_hash = full_blocks
             .last()
             .map(|b| b.hash.clone())
@@ -864,7 +864,7 @@ mod test {
         let blocks = generate_blocks(history_len, 0, None);
         let history = BlockHistory::new(blocks.clone(), 20).unwrap();
         let parent_hash = blocks
-            .get(incoming_block_num.saturating_sub(1) as usize)
+            .get(usize::try_from(incoming_block_num.saturating_sub(1)).unwrap())
             .map(|b| b.hash.clone())
             .unwrap_or_else(random_hash);
 
@@ -977,7 +977,7 @@ mod test {
 
         // Phase 2: Out-of-order partial is no-op
         history
-            .push(partial_block(10, 1, parent_hash.clone()))
+            .push(partial_block(10, 1, parent_hash))
             .unwrap();
         assert_eq!(
             history
@@ -1027,7 +1027,7 @@ mod test {
         // — every revert header is the last valid block — so it must not pop the tip.
         let blocks = generate_blocks(10, 0, None);
         let parent_hash = blocks.last().unwrap().hash.clone();
-        let mut history = BlockHistory::new(blocks.clone(), 20).unwrap();
+        let mut history = BlockHistory::new(blocks, 20).unwrap();
 
         let partial_1 = partial_block(10, 1, parent_hash.clone());
         history.push(partial_1.clone()).unwrap();
@@ -1035,7 +1035,7 @@ mod test {
         let partial_revert = BlockHeader {
             number: 10,
             hash: partial_1.hash.clone(),
-            parent_hash: parent_hash.clone(),
+            parent_hash,
             revert: true,
             partial_block_index: Some(1),
             ..Default::default()

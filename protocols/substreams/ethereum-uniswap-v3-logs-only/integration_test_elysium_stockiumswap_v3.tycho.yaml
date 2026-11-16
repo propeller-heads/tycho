@@ -1,0 +1,41 @@
+substreams_yaml_path: ./elysium-stockiumswap-v3.yaml
+protocol_system: "stockiumswap_v3"
+protocol_type_names:
+  - "stockiumswap_v3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # STK2PCT / WHYPE at fee 20000 and tick spacing 400, a tier outside Uniswap's defaults that the
+  # StockiumSwap factory enables.
+  - name: test_stk2pct_whype_fee_20000_pool
+    # PoolCreated, Initialize and the first Mint land in block 66074.
+    start_block: 66074
+    # First Swap: block 66077. First Burn: block 66109.
+    stop_block: 66109
+    expected_components:
+      - id: "0x2c7ff47171fa980aacfe3eeb3a96a3d9af889896"
+        tokens:
+          - "0x3c9bcf17f1aa155E18397eDe2866D14cAB0f5731" # STK2PCT
+          - "0xbA876237B0F021A6c6D852d6c26E107997cC5E81" # WHYPE
+        static_attributes:
+          fee: "0x4e20"
+          tick_spacing: "0x0190"
+        creation_tx: "0xb52510769f7cd6802687800df6f2c2e2b754122fa569f2940c6e7bc8fa11a578"
+        skip_simulation: false
+  # WHYPE / KNTQ at fee 3000, the factory's most traded pool.
+  - name: test_whype_kntq_pool
+    # PoolCreated and Initialize land in block 96201.
+    start_block: 96201
+    # First Swap: block 97510.
+    stop_block: 97510
+    expected_components:
+      - id: "0xbb4aacba1752b9efa37d5a25ed7e9d3001fefbae"
+        tokens:
+          - "0xbA876237B0F021A6c6D852d6c26E107997cC5E81" # WHYPE
+          - "0xe45a355d9e9cAd2aD85F2d03E3eE3102A036acF0" # KNTQ
+        static_attributes:
+          fee: "0x0bb8"
+          tick_spacing: "0x3c"
+        creation_tx: "0x37271d0bbe773145b8148a07308a44370e9b71f94f01ac29d80e4194663a16e3"
+        skip_simulation: false

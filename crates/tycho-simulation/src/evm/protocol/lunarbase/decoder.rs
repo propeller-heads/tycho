@@ -213,9 +213,14 @@ fn decode_bool(name: &'static str, value: &Bytes) -> Result<bool, InvalidSnapsho
 }
 
 fn address_from_bytes(value: &[u8]) -> Result<Address, InvalidSnapshotError> {
-    value.try_into().map_err(|_| {
-        InvalidSnapshotError::ValueError(format!("expected 20-byte address, got {}", value.len()))
-    })
+    value
+        .try_into()
+        .map_err(|_wrong_length| {
+            InvalidSnapshotError::ValueError(format!(
+                "expected 20-byte address, got {}",
+                value.len()
+            ))
+        })
 }
 
 fn address_from_component_id(value: &str) -> Result<Address, InvalidSnapshotError> {
@@ -278,8 +283,8 @@ mod tests {
             U256::from_be_slice(attrs[attrs::ANCHOR_PRICE_X96].as_ref()),
             U256::from(1u128 << 96)
         );
-        assert_eq!(u32::from(attrs[attrs::FEE_ASK_X24].clone()), 10);
-        assert_eq!(u64::from(attrs[attrs::LATEST_UPDATE_BLOCK].clone()), 100);
+        assert_eq!(u32::try_from(attrs[attrs::FEE_ASK_X24].clone()).unwrap(), 10);
+        assert_eq!(u64::try_from(attrs[attrs::LATEST_UPDATE_BLOCK].clone()).unwrap(), 100);
         assert!(!decode_bool(attrs::PAUSED, &attrs[attrs::PAUSED]).unwrap());
     }
 

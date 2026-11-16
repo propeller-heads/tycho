@@ -3,5 +3,5 @@ pub mod errors;
 pub mod evm;
 pub mod models;
 pub(crate) mod serde_primitives;
-mod swap_encoder;
+pub mod swap_encoder;
 pub mod tycho_encoder;

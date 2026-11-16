@@ -60,7 +60,10 @@ impl CowAMMState {
     ///
     /// # Returns
     /// A new `CowAMMState` with token states initialized.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         address: Bytes,
         token_a_addr: Bytes,
@@ -150,6 +153,10 @@ impl CowAMMState {
 
     //https://github.com/balancer/cow-amm/blob/main/src/contracts/BPool.sol#L174
     /// joinPool
+    #[expect(
+        clippy::unused_self,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn join_pool(
         &self,
         new_state: &mut CowAMMState,
@@ -255,14 +262,14 @@ impl CowAMMState {
     fn get_lp_swap_limits(
         &self,
         is_lp_buy: bool,
-        sell_token: Bytes,
-        buy_token: Bytes,
+        sell_token: &Bytes,
+        buy_token: &Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         // LP swaps are modeled as: swap part of the input to the other leg, then join/exit.
         // Limits cap the intermediate swap via MAX_IN_RATIO; dust is allowed.
         if is_lp_buy {
             // Buy LP: swap part of the sell token into the other leg, then join.
-            let is_token_a_in = sell_token == *self.token_a_addr();
+            let is_token_a_in = *sell_token == *self.token_a_addr();
 
             let (bal_in, weight_in, bal_out, weight_out) = if is_token_a_in {
                 (self.liquidity_a(), self.weight_a(), self.liquidity_b(), self.weight_b())
@@ -337,7 +344,7 @@ impl CowAMMState {
             Ok((u256_to_biguint(max_token_in), u256_to_biguint(max_lp_out)))
         } else {
             // Sell LP: exit to both tokens, then swap the unwanted leg into the desired token.
-            let is_token_a_out = buy_token == *self.token_a_addr();
+            let is_token_a_out = *buy_token == *self.token_a_addr();
 
             let (unwanted_liquidity, unwanted_weight, wanted_liquidity, wanted_weight) =
                 if is_token_a_out {
@@ -725,7 +732,7 @@ impl ProtocolSim for CowAMMState {
 
         // Use special LP swap limits that account for intermediate swaps
         if is_lp_sell || is_lp_buy {
-            return self.get_lp_swap_limits(is_lp_buy, sell_token, buy_token);
+            return self.get_lp_swap_limits(is_lp_buy, &sell_token, &buy_token);
         }
 
         if sell_token == *self.token_a_addr() {
@@ -1036,7 +1043,7 @@ mod tests {
         );
 
         let res = state
-            .get_amount_out(amount_in.clone(), token_a, token_b)
+            .get_amount_out(amount_in, token_a, token_b)
             .unwrap();
 
         assert_eq!(res.amount, expected_out);
@@ -1093,7 +1100,7 @@ mod tests {
         );
 
         let res = state
-            .get_amount_out(amount_in.clone(), token_a, token_b)
+            .get_amount_out(amount_in, token_a, token_b)
             .unwrap();
 
         assert_eq!(res.amount, expected_out);
@@ -1140,7 +1147,7 @@ mod tests {
             0,
         );
 
-        let res = state.get_amount_out(max, &t0.clone(), &t1.clone());
+        let res = state.get_amount_out(max, &t0, &t1);
         assert!(res.is_err());
         let err = res.err().unwrap();
         assert!(matches!(err, SimulationError::FatalError(_)));
@@ -1173,8 +1180,8 @@ mod tests {
 
         let state = CowAMMState::new(
             Bytes::from("0x9bd702E05B9c97E4A4a3E47Df1e0fe7A0C26d2F1"),
-            t0.address.clone(),
-            t1.address.clone(),
+            t0.address,
+            t1.address,
             U256::from_str("36925554990922").unwrap(),
             U256::from_str("30314846538607556521556").unwrap(),
             Bytes::from("0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"),
@@ -1194,8 +1201,8 @@ mod tests {
 
         let mut state = CowAMMState::new(
             Bytes::from("0x9bd702E05B9c97E4A4a3E47Df1e0fe7A0C26d2F1"),
-            t0.address.clone(),
-            t1.address.clone(),
+            t0.address,
+            t1.address,
             U256::from_str("36925554990922").unwrap(),
             U256::from_str("30314846538607556521556").unwrap(),
             Bytes::from("0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"),
@@ -1273,8 +1280,8 @@ mod tests {
 
         let state = CowAMMState::new(
             Bytes::from("0x9bd702E05B9c97E4A4a3E47Df1e0fe7A0C26d2F1"),
-            t0.address.clone(),
-            t1.address.clone(),
+            t0.address,
+            t1.address,
             U256::from_str("886800000000000000").unwrap(),
             U256::from_str("50000000000000000").unwrap(),
             Bytes::from("0x9bd702E05B9c97E4A4a3E47Df1e0fe7A0C26d2F1"),
@@ -1312,7 +1319,7 @@ mod tests {
         );
 
         let result = state
-            .get_amount_out(amount_in.clone(), &t0, &t1)
+            .get_amount_out(amount_in, &t0, &t1)
             .unwrap();
         let new_state = result
             .new_state
@@ -1361,7 +1368,7 @@ mod tests {
 
         let state = CowAMMState::new(
             Bytes::from_str("0x4359a8ea4c353d93245c0b6b8608a28bb48a05e2").unwrap(),
-            arb.address.clone(),
+            arb.address,
             weth.address.clone(),
             U256::from_str("286275852074040134274570").unwrap(), //ARB
             U256::from_str("61694306956323018369").unwrap(),     //WETH
@@ -1383,11 +1390,11 @@ mod tests {
         println!("  Max WETH out: {:.6} WETH", wei_to_eth(&max_weth_out));
 
         // Test with 10% of the SAFE max
-        let amount_in = max_lp_in.clone() / BigUint::from(10u64);
+        let amount_in = max_lp_in / BigUint::from(10u64);
         println!("\nTesting with 10% of safe max: {}", amount_in);
 
         let res = state
-            .get_amount_out(amount_in.clone(), &lp_token, &weth)
+            .get_amount_out(amount_in, &lp_token, &weth)
             .expect("Should succeed with safe limit");
         // Basic sanity assertions
         assert!(!res.amount.is_zero(), "Amount out should be non-zero for a valid LP redemption");

@@ -24,3 +24,14 @@ alongside another Tycho stack, isolate both the database and the port — see `R
 (default 5431).
 
 Docker Compose is available for isolated runs — see `README.md`.
+
+A `cargo` spawned for the Substreams workspace must drop `RUSTUP_TOOLCHAIN` and the inherited
+target-directory variables, or it builds with this crate's toolchain and target dir instead of the
+package's; `build_wasm` in `src/utils.rs` shows how.
+
+## Strict mode
+
+A test yaml can opt into `harness: strict`; without it the runner behaves as before. Strict mode
+rejects keys the runner does not read and reports every failed check of a test, not just the
+first. It is not required of any package yet, and new checks go into strict mode only.
+`range --report <path>` writes each check's outcome as JSON. See `README.md`, "Strict mode".

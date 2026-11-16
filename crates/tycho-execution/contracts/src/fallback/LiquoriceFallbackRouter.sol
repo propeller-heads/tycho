@@ -98,7 +98,7 @@ contract LiquoriceFallbackRouter is TychoFallbackRouter {
         uint256 balanceBefore = tokenOut.balanceOf(address(this));
 
         tokenIn.forceApprove(liquoriceBalanceManager, swap_.amountIn);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The output is measured by balance diff below.
         liquoriceSettlement.functionCall(settlementCalldata);
         tokenIn.forceApprove(liquoriceBalanceManager, 0);
 

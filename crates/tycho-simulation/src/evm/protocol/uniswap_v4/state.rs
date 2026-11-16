@@ -20,59 +20,92 @@ use tycho_common::{
 };
 
 use super::hooks::utils::HookOptions;
-use crate::evm::{
-    protocol::{
-        clmm::clmm_swap_to_price,
-        safe_math::{safe_add_u256, safe_sub_u256},
-        u256_num::{u256_to_biguint, u256_to_f64},
-        uniswap_v4::hooks::{
-            hook_handler::HookHandler,
-            models::{
-                AfterSwapParameters, BalanceDelta, BeforeSwapDelta, BeforeSwapParameters,
-                StateContext, SwapParams,
-            },
-        },
-        utils::{
-            add_fee_markup,
-            uniswap::{
-                i24_be_bytes_to_i32, liquidity_math,
-                lp_fee::{self, is_dynamic},
-                pool_tick::PoolTick,
-                sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
-                swap_math::{self, SwapStepResult},
-                swap_step_cache::{StepCacheKey, StepCacheRun, SwapStepCache},
-                tick_list::{TickInfo, TickList, TickListErrorKind},
-                tick_math::{
-                    get_sqrt_ratio_at_tick_cached, MAX_SQRT_RATIO, MAX_TICK, MIN_SQRT_RATIO,
-                    MIN_TICK,
+use crate::{
+    evm::{
+        protocol::{
+            clmm::clmm_swap_to_price,
+            safe_math::{safe_add_u256, safe_sub_u256},
+            u256_num::{u256_to_biguint, u256_to_f64},
+            uniswap_v4::hooks::{
+                hook_handler::HookHandler,
+                models::{
+                    AfterSwapParameters, BalanceDelta, BeforeSwapDelta, BeforeSwapParameters,
+                    StateContext, SwapParams,
                 },
-                StepComputation, SwapResults, SwapState,
             },
+            utils::{
+                add_fee_markup,
+                uniswap::{
+                    i24_be_bytes_to_i32, liquidity_math,
+                    lp_fee::{self, is_dynamic},
+                    pool_tick::PoolTick,
+                    sqrt_price_math::{
+                        get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64,
+                    },
+                    swap_math::{self, SwapStepResult},
+                    swap_step_cache::{StepCacheKey, StepCacheRun, SwapStepCache},
+                    tick_list::{TickInfo, TickList, TickListErrorKind},
+                    tick_math::{
+                        get_sqrt_ratio_at_tick_cached, MAX_SQRT_RATIO, MAX_TICK, MIN_SQRT_RATIO,
+                        MIN_TICK,
+                    },
+                    StepComputation, SwapResults, SwapState,
+                },
+            },
+            vm::constants::EXTERNAL_ACCOUNT,
         },
-        vm::constants::EXTERNAL_ACCOUNT,
+        simulation::PendingOverrides,
     },
-    simulation::PendingOverrides,
+    utils::decimals_exponent,
 };
 
-// Fixed overhead per swap: covers router overhead, executor preamble (decode, sync,
-// unlock/callback pattern), and token transfer-in.
-const SWAP_BASE_GAS: u64 = 185_000;
-// Per loop: PoolManager.swap bitmap lookup + sqrt math + computeSwapStep.
-// V4's singleton PoolManager hits warmer storage than V3 standalone pools: ~3,500/loop.
-const GAS_PER_BITMAP_LOOKUP: u64 = 3_500;
-// Initialized tick crossing: _updateTick() updates feeGrowthOutside0/1 (2 SSTOREs).
-// Warm ≈ 10–17k, cold ≈ 40–52k. We use a blended estimate that
-// weights toward cold costs.
-const GAS_PER_TICK: u64 = 29_000;
-// Settlement overhead within swapExactInputSingle: _settle() + _getFullCredit() + misc.
-const V4_CALLBACK_SETTLEMENT_GAS: u64 = 30_000;
+/// The gas a swap through a singleton pool manager costs, by part. Pool managers that share the
+/// Uniswap V4 swap math still differ in what each part costs, so every protocol system decoded
+/// into this state carries its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwapGasCosts {
+    /// Fixed overhead per swap: router overhead, executor preamble (decode, sync,
+    /// unlock/callback pattern), and token transfer-in.
+    pub base: u64,
+    /// Per loop: bitmap lookup + sqrt math + computeSwapStep.
+    pub per_bitmap_lookup: u64,
+    /// Per initialized tick crossed: `_updateTick()` updates feeGrowthOutside0/1.
+    pub per_tick: u64,
+    /// Settlement after the swap: `_settle()` + `_getFullCredit()` + misc.
+    pub settlement: u64,
+}
+
+impl SwapGasCosts {
+    /// Uniswap V4's PoolManager. Its singleton storage is warmer than a V3 standalone pool's, so a
+    /// loop costs ~3,500. A tick crossing is warm ≈ 10–17k and cold ≈ 40–52k; the estimate is a
+    /// blend weighted toward cold.
+    pub const UNISWAP_V4: Self =
+        Self { base: 185_000, per_bitmap_lookup: 3_500, per_tick: 29_000, settlement: 30_000 };
+
+    /// PancakeSwap Infinity's CLPoolManager, fitted by least squares to ~12.9k TychoRouter swaps
+    /// through `pancakeswap_infinity_cl` and `pancakeswap_infinity_cl_hooks` on BSC (October
+    /// 2026), with the bitmap lookups and tick crossings counted per swap. A loop costs more than
+    /// on Uniswap V4 because the bitmap words a swap walks past are mostly cold, and the fixed
+    /// part is lower.
+    pub const PANCAKESWAP_INFINITY_CL: Self =
+        Self { base: 150_000, per_bitmap_lookup: 6_100, per_tick: 23_500, settlement: 30_000 };
+
+    /// The most ticks a swap may cross before it would exceed `MAX_SWAP_GAS`.
+    fn max_ticks_crossed(&self) -> u64 {
+        (MAX_SWAP_GAS - self.base) / self.per_tick
+    }
+}
+
+fn uniswap_v4_gas_costs() -> SwapGasCosts {
+    SwapGasCosts::UNISWAP_V4
+}
+
 // PoolManager Hooks.sol wrapper overhead per hook call: ABI encode params,
 // external CALL dispatch, decode return, validate selector, and process
 // the returned BeforeSwapDelta / AfterSwapDelta.
 pub(crate) const PM_PER_HOOK_CALL_OVERHEAD: u64 = 25_000;
 // Conservative max gas budget for a single swap (Ethereum transaction gas limit)
 const MAX_SWAP_GAS: u64 = 16_700_000;
-const MAX_TICKS_CROSSED: u64 = (MAX_SWAP_GAS - SWAP_BASE_GAS) / GAS_PER_TICK;
 // Decimal exponent of the output amount a hook is probed with to read off its fee rate.
 // Hooks floor each term of their fee, so the rate is only exact in the limit of a large amount;
 // 1e30 makes the rounding smaller than an f64 can hold and still leaves room under U256::MAX for
@@ -82,6 +115,10 @@ const HOOK_FEE_PROBE_EXP: u64 = 30;
 /// Only hookless pools serialize. Deserializing sets `hook: None` and checks the tick list.
 #[derive(Clone, Deserialize)]
 #[serde(try_from = "UniswapV4StateData<'static>")]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; making `hook` private or the rest public is a breaking change"
+)]
 pub struct UniswapV4State {
     liquidity: u128,
     sqrt_price: U256,
@@ -92,6 +129,7 @@ pub struct UniswapV4State {
     /// another state shares it.
     ticks: Arc<TickList>,
     tick_spacing: i32,
+    gas_costs: SwapGasCosts,
     pub hook: Option<Box<dyn HookHandler>>,
     /// Storage and block environment a pending quote runs the hook under. `None` on confirmed
     /// state; set only on the clones `apply_deltas_ephemeral` hands out.
@@ -111,20 +149,26 @@ struct UniswapV4StateData<'a> {
     tick: i32,
     tick_spacing: i32,
     ticks: Cow<'a, [TickInfo]>,
+    /// Absent from states serialized before the field existed, which were all priced as
+    /// Uniswap V4.
+    #[serde(default = "uniswap_v4_gas_costs")]
+    gas_costs: SwapGasCosts,
 }
 
 impl TryFrom<UniswapV4StateData<'_>> for UniswapV4State {
     type Error = SimulationError;
 
     fn try_from(data: UniswapV4StateData<'_>) -> Result<Self, Self::Error> {
-        UniswapV4State::new(
+        let mut state = UniswapV4State::new(
             data.liquidity,
             data.sqrt_price,
             data.fees.into_owned(),
             data.tick,
             data.tick_spacing,
             data.ticks.into_owned(),
-        )
+        )?;
+        state.set_gas_costs(data.gas_costs);
+        Ok(state)
     }
 }
 
@@ -142,6 +186,7 @@ impl Serialize for UniswapV4State {
             tick: self.tick.value(),
             tick_spacing: self.tick_spacing,
             ticks: Cow::Borrowed(self.ticks.ticks()),
+            gas_costs: self.gas_costs,
         }
         .serialize(serializer)
     }
@@ -155,6 +200,7 @@ impl fmt::Debug for UniswapV4State {
             .field("fees", &self.fees)
             .field("tick", &self.tick)
             .field("tick_spacing", &self.tick_spacing)
+            .field("gas_costs", &self.gas_costs)
             .field("pending_overrides", &self.pending_overrides.is_some())
             .finish_non_exhaustive()
     }
@@ -187,7 +233,11 @@ impl UniswapV4Fees {
         Self { zero_for_one, one_for_zero, lp_fee }
     }
 
-    fn calculate_swap_fees_pips(&self, zero_for_one: bool, lp_fee_override: Option<u32>) -> u32 {
+    fn calculate_swap_fees_pips(
+        &self,
+        zero_for_one: bool,
+        lp_fee_override: Option<u32>,
+    ) -> Result<u32, SimulationError> {
         let protocol_fee = if zero_for_one { self.zero_for_one } else { self.one_for_zero };
         let lp_fee = lp_fee_override.unwrap_or_else(|| {
             // If a protocol has dynamic fees,
@@ -202,7 +252,13 @@ impl UniswapV4Fees {
         // Source: https://raw.githubusercontent.com/Uniswap/v4-core/main/src/libraries/ProtocolFeeLibrary.sol
         // This accounts for the fact that protocol fee is taken first, then LP fee applies to
         // remainder
-        protocol_fee + lp_fee - ((protocol_fee as u64 * lp_fee as u64 / 1_000_000) as u32)
+        let overlap = u64::from(protocol_fee) * u64::from(lp_fee) / 1_000_000;
+        u32::try_from(u64::from(protocol_fee) + u64::from(lp_fee) - overlap).map_err(|e| {
+            SimulationError::InvalidInput(
+                format!("swap fee for protocol fee {protocol_fee} and lp fee {lp_fee}: {e}"),
+                None,
+            )
+        })
     }
 }
 
@@ -216,14 +272,16 @@ impl UniswapV4State {
         tick_spacing: i32,
         ticks: Vec<TickInfo>,
     ) -> Result<Self, SimulationError> {
-        let tick_spacing_u16 = tick_spacing.try_into().map_err(|_| {
-            // even though it's given as int24, tick_spacing must be positive, see here:
-            // https://github.com/Uniswap/v4-core/blob/a22414e4d7c0d0b0765827fe0a6c20dfd7f96291/src/libraries/TickMath.sol#L25-L28
-            SimulationError::FatalError(format!(
-                "tick_spacing {} must be positive (int24 -> u16 conversion failed)",
-                tick_spacing
-            ))
-        })?;
+        let tick_spacing_u16 = tick_spacing
+            .try_into()
+            .map_err(|_out_of_range| {
+                // even though it's given as int24, tick_spacing must be positive, see here:
+                // https://github.com/Uniswap/v4-core/blob/a22414e4d7c0d0b0765827fe0a6c20dfd7f96291/src/libraries/TickMath.sol#L25-L28
+                SimulationError::FatalError(format!(
+                    "tick_spacing {} must be positive (int24 -> u16 conversion failed)",
+                    tick_spacing
+                ))
+            })?;
         let tick_list = TickList::from(tick_spacing_u16, ticks)?;
         Ok(UniswapV4State {
             liquidity,
@@ -232,6 +290,7 @@ impl UniswapV4State {
             tick: tick.into(),
             ticks: Arc::new(tick_list),
             tick_spacing,
+            gas_costs: SwapGasCosts::UNISWAP_V4,
             hook: None,
             pending_overrides: None,
             step_cache: SwapStepCache::default(),
@@ -240,6 +299,12 @@ impl UniswapV4State {
 
     pub fn pending_overrides(&self) -> Option<&PendingOverrides> {
         self.pending_overrides.as_deref()
+    }
+
+    /// Prices swaps with `gas_costs` instead of the Uniswap V4 costs `new` sets.
+    pub fn set_gas_costs(&mut self, gas_costs: SwapGasCosts) {
+        self.gas_costs = gas_costs;
+        self.step_cache = SwapStepCache::default();
     }
 
     /// A clone of this state with the final price, tick and liquidity of a swap, and an empty
@@ -301,7 +366,7 @@ impl UniswapV4State {
             tick: self.tick.value().into(),
             liquidity: self.liquidity,
         };
-        let mut gas_used = U256::from(SWAP_BASE_GAS);
+        let mut gas_used = U256::from(self.gas_costs.base);
 
         // A hook's fee override holds for one swap only, so those swaps neither use nor add to the
         // step cache.
@@ -311,7 +376,7 @@ impl UniswapV4State {
         let cache_key = if exact_input && sqrt_price_limit.is_none() && lp_fee_override.is_none() {
             let fee_pips = self
                 .fees
-                .calculate_swap_fees_pips(zero_for_one, None);
+                .calculate_swap_fees_pips(zero_for_one, None)?;
             StepCacheKey::new(
                 self.sqrt_price,
                 state.tick.value(),
@@ -338,7 +403,8 @@ impl UniswapV4State {
                 .next_initialized_tick_within_one_word(state.tick.value(), zero_for_one)
             {
                 Ok((tick, info)) => {
-                    gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_BITMAP_LOOKUP))?;
+                    gas_used =
+                        safe_add_u256(gas_used, U256::from(self.gas_costs.per_bitmap_lookup))?;
                     (tick, info)
                 }
                 Err(tick_err) => match tick_err.kind {
@@ -357,7 +423,9 @@ impl UniswapV4State {
                             )),
                         ));
                     }
-                    _ => return Err(SimulationError::FatalError("Unknown error".to_string())),
+                    TickListErrorKind::BelowSmallest | TickListErrorKind::AtOrAboveLargest => {
+                        return Err(SimulationError::FatalError("Unknown error".to_string()))
+                    }
                 },
             };
 
@@ -369,7 +437,7 @@ impl UniswapV4State {
             };
             let fee_pips = self
                 .fees
-                .calculate_swap_fees_pips(zero_for_one, lp_fee_override);
+                .calculate_swap_fees_pips(zero_for_one, lp_fee_override)?;
 
             let sqrt_price_start = state.sqrt_price;
             let SwapStepResult { sqrt_price, amount_in_with_fee, amount_out } =
@@ -415,7 +483,7 @@ impl UniswapV4State {
                     let liquidity_net = if zero_for_one { -liquidity_raw } else { liquidity_raw };
                     state.liquidity =
                         liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;
-                    gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_TICK))?;
+                    gas_used = safe_add_u256(gas_used, U256::from(self.gas_costs.per_tick))?;
                 }
                 state.tick =
                     PoolTick::from(if zero_for_one { step.tick_next - 1 } else { step.tick_next });
@@ -432,7 +500,7 @@ impl UniswapV4State {
             sqrt_price: state.sqrt_price,
             liquidity: state.liquidity,
             tick: state.tick,
-            gas_used: safe_add_u256(gas_used, U256::from(V4_CALLBACK_SETTLEMENT_GAS))?,
+            gas_used: safe_add_u256(gas_used, U256::from(self.gas_costs.settlement))?,
         })
     }
 
@@ -460,15 +528,15 @@ impl UniswapV4State {
 
     fn find_limits_experimentally(
         &self,
-        token_in: Bytes,
-        token_out: Bytes,
-    ) -> Result<(BigUint, BigUint), SimulationError> {
+        token_in: &Bytes,
+        token_out: &Bytes,
+    ) -> (BigUint, BigUint) {
         // Create dummy token objects with proper addresses. This is fine since `get_amount_out`
         // only uses the token addresses.
         let token_in_obj =
-            Token::new(&token_in, "TOKEN_IN", 18, 0, &[Some(10_000)], Default::default(), 100);
+            Token::new(token_in, "TOKEN_IN", 18, 0, &[Some(10_000)], Default::default(), 100);
         let token_out_obj =
-            Token::new(&token_out, "TOKEN_OUT", 18, 0, &[Some(10_000)], Default::default(), 100);
+            Token::new(token_out, "TOKEN_OUT", 18, 0, &[Some(10_000)], Default::default(), 100);
 
         self.find_max_amount(&token_in_obj, &token_out_obj)
     }
@@ -485,11 +553,7 @@ impl UniswapV4State {
     /// # Returns
     ///
     /// Returns a tuple containing the max amount in and max amount out respectively.
-    fn find_max_amount(
-        &self,
-        token_in: &Token,
-        token_out: &Token,
-    ) -> Result<(BigUint, BigUint), SimulationError> {
+    fn find_max_amount(&self, token_in: &Token, token_out: &Token) -> (BigUint, BigUint) {
         let mut low = BigUint::from(1u64);
 
         // The max you can swap on a USV4 is I256::MAX is 5.7e76, since input amount is I256.
@@ -510,7 +574,7 @@ impl UniswapV4State {
 
             // Stop if we're getting too large for I256 (about 10^75)
             if high > BigUint::from(10u64).pow(75) {
-                return Ok((last_successful_amount_in, last_successful_amount_out));
+                return (last_successful_amount_in, last_successful_amount_out);
             }
         }
 
@@ -530,7 +594,7 @@ impl UniswapV4State {
             }
         }
 
-        Ok((last_successful_amount_in, last_successful_amount_out))
+        (last_successful_amount_in, last_successful_amount_out)
     }
 
     /// Helper method to check if there are no initialized ticks in either direction
@@ -544,7 +608,7 @@ impl UniswapV4State {
         let base_is_currency0 = base < quote;
         let fee_pips = self
             .fees
-            .calculate_swap_fees_pips(base_is_currency0, None);
+            .calculate_swap_fees_pips(base_is_currency0, None)?;
         let fee = fee_pips as f64 / 1_000_000.0;
 
         let price = if base_is_currency0 {
@@ -590,6 +654,10 @@ impl ProtocolSim for UniswapV4State {
         &mut self,
         overrides: Arc<dyn Any + Send + Sync>,
     ) -> Result<(), SimulationError> {
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "the downcast error is the original `Arc<dyn Any>`, which has no message"
+        )]
         let overrides = overrides
             .downcast::<PendingOverrides>()
             .map_err(|_| {
@@ -606,6 +674,10 @@ impl ProtocolSim for UniswapV4State {
 
     // Not possible to implement correctly with the current interface because we need to know the
     // swap direction.
+    #[expect(
+        clippy::todo,
+        reason = "fee() returns no error and the trait documents the panic for asymmetric fees"
+    )]
     fn fee(&self) -> f64 {
         todo!()
     }
@@ -669,7 +741,8 @@ impl ProtocolSim for UniswapV4State {
                         )
                     })?;
 
-                    let token_correction = 10f64.powi(base.decimals as i32 - quote.decimals as i32);
+                    let token_correction =
+                        10f64.powi(decimals_exponent(base.decimals, quote.decimals)?);
 
                     return Ok(num_f64 / den_f64 * token_correction);
                 }
@@ -712,11 +785,16 @@ impl ProtocolSim for UniswapV4State {
             tick_spacing: self.tick_spacing,
         };
 
-        let swap_params = SwapParams {
-            zero_for_one,
-            amount_specified: amount_to_swap,
-            sqrt_price_limit: self.sqrt_price,
+        // The hooks must see the limit an executed swap sends: the full price range, like the
+        // default `swap` applies. A hook that fills only up to the taker's limit would otherwise
+        // fill nothing in simulation and everything on chain.
+        let sqrt_price_limit = if zero_for_one {
+            safe_add_u256(MIN_SQRT_RATIO, U256::from(1u64))?
+        } else {
+            safe_sub_u256(MAX_SQRT_RATIO, U256::from(1u64))?
         };
+        let swap_params =
+            SwapParams { zero_for_one, amount_specified: amount_to_swap, sqrt_price_limit };
 
         // Check if hook is set and has before_swap permissions
         if let Some(ref hook) = self.hook {
@@ -734,9 +812,10 @@ impl ProtocolSim for UniswapV4State {
                     .before_swap(before_swap_params, None, None)
                     .map_err(|e| match e {
                         SimulationError::InvalidInput(..) => e,
-                        e => SimulationError::FatalError(format!(
-                            "BeforeSwap hook simulation failed: {e:?}"
-                        )),
+                        e @ (SimulationError::FatalError(_) |
+                        SimulationError::RecoverableError(_)) => SimulationError::FatalError(
+                            format!("BeforeSwap hook simulation failed: {e:?}"),
+                        ),
                     })?;
 
                 before_swap_gas = before_swap_result.gas_estimate;
@@ -860,8 +939,8 @@ impl ProtocolSim for UniswapV4State {
 
     fn get_limits(
         &self,
-        token_in: Bytes,
-        token_out: Bytes,
+        sell_token: Bytes,
+        buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         if let Some(hook) = &self.hook {
             if !hook.swaps_enabled() {
@@ -870,7 +949,7 @@ impl ProtocolSim for UniswapV4State {
             // Check if pool has no liquidity & ticks -> hook manages liquidity
             if self.liquidity == 0 && self.has_no_initialized_ticks() {
                 // If the hook has a get_amount_ranges entrypoint, call it and return (0, limits[1])
-                match hook.get_amount_ranges(token_in.clone(), token_out.clone()) {
+                match hook.get_amount_ranges(sell_token.clone(), buy_token.clone()) {
                     Ok(amount_ranges) => {
                         return Ok((
                             u256_to_biguint(amount_ranges.amount_in_range.1),
@@ -884,7 +963,7 @@ impl ProtocolSim for UniswapV4State {
                     {
                         // Hook manages liquidity but doesn't have get_amount_ranges
                         // Use binary search to find limits by calling swap with increasing amounts
-                        return self.find_limits_experimentally(token_in, token_out);
+                        return Ok(self.find_limits_experimentally(&sell_token, &buy_token));
                         // Otherwise fall back to default implementation
                     }
                     Err(e) => return Err(e),
@@ -897,13 +976,14 @@ impl ProtocolSim for UniswapV4State {
             return Ok((BigUint::zero(), BigUint::zero()));
         }
 
-        let zero_for_one = token_in < token_out;
+        let zero_for_one = sell_token < buy_token;
         let mut current_tick = self.tick.value();
         let mut current_sqrt_price = self.sqrt_price;
         let mut current_liquidity = self.liquidity;
         let mut total_amount_in = U256::ZERO;
         let mut total_amount_out = U256::ZERO;
         let mut ticks_crossed: u64 = 0;
+        let max_ticks_crossed = self.gas_costs.max_ticks_crossed();
 
         // Iterate through ticks in the direction of the swap
         // Stops when: no more liquidity, no more ticks, or gas limit would be exceeded
@@ -912,7 +992,7 @@ impl ProtocolSim for UniswapV4State {
             .next_initialized_tick_within_one_word(current_tick, zero_for_one)
         {
             // Cap iteration to prevent exceeding Ethereum's gas limit
-            if ticks_crossed >= MAX_TICKS_CROSSED {
+            if ticks_crossed >= max_ticks_crossed {
                 break;
             }
             ticks_crossed += 1;
@@ -1029,7 +1109,7 @@ impl ProtocolSim for UniswapV4State {
             .updated_attributes
             .get("liquidity")
         {
-            self.liquidity = u128::from(liquidity.clone());
+            self.liquidity = u128::try_from(liquidity.clone())?;
         }
         if let Some(sqrt_price) = delta
             .updated_attributes
@@ -1041,19 +1121,19 @@ impl ProtocolSim for UniswapV4State {
             self.tick = i24_be_bytes_to_i32(tick).into();
         }
         if let Some(lp_fee) = delta.updated_attributes.get("fee") {
-            self.fees.lp_fee = u32::from(lp_fee.clone());
+            self.fees.lp_fee = u32::try_from(lp_fee.clone())?;
         }
         if let Some(zero2one_protocol_fee) = delta
             .updated_attributes
             .get("protocol_fees/zero2one")
         {
-            self.fees.zero_for_one = u32::from(zero2one_protocol_fee.clone());
+            self.fees.zero_for_one = u32::try_from(zero2one_protocol_fee.clone())?;
         }
         if let Some(one2zero_protocol_fee) = delta
             .updated_attributes
             .get("protocol_fees/one2zero")
         {
-            self.fees.one_for_zero = u32::from(one2zero_protocol_fee.clone());
+            self.fees.one_for_zero = u32::try_from(one2zero_protocol_fee.clone())?;
         }
 
         // apply tick changes
@@ -1066,7 +1146,7 @@ impl ProtocolSim for UniswapV4State {
                         parts[1]
                             .parse::<i32>()
                             .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
-                        i128::from(value.clone()),
+                        i128::try_from(value.clone())?,
                     )
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
             }
@@ -1116,7 +1196,7 @@ impl ProtocolSim for UniswapV4State {
         let zero_for_one = params.token_in().address < params.token_out().address;
         let fee_pips = self
             .fees
-            .calculate_swap_fees_pips(zero_for_one, None);
+            .calculate_swap_fees_pips(zero_for_one, None)?;
 
         match params.swap_constraint() {
             SwapConstraint::TradeLimitPrice { .. } => Err(SimulationError::InvalidInput(
@@ -1289,6 +1369,33 @@ mod tests {
             Default::default(),
             100,
         )
+    }
+
+    #[test]
+    fn delta_with_oversized_liquidity_is_rejected_without_panicking() {
+        let mut pool = UniswapV4State::new(
+            1000,
+            U256::from_str("1000").unwrap(),
+            UniswapV4Fees { zero_for_one: 100, one_for_zero: 90, lp_fee: 700 },
+            100,
+            60,
+            vec![TickInfo::new(120, 10000).unwrap(), TickInfo::new(180, -10000).unwrap()],
+        )
+        .unwrap();
+        let address_sized = Bytes::from(vec![0x11_u8; 20]);
+        let delta = ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: HashMap::from([("liquidity".to_string(), address_sized.clone())]),
+            deleted_attributes: HashSet::new(),
+        };
+
+        let result = pool.delta_transition(delta, &HashMap::new(), &Balances::default());
+
+        let Err(TransitionError::DecodeError(message)) = result else {
+            panic!("a 20-byte liquidity attribute must not apply");
+        };
+        assert!(message.contains(&address_sized.to_string()), "{message}");
+        assert_eq!(pool.liquidity, 1000);
     }
 
     #[test]
@@ -1530,6 +1637,10 @@ mod tests {
             self.address
         }
 
+        #[expect(
+            clippy::unwrap_in_result,
+            reason = "test mock; a poisoned lock means a test already failed"
+        )]
         fn before_swap(
             &self,
             _params: BeforeSwapParameters,
@@ -1553,6 +1664,10 @@ mod tests {
             })
         }
 
+        #[expect(
+            clippy::unwrap_in_result,
+            reason = "test mock; a poisoned lock means a test already failed"
+        )]
         fn after_swap(
             &self,
             _params: AfterSwapParameters,
@@ -1627,8 +1742,8 @@ mod tests {
             0,
             60,
             vec![
-                TickInfo::new(-60, liquidity as i128).unwrap(),
-                TickInfo::new(60, -(liquidity as i128)).unwrap(),
+                TickInfo::new(-60, i128::try_from(liquidity).unwrap()).unwrap(),
+                TickInfo::new(60, -(i128::try_from(liquidity).unwrap())).unwrap(),
             ],
         )
         .unwrap();
@@ -2032,7 +2147,7 @@ mod tests {
         let db = SimulationDB::new(
             get_client(None).expect("Failed to create client"),
             get_runtime().expect("Failed to get runtime"),
-            Some(block.clone()),
+            Some(block),
         );
         let engine = create_engine(db, true).expect("Failed to create simulation engine");
         let pool_manager = Address::from_str("0x000000000004444c5dc75cb358380d2e3de08a90")
@@ -2322,6 +2437,129 @@ mod tests {
         );
     }
 
+    /// Hook that fills part of an exact-in swap from its own inventory, the way a limit order
+    /// does: only when the taker's price limit reaches the order's price.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct LimitOrderTestHook {
+        fill_sqrt_price: U256,
+        /// Input the hook takes from the taker, and output it pays back, when it fills.
+        fill_in: u128,
+        fill_out: u128,
+    }
+
+    impl LimitOrderTestHook {
+        fn fill_delta(&self) -> BeforeSwapDelta {
+            let specified = U256::from(self.fill_in) << 128;
+            // The hook pays the output, so the unspecified delta is `-fill_out`, in two's
+            // complement over the lower 128 bits.
+            let unspecified = U256::from(self.fill_out.wrapping_neg());
+            BeforeSwapDelta(I256::from_raw(specified | unspecified))
+        }
+    }
+
+    impl HookHandler for LimitOrderTestHook {
+        fn address(&self) -> Address {
+            construct_hook_address(&[HookOptions::BeforeSwap, HookOptions::BeforeSwapReturnsDelta])
+        }
+
+        fn before_swap(
+            &self,
+            params: BeforeSwapParameters,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+        ) -> Result<WithGasEstimate<BeforeSwapOutput>, SimulationError> {
+            let limit = params.swap_params.sqrt_price_limit;
+            let limit_reaches_order = if params.swap_params.zero_for_one {
+                limit <= self.fill_sqrt_price
+            } else {
+                limit >= self.fill_sqrt_price
+            };
+            let amount_delta =
+                if limit_reaches_order { self.fill_delta() } else { BeforeSwapDelta(I256::ZERO) };
+            Ok(WithGasEstimate {
+                gas_estimate: 0,
+                result: BeforeSwapOutput {
+                    amount_delta,
+                    fee: U24::ZERO,
+                    overwrites: HashMap::new(),
+                    transient_storage: HashMap::new(),
+                },
+            })
+        }
+
+        fn after_swap(
+            &self,
+            _: AfterSwapParameters,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+        ) -> Result<WithGasEstimate<AfterSwapDelta>, SimulationError> {
+            Err(SimulationError::FatalError("hook has no afterSwap permission".into()))
+        }
+
+        fn fee(&self, _: &UniswapV4State, _: SwapParams) -> Result<f64, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn spot_price(&self, _: &Token, _: &Token) -> Result<f64, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn get_amount_ranges(&self, _: Bytes, _: Bytes) -> Result<AmountRanges, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn delta_transition(
+            &mut self,
+            _: ProtocolStateDelta,
+            _: &HashMap<Bytes, Token>,
+            _: &Balances,
+        ) -> Result<(), TransitionError> {
+            Ok(())
+        }
+
+        fn clone_box(&self) -> Box<dyn HookHandler> {
+            Box::new(self.clone())
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn is_equal(&self, other: &dyn HookHandler) -> bool {
+            other.as_any().downcast_ref::<Self>() == Some(self)
+        }
+    }
+
+    /// `beforeSwap` sees the full-range price limit the executor sends on chain, so a hook that
+    /// fills only at a price beyond the pool's current one is quoted as filling.
+    #[rstest]
+    #[case::zero_for_one(true)]
+    #[case::one_for_zero(false)]
+    fn test_before_swap_limit_order_fill(#[case] zero_for_one: bool) {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(zero_for_one);
+        let amount_in = 1_000_000_000_000_000_000u128;
+        let fill_in = amount_in / 2;
+        let fill_out = 123_456_789u128;
+
+        let mut pool = create_basic_v4_test_pool();
+        // An order one percent past the current price, in the direction the swap moves it.
+        let fill_sqrt_price = if zero_for_one {
+            pool.sqrt_price * U256::from(99u8) / U256::from(100u8)
+        } else {
+            pool.sqrt_price * U256::from(101u8) / U256::from(100u8)
+        };
+        let remainder = create_basic_v4_test_pool()
+            .get_amount_out(BigUint::from(amount_in - fill_in), &token_in, &token_out)
+            .expect("hookless swap of the remainder should succeed");
+
+        pool.set_hook_handler(Box::new(LimitOrderTestHook { fill_sqrt_price, fill_in, fill_out }));
+        let quote = pool
+            .get_amount_out(BigUint::from(amount_in), &token_in, &token_out)
+            .expect("hooked swap should succeed");
+
+        assert_eq!(quote.amount, remainder.amount + BigUint::from(fill_out));
+    }
+
     const FEELESS_POOL_LIQUIDITY: u128 = 100_000_000_000_000_000_000; // 100e18
 
     /// A pool with no LP fee and no protocol fee, holding a single position that spans the whole
@@ -2331,7 +2569,7 @@ mod tests {
         let sqrt_price = get_sqrt_price_q96(U256::from(20_000_000u64), U256::from(10_000_000u64))
             .expect("a price of two has a square root");
         let tick = get_tick_at_sqrt_ratio(sqrt_price).expect("the sqrt price maps to a tick");
-        let position = FEELESS_POOL_LIQUIDITY as i128;
+        let position = i128::try_from(FEELESS_POOL_LIQUIDITY).unwrap();
 
         UniswapV4State::new(
             liquidity,
@@ -2372,8 +2610,8 @@ mod tests {
             tick,
             60,
             vec![
-                TickInfo::new(-46_080, LIQUIDITY as i128).unwrap(),
-                TickInfo::new(46_080, -(LIQUIDITY as i128)).unwrap(),
+                TickInfo::new(-46_080, i128::try_from(LIQUIDITY).unwrap()).unwrap(),
+                TickInfo::new(46_080, -(i128::try_from(LIQUIDITY).unwrap())).unwrap(),
             ],
         )
         .expect("the pool builds");
@@ -2551,7 +2789,7 @@ mod tests {
             .get_limits(token_in.address.clone(), token_out.address.clone())
             .expect("a pool with liquidity has limits");
         let (limit_in, limit_out) = hooked
-            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .get_limits(token_in.address, token_out.address)
             .expect("a pool with liquidity has limits");
 
         assert!(hookless_out > BigUint::zero(), "the reference pool must move some output");
@@ -2580,7 +2818,7 @@ mod tests {
             .get_limits(token_in.address.clone(), token_out.address.clone())
             .expect("a pool with liquidity has limits");
         let limits = hooked
-            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .get_limits(token_in.address, token_out.address)
             .expect("a pool with liquidity has limits");
 
         assert_eq!(limits, hookless);
@@ -2667,7 +2905,7 @@ mod tests {
         let db = SimulationDB::new(
             get_client(None).expect("Failed to create client"),
             get_runtime().expect("Failed to get runtime"),
-            Some(block.clone()),
+            Some(block),
         );
         let engine = create_engine(db, true).expect("Failed to create simulation engine");
         let pool_manager = Address::from_str("0x000000000004444c5dc75cb358380d2e3de08a90")
@@ -2725,8 +2963,8 @@ mod tests {
         let fees = UniswapV4Fees { zero_for_one: 100, one_for_zero: 100, lp_fee: 100 };
         let tick_spacing = 60;
         let ticks = vec![
-            TickInfo::new(-600, (liquidity / 4) as i128).unwrap(),
-            TickInfo::new(600, -((liquidity / 4) as i128)).unwrap(),
+            TickInfo::new(-600, i128::try_from(liquidity / 4).unwrap()).unwrap(),
+            TickInfo::new(600, -(i128::try_from(liquidity / 4).unwrap())).unwrap(),
         ];
 
         let usv4_state = UniswapV4State::new(
@@ -2742,9 +2980,7 @@ mod tests {
         let token_in = usdc();
         let token_out = weth();
 
-        let (max_amount_in, _max_amount_out) = usv4_state
-            .find_max_amount(&token_in, &token_out)
-            .unwrap();
+        let (max_amount_in, _max_amount_out) = usv4_state.find_max_amount(&token_in, &token_out);
 
         let success = usv4_state
             .get_amount_out(max_amount_in.clone(), &token_in, &token_out)
@@ -2765,12 +3001,16 @@ mod tests {
 
         // Without override, should use UniswapV4 formula: protocol + lp - (protocol * lp /
         // 1_000_000)
-        let total_zero_for_one = fees.calculate_swap_fees_pips(true, None);
+        let total_zero_for_one = fees
+            .calculate_swap_fees_pips(true, None)
+            .unwrap();
         // 100 + 500 - (100 * 500 / 1_000_000) = 600 - 0 = 600 (rounded down)
         assert_eq!(total_zero_for_one, 600);
 
         // With override, should use override fee + protocol fee with same formula
-        let total_with_override = fees.calculate_swap_fees_pips(true, Some(1000));
+        let total_with_override = fees
+            .calculate_swap_fees_pips(true, Some(1000))
+            .unwrap();
         // 100 + 1000 - (100 * 1000 / 1_000_000) = 1100 - 0 = 1100 (rounded down)
         assert_eq!(total_with_override, 1100);
     }
@@ -2779,7 +3019,9 @@ mod tests {
     fn test_max_combined_fees_stays_valid() {
         // Test that even with max protocol + max LP fees, we stay under compute_swap_step limit
         let fees = UniswapV4Fees::new(1000, 1000, 1000);
-        let total = fees.calculate_swap_fees_pips(true, Some(lp_fee::MAX_LP_FEE));
+        let total = fees
+            .calculate_swap_fees_pips(true, Some(lp_fee::MAX_LP_FEE))
+            .unwrap();
 
         // Using UniswapV4 formula: 1000 + 1000000 - (1000 * 1000000 / 1_000_000)
         // = 1001000 - 1000 = 1000000
@@ -2811,7 +3053,7 @@ mod tests {
         let weth = weth();
 
         let (limit_in, limit_out) = usv4_state
-            .get_limits(usdc.address.clone(), weth.address.clone())
+            .get_limits(usdc.address, weth.address)
             .unwrap();
 
         // Should return some conservative limits
@@ -2837,7 +3079,9 @@ mod tests {
         #[case] expected: u32,
     ) {
         let fees = UniswapV4Fees::new(protocol_fee, protocol_fee, lp_fee);
-        let result = fees.calculate_swap_fees_pips(true, None);
+        let result = fees
+            .calculate_swap_fees_pips(true, None)
+            .unwrap();
         assert_eq!(result, expected);
     }
 
@@ -2847,12 +3091,16 @@ mod tests {
         let fees = UniswapV4Fees::new(100, 90, lp_fee::DYNAMIC_FEE_FLAG);
 
         // Without override, dynamic fee should be treated as 0
-        let total_zero_for_one = fees.calculate_swap_fees_pips(true, None);
+        let total_zero_for_one = fees
+            .calculate_swap_fees_pips(true, None)
+            .unwrap();
         // 100 + 0 - (100 * 0 / 1_000_000) = 100
         assert_eq!(total_zero_for_one, 100);
 
         // With override, should use the override value
-        let total_with_override = fees.calculate_swap_fees_pips(true, Some(500));
+        let total_with_override = fees
+            .calculate_swap_fees_pips(true, Some(500))
+            .unwrap();
         // 100 + 500 - (100 * 500 / 1_000_000) = 600 - 0 = 600
         assert_eq!(total_with_override, 600);
     }
@@ -2862,11 +3110,15 @@ mod tests {
         // Test that zero_for_one direction affects which protocol fee is used
         let fees = UniswapV4Fees::new(100, 200, 500);
 
-        let zero_for_one_fee = fees.calculate_swap_fees_pips(true, None);
+        let zero_for_one_fee = fees
+            .calculate_swap_fees_pips(true, None)
+            .unwrap();
         // 100 + 500 - (100 * 500 / 1_000_000) = 600 - 0 = 600
         assert_eq!(zero_for_one_fee, 600);
 
-        let one_for_zero_fee = fees.calculate_swap_fees_pips(false, None);
+        let one_for_zero_fee = fees
+            .calculate_swap_fees_pips(false, None)
+            .unwrap();
         // 200 + 500 - (200 * 500 / 1_000_000) = 700 - 0 = 700
         assert_eq!(one_for_zero_fee, 700);
     }
@@ -2883,7 +3135,9 @@ mod tests {
         // Test cases where the subtraction term (protocol * lp / 1M) significantly affects the
         // result
         let fees = UniswapV4Fees::new(protocol_fee, protocol_fee, lp_fee);
-        let result = fees.calculate_swap_fees_pips(true, None);
+        let result = fees
+            .calculate_swap_fees_pips(true, None)
+            .unwrap();
         assert_eq!(result, expected, "Failed for protocol={}, lp={}", protocol_fee, lp_fee);
     }
 
@@ -2893,12 +3147,16 @@ mod tests {
         let fees = UniswapV4Fees::new(100, 100, 3000);
 
         // With override, stored lp_fee should be ignored
-        let result = fees.calculate_swap_fees_pips(true, Some(5000));
+        let result = fees
+            .calculate_swap_fees_pips(true, Some(5000))
+            .unwrap();
         // 100 + 5000 - (100 * 5000 / 1_000_000) = 5100 - 0 = 5100
         assert_eq!(result, 5100);
 
         // Without override, should use stored lp_fee
-        let result_no_override = fees.calculate_swap_fees_pips(true, None);
+        let result_no_override = fees
+            .calculate_swap_fees_pips(true, None)
+            .unwrap();
         // 100 + 3000 - (100 * 3000 / 1_000_000) = 3100 - 0 = 3100
         assert_eq!(result_no_override, 3100);
     }
@@ -2907,7 +3165,9 @@ mod tests {
     fn test_calculate_swap_fees_zero_protocol_fee() {
         // When protocol fee is 0, formula simplifies to just lpFee
         let fees = UniswapV4Fees::new(0, 0, 3000);
-        let result = fees.calculate_swap_fees_pips(true, None);
+        let result = fees
+            .calculate_swap_fees_pips(true, None)
+            .unwrap();
         // 0 + 3000 - (0 * 3000 / 1_000_000) = 3000
         assert_eq!(result, 3000);
     }
@@ -2916,7 +3176,9 @@ mod tests {
     fn test_calculate_swap_fees_zero_lp_fee() {
         // When lp fee is 0, formula simplifies to just protocolFee
         let fees = UniswapV4Fees::new(500, 500, 0);
-        let result = fees.calculate_swap_fees_pips(true, None);
+        let result = fees
+            .calculate_swap_fees_pips(true, None)
+            .unwrap();
         // 500 + 0 - (500 * 0 / 1_000_000) = 500
         assert_eq!(result, 500);
     }
@@ -2954,6 +3216,95 @@ mod tests {
             ticks,
         )
         .expect("Failed to create pool")
+    }
+
+    /// A pool with an inner range at [-60, 60] inside an outer range at [-6000, 6000], so a
+    /// zero-for-one swap of `TWO_RANGE_SWAP_AMOUNT` crosses tick -60 and ends inside the outer
+    /// range.
+    fn create_two_range_v4_test_pool() -> UniswapV4State {
+        let (outer, inner) = (1_000_000_000_000_000_000_i128, 4_000_000_000_000_000_000_i128);
+        let ticks = vec![
+            TickInfo::new(-6000, outer).unwrap(),
+            TickInfo::new(-60, inner).unwrap(),
+            TickInfo::new(60, -inner).unwrap(),
+            TickInfo::new(6000, -outer).unwrap(),
+        ];
+        UniswapV4State::new(
+            u128::try_from(outer + inner).unwrap(),
+            get_sqrt_ratio_at_tick(0).unwrap(),
+            UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 3000 },
+            0,
+            60,
+            ticks,
+        )
+        .expect("Failed to create pool")
+    }
+
+    const TWO_RANGE_SWAP_AMOUNT: u64 = 100_000_000_000_000_000;
+
+    fn two_range_swap_gas(pool: &UniswapV4State) -> u64 {
+        let amount = -I256::from_raw(U256::from(TWO_RANGE_SWAP_AMOUNT));
+        pool.swap(true, amount, None, None)
+            .expect("the swap ends inside the outer range")
+            .gas_used
+            .to::<u64>()
+    }
+
+    #[rstest]
+    #[case::uniswap_v4(SwapGasCosts::UNISWAP_V4)]
+    #[case::infinity_cl(SwapGasCosts::PANCAKESWAP_INFINITY_CL)]
+    fn test_swap_gas_follows_the_states_gas_costs(#[case] gas_costs: SwapGasCosts) {
+        // Costs far enough apart that the gas of a swap gives back how many bitmap lookups and
+        // tick crossings it took.
+        let mut pool = create_two_range_v4_test_pool();
+        pool.set_gas_costs(SwapGasCosts {
+            base: 0,
+            per_bitmap_lookup: 1,
+            per_tick: 1_000_000,
+            settlement: 0,
+        });
+        let counted = two_range_swap_gas(&pool);
+        let (ticks, lookups) = (counted / 1_000_000, counted % 1_000_000);
+        assert_eq!(ticks, 1, "the swap crosses tick -60 only");
+        assert!(lookups >= 2, "the swap walks past tick -60: {lookups} lookups");
+
+        pool.set_gas_costs(gas_costs);
+
+        assert_eq!(
+            two_range_swap_gas(&pool),
+            gas_costs.base +
+                lookups * gas_costs.per_bitmap_lookup +
+                ticks * gas_costs.per_tick +
+                gas_costs.settlement
+        );
+    }
+
+    #[test]
+    fn test_serde_roundtrip_keeps_gas_costs() {
+        let mut pool = create_two_range_v4_test_pool();
+        pool.set_gas_costs(SwapGasCosts::PANCAKESWAP_INFINITY_CL);
+
+        let json = serde_json::to_string(&pool).expect("hookless state should serialize");
+        let deserialized: UniswapV4State =
+            serde_json::from_str(&json).expect("state should deserialize");
+
+        assert_eq!(two_range_swap_gas(&deserialized), two_range_swap_gas(&pool));
+    }
+
+    #[test]
+    fn test_state_serialized_without_gas_costs_prices_as_uniswap_v4() {
+        let mut pool = create_two_range_v4_test_pool();
+        pool.set_gas_costs(SwapGasCosts::PANCAKESWAP_INFINITY_CL);
+        let mut json = serde_json::to_value(&pool).expect("hookless state should serialize");
+        json.as_object_mut()
+            .expect("the state serializes to an object")
+            .remove("gas_costs");
+
+        let deserialized: UniswapV4State =
+            serde_json::from_value(json).expect("state should deserialize");
+
+        let uniswap_v4 = create_two_range_v4_test_pool();
+        assert_eq!(two_range_swap_gas(&deserialized), two_range_swap_gas(&uniswap_v4));
     }
 
     #[test]
@@ -3563,6 +3914,10 @@ mod step_cache_tests {
         // WETH needs a far larger amount to leave its first tick.
         for (sell, buy, doublings) in [(&wbtc, &weth, 30u32), (&weth, &wbtc, 70)] {
             let cached = test_pool();
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the quote may run out of liquidity; only the step cache it fills is used"
+            )]
             let _ = cached.get_amount_out(BigUint::from(10u32) << doublings, sell, buy);
             let boundaries = cached.step_cache.min_inputs(sell < buy);
             assert!(boundaries.len() > 2, "only {} steps cached", boundaries.len());

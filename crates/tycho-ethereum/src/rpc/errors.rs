@@ -81,12 +81,12 @@ pub enum RPCError {
 }
 
 impl RPCError {
-    pub(super) fn from_alloy<S: ToString>(
-        msg: S,
+    pub(super) fn from_alloy(
+        msg: impl Into<String>,
         error: AlloyRpcError<TransportErrorKind>,
     ) -> Self {
         RPCError::RequestError(RequestError::Reqwest(ReqwestError {
-            msg: msg.to_string(),
+            msg: msg.into(),
             source: error,
         }))
     }

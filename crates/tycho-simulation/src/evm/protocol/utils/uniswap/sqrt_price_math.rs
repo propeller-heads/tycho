@@ -4,12 +4,15 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::evm::protocol::{
-    safe_math::{
-        div_mod_u256, safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256, sqrt_u256,
+use crate::{
+    evm::protocol::{
+        safe_math::{
+            div_mod_u256, safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256, sqrt_u256,
+        },
+        u256_num::{biguint_to_u256, u256_to_f64},
+        utils::solidity_math::{mul_div, mul_div_q96_rounding_up, mul_div_rounding_up},
     },
-    u256_num::{biguint_to_u256, u256_to_f64},
-    utils::solidity_math::{mul_div, mul_div_q96_rounding_up, mul_div_rounding_up},
+    utils::decimals_exponent,
 };
 
 const Q96: U256 = U256::from_limbs([0, 4294967296, 0, 0]);
@@ -35,7 +38,7 @@ fn div_rounding_up(a: U256, b: U256) -> Result<U256, SimulationError> {
     }
 }
 
-pub(crate) fn get_amount0_delta(
+pub fn get_amount0_delta(
     a: U256,
     b: U256,
     liquidity: u128,
@@ -59,7 +62,7 @@ pub(crate) fn get_amount0_delta(
     }
 }
 
-pub(crate) fn get_amount1_delta(
+pub fn get_amount1_delta(
     a: U256,
     b: U256,
     liquidity: u128,
@@ -182,7 +185,7 @@ fn get_next_sqrt_price_from_amount1_rounding_down(
 ///
 /// # Panics
 /// Will panic if the `x` is bigger than U160.
-pub(crate) fn sqrt_price_q96_to_f64(
+pub fn sqrt_price_q96_to_f64(
     x: U256,
     token_0_decimals: u32,
     token_1_decimals: u32,
@@ -192,7 +195,7 @@ pub(crate) fn sqrt_price_q96_to_f64(
             "sqrt_price_q96_to_f64: x value {x} exceeds U160 max"
         )));
     }
-    let token_correction = 10f64.powi(token_0_decimals as i32 - token_1_decimals as i32);
+    let token_correction = 10f64.powi(decimals_exponent(token_0_decimals, token_1_decimals)?);
 
     let price = u256_to_f64(x)? / 2.0f64.powi(96);
     Ok(price.powi(2) * token_correction)
@@ -209,7 +212,7 @@ pub(crate) fn sqrt_price_q96_to_f64(
 ///
 /// # Returns
 /// The sqrt price in Q96 format as U256
-pub(crate) fn get_sqrt_price_q96(price_0: U256, price_1: U256) -> Result<U256, SimulationError> {
+pub fn get_sqrt_price_q96(price_0: U256, price_1: U256) -> Result<U256, SimulationError> {
     // sqrt(price_0/price_1) * 2^96 = sqrt(price_0 * 2^192 / price_1)
     // We need to compute this carefully to avoid overflow
 
@@ -228,7 +231,7 @@ pub(crate) fn get_sqrt_price_q96(price_0: U256, price_1: U256) -> Result<U256, S
 ///
 /// # Returns
 /// The sqrt price limit in Q96 format
-pub(crate) fn get_sqrt_price_limit(
+pub fn get_sqrt_price_limit(
     token_in: &Bytes,
     token_out: &Bytes,
     target_price: &Price,

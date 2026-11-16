@@ -26,12 +26,20 @@ pub struct RPCTools {
 
 impl RPCTools {
     pub async fn new(rpc_url: &str, chain: &Chain) -> miette::Result<Self> {
-        let provider: RootProvider<Ethereum> = ProviderBuilder::default()
-            .with_chain(named_chain(chain)?)
-            .connect(rpc_url)
-            .await
-            .into_diagnostic()
-            .wrap_err("Failed to connect to provider")?;
+        let builder = ProviderBuilder::default();
+        // A named chain only tunes the polling interval. alloy-chains lags new chains, so a chain
+        // it does not know keeps alloy's default interval.
+        let provider: RootProvider<Ethereum> = match NamedChain::try_from(chain.id()) {
+            Ok(named_chain) => {
+                builder
+                    .with_chain(named_chain)
+                    .connect(rpc_url)
+                    .await
+            }
+            Err(_unknown_to_alloy_chains) => builder.connect(rpc_url).await,
+        }
+        .into_diagnostic()
+        .wrap_err("Failed to connect to provider")?;
 
         let rpc = EthereumRpcClient::new(rpc_url)
             .into_diagnostic()
@@ -50,33 +58,14 @@ impl RPCTools {
     }
 }
 
-fn named_chain(chain: &Chain) -> miette::Result<NamedChain> {
-    NamedChain::try_from(chain.id())
-        .into_diagnostic()
-        .wrap_err_with(|| {
-            format!("alloy-chains has no named chain for {chain} (id {})", chain.id())
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn router_chains_have_named_chains() {
-        let chains = [
-            Chain::Ethereum,
-            Chain::Arbitrum,
-            Chain::Base,
-            Chain::Bsc,
-            Chain::Unichain,
-            Chain::Polygon,
-            Chain::Plasma,
-            Chain::Robinhood,
-            Chain::Arc,
-        ];
-        for chain in chains {
-            named_chain(&chain).unwrap_or_else(|e| panic!("{e:?}"));
-        }
+    #[tokio::test]
+    async fn connects_on_a_named_chain() {
+        RPCTools::new("http://localhost:8545", &Chain::Ethereum)
+            .await
+            .unwrap();
     }
 }

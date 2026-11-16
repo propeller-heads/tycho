@@ -13,9 +13,14 @@ import {TransferManager} from "../TransferManager.sol";
 
 error UniswapV2Executor__InvalidDataLength();
 error UniswapV2Executor__InvalidFee();
+error UniswapV2Executor__InsufficientLiquidity();
 
 contract UniswapV2Executor is IExecutor {
     using SafeERC20 for IERC20;
+
+    // pool (20) + tokenIn (20) + tokenOut (20)
+    uint256 private constant _DATA_LENGTH = 60;
+    uint256 private constant _BPS_DENOMINATOR = 10000;
 
     uint256 public immutable feeBps;
 
@@ -35,7 +40,7 @@ contract UniswapV2Executor is IExecutor {
         return target;
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -59,7 +64,7 @@ contract UniswapV2Executor is IExecutor {
         bool zeroForOne,
         address receiver
     ) internal {
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return Pricing needs only the reserves, not their timestamp.
         (uint112 reserve0, uint112 reserve1,) = pool.getReserves();
         uint112 reserveIn = zeroForOne ? reserve0 : reserve1;
         uint112 reserveOut = zeroForOne ? reserve1 : reserve0;
@@ -79,7 +84,7 @@ contract UniswapV2Executor is IExecutor {
         pure
         returns (address target, address tokenIn, address tokenOut)
     {
-        if (data.length != 60) {
+        if (data.length != _DATA_LENGTH) {
             revert UniswapV2Executor__InvalidDataLength();
         }
         target = address(bytes20(data[0:20]));
@@ -92,10 +97,14 @@ contract UniswapV2Executor is IExecutor {
         uint112 reserveIn,
         uint112 reserveOut
     ) internal view returns (uint256 amount) {
-        require(reserveIn > 0 && reserveOut > 0, "L");
-        uint256 amountInWithFee = amountIn * (10000 - feeBps);
+        require(
+            reserveIn > 0 && reserveOut > 0,
+            UniswapV2Executor__InsufficientLiquidity()
+        );
+        uint256 amountInWithFee = amountIn * (_BPS_DENOMINATOR - feeBps);
         uint256 numerator = amountInWithFee * uint256(reserveOut);
-        uint256 denominator = (uint256(reserveIn) * 10000) + amountInWithFee;
+        uint256 denominator =
+            (uint256(reserveIn) * _BPS_DENOMINATOR) + amountInWithFee;
         amount = numerator / denominator;
     }
 
@@ -110,7 +119,7 @@ contract UniswapV2Executor is IExecutor {
             bool outputToRouter
         )
     {
-        if (data.length != 60) {
+        if (data.length != _DATA_LENGTH) {
             revert UniswapV2Executor__InvalidDataLength();
         }
         address target = address(bytes20(data[0:20]));

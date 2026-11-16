@@ -63,7 +63,10 @@ pub struct RocketpoolState {
 }
 
 impl RocketpoolState {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         reth_supply: U256,
         total_eth: U256,
@@ -220,6 +223,10 @@ impl RocketpoolState {
 
 #[typetag::serde]
 impl ProtocolSim for RocketpoolState {
+    #[expect(
+        clippy::unimplemented,
+        reason = "fee() returns no error and the trait documents the panic for asymmetric fees"
+    )]
     fn fee(&self) -> f64 {
         unimplemented!("Rocketpool has asymmetric fees; use spot_price or get_amount_out instead")
     }

@@ -17,7 +17,7 @@ use tycho_common::{
 
 use crate::{
     book::{
-        all_pairs::{all_pairs_state, RefusesQuote, SignedByVenue},
+        all_pairs::{all_pairs_state, PricesAfterFill, RefusesQuote, SignedByVenue},
         component::PairState,
         levels::Levels,
         sim::{self, SwapDirection},
@@ -111,6 +111,20 @@ impl PairState for NativeState {
             !self.book.bids.levels.is_empty(),
             !self.book.asks.levels.is_empty(),
         )
+    }
+}
+
+impl PricesAfterFill for NativeState {
+    fn marginal_price(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        filled: &BigUint,
+    ) -> Result<f64, SimulationError> {
+        let direction =
+            SwapDirection::require(&self.base_token, &self.quote_token, token_in, token_out)?;
+        let (sell_decimals, _) = direction.decimals(&self.base_token, &self.quote_token);
+        sim::marginal_price(&self.ladder(direction), filled, sell_decimals)
     }
 }
 
@@ -386,6 +400,36 @@ mod tests {
             Err(SimulationError::RecoverableError(message))
                 if message.contains("not positive and finite")
         ));
+    }
+
+    /// After some input went in, the next unit is priced at the level where the fill stopped, on
+    /// the side of the book a swap in that direction fills.
+    #[rstest]
+    #[case::selling_base_in_the_level(true, 500_000_000_000_000_000, Some(2_000.0))]
+    #[case::selling_base_past_the_depth(true, 1_000_000_000_000_000_000, None)]
+    #[case::selling_quote_in_the_level(false, 1_000_000_000, Some(1.0 / 2_000.0))]
+    fn the_price_after_a_fill_is_the_level_where_it_stopped(
+        #[case] sell_base: bool,
+        #[case] filled: u64,
+        #[case] expected: Option<f64>,
+    ) {
+        let state = state();
+        let (token_in, token_out) = if sell_base {
+            (&state.base_token, &state.quote_token)
+        } else {
+            (&state.quote_token, &state.base_token)
+        };
+
+        let price =
+            state.marginal_price(&token_in.address, &token_out.address, &BigUint::from(filled));
+
+        match (price, expected) {
+            (Ok(price), Some(expected)) => assert_eq!(price, expected),
+            (Err(SimulationError::RecoverableError(message)), None) => {
+                assert_eq!(message, "No liquidity")
+            }
+            (price, _) => panic!("expected {expected:?}, got {price:?}"),
+        }
     }
 
     #[rstest]

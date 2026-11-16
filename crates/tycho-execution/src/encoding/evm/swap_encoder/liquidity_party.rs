@@ -23,7 +23,7 @@ pub struct LiquidityPartySwapEncoder {
 }
 
 impl LiquidityPartySwapEncoder {
-    fn get_token_indexes(&self, swap: &Swap) -> Result<(Bytes, Bytes, u8, u8), EncodingError> {
+    fn get_token_indexes(swap: &Swap) -> Result<(Bytes, Bytes, u8, u8), EncodingError> {
         let token_addresses: &Vec<Address> = &swap.component().tokens;
         let token_in = &swap.token_in().address;
         let token_out = &swap.token_out().address;
@@ -31,14 +31,23 @@ impl LiquidityPartySwapEncoder {
         let token_in_idx = token_addresses
             .iter()
             .position(|addr| addr == token_in)
-            .ok_or(EncodingError::FatalError("Token in not found in pool tokens".to_string()))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError("Token in not found in pool tokens".to_string())
+            })?;
 
         let token_out_idx = token_addresses
             .iter()
             .position(|addr| addr == token_out)
-            .ok_or(EncodingError::FatalError("Token out not found in pool tokens".to_string()))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError("Token out not found in pool tokens".to_string())
+            })?;
 
-        Ok((token_in.clone(), token_out.clone(), token_in_idx as u8, token_out_idx as u8))
+        let to_u8 = |idx: usize| {
+            u8::try_from(idx).map_err(|_out_of_range| {
+                EncodingError::InvalidInput(format!("Pool token index {idx} exceeds u8"))
+            })
+        };
+        Ok((token_in.clone(), token_out.clone(), to_u8(token_in_idx)?, to_u8(token_out_idx)?))
     }
 }
 
@@ -56,11 +65,11 @@ impl SwapEncoder for LiquidityPartySwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let pool_addr = Address::from_str(&swap.component().id).map_err(|_| {
-            EncodingError::FatalError("LiqP swap encoder: invalid component id".to_string())
+        let pool_addr = Address::from_str(&swap.component().id).map_err(|e| {
+            EncodingError::FatalError(format!("LiqP swap encoder: invalid component id: {e}"))
         })?;
 
-        let (token_in, token_out, token_in_idx, token_out_idx) = self.get_token_indexes(swap)?;
+        let (token_in, token_out, token_in_idx, token_out_idx) = Self::get_token_indexes(swap)?;
 
         let args = (
             bytes_to_address(&pool_addr)?,
@@ -115,8 +124,8 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             origin: None,
         };
         let encoder = LiquidityPartySwapEncoder::new(

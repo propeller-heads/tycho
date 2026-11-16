@@ -1,0 +1,2 @@
+ignore-interior-mutability = ["bytes::Bytes", "tycho_core::hex_bytes::Bytes"]
+allow-dbg-in-tests = true

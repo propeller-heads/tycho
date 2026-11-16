@@ -57,9 +57,9 @@ impl SwapEncoder for LiquoriceFallbackSwapEncoder {
                      protocol_specific_addresses.json"
                 ))
             })?;
-        let fallback_router = Bytes::from_str(fallback_router).map_err(|_| {
+        let fallback_router = Bytes::from_str(fallback_router).map_err(|e| {
             EncodingError::FatalError(format!(
-                "Invalid {FALLBACK_ROUTER_CONFIG_KEY} address for {chain}: {fallback_router}"
+                "Invalid {FALLBACK_ROUTER_CONFIG_KEY} address for {chain}: {fallback_router}: {e}"
             ))
         })?;
         let liquorice = LiquoriceSwapEncoder::new(executor_address.clone(), chain, config)?;
@@ -71,7 +71,7 @@ impl SwapEncoder for LiquoriceFallbackSwapEncoder {
         swap: &Swap,
         encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let fallback = FallbackSwap::from_user_data(swap.user_data())?;
+        let fallback = FallbackSwap::from_user_data(swap.user_data().as_ref())?;
         if !fallback
             .protocol
             .supported_on(self.chain)
@@ -99,7 +99,7 @@ impl SwapEncoder for LiquoriceFallbackSwapEncoder {
         let (head, rest) = liquorice.split_at(LIQUORICE_HEAD_LENGTH);
         let settlement_calldata = &rest[LIQUORICE_FILL_FIELDS_LENGTH..];
         let settlement_calldata_length =
-            u32::try_from(settlement_calldata.len()).map_err(|_| {
+            u32::try_from(settlement_calldata.len()).map_err(|_out_of_range| {
                 EncodingError::FatalError(format!(
                     "Liquorice calldata of {} bytes does not fit the uint32 length prefix",
                     settlement_calldata.len()

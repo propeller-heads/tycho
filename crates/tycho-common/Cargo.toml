@@ -55,3 +55,6 @@ test-utils = ["mockall"]
 
 [package.metadata.cargo-machete]
 ignored = ["strum"]
+
+[lints]
+workspace = true

@@ -38,21 +38,21 @@ contract FermiSwapExecutor is IExecutor {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
     {
         (address tokenIn, address tokenOut) = _decodeData(data);
+        // forge-lint: disable-next-line(unsafe-typecast) type(int256).max fits uint256.
         if (amountIn > uint256(type(int256).max)) {
             revert FermiSwapExecutor__AmountTooLarge();
         }
 
-        // amountIn is checked above against int256.max.
-        // forge-lint: disable-next-line(unsafe-typecast)
+        // forge-lint: disable-next-line(unsafe-typecast) amountIn is checked above against int256's maximum.
         int256 amountSpecified = int256(amountIn);
 
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         fermiSwapper.fermiSwapWithAllowances(
             tokenIn, tokenOut, amountSpecified, 0, receiver
         );

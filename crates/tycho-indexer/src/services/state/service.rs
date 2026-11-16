@@ -41,6 +41,7 @@ use tycho_common::{
     storage::{BlockOrTimestamp, StorageError, WriteTimestamp},
     Bytes,
 };
+use tycho_storage::postgres::{count_to_i64, page_window};
 
 use super::{
     cache::{CachedAccount, EntityCache},
@@ -83,7 +84,7 @@ impl<T> EntityCacheSetup<T> {
 
 /// Why the cache handed a request to the database path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FallbackReason {
+pub enum FallbackReason {
     /// The version is below the window.
     BelowWindow,
     /// The window holds no block: at startup, or after the extractor restarted.
@@ -126,7 +127,7 @@ impl FallbackReason {
 
 /// Why the state service did not answer a request. The RPC handler picks the response for each.
 #[derive(Debug, Error)]
-pub(crate) enum StateServiceError {
+pub enum StateServiceError {
     /// The cache cannot answer this request; the database path answers it instead. See the
     /// module doc for when this happens.
     #[error("Entity cache fallback: {0:?}")]
@@ -151,14 +152,14 @@ pub(crate) enum StateServiceError {
 /// What a read depends on besides the request: the window of the requested system and the entity
 /// cache. A read straddles a change when the tokens taken before and after it differ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct StraddleToken {
+pub struct StraddleToken {
     /// `None` when the system has no window or its lock is poisoned; the read then fails anyway.
     window_generation: Option<u64>,
     folds: u64,
 }
 
 /// Answers state requests from the delta windows and the entity cache. Never reads the database.
-pub(crate) struct StateService {
+pub struct StateService {
     /// One window per protocol system, shared with the pump that writes them.
     windows: HashMap<String, Arc<Mutex<DeltaWindow>>>,
     cache: Arc<EntityCache>,
@@ -244,11 +245,12 @@ impl StateService {
         // Slice the page out of the requested ids and keep each id once, like the database path
         // does. `total` still counts every requested id.
         let pagination = PaginationParams::from(&request.pagination);
+        let (offset, limit) = page_window(&pagination).map_err(StateServiceError::WindowRead)?;
         let mut seen = HashSet::new();
         let page: Vec<Bytes> = ids
             .iter()
-            .skip(pagination.offset() as usize)
-            .take(pagination.page_size as usize)
+            .skip(offset)
+            .take(limit)
             .filter(|id| seen.insert(*id))
             .cloned()
             .collect();
@@ -331,7 +333,7 @@ impl StateService {
             pagination: PaginationResponse::new(
                 pagination.page,
                 pagination.page_size,
-                ids.len() as i64,
+                count_to_i64(ids.len()),
             ),
         })
     }
@@ -370,11 +372,12 @@ impl StateService {
         // Slice the page out of the requested ids and keep each id once, like the database path
         // does. `total` still counts every requested id.
         let pagination = PaginationParams::from(&request.pagination);
+        let (offset, limit) = page_window(&pagination).map_err(StateServiceError::WindowRead)?;
         let mut seen = HashSet::new();
         let page: Vec<&str> = ids
             .iter()
-            .skip(pagination.offset() as usize)
-            .take(pagination.page_size as usize)
+            .skip(offset)
+            .take(limit)
             .map(String::as_str)
             .filter(|id| seen.insert(*id))
             .collect();
@@ -432,7 +435,7 @@ impl StateService {
             pagination: PaginationResponse::new(
                 pagination.page,
                 pagination.page_size,
-                ids.len() as i64,
+                count_to_i64(ids.len()),
             ),
         })
     }
@@ -618,11 +621,11 @@ mod test {
         let before = harness.service.straddle_token(SYSTEM);
         let window = harness.window.clone();
 
-        let _ = std::thread::spawn(move || {
+        let poisoner = std::thread::spawn(move || {
             let _guard = window.lock().unwrap();
             panic!("cache path bug");
-        })
-        .join();
+        });
+        assert!(poisoner.join().is_err());
 
         assert_ne!(harness.service.straddle_token(SYSTEM), before);
     }
@@ -728,7 +731,7 @@ mod test {
     fn account_delta(address: &Bytes, x: u64, change: ChangeType) -> AccountDelta {
         let (balance, code) = match change {
             ChangeType::Creation => (Some(Bytes::from(x)), Some(Bytes::from("0x6000"))),
-            _ => (None, None),
+            ChangeType::Update | ChangeType::Deletion => (None, None),
         };
         AccountDelta::new(
             Chain::Ethereum,
@@ -858,7 +861,10 @@ mod test {
     }
 
     fn at_hash(n: u64) -> dto::VersionParam {
-        #[allow(deprecated)]
+        #[expect(
+            deprecated,
+            reason = "builds a `BlockParam`, which is deprecated for consumers but still accepted"
+        )]
         let block =
             dto::BlockParam { hash: Some(testing::block(n).hash), chain: None, number: None };
         dto::VersionParam::new(None, Some(block))

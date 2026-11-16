@@ -30,7 +30,7 @@ use crate::extractor::{
     ExtractionError, ExtractorExtension,
 };
 
-pub(crate) struct DynamicContractIndexer<AE, T, G>
+pub struct DynamicContractIndexer<AE, T, G>
 where
     AE: AccountExtractor + Send + Sync,
     T: EntryPointTracer + Send + Sync,
@@ -627,7 +627,7 @@ where
         self.cache
             .ep_id_to_entrypoint
             .extend_pending(
-                block_changes.block.clone(),
+                &block_changes.block,
                 new_entrypoints
                     .into_values()
                     .map(|ep| (ep.external_id.clone(), ep)),
@@ -721,7 +721,7 @@ where
     /// let mut dci = DynamicContractIndexer::new(...);
     /// dci.with_max_retry_count(10); // Allow up to 10 retries
     /// ```
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn with_max_retry_count(&mut self, count: u32) {
         self.max_retry_count = count;
     }
@@ -1122,7 +1122,7 @@ where
             self.cache
                 .entrypoint_results
                 .insert_pending(
-                    block.clone(),
+                    block,
                     (
                         traced_entry_point
                             .entry_point_with_params
@@ -1155,7 +1155,7 @@ where
             // Store the failed trace result
             self.cache
                 .entrypoint_results
-                .insert_pending(block.clone(), key.clone(), None)?;
+                .insert_pending(block, key.clone(), None)?;
 
             // Increment retry counter: read across all layers, then write to current layer
             let current_count = self
@@ -1166,7 +1166,7 @@ where
                 .unwrap_or(0);
             self.cache
                 .tracing_retry_counts
-                .insert_pending(block.clone(), key, current_count + 1)?;
+                .insert_pending(block, key, current_count + 1)?;
         }
 
         Ok(())
@@ -2293,7 +2293,7 @@ mod tests {
                         token_address.clone(),
                         AccountDelta::new(
                             Chain::Ethereum,
-                            token_address.clone(),
+                            token_address,
                             HashMap::new(),
                             None,
                             None,
@@ -2532,7 +2532,7 @@ mod tests {
             .insert_permanent(token_address.clone(), tracked_slots.clone());
         dci.cache
             .tracked_contracts
-            .insert_permanent(normal_address.clone(), tracked_slots.clone());
+            .insert_permanent(normal_address.clone(), tracked_slots);
 
         // Create block changes with storage updates
         let block_changes = BlockChanges::new(
@@ -2881,7 +2881,7 @@ mod tests {
                         Bytes::zero(32),
                         // Account with empty slots - this is the key scenario
                         get_tracing_result_with_addresses_and_slots(vec![
-                            (new_account.clone(), vec![]), // No slots!
+                            (new_account, vec![]), // No slots!
                         ]),
                     ))]
                 }

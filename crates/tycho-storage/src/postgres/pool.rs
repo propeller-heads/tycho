@@ -5,16 +5,15 @@ use metrics::{gauge, histogram};
 use tracing::instrument;
 use tycho_common::storage::StorageError;
 
-pub(crate) const EXTRACTION_POOL: &str = "extraction";
-pub(crate) const RPC_POOL: &str = "rpc";
-pub(crate) const DIRECT_POOL: &str = "direct";
+pub const EXTRACTION_POOL: &str = "extraction";
+pub const RPC_POOL: &str = "rpc";
+pub const DIRECT_POOL: &str = "direct";
 
-pub(crate) type PooledConnection =
-    diesel_async::pooled_connection::deadpool::Object<AsyncPgConnection>;
+pub type PooledConnection = diesel_async::pooled_connection::deadpool::Object<AsyncPgConnection>;
 
 /// Takes a connection from `pool`. The span and the histogram show how long the call waits.
 #[instrument(name = "db_pool_checkout", skip_all, fields(pool = label))]
-pub(crate) async fn checkout(
+pub async fn checkout(
     pool: &Pool<AsyncPgConnection>,
     label: &'static str,
 ) -> Result<PooledConnection, StorageError> {
@@ -25,14 +24,10 @@ pub(crate) async fn checkout(
     result.map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))
 }
 
-pub(crate) const POOL_STATUS_PERIOD: Duration = Duration::from_secs(1);
+pub const POOL_STATUS_PERIOD: Duration = Duration::from_secs(1);
 
 /// Exports the state of `pool` as gauges every `period`.
-pub(crate) fn spawn_status_gauges(
-    pool: Pool<AsyncPgConnection>,
-    label: &'static str,
-    period: Duration,
-) {
+pub fn spawn_status_gauges(pool: Pool<AsyncPgConnection>, label: &'static str, period: Duration) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(period);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

@@ -206,7 +206,7 @@ impl MetricClient {
             fetch_json(request, "Metric batch bid/ask", refuses_the_chain),
         )
         .await
-        .map_err(|_| {
+        .map_err(|_elapsed| {
             FeedError::Connection(format!(
                 "Metric batch bid/ask request timed out after {BID_ASK_TIMEOUT:?}",
             ))

@@ -44,14 +44,14 @@ pub(crate) async fn handle_traces(
         }
     }
 
-    print_traces(&mut result, &decoder).await?;
+    print_traces(&result, &decoder).await?;
 
     Ok(())
 }
 
 /// Print decoded traces to console (internal use only)
 async fn print_traces(
-    result: &mut TraceResult,
+    result: &TraceResult,
     _decoder: &CallTraceDecoder, // Decoder already applied in handle_traces
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let traces = result

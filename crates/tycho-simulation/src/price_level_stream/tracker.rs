@@ -142,6 +142,10 @@ impl ServingState {
 }
 
 /// What a [`FreshnessTracker`] is built from.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent configuration switches, not mutually exclusive states"
+)]
 pub(super) struct TrackerSettings {
     /// The venues to serve, keyed by their canonical public identity (see
     /// [`canonical_pamm_address`]).
@@ -172,6 +176,10 @@ pub(super) struct TrackerSettings {
 /// Turns Titan messages into [`Update`]s. A message only adds or refreshes components: a component
 /// (or a whole venue) that a message omits stays served until its own deadline passes in
 /// [`on_stale_deadline`](Self::on_stale_deadline).
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent configuration switches and a streak flag, not mutually exclusive states"
+)]
 pub(super) struct FreshnessTracker {
     registry: HashMap<Bytes, PriceLevelStreamConfig>,
     denied: HashSet<Bytes>,
@@ -1376,7 +1384,11 @@ mod tests {
                 let served = tracker
                     .on_price_level_message(message, clock.at(1))
                     .is_some();
-                assert_eq!(served, (index as usize) < MAX_AUTO_DETECTED, "venue {index}");
+                assert_eq!(
+                    served,
+                    usize::try_from(index).unwrap() < MAX_AUTO_DETECTED,
+                    "venue {index}"
+                );
             }
             tracker.registry.len()
         });

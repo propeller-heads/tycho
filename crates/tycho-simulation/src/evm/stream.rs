@@ -605,24 +605,30 @@ impl ProtocolStreamBuilder {
 
     /// Registers a [`TxDeltaIndexer`] for ephemeral pending-block simulation.
     ///
-    /// The indexer is associated with `extractor` (the protocol synchronizer name, e.g.
-    /// `"uniswap_v3"`). Use [`build_with_pending`](Self::build_with_pending) to obtain both
-    /// the confirmed stream and the pending processor.
+    /// `protocol_system` is the protocol system of the indexer's components, which is also the
+    /// exchange name (e.g. `"uniswap_v3"`). The indexer's account deltas reach only pools of that
+    /// protocol system, so the indexer must emit the writes to every account those pools read. Use
+    /// [`build_with_pending`](Self::build_with_pending) to obtain both the confirmed stream and
+    /// the pending processor.
     ///
     /// The exchange must decode into a state whose `delta_transition` can rebuild it from the
-    /// `state_deltas` the indexer produces, because that is all
+    /// `state_deltas` the indexer produces, because
     /// [`apply_deltas_ephemeral`](crate::evm::decoder::TychoStreamDecoder::apply_deltas_ephemeral)
-    /// applies. Native and hybrid states qualify; the generic VM adapter does not, because it
-    /// re-reads pool state from the VM database — an indexer registered for one still gets its
-    /// balance and block-environment attributes applied, but every storage-derived value stays at
-    /// the confirmed block, with no error.
+    /// writes nothing to the VM database. Native and hybrid states qualify; the generic VM adapter
+    /// does not, because it re-reads pool state from the VM database — an indexer registered for
+    /// one still gets its balance and block-environment attributes applied, but every
+    /// storage-derived value stays at the confirmed block, with no error.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn with_pending_indexer(
         mut self,
-        extractor: &str,
+        protocol_system: &str,
         indexer: Box<dyn TxDeltaIndexer>,
     ) -> Result<Self, StreamError> {
         self.pending_indexers
-            .insert(extractor.to_string(), indexer);
+            .insert(protocol_system.to_string(), indexer);
         Ok(self)
     }
 
@@ -684,12 +690,20 @@ impl ProtocolStreamBuilder {
                 }
 
                 // Publish the buffered message so the caller can peek before triggering.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the peek slot is optional; a send error only means the controller dropped its receiver"
+                )]
                 let _ = peek_tx.send(Some(msg.clone()));
 
                 // Block until the controller fires trigger_next_block(), or until it is dropped.
                 if trigger_rx.recv().await.is_none() {
                     // Controller dropped — forward the buffered message and drain the rest
                     // without gating, so the stream continues to its natural end.
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the peek slot is optional; a send error only means the controller dropped its receiver"
+                    )]
                     let _ = peek_tx.send(None);
                     if output_tx.send(msg).await.is_err() {
                         break;
@@ -707,6 +721,10 @@ impl ProtocolStreamBuilder {
                 }
 
                 // Clear the peek slot before decoding so callers see None between blocks.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the peek slot is optional; a send error only means the controller dropped its receiver"
+                )]
                 let _ = peek_tx.send(None);
 
                 if output_tx.send(msg).await.is_err() {
@@ -763,12 +781,26 @@ impl ProtocolStreamBuilder {
     ///
     /// Call [`generate_pending_update`](PendingBlockProcessor::generate_pending_update) to
     /// simulate a candidate bundle; it drains the channel automatically before computing.
+    ///
+    /// Warns once for each pending indexer whose protocol system is not a registered exchange:
+    /// its deltas reach no pool.
     pub async fn build_with_pending(
         mut self,
     ) -> Result<
         (impl Stream<Item = Result<Update, StreamDecodeError>>, PendingBlockProcessor),
         StreamError,
     > {
+        for protocol_system in self.pending_indexers.keys() {
+            if !self
+                .registered_exchanges
+                .contains(protocol_system)
+            {
+                warn!(
+                    protocol_system,
+                    "Pending indexer reaches no pool: no exchange has this protocol system"
+                );
+            }
+        }
         initialize_hook_handlers().map_err(|e| {
             StreamError::SetUpError(format!("Error initializing hook handlers: {e:?}"))
         })?;
@@ -819,12 +851,14 @@ impl ProtocolStreamBuilder {
             };
 
         let stream = Box::pin(decode_stream.then({
-            let decoder = decoder.clone();
+            let decoder = decoder;
             move |msg| {
                 let decoder = decoder.clone();
                 let advance_tx = advance_tx.clone();
                 async move {
-                    let _ = advance_tx.send(msg.clone());
+                    if let Err(e) = advance_tx.send(msg.clone()) {
+                        warn!(error = %e, "Pending block processor is gone; block not forwarded");
+                    }
                     decoder.decode(&msg).await.map_err(|e| {
                         debug!(msg=?msg, "Decode error: {}", e);
                         e
@@ -883,7 +917,7 @@ impl ProtocolStreamBuilder {
             };
 
         let stream = Box::pin(decode_stream.then({
-            let decoder = decoder.clone();
+            let decoder = decoder;
             move |msg| {
                 let decoder = decoder.clone();
                 async move {

@@ -838,6 +838,11 @@ mod tests {
     }
 
     fn scaled_target(spot: &(U256, U256), multiplier: f64) -> (U256, U256) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "test multipliers are small and positive"
+        )]
         let ppb = U256::from((multiplier * 1e9) as u64);
         (spot.0 * ppb, spot.1 * U256::from(1_000_000_000u64))
     }

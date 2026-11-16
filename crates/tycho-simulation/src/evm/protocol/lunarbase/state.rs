@@ -19,6 +19,7 @@ use tycho_common::{
 };
 
 use super::decoder::apply_delta;
+use crate::utils::decimals_exponent;
 
 pub type Address = [u8; 20];
 // Pool-call estimate for routing, not a transaction gas limit.
@@ -128,12 +129,12 @@ impl ProtocolSim for LunarBaseState {
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         self.pool_params()
             .validate()
-            .map_err(|err| map_quote_error(QuoteError::Math(err)))?;
+            .map_err(|err| map_quote_error(&QuoteError::Math(err)))?;
         let token_in = address_from_bytes(base.address.as_ref())?;
         let token_out = address_from_bytes(quote.address.as_ref())?;
         if token_in == self.token_x && token_out == self.token_y {
             return Ok(apply_fee_discount(
-                anchor_price(self.anchor_price_x96, base, quote),
+                anchor_price(self.anchor_price_x96, base, quote)?,
                 self.fee_bid_x24,
             ));
         }
@@ -142,7 +143,7 @@ impl ProtocolSim for LunarBaseState {
                 return Ok(0.0);
             }
             return Ok(apply_fee_discount(
-                1.0 / anchor_price(self.anchor_price_x96, quote, base),
+                1.0 / anchor_price(self.anchor_price_x96, quote, base)?,
                 self.fee_ask_x24,
             ));
         }
@@ -169,7 +170,7 @@ impl ProtocolSim for LunarBaseState {
                 address_from_bytes(token_out.address.as_ref())?,
                 biguint_to_u256(&amount_in)?,
             )
-            .map_err(map_quote_error)?;
+            .map_err(|err| map_quote_error(&err))?;
 
         Ok(GetAmountOutResult::new(
             u256_to_biguint(amount_out),
@@ -268,7 +269,7 @@ impl ProtocolSim for LunarBaseState {
                 address_from_bytes(token_out.address.as_ref())?,
                 biguint_to_u256(&maximum)?,
             )
-            .map_err(map_quote_error)?;
+            .map_err(|err| map_quote_error(&err))?;
         let amount_out = u256_to_biguint(amount_out);
         let full_fill_allowed = if trade_price {
             // Compare actual rounded output in raw token units, without f64/decimal loss.
@@ -342,9 +343,13 @@ enum QuoteError {
     Math(MathError),
 }
 
-fn anchor_price(anchor_price_x96: U256, token_in: &Token, token_out: &Token) -> f64 {
-    let decimals_adjustment = 10f64.powi(token_in.decimals as i32 - token_out.decimals as i32);
-    sqrt_price_x96_to_price(anchor_price_x96) * decimals_adjustment
+fn anchor_price(
+    anchor_price_x96: U256,
+    token_in: &Token,
+    token_out: &Token,
+) -> Result<f64, SimulationError> {
+    let decimals_adjustment = 10f64.powi(decimals_exponent(token_in.decimals, token_out.decimals)?);
+    Ok(sqrt_price_x96_to_price(anchor_price_x96) * decimals_adjustment)
 }
 
 fn apply_fee_discount(price: f64, fee_x24: u32) -> f64 {
@@ -391,7 +396,7 @@ fn quote_limit(
     state
         .pool_params()
         .validate()
-        .map_err(|err| map_quote_error(QuoteError::Math(err)))?;
+        .map_err(|err| map_quote_error(&QuoteError::Math(err)))?;
     let (mut low, mut high) = quote_input_bounds(state, direction);
     if high == BigUint::ZERO || low > high {
         return Ok((BigUint::ZERO, BigUint::ZERO));
@@ -399,14 +404,14 @@ fn quote_limit(
     match state.quote_exact_in(token_in, token_out, biguint_to_u256(&high)?) {
         Ok((output, _)) => return Ok((high, u256_to_biguint(output))),
         Err(QuoteError::Rejected | QuoteError::ReserveOverflow) => {}
-        Err(err) => return Err(map_quote_error(err)),
+        Err(err) => return Err(map_quote_error(&err)),
     }
     let mut low_output = match state.quote_exact_in(token_in, token_out, biguint_to_u256(&low)?) {
         Ok((output, _)) => u256_to_biguint(output),
         Err(QuoteError::Rejected | QuoteError::ReserveOverflow) => {
             return Ok((BigUint::ZERO, BigUint::ZERO));
         }
-        Err(err) => return Err(map_quote_error(err)),
+        Err(err) => return Err(map_quote_error(&err)),
     };
     // Gross output and punishment are nondecreasing. Between the positive-output
     // minimum and the reserve bounds, only fee saturation can stop execution.
@@ -419,19 +424,21 @@ fn quote_limit(
                 low_output = u256_to_biguint(output);
             }
             Err(QuoteError::Rejected | QuoteError::ReserveOverflow) => high = middle,
-            Err(err) => return Err(map_quote_error(err)),
+            Err(err) => return Err(map_quote_error(&err)),
         }
     }
     Ok((low, low_output))
 }
 
 fn address_from_bytes(value: &[u8]) -> Result<Address, SimulationError> {
-    value.try_into().map_err(|_| {
-        SimulationError::InvalidInput(
-            format!("expected 20-byte address, got {}", value.len()),
-            None,
-        )
-    })
+    value
+        .try_into()
+        .map_err(|_wrong_length| {
+            SimulationError::InvalidInput(
+                format!("expected 20-byte address, got {}", value.len()),
+                None,
+            )
+        })
 }
 
 fn biguint_to_u256(value: &BigUint) -> Result<U256, SimulationError> {
@@ -446,7 +453,7 @@ fn u256_to_biguint(value: U256) -> BigUint {
     BigUint::from_bytes_be(&value.to_be_bytes::<32>())
 }
 
-fn map_quote_error(err: QuoteError) -> SimulationError {
+fn map_quote_error(err: &QuoteError) -> SimulationError {
     SimulationError::InvalidInput(format!("LunarBase quote rejected: {err:?}"), None)
 }
 
@@ -587,7 +594,7 @@ mod tests {
                         constraint,
                     );
                     let swap = state.query_pool_swap(&params).unwrap();
-                    let expected = max.unwrap_or(1_000_000u32.into());
+                    let expected = max.unwrap_or_else(|| 1_000_000u32.into());
                     assert_eq!(swap.amount_in(), &expected);
                     assert_eq!(swap.amount_out(), &expected);
                 }
@@ -1313,6 +1320,10 @@ mod tests {
                             U256::from(1u64) << if x_to_y { 97usize } else { 95usize };
                     }
                     "invalid math" => state.max_punishment_x24 = 1 << 24,
+                    #[expect(
+                        clippy::unreachable,
+                        reason = "the test cases only name the cases above"
+                    )]
                     _ => unreachable!(),
                 }
                 let limits = state.get_limits(Bytes::from(sell), Bytes::from(buy));

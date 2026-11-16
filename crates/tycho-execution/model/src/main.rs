@@ -11,7 +11,7 @@ use tycho_router_model::{
     worker::worker_thread,
 };
 
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn main() {
     let global_queue_of_main_thread: Arc<Injector<ParamsInner>> = Arc::new(Injector::new());
     global_queue_of_main_thread.push(ParamsInner::default());
 
@@ -68,12 +68,12 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
         worker_thread_join_handles.push(std::thread::spawn(move || {
             worker_thread(
-                global_queue_of_worker_thread,
-                local_queue,
-                stealers,
-                is_worker_idle_of_worker_thread,
-                tell_idle_workers_to_stop_of_worker_thread,
-                is_first_output_of_worker_thread,
+                &global_queue_of_worker_thread,
+                &local_queue,
+                &stealers,
+                &is_worker_idle_of_worker_thread,
+                &tell_idle_workers_to_stop_of_worker_thread,
+                &is_first_output_of_worker_thread,
                 counters_of_worker_thread,
             )
         }));
@@ -82,9 +82,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let is_running_of_main_thread = Arc::new(AtomicBool::new(true));
 
     let is_running_of_progress_thread = Arc::clone(&is_running_of_main_thread);
-    let counters_of_progress_thread = counters_of_main_thread.clone();
+    let counters_of_progress_thread = counters_of_main_thread;
     let progress_thread_join_handle = std::thread::spawn(move || {
-        progress_thread(counters_of_progress_thread, is_running_of_progress_thread);
+        progress_thread(&counters_of_progress_thread, &is_running_of_progress_thread);
     });
 
     loop {
@@ -138,5 +138,4 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     eprintln!();
     eprintln!("{telemetry}");
-    Ok(())
 }

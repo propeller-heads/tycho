@@ -11,16 +11,34 @@ pub struct Vault {
     /// Vault balances.
     /// First element of key tuple is owner.
     /// Second element of key tuple is token.
-    pub owner_and_token_to_balance: rustc_hash::FxHashMap<(Address, Address), i64>,
+    owner_and_token_to_balance: rustc_hash::FxHashMap<(Address, Address), i64>,
 
     /// Transient deltas.
     /// Could be stored via [State::tstore]
     /// but it is both simpler and faster to store them in a dedicated map.
-    pub deltas: rustc_hash::FxHashMap<Address, i64>,
+    deltas: rustc_hash::FxHashMap<Address, i64>,
     nonzero_delta_count: u64,
 }
 
 impl Vault {
+    /// Vault balance per (owner, token).
+    pub fn token_balances(&self) -> &rustc_hash::FxHashMap<(Address, Address), i64> {
+        &self.owner_and_token_to_balance
+    }
+
+    /// Transient delta per token.
+    pub fn deltas(&self) -> &rustc_hash::FxHashMap<Address, i64> {
+        &self.deltas
+    }
+
+    /// Removes the zero entries from the balances and the deltas. The count of non-zero deltas is
+    /// unaffected.
+    pub fn drop_zero_entries(&mut self) {
+        self.owner_and_token_to_balance
+            .retain(|_, v| *v != 0);
+        self.deltas.retain(|_, v| *v != 0);
+    }
+
     /// <https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v5.5.0/contracts/token/ERC6909/ERC6909.sol#L89>
     pub fn _mint(&mut self, to: Address, token: Address, amount: i64) -> Result<(), Error> {
         if to == Address::Zero {
@@ -38,6 +56,10 @@ impl Vault {
     }
 
     /// <https://github.com/propeller-heads/tycho-execution/blob/d27e2a6f4d9ea6f4cba53b2fc1f54cd6676b60d2/foundry/src/Vault.sol#L61>
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn _update(
         &mut self,
         from: Address,
@@ -141,6 +163,10 @@ impl Vault {
     }
 
     /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/Vault.sol#L332>
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn _finalize_balances(
         &mut self,
         state: &mut State,

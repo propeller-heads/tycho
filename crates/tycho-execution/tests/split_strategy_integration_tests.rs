@@ -62,7 +62,7 @@ fn test_evm_split_swap_strategy_encoder() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        default_token(dai.clone()),
+        default_token(dai),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -72,7 +72,7 @@ fn test_evm_split_swap_strategy_encoder() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        default_token(wbtc.clone()),
+        default_token(wbtc),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -97,13 +97,13 @@ fn test_evm_split_swap_strategy_encoder() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -180,7 +180,7 @@ fn test_evm_split_input_cyclic_swap() {
             },
             ..Default::default()
         },
-        default_token(weth.clone()),
+        default_token(weth),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -191,7 +191,7 @@ fn test_evm_split_input_cyclic_swap() {
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         usdc.clone(),
-        usdc.clone(),
+        usdc,
         BigUint::from_str("100000000").unwrap(), // 100 USDC (6 decimals)
         BigUint::from_str("99574171").unwrap(),
         BigUint::from_str("97582687").unwrap(),
@@ -206,13 +206,13 @@ fn test_evm_split_input_cyclic_swap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -334,7 +334,7 @@ fn test_evm_split_output_cyclic_swap() {
             },
             ..Default::default()
         },
-        default_token(weth.clone()),
+        default_token(weth),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -345,7 +345,7 @@ fn test_evm_split_output_cyclic_swap() {
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         usdc.clone(),
-        usdc.clone(),
+        usdc,
         BigUint::from_str("100000000").unwrap(), // 100 USDC (6 decimals)
         BigUint::from_str("99025908").unwrap(),
         BigUint::from_str("97045389").unwrap(),
@@ -360,13 +360,13 @@ fn test_evm_split_output_cyclic_swap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -469,7 +469,7 @@ fn test_evm_split_swap_strategy_with_fees() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        default_token(dai.clone()),
+        default_token(dai),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -479,7 +479,7 @@ fn test_evm_split_swap_strategy_with_fees() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        default_token(wbtc.clone()),
+        default_token(wbtc),
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
@@ -503,13 +503,13 @@ fn test_evm_split_swap_strategy_with_fees() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         1_000_000,
-        client_fee_receiver(),
-        BigUint::ZERO,
+        &client_fee_receiver(),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -596,13 +596,13 @@ fn test_evm_split_swap_native_and_wrapped_branches() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth,
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;

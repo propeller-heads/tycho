@@ -124,7 +124,7 @@ pub(super) fn decode_attribute(name: &str, value: &[u8]) -> Result<U256, String>
 /// `decode_attribute` for the two 32-bit block counters in `StakeLimitUtils`.
 pub(super) fn decode_u32_attribute(name: &str, value: &[u8]) -> Result<u32, String> {
     let value = decode_attribute(name, value)?;
-    u32::try_from(value).map_err(|_| format!("{name} does not fit in 32 bits"))
+    u32::try_from(value).map_err(|_out_of_range| format!("{name} does not fit in 32 bits"))
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,7 +136,10 @@ pub struct StakingState {
 }
 
 impl LidoV4State {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         execution_block_number: u64,
         total_shares: U256,
@@ -398,7 +401,8 @@ impl StakingState {
                 return Err(SimulationError::RecoverableError("STAKE_LIMIT".to_string()));
             }
             self.prev_stake_limit = current_stake_limit - amount;
-            self.prev_stake_block_number = block_number as u32;
+            // Lido stores prevStakeBlockNumber as a uint32: the low 32 bits of the block number.
+            self.prev_stake_block_number = (block_number & 0xFFFF_FFFF) as u32;
         }
 
         Ok(())
@@ -848,7 +852,7 @@ mod tests {
         let state = sample_state();
         let amount_in = BigUint::from(10u64).pow(18);
         let result = state
-            .get_amount_out(amount_in.clone(), &eth_token(), &steth_token())
+            .get_amount_out(amount_in, &eth_token(), &steth_token())
             .unwrap();
 
         assert!(result.amount > BigUint::ZERO);
@@ -1107,7 +1111,8 @@ mod tests {
         let mut staking_state = state.staking_state;
         // Capacity gone, but the pair still has a rate: the limit bounds size, not price.
         staking_state.prev_stake_limit = U256::ZERO;
-        staking_state.prev_stake_block_number = state.execution_block_number as u32;
+        staking_state.prev_stake_block_number =
+            u32::try_from(state.execution_block_number).unwrap();
         staking_state.max_stake_limit_growth_blocks = 0;
         state.staking_state = staking_state;
 
@@ -1470,7 +1475,7 @@ mod tests {
         let weth = Token::new(&Bytes::from([0xc0u8; 20]), "WETH", 18, 0, &[], Chain::Ethereum, 100);
         assert!(
             state
-                .get_limits(weth.address.clone(), steth_token().address.clone())
+                .get_limits(weth.address.clone(), steth_token().address)
                 .is_err(),
             "an unknown token reported a limit instead of an error"
         );

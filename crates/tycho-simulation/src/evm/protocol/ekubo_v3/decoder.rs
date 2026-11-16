@@ -9,6 +9,7 @@ use ekubo_sdk::{
     quoting::{
         pools::{
             full_range::{FullRangePoolKey, FullRangePoolState, FullRangePoolTypeConfig},
+            mev_capture_v21_main::MevCaptureV21MainPoolState,
             stableswap::{StableswapPoolKey, StableswapPoolState},
             twamm::TwammPoolState,
         },
@@ -27,8 +28,8 @@ use tycho_common::{
 
 use super::{
     addresses::{
-        BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
-        SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS, TWAMM_ADDRESS_V1, TWAMM_ADDRESS_V2,
+        BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, MEV_CAPTURE_V21_ETHEREUM_ADDRESS,
+        ORACLE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS, TWAMM_ADDRESS_V1, TWAMM_ADDRESS_V2,
         VE33_ROBINHOOD_ADDRESS,
     },
     attributes::{rate_deltas_from_attributes, ticks_from_attributes},
@@ -37,6 +38,7 @@ use super::{
         concentrated::ConcentratedPool,
         full_range::FullRangePool,
         mev_capture::MevCapturePool,
+        mev_capture_v21::{self, MevCaptureV21Pool},
         oracle::OraclePool,
         stableswap::StableswapPool,
         twamm::TwammPool,
@@ -54,6 +56,7 @@ pub enum ExtensionType {
     Oracle,
     Twamm,
     MevCapture,
+    MevCaptureV21,
     BoostedFees,
     SignedExclusiveSwap,
     Ve33,
@@ -74,6 +77,8 @@ pub fn extension_type(extension: Address, chain: Chain) -> Option<ExtensionType>
         ExtensionType::Twamm
     } else if extension == MEV_CAPTURE_ADDRESS {
         ExtensionType::MevCapture
+    } else if chain == Chain::Ethereum && extension == MEV_CAPTURE_V21_ETHEREUM_ADDRESS {
+        ExtensionType::MevCaptureV21
     } else if extension == BOOSTED_FEES_CONCENTRATED_ADDRESS {
         ExtensionType::BoostedFees
     } else if SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS.contains(&(chain, extension)) {
@@ -137,7 +142,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
 
         let liquidity = attribute(&state_attrs, "liquidity")?
             .clone()
-            .into();
+            .try_into()?;
 
         let sqrt_ratio = U256::try_from_be_slice(&attribute(&state_attrs, "sqrt_ratio")?[..])
             .ok_or_else(|| InvalidSnapshotError::ValueError("invalid pool price".to_string()))?;
@@ -150,7 +155,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
         > {
             let tick = attribute(state_attrs, "tick")?
                 .clone()
-                .into();
+                .try_into()?;
 
             let mut ticks = ticks_from_attributes(
                 state_attrs
@@ -259,6 +264,31 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
 
                 Self::MevCapture(MevCapturePool::new(key, tick, concentrated_state, ticks)?)
             }
+            ExtensionType::MevCaptureV21 => {
+                let EvmPoolTypeConfig::Concentrated(pool_type_config) = pool_type_config else {
+                    return Err(InvalidSnapshotError::ValueError(
+                        "expected concentrated pool type config for MEVCapture v2.1 pool"
+                            .to_string(),
+                    ));
+                };
+
+                let (key, _, tick, ticks) = concentrated_pool(&state_attrs, pool_type_config)?;
+                let anchor = mev_capture_v21::anchor_from_bytes(attribute(
+                    &state_attrs,
+                    mev_capture_v21::ANCHOR_STATE_ATTRIBUTE,
+                )?)
+                .map_err(InvalidSnapshotError::ValueError)?;
+
+                Self::MevCaptureV21(MevCaptureV21Pool::new(
+                    key,
+                    mev_capture_v21::config_from_attributes(&static_attrs)?,
+                    MevCaptureV21MainPoolState {
+                        core: mev_capture_v21::core_state(sqrt_ratio, tick, liquidity),
+                        anchor,
+                    },
+                    ticks,
+                )?)
+            }
             ExtensionType::SignedExclusiveSwap => {
                 let EvmPoolTypeConfig::Concentrated(pool_type_config) = pool_type_config else {
                     return Err(InvalidSnapshotError::ValueError(
@@ -356,7 +386,7 @@ fn extension_type_from_attributes_or_address(
     // Backward compat: use extension_id attribute if present (legacy format).
     // A value of 0 means unset — fall through to address-based detection.
     if let Some(extension_id) = static_attrs.get("extension_id") {
-        match i32::from(extension_id.clone()) {
+        match i32::try_from(extension_id.clone())? {
             0 => {}
             1 => return Ok(ExtensionType::NoSwapCallPoints),
             2 => return Ok(ExtensionType::Oracle),
@@ -401,15 +431,15 @@ fn timed_state_details(
 ) -> Result<TimedStateDetails, InvalidSnapshotError> {
     let last_time = attribute_with_fallback(&attrs, "last_time", "last_execution_time")?
         .clone()
-        .into();
+        .try_into()?;
 
     Ok(TimedStateDetails {
         rate_token0: attribute_with_fallback(&attrs, "rate_token0", "token0_sale_rate")?
             .clone()
-            .into(),
+            .try_into()?,
         rate_token1: attribute_with_fallback(&attrs, "rate_token1", "token1_sale_rate")?
             .clone()
-            .into(),
+            .try_into()?,
         last_time,
         rate_deltas: rate_deltas_from_attributes(
             attrs
@@ -471,8 +501,10 @@ mod tests {
             EkuboV3State::Oracle(_) => 2,
             EkuboV3State::Twamm(_) => 3,
             EkuboV3State::MevCapture(_) => 4,
-            // BoostedFees is new, no legacy format
-            EkuboV3State::BoostedFees(_) | EkuboV3State::Ve33(_) => return,
+            // Extensions added after the legacy format have none
+            EkuboV3State::BoostedFees(_) |
+            EkuboV3State::MevCaptureV21(_) |
+            EkuboV3State::Ve33(_) => return,
         };
 
         let mut component = case.component;

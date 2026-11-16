@@ -27,9 +27,10 @@ use crate::{
             utils::{
                 add_fee_markup,
                 slipstreams::{
+                    aero_hook_fee::{AeroHookFee, Execution, HookFee, PoolOracle},
                     dynamic_fee_module::{get_dynamic_fee, DynamicFeeConfig, ResolvedFee},
-                    observations::{Observation, Observations},
-                    raw_target_price,
+                    observations::{observation_slot, Observation, Observations},
+                    oracle_timestamp, raw_target_price,
                 },
                 uniswap::{
                     i24_be_bytes_to_i32, liquidity_math,
@@ -56,25 +57,29 @@ use crate::{
 // Cold-storage warmup on the first loop iteration:
 // nextInitializedTickWithinOneWord first call (~3,000) vs warm (~1,060)
 // calculateFees first call via cold getUnstakedFee STATICCALL (~19,050) vs warm (~6,055)
-const FIRST_LOOP_OVERHEAD: i32 = 15_000;
+const FIRST_LOOP_OVERHEAD: u64 = 15_000;
 // Steady-state per-loop: nextInitializedTickWithinOneWord (warm) + getSqrtRatioAtTick
 // + computeSwapStep + calculateFees (warm) + toInt256x2 + EVM opcode overhead
-const LOOP_GAS_COST: i32 = 12_500;
+const LOOP_GAS_COST: u64 = 12_500;
 // cross(): updates tick fee growth and staked reward growth slots.
 // Warm ticks (previously crossed, non-zero SSTORE slots) cost ~22k; cold ticks ~76k.
 // We bias toward the cold end to prefer overestimation: 70k.
-const TICK_CROSSING_GAS_COST: i32 = 70_000;
-// When dfc.scaling_factor != 0, fee() does a TWAP binary search on the observation ring
-// buffer (~77k–91k gas) instead of a simple slot read (~18k–27k gas). This extra cost is
-// added once per swap on top of the base.
-const TWAP_FEE_OVERHEAD: i32 = 65_000;
+const TICK_CROSSING_GAS_COST: u64 = 70_000;
+// When the module reads the oracle (`observed_twap`, whatever the scaling factor), fee() does a
+// TWAP binary search on the observation ring buffer (~77k–91k gas) instead of a simple slot read
+// (~18k–27k gas). This extra cost is added once per swap on top of the base.
+const TWAP_FEE_OVERHEAD: u64 = 65_000;
 // Pre/post loop overhead: fee(), slot0 reads, end-of-swap writes.
-const SWAP_BASE_GAS: i32 = 125_000;
+const SWAP_BASE_GAS: u64 = 125_000;
+// AERO v1.1 pools call their swap hook, which runs the TWAP observe and stores the block fee,
+// then record the swap on the pool tape and settle the gauge. Measured with eth_simulateV1 of
+// single-step swaps on Base: ~312-317k for the pool's swap against ~140k for an Aerodrome
+// Slipstreams pool. Replaces TWAP_FEE_OVERHEAD.
+const AERO_HOOK_GAS: u64 = 160_000;
 // Conservative max gas for a single swap. Used to cap get_limits iteration.
 const MAX_SWAP_GAS: u64 = 16_700_000;
 // Maximum initialized ticks that can be crossed within MAX_SWAP_GAS.
-const MAX_TICKS_CROSSED: u64 =
-    (MAX_SWAP_GAS - SWAP_BASE_GAS as u64) / TICK_CROSSING_GAS_COST as u64;
+const MAX_TICKS_CROSSED: u64 = (MAX_SWAP_GAS - SWAP_BASE_GAS) / TICK_CROSSING_GAS_COST;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AerodromeSlipstreamsState {
@@ -86,6 +91,10 @@ pub struct AerodromeSlipstreamsState {
     /// is the next block for a confirmed update and the still-open block for a flashblock
     /// update.
     execution_block_timestamp: u64,
+    /// Number of the block a quote is expected to execute in; maintained like
+    /// `execution_block_timestamp`. The AERO swap hook caches its fee per block number.
+    #[serde(default)]
+    execution_block_number: u64,
     liquidity: u128,
     sqrt_price: U256,
     observation_index: u16,
@@ -103,8 +112,15 @@ pub struct AerodromeSlipstreamsState {
     /// those fields must do the same.
     #[serde(skip)]
     step_cache: SwapStepCache,
+    /// The oracle observations. The ring is shared by this state, its clones and the states its
+    /// swaps return; a swap records its observation in the state's own overlay (see
+    /// [`Observations`]), so a quote copies no ring.
     observations: Observations,
     dfc: DynamicFeeConfig,
+    /// Fee settings of an AERO v1.1 pool, whose swap hook sets the fee instead of a fee module.
+    /// When set, `dfc` is unused.
+    #[serde(default)]
+    aero_hook: Option<AeroHookFee>,
     /// What quotes may assume about the swap's position within its execution block; see
     /// [`BlockPositionAssumption`].
     position_assumption: BlockPositionAssumption,
@@ -127,7 +143,10 @@ impl AerodromeSlipstreamsState {
     /// - `observations`: A vector of `Observation` representing the observation information for the
     ///   pool.
     /// - `dfc`: The dynamic fee configuration for the pool.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         id: String,
         execution_block_timestamp: u64,
@@ -142,10 +161,14 @@ impl AerodromeSlipstreamsState {
         observations: Vec<Observation>,
         dfc: DynamicFeeConfig,
     ) -> Result<Self, SimulationError> {
-        let tick_list = TickList::from(tick_spacing as u16, ticks)?;
+        let tick_list_spacing = u16::try_from(tick_spacing).map_err(|e| {
+            SimulationError::InvalidInput(format!("Invalid tick spacing {tick_spacing}: {e}"), None)
+        })?;
+        let tick_list = TickList::from(tick_list_spacing, ticks)?;
         Ok(AerodromeSlipstreamsState {
             id,
             execution_block_timestamp,
+            execution_block_number: 0,
             liquidity,
             sqrt_price,
             observation_index,
@@ -157,8 +180,15 @@ impl AerodromeSlipstreamsState {
             step_cache: SwapStepCache::default(),
             observations: Observations::new(observations),
             dfc,
+            aero_hook: None,
             position_assumption: BlockPositionAssumption::default(),
         })
+    }
+
+    /// Prices swaps with an AERO v1.1 swap hook instead of the dynamic fee module.
+    pub fn with_aero_hook(mut self, hook: AeroHookFee) -> Self {
+        self.aero_hook = Some(hook);
+        self
     }
 
     /// Sets what quotes assume about the swap's position within its execution block.
@@ -170,6 +200,10 @@ impl AerodromeSlipstreamsState {
     }
 
     fn get_fee(&self) -> Result<ResolvedFee, SimulationError> {
+        if let Some(hook) = &self.aero_hook {
+            let fee = self.hook_fee(hook)?;
+            return Ok(ResolvedFee { fee: fee.fee, observed_twap: fee.observed_twap });
+        }
         get_dynamic_fee(
             &self.dfc,
             self.default_fee,
@@ -178,8 +212,26 @@ impl AerodromeSlipstreamsState {
             self.observation_index,
             self.observation_cardinality,
             &self.observations,
-            self.execution_block_timestamp as u32,
+            oracle_timestamp(self.execution_block_timestamp),
             self.position_assumption == BlockPositionAssumption::First,
+        )
+    }
+
+    fn hook_fee(&self, hook: &AeroHookFee) -> Result<HookFee, SimulationError> {
+        hook.resolve(
+            &PoolOracle {
+                tick: self.tick,
+                liquidity: self.liquidity,
+                observation_index: self.observation_index,
+                observation_cardinality: self.observation_cardinality,
+                observations: &self.observations,
+            },
+            self.default_fee,
+            Execution {
+                block: self.execution_block_number,
+                timestamp: oracle_timestamp(self.execution_block_timestamp),
+                first_in_block: self.position_assumption == BlockPositionAssumption::First,
+            },
         )
     }
 
@@ -195,7 +247,7 @@ impl AerodromeSlipstreamsState {
         }
         self.observation_index = self.observations.write(
             self.observation_index,
-            self.execution_block_timestamp as u32,
+            oracle_timestamp(self.execution_block_timestamp),
             self.tick,
             self.liquidity,
             self.observation_cardinality,
@@ -262,6 +314,16 @@ impl AerodromeSlipstreamsState {
     ) -> (Self, Result<(), SimulationError>) {
         let mut state = self.clone();
         state.step_cache = SwapStepCache::default();
+        // The block's first swap stores the block fee every later swap in the block pays.
+        if let (Some(hook), Some(state_hook)) = (&self.aero_hook, state.aero_hook.as_mut()) {
+            match self.hook_fee(hook) {
+                Ok(HookFee { block_fee_to_store: Some(fee), .. }) => {
+                    state_hook.store_block_fee(self.execution_block_number, fee)
+                }
+                Ok(_) => {}
+                Err(err) => return (state, Err(err)),
+            }
+        }
         let observation = state.record_observation(tick);
         state.liquidity = liquidity;
         state.tick = tick;
@@ -305,8 +367,14 @@ impl AerodromeSlipstreamsState {
             liquidity: self.liquidity,
         };
         let resolved_fee = self.get_fee()?;
-        let twap_overhead = if resolved_fee.observed_twap { TWAP_FEE_OVERHEAD } else { 0 };
-        let mut gas_used = U256::from((SWAP_BASE_GAS + twap_overhead) as u64);
+        let twap_overhead = if self.aero_hook.is_some() {
+            AERO_HOOK_GAS
+        } else if resolved_fee.observed_twap {
+            TWAP_FEE_OVERHEAD
+        } else {
+            0
+        };
+        let mut gas_used = U256::from(SWAP_BASE_GAS + twap_overhead);
         let mut n_loops = 0;
 
         let fee = resolved_fee.fee;
@@ -359,7 +427,9 @@ impl AerodromeSlipstreamsState {
                             )),
                         ));
                     }
-                    _ => return Err(SimulationError::FatalError("Unknown error".to_string())),
+                    TickListErrorKind::BelowSmallest | TickListErrorKind::AtOrAboveLargest => {
+                        return Err(SimulationError::FatalError("Unknown error".to_string()))
+                    }
                 },
             };
 
@@ -471,11 +541,11 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         }
     }
 
-    fn spot_price(&self, a: &Token, b: &Token) -> Result<f64, SimulationError> {
-        let price = if a < b {
-            sqrt_price_q96_to_f64(self.sqrt_price, a.decimals, b.decimals)?
+    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        let price = if base < quote {
+            sqrt_price_q96_to_f64(self.sqrt_price, base.decimals, quote.decimals)?
         } else {
-            1.0f64 / sqrt_price_q96_to_f64(self.sqrt_price, b.decimals, a.decimals)?
+            1.0f64 / sqrt_price_q96_to_f64(self.sqrt_price, quote.decimals, base.decimals)?
         };
         Ok(add_fee_markup(price, self.get_fee()?.fee as f64 / 1_000_000.0))
     }
@@ -483,10 +553,10 @@ impl ProtocolSim for AerodromeSlipstreamsState {
     fn get_amount_out(
         &self,
         amount_in: BigUint,
-        token_a: &Token,
-        token_b: &Token,
+        token_in: &Token,
+        token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let zero_for_one = token_a < token_b;
+        let zero_for_one = token_in < token_out;
         let amount_specified = I256::checked_from_sign_and_abs(
             Sign::Positive,
             U256::from_be_slice(&amount_in.to_bytes_be()),
@@ -497,7 +567,7 @@ impl ProtocolSim for AerodromeSlipstreamsState {
 
         let result = self.swap(zero_for_one, amount_specified, None)?;
 
-        trace!(?amount_in, ?token_a, ?token_b, ?zero_for_one, ?result, "SLIPSTREAMS SWAP");
+        trace!(?amount_in, ?token_in, ?token_out, ?zero_for_one, ?result, "SLIPSTREAMS SWAP");
         let (new_state, observation) =
             self.clone_post_swap(result.sqrt_price, result.tick.value(), result.liquidity);
         observation?;
@@ -516,15 +586,18 @@ impl ProtocolSim for AerodromeSlipstreamsState {
 
     fn get_limits(
         &self,
-        token_in: Bytes,
-        token_out: Bytes,
+        sell_token: Bytes,
+        buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         // If the pool has no liquidity, return zeros for both limits
         if self.liquidity == 0 {
             return Ok((BigUint::zero(), BigUint::zero()));
         }
+        // The limits do not depend on the fee, but a quote does: a pool whose fee cannot be
+        // resolved fails every quote, so it reports no limits to size one from.
+        self.get_fee()?;
 
-        let zero_for_one = token_in < token_out;
+        let zero_for_one = sell_token < buy_token;
         let mut current_tick = self.tick;
         let mut current_sqrt_price = self.sqrt_price;
         let mut current_liquidity = self.liquidity;
@@ -634,7 +707,7 @@ impl ProtocolSim for AerodromeSlipstreamsState {
                 liquidity.clone()
             };
 
-            self.liquidity = u128::from(liq_16_bytes);
+            self.liquidity = u128::try_from(liq_16_bytes)?;
         }
         if let Some(sqrt_price) = delta
             .updated_attributes
@@ -646,27 +719,32 @@ impl ProtocolSim for AerodromeSlipstreamsState {
             .updated_attributes
             .get("observationIndex")
         {
-            self.observation_index = u16::from(observation_index.clone());
+            self.observation_index = u16::try_from(observation_index.clone())?;
         }
         if let Some(observation_cardinality) = delta
             .updated_attributes
             .get("observationCardinality")
         {
-            self.observation_cardinality = u16::from(observation_cardinality.clone());
+            self.observation_cardinality = u16::try_from(observation_cardinality.clone())?;
         }
         if let Some(default_fee) = delta
             .updated_attributes
             .get("default_fee")
         {
-            self.default_fee = u32::from(default_fee.clone());
+            self.default_fee = u32::try_from(default_fee.clone())?;
         }
-        self.dfc
-            .update_from_attributes(&delta.updated_attributes)
-            .map_err(|err| {
-                TransitionError::DecodeError(format!(
-                    "Failed to update dynamic fee module config: {err}"
-                ))
-            })?;
+        if let Some(hook) = self.aero_hook.as_mut() {
+            hook.update_from_attributes(&delta.updated_attributes)
+                .map_err(TransitionError::DecodeError)?;
+        } else {
+            self.dfc
+                .update_from_attributes(&delta.updated_attributes)
+                .map_err(|err| {
+                    TransitionError::DecodeError(format!(
+                        "Failed to update dynamic fee module config: {err}"
+                    ))
+                })?;
+        }
         if let Some(tick) = delta.updated_attributes.get("tick") {
             // This is a hotfix because if the tick has never been updated after creation, it's
             // currently encoded as H256::zero(), therefore, we can't decode this as i32.
@@ -696,18 +774,16 @@ impl ProtocolSim for AerodromeSlipstreamsState {
                         parts[1]
                             .parse::<i32>()
                             .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
-                        i128::from(value.clone()),
+                        i128::try_from(value.clone())?,
                     )
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
             }
 
-            // observations keys are in the format "observations/{observation_index}"
-            if let Some(idx_str) = key.strip_prefix("observations/") {
-                if let Ok(idx) = idx_str.parse::<i32>() {
-                    let _ = self
-                        .observations
-                        .upsert_observation(idx, value);
-                }
+            if let Some(slot) = observation_slot(key) {
+                let slot = slot.map_err(TransitionError::DecodeError)?;
+                self.observations
+                    .upsert_observation(slot, value)
+                    .map_err(|err| TransitionError::DecodeError(format!("{key}: {err}")))?;
             }
         }
         // delete ticks - ignores deletes for attributes other than tick liquidity
@@ -725,13 +801,11 @@ impl ProtocolSim for AerodromeSlipstreamsState {
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
             }
 
-            // observations keys are in the format "observations/{observation_index}"
-            if let Some(idx_str) = key.strip_prefix("observations/") {
-                if let Ok(idx) = idx_str.parse::<i32>() {
-                    let _ = self
-                        .observations
-                        .upsert_observation(idx, &[]);
-                }
+            if let Some(slot) = observation_slot(key) {
+                let slot = slot.map_err(TransitionError::DecodeError)?;
+                self.observations
+                    .upsert_observation(slot, &[])
+                    .map_err(|err| TransitionError::DecodeError(format!("{key}: {err}")))?;
             }
         }
         Ok(())
@@ -742,11 +816,14 @@ impl ProtocolSim for AerodromeSlipstreamsState {
     /// the unchanged timestamp.
     fn apply_block(&mut self, block: &BlockContext) -> bool {
         let timestamp = block.timestamp();
-        if timestamp == self.execution_block_timestamp {
+        if timestamp == self.execution_block_timestamp &&
+            block.number() == self.execution_block_number
+        {
             return false;
         }
         let fee_before = self.get_fee().ok();
         self.execution_block_timestamp = timestamp;
+        self.execution_block_number = block.number();
         fee_before != self.get_fee().ok()
     }
 
@@ -767,14 +844,8 @@ impl ProtocolSim for AerodromeSlipstreamsState {
             .as_any()
             .downcast_ref::<AerodromeSlipstreamsState>()
         {
-            let self_fee = match self.get_fee() {
-                Ok(fee) => fee,
-                Err(_) => return false,
-            };
-            let other_fee = match other_state.get_fee() {
-                Ok(fee) => fee,
-                Err(_) => return false,
-            };
+            let Ok(self_fee) = self.get_fee() else { return false };
+            let Ok(other_fee) = other_state.get_fee() else { return false };
 
             self.liquidity == other_state.liquidity &&
                 self.sqrt_price == other_state.sqrt_price &&
@@ -822,6 +893,10 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "aero_cl_replay_tests.rs"]
+mod aero_cl_replay_tests;
 
 #[cfg(test)]
 mod tests {
@@ -896,7 +971,6 @@ mod tests {
         pool.observations = Observations::new(vec![Observation {
             block_timestamp: last_observation_ts,
             initialized: true,
-            index: 0,
             ..Default::default()
         }]);
         pool
@@ -916,9 +990,9 @@ mod tests {
     /// index must match the chain (213 -> 214: exactly one observation written).
     #[test]
     fn replays_base_block_50166683_swap_pair_wei_exact() {
-        let mut observations: Vec<Observation> = (0..213)
-            .map(|index| Observation { index, ..Default::default() })
-            .collect();
+        // The fixture carries only the newest slot: at a zero scaling factor the module's fee does
+        // not depend on the oracle, and the swap's `write` reads only the current slot.
+        let mut observations = vec![Observation::default(); 213];
         observations.push(Observation {
             block_timestamp: 1_787_122_711, // == parent block ts: the pool traded in that block
             tick_cumulative: -18_995_710_863_218,
@@ -927,7 +1001,6 @@ mod tests {
             )
             .unwrap(),
             initialized: true,
-            index: 213,
         });
 
         let mut pool = AerodromeSlipstreamsState::new(
@@ -1023,6 +1096,37 @@ mod tests {
         };
 
         assert_eq!(partial.new_state.fee(), 2700.0 / 1_000_000.0);
+    }
+
+    #[test]
+    fn ring_that_cannot_answer_observe_fails_limits_like_quotes() {
+        // A non-zero scaling factor, with the slots around the 600 s target missing from this
+        // copy of the ring: the fee is unknown, so no quote can be given and no limit either.
+        let mut pool = create_basic_test_pool();
+        pool.dfc = DynamicFeeConfig::new(0, 10_000, 1_000_000, false, 0);
+        pool.observation_index = 5;
+        pool.observation_cardinality = 300;
+        let mut slots = vec![Observation::default(); 7];
+        slots[5] =
+            Observation { block_timestamp: 999_990, initialized: true, ..Default::default() };
+        slots[6] =
+            Observation { block_timestamp: 999_000, initialized: true, ..Default::default() };
+        pool.observations = Observations::new(slots);
+        let token_a =
+            Token::new(&Bytes::from([0x11; 20]), "A", 18, 0, &[Some(10_000)], Chain::Base, 100);
+        let token_b =
+            Token::new(&Bytes::from([0x22; 20]), "B", 18, 0, &[Some(10_000)], Chain::Base, 100);
+
+        assert!(pool.get_fee().is_err());
+        assert!(pool
+            .spot_price(&token_a, &token_b)
+            .is_err());
+        assert!(pool
+            .get_amount_out(BigUint::from(1_000u32), &token_a, &token_b)
+            .is_err());
+        assert!(pool
+            .get_limits(token_a.address, token_b.address)
+            .is_err());
     }
 
     #[test]
@@ -1231,6 +1335,51 @@ mod tests {
             .expect("partial dynamic fee update should be valid");
 
         assert_eq!(pool.dfc, DynamicFeeConfig::new(500, 10_000, 1, false, 0));
+    }
+
+    #[test]
+    fn applies_a_cardinality_increase() {
+        // `increaseObservationCardinalityNext(4)` prefills slots 1-3 with timestamp 1, which the
+        // stream sends as the single byte 0x01. Lookups read them as uninitialized whether stored
+        // or not, so the ring is left as it was.
+        let mut pool = create_basic_test_pool();
+        let ring = Observations::new(vec![Observation {
+            block_timestamp: 999_990,
+            initialized: true,
+            ..Default::default()
+        }]);
+        pool.observations = ring.clone();
+        let delta = ProtocolStateDelta {
+            component_id: "test-pool".to_string(),
+            updated_attributes: (1..4)
+                .map(|index| (format!("observations/{index}"), Bytes::from([0x01_u8])))
+                .collect(),
+            ..Default::default()
+        };
+
+        pool.delta_transition(delta, &HashMap::new(), &Balances::default())
+            .expect("prefilled observation slots should be valid");
+
+        assert_eq!(pool.observations, ring);
+    }
+
+    #[rstest]
+    #[case::not_a_number("observations/next")]
+    #[case::past_the_ring("observations/65535")]
+    fn malformed_observation_key_fails_the_transition(#[case] key: &str) {
+        let mut pool = create_basic_test_pool();
+        let delta = ProtocolStateDelta {
+            component_id: "test-pool".to_string(),
+            updated_attributes: HashMap::from([(key.to_string(), Bytes::from([0x01_u8]))]),
+            ..Default::default()
+        };
+
+        let result = pool.delta_transition(delta, &HashMap::new(), &Balances::default());
+
+        let Err(TransitionError::DecodeError(message)) = result else {
+            panic!("expected a DecodeError, got {result:?}");
+        };
+        assert!(message.starts_with(key), "{message}");
     }
 
     #[test]
@@ -1502,6 +1651,288 @@ mod tick_list_sharing_tests {
 }
 
 #[cfg(test)]
+mod observation_sharing_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use tycho_common::{dto::ProtocolStateDelta, hex_bytes::Bytes};
+
+    use super::*;
+    use crate::evm::protocol::utils::uniswap::tick_math::get_sqrt_ratio_at_tick;
+
+    fn pool_with_observations() -> AerodromeSlipstreamsState {
+        let observations = (0..3)
+            .map(|index| Observation {
+                block_timestamp: 1_000 + u32::try_from(index).unwrap(),
+                tick_cumulative: 10 * i64::from(index),
+                initialized: true,
+                ..Default::default()
+            })
+            .collect();
+        let mut pool = AerodromeSlipstreamsState::new(
+            "test-pool".to_string(),
+            1_000_000,
+            100_000_000_000_000_000_000u128,
+            get_sqrt_ratio_at_tick(0).unwrap(),
+            0,
+            3,
+            3000,
+            1,
+            0,
+            vec![TickInfo::new(-120, 10000).unwrap(), TickInfo::new(120, -10000).unwrap()],
+            observations,
+            DynamicFeeConfig::new(3000, 10_000, 1, false, 0),
+        )
+        .unwrap();
+        pool.execution_block_timestamp = 2_000;
+        pool
+    }
+
+    /// The state after a swap at `timestamp` that moved the tick to `tick`.
+    fn swapped(
+        pool: &AerodromeSlipstreamsState,
+        timestamp: u64,
+        tick: i32,
+    ) -> AerodromeSlipstreamsState {
+        let mut source = pool.clone();
+        source.execution_block_timestamp = timestamp;
+        let (state, written) =
+            source.clone_post_swap(get_sqrt_ratio_at_tick(tick).unwrap(), tick, 1);
+        written.unwrap();
+        state
+    }
+
+    fn observation_bytes(timestamp: u32) -> Bytes {
+        // Packed as on chain: timestamp in the low 32 bits, `initialized` at bit 248.
+        let mut packed = [0u8; 32];
+        packed[28..].copy_from_slice(&timestamp.to_be_bytes());
+        packed[0] = 1;
+        Bytes::from(packed.to_vec())
+    }
+
+    fn observation_delta(timestamp: u32) -> ProtocolStateDelta {
+        ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: HashMap::from([(
+                "observations/1".to_string(),
+                observation_bytes(timestamp),
+            )]),
+            deleted_attributes: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn clone_shares_observations() {
+        let original = pool_with_observations();
+
+        let copy = original.clone();
+
+        assert!(original
+            .observations
+            .shares_ring_with(&copy.observations));
+    }
+
+    #[test]
+    fn chain_of_tick_moving_swaps_never_copies_the_ring() {
+        let original = pool_with_observations();
+
+        let first = swapped(&original, 2_000, 60);
+        let second = swapped(&first, 2_010, -60);
+        let third = swapped(&second, 2_020, 30);
+
+        for state in [&first, &second, &third] {
+            assert!(original
+                .observations
+                .shares_ring_with(&state.observations));
+        }
+        assert_eq!(third.observation_index, 0);
+        assert_eq!(
+            third
+                .observations
+                .timestamp_at(0, 3)
+                .unwrap(),
+            2_020
+        );
+        assert_eq!(
+            second
+                .observations
+                .timestamp_at(2, 3)
+                .unwrap(),
+            2_010
+        );
+        assert_eq!(
+            first
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            2_000
+        );
+    }
+
+    #[test]
+    fn swap_leaves_the_source_states_observations_unchanged() {
+        let original = pool_with_observations();
+
+        let after_swap = swapped(&original, 2_000, 60);
+
+        assert_eq!(after_swap.observation_index, 1);
+        assert_eq!(
+            after_swap
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            2_000
+        );
+        assert_eq!(original.observation_index, 0);
+        assert_eq!(
+            original
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            1_001
+        );
+    }
+
+    #[test]
+    fn second_swap_in_the_same_block_writes_nothing() {
+        let original = pool_with_observations();
+        let first = swapped(&original, 2_000, 60);
+
+        let second = swapped(&first, 2_000, -60);
+
+        assert_eq!(second.observation_index, first.observation_index);
+        assert_eq!(second.observations, first.observations);
+    }
+
+    #[test]
+    fn swap_that_keeps_the_tick_writes_nothing() {
+        let original = pool_with_observations();
+
+        let after_swap = swapped(&original, 2_000, original.tick);
+
+        assert_eq!(after_swap.observation_index, 0);
+        assert_eq!(after_swap.observations, original.observations);
+    }
+
+    #[test]
+    fn fee_and_observations_match_a_state_rebuilt_from_the_merged_observations() {
+        let original = pool_with_observations();
+        let chained = swapped(&swapped(&original, 2_000, 60), 2_010, -60);
+        let copied: AerodromeSlipstreamsState =
+            serde_json::from_str(&serde_json::to_string(&chained).unwrap()).unwrap();
+
+        assert!(!chained
+            .observations
+            .shares_ring_with(&copied.observations));
+        assert_eq!(chained.observations, copied.observations);
+        assert_eq!(chained.get_fee().unwrap().fee, copied.get_fee().unwrap().fee);
+        for seconds_ago in [0, 5, 10, 15] {
+            assert_eq!(
+                chained
+                    .observations
+                    .observe_single(2_020, seconds_ago, -60, 2, 1, 3)
+                    .unwrap(),
+                copied
+                    .observations
+                    .observe_single(2_020, seconds_ago, -60, 2, 1, 3)
+                    .unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn delta_transition_leaves_clones_observations_unchanged() {
+        let original = pool_with_observations();
+        let mut updated = original.clone();
+
+        updated
+            .delta_transition(observation_delta(5_000), &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(
+            updated
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            5_000
+        );
+        assert_eq!(
+            original
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            1_001
+        );
+        assert!(!original
+            .observations
+            .shares_ring_with(&updated.observations));
+    }
+
+    #[test]
+    fn delta_transition_after_simulated_writes_reads_the_chain_values() {
+        let original = pool_with_observations();
+        let mut simulated = swapped(&original, 2_000, 60);
+
+        simulated
+            .delta_transition(observation_delta(5_000), &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(
+            simulated
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            5_000
+        );
+        assert_eq!(
+            simulated
+                .observations
+                .timestamp_at(2, 3)
+                .unwrap(),
+            1_002
+        );
+        assert_eq!(
+            original
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            1_001
+        );
+    }
+
+    #[test]
+    fn delta_transition_keeps_simulated_writes_the_chain_did_not_touch() {
+        let original = pool_with_observations();
+        let mut simulated = swapped(&swapped(&original, 2_000, 60), 2_010, -60);
+        let mut delta = observation_delta(5_000);
+        delta.updated_attributes.clear();
+        delta
+            .deleted_attributes
+            .insert("observations/0".to_string());
+
+        simulated
+            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        // Deleting slot 0 zeroes it; the simulated writes stay at slots 1 and 2.
+        assert_eq!(simulated.observations.get(0), Some(Observation::default()));
+        assert_eq!(
+            simulated
+                .observations
+                .timestamp_at(1, 3)
+                .unwrap(),
+            2_000
+        );
+        assert_eq!(
+            simulated
+                .observations
+                .timestamp_at(2, 3)
+                .unwrap(),
+            2_010
+        );
+    }
+}
+
+#[cfg(test)]
 mod step_cache_tests {
     use std::{
         collections::{HashMap, HashSet},
@@ -1586,6 +2017,10 @@ mod step_cache_tests {
         // WETH needs a far larger amount to leave its first tick.
         for (sell, buy, doublings) in [(&wbtc, &weth, 30u32), (&weth, &wbtc, 70)] {
             let cached = test_pool();
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the quote may run out of liquidity; only the step cache it fills is used"
+            )]
             let _ = cached.get_amount_out(BigUint::from(10u32) << doublings, sell, buy);
             let boundaries = cached.step_cache.min_inputs(sell < buy);
             assert!(boundaries.len() > 2, "only {} steps cached", boundaries.len());

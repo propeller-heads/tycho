@@ -29,7 +29,10 @@ pub struct Account {
 }
 
 impl Account {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         chain: Chain,
         address: Address,
@@ -92,6 +95,10 @@ impl Account {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default, DeepSizeOf)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; `code` and `change` are kept consistent by `new`, and making the other fields private is a breaking change"
+)]
 pub struct AccountDelta {
     pub chain: Chain,
     pub address: Address,
@@ -249,7 +256,7 @@ impl AccountDelta {
         if let Some(balance) = other.balance {
             self.balance = Some(balance)
         }
-        self.code = other.code.or(self.code.take());
+        self.code = other.code.or_else(|| self.code.take());
         if other.change == ChangeType::Creation {
             self.change = ChangeType::Creation;
         }
@@ -273,6 +280,10 @@ impl AccountDelta {
         self.change
     }
 
+    #[expect(
+        clippy::ref_option,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn code(&self) -> &Option<Code> {
         &self.code
     }
@@ -379,7 +390,7 @@ impl From<dto::AccountUpdate> for AccountDelta {
     }
 }
 
-#[allow(deprecated)] // creation_tx field on ResponseAccount is deprecated
+#[expect(deprecated, reason = "reads the deprecated creation_tx field of ResponseAccount")]
 impl From<dto::ResponseAccount> for Account {
     fn from(value: dto::ResponseAccount) -> Self {
         // Snapshot responses don't carry per-balance modify_tx; use zero as placeholder.

@@ -33,7 +33,7 @@ contract SlipstreamsExecutor is IExecutor, ICallback {
         return msg.sender;
     }
 
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -46,11 +46,12 @@ contract SlipstreamsExecutor is IExecutor, ICallback {
 
         bytes memory callbackData = "";
 
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         pool.swap(
             receiver,
             zeroForOne,
             // positive means exactIn
+            // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
             int256(amountIn),
             zeroForOne ? _MIN_SQRT_RATIO + 1 : _MAX_SQRT_RATIO - 1,
             callbackData

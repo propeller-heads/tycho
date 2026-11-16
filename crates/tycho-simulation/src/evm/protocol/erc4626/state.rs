@@ -155,8 +155,7 @@ impl ProtocolSim for ERC4626State {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        let engine =
-            create_engine(SHARED_TYCHO_DB.clone(), false).expect("Failed to create engine");
+        let engine = create_engine(SHARED_TYCHO_DB.clone(), false)?;
 
         let state =
             vm::decode_from_vm(&self.pool_address, &self.asset_token, &self.share_token, engine)?;

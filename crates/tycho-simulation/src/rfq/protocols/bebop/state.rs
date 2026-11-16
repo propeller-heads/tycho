@@ -16,7 +16,7 @@ use tycho_common::{
 
 use crate::{
     book::{
-        all_pairs::{all_pairs_state, RefusesQuote, SignedByVenue},
+        all_pairs::{all_pairs_state, PricesAfterFill, RefusesQuote, SignedByVenue},
         component::PairState,
         levels::Levels,
         sim::{self, SwapDirection},
@@ -86,6 +86,20 @@ impl PairState for BebopState {
             !self.book.bids.is_empty(),
             !self.book.asks.is_empty(),
         )
+    }
+}
+
+impl PricesAfterFill for BebopState {
+    fn marginal_price(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        filled: &BigUint,
+    ) -> Result<f64, SimulationError> {
+        let direction =
+            SwapDirection::require(&self.base_token, &self.quote_token, token_in, token_out)?;
+        let (sell_decimals, _) = direction.decimals(&self.base_token, &self.quote_token);
+        sim::marginal_price(&self.ladder(direction), filled, sell_decimals)
     }
 }
 
@@ -402,6 +416,33 @@ mod tests {
         }
     }
 
+    /// After some input went in, the next unit is priced at the level where the fill stopped, on
+    /// the side of the book a swap in that direction fills.
+    #[rstest]
+    #[case::selling_base_in_the_first_level(true, 100_000_000, Some(65000.0))]
+    #[case::selling_base_on_the_first_boundary(true, 150_000_000, Some(64950.0))]
+    #[case::selling_base_past_the_depth(true, 400_000_000, None)]
+    #[case::selling_quote_before_any_fill(false, 0, Some(1.0 / 65100.0))]
+    fn the_price_after_a_fill_is_the_level_where_it_stopped(
+        #[case] sell_base: bool,
+        #[case] filled: u64,
+        #[case] expected: Option<f64>,
+    ) {
+        let state = create_test_bebop_state();
+        let (token_in, token_out) = if sell_base { (wbtc(), usdc()) } else { (usdc(), wbtc()) };
+
+        let price =
+            state.marginal_price(&token_in.address, &token_out.address, &BigUint::from(filled));
+
+        match (price, expected) {
+            (Ok(price), Some(expected)) => assert_eq!(price, expected),
+            (Err(SimulationError::RecoverableError(message)), None) => {
+                assert_eq!(message, "No liquidity")
+            }
+            (price, _) => panic!("expected {expected:?}, got {price:?}"),
+        }
+    }
+
     #[test]
     fn spot_price_matching_base_and_quote() {
         let state = create_test_bebop_state();
@@ -464,7 +505,7 @@ mod tests {
 
         // Test selling WBTC for USDC (should use bids)
         let (wbtc_limit, usdc_limit) = state
-            .get_limits(wbtc().address.clone(), usdc().address.clone())
+            .get_limits(wbtc().address, usdc().address)
             .unwrap();
 
         // Use bids: vec![(65000.0, 1.5), (64950.0, 2.0), (64900.0, 0.5)]
@@ -486,7 +527,7 @@ mod tests {
 
         // Test buying WBTC with USDC (should use asks)
         let (usdc_limit, wbtc_limit) = state
-            .get_limits(usdc().address.clone(), wbtc().address.clone())
+            .get_limits(usdc().address, wbtc().address)
             .unwrap();
 
         // Use asks: vec![(65100.0, 1.0), (65150.0, 2.5), (65200.0, 1.5)]
@@ -519,7 +560,7 @@ mod tests {
                 .get_amount_out(amount, &wbtc(), &weth())
                 .map(|_| ()),
             state
-                .get_limits(weth().address.clone(), usdc().address.clone())
+                .get_limits(weth().address, usdc().address)
                 .map(|_| ()),
         ];
 
@@ -542,7 +583,7 @@ mod tests {
             Err(SimulationError::InvalidInput(_, None))
         ));
         assert!(matches!(
-            state.get_limits(usdc().address.clone(), wbtc().address.clone()),
+            state.get_limits(usdc().address, wbtc().address),
             Err(SimulationError::RecoverableError(_))
         ));
     }

@@ -4,10 +4,12 @@ pragma solidity ^0.8.26;
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {TransferManager} from "../TransferManager.sol";
 
+error LiquidityPartyExecutor__InvalidDataLength();
+
 contract LiquidityPartyExecutor is IExecutor {
     /// @dev We avoid declaring any IERC20 types, since it is critical to use the router's transfer facility and never
     /// the inherent ERC20 transfer methods, not even the SafeERC20 versions.
-    // slither-disable-next-line locked-ether
+    // slither-disable-next-line locked-ether The router delegatecalls swap, so any ETH it receives is held by the router.
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
@@ -16,7 +18,7 @@ contract LiquidityPartyExecutor is IExecutor {
         (IPartyPool pool,,, uint8 indexIn, uint8 indexOut) = _decodeData(data);
 
         // Perform the swap. Tokens have already been sent to the pool by the Dispatcher.
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         pool.swap(
             address(this), // pool requires msg.sender == payer for PREFUNDING
             Funding.PREFUNDING,
@@ -71,7 +73,7 @@ contract LiquidityPartyExecutor is IExecutor {
             uint8 indexOut
         )
     {
-        require(data.length == 62, "LiqP executor: invalid data length");
+        require(data.length == 62, LiquidityPartyExecutor__InvalidDataLength());
         pool = IPartyPool(address(bytes20(data[0:20])));
         tokenIn = address(bytes20(data[20:40]));
         tokenOut = address(bytes20(data[40:60]));
@@ -82,13 +84,11 @@ contract LiquidityPartyExecutor is IExecutor {
 
 library Funding {
     /// @notice a constant passed to swap as the fundingSelector to indicate that the payer has used regular ERC20 approvals to allow the pool to move the necessary input tokens.
-    // Slither analysis of this line is literally wrong and broken. The extra zero digits are REQUIRED by Solidity since it is a bytes4 literal.
-    // slither-disable-next-line too-many-digits
+    // forge-lint: disable-next-line(too-many-digits) A bytes4 literal needs all eight hex digits.
     bytes4 internal constant APPROVALS = 0x00000000;
 
     /// @notice a constant passed to swap as the fundingSelector to indicate that the payer has already sent sufficient input tokens to the pool before calling swap, so no movement of input tokens is required.
-    // Slither analysis of this line is literally wrong and broken. The extra zero digits are REQUIRED by Solidity since it is a bytes4 literal.
-    // slither-disable-next-line too-many-digits
+    // forge-lint: disable-next-line(too-many-digits) A bytes4 literal needs all eight hex digits.
     bytes4 internal constant PREFUNDING = 0x00000001;
 }
 

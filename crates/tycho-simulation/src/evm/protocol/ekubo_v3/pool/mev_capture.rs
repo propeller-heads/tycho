@@ -232,9 +232,10 @@ mod tests {
     const TOKEN0: Address = address!("0x0000000000000000000000000000000000000001");
     const TOKEN1: Address = address!("0x0000000000000000000000000000000000000002");
     const LIQUIDITY: u128 = 1_000_000_000_000;
+    const LIQUIDITY_DELTA: i128 = 1_000_000_000_000;
     const TICKS: [Tick; 2] = [
-        Tick { index: -10_000, liquidity_delta: LIQUIDITY as i128 },
-        Tick { index: 10_000, liquidity_delta: -(LIQUIDITY as i128) },
+        Tick { index: -10_000, liquidity_delta: LIQUIDITY_DELTA },
+        Tick { index: 10_000, liquidity_delta: -LIQUIDITY_DELTA },
     ];
 
     fn pool_at(tick: i32) -> MevCapturePool {

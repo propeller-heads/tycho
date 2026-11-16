@@ -30,7 +30,7 @@ impl SwapEncoder for ERC4626SwapEncoder {
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
         let component_id = AlloyBytes::from_str(&swap.component().id)
-            .map_err(|_| EncodingError::FatalError("Invalid component ID".to_string()))?;
+            .map_err(|e| EncodingError::FatalError(format!("Invalid component ID: {e}")))?;
 
         let args = (bytes_to_address(&swap.token_in().address)?, component_id);
         Ok(args.abi_encode_packed())
@@ -70,8 +70,8 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             origin: None,
         };
         let encoder = ERC4626SwapEncoder::new(
@@ -116,8 +116,8 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             origin: None,
         };
         let encoder = ERC4626SwapEncoder::new(

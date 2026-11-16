@@ -6,7 +6,7 @@ use tycho_common::Bytes;
 use crate::{
     book::{
         all_pairs::{ComponentLayout, QuoteRule},
-        BookFeedConfig, BookSnapshot, ReceivedAt,
+        chain_id, BookFeedConfig, BookSnapshot, ReceivedAt,
     },
     rfq::{
         constants::DEFAULT_QUOTE_TIMEOUT,
@@ -126,7 +126,7 @@ impl LiquoriceFeedBuilder {
     /// Whether the venue prices that chain is Liquorice's own answer, and the first poll carries
     /// it.
     pub fn build(self) -> Result<LiquoriceFeed, FeedError> {
-        let chain_id = self.book_config.chain_id()?;
+        let chain_id = chain_id(self.book_config.chain)?;
         Ok(LiquoriceFeed {
             feed_config: self.feed_config,
             source: LiquoriceBookSource {

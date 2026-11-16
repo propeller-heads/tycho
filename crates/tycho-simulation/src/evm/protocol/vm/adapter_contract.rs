@@ -57,7 +57,10 @@ where
 {
     /// `caller` sets the simulation's `tx.origin`/`msg.sender`; `None` defaults to
     /// `EXTERNAL_ACCOUNT`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn price(
         &self,
         pair_id: &str,
@@ -88,11 +91,14 @@ where
             SimulationError::FatalError(format!("Failed to decode price return value: {e:?}"))
         })?;
 
-        let price = self.calculate_price(decoded)?;
+        let price = Self::calculate_price(decoded)?;
         Ok(price)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn swap(
         &self,
         pair_id: &str,
@@ -117,17 +123,16 @@ where
             None,
         )?;
 
-        let decoded: SwapReturn = SwapReturn::abi_decode(&res.return_value).map_err(|_| {
+        let decoded: SwapReturn = SwapReturn::abi_decode(&res.return_value).map_err(|e| {
             SimulationError::FatalError(format!(
-                "Adapter swap call failed: Failed to decode return value. Expected amount, gas, and price elements in the format (U256, U256, (U256, U256)). Found {:?}",
+                "Adapter swap call failed: Failed to decode return value. Expected amount, gas, and price elements in the format (U256, U256, (U256, U256)). Found {:?}: {e}",
                         &res.return_value[..],
             ))
         })?;
 
         let (received_amount, gas_used, price_elements) = decoded;
 
-        let price = self
-            .calculate_price(vec![price_elements])?
+        let price = Self::calculate_price(vec![price_elements])?
             .first()
             .cloned()
             .ok_or_else(|| {
@@ -189,7 +194,6 @@ where
         Ok(capabilities)
     }
 
-    #[allow(dead_code)]
     pub fn min_gas_usage(&self) -> Result<u64, SimulationError> {
         let args = ();
         let selector = "minGasUsage()";
@@ -203,12 +207,12 @@ where
                 "Adapter min gas usage call failed: Failed to decode return value: {e:?}"
             ))
         })?;
-        decoded
-            .try_into()
-            .map_err(|_| SimulationError::FatalError("Decoded value exceeds u64 range".to_string()))
+        decoded.try_into().map_err(|e| {
+            SimulationError::FatalError(format!("Decoded value exceeds u64 range: {e}"))
+        })
     }
 
-    fn calculate_price(&self, fractions: Vec<(U256, U256)>) -> Result<Vec<f64>, SimulationError> {
+    fn calculate_price(fractions: Vec<(U256, U256)>) -> Result<Vec<f64>, SimulationError> {
         fractions
             .into_iter()
             .map(|(numerator, denominator)| {

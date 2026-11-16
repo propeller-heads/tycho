@@ -33,14 +33,14 @@ mod typed {
 
 const PAYER_CONFIG_KEY: &str = "payer_address";
 const MAX_ENCODABLE_DEADLINE: u64 = (1 << 48) - 1;
-pub(crate) const SUBSIDY_SIGNATURE_LEN: usize = 65;
+pub const SUBSIDY_SIGNATURE_LEN: usize = 65;
 
 /// Start of the signature in the subsidizing executor's swap data.
-pub(crate) const SUBSIDY_SIGNATURE_OFFSET: usize = 20 + 32 + 32 + 32 + 6;
+pub const SUBSIDY_SIGNATURE_OFFSET: usize = 20 + 32 + 32 + 32 + 6;
 
 /// The subsidizing executor and the subsidy payer of a chain.
 #[derive(Clone, Debug)]
-pub(crate) struct SubsidyEncoder {
+pub struct SubsidyEncoder {
     executor_address: Bytes,
     payer_address: Bytes,
     chain: Chain,
@@ -55,10 +55,9 @@ impl SubsidyEncoder {
     pub(crate) fn from_config(
         executor_address: Bytes,
         chain: Chain,
-        config: Option<HashMap<String, String>>,
+        config: Option<&HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
         let payer = config
-            .as_ref()
             .and_then(|config| config.get(PAYER_CONFIG_KEY))
             .ok_or_else(|| {
                 EncodingError::FatalError(format!(
@@ -66,16 +65,19 @@ impl SubsidyEncoder {
                      is missing from its subsidy protocol config"
                 ))
             })?;
-        let invalid_payer =
-            || EncodingError::FatalError(format!("Invalid subsidy {PAYER_CONFIG_KEY}: {payer}"));
-        let payer_address = Bytes::from_str(payer).map_err(|_| invalid_payer())?;
-        bytes_to_address(&payer_address).map_err(|_| invalid_payer())?;
+        let payer_address = Bytes::from_str(payer).map_err(|e| invalid_payer(payer, e))?;
+        bytes_to_address(&payer_address).map_err(|e| invalid_payer(payer, e))?;
         Ok(Self::new(executor_address, payer_address, chain))
     }
 }
 
+/// The error for a configured payer address that is not a valid address.
+fn invalid_payer(payer: &str, error: impl std::fmt::Display) -> EncodingError {
+    EncodingError::FatalError(format!("Invalid subsidy {PAYER_CONFIG_KEY}: {payer}: {error}"))
+}
+
 /// The swap group that carries a solution's subsidy.
-pub(crate) struct SubsidizedGroup<'a> {
+pub struct SubsidizedGroup<'a> {
     pub(crate) group_index: usize,
     token_out: &'a Bytes,
     terms: &'a SubsidyTerms,
@@ -84,7 +86,7 @@ pub(crate) struct SubsidizedGroup<'a> {
 }
 
 /// Signing hash and signature position of the subsidized group, after wrapping.
-pub(crate) struct SubsidizedGroupSignature {
+pub struct SubsidizedGroupSignature {
     pub(crate) group_index: usize,
     signing_hash: B256,
     /// Distance from the start of the signature to the end of the group's protocol data.
@@ -152,7 +154,7 @@ impl SubsidizedGroup<'_> {
 }
 
 /// The solution's subsidy terms, or `None` when it has none or is cyclical.
-pub(crate) fn encoded_subsidy(solution: &Solution) -> Option<&SubsidyTerms> {
+pub fn encoded_subsidy(solution: &Solution) -> Option<&SubsidyTerms> {
     if solution.token_in() == solution.token_out() {
         return None;
     }
@@ -164,7 +166,7 @@ pub(crate) fn encoded_subsidy(solution: &Solution) -> Option<&SubsidyTerms> {
 ///
 /// Expects a solution that passed [`validate_subsidy`]. Fails with `FatalError` when the chain
 /// has no subsidizing executor.
-pub(crate) fn select_subsidized_group<'a>(
+pub fn select_subsidized_group<'a>(
     solution: &'a Solution,
     groups: &'a [SwapGroup],
     swap_encoder_registry: &'a SwapEncoderRegistry,
@@ -185,7 +187,7 @@ pub(crate) fn select_subsidized_group<'a>(
 /// Fails unless the solution's subsidy, if any, can be paid: `InvalidInput` when the solution, its
 /// subsidy terms or the swap group they name cannot carry it, `FatalError` when the chain has no
 /// subsidizing executor.
-pub(crate) fn validate_subsidy(
+pub fn validate_subsidy(
     solution: &Solution,
     groups: &[SwapGroup],
     swap_encoder_registry: &SwapEncoderRegistry,
@@ -194,8 +196,8 @@ pub(crate) fn validate_subsidy(
         return Ok(());
     };
     let group_index = find_subsidized_group(solution, terms, groups)?;
+    check_not_wrap(&groups[group_index])?;
     validate_terms(solution, terms)?;
-    check_reaches_token_out(groups, group_index, solution.token_out())?;
     swap_encoder_registry.get_subsidy_encoder()?;
     Ok(())
 }
@@ -230,15 +232,6 @@ fn validate_terms(solution: &Solution, terms: &SubsidyTerms) -> Result<(), Encod
             )));
         }
     }
-    if solution.min_amount_out() + &terms.amount > *solution.expected_amount_out() {
-        return Err(EncodingError::InvalidInput(format!(
-            "min_amount_out {} must be at most expected_amount_out {} minus the subsidy {}, so the \
-             swap still succeeds if the subsidy is not paid",
-            solution.min_amount_out(),
-            solution.expected_amount_out(),
-            terms.amount
-        )));
-    }
     if terms.deadline > MAX_ENCODABLE_DEADLINE {
         return Err(EncodingError::InvalidInput(format!(
             "Subsidy deadline {} does not fit in 48 bits",
@@ -248,42 +241,12 @@ fn validate_terms(solution: &Solution, terms: &SubsidyTerms) -> Result<(), Encod
     Ok(())
 }
 
-/// The subsidized group's output must be `token_out`, or the input of a final wrap/unwrap that
-/// takes all of it.
-fn check_reaches_token_out(
-    groups: &[SwapGroup],
-    index: usize,
-    token_out: &Bytes,
-) -> Result<(), EncodingError> {
-    let group = &groups[index];
+/// Fails with `InvalidInput` when `group` is a wrap/unwrap, which cannot carry a subsidy.
+fn check_not_wrap(group: &SwapGroup) -> Result<(), EncodingError> {
     if group.protocol_system == NATIVE_WRAPPER_PROTOCOL_SYSTEM {
         return Err(EncodingError::InvalidInput(
-            "A wrap/unwrap cannot carry a subsidy: name the pool swap before it".to_string(),
+            "A wrap/unwrap cannot carry a subsidy: name a pool swap".to_string(),
         ));
-    }
-    if group.token_out == *token_out {
-        return Ok(());
-    }
-    let consumers: Vec<&SwapGroup> = groups
-        .iter()
-        .filter(|consumer| consumer.token_in == group.token_out)
-        .collect();
-    let Some(wrap) = consumers.iter().find(|consumer| {
-        consumer.protocol_system == NATIVE_WRAPPER_PROTOCOL_SYSTEM &&
-            consumer.token_out == *token_out
-    }) else {
-        return Err(EncodingError::InvalidInput(format!(
-            "The subsidized swap group outputs {}, which reaches token_out {token_out} neither \
-             directly nor through a final wrap/unwrap",
-            group.token_out
-        )));
-    };
-    if consumers.len() > 1 || wrap.split != 0.0 {
-        return Err(EncodingError::InvalidInput(format!(
-            "The final wrap/unwrap into token_out {token_out} takes only part of the subsidized \
-             swap group's output {}",
-            group.token_out
-        )));
     }
     Ok(())
 }
@@ -452,6 +415,12 @@ mod tests {
         1,
         0
     )]
+    #[case::earlier_pool_swap(
+        vec![swap("uniswap_v2", WETH, DAI, 0.0), swap("uniswap_v2", DAI, USDC, 0.0)],
+        USDC,
+        0,
+        0
+    )]
     #[case::swap_after_a_multi_swap_group(
         vec![
             swap("uniswap_v4", USDC, WETH, 0.0),
@@ -521,31 +490,6 @@ mod tests {
         1,
         "wrap/unwrap cannot carry"
     )]
-    #[case::output_does_not_reach_token_out(
-        WETH,
-        USDC,
-        sequential_weth_dai_usdc(),
-        0,
-        "neither directly"
-    )]
-    #[case::unwrap_takes_part_of_the_token(
-        DAI,
-        ETH,
-        vec![
-            swap("uniswap_v2", DAI, WETH, 0.0),
-            swap(NATIVE_WRAPPER_PROTOCOL_SYSTEM, WETH, ETH, 0.6),
-            swap("uniswap_v4", WETH, ETH, 0.0),
-        ],
-        0,
-        "takes only part"
-    )]
-    #[case::sole_unwrap_with_a_split(
-        DAI,
-        ETH,
-        vec![swap("uniswap_v2", DAI, WETH, 0.0), swap(NATIVE_WRAPPER_PROTOCOL_SYSTEM, WETH, ETH, 0.6)],
-        0,
-        "takes only part"
-    )]
     fn test_validate_subsidy_invalid_swap(
         #[case] token_in: &str,
         #[case] token_out: &str,
@@ -567,6 +511,45 @@ mod tests {
         );
     }
 
+    /// Any pool swap group may carry the subsidy, and its amount is not checked against
+    /// expected_amount_out: the caller keeps min_amount_out below the output without it.
+    #[rstest]
+    #[case::last_pool_swap(WETH, DAI, vec![swap("uniswap_v2", WETH, DAI, 0.0)], 0)]
+    #[case::earlier_pool_swap(WETH, USDC, sequential_weth_dai_usdc(), 0)]
+    #[case::pool_swap_before_a_partial_unwrap(
+        DAI,
+        ETH,
+        vec![
+            swap("uniswap_v2", DAI, WETH, 0.0),
+            swap(NATIVE_WRAPPER_PROTOCOL_SYSTEM, WETH, ETH, 0.6),
+            swap("uniswap_v4", WETH, ETH, 0.0),
+        ],
+        0
+    )]
+    #[case::pool_swap_before_a_sole_unwrap_with_a_split(
+        DAI,
+        ETH,
+        vec![swap("uniswap_v2", DAI, WETH, 0.0), swap(NATIVE_WRAPPER_PROTOCOL_SYSTEM, WETH, ETH, 0.6)],
+        0
+    )]
+    fn test_validate_subsidy_on_any_pool_group(
+        #[case] token_in: &str,
+        #[case] token_out: &str,
+        #[case] swaps: Vec<Swap>,
+        #[case] subsidized_swap_index: usize,
+    ) {
+        let amount = BigUint::from(u128::MAX);
+        let solution = solution(
+            token_in,
+            token_out,
+            swaps,
+            SubsidyTerms { subsidized_swap_index, amount, ..terms() },
+        );
+        let groups = group_swaps(solution.swaps());
+
+        validate_subsidy(&solution, &groups, &registry()).unwrap();
+    }
+
     #[rstest]
     #[case::deadline_over_48_bits(SubsidyTerms { deadline: 1 << 48, ..terms() }, "48 bits")]
     #[case::amount_over_256_bits(
@@ -576,10 +559,6 @@ mod tests {
     #[case::min_amount_in_over_256_bits(
         SubsidyTerms { min_amount_in: BigUint::from(1u32) << 256, ..terms() },
         "Subsidy min_amount_in"
-    )]
-    #[case::min_amount_out_includes_subsidy(
-        SubsidyTerms { amount: BigUint::from(5_000_000_000_000_000_001u64), ..terms() },
-        "must be at most"
     )]
     fn test_validate_subsidy_invalid_terms(#[case] terms: SubsidyTerms, #[case] message: &str) {
         let solution = solution(WETH, DAI, vec![swap("uniswap_v2", WETH, DAI, 0.0)], terms);
@@ -636,8 +615,8 @@ mod tests {
         );
     }
 
-    fn payer_config(payer: &str) -> Option<HashMap<String, String>> {
-        Some(HashMap::from([(PAYER_CONFIG_KEY.to_string(), payer.to_string())]))
+    fn payer_config(payer: &str) -> HashMap<String, String> {
+        HashMap::from([(PAYER_CONFIG_KEY.to_string(), payer.to_string())])
     }
 
     #[test]
@@ -645,7 +624,7 @@ mod tests {
         let encoder = SubsidyEncoder::from_config(
             Bytes::from(EXECUTOR),
             Chain::Ethereum,
-            payer_config(PAYER),
+            Some(&payer_config(PAYER)),
         )
         .unwrap();
 
@@ -655,13 +634,14 @@ mod tests {
 
     #[rstest]
     #[case::missing_config(None, "missing")]
-    #[case::not_hex(payer_config("not an address"), "Invalid subsidy payer_address")]
-    #[case::not_20_bytes(payer_config("0x1234"), "Invalid subsidy payer_address")]
+    #[case::not_hex(Some(payer_config("not an address")), "Invalid subsidy payer_address")]
+    #[case::not_20_bytes(Some(payer_config("0x1234")), "Invalid subsidy payer_address")]
     fn test_from_config_invalid_payer(
         #[case] config: Option<HashMap<String, String>>,
         #[case] message: &str,
     ) {
-        let result = SubsidyEncoder::from_config(Bytes::from(EXECUTOR), Chain::Ethereum, config);
+        let result =
+            SubsidyEncoder::from_config(Bytes::from(EXECUTOR), Chain::Ethereum, config.as_ref());
 
         assert!(
             matches!(result, Err(EncodingError::FatalError(ref error)) if error.contains(message)),

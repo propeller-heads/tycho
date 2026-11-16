@@ -30,7 +30,9 @@ fn bench_threads(c: &mut Criterion) {
                             (state.clone(), t_in.clone(), t_out.clone(), amount.clone());
                         thread::spawn(move || {
                             for _ in 0..CALLS_PER_THREAD {
-                                let _ = state.get_amount_out(amount.clone(), &t_in, &t_out);
+                                state
+                                    .get_amount_out(amount.clone(), &t_in, &t_out)
+                                    .expect("fixture swap quotes");
                             }
                         })
                     })

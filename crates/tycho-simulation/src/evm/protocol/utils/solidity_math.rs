@@ -3,7 +3,7 @@ use tycho_common::simulation::errors::SimulationError;
 
 use crate::evm::protocol::safe_math::{div_mod_u256, div_mod_u512, safe_div_u256, safe_div_u512};
 
-pub(crate) fn mul_div_rounding_up(a: U256, b: U256, denom: U256) -> Result<U256, SimulationError> {
+pub fn mul_div_rounding_up(a: U256, b: U256, denom: U256) -> Result<U256, SimulationError> {
     let product: U512 = a.widening_mul(b);
     if let Some(product) = to_u256_if_fits(&product) {
         let (result, rest) = div_mod_u256(product, denom)?;
@@ -19,7 +19,7 @@ pub(crate) fn mul_div_rounding_up(a: U256, b: U256, denom: U256) -> Result<U256,
     truncate_to_u256(result)
 }
 
-pub(crate) fn mul_div(a: U256, b: U256, denom: U256) -> Result<U256, SimulationError> {
+pub fn mul_div(a: U256, b: U256, denom: U256) -> Result<U256, SimulationError> {
     let product: U512 = a.widening_mul(b);
     if let Some(product) = to_u256_if_fits(&product) {
         return safe_div_u256(product, denom);
@@ -30,7 +30,7 @@ pub(crate) fn mul_div(a: U256, b: U256, denom: U256) -> Result<U256, SimulationE
 
 /// `ceil(a * b / 2^96)`: [`mul_div_rounding_up`] with `Q96` as the denominator, where a shift
 /// does the division.
-pub(crate) fn mul_div_q96_rounding_up(a: U256, b: U256) -> Result<U256, SimulationError> {
+pub fn mul_div_q96_rounding_up(a: U256, b: U256) -> Result<U256, SimulationError> {
     let product: U512 = a.widening_mul(b);
     let limbs = product.as_limbs();
     let has_remainder = limbs[0] != 0 || limbs[1] & u64::from(u32::MAX) != 0;

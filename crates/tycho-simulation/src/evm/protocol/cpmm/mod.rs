@@ -1,2 +1,2 @@
-pub(crate) mod protocol;
+pub mod protocol;
 mod reserve_price;

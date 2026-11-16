@@ -2,7 +2,6 @@
 pragma solidity ^0.8.26;
 
 import {SignedOrder} from "./IStructs.sol";
-import {IReactorCallback} from "./IReactorCallback.sol";
 
 /// @notice Interface for order execution reactors
 interface IReactor {

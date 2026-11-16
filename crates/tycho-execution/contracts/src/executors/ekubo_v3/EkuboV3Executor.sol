@@ -43,14 +43,24 @@ address payable constant CORE_ADDRESS =
 ICore constant CORE = ICore(CORE_ADDRESS);
 address constant MEV_CAPTURE_ADDRESS =
     0x5555fF9Ff2757500BF4EE020DcfD0210CFfa41Be;
+// MEVCapture v2.1, deployed with the deterministic CREATE2 deployer, so any
+// chain that gets it (only Ethereum so far) gets it at this address. Like
+// MEVCapture, it only accepts swaps forwarded through Core with
+// `abi.encode(poolKey, params)` and returns `abi.encode(balanceUpdate,
+// stateAfter)`. Core only initializes pools on an extension that registered
+// itself, which the extension's constructor does, so no pool matches this
+// address on a chain without the deployment.
+address constant MEV_CAPTURE_V21_ADDRESS =
+    0x51f831c23fa4051862881Ef8EfC0c3C37905Ce49;
 
-/// Chain-agnostic Ekubo V3 executor. The MEVCapture extension, deployed at the
-/// same deterministic address on every chain, is handled here.
+/// Chain-agnostic Ekubo V3 executor. MEVCapture and MEVCapture v2.1, each at
+/// one deterministic address on every chain it is deployed to, are handled
+/// here.
 /// SignedExclusiveSwap is deployed per chain, so its address is a constructor
-/// argument. Deployment-specific extensions (Ve33) live in per-chain
-/// executors, which override `_swapHop` — and `_hopEnd` when their hops carry
-/// a self-describing tail — so a deployed executor only contains extra code
-/// reachable on its chain.
+/// argument. Extensions whose address differs per deployment (Ve33) live in
+/// per-chain executors, which override `_swapHop` — and `_hopEnd` when their
+/// hops carry a self-describing tail — so a deployed executor only contains
+/// extra code reachable on its chain.
 contract EkuboV3Executor is IExecutor, ICallback {
     error EkuboV3Executor__InvalidDataLength();
     error EkuboV3Executor__CoreOnly();
@@ -63,6 +73,8 @@ contract EkuboV3Executor is IExecutor, ICallback {
     /// hop through the signed path.
     address public immutable signedExclusiveSwap;
 
+    uint256 private constant _ADDRESS_LEN = 20;
+    uint256 private constant _WORD_LEN = 32;
     uint256 private constant _POOL_DATA_OFFSET = 56;
     uint256 internal constant _HOP_BYTE_LEN = 52;
 
@@ -105,18 +117,21 @@ contract EkuboV3Executor is IExecutor, ICallback {
         // output). Here `data` is tokenIn(20) followed by the hops, so the
         // first hop starts at offset 20. Hops with a self-describing tail
         // advance past it via `_hopEnd`; fixed-size hops advance by 52.
-        uint256 offset = 20;
+        uint256 offset = _ADDRESS_LEN;
         uint256 lastHopOffset = offset;
         while (offset < data.length) {
             if (offset + _HOP_BYTE_LEN > data.length) {
+                // forge-lint: disable-next-line(require-revert-in-loop) Malformed swap data fails the swap.
                 revert EkuboV3Executor__InvalidDataLength();
             }
             lastHopOffset = offset;
-            PoolConfig poolConfig =
-                PoolConfig.wrap(bytes32(data[offset + 20:offset + 52]));
+            PoolConfig poolConfig = PoolConfig.wrap(
+                bytes32(data[offset + _ADDRESS_LEN:offset + _HOP_BYTE_LEN])
+            );
             offset = _hopEnd(data, offset + _HOP_BYTE_LEN, poolConfig);
         }
-        tokenOut = address(bytes20(data[lastHopOffset:lastHopOffset + 20]));
+        tokenOut =
+            address(bytes20(data[lastHopOffset:lastHopOffset + _ADDRESS_LEN]));
         // Ekubo uses flash accounting: no pre-swap transfer needed.
         // Tokens are paid during the callback in the Dispatcher
         return (
@@ -150,7 +165,7 @@ contract EkuboV3Executor is IExecutor, ICallback {
         // address(0) for Ekubo V3 protocol interaction.
         if (tokenIn == ETH_ADDRESS) tokenIn = address(0);
         // startPayments needs to be called in CORE before we transfer the token IN (which happens during callback)
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return startPayments returns token balances the executor does not need.
         LibCall.callContract(
             CORE_ADDRESS,
             abi.encodeWithSelector(
@@ -159,12 +174,12 @@ contract EkuboV3Executor is IExecutor, ICallback {
         );
 
         // amountIn must be at most type(int128).max
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher derives the output from balance diffs, not from return values.
         LibCall.callContract(
             CORE_ADDRESS,
             abi.encodePacked(
                 IFlashAccountant.lock.selector,
-                bytes16(uint128(SafeCastLib.toInt128(amountIn))),
+                SafeCastLib.toInt128(amountIn),
                 bytes20(receiver),
                 data
             )
@@ -231,7 +246,6 @@ contract EkuboV3Executor is IExecutor, ICallback {
             nextOffset = _hopEnd(swapData, offset, poolKey.config);
             uint256 sigStart = offset + _SIGNED_FIXED_TAIL_LEN + _SIG_LEN_BYTES;
 
-            // slither-disable-next-line calls-loop
             (balanceUpdate,) = abi.decode(
                 CORE.forward(
                     signedExclusiveSwap,
@@ -239,10 +253,15 @@ contract EkuboV3Executor is IExecutor, ICallback {
                         poolKey,
                         swapParameters,
                         // SignedSwapMeta (uint256)
-                        uint256(bytes32(swapData[offset:offset + 32])),
+                        uint256(bytes32(swapData[offset:offset + _WORD_LEN])),
                         // minBalanceUpdate
                         PoolBalanceUpdate.wrap(
-                            bytes32(swapData[offset + 32:offset + 64])
+                            bytes32(
+                                swapData[offset
+                                        + _WORD_LEN:offset
+                                            + _SIGNED_FIXED_TAIL_LEN
+                                ]
+                            )
                         ),
                         // signature
                         bytes(swapData[sigStart:nextOffset])
@@ -250,18 +269,17 @@ contract EkuboV3Executor is IExecutor, ICallback {
                 ),
                 (PoolBalanceUpdate, PoolState)
             );
-        } else if (extension == MEV_CAPTURE_ADDRESS) {
+        } else if (
+            extension == MEV_CAPTURE_ADDRESS
+                || extension == MEV_CAPTURE_V21_ADDRESS
+        ) {
             (balanceUpdate,) = abi.decode(
-                // slither-disable-next-line calls-loop
-                CORE.forward(
-                    MEV_CAPTURE_ADDRESS, abi.encode(poolKey, swapParameters)
-                ),
+                CORE.forward(extension, abi.encode(poolKey, swapParameters)),
                 (PoolBalanceUpdate, PoolState)
             );
             nextOffset = offset;
         } else {
             PoolState _stateAfter;
-            // slither-disable-next-line calls-loop
             (balanceUpdate, _stateAfter) = CORE.swap(0, poolKey, swapParameters);
             nextOffset = offset;
         }
@@ -284,12 +302,14 @@ contract EkuboV3Executor is IExecutor, ICallback {
 
         uint256 sigLenOff = offset + _SIGNED_FIXED_TAIL_LEN;
         if (sigLenOff + _SIG_LEN_BYTES > data.length) {
+            // forge-lint: disable-next-line(require-revert-in-loop) Malformed swap data fails the swap.
             revert EkuboV3Executor__InvalidDataLength();
         }
         uint256 sigLen =
             uint256(uint16(bytes2(data[sigLenOff:sigLenOff + _SIG_LEN_BYTES])));
         uint256 sigEnd = sigLenOff + _SIG_LEN_BYTES + sigLen;
         if (sigEnd > data.length) {
+            // forge-lint: disable-next-line(require-revert-in-loop) Malformed swap data fails the swap.
             revert EkuboV3Executor__InvalidDataLength();
         }
         return sigEnd;
@@ -297,6 +317,7 @@ contract EkuboV3Executor is IExecutor, ICallback {
 
     function _locked(bytes calldata swapData) private {
         uint128 amountIn = uint128(bytes16(swapData[0:16]));
+        // forge-lint: disable-next-line(unsafe-typecast) swap packs amountIn with toInt128, so it fits int128.
         int128 nextAmountIn = int128(amountIn);
         address receiver = address(bytes20(swapData[16:36]));
         address tokenIn = address(bytes20(swapData[36:56]));
@@ -314,14 +335,17 @@ contract EkuboV3Executor is IExecutor, ICallback {
 
         while (offset < swapData.length) {
             if (offset + _HOP_BYTE_LEN > swapData.length) {
+                // forge-lint: disable-next-line(require-revert-in-loop) Malformed swap data fails the swap.
                 revert EkuboV3Executor__InvalidDataLength();
             }
 
+            // forge-lint: disable-next-item(unsafe-typecast) Reads the address at the front of the loaded word.
             nextTokenOut =
                 address(bytes20(LibBytes.loadCalldata(swapData, offset)));
             if (nextTokenOut == ETH_ADDRESS) nextTokenOut = address(0);
-            PoolConfig poolConfig =
-                PoolConfig.wrap(LibBytes.loadCalldata(swapData, offset + 20));
+            PoolConfig poolConfig = PoolConfig.wrap(
+                LibBytes.loadCalldata(swapData, offset + _ADDRESS_LEN)
+            );
 
             (
                 address token0,
@@ -352,11 +376,13 @@ contract EkuboV3Executor is IExecutor, ICallback {
         }
 
         _pay(tokenIn, amountIn);
+        // forge-lint: disable-next-line(unsafe-typecast) The core's exact-input swap returns a non-positive output delta, so nextAmountIn is non-negative.
         CORE.withdraw(nextTokenIn, receiver, uint128(nextAmountIn));
     }
 
     function _pay(address token, uint128 amount) private {
         if (token == NATIVE_TOKEN_ADDRESS) {
+            // forge-lint: disable-next-line(arbitrary-send-eth) CORE_ADDRESS is a file-level constant.
             SafeTransferLib.safeTransferETH(CORE_ADDRESS, amount);
             return;
         }

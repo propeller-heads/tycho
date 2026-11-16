@@ -142,6 +142,20 @@ contract TychoSubsidizingEncoderTest is TychoRouterTestSetup {
         assertEq(signedOut, unsignedOut + USDC_SUBSIDY);
     }
 
+    function testSubsidizedSequentialSwapOnItsFirstHop() public {
+        (uint256 unsignedOut, uint256 signedOut) = _run(
+            "test_subsidized_sequential_swap_on_its_first_hop",
+            DAI_ADDR,
+            3000 ether,
+            _aliceUsdc
+        );
+
+        // The same route as testSubsidizedSequentialSwapEndingInUniswapV3. The WETH subsidy is
+        // paid after the first hop and the second hop converts it to USDC.
+        assertEq(unsignedOut, 2983381989);
+        assertGt(signedOut, unsignedOut);
+    }
+
     function testSubsidizedSplitSwapLargerShare() public {
         (uint256 unsignedOut, uint256 signedOut) = _run(
             "test_subsidized_split_swap_larger_share",

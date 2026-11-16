@@ -17,6 +17,7 @@ error MetricFallbackRouter__InvalidDataLength(uint256 length);
 /// Metric's v1 `MetricOmmSwapQuoter` reverts inside a transaction: its oracle returns a price
 /// only to a pool in a swap, or to an `eth_call` from `address(0)`.
 contract MetricFallbackRouter is TychoFallbackRouter {
+    // forge-lint: disable-next-line(unsafe-typecast) type(int128).max fits uint128.
     uint256 private constant _INT128_MAX = uint256(uint128(type(int128).max));
 
     constructor(
@@ -86,13 +87,12 @@ contract MetricFallbackRouter is TychoFallbackRouter {
         bool zeroForOne = uint8(metricData[0]) > 0;
 
         _setCallbackContext(pool, swap_.tokenIn, swap_.amountIn);
-        // slither-disable-next-line unused-return
+        // slither-disable-next-line unused-return The Dispatcher measures the output at the receiver.
         IMetricPool(pool)
             .swap(
                 swap_.receiver,
                 zeroForOne,
-                // `_quotePrimary` quotes zero above int128's maximum, so no swap runs.
-                // forge-lint: disable-next-line(unsafe-typecast)
+                // forge-lint: disable-next-line(unsafe-typecast) _quotePrimary quotes zero above int128's maximum, so no swap runs.
                 int128(uint128(swap_.amountIn)),
                 _priceLimit(zeroForOne),
                 "",

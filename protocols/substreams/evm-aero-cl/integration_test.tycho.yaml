@@ -1,0 +1,26 @@
+substreams_yaml_path: ./base-aero-cl.yaml
+protocol_system: "aero_cl"
+protocol_type_names:
+  - "aero_cl_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # Starts at the factory deployment: its constructor enables the tick spacings and sets the
+  # default swap hook, and the hook's constructor writes its settings, which pool creation reads.
+  - name: test_first_pools
+    start_block: 52881649
+    stop_block: 52902300
+    expected_components:
+      - id: "0xbb5507daae822ba89c4da61bbfdf4b49a1666bac"
+        tokens:
+          - "0x4200000000000000000000000000000000000006" # WETH
+          - "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf" # cbBTC
+        static_attributes:
+          default_fee: "0x01f4"
+          tick_spacing: "0x0a"
+          pool_address: "0xbb5507daae822ba89c4da61bbfdf4b49a1666bac"
+        creation_tx: "0x1d42a90ce24b8d9c671724f415a6767cfb179fca1175229b8f700f6b0e999c37"
+        # The aero_cl simulation and execution land in follow-up PRs.
+        skip_simulation: true
+        skip_execution: true

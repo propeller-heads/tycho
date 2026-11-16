@@ -1,6 +1,4 @@
 //! This module contains Tycho web services implementation
-// TODO: remove once deprecated ProtocolId struct is removed
-#![allow(deprecated)]
 use std::{
     collections::HashMap,
     sync::{mpsc, Arc},

@@ -162,6 +162,7 @@ fn chain_heading(chain_name: &str) -> &str {
         "plasma" => "Plasma",
         "robinhood" => "Robinhood",
         "arc" => "Arc",
+        "elysium" => "Elysium",
         _ => panic!("missing documentation heading for {chain_name}"),
     }
 }

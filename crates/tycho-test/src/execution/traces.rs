@@ -52,7 +52,7 @@ pub async fn decode_method_selector_with_info(input: &str) -> Option<(String, Ve
                     .filter_map(|p| p.ty.as_str().parse().ok())
                     .collect();
 
-                return Some((signature.name.clone(), param_types));
+                return Some((signature.name, param_types));
             }
         }
     }

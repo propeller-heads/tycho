@@ -1,7 +1,7 @@
 use alloy::primitives::U256;
 use tycho_common::simulation::errors::SimulationError;
 
-use crate::evm::protocol::u256_num::u256_to_f64;
+use crate::{evm::protocol::u256_num::u256_to_f64, utils::decimals_exponent};
 
 /// Computes a spot price given two token reserves
 ///
@@ -15,7 +15,7 @@ pub(super) fn spot_price_from_reserves(
     token_0_decimals: u32,
     token_1_decimals: u32,
 ) -> Result<f64, SimulationError> {
-    let token_correction = 10f64.powi(token_0_decimals as i32 - token_1_decimals as i32);
+    let token_correction = 10f64.powi(decimals_exponent(token_0_decimals, token_1_decimals)?);
     Ok((u256_to_f64(r1)? / u256_to_f64(r0)?) * token_correction)
 }
 

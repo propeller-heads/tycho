@@ -36,7 +36,7 @@ impl FeedError {
     /// The same failure with `context` in front of its message: a caller can say what it was
     /// doing when the failure reached it without reclassifying what went wrong, which stays
     /// the judgement of whoever found out.
-    pub(crate) fn in_context(self, context: impl std::fmt::Display) -> Self {
+    pub fn in_context(self, context: impl std::fmt::Display) -> Self {
         match self {
             FeedError::Connection(message) => {
                 FeedError::Connection(format!("{context}: {message}"))

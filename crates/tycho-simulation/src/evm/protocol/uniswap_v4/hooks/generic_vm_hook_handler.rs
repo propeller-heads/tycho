@@ -460,7 +460,7 @@ mod tests {
         let db = SimulationDB::new(
             get_client(None).expect("Failed to create client"),
             get_runtime().expect("Failed to get runtime"),
-            Some(block.clone()),
+            Some(block),
         );
         let engine = create_engine(db, true).expect("Failed to create simulation engine");
 
@@ -553,7 +553,7 @@ mod tests {
         let db = SimulationDB::new(
             get_client(None).expect("Failed to create client"),
             get_runtime().expect("Failed to get runtime"),
-            Some(block.clone()),
+            Some(block),
         );
         let engine = create_engine(db, true).expect("Failed to create simulation engine");
 
@@ -649,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Rate limits on Unichain RPC free tier
+    #[ignore = "requires network access to the public Unichain RPC, which is rate limited"]
     fn test_before_and_after_swap() {
         let block = BlockHeader {
             number: 15797251,
@@ -663,7 +663,7 @@ mod tests {
         let db = SimulationDB::new(
             get_client(Some("https://unichain.drpc.org".into())).expect("Failed to create client"),
             get_runtime().expect("Failed to get runtime"),
-            Some(block.clone()),
+            Some(block),
         );
         let engine = create_engine(db, true).expect("Failed to create simulation engine");
 
@@ -758,7 +758,7 @@ mod tests {
         let db = SimulationDB::new(
             get_client(None).expect("Failed to create client"),
             get_runtime().expect("Failed to get runtime"),
-            Some(block.clone()),
+            Some(block),
         );
         let engine = create_engine(db, true).expect("Failed to create simulation engine");
 
@@ -819,7 +819,7 @@ mod tests {
         let db = SimulationDB::new(
             get_client(None).expect("Failed to create client"),
             get_runtime().expect("Failed to get runtime"),
-            Some(block.clone()),
+            Some(block),
         );
         let engine = create_engine(db, true).expect("Failed to create simulation engine");
 

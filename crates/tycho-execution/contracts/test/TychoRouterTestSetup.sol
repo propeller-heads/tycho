@@ -39,10 +39,12 @@ import {
 } from "../src/executors/PancakeswapInfinityExecutor.sol";
 import {LiquoriceExecutor} from "../src/executors/LiquoriceExecutor.sol";
 import {AerodromeV1Executor} from "../src/executors/AerodromeV1Executor.sol";
+import {AeroBasicExecutor} from "../src/executors/AeroBasicExecutor.sol";
 import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
 import {RingSwapV2Executor} from "../src/executors/RingSwapV2Executor.sol";
 import {NativeExecutor} from "../src/executors/NativeExecutor.sol";
 import {SkyExecutor} from "../src/executors/SkyExecutor.sol";
+import {TransferManager} from "../src/TransferManager.sol";
 // Test utilities and mocks
 import "./Constants.sol";
 import "./TestUtils.sol";
@@ -73,15 +75,6 @@ contract TychoRouterExposed is TychoRouterV3 {
         )
     {}
 
-    function tstoreExposed(
-        address tokenIn,
-        uint256 amountIn,
-        bool isPermit2,
-        bool useVault
-    ) external {
-        _tstoreTransferFromInfo(tokenIn, amountIn, isPermit2, useVault);
-    }
-
     function exposedSplitSwap(
         uint256 amountIn,
         uint256 nTokens,
@@ -97,6 +90,31 @@ contract TychoRouterExposed is TychoRouterV3 {
         bytes calldata swaps,
         address receiver
     ) external returns (uint256) {
+        return _sequentialSwap(amountIn, swaps, receiver);
+    }
+
+    /// Authorises the swap to `transferFrom` `amountIn` of `tokenIn` from the
+    /// caller, then runs the split swap.
+    function exposedSplitSwapWithTransferFrom(
+        address tokenIn,
+        uint256 amountIn,
+        uint256 nTokens,
+        bytes calldata swaps,
+        address receiver,
+        bool isCyclical
+    ) external returns (uint256) {
+        _tstoreTransferFromInfo(tokenIn, amountIn, false, false);
+        return _splitSwap(amountIn, nTokens, swaps, receiver, isCyclical);
+    }
+
+    /// Sequential-swap counterpart of `exposedSplitSwapWithTransferFrom`.
+    function exposedSequentialSwapWithTransferFrom(
+        address tokenIn,
+        uint256 amountIn,
+        bytes calldata swaps,
+        address receiver
+    ) external returns (uint256) {
+        _tstoreTransferFromInfo(tokenIn, amountIn, false, false);
         return _sequentialSwap(amountIn, swaps, receiver);
     }
 
@@ -140,6 +158,7 @@ contract TychoRouterTestSetup is
     LiquidityPartyExecutor public liquidityPartyExecutor;
     LiquoriceExecutor public liquoriceExecutor;
     AerodromeV1Executor public aerodromeV1Executor;
+    AeroBasicExecutor public aeroBasicExecutor;
     FermiSwapExecutor public fermiSwapExecutor;
     MetricExecutor public metricExecutor;
     BopAMMExecutor public bopAMMExecutor;
@@ -169,7 +188,7 @@ contract TychoRouterTestSetup is
         uint256 forkBlock = getForkBlock();
         vm.createSelectFork(vm.rpcUrl(chain), forkBlock);
 
-        forkTimestamp = block.timestamp;
+        forkTimestamp = vm.getBlockTimestamp();
         uint256 setupTime = forkTimestamp - _SETUP_TIME_OFFSET_NEW_EXECUTOR;
         vm.warp(setupTime);
 
@@ -188,7 +207,10 @@ contract TychoRouterTestSetup is
         vm.prank(FEE_SETTER);
         tychoRouter.setFeeCalculator(address(feeCalculator));
         // Warp past the timelock and activate
-        vm.warp(block.timestamp + tychoRouter.DELAY_FEE_CALCULATOR_ACTIVATION());
+        vm.warp(
+            vm.getBlockTimestamp()
+                + tychoRouter.DELAY_FEE_CALCULATOR_ACTIVATION()
+        );
         vm.prank(FEE_SETTER);
         tychoRouter.activateFeeCalculator();
         vm.warp(forkTimestamp);
@@ -318,9 +340,10 @@ contract TychoRouterTestSetup is
             0xa0FfB9c1CE1Fe56963B0321B32E7A0302114058b,
             0xC697d2898e0D09264376196696c51D7aBbbAA4a9
         );
+        aeroBasicExecutor = new AeroBasicExecutor();
 
         address[] memory executors = new address[](
-            29 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
+            30 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
         );
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
@@ -351,7 +374,8 @@ contract TychoRouterTestSetup is
         executors[26] = address(propAMMFallbackExecutor);
         executors[27] = address(lidoV4Executor);
         executors[28] = address(pancakeswapInfinityExecutor);
-        uint256 nextExecutorIndex = 29;
+        executors[29] = address(aeroBasicExecutor);
+        uint256 nextExecutorIndex = 30;
         if (skyDeployable) {
             executors[nextExecutorIndex] = address(skyExecutor);
             nextExecutorIndex++;
@@ -378,12 +402,12 @@ contract TychoRouterTestSetup is
         // clientFeeReceiver is the address corresponding to CLIENT_FEE_RECEIVER_PK
         clientFeeReceiver = vm.addr(CLIENT_FEE_RECEIVER_PK);
         feeCalculator = new FeeCalculator(FEE_SETTER, routerFeeReceiver);
-        // The calculator enables positive slippage capture in its constructor.
+        // The calculator captures the full surplus from its constructor.
         // The swap tests quote a round `expectedAmountOut` below the real pool
-        // output and assert the receiver gets that whole output, so capture is
-        // switched off here and exercised by the tests that opt back in.
+        // output and assert the receiver gets that whole output, so the capture
+        // bps is set to zero here and the capture tests set it back.
         vm.prank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageEnabled(false);
+        feeCalculator.setRouterPositiveSlippageBps(0);
     }
 
     function pleEncode(bytes[] memory data)

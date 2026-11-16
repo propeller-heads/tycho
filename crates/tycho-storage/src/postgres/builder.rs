@@ -151,7 +151,7 @@ impl GatewayBuilder {
         spawn_refresh_tasks(&inner_gw, &pool);
         let (tx, _) = mpsc::channel(10);
 
-        let cached_gw = CachedGateway::new(tx, pool.clone(), inner_gw.clone());
+        let cached_gw = CachedGateway::new(tx, pool.clone(), inner_gw);
         Ok(cached_gw)
     }
 
@@ -179,7 +179,7 @@ impl GatewayBuilder {
         spawn_refresh_tasks(&inner_gw, &pool);
         spawn_status_gauges(pool.clone(), DIRECT_POOL, POOL_STATUS_PERIOD);
 
-        let direct_gw = DirectGateway::new(pool.clone(), inner_gw.clone(), chain);
+        let direct_gw = DirectGateway::new(pool.clone(), inner_gw, chain);
         Ok(direct_gw)
     }
 }
@@ -230,6 +230,10 @@ mod test_serial_db {
                         .expect("pool should connect")
                 }
             };
+            #[expect(
+                clippy::collection_is_never_read,
+                reason = "the vector keeps the connections checked out until the end of the test"
+            )]
             let mut held = Vec::new();
             for _ in 0..rpc_pool.status().max_size {
                 held.push(connect(rpc_pool).await);

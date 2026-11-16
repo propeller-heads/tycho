@@ -28,7 +28,7 @@ impl Cli {
         self.global_args.clone()
     }
 
-    pub fn command(&self) -> Command {
+    pub fn subcommand(&self) -> Command {
         self.command.clone()
     }
 }
@@ -150,7 +150,7 @@ fn parse_disabled_rpc_caches(value: &str) -> Result<DisabledRpcCaches, String> {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(|name| {
-            RpcCacheKind::from_str(name, false).map_err(|_| {
+            RpcCacheKind::from_str(name, false).map_err(|err| {
                 let valid: Vec<String> = RpcCacheKind::value_variants()
                     .iter()
                     .filter_map(|kind| {
@@ -161,7 +161,7 @@ fn parse_disabled_rpc_caches(value: &str) -> Result<DisabledRpcCaches, String> {
                         )
                     })
                     .collect();
-                format!("unknown RPC cache '{name}', expected one of: {}", valid.join(", "))
+                format!("unknown RPC cache '{name}' ({err}), expected one of: {}", valid.join(", "))
             })
         })
         .collect::<Result<Vec<_>, _>>()
@@ -216,7 +216,9 @@ impl RPCArgs {
             RPCRetryConfig::new(self.max_retries, self.initial_backoff_ms, self.max_backoff_ms);
 
         if self.storage_slot_max_batch_size == Some(0) {
-            panic!("--rpc-storage-slot-max-batch-size must be greater than 0");
+            return Err(ExtractionError::Setup(
+                "--rpc-storage-slot-max-batch-size must be greater than 0".to_string(),
+            ));
         }
 
         let batching_config = match self.max_batch_size {
@@ -280,6 +282,10 @@ pub struct IndexArgs {
 }
 
 #[derive(Args, Debug, Clone, PartialEq)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the raw `stop_block` may carry a `+` increment prefix, so it is read through the parsing `stop_block()` accessor"
+)]
 pub struct RunSpkgArgs {
     /// The blockchain to index on
     #[clap(long, default_value = "ethereum")]
@@ -342,20 +348,19 @@ pub struct RunSpkgArgs {
 }
 
 impl RunSpkgArgs {
-    pub fn stop_block(&self) -> Option<i64> {
-        if let Some(s) = &self.stop_block {
-            if s.starts_with('+') {
-                let increment: i64 = s
-                    .strip_prefix('+')
-                    .expect("stripped stop block value")
-                    .parse()
-                    .expect("stop block value");
-                Some(self.start_block + increment)
-            } else {
-                Some(s.parse().expect("stop block value"))
+    pub fn stop_block(&self) -> Result<Option<i64>, ExtractionError> {
+        let Some(stop_block) = &self.stop_block else {
+            return Ok(None);
+        };
+        let invalid = |e: std::num::ParseIntError| {
+            ExtractionError::Setup(format!("Invalid stop block '{stop_block}': {e}"))
+        };
+        match stop_block.strip_prefix('+') {
+            Some(increment) => {
+                let increment: i64 = increment.parse().map_err(invalid)?;
+                Ok(Some(self.start_block + increment))
             }
-        } else {
-            None
+            None => Ok(Some(stop_block.parse().map_err(invalid)?)),
         }
     }
 }

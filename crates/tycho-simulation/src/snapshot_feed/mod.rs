@@ -658,7 +658,7 @@ mod tests {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
                 self.0
                     .lock()
-                    .unwrap()
+                    .map_err(|e| std::io::Error::other(e.to_string()))?
                     .extend_from_slice(buf);
                 Ok(buf.len())
             }

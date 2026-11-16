@@ -121,7 +121,7 @@ pub trait StoredVersionedRow {
 }
 
 #[derive(Debug)]
-pub(crate) enum VersioningEntry<T: PartitionedVersionedRow> {
+pub enum VersioningEntry<T: PartitionedVersionedRow> {
     Update(T),
     Deletion((T::EntityId, NaiveDateTime)),
 }
@@ -404,11 +404,9 @@ fn set_partitioned_versioning_attributes<N: PartitionedVersionedRow>(
                 }
 
                 // Handle deleted rows
-                let mut delete_row = latest
-                    .remove(id)
-                    .ok_or(StorageError::Unexpected(format!(
-                        "Missing deleted row with id {id:?}"
-                    )))?;
+                let mut delete_row = latest.remove(id).ok_or_else(|| {
+                    StorageError::Unexpected(format!("Missing deleted row with id {id:?}"))
+                })?;
 
                 delete_row.delete(*delete_version);
                 archived.push(delete_row);

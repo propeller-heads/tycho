@@ -1,0 +1,24 @@
+substreams_yaml_path: ./elysium-elyspump-v3.yaml
+protocol_system: "elyspump_v3"
+protocol_type_names:
+  - "elyspump_v3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # WHYPE / AK, the first pool ElysPump V3 created on Elysium.
+  - name: test_whype_ak_pool
+    # PoolCreated, Initialize, the first Mint and the first Swap all land in block 36.
+    start_block: 36
+    # First Burn: block 1573.
+    stop_block: 1573
+    expected_components:
+      - id: "0xcad1ffa19cecece2726d01e6897c07cb5b6fd6f2"
+        tokens:
+          - "0xbA876237B0F021A6c6D852d6c26E107997cC5E81" # WHYPE
+          - "0xcceEEDb7F7F6FB96451789900Bc73937f43d9B6f" # AK
+        static_attributes:
+          fee: "0x2710"
+          tick_spacing: "0x00c8"
+        creation_tx: "0xe8b199d3e3f0bc2099e4fcaa4cb898030538878d535c95fbf42c9e867157af62"
+        skip_simulation: false

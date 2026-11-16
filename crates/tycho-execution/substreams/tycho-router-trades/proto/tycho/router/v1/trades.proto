@@ -119,13 +119,20 @@ message RouterFeeConfig {
   uint64 fee_on_client_fee_bps = 3;
   bool custom_fee_on_output = 4;
   bool custom_fee_on_client_fee = 5;
+  // False only when an older calculator turned capture off with PositiveSlippageToggled. A
+  // calculator with a router positive slippage bps has no switch and reports true.
   bool positive_slippage_enabled = 6;
   // Denominator of the bps values: 10000 for v3_0, 100000000 for v3_1.
   uint64 bps_scale = 7;
-  // Whether this trade's client is exempt from positive slippage capture. The client is the
-  // signed clientFeeReceiver, or tx.origin when that is zero, the same resolution the
-  // FeeCalculator does. Only the calculator generation that has exemptions can set it.
-  bool positive_slippage_exempt = 8;
+  reserved 8;
+  reserved "positive_slippage_exempt";
+  // Part of the surplus the router captures for this trade's client, in fee units (100000000 =
+  // the full surplus): the client's custom value if set, otherwise the calculator's global one.
+  // The client is the signed clientFeeReceiver, or tx.origin when that is zero, the same
+  // resolution the FeeCalculator does. An exemption on an older calculator reads as zero.
+  uint64 router_positive_slippage_bps = 9;
+  // The client's share of the captured surplus, in fee units. The router keeps the rest.
+  uint64 client_positive_slippage_share_bps = 10;
 }
 
 // One recipient of the FeesTaken event.
@@ -197,4 +204,44 @@ message VaultTransfer {
   string amount = 11;
   // "credit" (minted), "debit" (burned) or "transfer" (between two owners).
   string kind = 12;
+}
+
+// Every SubsidyPaid and SubsidySkipped the SubsidyPayer emitted in one block.
+message SubsidyEvents {
+  repeated SubsidyEvent events = 1;
+}
+
+// One signed subsidy a payer settled, inside a router swap: paid, or skipped with the contract's
+// reason.
+message SubsidyEvent {
+  string chain = 1;
+  uint64 block_number = 2;
+  uint64 block_timestamp = 3;
+  bytes tx_hash = 4;
+  uint32 log_index = 5;
+  // The contract that emitted the event.
+  bytes payer = 6;
+  // The nonce of the signed terms, 32 bytes.
+  bytes nonce = 7;
+  // The index of the router swap call the payer ran in: the call_index of the trade this
+  // subsidy belongs to.
+  uint32 trade_call_index = 8;
+  oneof outcome {
+    SubsidyPayment paid = 9;
+    SubsidySkip skipped = 10;
+  }
+}
+
+// A SubsidyPaid: `amount` of `token` to `receiver`, the router, which pays the user with the
+// swap's output. `bound_to` is the address the terms were signed for.
+message SubsidyPayment {
+  bytes bound_to = 1;
+  bytes receiver = 2;
+  bytes token = 3;
+  string amount = 4;
+}
+
+// A SubsidySkipped: the payer's SkipReason, in snake case, or its number when unknown.
+message SubsidySkip {
+  string reason = 1;
 }

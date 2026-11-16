@@ -37,7 +37,7 @@ where
     <D as EngineDatabaseInterface>::Error: Debug,
     <D as DatabaseRef>::Error: Debug,
 {
-    let engine = SimulationEngine::new(db.clone(), trace);
+    let engine = SimulationEngine::new(db, trace);
 
     let zero_account_info =
         AccountInfo { balance: Default::default(), nonce: 0, code_hash: KECCAK_EMPTY, code: None };
@@ -52,7 +52,7 @@ where
 
     engine
         .state
-        .init_account(Address::from(U160::from(4)), zero_account_info.clone(), None, false)
+        .init_account(Address::from(U160::from(4)), zero_account_info, None, false)
         .map_err(|e| {
             SimulationError::FatalError(format!(
                 "Failed to init ecrecover precompile address: {:?}",
@@ -63,6 +63,10 @@ where
     Ok(engine)
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "public API; taking &PreCachedDB and &HashMap is a breaking change"
+)]
 pub fn update_engine(
     db: PreCachedDB,
     block: Option<BlockHeader>,

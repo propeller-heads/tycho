@@ -1,5 +1,6 @@
 {
   "ethereum": {
+    "aero_basic": { "contract": "AeroBasicExecutor", "args": [] },
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
     "ring_swap_v2": {
       "contract": "RingSwapV2Executor",
@@ -60,7 +61,7 @@
     },
     "ekubo_v3": {
       "contract": "EkuboV3Executor",
-      "args": ["0x55b703eED01b35641963da2FB2E14885993605A3"]
+      "args": ["0x550CFe1292d0D9c0d28f232b3F42Edb4439B1D09"]
     },
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
@@ -101,11 +102,11 @@
     },
     "fallback:rfq:native": {
       "contract": "NativeFallbackExecutor",
-      "args": ["0x0000000000000000000000000000000000000000"]
+      "args": ["0x5D4FA48eA95dca88E94549bf006B71B4fc956310"]
     },
     "fallback:rfq:liquorice": {
       "contract": "LiquoriceFallbackExecutor",
-      "args": ["0x0000000000000000000000000000000000000000"]
+      "args": ["0x60C0050d60Ca4ce90EB3E52CaE63F1d547b05d5A"]
     },
     "rfq:metric": {
       "contract": "MetricExecutor",
@@ -138,6 +139,7 @@
     }
   },
   "base": {
+    "aero_basic": { "contract": "AeroBasicExecutor", "args": [] },
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
     "uniswap_v4": {
@@ -165,9 +167,14 @@
       "args": ["0x4200000000000000000000000000000000000006"]
     },
     "lunarbase": { "contract": "LunarBaseExecutor", "args": [] },
+    "biconomy": { "contract": "PropAMMExecutor", "args": [] },
     "fallback": {
       "contract": "PropAMMFallbackExecutor",
       "args": ["0xd38142E88f3d1011D8258737f257c709Dd0e2204"]
+    },
+    "baibai": {
+      "contract": "BaibaiExecutor",
+      "args": ["0x98c1D9E102Eb2806D902b13186BDc7892aC4fFBa"]
     },
     "fallback:rfq:metric": {
       "contract": "MetricFallbackExecutor",
@@ -176,6 +183,10 @@
     "fallback:rfq:bebop": {
       "contract": "BebopFallbackExecutor",
       "args": ["0x4bB02166188132103fc608402B8993c0c0857708"]
+    },
+    "fallback:rfq:native": {
+      "contract": "NativeFallbackExecutor",
+      "args": ["0xBCBc2cFEd6fB0831deF1d39eB3ED6273f15f18e3"]
     },
     "pancakeswap_infinity_cl": {
       "contract": "PancakeswapInfinityExecutor",
@@ -218,6 +229,7 @@
     }
   },
   "arbitrum": {
+    "aero_basic": { "contract": "AeroBasicExecutor", "args": [] },
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
     "uniswap_v4": {
@@ -242,6 +254,10 @@
     "fallback:rfq:metric": {
       "contract": "MetricFallbackExecutor",
       "args": ["0x92Ebf3AC5B8F53faA94471E3D1260D4d7492e4f5"]
+    },
+    "fallback:rfq:native": {
+      "contract": "NativeFallbackExecutor",
+      "args": ["0xcCe5C292fF5e2C5F85Ff33b83D3B74d03c7DF852"]
     }
   },
   "polygon": {
@@ -305,6 +321,10 @@
       "contract": "MetricFallbackExecutor",
       "args": ["0x174ec4B11994b36AfCCA0d31b6c591594cDdA1FB"]
     },
+    "fallback:rfq:native": {
+      "contract": "NativeFallbackExecutor",
+      "args": ["0x1D062B665c9aA1FD9851a3C327d5c60d0Ba36e59"]
+    },
     "pancakeswap_infinity_cl": {
       "contract": "PancakeswapInfinityExecutor",
       "args": [
@@ -334,6 +354,7 @@
     }
   },
   "robinhood": {
+    "aero_basic": { "contract": "AeroBasicExecutor", "args": [] },
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
     "ekubo_v3": {
       "contract": "EkuboV3RobinhoodExecutor",
@@ -359,6 +380,10 @@
       "contract": "MetricFallbackExecutor",
       "args": ["0x6f37069B1dcd2e33595F1fF711559CfdDe5338E5"]
     },
+    "fallback:rfq:native": {
+      "contract": "NativeFallbackExecutor",
+      "args": ["0x7b200EfFfC1a680aad250a0e5a66692E74386A9E"]
+    },
     "rfq:native": {
       "contract": "NativeExecutor",
       "args": ["0x4Df7557734B382EB542BEa6c74786D398DF4CC19"]
@@ -373,6 +398,7 @@
     }
   },
   "arc": {
+    "aero_basic": { "contract": "AeroBasicExecutor", "args": [] },
     "uniswap_v2": {
       "contract": "UniswapV2Executor",
       "args": [
@@ -389,6 +415,38 @@
         "0x8366a39CC670B4001A1121B8F6A443A643e40951",
         "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
       ]
+    }
+  },
+  "elysium": {
+    "aero_basic": { "contract": "AeroBasicExecutor", "args": [] },
+    "uniswap_v2": {
+      "contract": "UniswapV2Executor",
+      "args": [
+        30
+      ]
+    },
+    "uniswap_v3": {
+      "contract": "UniswapV3Executor",
+      "args": []
+    },
+    "uniswap_v4": {
+      "contract": "UniswapV4Executor",
+      "args": [
+        "0xe2e105d3f7209a9da11f83ccf3e7398a753823f1",
+        "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
+      ]
+    },
+    "native_wrapper": {
+      "contract": "NativeWrapExecutor",
+      "args": ["0xbA876237B0F021A6c6D852d6c26E107997cC5E81"]
+    },
+    "rfq:metric": {
+      "contract": "MetricExecutor",
+      "args": []
+    },
+    "fallback:rfq:metric": {
+      "contract": "MetricFallbackExecutor",
+      "args": ["0xF70E16dcc8f065143C4FDD0a42e29BBfcc96DE17"]
     }
   }
 }

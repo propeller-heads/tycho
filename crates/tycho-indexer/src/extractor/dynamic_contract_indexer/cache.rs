@@ -121,13 +121,13 @@ impl DCICache {
         finalized_block_height: u64,
     ) -> Result<(), DCICacheError> {
         self.ep_id_to_entrypoint
-            .handle_finality(finalized_block_height, MergeStrategy::Replace)?;
+            .handle_finality(finalized_block_height, &MergeStrategy::Replace)?;
         self.entrypoint_results
-            .handle_finality(finalized_block_height, MergeStrategy::Replace)?;
+            .handle_finality(finalized_block_height, &MergeStrategy::Replace)?;
         // Use custom merge function for retriggers to union HashSets
         self.retriggers.handle_finality(
             finalized_block_height,
-            MergeStrategy::Custom(Box::new(
+            &MergeStrategy::Custom(Box::new(
                 |existing: &(HashSet<EntryPointWithTracingParams>, u8),
                  new: (HashSet<EntryPointWithTracingParams>, u8)| {
                     let (mut merged, previous_offset) = existing.clone();
@@ -143,7 +143,7 @@ impl DCICache {
         // Use custom merge function for tracked_contracts to merge HashSets
         self.tracked_contracts.handle_finality(
             finalized_block_height,
-            MergeStrategy::Custom(Box::new(
+            &MergeStrategy::Custom(Box::new(
                 |existing: &HashSet<StoreKey>, new: HashSet<StoreKey>| {
                     let mut merged = existing.clone();
                     merged.extend(new);
@@ -153,13 +153,13 @@ impl DCICache {
         )?;
 
         self.erc20_addresses
-            .handle_finality(finalized_block_height, MergeStrategy::Replace)?;
+            .handle_finality(finalized_block_height, &MergeStrategy::Replace)?;
         self.blacklisted_addresses
-            .handle_finality(finalized_block_height, MergeStrategy::Replace)?;
+            .handle_finality(finalized_block_height, &MergeStrategy::Replace)?;
         self.ep_id_to_component_id
             .handle_finality(
                 finalized_block_height,
-                MergeStrategy::Custom(Box::new(
+                &MergeStrategy::Custom(Box::new(
                     |existing: &HashSet<ComponentId>, new: HashSet<ComponentId>| {
                         let mut merged = existing.clone();
                         merged.extend(new);
@@ -170,7 +170,7 @@ impl DCICache {
         self.component_id_to_entrypoint_params
             .handle_finality(
                 finalized_block_height,
-                MergeStrategy::Custom(Box::new(
+                &MergeStrategy::Custom(Box::new(
                     |existing: &HashSet<EntryPointWithTracingParams>,
                      new: HashSet<EntryPointWithTracingParams>| {
                         let mut merged = existing.clone();
@@ -180,7 +180,7 @@ impl DCICache {
                 )),
             )?;
         self.tracing_retry_counts
-            .handle_finality(finalized_block_height, MergeStrategy::Replace)?;
+            .handle_finality(finalized_block_height, &MergeStrategy::Replace)?;
 
         Ok(())
     }
@@ -375,9 +375,9 @@ impl HooksDCICache {
         finalized_block_height: u64,
     ) -> Result<(), DCICacheError> {
         self.component_states
-            .handle_finality(finalized_block_height, MergeStrategy::Replace)?;
+            .handle_finality(finalized_block_height, &MergeStrategy::Replace)?;
         self.protocol_components
-            .handle_finality(finalized_block_height, MergeStrategy::Replace)?;
+            .handle_finality(finalized_block_height, &MergeStrategy::Replace)?;
         Ok(())
     }
 
@@ -484,8 +484,13 @@ where
     /// Inserts a key-value pair into the pending layer for the specified block.
     ///
     /// An error is returned if the layer for the block is not found.
-    pub(super) fn insert_pending(&mut self, block: Block, k: K, v: V) -> Result<(), DCICacheError> {
-        let layer = self.get_layer_mut(&block)?;
+    pub(super) fn insert_pending(
+        &mut self,
+        block: &Block,
+        k: K,
+        v: V,
+    ) -> Result<(), DCICacheError> {
+        let layer = self.get_layer_mut(block)?;
         layer.data.insert(k, v);
         Ok(())
     }
@@ -500,10 +505,10 @@ where
     /// An error is returned if the layer for the block is not found.
     pub(super) fn extend_pending(
         &mut self,
-        block: Block,
+        block: &Block,
         entries: impl IntoIterator<Item = (K, V)>,
     ) -> Result<(), DCICacheError> {
-        let layer = self.get_layer_mut(&block)?;
+        let layer = self.get_layer_mut(block)?;
         layer.data.extend(entries);
         Ok(())
     }
@@ -632,7 +637,7 @@ where
     pub(super) fn handle_finality(
         &mut self,
         finalized_block_height: u64,
-        strategy: MergeStrategy<V>,
+        strategy: &MergeStrategy<V>,
     ) -> Result<(), DCICacheError> {
         if self.pending.is_empty() {
             return Ok(());
@@ -665,7 +670,7 @@ where
             .collect();
 
         for layer in finalized_layers {
-            match &strategy {
+            match strategy {
                 MergeStrategy::Replace => {
                     self.permanent.extend(layer.data);
                 }
@@ -712,7 +717,7 @@ where
         let mut found = false;
         for (index, layer) in self.pending.iter().enumerate().rev() {
             if layer.block.hash == *block {
-                let _ = self.pending.split_off(index + 1); // +1 to keep the target block
+                self.pending.truncate(index + 1); // +1 to keep the target block
                 found = true;
                 break;
             }
@@ -912,7 +917,7 @@ mod tests {
 
         // Test pending insert
         cache
-            .insert_pending(block1.clone(), "key1".to_string(), 1)
+            .insert_pending(&block1, "key1".to_string(), 1)
             .unwrap();
         assert_eq!(cache.get(&"key1".to_string()), Some(&1));
 
@@ -925,21 +930,21 @@ mod tests {
 
         // Test pending update
         cache
-            .extend_pending(block1.clone(), vec![("key3".to_string(), 3), ("key4".to_string(), 4)])
+            .extend_pending(&block1, vec![("key3".to_string(), 3), ("key4".to_string(), 4)])
             .unwrap();
         assert_eq!(cache.get(&"key3".to_string()), Some(&3));
         assert_eq!(cache.get(&"key4".to_string()), Some(&4));
 
         // Test block ordering
         cache
-            .insert_pending(block2.clone(), "key5".to_string(), 5)
+            .insert_pending(&block2, "key5".to_string(), 5)
             .unwrap();
         assert_eq!(cache.get(&"key5".to_string()), Some(&5));
 
         // Test invalid block order
         let invalid_block = create_test_block(3, "0x03", "0x00"); // Wrong parent hash
         assert!(cache
-            .insert_pending(invalid_block, "key6".to_string(), 6)
+            .insert_pending(&invalid_block, "key6".to_string(), 6)
             .is_err());
     }
 
@@ -966,10 +971,10 @@ mod tests {
         // Insert data in both blocks
         cache.insert_permanent("perm".to_string(), 0);
         cache
-            .insert_pending(block1.clone(), "key1".to_string(), 1)
+            .insert_pending(&block1, "key1".to_string(), 1)
             .unwrap();
         cache
-            .insert_pending(block2.clone(), "key2".to_string(), 2)
+            .insert_pending(&block2, "key2".to_string(), 2)
             .unwrap();
 
         // Verify initial state
@@ -1017,30 +1022,26 @@ mod tests {
         // Insert data in block1
         cache
             .ep_id_to_entrypoint
-            .insert_pending(block1.clone(), entrypoint.external_id.clone(), entrypoint.clone())
+            .insert_pending(&block1, entrypoint.external_id.clone(), entrypoint.clone())
             .unwrap();
         cache
             .entrypoint_results
             .insert_pending(
-                block1.clone(),
-                (entrypoint.external_id.clone(), tracing_params.clone()),
-                Some(tracing_result.clone()),
+                &block1,
+                (entrypoint.external_id.clone(), tracing_params),
+                Some(tracing_result),
             )
             .unwrap();
         cache
             .retriggers
-            .insert_pending(
-                block1.clone(),
-                (address.clone(), store_key.clone()),
-                (retrigger_set.clone(), 0),
-            )
+            .insert_pending(&block1, (address, store_key), (retrigger_set.clone(), 0))
             .unwrap();
 
         // Insert different data in block2
         let entrypoint2 = get_entrypoint(2);
         cache
             .ep_id_to_entrypoint
-            .insert_pending(block2.clone(), entrypoint2.external_id.clone(), entrypoint2.clone())
+            .insert_pending(&block2, entrypoint2.external_id.clone(), entrypoint2.clone())
             .unwrap();
 
         // Verify initial state
@@ -1106,24 +1107,24 @@ mod tests {
 
         // Insert data in block1
         cache
-            .insert_pending(block1.clone(), "key1".to_string(), 1)
+            .insert_pending(&block1, "key1".to_string(), 1)
             .unwrap();
 
         // Insert data in block2
         cache
-            .insert_pending(block2.clone(), "key2".to_string(), 2)
+            .insert_pending(&block2, "key2".to_string(), 2)
             .unwrap();
 
         // Insert data in block3
         cache
-            .insert_pending(block3.clone(), "key3".to_string(), 3)
+            .insert_pending(&block3, "key3".to_string(), 3)
             .unwrap();
 
         assert_eq!(cache.get_full_permanent_state(), &HashMap::new());
 
         // Handle finality of block2
         cache
-            .handle_finality(block2.number, MergeStrategy::Replace)
+            .handle_finality(block2.number, &MergeStrategy::Replace)
             .unwrap();
 
         assert_eq!(cache.get_full_permanent_state(), &HashMap::from([("key1".to_string(), 1)]));
@@ -1148,13 +1149,13 @@ mod tests {
         cache.insert_permanent("key".to_string(), 1);
         cache.insert_permanent("key2".to_string(), 2);
         cache
-            .insert_pending(block1.clone(), "key".to_string(), 2)
+            .insert_pending(&block1, "key".to_string(), 2)
             .unwrap();
         cache
-            .insert_pending(block2.clone(), "key".to_string(), 3)
+            .insert_pending(&block2, "key".to_string(), 3)
             .unwrap();
         cache
-            .insert_pending(block2.clone(), "key2".to_string(), 3)
+            .insert_pending(&block2, "key2".to_string(), 3)
             .unwrap();
 
         // get() should return the latest version (from block2)
@@ -1184,10 +1185,10 @@ mod tests {
         // Insert same key with different values in different blocks
         cache.insert_permanent("key".to_string(), 1);
         cache
-            .insert_pending(block1.clone(), "key".to_string(), 2)
+            .insert_pending(&block1, "key".to_string(), 2)
             .unwrap();
         cache
-            .insert_pending(block2.clone(), "key".to_string(), 3)
+            .insert_pending(&block2, "key".to_string(), 3)
             .unwrap();
 
         // pending_entry() should return the latest version for block2
@@ -1221,20 +1222,17 @@ mod tests {
         cache.extend_permanent(vec![("key1".to_string(), 10), ("key2".to_string(), 20)]);
 
         cache
-            .insert_pending(block1.clone(), "key2".to_string(), 2)
+            .insert_pending(&block1, "key2".to_string(), 2)
             .unwrap();
         cache
-            .extend_pending(
-                block1.clone(),
-                vec![("key2".to_string(), 21), ("key3".to_string(), 31)],
-            )
+            .extend_pending(&block1, vec![("key2".to_string(), 21), ("key3".to_string(), 31)])
             .unwrap();
 
         cache
-            .insert_pending(block2.clone(), "key3".to_string(), 3)
+            .insert_pending(&block2, "key3".to_string(), 3)
             .unwrap();
         cache
-            .extend_pending(block2.clone(), vec![("key4".to_string(), 40)])
+            .extend_pending(&block2, vec![("key4".to_string(), 40)])
             .unwrap();
 
         // Verify latest versions
@@ -1275,7 +1273,7 @@ mod tests {
 
         // Test 3: Key only in one pending layer
         cache
-            .insert_pending(block2.clone(), "pending_only".to_string(), 200)
+            .insert_pending(&block2, "pending_only".to_string(), 200)
             .unwrap();
         let result = cache
             .get_all("pending_only".to_string())
@@ -1285,7 +1283,7 @@ mod tests {
         // Test 4: Key in permanent and one pending layer
         cache.insert_permanent("mixed".to_string(), 300);
         cache
-            .insert_pending(block1.clone(), "mixed".to_string(), 301)
+            .insert_pending(&block1, "mixed".to_string(), 301)
             .unwrap();
         let result = cache
             .get_all("mixed".to_string())
@@ -1295,13 +1293,13 @@ mod tests {
         // Test 5: Key in multiple pending layers and permanent
         cache.insert_permanent("multi".to_string(), 400);
         cache
-            .insert_pending(block1.clone(), "multi".to_string(), 401)
+            .insert_pending(&block1, "multi".to_string(), 401)
             .unwrap();
         cache
-            .insert_pending(block2.clone(), "multi".to_string(), 402)
+            .insert_pending(&block2, "multi".to_string(), 402)
             .unwrap();
         cache
-            .insert_pending(block3.clone(), "multi".to_string(), 403)
+            .insert_pending(&block3, "multi".to_string(), 403)
             .unwrap();
         let result = cache
             .get_all("multi".to_string())
@@ -1311,10 +1309,10 @@ mod tests {
         // Test 6: Key in some but not all pending layers
         cache.insert_permanent("sparse".to_string(), 500);
         cache
-            .insert_pending(block1.clone(), "sparse".to_string(), 501)
+            .insert_pending(&block1, "sparse".to_string(), 501)
             .unwrap();
         cache
-            .insert_pending(block3.clone(), "sparse".to_string(), 503)
+            .insert_pending(&block3, "sparse".to_string(), 503)
             .unwrap();
         let result = cache
             .get_all("sparse".to_string())
@@ -1323,10 +1321,10 @@ mod tests {
 
         // Test 7: Key only in multiple pending layers (no permanent)
         cache
-            .insert_pending(block1.clone(), "pending_multi".to_string(), 601)
+            .insert_pending(&block1, "pending_multi".to_string(), 601)
             .unwrap();
         cache
-            .insert_pending(block3.clone(), "pending_multi".to_string(), 603)
+            .insert_pending(&block3, "pending_multi".to_string(), 603)
             .unwrap();
         let result = cache
             .get_all("pending_multi".to_string())
@@ -1342,7 +1340,7 @@ mod tests {
 
         // Test 9: After finality, get_all should include finalized data in permanent
         cache
-            .handle_finality(block2.number, MergeStrategy::Replace)
+            .handle_finality(block2.number, &MergeStrategy::Replace)
             .unwrap();
         let result = cache
             .get_all("multi".to_string())
@@ -1380,24 +1378,24 @@ mod tests {
 
         // Insert data in block1 - same address, different keys
         cache
-            .insert_pending(block1.clone(), address1.clone(), Some(HashSet::from([key2.clone()])))
+            .insert_pending(&block1, address1.clone(), Some(HashSet::from([key2.clone()])))
             .unwrap();
 
         // Insert data in block2 - same address, more keys
         cache
-            .insert_pending(block2.clone(), address1.clone(), Some(HashSet::from([key3.clone()])))
+            .insert_pending(&block2, address1.clone(), Some(HashSet::from([key3])))
             .unwrap();
 
         // Insert different address in block1
         cache
-            .insert_pending(block1.clone(), address2.clone(), Some(HashSet::from([key1.clone()])))
+            .insert_pending(&block1, address2.clone(), Some(HashSet::from([key1.clone()])))
             .unwrap();
 
         // Handle finality with merge function
         cache
             .handle_finality(
                 block2.number,
-                MergeStrategy::Custom(Box::new(
+                &MergeStrategy::Custom(Box::new(
                     |existing: &Option<HashSet<StoreKey>>, new: Option<HashSet<StoreKey>>| {
                         match (existing, new) {
                             (None, _) | (_, None) => None, /* If either is None (full tracking), */
@@ -1418,10 +1416,10 @@ mod tests {
 
         // address1 should have keys merged from permanent layer and block1 only
         // (block2 remains in pending, so key3 is not included in permanent yet)
-        let expected_keys = HashSet::from([key1.clone(), key2.clone()]);
+        let expected_keys = HashSet::from([key1.clone(), key2]);
         assert_eq!(permanent_state.get(&address1), Some(&Some(expected_keys)));
 
         // address2 should have key1 from block1
-        assert_eq!(permanent_state.get(&address2), Some(&Some(HashSet::from([key1.clone()]))));
+        assert_eq!(permanent_state.get(&address2), Some(&Some(HashSet::from([key1]))));
     }
 }

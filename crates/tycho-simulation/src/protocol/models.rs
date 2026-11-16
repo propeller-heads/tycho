@@ -56,6 +56,10 @@ pub enum BlockPositionAssumption {
 ///
 /// This struct can be extended to include additional attributes for other decoders in the future
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; making every field public or private is a breaking change"
+)]
 pub struct DecoderContext {
     pub adapter_path: Option<String>,
     pub vm_traces: Option<bool>,
@@ -144,8 +148,14 @@ pub struct ProtocolComponent {
 }
 
 impl ProtocolComponent {
-    #[allow(deprecated)]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        deprecated,
+        reason = "fills the deprecated address field so consumers still reading it get a value"
+    )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         id: Bytes,
         protocol_system: String,
@@ -177,7 +187,7 @@ impl ProtocolComponent {
     ) -> Self {
         let id = Bytes::from(core_model.id.as_str());
         ProtocolComponent::new(
-            id.clone(),
+            id,
             core_model.protocol_system,
             core_model.protocol_type_name,
             core_model.chain,
@@ -218,7 +228,7 @@ where
     type Error;
 
     fn try_from_with_header(
-        value: T,
+        snapshot: T,
         block: H,
         account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
         all_tokens: &HashMap<Bytes, Token>,

@@ -23,8 +23,8 @@ fn build_wasm(package_dir: &Path, prebuilt: bool) -> miette::Result<()> {
         .args(["build", "--release", "--target", "wasm32-unknown-unknown"])
         .current_dir(package_dir)
         // RUSTUP_TOOLCHAIN outranks a rust-toolchain.toml, so the value rustup exported for this
-        // crate would build the package with its nightly toolchain, which carries no wasm32
-        // target, instead of the version the Substreams workspace pins.
+        // crate would build the package with the root workspace's toolchain, which carries no
+        // wasm32 target, instead of the version the Substreams workspace pins.
         .env_remove("RUSTUP_TOOLCHAIN")
         // The manifest looks for the binary under the package's own target directory, so a shared
         // one exported by a developer or a CI runner would hide it from `substreams pack`.

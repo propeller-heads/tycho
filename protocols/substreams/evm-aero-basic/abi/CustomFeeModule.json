@@ -1,0 +1,5 @@
+[
+  {"type":"event","name":"SetCustomFee","anonymous":false,"inputs":[
+    {"name":"pool","type":"address","indexed":true},
+    {"name":"fee","type":"uint256","indexed":true}]}
+]

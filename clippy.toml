@@ -1,2 +1,13 @@
 ignore-interior-mutability = ["bytes::Bytes", "tycho_core::hex_bytes::Bytes"]
 allow-dbg-in-tests = true
+
+# Each remaining call needs `#[expect(clippy::disallowed_methods, reason = "...")]` at the call site.
+disallowed-methods = [
+    { path = "tokio::task::block_in_place", reason = "panics on a current-thread runtime; make the precondition explicit or move the work to async" },
+    { path = "tokio::runtime::Handle::current", reason = "panics outside a runtime; make the precondition explicit or move the work to async" },
+]
+
+# Lints such as unnecessary_wraps, ref_option and unused_self also check items reachable from
+# outside the crate, so new public API is held to them. Existing public items that violate them
+# carry an #[expect] naming the breaking change a fix would be.
+avoid-breaking-exported-api = false

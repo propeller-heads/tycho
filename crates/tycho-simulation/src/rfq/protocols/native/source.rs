@@ -270,7 +270,7 @@ mod tests {
     };
 
     fn test_source(
-        endpoint: String,
+        endpoint: &str,
         tokens: &[&Bytes],
         usd_quote_tokens: HashSet<Bytes>,
         min_tvl_usd: f64,
@@ -289,7 +289,7 @@ mod tests {
             },
             usd_quote_tokens: Arc::new(usd_quote_tokens),
             client: Arc::new(NativeClient::new(
-                Some(&endpoint),
+                Some(endpoint),
                 NativeSupportedChain::Ethereum,
                 "test-api-key".to_string(),
                 Duration::from_secs(5),
@@ -335,7 +335,7 @@ mod tests {
         let wbtc = Bytes::from_str("0x4444444444444444444444444444444444444444").unwrap();
         let unapproved = Bytes::from_str("0x5555555555555555555555555555555555555555").unwrap();
         let source = test_source(
-            "http://native.example".to_string(),
+            "http://native.example",
             &[&weth, &usdc, &usdt, &wbtc, &unapproved],
             HashSet::from([usdc.clone(), usdt.clone()]),
             0.0,
@@ -359,7 +359,7 @@ mod tests {
         let weth = Bytes::from_str("0x3333333333333333333333333333333333333333").unwrap();
         let usdc = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
         let source = test_source(
-            "http://native.example".to_string(),
+            "http://native.example",
             &[&weth, &usdc],
             HashSet::from([usdc.clone()]),
             0.0,
@@ -384,7 +384,7 @@ mod tests {
         let lower_quote = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
         let higher_quote = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
         let source = test_source(
-            "http://native.example".to_string(),
+            "http://native.example",
             &[&weth, &lower_quote, &higher_quote],
             HashSet::from([lower_quote.clone(), higher_quote.clone()]),
             0.0,
@@ -642,7 +642,7 @@ mod tests {
             Some(("200 OK", "[]".to_string()))
         })
         .await;
-        let source = test_source(server.url(), &[], HashSet::new(), 0.0);
+        let source = test_source(&server.url(), &[], HashSet::new(), 0.0);
 
         let orderbook = source
             .client
@@ -675,7 +675,7 @@ mod tests {
     ) {
         let body = format!(r#"{{"code":{code},"message":"{message}"}}"#);
         let server = spawn_http_server(move |_| Some(("200 OK", body.clone()))).await;
-        let source = test_source(server.url(), &[], HashSet::new(), 0.0);
+        let source = test_source(&server.url(), &[], HashSet::new(), 0.0);
 
         let result = source.client.fetch_orderbook().await;
 
@@ -693,7 +693,7 @@ mod tests {
     async fn non_success_status_without_error_envelope_is_a_connection_error() {
         let server =
             spawn_http_server(|_| Some(("502 Bad Gateway", "bad gateway".to_string()))).await;
-        let source = test_source(server.url(), &[], HashSet::new(), 0.0);
+        let source = test_source(&server.url(), &[], HashSet::new(), 0.0);
 
         let result = source.client.fetch_orderbook().await;
 
@@ -742,7 +742,7 @@ mod tests {
         // USDC is a USD quote token but not a requested token: its helper book must never be
         // emitted.
         let source =
-            test_source(server.url(), &[&weth, &usdt], HashSet::from([usdc]), tvl_threshold);
+            test_source(&server.url(), &[&weth, &usdt], HashSet::from([usdc]), tvl_threshold);
 
         let books = timeout(Duration::from_secs(5), source.fetch())
             .await
@@ -789,7 +789,7 @@ mod tests {
         let source = NativeBookSource {
             protocol_system: FALLBACK_PROTOCOL_SYSTEM,
             all_pairs,
-            ..test_source(server.url(), &[&weth, &usdt], HashSet::from([usdt.clone()]), 0.0)
+            ..test_source(&server.url(), &[&weth, &usdt], HashSet::from([usdt.clone()]), 0.0)
         };
 
         let books = source.fetch().await.unwrap().books;
@@ -825,7 +825,12 @@ mod tests {
         let server = spawn_http_server(move |_| Some(("200 OK", body.clone()))).await;
         let source = NativeBookSource {
             protocol_system,
-            ..test_source(server.url(), &[&native_token, &usdt], HashSet::from([usdt.clone()]), 0.0)
+            ..test_source(
+                &server.url(),
+                &[&native_token, &usdt],
+                HashSet::from([usdt.clone()]),
+                0.0,
+            )
         };
 
         let books = source.fetch().await.unwrap().books;
@@ -859,7 +864,7 @@ mod tests {
         let server = spawn_http_server(move |_| Some(("200 OK", body.clone()))).await;
         let source = NativeBookSource {
             all_pairs: true,
-            ..test_source(server.url(), &[&weth, &wbtc, &usdt], HashSet::from([usdt.clone()]), 0.0)
+            ..test_source(&server.url(), &[&weth, &wbtc, &usdt], HashSet::from([usdt.clone()]), 0.0)
         };
 
         let books = source.fetch().await.unwrap().books;

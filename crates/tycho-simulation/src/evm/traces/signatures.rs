@@ -163,7 +163,7 @@ impl SignaturesIdentifier {
             .iter()
             .filter_map(|s| match s {
                 SelectorKind::Function(sel) => Some(*sel),
-                _ => None,
+                SelectorKind::Event(_) => None,
             })
             .collect();
 
@@ -171,7 +171,7 @@ impl SignaturesIdentifier {
             .iter()
             .filter_map(|s| match s {
                 SelectorKind::Event(topic) => Some(*topic),
-                _ => None,
+                SelectorKind::Function(_) => None,
             })
             .collect();
 
@@ -219,14 +219,12 @@ impl SignaturesIdentifier {
                         sleep(Duration::from_secs(1)).await;
                         retries -= 1;
                         continue;
-                    } else {
-                        return Ok(response);
                     }
+                    return Ok(response);
                 }
                 Err(_e) if retries > 0 => {
                     sleep(Duration::from_millis(500)).await;
                     retries -= 1;
-                    continue;
                 }
                 Err(e) => return Err(e),
             }

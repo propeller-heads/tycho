@@ -7,9 +7,10 @@ use ::http::Request;
 use async_stream::try_stream;
 use futures::{Stream, StreamExt};
 use tokio::time::{sleep, timeout};
+pub use tokio_tungstenite::tungstenite::{Bytes as FrameBytes, Utf8Bytes};
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::{self, Bytes, Message, Utf8Bytes},
+    tungstenite::{self, Message},
 };
 use tracing::{debug_span, error, info, warn};
 
@@ -45,7 +46,7 @@ pub struct WsFeedConfig {
 /// The values every WebSocket feed builder starts from. The relation among them worth keeping
 /// through a retune: the withdrawal age is the idle window, so the moment the loop gives up on
 /// the socket it stops serving what that socket brought.
-pub(crate) fn default_ws_feed_config() -> WsFeedConfig {
+pub fn default_ws_feed_config() -> WsFeedConfig {
     WsFeedConfig {
         connect_timeout: Duration::from_secs(10),
         read_idle_timeout: Duration::from_secs(60),
@@ -56,7 +57,8 @@ pub(crate) fn default_ws_feed_config() -> WsFeedConfig {
     }
 }
 
-/// The connection loop shared by WebSocket-based feeds.
+/// Runs the shared WebSocket connection loop with reconnects, backoff, idle timeouts and
+/// staleness checks.
 ///
 /// Keeps `source` connected on the terms `config` sets and publishes every snapshot decoded off
 /// the socket, withdrawing one that goes `max_snapshot_age` without a refresh. What each knob
@@ -71,7 +73,7 @@ pub(crate) fn default_ws_feed_config() -> WsFeedConfig {
 /// receiver goes away, mid-connect or mid-read included, since nothing it read from then on could
 /// reach anyone; reconnecting itself never runs out, so a feed is otherwise stopped by dropping
 /// its future, which withdraws the published snapshot on the way out.
-pub(crate) async fn run_ws_feed<S: WsSource>(
+pub async fn run_ws_feed<S: WsSource>(
     config: WsFeedConfig,
     publisher: Publisher<S::Snapshot>,
     source: S,
@@ -102,20 +104,42 @@ pub(crate) async fn run_ws_feed<S: WsSource>(
 /// A data-bearing WebSocket frame. Control frames never reach a [`WsSource`]: the loop
 /// reconnects on `Close`, tokio-tungstenite answers pings while the stream is polled, and
 /// tungstenite never yields raw frames on the read side.
-pub(crate) enum WsPayload {
+///
+/// The payloads are tokio-tungstenite's [`Utf8Bytes`] and `Bytes`, re-exported from this module,
+/// the latter as [`FrameBytes`] so it does not collide with `tycho_common::Bytes`. Both
+/// dereference to slices; `FrameBytes` shares its data through reference counting instead of
+/// copying it.
+pub enum WsPayload {
+    /// A text frame.
     Text(Utf8Bytes),
-    Binary(Bytes),
+    /// A binary frame.
+    Binary(FrameBytes),
 }
 
 /// The provider-specific half of a WebSocket feed: it builds the handshake request and decodes
 /// data frames into complete snapshots. [`run_ws_feed`] owns the source and drives it by
 /// reference.
-pub(crate) trait WsSource: Send {
+pub trait WsSource: Send {
+    /// The complete snapshot decoded from a frame. Each snapshot replaces the previous one, so it
+    /// must not be a delta.
     type Snapshot: Send + Sync + 'static;
 
+    /// Builds the handshake for one connection. The loop calls this before every connection attempt
+    /// to refresh connection-specific headers such as `Sec-WebSocket-Key`.
+    ///
+    /// Return [`FeedError::Fatal`] when retrying cannot produce a different request; this ends
+    /// the feed. Any other error counts as one failed attempt toward `max_consecutive_failures`,
+    /// followed by a backoff wait.
     fn request(&self) -> Result<Request<()>, FeedError>;
 
-    /// `Ok(None)` for frames that carry no snapshot.
+    /// Turns a data frame into a snapshot.
+    ///
+    /// Return `Ok(None)` for frames without snapshots, such as server notices. The loop skips
+    /// these frames without changing the failure count. `Err` closes the connection and counts as
+    /// one failure; repeated decode failures trigger reconnects with backoff, and
+    /// `max_consecutive_failures` (unset by default, which reconnects forever) ends the feed once
+    /// reached. [`FeedError::Fatal`] ends the feed immediately.
+    /// Only `Ok(Some(_))` clears the failure count.
     fn decode(&mut self, payload: WsPayload) -> Result<Option<Self::Snapshot>, FeedError>;
 }
 
@@ -272,10 +296,18 @@ mod tests {
     impl WsSource for NoSource {
         type Snapshot = u32;
 
+        #[expect(
+            clippy::unreachable,
+            reason = "the loop rejects the config before it builds a request"
+        )]
         fn request(&self) -> Result<Request<()>, FeedError> {
             unreachable!("the loop must reject the config before building a request")
         }
 
+        #[expect(
+            clippy::unreachable,
+            reason = "the loop rejects the config before it reads a payload"
+        )]
         fn decode(&mut self, _payload: WsPayload) -> Result<Option<u32>, FeedError> {
             unreachable!()
         }
@@ -388,7 +420,15 @@ mod tests {
                 connections_clone.fetch_add(1, Ordering::SeqCst);
                 tokio::spawn(async move {
                     let Ok(mut ws_stream) = accept_async(stream).await else { return };
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = ws_stream.send(snapshot_frame()).await;
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = ws_stream.send(fatal_frame()).await;
                     std::future::pending::<()>().await;
                 });
@@ -417,6 +457,10 @@ mod tests {
             Err(self.0.clone())
         }
 
+        #[expect(
+            clippy::unreachable,
+            reason = "the loop that drives this source never decodes a payload without connecting"
+        )]
         fn decode(&mut self, _: WsPayload) -> Result<Option<u32>, FeedError> {
             unreachable!("the feed never connects")
         }
@@ -481,9 +525,17 @@ mod tests {
                 tokio::spawn(async move {
                     if let Ok(ws_stream) = accept_async(stream).await {
                         let (mut ws_sender, _ws_receiver) = ws_stream.split();
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "the fake peer may already be gone; that is not a test failure"
+                        )]
                         let _ = ws_sender.send(snapshot_frame()).await;
                         if count == 1 {
                             tokio::time::sleep(Duration::from_millis(100)).await;
+                            #[expect(
+                                clippy::let_underscore_must_use,
+                                reason = "the fake peer may already be gone; that is not a test failure"
+                            )]
                             let _ = ws_sender.close().await;
                         } else {
                             tokio::time::sleep(Duration::from_secs(10)).await;
@@ -515,6 +567,10 @@ mod tests {
         tokio::spawn(async move {
             if let Ok((stream, _)) = listener.accept().await {
                 if let Ok(mut ws_stream) = accept_async(stream).await {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = ws_stream.send(snapshot_frame()).await;
                     loop {
                         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -561,7 +617,15 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let ws_stream = accept_async(stream).await.unwrap();
             let (mut ws_sender, _ws_receiver) = ws_stream.split();
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = ws_sender.send(snapshot_frame()).await;
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = ws_sender.close().await;
             // Further connects complete at the TCP level from the backlog and then hang.
             tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -603,8 +667,20 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let ws_stream = accept_async(stream).await.unwrap();
             let (mut ws_sender, _ws_receiver) = ws_stream.split();
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = ws_sender.send(snapshot_frame()).await;
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = resume_rx.await;
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = ws_sender.send(snapshot_frame()).await;
             tokio::time::sleep(Duration::from_secs(10)).await;
         });
@@ -658,7 +734,15 @@ mod tests {
                     } else {
                         Message::Text("notice".into())
                     };
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = ws_stream.send(frame).await;
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = ws_stream.close(None).await;
                 });
             }
@@ -765,13 +849,25 @@ mod tests {
                         match disconnect {
                             Disconnect::IdleTimeout => {}
                             Disconnect::CloseFrame => {
+                                #[expect(
+                                    clippy::let_underscore_must_use,
+                                    reason = "the fake peer may already be gone; that is not a test failure"
+                                )]
                                 let _ = ws_stream.close(None).await;
                             }
                             Disconnect::UndecodableFrame => {
+                                #[expect(
+                                    clippy::let_underscore_must_use,
+                                    reason = "the fake peer may already be gone; that is not a test failure"
+                                )]
                                 let _ = ws_stream.send(bad_frame()).await;
                             }
                         }
                     } else {
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "the fake peer may already be gone; that is not a test failure"
+                        )]
                         let _ = ws_stream.send(snapshot_frame()).await;
                     }
                     // Hold the connection so the client, not a server-side drop, ends it.
@@ -806,6 +902,10 @@ mod tests {
             while let Ok((stream, _)) = listener.accept().await {
                 tokio::spawn(async move {
                     let Ok(mut ws_stream) = accept_async(stream).await else { return };
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = ws_stream.send(bad_frame()).await;
                 });
             }

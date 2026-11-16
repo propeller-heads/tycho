@@ -15,6 +15,33 @@ use tycho_common::{
     Bytes,
 };
 
+/// The signed exponent `from_decimals - to_decimals` of a decimals correction factor, or an
+/// error when it does not fit an `i32`.
+pub(crate) fn decimals_exponent(
+    from_decimals: u32,
+    to_decimals: u32,
+) -> Result<i32, SimulationError> {
+    i32::try_from(i64::from(from_decimals) - i64::from(to_decimals)).map_err(|e| {
+        SimulationError::InvalidInput(
+            format!("Decimals exponent {from_decimals} - {to_decimals} out of range: {e}"),
+            None,
+        )
+    })
+}
+
+/// A token's decimals as a signed exponent, or an error when they do not fit an `i32`.
+pub(crate) fn decimals_i32(decimals: u32) -> Result<i32, SimulationError> {
+    i32::try_from(decimals).map_err(|e| {
+        SimulationError::InvalidInput(format!("Decimals {decimals} out of range: {e}"), None)
+    })
+}
+
+/// `10^decimals` as a float. Decimals beyond `i32` give infinity, which `10^decimals` is in `f64`
+/// from an exponent of 309 on.
+pub(crate) fn decimals_scale(decimals: u32) -> f64 {
+    decimals_i32(decimals).map_or(f64::INFINITY, |exponent| 10f64.powi(exponent))
+}
+
 /// Converts a hexadecimal string into a `Vec<u8>`.
 ///
 /// This function accepts a hexadecimal string with or without the `0x` prefix. If the prefix
@@ -80,17 +107,18 @@ pub async fn load_all_tokens(
         .with_compression(compression);
 
     let rpc_client = HttpRPCClient::new(rpc_url.as_str(), rpc_options)
-        .map_err(|err| map_rpc_error(err, "Failed to create Tycho RPC client"))?;
+        .map_err(|err| map_rpc_error(&err, "Failed to create Tycho RPC client"))?;
 
     // Chain specific defaults for special case chains. Otherwise defaults to 14 days.
     let default_min_days = HashMap::from([(Chain::Base, 7_u64), (Chain::Ethereum, 30_u64)]);
 
-    #[allow(clippy::mutable_key_type)]
     let min_q = min_quality.or(Some(100));
-    let traded = max_days_since_last_trade.or(default_min_days
-        .get(&chain)
-        .or(Some(&42))
-        .copied());
+    let traded = max_days_since_last_trade.or_else(|| {
+        default_min_days
+            .get(&chain)
+            .or(Some(&42))
+            .copied()
+    });
     let mut token_params = AllTokensParams::new(chain, RPC_CLIENT_CONCURRENCY);
     if let Some(q) = min_q {
         token_params = token_params.with_min_quality(q);
@@ -101,7 +129,7 @@ pub async fn load_all_tokens(
     let tokens = rpc_client
         .get_all_tokens(token_params)
         .await
-        .map_err(|err| map_rpc_error(err, "Unable to load tokens"))?;
+        .map_err(|err| map_rpc_error(&err, "Unable to load tokens"))?;
 
     tokens
         .into_iter()
@@ -119,7 +147,7 @@ pub fn get_default_url(chain: &Chain) -> Option<String> {
         Chain::Arbitrum => Some("tycho-arbitrum-beta.propellerheads.xyz".to_string()),
         Chain::Polygon => Some("tycho-polygon-beta.propellerheads.xyz".to_string()),
         Chain::Robinhood => Some("tycho-robinhood-beta.propellerheads.xyz".to_string()),
-        _ => None,
+        Chain::Starknet | Chain::ZkSync | Chain::Plasma | Chain::Arc | Chain::Custom(_) | _ => None,
     }
 }
 
@@ -162,12 +190,18 @@ fn parse_blocklist(contents: &str) -> Result<HashSet<String>, toml::de::Error> {
     Ok(config.blocklist.components)
 }
 
-fn map_rpc_error(err: RPCError, context: &str) -> SimulationError {
+fn map_rpc_error(err: &RPCError, context: &str) -> SimulationError {
     let message = format!("{context}: {err}", err = err,);
     match err {
         RPCError::UrlParsing(_, _) | RPCError::FormatRequest(_) => {
             SimulationError::InvalidInput(message, None)
         }
-        _ => SimulationError::FatalError(message),
+        RPCError::HttpClient(..) |
+        RPCError::ParseResponse(_) |
+        RPCError::StaleBlock(_) |
+        RPCError::UnknownExtractor(_) |
+        RPCError::Fatal(_) |
+        RPCError::RateLimited(_) |
+        RPCError::ServerUnreachable(_) => SimulationError::FatalError(message),
     }
 }

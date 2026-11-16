@@ -1,5 +1,3 @@
-#![allow(dead_code)] // TODO: Remove when implementation is complete
-
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 use async_trait::async_trait;
@@ -26,7 +24,6 @@ pub(super) type Balances = HashMap<Address, Bytes>;
 // every block.
 // Represented by (tokenIn, tokenOut), (maxAmountIn, maxAmountOut, Entrypoint)
 type Limits = Vec<((Address, Address), (Bytes, Bytes, Option<EntryPointWithTracingParams>))>;
-type Tvl = f64;
 pub(super) type DeduplicationId = String;
 
 type RoutingKey = String;
@@ -40,24 +37,20 @@ pub(super) struct ComponentTracingMetadata {
     tx_hash: TxHash,
     balances: Option<Result<Balances, MetadataError>>,
     limits: Option<Result<Limits, MetadataError>>,
-    tvl: Option<Result<Tvl, MetadataError>>,
 }
 
 impl ComponentTracingMetadata {
     pub(super) fn new(tx_hash: TxHash) -> Self {
-        Self { tx_hash, balances: None, limits: None, tvl: None }
+        Self { tx_hash, balances: None, limits: None }
     }
 
     pub(super) fn with_balances(self, balances: Result<Balances, MetadataError>) -> Self {
         Self { balances: Some(balances), ..self }
     }
 
+    #[cfg(test)]
     pub(super) fn with_limits(self, limits: Result<Limits, MetadataError>) -> Self {
         Self { limits: Some(limits), ..self }
-    }
-
-    pub(super) fn with_tvl(self, tvl: Result<Tvl, MetadataError>) -> Self {
-        Self { tvl: Some(tvl), ..self }
     }
 
     pub(super) fn add_result(&mut self, result: MetadataResult) {
@@ -77,18 +70,12 @@ impl ComponentTracingMetadata {
                     }
                 }
             }
-            Ok(MetadataValue::Tvl(tvl)) => {
-                self.tvl = Some(Ok(tvl));
-            }
             Err(e) => match result.request_type {
-                MetadataRequestType::ComponentBalance { .. } => {
+                MetadataRequestType::ComponentBalance => {
                     self.balances = Some(Err(e));
                 }
                 MetadataRequestType::Limits { .. } => {
                     self.limits = Some(Err(e));
-                }
-                MetadataRequestType::Tvl => {
-                    self.tvl = Some(Err(e));
                 }
             },
         }
@@ -100,10 +87,6 @@ impl ComponentTracingMetadata {
 
     pub(super) fn limits(&self) -> Option<&Result<Limits, MetadataError>> {
         self.limits.as_ref()
-    }
-
-    pub(super) fn tvl(&self) -> Option<&Result<Tvl, MetadataError>> {
-        self.tvl.as_ref()
     }
 
     pub(super) fn tx_hash(&self) -> &TxHash {
@@ -150,6 +133,7 @@ impl MetadataRequest {
         &self.generator_name
     }
 
+    #[cfg(test)]
     pub(super) fn request_id(&self) -> &RequestId {
         &self.request_id
     }
@@ -170,8 +154,7 @@ impl MetadataRequest {
 #[derive(Clone, Debug)]
 #[cfg_attr(test, derive(PartialEq))]
 pub(super) enum MetadataRequestType {
-    ComponentBalance { token_addresses: Vec<Address> },
-    Tvl,
+    ComponentBalance,
     // Every request should cover only one token pair - but we should leave the interface
     // open to allow for future extensions or requests that cover multiple token pairs.
     Limits { token_pair: Vec<(Address, Address)> },
@@ -200,13 +183,6 @@ pub(super) trait RequestTransport: Send + Sync + Debug {
     ///
     /// A string identifier for routing requests to the appropriate provider.
     fn routing_key(&self) -> String;
-
-    /// Sets a custom routing key for this transport.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The new routing key to use for this transport
-    fn set_routing_key(&mut self, key: String);
 
     /// Returns a unique identifier for request deduplication.
     ///
@@ -316,27 +292,6 @@ pub(super) trait MetadataRequestGenerator: Send + Sync {
         component: &ProtocolComponent,
         block: &Block,
     ) -> Result<Vec<MetadataRequest>, MetadataError>;
-
-    /// Returns the types of metadata this generator can produce.
-    ///
-    /// Used by the orchestrator to understand generator capabilities and ensure
-    /// all required metadata types are covered by available generators.
-    ///
-    /// # Returns
-    ///
-    /// A vector of metadata request types this generator supports.
-    ///
-    /// # Example
-    ///
-    /// A DEX generator might return:
-    /// ```ignore
-    /// vec![
-    ///     MetadataRequestType::ComponentBalance { token_addresses: vec![] },
-    ///     MetadataRequestType::Limits { token_pair: vec![] },
-    ///     MetadataRequestType::Tvl,
-    /// ]
-    /// ```
-    fn supported_metadata_types(&self) -> Vec<MetadataRequestType>;
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -462,6 +417,7 @@ impl MetadataGeneratorRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn register_hook_generator(
         &mut self,
         hook_address: Address,
@@ -480,6 +436,7 @@ impl MetadataGeneratorRegistry {
             .insert(hook_identifier, generator);
     }
 
+    #[cfg(test)]
     pub(super) fn set_default_generator(
         &mut self,
         generator: Option<Box<dyn MetadataRequestGenerator>>,
@@ -539,8 +496,8 @@ impl MetadataGeneratorRegistry {
             {
                 Some(hook_identifier_bytes) => {
                     let identifier =
-                        String::from_utf8(hook_identifier_bytes.to_vec()).map_err(|_| {
-                            MetadataError::UnknownError("Invalid hook identifier".to_string())
+                        String::from_utf8(hook_identifier_bytes.to_vec()).map_err(|e| {
+                            MetadataError::UnknownError(format!("Invalid hook identifier: {e}"))
                         })?;
                     match self.hook_identifiers.get(&identifier) {
                         Some(generator) => Ok(Some(generator.as_ref())),
@@ -649,7 +606,6 @@ pub(super) trait RequestProvider: Send + Sync {
 }
 
 pub(super) struct MetadataResult {
-    request_id: RequestId,
     component_id: ComponentId,
     request_type: MetadataRequestType,
     result: Result<MetadataValue, MetadataError>,
@@ -657,20 +613,15 @@ pub(super) struct MetadataResult {
 
 impl MetadataResult {
     pub(super) fn new(
-        request_id: RequestId,
         component_id: ComponentId,
         request_type: MetadataRequestType,
         result: Result<MetadataValue, MetadataError>,
     ) -> Self {
-        Self { request_id, component_id, request_type, result }
+        Self { component_id, request_type, result }
     }
 
     pub(super) fn component_id(&self) -> &ComponentId {
         &self.component_id
-    }
-
-    pub(super) fn request_id(&self) -> &RequestId {
-        &self.request_id
     }
 
     pub(super) fn request_type(&self) -> &MetadataRequestType {
@@ -687,7 +638,6 @@ impl MetadataResult {
 pub(super) enum MetadataValue {
     Balances(HashMap<Address, Bytes>),
     Limits(Limits),
-    Tvl(f64),
 }
 
 // Provider registry with configurable routing keys
@@ -715,6 +665,7 @@ impl ProviderRegistry {
             .insert(routing_key, provider);
     }
 
+    #[cfg(test)]
     pub(super) fn get_provider(
         &self,
         transport: &dyn RequestTransport,
@@ -739,8 +690,6 @@ pub(super) enum MetadataError {
     GenerationFailed(String),
     #[error("Provider failed: {0}")]
     ProviderFailed(String),
-    #[error("Request failed: {0}")]
-    RequestFailed(String),
     #[error("Unknown error: {0}")]
     UnknownError(String),
     #[error("Missing {0} for {1}")]
@@ -749,22 +698,22 @@ pub(super) enum MetadataError {
 
 // Example Implementations
 
-// HTTP Transport Example Implementation
-#[derive(Clone, Debug, Serialize, Deserialize)]
+// HTTP Transport implementation used to exercise provider routing in tests
+#[cfg(test)]
+#[derive(Clone, Debug)]
 struct HttpTransport {
     url: String,
     method: HttpMethod,
-    headers: HashMap<String, String>,
-    body: Option<serde_json::Value>,
     routing_key: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg(test)]
+#[derive(Clone, Debug)]
 enum HttpMethod {
     Get,
-    Post,
 }
 
+#[cfg(test)]
 impl HttpTransport {
     fn new(url: String, method: HttpMethod) -> Self {
         let routing_key = format!(
@@ -773,37 +722,25 @@ impl HttpTransport {
                 .nth(2)
                 .unwrap_or("default")
         );
-        Self { url, method, headers: HashMap::new(), body: None, routing_key }
-    }
-
-    fn with_header(mut self, key: String, value: String) -> Self {
-        self.headers.insert(key, value);
-        self
-    }
-
-    fn with_body(mut self, body: serde_json::Value) -> Self {
-        self.body = Some(body);
-        self
+        Self { url, method, routing_key }
     }
 }
 
+#[cfg(test)]
+impl HttpTransport {
+    fn set_routing_key(&mut self, key: String) {
+        self.routing_key = key;
+    }
+}
+
+#[cfg(test)]
 impl RequestTransport for HttpTransport {
     fn routing_key(&self) -> String {
         self.routing_key.clone()
     }
 
-    fn set_routing_key(&mut self, key: String) {
-        self.routing_key = key;
-    }
-
     fn deduplication_id(&self) -> String {
-        // Create unique ID based on URL and body. Please use a hash function.
-        let body_str = self
-            .body
-            .as_ref()
-            .map(|b| b.to_string())
-            .unwrap_or_default();
-        format!("{}_{}_{}", self.method.as_str(), self.url, body_str)
+        format!("{}_{}", self.method.as_str(), self.url)
     }
 
     fn clone_box(&self) -> Box<dyn RequestTransport> {
@@ -815,11 +752,11 @@ impl RequestTransport for HttpTransport {
     }
 }
 
+#[cfg(test)]
 impl HttpMethod {
     fn as_str(&self) -> &str {
         match self {
             HttpMethod::Get => "GET",
-            HttpMethod::Post => "POST",
         }
     }
 }
@@ -844,54 +781,9 @@ impl RpcTransport {
         //TODO: use a better id that ensure no collisions at all
     }
 
-    pub(super) fn eth_call(
-        endpoint: String,
-        contract: Address,
-        data: Bytes,
-        block: Option<String>,
-    ) -> Self {
-        let call_object = serde_json::json!({
-            "to": format!("0x{}", hex::encode(contract.as_ref())),
-            "data": format!("0x{}", hex::encode(data.as_ref()))
-        });
-
-        let params = if let Some(block_tag) = block {
-            vec![call_object, serde_json::Value::String(block_tag)]
-        } else {
-            vec![call_object, serde_json::Value::String("latest".to_string())]
-        };
-
-        Self::new(endpoint, "eth_call".to_string(), params)
-    }
-
-    pub(super) fn multicall(
-        endpoint: String,
-        calls: Vec<(Address, Bytes)>,
-        block: Option<String>,
-    ) -> Self {
-        // Create multicall3 aggregate call data
-        // Function selector for aggregate3((address,bool,bytes)[])
-        let selector = hex::decode("82ad56cb").unwrap();
-        let call_data = selector;
-
-        // Encode array of calls
-        // This is simplified - in production you'd use proper ABI encoding
-        let _encoded_calls = calls
-            .iter()
-            .map(|(target, data)| {
-                serde_json::json!({
-                    "target": format!("0x{}", hex::encode(target.as_ref())),
-                    "allowFailure": true,
-                    "callData": format!("0x{}", hex::encode(data.as_ref()))
-                })
-            })
-            .collect::<Vec<_>>();
-
-        // Multicall3 contract address (same on most chains)
-        let multicall_address =
-            Address::from(hex::decode("cA11bde05977b3631167028862bE2a173976CA11").unwrap());
-
-        Self::eth_call(endpoint, multicall_address, Bytes::from(call_data), block)
+    #[cfg(test)]
+    pub(super) fn set_routing_key(&mut self, key: String) {
+        self.routing_key = key;
     }
 
     pub(super) fn params(&self) -> &Vec<serde_json::Value> {
@@ -914,10 +806,6 @@ impl RpcTransport {
 impl RequestTransport for RpcTransport {
     fn routing_key(&self) -> String {
         self.routing_key.clone()
-    }
-
-    fn set_routing_key(&mut self, key: String) {
-        self.routing_key = key;
     }
 
     fn deduplication_id(&self) -> String {
@@ -1024,7 +912,7 @@ mod tests {
         assert!(provider.is_none()); // Should be none since transport has different routing key
 
         // Set the routing key to the correct one
-        transport.set_routing_key(routing_key.clone());
+        transport.set_routing_key(routing_key);
         let provider = registry.get_provider(&transport);
         assert!(provider.is_some());
     }

@@ -765,7 +765,11 @@ impl Pool {
             Pool::StableSwapALend { fee, .. } |
             Pool::StableSwapNG { fee, .. } |
             Pool::StableSwapMeta { fee, .. } => Some(*fee),
-            _ => None,
+            Pool::TwoCryptoV1 { .. } |
+            Pool::TwoCryptoNG { .. } |
+            Pool::TwoCryptoStable { .. } |
+            Pool::TriCryptoV1 { .. } |
+            Pool::TriCryptoNG { .. } => None,
         }
     }
 
@@ -779,7 +783,13 @@ impl Pool {
             Pool::TriCryptoNG { mid_fee, out_fee, fee_gamma, .. } => {
                 Some((*mid_fee, *out_fee, *fee_gamma))
             }
-            _ => None,
+            Pool::StableSwapV0 { .. } |
+            Pool::StableSwapV1 { .. } |
+            Pool::StableSwapV2 { .. } |
+            Pool::StableSwapSTETH { .. } |
+            Pool::StableSwapALend { .. } |
+            Pool::StableSwapNG { .. } |
+            Pool::StableSwapMeta { .. } => None,
         }
     }
 
@@ -793,7 +803,12 @@ impl Pool {
             Pool::StableSwapSTETH { rates, .. } |
             Pool::StableSwapNG { rates, .. } |
             Pool::StableSwapMeta { rates, .. } => Some(rates),
-            _ => None,
+            Pool::StableSwapALend { .. } |
+            Pool::TwoCryptoV1 { .. } |
+            Pool::TwoCryptoNG { .. } |
+            Pool::TwoCryptoStable { .. } |
+            Pool::TriCryptoV1 { .. } |
+            Pool::TriCryptoNG { .. } => None,
         }
     }
 
@@ -804,7 +819,13 @@ impl Pool {
             Pool::TwoCryptoNG { d, .. } |
             Pool::TwoCryptoStable { d, .. } => Some(*d),
             Pool::TriCryptoV1 { d, .. } | Pool::TriCryptoNG { d, .. } => Some(*d),
-            _ => None,
+            Pool::StableSwapV0 { .. } |
+            Pool::StableSwapV1 { .. } |
+            Pool::StableSwapV2 { .. } |
+            Pool::StableSwapSTETH { .. } |
+            Pool::StableSwapALend { .. } |
+            Pool::StableSwapNG { .. } |
+            Pool::StableSwapMeta { .. } => None,
         }
     }
 
@@ -813,7 +834,14 @@ impl Pool {
         match self {
             Pool::TwoCryptoV1 { gamma, .. } | Pool::TwoCryptoNG { gamma, .. } => Some(*gamma),
             Pool::TriCryptoV1 { gamma, .. } | Pool::TriCryptoNG { gamma, .. } => Some(*gamma),
-            _ => None,
+            Pool::StableSwapV0 { .. } |
+            Pool::StableSwapV1 { .. } |
+            Pool::StableSwapV2 { .. } |
+            Pool::StableSwapSTETH { .. } |
+            Pool::StableSwapALend { .. } |
+            Pool::StableSwapNG { .. } |
+            Pool::StableSwapMeta { .. } |
+            Pool::TwoCryptoStable { .. } => None,
         }
     }
 
@@ -821,7 +849,17 @@ impl Pool {
     pub fn precision_mul(&self) -> Option<&[U256]> {
         match self {
             Pool::StableSwapALend { precision_mul, .. } => Some(precision_mul),
-            _ => None,
+            Pool::StableSwapV0 { .. } |
+            Pool::StableSwapV1 { .. } |
+            Pool::StableSwapV2 { .. } |
+            Pool::StableSwapSTETH { .. } |
+            Pool::StableSwapNG { .. } |
+            Pool::StableSwapMeta { .. } |
+            Pool::TwoCryptoV1 { .. } |
+            Pool::TwoCryptoNG { .. } |
+            Pool::TwoCryptoStable { .. } |
+            Pool::TriCryptoV1 { .. } |
+            Pool::TriCryptoNG { .. } => None,
         }
     }
 
@@ -834,7 +872,13 @@ impl Pool {
             Pool::TriCryptoV1 { precisions, .. } | Pool::TriCryptoNG { precisions, .. } => {
                 Some(precisions)
             }
-            _ => None,
+            Pool::StableSwapV0 { .. } |
+            Pool::StableSwapV1 { .. } |
+            Pool::StableSwapV2 { .. } |
+            Pool::StableSwapSTETH { .. } |
+            Pool::StableSwapALend { .. } |
+            Pool::StableSwapNG { .. } |
+            Pool::StableSwapMeta { .. } => None,
         }
     }
 
@@ -843,7 +887,16 @@ impl Pool {
         match self {
             Pool::StableSwapNG { offpeg_fee_multiplier, .. } |
             Pool::StableSwapALend { offpeg_fee_multiplier, .. } => Some(*offpeg_fee_multiplier),
-            _ => None,
+            Pool::StableSwapV0 { .. } |
+            Pool::StableSwapV1 { .. } |
+            Pool::StableSwapV2 { .. } |
+            Pool::StableSwapSTETH { .. } |
+            Pool::StableSwapMeta { .. } |
+            Pool::TwoCryptoV1 { .. } |
+            Pool::TwoCryptoNG { .. } |
+            Pool::TwoCryptoStable { .. } |
+            Pool::TriCryptoV1 { .. } |
+            Pool::TriCryptoNG { .. } => None,
         }
     }
 
@@ -856,7 +909,13 @@ impl Pool {
             Pool::TriCryptoV1 { price_scale, .. } | Pool::TriCryptoNG { price_scale, .. } => {
                 Some(price_scale)
             }
-            _ => None,
+            Pool::StableSwapV0 { .. } |
+            Pool::StableSwapV1 { .. } |
+            Pool::StableSwapV2 { .. } |
+            Pool::StableSwapSTETH { .. } |
+            Pool::StableSwapALend { .. } |
+            Pool::StableSwapNG { .. } |
+            Pool::StableSwapMeta { .. } => None,
         }
     }
 
@@ -897,7 +956,12 @@ impl Pool {
                     .ok_or(PoolError::IndexOutOfRange)? = value;
                 Ok(())
             }
-            _ => Err(PoolError::NotApplicable),
+            Pool::StableSwapALend { .. } |
+            Pool::TwoCryptoV1 { .. } |
+            Pool::TwoCryptoNG { .. } |
+            Pool::TwoCryptoStable { .. } |
+            Pool::TriCryptoV1 { .. } |
+            Pool::TriCryptoNG { .. } => Err(PoolError::NotApplicable),
         }
     }
 
@@ -914,7 +978,13 @@ impl Pool {
                 *d = value;
                 Ok(())
             }
-            _ => Err(PoolError::NotApplicable),
+            Pool::StableSwapV0 { .. } |
+            Pool::StableSwapV1 { .. } |
+            Pool::StableSwapV2 { .. } |
+            Pool::StableSwapSTETH { .. } |
+            Pool::StableSwapALend { .. } |
+            Pool::StableSwapNG { .. } |
+            Pool::StableSwapMeta { .. } => Err(PoolError::NotApplicable),
         }
     }
 
@@ -936,7 +1006,13 @@ impl Pool {
                     .ok_or(PoolError::IndexOutOfRange)? = value;
                 Ok(())
             }
-            _ => Err(PoolError::NotApplicable),
+            Pool::StableSwapV0 { .. } |
+            Pool::StableSwapV1 { .. } |
+            Pool::StableSwapV2 { .. } |
+            Pool::StableSwapSTETH { .. } |
+            Pool::StableSwapALend { .. } |
+            Pool::StableSwapNG { .. } |
+            Pool::StableSwapMeta { .. } => Err(PoolError::NotApplicable),
         }
     }
 
@@ -972,7 +1048,14 @@ impl Pool {
                 *gamma = value;
                 Ok(())
             }
-            _ => Err(PoolError::NotApplicable),
+            Pool::StableSwapV0 { .. } |
+            Pool::StableSwapV1 { .. } |
+            Pool::StableSwapV2 { .. } |
+            Pool::StableSwapSTETH { .. } |
+            Pool::StableSwapALend { .. } |
+            Pool::StableSwapNG { .. } |
+            Pool::StableSwapMeta { .. } |
+            Pool::TwoCryptoStable { .. } => Err(PoolError::NotApplicable),
         }
     }
 }

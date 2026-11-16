@@ -167,4 +167,50 @@ END $$;
 DROP FUNCTION add_fee(TEXT, TEXT, TEXT, NUMERIC, TEXT);
 DROP FUNCTION add_vault(TEXT, TEXT, TEXT, TEXT, NUMERIC, TEXT);
 DROP FUNCTION add_trade(TEXT, TEXT, INTEGER, TEXT, TEXT, NUMERIC, BOOLEAN, BOOLEAN, BOOLEAN);
+-- A paid subsidy sits next to the settled trade it was paid on; one on a discarded call, one
+-- skipped, and one whose trade was not indexed stay out of the view.
+CREATE OR REPLACE FUNCTION add_subsidy(
+    p_id TEXT, p_event TEXT, p_trade TEXT, p_token TEXT, p_amount NUMERIC
+) RETURNS VOID AS $$
+    INSERT INTO subsidies (
+        id, chain, block_number, block_time, tx_hash, log_index, payer, event, nonce, trade_id,
+        bound_to, receiver, token, amount, reason
+    ) VALUES (
+        p_id, 'robinhood', 3, '2026-09-01T00:00:00Z', '0x' || p_id, 0, '0xpayer', p_event,
+        '0xnonce' || p_id, p_trade,
+        CASE WHEN p_event = 'paid' THEN '0xuser' END, CASE WHEN p_event = 'paid' THEN '0xr' END,
+        CASE WHEN p_event = 'paid' THEN p_token END, CASE WHEN p_event = 'paid' THEN p_amount END,
+        CASE WHEN p_event = 'skipped' THEN 'insufficient_balance' END
+    );
+$$ LANGUAGE sql;
+
+DO $$
+DECLARE
+    kept TEXT[];
+    usd DOUBLE PRECISION;
+BEGIN
+    UPDATE trades SET price_out_usd = 2, decimals_out = 6, volume_usd = 100 WHERE id = 'committed';
+    PERFORM add_subsidy('s-committed', 'paid', 'committed', '0xout', 874);
+    PERFORM add_subsidy('s-other-token', 'paid', 'fill', '0xmid', 874);
+    PERFORM add_subsidy('s-discarded', 'paid', 'discarded', '0xout', 874);
+    PERFORM add_subsidy('s-skipped', 'skipped', 'committed', NULL, NULL);
+    PERFORM add_subsidy('s-no-trade', 'paid', 'not-indexed', '0xout', 874);
+
+    SELECT array_agg(tx_hash ORDER BY tx_hash) INTO kept FROM subsidized_trades;
+    IF kept IS DISTINCT FROM ARRAY['0xs-committed', '0xs-other-token'] THEN
+        RAISE EXCEPTION 'subsidized_trades kept %', kept;
+    END IF;
+
+    -- 874 raw units of a 6-decimal token at 2 USD.
+    SELECT subsidy_usd INTO usd FROM subsidized_trades WHERE tx_hash = '0xs-committed';
+    IF abs(usd - 0.001748) > 1e-9 THEN
+        RAISE EXCEPTION 'subsidy_usd is %, expected 0.001748', usd;
+    END IF;
+    -- A subsidy paid in another token than the trade's output has no price here.
+    SELECT subsidy_usd INTO usd FROM subsidized_trades WHERE tx_hash = '0xs-other-token';
+    IF usd IS NOT NULL THEN
+        RAISE EXCEPTION 'a subsidy in another token is priced: %', usd;
+    END IF;
+END $$;
+
 COMMIT;

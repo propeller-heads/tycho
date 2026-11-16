@@ -1,14 +1,11 @@
 pragma solidity ^0.8.26;
 
-import {
-    TychoRouterV3,
-    TransferManager,
-    ClientFeeParams
-} from "@src/TychoRouterV3.sol";
+import {TychoRouterV3, ClientFeeParams} from "@src/TychoRouterV3.sol";
 import "./TychoRouterTestSetup.sol";
 import {Vault__UnexpectedNonZeroCount} from "@src/Vault.sol";
 
 import {
+    TransferManager,
     TransferManager__ExceededTransferFromAllowance
 } from "@src/TransferManager.sol";
 
@@ -32,7 +29,6 @@ contract HackedCallbackDataPool is Constants {
         );
         uint256 stolenAmount = 1000 ether;
 
-        // slither-disable-next-line low-level-calls
         (bool ok,) = msg.sender
             .call(
                 abi.encodeWithSignature(
@@ -103,10 +99,8 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
         vm.startPrank(ALICE);
         IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
         bytes[] memory swaps = _getSplitSwaps();
-        // Set transient storage to allow transferFrom from ALICE
-        tychoRouter.tstoreExposed(WETH_ADDR, amountIn, false, false);
-        tychoRouter.exposedSplitSwap(
-            amountIn, 4, pleEncode(swaps), tychoRouterAddr, false
+        tychoRouter.exposedSplitSwapWithTransferFrom(
+            WETH_ADDR, amountIn, 4, pleEncode(swaps), tychoRouterAddr, false
         );
         vm.stopPrank();
 
@@ -415,10 +409,8 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             address(usv2Executor),
             wethUsdcV2OneZeroData
         );
-        // Set transient storage to allow transferFrom from ALICE
-        tychoRouter.tstoreExposed(USDC_ADDR, amountIn, false, false);
-        tychoRouter.exposedSplitSwap(
-            amountIn, 2, pleEncode(swaps), tychoRouterAddr, false
+        tychoRouter.exposedSplitSwapWithTransferFrom(
+            USDC_ADDR, amountIn, 2, pleEncode(swaps), tychoRouterAddr, false
         );
         vm.stopPrank();
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 99654537);
@@ -600,10 +592,8 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             usdcWethV3Pool2OneZeroData
         );
 
-        // Set transient storage to allow transferFrom from ALICE
-        tychoRouter.tstoreExposed(USDC_ADDR, amountIn, false, false);
-        tychoRouter.exposedSplitSwap(
-            amountIn, 2, pleEncode(swaps), tychoRouterAddr, true
+        tychoRouter.exposedSplitSwapWithTransferFrom(
+            USDC_ADDR, amountIn, 2, pleEncode(swaps), tychoRouterAddr, true
         );
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 99444510);
         assertEq(IERC20(USDC_ADDR).balanceOf(ALICE), 0);

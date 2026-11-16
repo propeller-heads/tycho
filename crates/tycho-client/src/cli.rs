@@ -16,6 +16,7 @@ use crate::{
 /// providing real-time updates about their state.
 #[derive(Parser, Debug, Clone, PartialEq)]
 #[clap(version = env!("CARGO_PKG_VERSION"))]
+#[expect(clippy::struct_excessive_bools, reason = "each bool is an independent CLI flag")]
 struct CliArgs {
     /// Tycho server URL, without protocol. Example: localhost:4242
     #[clap(long, default_value = "localhost:4242", env = "TYCHO_URL")]
@@ -32,7 +33,7 @@ struct CliArgs {
 
     /// The blockchain to index on
     #[clap(short = 'c', long, default_value = "ethereum")]
-    pub chain: String,
+    chain: String,
 
     /// Specifies exchanges. Optionally also supply a pool address in the format
     /// {exchange}-{pool_address}
@@ -235,7 +236,7 @@ async fn run(exchanges: Vec<(String, Option<String>)>, args: CliArgs) -> Result<
     };
 
     let chain = Chain::from_str(&args.chain)
-        .map_err(|_| format!("Unknown chain: {chain}", chain = args.chain))?;
+        .map_err(|e| format!("Unknown chain: {chain}: {e}", chain = args.chain))?;
 
     let mut builder = TychoStreamBuilder::new(&args.tycho_url, chain)
         .auth_key(args.auth_key)
@@ -314,7 +315,7 @@ async fn run(exchanges: Vec<(String, Option<String>)>, args: CliArgs) -> Result<
 
     Err(format!(
         "{failed_task} task terminated: {}",
-        shutdown_reason.unwrap_or("unknown reason".to_string())
+        shutdown_reason.unwrap_or_else(|| "unknown reason".to_string())
     ))
 }
 

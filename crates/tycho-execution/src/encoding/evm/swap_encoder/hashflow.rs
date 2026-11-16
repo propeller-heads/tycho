@@ -18,7 +18,10 @@ use crate::encoding::{
 pub struct HashflowSwapEncoder {
     executor_address: Bytes,
     runtime_handle: Handle,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "owns the runtime behind `runtime_handle`; dropping it would shut the runtime down"
+    )]
     runtime: SafeRuntime,
 }
 
@@ -47,16 +50,20 @@ impl SwapEncoder for HashflowSwapEncoder {
         let amount_in = swap
             .estimated_amount_in()
             .as_ref()
-            .ok_or(EncodingError::FatalError(
-                "Estimated amount in is mandatory for a Hashflow swap".to_string(),
-            ))?
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "Estimated amount in is mandatory for a Hashflow swap".to_string(),
+                )
+            })?
             .clone();
         let router_address = encoding_context
             .router_address
             .clone()
-            .ok_or(EncodingError::FatalError(
-                "The router address is needed to perform a Hashflow swap".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "The router address is needed to perform a Hashflow swap".to_string(),
+                )
+            })?;
         let signed_quote = on_blocking_thread(|| {
             self.runtime_handle.block_on(async {
                 protocol_state
@@ -95,9 +102,11 @@ impl SwapEncoder for HashflowSwapEncoder {
             let value = signed_quote
                 .quote_attributes
                 .get(*field)
-                .ok_or(EncodingError::FatalError(format!(
-                    "Hashflow quote must have a {field} attribute"
-                )))?;
+                .ok_or_else(|| {
+                    EncodingError::FatalError(format!(
+                        "Hashflow quote must have a {field} attribute"
+                    ))
+                })?;
             hashflow_calldata.extend_from_slice(value);
         }
         let args = (&hashflow_calldata[..],);
@@ -134,11 +143,11 @@ mod test {
         models::{default_token, Swap},
     };
 
-    fn hashflow_config() -> Option<HashMap<String, String>> {
-        Some(HashMap::from([(
+    fn hashflow_config() -> HashMap<String, String> {
+        HashMap::from([(
             "hashflow_router_address".to_string(),
             "0x55084eE0fEf03f14a305cd24286359A35D735151".to_string(),
-        )]))
+        )])
     }
 
     #[test]
@@ -163,15 +172,15 @@ mod test {
 
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             origin: None,
         };
 
         let encoder = HashflowSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            hashflow_config(),
+            Some(hashflow_config()),
         )
         .unwrap();
         encoder
@@ -213,9 +222,8 @@ mod test {
         HashflowSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            hashflow_config(),
-        )
-        .unwrap()
+            Some(hashflow_config()),
+        )?
         .encode_swap(swap, &encoding_context)
     }
 
@@ -342,15 +350,15 @@ mod test {
 
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             origin: None,
         };
 
         let encoder = HashflowSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            hashflow_config(),
+            Some(hashflow_config()),
         )
         .unwrap();
 

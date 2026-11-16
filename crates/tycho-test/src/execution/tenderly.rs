@@ -170,6 +170,7 @@ pub fn build_tenderly_url(
     format!("https://dashboard.tenderly.co/tvinagre/project/simulator/new?{}", query_string)
 }
 
+#[expect(clippy::ref_option, reason = "public API; changing the signature is a breaking change")]
 pub fn get_overwrites_string(
     overwrites: &AddressHashMap<AccountOverride>,
     metadata: &Option<OverwriteMetadata>,
@@ -216,7 +217,7 @@ pub fn get_overwrites_string(
                                         owner, spender, amount
                                     ));
                                 }
-                                _ => {}
+                                SlotMetadata::Balance { .. } | SlotMetadata::Allowance { .. } => {}
                             }
                         }
                     }

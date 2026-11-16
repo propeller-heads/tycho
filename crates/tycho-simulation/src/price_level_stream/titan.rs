@@ -392,7 +392,10 @@ pub(super) fn validate(
         .into_iter()
         .map(|raw| {
             serde_json::from_str::<TitanVenueOverride>(raw.get())
-                .map_err(|_| EntryRejection::Undecodable)
+                .map_err(|e| {
+                    warn!(error = %e, "Titan venue entry does not decode");
+                    EntryRejection::Undecodable
+                })
                 .and_then(validated)
         })
         .collect()
@@ -924,6 +927,10 @@ mod tests {
                 {
                     return;
                 }
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the fake peer may already be gone; that is not a test failure"
+                )]
                 let _ = socket.send(Message::Close(None)).await;
             })
             .await;
@@ -953,6 +960,10 @@ mod tests {
     fn a_reconnect_names_the_socket_it_happened_on() {
         let ((), snapshot) = record_async(async {
             let fake = FakeTitan::spawn(|_, mut socket| async move {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the fake peer may already be gone; that is not a test failure"
+                )]
                 let _ = socket.send(Message::Close(None)).await;
             })
             .await;
@@ -960,6 +971,10 @@ mod tests {
             tokio::pin!(stream);
             // The fake sends no message, so the stream yields nothing; polling it drives the
             // connect, close and back-off loop.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
         });
 
@@ -1219,20 +1234,20 @@ mod tests {
         }
 
         /// The result of validating this entry, which the message carries as its only one.
-        fn outcome(&self) -> Result<VenueOverrides, EntryRejection> {
-            let mut outcomes = validate(parsed(&self.message()));
-            assert_eq!(outcomes.len(), 1, "expected exactly one venue entry");
-            outcomes.remove(0)
+        fn outcome(&self) -> [Result<VenueOverrides, EntryRejection>; 1] {
+            validate(parsed(&self.message()))
+                .try_into()
+                .expect("expected exactly one venue entry")
         }
 
         fn rejection(&self) -> EntryRejection {
-            self.outcome()
-                .expect_err("the entry was accepted")
+            let [outcome] = self.outcome();
+            outcome.expect_err("the entry was accepted")
         }
 
         fn validated(&self) -> VenueOverrides {
-            self.outcome()
-                .expect("the entry was refused")
+            let [outcome] = self.outcome();
+            outcome.expect("the entry was refused")
         }
     }
 

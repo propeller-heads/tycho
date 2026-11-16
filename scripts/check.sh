@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+: "${RUST_NIGHTLY:?is set in mise.toml; activate mise or run this through mise exec --}"
 
-cargo +nightly fmt --all --check
-cargo clippy --workspace --all --all-features --all-targets -- -D warnings
+cargo +"$RUST_NIGHTLY" fmt --all --check
+cargo +"$RUST_NIGHTLY" clippy --workspace --all --all-features --all-targets -- -D warnings
 cargo nextest run --workspace --all-targets --all-features -E 'not test(serial_db)'
 cargo nextest run --workspace --all-targets --all-features -E 'test(serial_db)'
 

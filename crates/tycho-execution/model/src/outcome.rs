@@ -16,19 +16,8 @@ impl<T: Log> Outcome<T> {
     pub fn new(params: Params, mut state: State, mut vault: Vault, log: T) -> Self {
         // in order to keep the serialized output readable and compact
         // remove zero valued entries in various maps
-        state
-            .owner_to_eth_balance
-            .retain(|_, v| *v != 0);
-        state
-            .owner_and_token_to_balance
-            .retain(|_, v| *v != 0);
-        state
-            .token_and_owner_and_spender_to_allowance
-            .retain(|_, v| *v != 0);
-        vault
-            .owner_and_token_to_balance
-            .retain(|_, v| *v != 0);
-        vault.deltas.retain(|_, v| *v != 0);
+        state.drop_zero_entries();
+        vault.drop_zero_entries();
 
         Self { params, state, vault, log }
     }
@@ -53,7 +42,7 @@ impl<T: Log> Outcome<T> {
     /// ClientFeeReceiver by signing the client fee params.
     fn sender_vault_eth_change(&self) -> i64 {
         let mut total = 0;
-        for ((owner, token), balance) in &self.vault.owner_and_token_to_balance {
+        for ((owner, token), balance) in self.vault.token_balances() {
             if owner.is_sender_controlled() &&
                 (*token == Address::NativeETH || *token == Address::WETH)
             {
@@ -67,12 +56,12 @@ impl<T: Log> Outcome<T> {
     /// A negative value means the router lost tokens.
     pub fn final_router_eth_balance(&self) -> i64 {
         self.state
-            .owner_to_eth_balance
+            .eth_balances()
             .get(&Address::Router)
             .copied()
             .unwrap_or(0) +
             self.state
-                .owner_and_token_to_balance
+                .token_balances()
                 .get(&(Address::Router, Address::WETH))
                 .copied()
                 .unwrap_or(0)
@@ -83,12 +72,12 @@ impl<T: Log> Outcome<T> {
     /// across all addresses they control ([Address::is_sender_controlled]).
     pub fn final_caller_eth_balance(&self) -> i64 {
         let mut total_eth = 0;
-        for (owner, balance) in &self.state.owner_to_eth_balance {
+        for (owner, balance) in self.state.eth_balances() {
             if owner.is_sender_controlled() {
                 total_eth += balance;
             }
         }
-        for ((owner, token), balance) in &self.state.owner_and_token_to_balance {
+        for ((owner, token), balance) in self.state.token_balances() {
             if owner.is_sender_controlled() {
                 // TODO if you introduce other value holding erc20 tokens,
                 // make sure to add code for them here and introduce
@@ -98,10 +87,7 @@ impl<T: Log> Outcome<T> {
                 }
             }
         }
-        for ((token, _, spender), router_allowance) in &self
-            .state
-            .token_and_owner_and_spender_to_allowance
-        {
+        for ((token, _, spender), router_allowance) in self.state.allowances() {
             if spender.is_sender_controlled() {
                 // TODO if you introduce other value holding erc20 tokens,
                 // make sure to add code for them here and introduce
@@ -111,7 +97,7 @@ impl<T: Log> Outcome<T> {
                 }
             }
         }
-        for ((owner, token), balance) in &self.vault.owner_and_token_to_balance {
+        for ((owner, token), balance) in self.vault.token_balances() {
             if owner.is_sender_controlled() {
                 // TODO if you introduce other value holding erc20 tokens,
                 // make sure to add code for them here and introduce
@@ -141,49 +127,28 @@ impl<T: Log + Serialize> Serialize for Outcome<T> {
             s.serialize_entry("final_router_eth_balance", &final_router_eth_balance)?;
         }
 
-        if !self
-            .state
-            .owner_to_eth_balance
-            .is_empty()
-        {
-            s.serialize_entry("eth_balance", &self.state.owner_to_eth_balance)?;
+        if !self.state.eth_balances().is_empty() {
+            s.serialize_entry("eth_balance", self.state.eth_balances())?;
         }
 
-        if !self
-            .state
-            .owner_and_token_to_balance
-            .is_empty()
-        {
-            s.serialize_entry("erc20_balance", &self.state.owner_and_token_to_balance)?;
+        if !self.state.token_balances().is_empty() {
+            s.serialize_entry("erc20_balance", self.state.token_balances())?;
         }
 
-        if !self
-            .state
-            .token_and_owner_and_spender_to_allowance
-            .is_empty()
-        {
-            s.serialize_entry(
-                "erc20_allowance",
-                &self
-                    .state
-                    .token_and_owner_and_spender_to_allowance,
-            )?;
+        if !self.state.allowances().is_empty() {
+            s.serialize_entry("erc20_allowance", self.state.allowances())?;
         }
 
-        if !self
-            .vault
-            .owner_and_token_to_balance
-            .is_empty()
-        {
-            s.serialize_entry("vault_balance", &self.vault.owner_and_token_to_balance)?;
+        if !self.vault.token_balances().is_empty() {
+            s.serialize_entry("vault_balance", self.vault.token_balances())?;
         }
 
         if self.vault._get_nonzero_delta_count() > 0 {
             s.serialize_entry("nonzero_delta_count", &self.vault._get_nonzero_delta_count())?;
         }
 
-        if !self.vault.deltas.is_empty() {
-            s.serialize_entry("vault_delta", &self.vault.deltas)?;
+        if !self.vault.deltas().is_empty() {
+            s.serialize_entry("vault_delta", self.vault.deltas())?;
         }
 
         if !self.log.is_empty() {

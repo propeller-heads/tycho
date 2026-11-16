@@ -55,7 +55,7 @@ mod tests {
 
     use super::{
         addresses::{
-            ORACLE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS, SIGNED_EXCLUSIVE_SWAP_V3_3_ADDRESS,
+            ORACLE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_ADDRESS, SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS,
         },
         *,
     };
@@ -89,9 +89,9 @@ mod tests {
     }
 
     #[test]
-    fn signed_exclusive_swap_v3_3_chains() {
-        for chain in [Chain::Robinhood, Chain::Bsc, Chain::Base] {
-            let mut signed = with_extension(SIGNED_EXCLUSIVE_SWAP_V3_3_ADDRESS);
+    fn signed_exclusive_swap_chains() {
+        for chain in [Chain::Ethereum, Chain::Robinhood, Chain::Bsc, Chain::Base] {
+            let mut signed = with_extension(SIGNED_EXCLUSIVE_SWAP_ADDRESS);
             signed.component.chain = chain;
 
             assert!(!filter_fn(&signed), "{chain} pool passed the default filter");
@@ -100,12 +100,12 @@ mod tests {
     }
 
     #[test]
-    fn signed_exclusive_swap_address_on_another_chain() {
-        // The default component chain is Ethereum, which only has the v3.2.0 deployment.
-        let v3_3_on_ethereum = with_extension(SIGNED_EXCLUSIVE_SWAP_V3_3_ADDRESS);
+    fn signed_exclusive_swap_on_undeployed_chain() {
+        let mut on_unichain = with_extension(SIGNED_EXCLUSIVE_SWAP_ADDRESS);
+        on_unichain.component.chain = Chain::Unichain;
 
-        assert!(!filter_fn(&v3_3_on_ethereum));
-        assert!(!filter_fn_with_signed_exclusive_swap(&v3_3_on_ethereum));
+        assert!(!filter_fn(&on_unichain));
+        assert!(!filter_fn_with_signed_exclusive_swap(&on_unichain));
     }
 
     #[test]

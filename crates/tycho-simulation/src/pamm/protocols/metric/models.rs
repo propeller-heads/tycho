@@ -32,13 +32,17 @@ pub struct PaginatedMetadataResponse {
     pub next_offset: Option<u64>,
 }
 
+/// One Metric pool's address, tokens, USD TVL and pause level.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetricMetadata {
+    /// The pool contract's address.
     #[serde(deserialize_with = "evm_address::deserialize")]
     pub pool_address: Bytes,
+    /// The pool's first token; bids and asks are quoted for it.
     #[serde(deserialize_with = "evm_address::deserialize")]
     pub token0: Bytes,
+    /// The pool's second token, in which token0 is priced.
     #[serde(deserialize_with = "evm_address::deserialize")]
     pub token1: Bytes,
     /// Total value locked in the requested fiat currency, used directly as the component TVL.
@@ -119,6 +123,8 @@ impl From<MetricBatchBidAskError> for FeedError {
     }
 }
 
+/// One pool's quote from Metric's bid/ask endpoints.
+///
 /// Metric returns its numeric fields as decimal strings; they are parsed once at deserialization
 /// (`DisplayFromStr`) so the pricing paths never re-parse, and serialize back to the same form.
 #[serde_as]
@@ -149,18 +155,24 @@ pub struct MetricBidAskResponse {
     pub depth: MetricDepth,
 }
 
+/// The depth of one pool's book: the bins a swap walks, per side.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MetricDepth {
+    /// Bins walked when buying token0 with token1.
     #[serde(default)]
     pub asks: Vec<MetricDepthBin>,
+    /// Bins walked when selling token0 for token1.
     #[serde(default)]
     pub bids: Vec<MetricDepthBin>,
 }
 
+/// One boundary of a side's depth: the price there and what a swap has consumed and received by
+/// reaching it.
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetricDepthBin {
+    /// The bin's index on Metric's price grid.
     pub bin_idx: i64,
     /// Fee-adjusted price at this bin boundary, Q64.64.
     #[serde_as(as = "DisplayFromStr")]
@@ -230,6 +242,25 @@ fn q64_to_f64(value: &BigUint) -> Result<f64, FeedError> {
         .to_f64()
         .ok_or_else(|| FeedError::Parsing(format!("Q64 price does not fit in f64: {value}")))?;
     Ok(raw / Q64_FLOAT)
+}
+
+/// The pools one Metric poll quoted, in whatever order the venue answered.
+///
+/// The serde form follows the venue API models, so the writer and the reader must run the same
+/// tycho-simulation version.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MetricPrices {
+    /// One entry per pool the poll quoted.
+    pub pools: Vec<MetricPoolPrice>,
+}
+
+/// One pool's metadata and bid/ask quote.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MetricPoolPrice {
+    /// The pool's tokens, TVL and pause level.
+    pub metadata: MetricMetadata,
+    /// The pool's quote.
+    pub bid_ask: MetricBidAskResponse,
 }
 
 #[cfg(test)]

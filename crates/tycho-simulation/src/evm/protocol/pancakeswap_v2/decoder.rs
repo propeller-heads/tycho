@@ -25,7 +25,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PancakeswapV2State {
         _all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
-        let (reserve0, reserve1) = cpmm_try_from_with_header(snapshot)?;
+        let (reserve0, reserve1) = cpmm_try_from_with_header(&snapshot)?;
         Ok(Self::new(reserve0, reserve1))
     }
 }

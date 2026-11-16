@@ -32,7 +32,7 @@ impl SwapEncoder for MetricFallbackSwapEncoder {
         swap: &Swap,
         encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let fallback = FallbackSwap::from_user_data(swap.user_data())?;
+        let fallback = FallbackSwap::from_user_data(swap.user_data().as_ref())?;
         if !fallback
             .protocol
             .supported_on(self.chain)
@@ -100,8 +100,7 @@ mod tests {
             origin: None,
         };
 
-        MetricFallbackSwapEncoder::new(Bytes::default(), chain, None)
-            .unwrap()
+        MetricFallbackSwapEncoder::new(Bytes::default(), chain, None)?
             .encode_swap(&swap, &encoding_context)
             .map(|encoded| encode(&encoded))
     }

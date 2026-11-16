@@ -42,6 +42,10 @@ pub struct EtherscanAddress {
 }
 
 /// Etherscan identifier for trace addresses
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; making every field public or private is a breaking change"
+)]
 pub struct EtherscanIdentifier {
     /// The Etherscan client
     client: Arc<Client>,
@@ -98,7 +102,7 @@ impl EtherscanIdentifier {
 
         for &address in addresses {
             if let Some(metadata) = self.contracts.get(&address) {
-                identities.push(self.identify_from_metadata(address, metadata));
+                identities.push(Self::identify_from_metadata(address, metadata));
             } else {
                 fetcher.push(address);
             }
@@ -107,7 +111,7 @@ impl EtherscanIdentifier {
         // Fetch unknown contracts
         let mut fetched_stream = Box::pin(fetcher);
         while let Some((address, metadata)) = fetched_stream.next().await {
-            let identity = self.identify_from_metadata(address, &metadata);
+            let identity = Self::identify_from_metadata(address, &metadata);
             self.contracts.insert(address, metadata);
             identities.push(identity);
         }
@@ -115,7 +119,7 @@ impl EtherscanIdentifier {
         identities
     }
 
-    fn identify_from_metadata(&self, address: Address, metadata: &Metadata) -> EtherscanAddress {
+    fn identify_from_metadata(address: Address, metadata: &Metadata) -> EtherscanAddress {
         let label = metadata.contract_name.clone();
         let abi = metadata.abi().ok().map(Cow::Owned);
         EtherscanAddress { address, label: Some(label.clone()), contract: Some(label), abi }
@@ -130,7 +134,15 @@ fn convert_chain(chain: &tycho_common::models::Chain) -> alloy_chains::Chain {
         Chain::Base => alloy_chains::Chain::from_id(8453),
         Chain::Arbitrum => alloy_chains::Chain::from_id(42161),
         Chain::Unichain => alloy_chains::Chain::from_id(1291), // Unichain testnet
-        _ => alloy_chains::Chain::from_id(1),                  // Default to mainnet
+        Chain::Starknet |
+        Chain::ZkSync |
+        Chain::Bsc |
+        Chain::Polygon |
+        Chain::Plasma |
+        Chain::Robinhood |
+        Chain::Arc |
+        Chain::Custom(_) |
+        _ => alloy_chains::Chain::from_id(1), // Default to mainnet
     }
 }
 

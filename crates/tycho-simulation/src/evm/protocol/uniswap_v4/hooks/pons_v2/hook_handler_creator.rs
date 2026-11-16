@@ -46,7 +46,7 @@ fn bps_attribute(
     }
 
     let value = U256::from_be_slice(raw);
-    u16::try_from(value).map_err(|_| {
+    u16::try_from(value).map_err(|_out_of_range| {
         InvalidSnapshotError::ValueError(format!(
             "{name} = {value} does not fit the uint16 the contract stores it in"
         ))

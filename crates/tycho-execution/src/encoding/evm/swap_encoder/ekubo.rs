@@ -37,21 +37,31 @@ impl SwapEncoder for EkuboSwapEncoder {
         let fee = u64::from_be_bytes(
             get_static_attribute(swap, "fee")?
                 .try_into()
-                .map_err(|_| EncodingError::FatalError("fee should be an u64".to_string()))?,
+                .map_err(|e: Vec<u8>| {
+                    EncodingError::FatalError(format!(
+                        "fee should be an u64, got {} bytes",
+                        e.len()
+                    ))
+                })?,
         );
 
         let tick_spacing = u32::from_be_bytes(
             get_static_attribute(swap, "tick_spacing")?
                 .try_into()
-                .map_err(|_| {
-                    EncodingError::FatalError("tick_spacing should be an u32".to_string())
+                .map_err(|e: Vec<u8>| {
+                    EncodingError::FatalError(format!(
+                        "tick_spacing should be an u32, got {} bytes",
+                        e.len()
+                    ))
                 })?,
         );
 
         let extension: Address = get_static_attribute(swap, "extension")?
             .as_slice()
             .try_into()
-            .map_err(|_| EncodingError::FatalError("extension should be an address".to_string()))?;
+            .map_err(|_wrong_length| {
+                EncodingError::FatalError("extension should be an address".to_string())
+            })?;
 
         let mut encoded = vec![];
 
@@ -109,8 +119,8 @@ mod tests {
         );
 
         let encoding_context = EncodingContext {
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             router_address: Some(Bytes::default()),
             origin: None,
         };
@@ -163,7 +173,7 @@ mod tests {
                 ]),
                 ..Default::default()
             },
-            default_token(group_token_in.clone()),
+            default_token(group_token_in),
             default_token(intermediary_token.clone()),
             BigUint::ZERO,
         );
@@ -178,8 +188,8 @@ mod tests {
                 ]),
                 ..Default::default()
             },
-            default_token(intermediary_token.clone()),
-            default_token(group_token_out.clone()),
+            default_token(intermediary_token),
+            default_token(group_token_out),
             BigUint::ZERO,
         );
 
