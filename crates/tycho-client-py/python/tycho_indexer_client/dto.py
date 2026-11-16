@@ -108,6 +108,8 @@ class Header(BaseModel):
     hash: HexBytes
     parent_hash: HexBytes
     revert: bool
+    timestamp: Optional[int] = None
+    partial_block_index: Optional[int] = None
 
 
 class Block(BaseModel):
@@ -257,10 +259,12 @@ class SynchronizerState(BaseModel):
     header: Optional[Header] = None
 
     def __init__(self, status: SynchronizerStateEnum, **kwargs):
-        if len(kwargs) == 4:
+        if "header" in kwargs:
+            header = kwargs["header"]
+        elif "hash" in kwargs:
             header = Header(**kwargs)
         else:
-            header = kwargs.get("header", None)
+            header = None
         super().__init__(status=status, header=header)
 
 

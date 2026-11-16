@@ -18,6 +18,7 @@ Reusable build/deploy steps are delegated to [propeller-heads/ci-cd-templates](h
 | `ci-substreams.yaml` | PR (`substreams/`), manual | Lint and unit tests for changed substreams packages |
 | `ci-substreams-integration.yaml` | PR (`protocols/substreams/`, `protocols/testing/`), manual | Full protocol integration tests against a live DB |
 | `ci-router-trades.yaml` | PR/push (`crates/tycho-execution/substreams/`), manual | Router-trades lint, WASM build, unit tests, and PostgreSQL pricing integration |
+| `ci-python-client.yaml` | PR/push (`crates/tycho-client-py/`, `crates/tycho-client/`), manual | Python client tests with the pinned dependencies |
 | `release-router-trades.yaml` | Manual | Build and publish one router-trades `.spkg` per chain to S3, where the sink containers fetch the version pinned in helm |
 | `cd-deploy-dev.yaml` | Manual | Build a branch image and deploy it to dev |
 | `promote-to-prod.yaml` | Manual | Promote a tagged dev image to production |
