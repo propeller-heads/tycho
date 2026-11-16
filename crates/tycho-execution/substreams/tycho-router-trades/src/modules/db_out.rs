@@ -65,6 +65,10 @@ pub fn db_out(
         if !ev.client.is_empty() {
             row.set("client", hex_addr(&ev.client));
         }
+        if !ev.token0.is_empty() {
+            row.set("token0", hex_addr(&ev.token0))
+                .set("token1", hex_addr(&ev.token1));
+        }
         if !ev.old_value.is_empty() {
             row.set("old_value", &ev.old_value);
         }
@@ -208,6 +212,8 @@ fn insert_trade(tables: &mut Tables, t: &Trade) -> Result<()> {
             .set("positive_slippage_enabled", f.positive_slippage_enabled)
             .set("router_positive_slippage_bps", f.router_positive_slippage_bps)
             .set("client_positive_slippage_share_bps", f.client_positive_slippage_share_bps)
+            .set("positive_slippage_cap_bps", f.positive_slippage_cap_bps)
+            .set("token_pair_fee", f.token_pair_fee)
             .set("fee_bps_scale", f.bps_scale);
     }
     if !t.fees_taken.is_empty() {

@@ -197,6 +197,14 @@ pub struct RouterFeeConfig {
     /// The client's share of the captured surplus, in fee units. The router keeps the rest.
     #[prost(uint64, tag="10")]
     pub client_positive_slippage_share_bps: u64,
+    /// Most surplus the router captures from this trade, as a part of the swaps' output before fees,
+    /// in fee units. 100000000 when the client has no cap, the same value the FeeCalculator reports.
+    #[prost(uint64, tag="11")]
+    pub positive_slippage_cap_bps: u64,
+    /// Whether the calculator has a pair fee for this trade's token pair. fee_on_output_bps already
+    /// applies it: it replaces the default fee, and against a custom fee the lower of the two applies.
+    #[prost(bool, tag="12")]
+    pub token_pair_fee: bool,
 }
 /// One recipient of the FeesTaken event.
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -255,6 +263,11 @@ pub struct FeeConfigEvent {
     /// uint32, so an event that carries one has a different topic in each.
     #[prost(uint64, tag="12")]
     pub bps_scale: u64,
+    /// The token pair of TokenPair* events, lower address first; empty otherwise.
+    #[prost(bytes="vec", tag="13")]
+    pub token0: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes="vec", tag="14")]
+    pub token1: ::prost::alloc::vec::Vec<u8>,
 }
 /// Every ERC-6909 Transfer a router emitted in one block.
 ///
