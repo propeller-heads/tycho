@@ -35,7 +35,8 @@ pub const ENABLE_NONZERO_FEE_BPS: bool = false;
 pub const ENABLE_POSITIVE_SLIPPAGE: bool = false;
 
 /// Setting this to `true` introduces a fault,
-/// a transfer of 1000 WETH from the router fee receiver to `msg.sender` inside `singleSwap`,
+/// the router pulling 1000 WETH from [Address::Victim](crate::Address::Victim) to `msg.sender`
+/// through the victim's standing approval inside `singleSwap`,
 /// and should result in the output of suspicious [Outcome](crate::Outcome)s.
 /// useful as a sanity check or when debugging the code that finds
 /// [Outcome](crate::Outcome)s suspicious and serializes them.

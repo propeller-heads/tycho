@@ -158,9 +158,10 @@ pub fn single_swap(
     _tstore_transfer_from_info(state, token_in, amount_in, false);
 
     if crate::config::INTRODUCE_FAULT {
-        state.erc20_safe_transfer(
+        state.erc20_safe_transfer_from(
             Address::WETH,
-            Address::RouterFeeReceiver,
+            Address::Router,
+            Address::Victim,
             Address::Sender,
             1000,
         )?;

@@ -20,23 +20,41 @@ impl<T: Log> Outcome<T> {
         Self { params, state, log }
     }
 
-    /// The [Outcome] is considered suspicious if the caller ends up with more ETH or WETH on the
-    /// addresses they control ([Address::is_sender_controlled]) than the router lost or approved to
-    /// them.
+    /// The [Outcome] is considered suspicious if [Address::Victim] lost ETH or WETH, or if the
+    /// caller ends up with more ETH or WETH on the addresses they control
+    /// ([Address::is_sender_controlled]) than the router lost or approved to them.
     ///
     /// Tokens held by the router are considered lost, so taking them is not suspicious. Any gain
     /// beyond them came from someone else, for example the router fee receiver.
     pub fn is_suspicious(&self) -> bool {
+        if self.final_victim_eth_balance() < 0 {
+            return true;
+        }
         let msg_value: i64 = self
             .params
             .get("msg_value")
             .unwrap_or(0);
         let caller_gain = self.final_caller_eth_balance() - msg_value;
-        caller_gain > self.router_eth_given_up()
+        caller_gain > self.router_eth_lost_or_approved()
+    }
+
+    /// On-chain ETH and WETH balance delta of [Address::Victim].
+    /// A negative value means someone took the victim's tokens.
+    fn final_victim_eth_balance(&self) -> i64 {
+        self.state
+            .eth_balances()
+            .get(&Address::Victim)
+            .copied()
+            .unwrap_or(0) +
+            self.state
+                .token_balances()
+                .get(&(Address::Victim, Address::WETH))
+                .copied()
+                .unwrap_or(0)
     }
 
     /// ETH and WETH the router lost or approved to addresses the caller controls.
-    fn router_eth_given_up(&self) -> i64 {
+    fn router_eth_lost_or_approved(&self) -> i64 {
         let mut total = -self.final_router_eth_balance();
         for ((token, owner, spender), allowance) in self.state.allowances() {
             if *owner == Address::Router &&
