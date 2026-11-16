@@ -22,7 +22,7 @@ contract TychoRouterChecksTest is TychoRouterTestSetup {
         return 24480104;
     }
 
-    function testMsgValueDoesNotMatchAmountIn() public {
+    function testInvalidMsgValue() public {
         // Alice sends 1 ETH less than her declared input amount - revert.
         uint256 amountIn = 1 ether;
         deal(ALICE, amountIn);
@@ -32,7 +32,7 @@ contract TychoRouterChecksTest is TychoRouterTestSetup {
         vm.startPrank(ALICE);
         vm.expectRevert(
             abi.encodeWithSelector(
-                TychoRouter__MsgValueDoesNotMatchAmountIn.selector,
+                TychoRouter__InvalidMsgValue.selector,
                 amountIn - 1,
                 amountIn
             )
@@ -66,7 +66,7 @@ contract TychoRouterChecksTest is TychoRouterTestSetup {
         IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
         vm.expectRevert(
             abi.encodeWithSelector(
-                TychoRouter__MsgValueDoesNotMatchAmountIn.selector, amountIn, 0
+                TychoRouter__InvalidMsgValue.selector, amountIn, 0
             )
         );
         tychoRouter.singleSwap{value: amountIn}(
@@ -91,7 +91,7 @@ contract TychoRouterChecksTest is TychoRouterTestSetup {
         vm.startPrank(ALICE);
         vm.expectRevert(
             abi.encodeWithSelector(
-                TychoRouter__MsgValueDoesNotMatchAmountIn.selector, 0, amountIn
+                TychoRouter__InvalidMsgValue.selector, 0, amountIn
             )
         );
         tychoRouter.singleSwap(
@@ -119,7 +119,7 @@ contract TychoRouterChecksTest is TychoRouterTestSetup {
         vm.startPrank(ALICE);
         vm.expectRevert(
             abi.encodeWithSelector(
-                TychoRouter__MsgValueDoesNotMatchAmountIn.selector, 0, amountIn
+                TychoRouter__InvalidMsgValue.selector, 0, amountIn
             )
         );
         tychoRouter.singleSwapPermit2(

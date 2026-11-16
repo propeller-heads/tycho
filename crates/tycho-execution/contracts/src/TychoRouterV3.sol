@@ -72,9 +72,7 @@ import {IFeeCalculator} from "@interfaces/IFeeCalculator.sol";
 error TychoRouter__AddressZero();
 error TychoRouter__NotAContract(address addr);
 error TychoRouter__EmptySwaps();
-error TychoRouter__MsgValueDoesNotMatchAmountIn(
-    uint256 msgValue, uint256 expectedMsgValue
-);
+error TychoRouter__InvalidMsgValue(uint256 msgValue, uint256 expectedMsgValue);
 error TychoRouter__NegativeSlippage(uint256 amount, uint256 minAmount);
 error TychoRouter__AmountOutZero();
 error TychoRouter__InvalidMinAmountOut(
@@ -1088,9 +1086,7 @@ contract TychoRouterV3 is
     {
         uint256 expectedMsgValue = tokenIn == ETH_ADDRESS ? amountIn : 0;
         if (msg.value != expectedMsgValue) {
-            revert TychoRouter__MsgValueDoesNotMatchAmountIn(
-                msg.value, expectedMsgValue
-            );
+            revert TychoRouter__InvalidMsgValue(msg.value, expectedMsgValue);
         }
     }
 

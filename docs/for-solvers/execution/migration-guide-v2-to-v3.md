@@ -569,6 +569,7 @@ function mustOutputThroughRouter(uint32 clientFeeBps, address client, address to
 |----------------------------------------------------|------------------------------------------------|
 | `TychoRouter__InvalidReceiver(receiver)`           | `receiver` is the TychoRouterV3 address        |
 | `TransferManager__Permit2AmountTooLarge(amountIn)` | A Permit2 `amountIn` above `type(uint160).max` |
-| `TychoRouter__MsgValueDoesNotMatchAmountIn(msgValue, expectedMsgValue)` | `msg.value` differs from `amountIn` for native ETH input, or is non-zero for any other input |
+| `TychoRouter__InvalidMsgValue(msgValue, expectedMsgValue)` | `msg.value` differs from `amountIn` for native ETH input, or is non-zero for any other input |
 
 The router no longer raises any `Vault__*` or `ERC6909*` error, or `TychoRouter__NegativeOutputDelta`.
+`TychoRouter__InvalidMsgValue` replaces `TychoRouter__MsgValueDoesNotMatchAmountIn`, with the same fields.
