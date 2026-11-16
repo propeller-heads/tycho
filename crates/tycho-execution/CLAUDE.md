@@ -73,6 +73,14 @@ delta when tokens arrive at the router, negative when they leave. `nonZeroDeltaC
 
 **External methods**: `deposit(token, amount)` and `withdraw(token, amount)`. Supports native ETH via `address(0)`.
 
+**Delta casts**: every `uint256` amount enters the deltas through `SafeCast.toInt256`, which reverts above
+`type(int256).max`. A raw cast would turn an amount near 2^256 into a credit for a token the router never received.
+
+**Vault pause**: `pauseVault` (`PAUSER_ROLE`) and `unpauseVault` (`UNPAUSER_ROLE`) on TychoRouterV3 block `deposit`
+and the three `*UsingVault` entry points with `Vault__Paused`; `vaultPaused()` reads the flag. Other swaps and
+withdrawals keep working, and so do vault credits and debits inside them (fees, outputs to the router, client
+contributions). `pause()` still stops everything but `withdraw`.
+
 **Fee accounting**: Fees credited directly to fee receivers' vault balances via `_creditVault()` -- persistent storage
 writes (~22k gas each) but no ERC20 transfers.
 
