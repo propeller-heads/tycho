@@ -134,15 +134,18 @@ final AS (
            c.volume_usd::double precision AS volume_usd,
            c.in_decimals,
            c.out_decimals,
-           -- The valued side keeps its own unit price; the other side is implied by this trade.
-           COALESCE(
-               c.in_unit,
-               c.volume_usd / (NULLIF(c.amount_in, 0) / power(10::numeric, c.in_decimals))
-           )::double precision AS price_in_usd,
-           COALESCE(
-               c.out_unit,
-               c.volume_usd / (NULLIF(c.amount_out, 0) / power(10::numeric, c.out_decimals))
-           )::double precision AS price_out_usd,
+           -- The side that valued the trade keeps its own unit price. The other side is always
+           -- implied from this trade, never taken from Tycho, for two reasons: Tycho holds one
+           -- current price and this trade may be a year old, and an implied price keeps the row
+           -- consistent, so price x amount equals volume_usd on both sides.
+           (CASE
+               WHEN c.side = 'in' THEN c.in_unit
+               ELSE c.volume_usd / (NULLIF(c.amount_in, 0) / power(10::numeric, c.in_decimals))
+           END)::double precision AS price_in_usd,
+           (CASE
+               WHEN c.side = 'out' THEN c.out_unit
+               ELSE c.volume_usd / (NULLIF(c.amount_out, 0) / power(10::numeric, c.out_decimals))
+           END)::double precision AS price_out_usd,
            c.side || '_' || CASE
                WHEN c.on_stable    THEN 'stable'
                WHEN c.on_preferred THEN 'preferred'

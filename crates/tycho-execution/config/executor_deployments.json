@@ -439,6 +439,14 @@
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
       "args": ["0xbA876237B0F021A6c6D852d6c26E107997cC5E81"]
+    },
+    "rfq:metric": {
+      "contract": "MetricExecutor",
+      "args": []
+    },
+    "fallback:rfq:metric": {
+      "contract": "MetricFallbackExecutor",
+      "args": ["0xF70E16dcc8f065143C4FDD0a42e29BBfcc96DE17"]
     }
   }
 }
