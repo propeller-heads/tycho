@@ -21,8 +21,9 @@ use crate::{
             ProtocolComponentStateDelta, QualityRange,
         },
         token::Token,
-        Address, BlockHash, Chain, ComponentId, ContractId, EntryPointId, ExtractionState,
-        PaginationParams, ProtocolSystem, ProtocolType, StoreKey, TxHash,
+        Address, Balance, BlockHash, Chain, Code, CodeHash, ComponentId, ContractId, EntryPointId,
+        ExtractionState, PaginationParams, ProtocolSystem, ProtocolType, StoreKey, StoreVal,
+        TxHash,
     },
     Bytes,
 };
@@ -891,8 +892,28 @@ pub struct ExtractorCursor {
     pub block: Block,
 }
 
+/// A point in the database's commit order, taken when a read starts. Every row version that the
+/// read cannot see carries this transaction id or a newer one.
+///
+/// "Snapshot" here is the Postgres transaction snapshot, the set of transactions a read can see
+/// (`pg_current_snapshot()`), not a [`StateSnapshot`]. The watermark is the `xmin` of that
+/// transaction snapshot: the oldest transaction that was still running when the read started, as
+/// a 64-bit transaction id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CommitWatermark(u64);
+
+impl CommitWatermark {
+    pub fn new(transaction_id: u64) -> Self {
+        Self(transaction_id)
+    }
+
+    pub fn transaction_id(&self) -> u64 {
+        self.0
+    }
+}
+
 /// All live contracts and components of one chain, and the cursor of each extractor, read from
-/// one database snapshot.
+/// one transaction snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateSnapshot {
     pub accounts: Vec<AccountSnapshot>,
@@ -900,16 +921,61 @@ pub struct StateSnapshot {
     /// By extractor name. An extractor that has committed nothing has no entry. The snapshot
     /// holds every block of an extractor up to the block of its cursor and no later block.
     pub cursors: HashMap<String, ExtractorCursor>,
+    /// Every row written after the snapshot is at or after this watermark.
+    pub watermark: CommitWatermark,
 }
 
-/// Reads all live contracts and components of a chain from one database snapshot.
+/// The values of one account written after a watermark, each timestamped with the block that
+/// wrote its row. A deleted slot has the zero value.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AccountChanges {
+    pub slots: HashMap<StoreKey, (StoreVal, WriteTimestamp)>,
+    pub native_balance: Option<(Balance, WriteTimestamp)>,
+    pub token_balances: HashMap<Address, (AccountBalance, WriteTimestamp)>,
+    pub code: Option<(Code, CodeHash, WriteTimestamp)>,
+}
+
+/// What a catch-up of the entity cache reads for one protocol system, in one transaction: the
+/// account rows written after a watermark, and the whole current state of the system's
+/// components.
+///
+/// The account part can hold more than was written after the watermark, never less.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatchUpRead {
+    /// The full state of each account created after the watermark. Only these accounts: an
+    /// account row is written when its contract is created, and changes later go to its value
+    /// rows. Deleted accounts and accounts without code are left out, as in a [`StateSnapshot`].
+    pub accounts: Vec<AccountSnapshot>,
+    /// By address: the live values written after the watermark, of any account of the chain,
+    /// including the accounts in `accounts`.
+    pub changes: HashMap<Address, AccountChanges>,
+    /// Every live component of the requested protocol system, changed or not. Unlike the account
+    /// part, this is the full state, not what changed after the watermark.
+    pub components: Vec<ComponentSnapshot>,
+    /// By extractor name, as in [`StateSnapshot::cursors`].
+    pub cursors: HashMap<String, ExtractorCursor>,
+    /// Every row written after this read is at or after this watermark.
+    pub watermark: CommitWatermark,
+}
+
+/// Reads all live contracts and components of a chain from one transaction snapshot.
 #[async_trait]
 pub trait StateSnapshotGateway {
     /// All live accounts and components of `chain`, every value timestamped with the block
     /// that wrote its row, and the cursor of each extractor of `chain`.
     ///
-    /// Implementations must read everything from one database snapshot: a row committed after
+    /// Implementations must read everything from one transaction snapshot: a row committed after
     /// the read starts is invisible to every part of the result. In SQL terms, a read-only
     /// `REPEATABLE READ` transaction or stricter.
     async fn state_snapshot(&self, chain: &Chain) -> Result<StateSnapshot, StorageError>;
+
+    /// The account rows of `chain` written at or after `since`, every live component of
+    /// `system`, and the cursor of each extractor of `chain`. Read from one transaction snapshot,
+    /// as [`Self::state_snapshot`].
+    async fn catch_up_read(
+        &self,
+        chain: &Chain,
+        since: CommitWatermark,
+        system: &str,
+    ) -> Result<CatchUpRead, StorageError>;
 }

@@ -180,9 +180,9 @@ pub struct ExtractorFactory {
     protocol_cache: ProtocolMemoryCache,
     chain_state: ChainState,
     writer_status: WriterStatus,
-    /// Where the next build resumes, taken by that build. Every later build reads its cursor
+    /// Where the next build resumes, taken by that build. A build without one reads its cursor
     /// from the database.
-    first_resume: std::sync::Mutex<Option<ResumeFrom>>,
+    next_resume: std::sync::Mutex<Option<ResumeFrom>>,
 }
 
 impl ExtractorFactory {
@@ -235,23 +235,25 @@ impl ExtractorFactory {
             protocol_cache,
             chain_state,
             writer_status: WriterStatus::leader(),
-            first_resume: std::sync::Mutex::new(None),
+            next_resume: std::sync::Mutex::new(None),
         })
     }
 
-    /// Makes the first extractor this factory builds resume from `resume` instead of the cursor
-    /// in the database. A later build, after a failure or a takeover, reads the database again.
-    pub fn with_first_resume(mut self, resume: ResumeFrom) -> Self {
-        self.first_resume = std::sync::Mutex::new(Some(resume));
-        self
+    /// Makes the next extractor this factory builds resume from `resume` instead of the cursor
+    /// in the database. A build after it reads the database again, unless this is called again.
+    pub fn resume_next_build_from(&self, resume: ResumeFrom) {
+        *self
+            .next_resume
+            .lock()
+            .expect("next resume lock poisoned") = Some(resume);
     }
 
-    /// Takes the resume point set with [`Self::with_first_resume`], or [`ResumeFrom::Database`]
-    /// once it is taken.
-    fn take_first_resume(&self) -> ResumeFrom {
-        self.first_resume
+    /// Takes the resume point set with [`Self::resume_next_build_from`], or
+    /// [`ResumeFrom::Database`] without one.
+    fn take_next_resume(&self) -> ResumeFrom {
+        self.next_resume
             .lock()
-            .expect("first resume lock poisoned")
+            .expect("next resume lock poisoned")
             .take()
             .unwrap_or(ResumeFrom::Database)
     }
@@ -338,7 +340,7 @@ impl ExtractorFactory {
                 self.token_pre_processor.clone(),
                 post_processor,
                 self.writer_status.clone(),
-                self.take_first_resume(),
+                self.take_next_resume(),
             )
             .await?;
 

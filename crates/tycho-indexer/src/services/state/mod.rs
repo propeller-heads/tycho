@@ -1,7 +1,8 @@
 //! In-memory serving of state requests.
 //!
 //! This module holds the block window ([`window`]), the entity cache ([`cache`]) it folds into,
-//! the service that answers state requests from both ([`service`]), and the views those answers
+//! the catch-up that brings the cache up to date from the database ([`catch_up`]), the service that
+//! answers state requests from the windows and the cache ([`service`]), and the views those answers
 //! are written from ([`view`]). Locking is described in the [`cache`] module doc; the read order
 //! in the [`service`] module doc.
 //!
@@ -18,6 +19,7 @@
 //! read never misses them.
 
 pub mod cache;
+pub mod catch_up;
 pub mod service;
 pub mod shadow;
 pub use cache::view;

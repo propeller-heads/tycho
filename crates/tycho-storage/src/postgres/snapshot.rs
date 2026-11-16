@@ -14,8 +14,9 @@ use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
 use diesel::{
+    dsl::sql,
     pg::Pg,
-    sql_types::{BigInt, Text},
+    sql_types::{BigInt, Bool, Text},
     BoolExpressionMethods, ExpressionMethods, QueryDsl,
 };
 use diesel_async::{pg::TransactionBuilder, AsyncPgConnection, RunQueryDsl};
@@ -26,14 +27,16 @@ use tycho_common::{
         Address, Chain,
     },
     storage::{
-        AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StorageError, WriteTimestamp,
+        AccountChanges, AccountSnapshot, AccountWriteTimestamps, CommitWatermark,
+        ComponentSnapshot, StorageError, WriteTimestamp,
     },
     Bytes,
 };
 
 use super::{schema, PostgresError, PostgresGateway, MAX_TS};
 
-/// A read-only `REPEATABLE READ` transaction, so every read in it sees the same database snapshot.
+/// A read-only `REPEATABLE READ` transaction, so every read in it sees the same transaction
+/// snapshot.
 pub fn snapshot_transaction(
     conn: &mut AsyncPgConnection,
 ) -> TransactionBuilder<'_, AsyncPgConnection> {
@@ -69,9 +72,34 @@ pub async fn bound_snapshot_reads(conn: &mut AsyncPgConnection) -> Result<(), Po
     Ok(())
 }
 
-/// Subquery for the ids of the live accounts of a chain: not deleted, with a live code row.
-fn account_ids(chain_id: i64) -> schema::account::BoxedQuery<'static, Pg, BigInt> {
-    schema::account::table
+/// Filter that keeps the rows of `table` written at or after `since`: rows whose `xmin`, the
+/// transaction that wrote the row version, is not older than the watermark. `age` counts
+/// transactions back from the current one and handles the 32-bit wraparound of `xmin`. A frozen
+/// row or one older than about two billion transactions counts as old.
+///
+/// Limits of the Postgres internals this relies on:
+/// - No index covers `xmin`, so the filter scans every row of the table.
+/// - A watermark more than about two billion transactions old makes every row count as old. At the
+///   rate the indexer writes, that is many years without a catch-up.
+/// - Transaction ids are local to one cluster. A watermark from before a restore or a move by
+///   logical replication (such as an RDS blue/green switch) means nothing in the new cluster:
+///   restart the indexer, so it loads a new snapshot.
+/// - A long-running transaction holds the watermark back, so each catch-up reads more rows again.
+///   That costs time, but loses nothing.
+fn written_since(table: &str, since: CommitWatermark) -> diesel::expression::SqlLiteral<Bool> {
+    // The low 32 bits of a 64-bit transaction id are its `xid`. Ids below 3 are reserved; the
+    // first normal id is the oldest a row can carry.
+    let xid = (since.transaction_id() & u64::from(u32::MAX)).max(3);
+    sql::<Bool>(&format!("age(\"{table}\".xmin) <= age('{xid}'::xid)"))
+}
+
+/// Subquery for the ids of the live accounts of a chain: not deleted, with a live code row. With
+/// `since`, only the accounts whose own row was written at or after it.
+fn account_ids(
+    chain_id: i64,
+    since: Option<CommitWatermark>,
+) -> schema::account::BoxedQuery<'static, Pg, BigInt> {
+    let mut query = schema::account::table
         .filter(schema::account::chain_id.eq(chain_id))
         .filter(
             schema::account::deleted_at
@@ -90,12 +118,20 @@ fn account_ids(chain_id: i64) -> schema::account::BoxedQuery<'static, Pg, BigInt
             ),
         )
         .select(schema::account::id)
-        .into_boxed()
+        .into_boxed();
+    if let Some(since) = since {
+        query = query.filter(written_since("account", since));
+    }
+    query
 }
 
-/// Subquery for the ids of the components of a chain that are not deleted.
-fn component_ids(chain_id: i64) -> schema::protocol_component::BoxedQuery<'static, Pg, BigInt> {
-    schema::protocol_component::table
+/// Subquery for the ids of the components of a chain that are not deleted. With `system`, only
+/// the components of that protocol system.
+fn component_ids(
+    chain_id: i64,
+    system: Option<&str>,
+) -> schema::protocol_component::BoxedQuery<'static, Pg, BigInt> {
+    let mut query = schema::protocol_component::table
         .filter(schema::protocol_component::chain_id.eq(chain_id))
         .filter(
             schema::protocol_component::deleted_at
@@ -103,7 +139,17 @@ fn component_ids(chain_id: i64) -> schema::protocol_component::BoxedQuery<'stati
                 .or(schema::protocol_component::deleted_at.eq(MAX_TS)),
         )
         .select(schema::protocol_component::id)
-        .into_boxed()
+        .into_boxed();
+    if let Some(system) = system {
+        query = query.filter(
+            schema::protocol_component::protocol_system_id.eq_any(
+                schema::protocol_system::table
+                    .filter(schema::protocol_system::name.eq(system.to_string()))
+                    .select(schema::protocol_system::id),
+            ),
+        );
+    }
+    query
 }
 
 impl PostgresGateway {
@@ -120,10 +166,32 @@ impl PostgresGateway {
         chain: &Chain,
         conn: &mut AsyncPgConnection,
     ) -> Result<Vec<AccountSnapshot>, StorageError> {
+        self.read_account_snapshots(chain, None, conn)
+            .await
+    }
+
+    /// Like [`Self::account_snapshots`], but only the accounts whose own row was written at or
+    /// after `since`, such as a new contract. Each one comes with its full state.
+    pub(crate) async fn account_snapshots_written_since(
+        &self,
+        chain: &Chain,
+        since: CommitWatermark,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<AccountSnapshot>, StorageError> {
+        self.read_account_snapshots(chain, Some(since), conn)
+            .await
+    }
+
+    async fn read_account_snapshots(
+        &self,
+        chain: &Chain,
+        since: Option<CommitWatermark>,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<AccountSnapshot>, StorageError> {
         let chain_id = self.get_chain_id(chain)?;
         let native_token_id = self.get_native_token_id(chain)?;
 
-        let accounts = schema::contract_code::table
+        let mut accounts_query = schema::contract_code::table
             .inner_join(schema::account::table)
             .inner_join(schema::transaction::table)
             .filter(schema::account::chain_id.eq(chain_id))
@@ -148,6 +216,12 @@ impl PostgresGateway {
                 schema::contract_code::valid_from,
                 schema::transaction::hash,
             ))
+            .into_boxed();
+        if since.is_some() {
+            accounts_query =
+                accounts_query.filter(schema::account::id.eq_any(account_ids(chain_id, since)));
+        }
+        let accounts = accounts_query
             .get_results::<(i64, Address, String, Bytes, Bytes, NaiveDateTime, Bytes)>(conn)
             .await
             .map_err(PostgresError::from)?;
@@ -156,7 +230,7 @@ impl PostgresGateway {
             HashMap::new();
         for (account_id, token_id, token, balance, valid_from) in schema::account_balance::table
             .inner_join(schema::token::table.inner_join(schema::account::table))
-            .filter(schema::account_balance::account_id.eq_any(account_ids(chain_id)))
+            .filter(schema::account_balance::account_id.eq_any(account_ids(chain_id, since)))
             .filter(
                 schema::account_balance::valid_to
                     .is_null()
@@ -188,7 +262,7 @@ impl PostgresGateway {
         let mut slots_by_account: HashMap<i64, Vec<(Bytes, Option<Bytes>, WriteTimestamp)>> =
             HashMap::new();
         for (account_id, slot, value, valid_from) in schema::contract_storage::table
-            .filter(schema::contract_storage::account_id.eq_any(account_ids(chain_id)))
+            .filter(schema::contract_storage::account_id.eq_any(account_ids(chain_id, since)))
             .filter(schema::contract_storage::valid_to.eq(MAX_TS))
             .select((
                 schema::contract_storage::account_id,
@@ -264,39 +338,213 @@ impl PostgresGateway {
         Ok(snapshots)
     }
 
+    /// The live slots, balances and code of the accounts of `chain` whose rows were written at or
+    /// after `since`, by account address. Each value is timestamped with its row's `valid_from`;
+    /// of two live rows for one key, the newer one wins.
+    pub(crate) async fn account_changes_since(
+        &self,
+        chain: &Chain,
+        since: CommitWatermark,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<HashMap<Address, AccountChanges>, StorageError> {
+        let chain_id = self.get_chain_id(chain)?;
+        let native_token_id = self.get_native_token_id(chain)?;
+        let mut changes: HashMap<Address, AccountChanges> = HashMap::new();
+
+        for (address, slot, value, valid_from) in schema::contract_storage::table
+            .inner_join(schema::account::table)
+            .filter(schema::account::chain_id.eq(chain_id))
+            .filter(schema::contract_storage::valid_to.eq(MAX_TS))
+            .filter(written_since("contract_storage", since))
+            .select((
+                schema::account::address,
+                schema::contract_storage::slot,
+                schema::contract_storage::value,
+                schema::contract_storage::valid_from,
+            ))
+            .get_results::<(Address, Bytes, Option<Bytes>, NaiveDateTime)>(conn)
+            .await
+            .map_err(PostgresError::from)?
+        {
+            changes
+                .entry(address)
+                .or_default()
+                .slots
+                .insert(slot, (value.unwrap_or_default(), WriteTimestamp::new(valid_from)));
+        }
+
+        for (address, code, hash, valid_from) in schema::contract_code::table
+            .inner_join(schema::account::table)
+            .filter(schema::account::chain_id.eq(chain_id))
+            .filter(
+                schema::contract_code::valid_to
+                    .is_null()
+                    .or(schema::contract_code::valid_to.eq(MAX_TS)),
+            )
+            .filter(written_since("contract_code", since))
+            .select((
+                schema::account::address,
+                schema::contract_code::code,
+                schema::contract_code::hash,
+                schema::contract_code::valid_from,
+            ))
+            .get_results::<(Address, Bytes, Bytes, NaiveDateTime)>(conn)
+            .await
+            .map_err(PostgresError::from)?
+        {
+            let written_at = WriteTimestamp::new(valid_from);
+            let code_slot = &mut changes.entry(address).or_default().code;
+            if code_slot
+                .as_ref()
+                .is_none_or(|(_, _, at)| *at < written_at)
+            {
+                *code_slot = Some((code, hash, written_at));
+            }
+        }
+
+        let balance_rows = schema::account_balance::table
+            .inner_join(schema::token::table.inner_join(schema::account::table))
+            .filter(
+                schema::account_balance::account_id.eq_any(
+                    schema::account::table
+                        .filter(schema::account::chain_id.eq(chain_id))
+                        .select(schema::account::id)
+                        .into_boxed(),
+                ),
+            )
+            .filter(
+                schema::account_balance::valid_to
+                    .is_null()
+                    .or(schema::account_balance::valid_to.eq(MAX_TS)),
+            )
+            .filter(written_since("account_balance", since))
+            .select((
+                schema::account_balance::account_id,
+                schema::account_balance::token_id,
+                schema::account::address,
+                schema::account_balance::balance,
+                schema::account_balance::valid_from,
+            ))
+            .get_results::<(i64, i64, Address, Bytes, NaiveDateTime)>(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        let owners: HashMap<i64, Address> = schema::account::table
+            .filter(
+                schema::account::id.eq_any(
+                    schema::account_balance::table
+                        .filter(
+                            schema::account_balance::valid_to
+                                .is_null()
+                                .or(schema::account_balance::valid_to.eq(MAX_TS)),
+                        )
+                        .filter(written_since("account_balance", since))
+                        .select(schema::account_balance::account_id),
+                ),
+            )
+            .select((schema::account::id, schema::account::address))
+            .get_results::<(i64, Address)>(conn)
+            .await
+            .map_err(PostgresError::from)?
+            .into_iter()
+            .collect();
+        for (account_id, token_id, token, balance, valid_from) in balance_rows {
+            let Some(owner) = owners.get(&account_id) else {
+                continue;
+            };
+            let written_at = WriteTimestamp::new(valid_from);
+            let account = changes
+                .entry(owner.clone())
+                .or_default();
+            if token_id == native_token_id {
+                if account
+                    .native_balance
+                    .as_ref()
+                    .is_none_or(|(_, at)| *at < written_at)
+                {
+                    account.native_balance = Some((balance, written_at));
+                }
+                continue;
+            }
+            let newer = account
+                .token_balances
+                .get(&token)
+                .is_none_or(|(_, at)| *at < written_at);
+            if newer {
+                let value =
+                    AccountBalance::new(owner.clone(), token.clone(), balance, Bytes::zero(32));
+                account
+                    .token_balances
+                    .insert(token, (value, written_at));
+            }
+        }
+        Ok(changes)
+    }
+
+    /// The watermark of the current transaction snapshot: every row written after the
+    /// snapshot was taken is at or after it.
+    pub(crate) async fn snapshot_watermark(
+        &self,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<CommitWatermark, StorageError> {
+        #[derive(diesel::QueryableByName)]
+        struct Row {
+            #[diesel(sql_type = Text)]
+            xmin: String,
+        }
+        let row: Row =
+            diesel::sql_query("SELECT pg_snapshot_xmin(pg_current_snapshot())::text AS xmin")
+                .get_result(conn)
+                .await
+                .map_err(PostgresError::from)?;
+        let transaction_id = row.xmin.parse::<u64>().map_err(|err| {
+            StorageError::Unexpected(format!("Snapshot xmin {} is not a number: {err}", row.xmin))
+        })?;
+        Ok(CommitWatermark::new(transaction_id))
+    }
+
     /// Every component of `chain` that is not deleted, with its live attributes and balances,
     /// timestamped with the newest `valid_from` among its rows or, for a component without rows,
-    /// its `created_at`. Order is unspecified.
+    /// its `created_at`. With `system`, only the components of that protocol system. Order is
+    /// unspecified.
     pub(crate) async fn component_snapshots(
         &self,
         chain: &Chain,
+        system: Option<&str>,
         conn: &mut AsyncPgConnection,
     ) -> Result<Vec<ComponentSnapshot>, StorageError> {
         let chain_id = self.get_chain_id(chain)?;
 
-        let components: Vec<(i64, String, String, NaiveDateTime)> =
-            schema::protocol_component::table
-                .inner_join(schema::protocol_system::table)
-                .filter(schema::protocol_component::chain_id.eq(chain_id))
-                .filter(
-                    schema::protocol_component::deleted_at
-                        .is_null()
-                        .or(schema::protocol_component::deleted_at.eq(MAX_TS)),
-                )
-                .select((
-                    schema::protocol_component::id,
-                    schema::protocol_component::external_id,
-                    schema::protocol_system::name,
-                    schema::protocol_component::created_at,
-                ))
-                .get_results(conn)
-                .await
-                .map_err(PostgresError::from)?;
+        let mut components_query = schema::protocol_component::table
+            .inner_join(schema::protocol_system::table)
+            .filter(schema::protocol_component::chain_id.eq(chain_id))
+            .filter(
+                schema::protocol_component::deleted_at
+                    .is_null()
+                    .or(schema::protocol_component::deleted_at.eq(MAX_TS)),
+            )
+            .select((
+                schema::protocol_component::id,
+                schema::protocol_component::external_id,
+                schema::protocol_system::name,
+                schema::protocol_component::created_at,
+            ))
+            .into_boxed();
+        if let Some(system) = system {
+            components_query =
+                components_query.filter(schema::protocol_system::name.eq(system.to_string()));
+        }
+        let components: Vec<(i64, String, String, NaiveDateTime)> = components_query
+            .get_results(conn)
+            .await
+            .map_err(PostgresError::from)?;
 
         let mut attributes_by_component: HashMap<i64, Vec<(String, Bytes, WriteTimestamp)>> =
             HashMap::new();
         for (component_id, name, value, valid_from) in schema::protocol_state::table
-            .filter(schema::protocol_state::protocol_component_id.eq_any(component_ids(chain_id)))
+            .filter(
+                schema::protocol_state::protocol_component_id
+                    .eq_any(component_ids(chain_id, system)),
+            )
             .filter(schema::protocol_state::valid_to.eq(MAX_TS))
             .select((
                 schema::protocol_state::protocol_component_id,
@@ -319,7 +567,8 @@ impl PostgresGateway {
         for (component_id, token, balance, valid_from) in schema::component_balance::table
             .inner_join(schema::token::table.inner_join(schema::account::table))
             .filter(
-                schema::component_balance::protocol_component_id.eq_any(component_ids(chain_id)),
+                schema::component_balance::protocol_component_id
+                    .eq_any(component_ids(chain_id, system)),
             )
             .filter(schema::component_balance::valid_to.eq(MAX_TS))
             .select((
@@ -369,7 +618,7 @@ impl PostgresGateway {
 
 #[cfg(test)]
 mod test_serial_db {
-    use std::str::FromStr;
+    use std::{collections::HashSet, str::FromStr};
 
     use diesel_async::{pooled_connection::deadpool::Pool, scoped_futures::ScopedFutureExt};
     use tokio::sync::mpsc;
@@ -383,6 +632,7 @@ mod test_serial_db {
     const C0: &str = "6B175474E89094C44Da98b954EedeAC495271d0F";
     const C1: &str = "73BcE791c239c8010Cd3C857d96580037CCdd0EE";
     const C2: &str = "94a3F312366b8D0a32A00986194053C0ed0CdDb1";
+    const C3: &str = "Ab5801a7D398351b8bE11C439e05C5B3259aeC9B";
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
     struct Fixture {
@@ -745,7 +995,7 @@ mod test_serial_db {
             let gw = PostgresGateway::from_connection(&mut conn).await;
 
             let components: HashMap<String, ComponentSnapshot> = gw
-                .component_snapshots(&Chain::Ethereum, &mut conn)
+                .component_snapshots(&Chain::Ethereum, None, &mut conn)
                 .await
                 .unwrap()
                 .into_iter()
@@ -826,6 +1076,75 @@ mod test_serial_db {
             let ambient = &snapshot.cursors["ambient"];
             assert_eq!(ambient.cursor, "cursor".as_bytes());
             assert_eq!(ambient.block.number, u64::try_from(block_number).unwrap());
+        })
+        .await;
+    }
+
+    /// Rows written after the watermark come back, rows written before do not, and only the
+    /// requested system's components are read.
+    #[tokio::test]
+    async fn state_delta_reads_what_was_written_after_the_watermark_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let f = setup_accounts(&mut conn).await;
+            setup_components(&mut conn, &f).await;
+            let gateway = cached_gateway(&pool, PostgresGateway::from_connection(&mut conn).await);
+            let watermark = gateway
+                .state_snapshot(&Chain::Ethereum)
+                .await
+                .unwrap()
+                .watermark;
+            let written = db_fixtures::yesterday_one_am();
+            db_fixtures::insert_slots(&mut conn, f.c0, f.txn[3], &written, None, &[(9, 9, None)])
+                .await;
+            let c3 =
+                db_fixtures::insert_account(&mut conn, C3, "c3", f.chain_id, Some(f.txn[3])).await;
+            db_fixtures::insert_contract_code(&mut conn, c3, f.txn[3], Bytes::from("C3C3C3")).await;
+            db_fixtures::insert_account_balance(&mut conn, 7, f.native_token, f.txn[3], None, c3)
+                .await;
+            drop(conn);
+
+            let delta = gateway
+                .catch_up_read(&Chain::Ethereum, watermark, "ambient")
+                .await
+                .unwrap();
+
+            let c0 = Bytes::from_str(C0).unwrap();
+            let c3 = Bytes::from_str(C3).unwrap();
+            assert_eq!(
+                delta.changes[&c0].slots,
+                HashMap::from([(
+                    Bytes::from(9u64).lpad(32, 0),
+                    (Bytes::from(9u64).lpad(32, 0), WriteTimestamp::new(written))
+                )]),
+                "only the slot written after the watermark"
+            );
+            assert!(delta.changes[&c0]
+                .native_balance
+                .is_none());
+            assert_eq!(
+                delta
+                    .changes
+                    .keys()
+                    .cloned()
+                    .collect::<HashSet<_>>(),
+                HashSet::from([c0, c3.clone()])
+            );
+            assert_eq!(
+                delta
+                    .accounts
+                    .iter()
+                    .map(|snapshot| snapshot.account.address.clone())
+                    .collect::<Vec<_>>(),
+                vec![c3],
+                "the new contract comes with its full state"
+            );
+            assert!(!delta.components.is_empty());
+            assert!(delta
+                .components
+                .iter()
+                .all(|component| component.system == "ambient"));
+            assert!(delta.watermark > watermark);
         })
         .await;
     }
@@ -1006,7 +1325,7 @@ mod test_serial_db {
                 .await
                 .unwrap();
             let components = gw
-                .component_snapshots(&Chain::Ethereum, &mut conn)
+                .component_snapshots(&Chain::Ethereum, None, &mut conn)
                 .await
                 .unwrap();
 
@@ -1062,7 +1381,7 @@ mod test_serial_db {
             let gw = PostgresGateway::from_connection(&mut conn).await;
 
             let p2 = gw
-                .component_snapshots(&Chain::Ethereum, &mut conn)
+                .component_snapshots(&Chain::Ethereum, None, &mut conn)
                 .await
                 .unwrap()
                 .into_iter()

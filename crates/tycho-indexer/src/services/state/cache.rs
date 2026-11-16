@@ -14,13 +14,17 @@
 //! Component removals follow the same rule. Account deletions are not expected and never remove an
 //! entry.
 //!
-//! The folds coming out of the block windows are the only writer. The startup load builds the
-//! cache from a database snapshot before the extractors start. The cache never reads the
-//! database, and it never evicts — an entity missing from the cache does not exist.
+//! The startup load builds the cache from a [`StateSnapshot`] before the extractors start. After
+//! that, the folds coming out of the block windows write it, and so does a catch-up
+//! ([`EntityCache::apply_catch_up`]): before an extractor is built again, or after it waited for
+//! the leader, [`CacheCatchUp`](super::catch_up::CacheCatchUp) reads from the database what was
+//! committed since its last read. A catch-up replaces the components of the extractor's system and
+//! writes each account value with the rule folds use. The cache never evicts: an entity missing
+//! from the cache does not exist.
 //!
-//! Reads and folds take turns behind one read-write lock: a fold takes the write side and
-//! applies one whole block atomically, reads take the read side. A reader never observes half a
-//! block.
+//! Reads and writes take turns behind one read-write lock: a fold or a catch-up takes the write
+//! side and applies one whole block or catch-up read atomically, reads take the read side. A reader
+//! never observes half a block or half a catch-up.
 //!
 //! Accounts and component states are held behind an `Arc`: an account can hold a large storage
 //! map, and a component many attributes. A reader copies only the `Arc` under the read lock, and
@@ -53,8 +57,8 @@ use tycho_common::{
         ProtocolSystem, StoreKey, StoreVal, TxHash,
     },
     storage::{
-        AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StateSnapshot, StorageError,
-        WriteTimestamp,
+        AccountChanges, AccountSnapshot, AccountWriteTimestamps, CatchUpRead, ComponentSnapshot,
+        StateSnapshot, StorageError, WriteTimestamp,
     },
     Bytes,
 };
@@ -250,9 +254,19 @@ impl CachedAccount {
         balances: Option<&HashMap<Address, AccountBalance>>,
         at: WriteTimestamp,
     ) {
-        if apply_account_block(self, delta, balances, at) {
+        if apply_account_block(self, delta, balances, at).applied > 0 {
             self.updated_at = self.updated_at.max(at);
         }
+    }
+
+    /// Applies `changes` with [`apply_account_changes`]. `updated_at` moves to the newest applied
+    /// write.
+    fn apply_changes(&mut self, changes: AccountChanges) -> ValueWrites {
+        let writes = apply_account_changes(self, changes);
+        if let Some(newest) = writes.newest_applied {
+            self.updated_at = self.updated_at.max(newest);
+        }
+        writes
     }
 
     /// Timestamp of the newest write applied to any value of the account.
@@ -322,49 +336,85 @@ impl AccountWrites for CachedAccount {
     }
 }
 
-/// Writes one block's changes to `account` and returns whether any write applied. Each value
-/// takes `at`; a value already written by that block or a newer one is left alone, so the rule
-/// lives in [`Timestamped::write`] rather than here: values of one account can have different
-/// timestamps, so one timestamp for the whole account cannot decide for each of them. A deleted
-/// slot becomes the zero value, as in [`Account::apply_delta`]. A delta that carries code replaces
-/// the code and its hash together. [`WriteOutcome::Conflict`]s are counted and logged once per
-/// block.
+/// Writes one block's changes to `account`. Each value takes `at`; a value already written by that
+/// block or a newer one is left alone, so the rule lives in [`Timestamped::write`] rather than
+/// here: values of one account can have different timestamps, so one timestamp for the whole
+/// account cannot decide for each of them. A deleted slot becomes the zero value, as in
+/// [`Account::apply_delta`]. A delta that carries code replaces the code and its hash together.
+/// [`WriteOutcome::Conflict`]s are logged once per block.
 fn apply_account_block(
     account: &mut impl AccountWrites,
     delta: Option<&AccountDelta>,
     balances: Option<&HashMap<Address, AccountBalance>>,
     at: WriteTimestamp,
-) -> bool {
-    let mut applied = false;
-    let mut conflicts = 0;
-    let mut count = |outcome| match outcome {
-        WriteOutcome::Applied => applied = true,
-        WriteOutcome::Skipped => {}
-        WriteOutcome::Conflict => conflicts += 1,
-    };
+) -> ValueWrites {
+    let mut writes = ValueWrites::default();
     if let Some(delta) = delta {
         for (key, value) in &delta.slots {
-            count(account.write_slot(key, value.clone().unwrap_or_default(), at));
+            writes.count(account.write_slot(key, value.clone().unwrap_or_default(), at), at);
         }
         if let Some(balance) = &delta.balance {
-            count(account.write_native_balance(balance.clone(), at));
+            writes.count(account.write_native_balance(balance.clone(), at), at);
         }
         if let Some(code) = delta.code() {
-            count(account.write_code(CachedCode::new(code.clone()), at));
+            writes.count(account.write_code(CachedCode::new(code.clone()), at), at);
         }
     }
     for (token, balance) in balances.into_iter().flatten() {
-        count(account.write_token_balance(token, balance.clone(), at));
+        writes.count(account.write_token_balance(token, balance.clone(), at), at);
     }
-    if conflicts > 0 {
+    if writes.conflicts > 0 {
         warn!(
             address = %account.address(),
             block_ts = %at.block_ts(),
-            values = conflicts,
+            values = writes.conflicts,
             "Skipped writes from the applied block carry different values"
         );
     }
-    applied
+    writes
+}
+
+/// Applies `changes` to `account` with the rule of [`apply_account_block`]. The only difference:
+/// each value carries its own timestamp, where a block gives all its values one.
+fn apply_account_changes(account: &mut impl AccountWrites, changes: AccountChanges) -> ValueWrites {
+    let mut writes = ValueWrites::default();
+    for (key, (value, at)) in changes.slots {
+        writes.count(account.write_slot(&key, value, at), at);
+    }
+    if let Some((balance, at)) = changes.native_balance {
+        writes.count(account.write_native_balance(balance, at), at);
+    }
+    if let Some((code, hash, at)) = changes.code {
+        writes.count(account.write_code(CachedCode { code, hash }, at), at);
+    }
+    for (token, (balance, at)) in changes.token_balances {
+        writes.count(account.write_token_balance(&token, balance, at), at);
+    }
+    writes
+}
+
+/// What writing a set of account values did.
+#[derive(Debug, Default, Clone, Copy)]
+struct ValueWrites {
+    applied: usize,
+    conflicts: usize,
+    newest_applied: Option<WriteTimestamp>,
+}
+
+impl ValueWrites {
+    fn count(&mut self, outcome: WriteOutcome, at: WriteTimestamp) {
+        match outcome {
+            WriteOutcome::Applied => {
+                self.applied += 1;
+                self.newest_applied = Some(
+                    self.newest_applied
+                        .map_or(at, |newest| newest.max(at)),
+                );
+            }
+            WriteOutcome::Skipped => {}
+            WriteOutcome::Conflict => self.conflicts += 1,
+        }
+    }
 }
 
 impl From<CachedAccount> for Account {
@@ -497,8 +547,8 @@ impl From<CachedComponentState> for ProtocolComponentState {
 /// The long-lived entity store. See the module doc for the data model and locking.
 pub struct EntityCache {
     state: RwLock<CacheState>,
-    /// Number of folded blocks. Bumped under the write lock, so a reader that took the read lock
-    /// after a fold also reads the bumped value.
+    /// Number of folded blocks and applied catch-ups. Bumped under the write lock, so a reader
+    /// that took the read lock after a change also reads the bumped value.
     folds: AtomicU64,
 }
 
@@ -525,10 +575,11 @@ impl CacheState {
 impl EntityCache {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
-        Self {
-            state: RwLock::new(CacheState { accounts: HashMap::new(), components: HashMap::new() }),
-            folds: AtomicU64::new(0),
-        }
+        Self::with_state(CacheState { accounts: HashMap::new(), components: HashMap::new() })
+    }
+
+    fn with_state(state: CacheState) -> Self {
+        Self { state: RwLock::new(state), folds: AtomicU64::new(0) }
     }
 
     /// Number of blocks folded into the cache since it was built.
@@ -537,10 +588,10 @@ impl EntityCache {
     }
 
     /// Builds the cache from one snapshot: every account and component becomes an entry
-    /// timestamped with the block that wrote it. The extractor cursors of the snapshot are not
-    /// part of the cache.
+    /// timestamped with the block that wrote it. The extractor cursors and the watermark of the
+    /// snapshot are not part of the cache.
     pub fn from_snapshot(snapshot: StateSnapshot) -> Self {
-        let StateSnapshot { accounts, components, cursors: _ } = snapshot;
+        let StateSnapshot { accounts, components, cursors: _, watermark: _ } = snapshot;
         gauge!("entity_cache_accounts").set(accounts.len() as f64);
         gauge!("entity_cache_components").set(components.len() as f64);
         let mut account_entries = HashMap::with_capacity(accounts.len());
@@ -550,26 +601,10 @@ impl EntityCache {
                 Arc::new(CachedAccount::from_snapshot(account, &written_at)),
             );
         }
-        let mut component_entries: HashMap<
-            ProtocolSystem,
-            HashMap<ComponentId, Arc<CachedComponentState>>,
-        > = HashMap::new();
-        for ComponentSnapshot { system, state, updated_at } in components {
-            component_entries
-                .entry(system)
-                .or_default()
-                .insert(
-                    state.component_id.clone(),
-                    Arc::new(CachedComponentState::from_snapshot(state, updated_at)),
-                );
-        }
-        Self {
-            state: RwLock::new(CacheState {
-                accounts: account_entries,
-                components: component_entries,
-            }),
-            folds: AtomicU64::new(0),
-        }
+        Self::with_state(CacheState {
+            accounts: account_entries,
+            components: component_entries_of(components),
+        })
     }
 
     /// Returns a read guard over the entries. Folds wait until it is dropped, so hold it only as
@@ -585,6 +620,114 @@ impl EntityCache {
             .write()
             .expect("entity cache lock poisoned")
     }
+
+    /// Writes a catch-up read for `system` into the cache, under one hold of the write lock: a
+    /// reader sees the cache from before or after the whole read, never part of it.
+    ///
+    /// Components: the cached components of `system` are replaced by `read.components`, which
+    /// holds every live component of `system`. A cached component missing from it was deleted,
+    /// so it leaves the cache. Components of other systems do not change.
+    ///
+    /// Accounts:
+    /// - `read.accounts` holds the full state of each account created since the watermark. It is
+    ///   added only when the cache does not hold its address. When a fold added the account during
+    ///   the read, the cached entry stays, and its newer values arrive through `read.changes`.
+    /// - `read.changes` holds the account values written since the watermark, each with the
+    ///   timestamp of its row. Each value is written with the rule folds use: it applies only when
+    ///   it is newer than the cached value, so a newer value from a fold stays.
+    /// - Values in `read.changes` for an address the cache does not hold are skipped. They are only
+    ///   the values written since the watermark, which is not enough to make an entry.
+    ///
+    /// Call it only while the extractor of `system` is stopped: replacing the components would
+    /// drop a fold of `system` that applied after the read.
+    ///
+    /// # Returns
+    ///
+    /// What was written: components replaced, accounts added, values applied, values that
+    /// conflict with a cached value from the same block, and accounts skipped.
+    pub(crate) fn apply_catch_up(&self, read: CatchUpRead, system: &str) -> CatchUpCounts {
+        let CatchUpRead { accounts, changes, components, cursors: _, watermark: _ } = read;
+        let mut counts = CatchUpCounts { components: components.len(), ..Default::default() };
+        let entries = component_entries_of(components)
+            .remove(system)
+            .unwrap_or_default();
+        let created: Vec<(Address, CachedAccount)> = accounts
+            .into_iter()
+            .map(|AccountSnapshot { account, written_at }| {
+                (account.address.clone(), CachedAccount::from_snapshot(account, &written_at))
+            })
+            .collect();
+
+        let mut state = self.write_lock();
+        state
+            .components
+            .insert(system.to_string(), entries);
+        for (address, account) in created {
+            if let Entry::Vacant(entry) = state.accounts.entry(address) {
+                entry.insert(Arc::new(account));
+                counts.accounts_added += 1;
+            }
+        }
+        for (address, account_changes) in changes {
+            match state.accounts.get_mut(&address) {
+                Some(entry) => {
+                    counts.add(make_mut_recorded(entry, "account").apply_changes(account_changes))
+                }
+                None => counts.accounts_skipped += 1,
+            }
+        }
+        self.folds
+            .fetch_add(1, Ordering::Relaxed);
+        drop(state);
+        if counts.conflicts > 0 {
+            warn!(
+                system,
+                values = counts.conflicts,
+                "Catch-up values from a block the cache holds carry different values"
+            );
+        }
+        counts
+    }
+}
+
+/// What one catch-up wrote into the cache.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CatchUpCounts {
+    /// Components of the caught-up system, all replaced.
+    pub components: usize,
+    /// Accounts the cache did not hold, added with their full state.
+    pub accounts_added: usize,
+    /// Account values written.
+    pub values_applied: usize,
+    /// Account values from a block the cache holds a different value of.
+    pub conflicts: usize,
+    /// Accounts with changes the cache does not hold, such as a token account without code.
+    pub accounts_skipped: usize,
+}
+
+impl CatchUpCounts {
+    fn add(&mut self, writes: ValueWrites) {
+        self.values_applied += writes.applied;
+        self.conflicts += writes.conflicts;
+    }
+}
+
+/// The cache entries of `components`, by system and then component id.
+fn component_entries_of(
+    components: Vec<ComponentSnapshot>,
+) -> HashMap<ProtocolSystem, HashMap<ComponentId, Arc<CachedComponentState>>> {
+    let mut entries: HashMap<ProtocolSystem, HashMap<ComponentId, Arc<CachedComponentState>>> =
+        HashMap::new();
+    for ComponentSnapshot { system, state, updated_at } in components {
+        entries
+            .entry(system)
+            .or_default()
+            .insert(
+                state.component_id.clone(),
+                Arc::new(CachedComponentState::from_snapshot(state, updated_at)),
+            );
+    }
+    entries
 }
 
 /// Every key of `deltas` or `balances`, paired with what each map holds for it. A key present in
@@ -760,7 +903,7 @@ mod test {
 
     use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
     use rstest::rstest;
-    use tycho_common::models::protocol::ProtocolComponent;
+    use tycho_common::{models::protocol::ProtocolComponent, storage::CommitWatermark};
 
     use super::*;
     use crate::{
@@ -1821,6 +1964,7 @@ mod test {
             accounts: vec![account_snapshot(5)],
             components: vec![component_snapshot(5)],
             cursors: HashMap::new(),
+            watermark: CommitWatermark::new(0),
         };
 
         let cache = EntityCache::from_snapshot(snapshot);
@@ -1835,6 +1979,7 @@ mod test {
             accounts: vec![],
             components: vec![component_snapshot(5)],
             cursors: HashMap::new(),
+            watermark: CommitWatermark::new(0),
         };
         let cache = EntityCache::from_snapshot(snapshot);
         let x =
@@ -1851,5 +1996,138 @@ mod test {
         same_ts.block.ts = testing::block(5).ts;
         cache.fold(&same_ts).unwrap();
         assert_eq!(x(&cache), Some(Bytes::from(1u64)), "an equal timestamp is block 5 again");
+    }
+
+    fn catch_up_read() -> CatchUpRead {
+        CatchUpRead {
+            accounts: vec![],
+            changes: HashMap::new(),
+            components: vec![],
+            cursors: HashMap::new(),
+            watermark: CommitWatermark::new(200),
+        }
+    }
+
+    /// A cache holding account 1 and component `c1` of [`EXTRACTOR`] from block 5, and component
+    /// `o1` of system `other`.
+    fn snapshot_cache() -> EntityCache {
+        let mut other = component_snapshot(5);
+        other.system = "other".to_string();
+        other.state.component_id = "o1".to_string();
+        EntityCache::from_snapshot(StateSnapshot {
+            accounts: vec![account_snapshot(5)],
+            components: vec![component_snapshot(5), other],
+            cursors: HashMap::new(),
+            watermark: CommitWatermark::new(100),
+        })
+    }
+
+    #[test]
+    fn apply_catch_up_replaces_the_components_of_the_system() {
+        let mut changed = component_snapshot(8);
+        changed.state.component_id = "c2".to_string();
+        let mut read = catch_up_read();
+        read.components = vec![changed.clone()];
+        let cache = snapshot_cache();
+
+        let counts = cache.apply_catch_up(read, EXTRACTOR);
+
+        assert_eq!(counts.components, 1);
+        assert_eq!(cached_component(&cache, "c1"), None, "the database no longer holds c1");
+        assert_eq!(cached_component(&cache, "c2"), Some(changed.state));
+        assert!(
+            cache
+                .read()
+                .component("other", "o1")
+                .is_some(),
+            "another system's components stay"
+        );
+    }
+
+    #[test]
+    fn apply_catch_up_writes_account_values_with_the_rule_folds_use() {
+        let mut read = catch_up_read();
+        read.changes = HashMap::from([
+            (
+                addr(1),
+                AccountChanges {
+                    slots: HashMap::from([
+                        (slot(1), (slot(6), at(6))),
+                        (slot(2), (slot(6), at(6))),
+                    ]),
+                    native_balance: Some((Bytes::from(66u64), at(6))),
+                    ..Default::default()
+                },
+            ),
+            (
+                addr(2),
+                AccountChanges {
+                    slots: HashMap::from([(slot(1), (slot(6), at(6)))]),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let mut new_account = account_snapshot(6);
+        new_account.account.address = addr(3);
+        read.accounts = vec![new_account.clone()];
+        let cache = snapshot_cache();
+        cache
+            .fold(&with_account_delta(
+                msg(7),
+                update(&addr(1), HashMap::from([(slot(1), Some(slot(7)))])),
+            ))
+            .unwrap();
+
+        let counts = cache.apply_catch_up(read, EXTRACTOR);
+
+        let account = cached_account(&cache, &addr(1)).unwrap();
+        assert_eq!(account.slots[&slot(1)], slot(7), "the fold of block 7 is newer");
+        assert_eq!(account.slots[&slot(2)], slot(6));
+        assert_eq!(account.native_balance, Bytes::from(66u64));
+        assert_eq!(cached_account(&cache, &addr(2)), None, "changes of an unknown account skip");
+        assert_eq!(cached_account(&cache, &addr(3)), Some(new_account.account));
+        assert_eq!(
+            counts,
+            CatchUpCounts {
+                components: 0,
+                accounts_added: 1,
+                values_applied: 2,
+                conflicts: 0,
+                accounts_skipped: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn apply_catch_up_keeps_a_created_account_a_fold_added_during_the_read() {
+        let mut created = account_snapshot(6);
+        created.account.address = addr(3);
+        let mut read = catch_up_read();
+        read.accounts = vec![created];
+        read.changes = HashMap::from([(
+            addr(3),
+            AccountChanges {
+                slots: HashMap::from([(slot(1), (slot(6), at(6)))]),
+                ..Default::default()
+            },
+        )]);
+        let cache = snapshot_cache();
+        cache
+            .fold(&with_account_delta(msg(7), creation(&addr(3), [(1, 7)], 0, "0x01")))
+            .unwrap();
+
+        cache.apply_catch_up(read, EXTRACTOR);
+
+        let account = cached_account(&cache, &addr(3)).unwrap();
+        assert_eq!(account.slots[&slot(1)], slot(7), "the fold of block 7 is newer");
+    }
+
+    #[test]
+    fn apply_catch_up_counts_as_one_fold() {
+        let cache = snapshot_cache();
+
+        cache.apply_catch_up(catch_up_read(), EXTRACTOR);
+
+        assert_eq!(cache.folds(), 1);
     }
 }

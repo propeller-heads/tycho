@@ -1841,8 +1841,8 @@ mod tests {
             ChangeType,
         },
         storage::{
-            AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StateSnapshot, WithTotal,
-            WriteTimestamp,
+            AccountSnapshot, AccountWriteTimestamps, CommitWatermark, ComponentSnapshot,
+            StateSnapshot, WithTotal, WriteTimestamp,
         },
         traits::MockEntryPointTracer,
     };
@@ -2934,6 +2934,7 @@ mod tests {
                 updated_at: at,
             }],
             cursors: HashMap::new(),
+            watermark: CommitWatermark::new(0),
         });
         let windows = new_windows(["ex"], WindowConfig::default());
         let address = Bytes::from(1u64).lpad(20, 0);

@@ -36,9 +36,9 @@ use tycho_common::{
         ProtocolType, TxHash,
     },
     storage::{
-        BlockIdentifier, BlockOrTimestamp, ChainGateway, ContractStateGateway, EntryPointFilter,
-        EntryPointGateway, ExtractionStateGateway, Gateway, ProtocolGateway, StateSnapshot,
-        StateSnapshotGateway, StorageError, Version, WithTotal,
+        BlockIdentifier, BlockOrTimestamp, CatchUpRead, ChainGateway, CommitWatermark,
+        ContractStateGateway, EntryPointFilter, EntryPointGateway, ExtractionStateGateway, Gateway,
+        ProtocolGateway, StateSnapshot, StateSnapshotGateway, StorageError, Version, WithTotal,
     },
     Bytes,
 };
@@ -1457,7 +1457,7 @@ impl Gateway for CachedGateway {}
 #[async_trait]
 impl StateSnapshotGateway for CachedGateway {
     /// Reads on one pooled connection in one [`snapshot_transaction`], so every part of the
-    /// result comes from the same database snapshot. The reads are bounded by
+    /// result comes from the same transaction snapshot. The reads are bounded by
     /// [`bound_snapshot_reads`]: a read that runs too long, or outlives its client, is cancelled
     /// by Postgres.
     async fn state_snapshot(&self, chain: &Chain) -> Result<StateSnapshot, StorageError> {
@@ -1466,19 +1466,75 @@ impl StateSnapshotGateway for CachedGateway {
             .run(|conn| {
                 async move {
                     bound_snapshot_reads(conn).await?;
+                    let watermark = self
+                        .state_gateway
+                        .snapshot_watermark(conn)
+                        .await?;
                     let accounts = self
                         .state_gateway
                         .account_snapshots(chain, conn)
                         .await?;
                     let components = self
                         .state_gateway
-                        .component_snapshots(chain, conn)
+                        .component_snapshots(chain, None, conn)
                         .await?;
                     let cursors = self
                         .state_gateway
                         .get_extractor_cursors(chain, conn)
                         .await?;
-                    Result::<_, PostgresError>::Ok(StateSnapshot { accounts, components, cursors })
+                    Result::<_, PostgresError>::Ok(StateSnapshot {
+                        accounts,
+                        components,
+                        cursors,
+                        watermark,
+                    })
+                }
+                .scope_boxed()
+            })
+            .await
+            .map_err(StorageError::from)
+    }
+
+    /// Reads on one pooled connection in one [`snapshot_transaction`], bounded as
+    /// [`Self::state_snapshot`].
+    async fn catch_up_read(
+        &self,
+        chain: &Chain,
+        since: CommitWatermark,
+        system: &str,
+    ) -> Result<CatchUpRead, StorageError> {
+        let mut conn = self.checkout().await?;
+        snapshot_transaction(&mut conn)
+            .run(|conn| {
+                async move {
+                    bound_snapshot_reads(conn).await?;
+                    let watermark = self
+                        .state_gateway
+                        .snapshot_watermark(conn)
+                        .await?;
+                    let accounts = self
+                        .state_gateway
+                        .account_snapshots_written_since(chain, since, conn)
+                        .await?;
+                    let changes = self
+                        .state_gateway
+                        .account_changes_since(chain, since, conn)
+                        .await?;
+                    let components = self
+                        .state_gateway
+                        .component_snapshots(chain, Some(system), conn)
+                        .await?;
+                    let cursors = self
+                        .state_gateway
+                        .get_extractor_cursors(chain, conn)
+                        .await?;
+                    Result::<_, PostgresError>::Ok(CatchUpRead {
+                        accounts,
+                        changes,
+                        components,
+                        cursors,
+                        watermark,
+                    })
                 }
                 .scope_boxed()
             })

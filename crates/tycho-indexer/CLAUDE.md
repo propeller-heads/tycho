@@ -15,7 +15,7 @@ testing.rs                  Test utilities
 extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
   runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control; waits for internal subscribers (`PendingDeltas`) but removes a websocket client whose channel is full, counted in `extractor_slow_clients_removed_total` (registered at zero)
-  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero); a fenced writer (`StorageError::Fenced`) ends supervision instead of restarting; `RestartToTakeOver` rebuilds at once, without backoff; on a follower, waits to build the extractor while the leader syncs history
+  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero); a fenced writer (`StorageError::Fenced`) ends supervision instead of restarting; `RestartToTakeOver` rebuilds at once, without backoff; on a follower, waits to build the extractor while the leader syncs history; catches the entity cache up before every build but an immediate first one
   factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
@@ -49,7 +49,8 @@ services/
   deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor
   state/
     window.rs               DeltaWindow — fixed-depth block window; retention, fold-on-eviction
-    cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::from_snapshot builds it from one StateSnapshotGateway read at startup
+    cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::from_snapshot builds it from one StateSnapshotGateway read at startup; EntityCache::apply_catch_up writes a catch-up read atomically
+    catch_up.rs             CacheCatchUp — reads what the database committed since the last read (CatchUpRead) and applies it to the EntityCache; keeps the commit watermark
     service.rs              StateService — answers contract/protocol state from cache ⊕ window, or names a FallbackReason; EntityCacheSetup (the routing itself is in rpc.rs)
     shadow.rs               Shadow mode — samples state requests, runs the cache path next to the DB path, compares the normalized answers, records metrics
     cache/view.rs           AccountView / ComponentView — views of cache entries plus window changes;
@@ -338,10 +339,24 @@ server starts. `EntityCache::from_snapshot` (`services/state/cache.rs`) builds t
 and the services get the cache. The snapshot also holds each extractor's cursor and its block. The
 first build of each extractor resumes from that cursor (`ResumeFrom::Snapshot`, set with
 `ExtractorFactory::with_first_resume`), so it streams every block the cache does not hold, also when
-a leader commits during the read. A later build reads the database cursor. The windows fold into
-the cache, under the window lock. A failed load is a setup error and ends the process. `off` (the
-default) skips the load, every extractor reads its database cursor, and the windows fold into
-`DiscardSink`.
+a leader commits during the read. The windows fold into the cache, under the window lock. A failed
+load is a setup error and ends the process. `off` (the default) skips the load, every extractor
+reads its database cursor, and the windows fold into `DiscardSink`.
+
+Every later build of an extractor, and a first build after the follower waited for the leader to
+sync history, resumes from a catch-up instead (`ExtractorSupervisor::catch_up_entity_cache`). The
+supervisor reads the writer role, then calls `CacheCatchUp::catch_up`
+(`services/state/catch_up.rs`) for the extractor's system, and the build resumes from the cursor it
+returns. A catch-up reads in one snapshot transaction (`StateSnapshotGateway::catch_up_read`):
+every live component of the system, the account rows written since the watermark, and the
+extractor cursors. The watermark is a point in the database's commit order (`CommitWatermark`, the
+`xmin` of the Postgres transaction snapshot); a row qualifies when its own `xmin` is not older. The
+account read covers every system, so `CacheCatchUp` keeps one watermark: the one of its newest
+read. `EntityCache::apply_catch_up` then replaces the system's components and writes each account
+value with the fold rule (`AccountWrites`), all under one hold of the write lock. The watermark
+lock is held for the whole catch-up, so one catch-up runs at a time. A failed catch-up ends
+supervision, like a failed build.
+Metrics: `entity_cache_catch_ups_total`, `entity_cache_catch_up_duration_seconds`.
 A fold copies an entry that a reader still holds. Two metrics count these copies, labelled by
 `entity`: `entity_cache_shared_copies_total` (counter, one per copy) and
 `entity_cache_shared_copy_duration_ms` (histogram, the time of each copy).

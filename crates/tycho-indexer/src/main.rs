@@ -77,7 +77,8 @@ use tycho_indexer::{
     },
     leadership,
     services::{
-        EntityCache, EntityCacheMode, EntityCacheSetup, PlansConfig, ServicesBuilder, WindowConfig,
+        CacheCatchUp, EntityCache, EntityCacheMode, EntityCacheSetup, PlansConfig, ServicesBuilder,
+        WindowConfig,
     },
 };
 use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
@@ -627,10 +628,16 @@ async fn create_indexing_tasks(
         initialize_all_accounts(accounts_to_initialize, &rpc_client, chain, &cached_gw).await;
     }
 
-    let (entity_cache, snapshot_cursors) =
-        load_entity_cache(global_args.entity_cache_mode, &rpc_gw, &chain, &writer_status).await?;
+    let LoadedEntityCache { setup: entity_cache, cursors: snapshot_cursors, catch_up } =
+        load_entity_cache(
+            global_args.entity_cache_mode,
+            Arc::new(rpc_gw.clone()),
+            chain,
+            &writer_status,
+        )
+        .await?;
 
-    let (supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
+    let (mut supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
         &extractors_config,
         chains,
         &global_args.endpoint_url,
@@ -647,6 +654,11 @@ async fn create_indexing_tasks(
     )
     .await
     .map_err(|e| ExtractionError::Setup(format!("Failed to create extractors: {e}")))?;
+    if let Some(catch_up) = &catch_up {
+        for supervisor in &mut supervisors {
+            supervisor.set_cache_catch_up(Arc::clone(catch_up));
+        }
+    }
 
     let server_url = format!("http://{}:{}", global_args.server_ip, global_args.server_port);
     let api_key = env::var("AUTH_API_KEY").map_err(|e| {
@@ -747,7 +759,18 @@ impl SnapshotCursors {
     }
 }
 
-/// Builds the entity cache from one state snapshot, unless `mode` is `off`.
+/// What the entity cache load hands to the rest of the startup.
+struct LoadedEntityCache {
+    setup: EntityCacheSetup<Arc<EntityCache>>,
+    /// `None` when the cache is off.
+    cursors: Option<SnapshotCursors>,
+    /// Catches the cache up from `gateway`, starting at the watermark of the snapshot. `None` when
+    /// the cache is off.
+    catch_up: Option<Arc<CacheCatchUp>>,
+}
+
+/// Builds the entity cache from one state snapshot, unless `mode` is `off`. Later catch-ups of the
+/// cache read from `gateway`.
 ///
 /// The snapshot also holds the extractor cursors. Each extractor resumes from its cursor in the
 /// snapshot, so it streams every block the cache does not hold, and none twice. The role is read
@@ -761,24 +784,30 @@ impl SnapshotCursors {
 /// `ExtractionError::Setup` when the snapshot read fails.
 async fn load_entity_cache(
     mode: EntityCacheMode,
-    gateway: &impl StateSnapshotGateway,
-    chain: &Chain,
+    gateway: Arc<dyn StateSnapshotGateway + Send + Sync>,
+    chain: Chain,
     writer_status: &WriterStatus,
-) -> Result<(EntityCacheSetup<EntityCache>, Option<SnapshotCursors>), ExtractionError> {
+) -> Result<LoadedEntityCache, ExtractionError> {
     if mode == EntityCacheMode::Off {
-        return Ok((EntityCacheSetup::Off, None));
+        return Ok(LoadedEntityCache {
+            setup: EntityCacheSetup::Off,
+            cursors: None,
+            catch_up: None,
+        });
     }
     info!(?mode, "Loading the entity cache");
     let started = Instant::now();
     let role = writer_status.role();
     let mut snapshot = gateway
-        .state_snapshot(chain)
+        .state_snapshot(&chain)
         .await
         .map_err(|e| ExtractionError::Setup(format!("Entity cache load failed: {e}")))?;
     let cursors = SnapshotCursors { role, cursors: std::mem::take(&mut snapshot.cursors) };
     let accounts = snapshot.accounts.len();
     let components = snapshot.components.len();
-    let cache = EntityCache::from_snapshot(snapshot);
+    let watermark = snapshot.watermark;
+    let cache = Arc::new(EntityCache::from_snapshot(snapshot));
+    let catch_up = Arc::new(CacheCatchUp::new(Arc::clone(&cache), gateway, chain, watermark));
     let elapsed = started.elapsed();
     metrics::gauge!("entity_cache_load_duration_seconds").set(elapsed.as_secs_f64());
     info!(
@@ -794,7 +823,7 @@ async fn load_entity_cache(
     } else {
         EntityCacheSetup::Serve(cache)
     };
-    Ok((setup, Some(cursors)))
+    Ok(LoadedEntityCache { setup, cursors: Some(cursors), catch_up: Some(catch_up) })
 }
 
 #[expect(
@@ -867,12 +896,9 @@ async fn build_all_extractors(
         )
         .await?
         .with_writer_status(writer_status.clone());
-        let factory = match snapshot_cursors {
-            Some(snapshot_cursors) => {
-                factory.with_first_resume(snapshot_cursors.resume_from(&extractor_config.name))
-            }
-            None => factory,
-        };
+        if let Some(snapshot_cursors) = snapshot_cursors {
+            factory.resume_next_build_from(snapshot_cursors.resume_from(&extractor_config.name));
+        }
 
         // Create dedicated PendingDeltas channel for this extractor
         let (pd_tx, pd_rx) = tokio::sync::mpsc::channel(PENDING_DELTAS_CHANNEL_SIZE);

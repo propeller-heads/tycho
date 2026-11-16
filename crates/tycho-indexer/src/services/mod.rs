@@ -50,7 +50,8 @@ mod ws;
 pub use cache::RpcCacheKind;
 pub use middleware::PlansConfig;
 pub use state::{
-    cache::EntityCache, service::EntityCacheSetup, window::WindowConfig, EntityCacheMode,
+    cache::EntityCache, catch_up::CacheCatchUp, service::EntityCacheSetup, window::WindowConfig,
+    EntityCacheMode,
 };
 
 /// Helper struct to build Tycho services such as HTTP and WS server.
@@ -152,8 +153,8 @@ where
     /// The cache must be fully loaded: the windows fold into it and requests read it from the
     /// first block on. Ignored without extractors: the standalone rpc server has no windows, so
     /// it always runs as [`EntityCacheSetup::Off`].
-    pub fn entity_cache(mut self, setup: EntityCacheSetup<EntityCache>) -> Self {
-        self.entity_cache = setup.map(Arc::new);
+    pub fn entity_cache(mut self, setup: EntityCacheSetup<Arc<EntityCache>>) -> Self {
+        self.entity_cache = setup;
         self
     }
 
