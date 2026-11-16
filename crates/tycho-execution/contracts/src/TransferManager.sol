@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {
     SafeERC20,
     IERC20
@@ -52,6 +53,7 @@ contract TransferManager is Vault {
     using TransientSlot for TransientSlot.BooleanSlot;
     using TransientSlot for TransientSlot.Uint256Slot;
     using SafeERC20 for IERC20;
+    using SafeCast for uint256;
 
     IAllowanceTransfer public immutable permit2;
     TransientSlot.AddressSlot private constant _TOKEN_IN_SLOT =
@@ -138,8 +140,7 @@ contract TransferManager is Vault {
         if (transferType == TransferType.TransferNativeInExecutor) {
             // Protocols like Fluid or Lido require us to send the ETH as
             // msg.value when calling the swap function from inside the executor.
-            // forge-lint: disable-next-line(unsafe-typecast) amount is sent as native currency; no chain's native supply comes near 2^255.
-            _updateDeltaAccounting(tokenIn, -int256(amount));
+            _updateDeltaAccounting(tokenIn, -amount.toInt256());
             return amount;
         }
 
@@ -156,8 +157,7 @@ contract TransferManager is Vault {
                 _approveIfNeeded(tokenIn, receiver, amount);
             } else {
                 // Scenario 4: Funds already in router (from vault or previous swap)
-                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                _updateDeltaAccounting(tokenIn, -int256(amount));
+                _updateDeltaAccounting(tokenIn, -amount.toInt256());
                 _approveIfNeeded(tokenIn, receiver, amount);
             }
             return amount;
@@ -183,8 +183,7 @@ contract TransferManager is Vault {
                 // Scenario 6: Transfer from router balance to pool
                 // This could mean the funds come from the user's vault (first swap with vault)
                 // or funds are in the router from the previous swap.
-                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                _updateDeltaAccounting(tokenIn, -int256(amount));
+                _updateDeltaAccounting(tokenIn, -amount.toInt256());
                 amount = _transferOut(tokenIn, receiver, amount);
             }
             return amount;

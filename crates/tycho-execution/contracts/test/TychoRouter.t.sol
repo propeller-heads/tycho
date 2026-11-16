@@ -10,6 +10,7 @@ import {
 } from "@openzeppelin/contracts/access/IAccessControl.sol";
 import "@src/TransferManager.sol";
 import "./TychoRouterTestSetup.sol";
+import {Vault} from "@src/Vault.sol";
 
 contract TychoRouterTest is TychoRouterTestSetup {
     bytes32 public constant EXECUTOR_SETTER_ROLE =
@@ -87,6 +88,42 @@ contract TychoRouterTest is TychoRouterTestSetup {
         vm.expectRevert();
         tychoRouter.pause();
         vm.stopPrank();
+    }
+
+    function testPauseVault() public {
+        assertEq(tychoRouter.vaultPaused(), false);
+
+        vm.expectEmit(tychoRouterAddr);
+        emit Vault.VaultPaused(PAUSER);
+        vm.prank(PAUSER);
+        tychoRouter.pauseVault();
+        assertEq(tychoRouter.vaultPaused(), true);
+        assertEq(tychoRouter.paused(), false);
+
+        vm.expectEmit(tychoRouterAddr);
+        emit Vault.VaultUnpaused(UNPAUSER);
+        vm.prank(UNPAUSER);
+        tychoRouter.unpauseVault();
+        assertEq(tychoRouter.vaultPaused(), false);
+    }
+
+    function testPauseVaultNonRole() public {
+        vm.startPrank(BOB);
+        vm.expectRevert();
+        tychoRouter.pauseVault();
+        vm.expectRevert();
+        tychoRouter.unpauseVault();
+        vm.stopPrank();
+
+        // Each role only holds its own direction
+        vm.prank(UNPAUSER);
+        vm.expectRevert();
+        tychoRouter.pauseVault();
+        vm.prank(PAUSER);
+        tychoRouter.pauseVault();
+        vm.prank(PAUSER);
+        vm.expectRevert();
+        tychoRouter.unpauseVault();
     }
 
     function testEmptySwapsRevert() public {
