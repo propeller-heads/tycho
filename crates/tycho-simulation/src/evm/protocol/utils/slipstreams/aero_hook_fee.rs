@@ -269,9 +269,9 @@ impl AeroHookFee {
         if self.seconds_ago == 0 || self.seconds_ago > available {
             return Ok((0, false));
         }
-        // The hook runs `observe` for any scaling factor, so the observe gas is paid. A zero
-        // factor multiplies the deviation away, so the fee does not depend on what the oracle
-        // answers, and a ring this copy cannot read does not fail the quote.
+        // A zero factor multiplies the deviation away, so the fee does not depend on what the
+        // oracle answers, and a ring this copy cannot read does not fail the quote. The hook
+        // still runs `observe` on chain; its gas is part of the flat `AERO_HOOK_GAS`.
         if scaling_factor == 0 {
             return Ok((0, true));
         }
