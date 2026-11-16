@@ -86,6 +86,26 @@ Executors must be deployed **before** the TychoRouterV3: the router approves eve
 Executors added after deployment with `setExecutors`, and fee calculators set with
 `setFeeCalculator`, wait 1 day before they take effect.
 
+### Deploy subsidies
+
+The `SubsidyPayer` must be deployed **before** the `TychoSubsidizingExecutor`, as the executor requires its address.
+The payer only accepts `pay` from the router in `config/router_addresses.json`, so a new router needs a new payer and
+a new executor.
+
+1. Check the roles in `scripts/roles.json`. The payer takes `SUBSIDY_SIGNER` as its signer and these role holders:
+   - `SIGNER_SETTER_ROLE` and `BUDGET_ROLE`: the first `EXECUTOR_SETTER_ROLE` address
+   - `PAUSER_ADMIN_ROLE` and `UNPAUSER_ROLE`: the first `UNPAUSER_ROLE` address
+   - `PAUSER_ROLE`: every `PAUSER_ROLE` address
+2. Deploy the payer: `npx hardhat run scripts/deploy-subsidy-payer.js --network NETWORK`
+3. Set the printed payer address as the `subsidy` argument in `config/executor_deployments.json`
+4. Deploy the executor with `deploy-executors.js` (see "Deploy executors")
+5. Fill in the executor address as `subsidy` in `config/executor_addresses.json`
+6. Move the budget: withdraw it from the previous payer and send it to the new one
+
+Via the safe wallet UI:
+
+7. Set the executor on the router with `setExecutors`. It takes effect after 1 day.
+
 ### Publish the deployment
 
 1. Add the complete deployment snapshot under the chain's `scheduled_successor` field. Keep the current deployment active during the notice period.
