@@ -19,6 +19,17 @@ const BLOCKSCOUT_NETWORKS = {
     },
 };
 
+// Chains whose Blockscout takes verification only through its
+// Etherscan-compatible API. hardhat-verify cannot reach it: one `apiKey` sends
+// every chain to the Etherscan v2 API.
+const ETHERSCAN_API_NETWORKS = {
+    elysium: {
+        chainId: 99901,
+        apiUrl: "https://elysium.kinetiq.xyz/api/verify",
+        browserUrl: "https://elysium.kinetiq.xyz/",
+    },
+};
+
 // Cloudflare answers 403 to requests carrying a curl or node User-Agent.
 const USER_AGENT =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
@@ -209,8 +220,77 @@ async function verifyOnBlockscout({network, address, contractFqn, constructorArg
 }
 
 /**
+ * Verify through an Etherscan-compatible `verifysourcecode` API with the
+ * artifact's own build-info, then wait for the final status.
+ */
+async function verifyOnEtherscanApi({network, address, contractFqn, constructorArgs}) {
+    const config = ETHERSCAN_API_NETWORKS[network];
+    if (!config) {
+        throw new Error(`No Etherscan-compatible API config for network "${network}"`);
+    }
+
+    console.log(`Verifying on ${config.apiUrl} (chain ${config.chainId})...`);
+    const contractsDir = path.resolve(__dirname, "..");
+    const {standardJson, compilerVersion} = getHardhatStandardJsonInput(
+        contractsDir,
+        contractFqn
+    );
+    const body = new URLSearchParams({
+        module: "contract",
+        action: "verifysourcecode",
+        codeformat: "solidity-standard-json-input",
+        contractaddress: address,
+        contractname: contractFqn,
+        compilerversion: compilerVersion,
+        sourceCode: standardJson,
+        // The misspelling is the Etherscan API's own parameter name.
+        constructorArguements: encodeConstructorArgs(
+            contractsDir,
+            contractFqn,
+            constructorArgs
+        ),
+    });
+    const res = await fetch(config.apiUrl, {
+        method: "POST",
+        headers: {
+            "user-agent": USER_AGENT,
+            "content-type": "application/x-www-form-urlencoded",
+        },
+        body,
+    });
+    const submitted = await res.json();
+    if (submitted.status !== "1") {
+        if (/already verified/i.test(submitted.result)) {
+            console.log(`Already verified: ${config.browserUrl}address/${address}?tab=contract`);
+            return;
+        }
+        throw new Error(`Verification rejected: ${submitted.result}`);
+    }
+
+    const statusUrl =
+        `${config.apiUrl}?module=contract&action=checkverifystatus` +
+        `&guid=${submitted.result}`;
+    for (let attempt = 0; attempt < 60; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        const status = await (
+            await fetch(statusUrl, {headers: {"user-agent": USER_AGENT}})
+        ).json();
+        if (/pending|in queue/i.test(status.result)) {
+            continue;
+        }
+        if (status.status !== "1") {
+            throw new Error(`Verification failed: ${status.result}`);
+        }
+        console.log(`${status.result}: ${config.browserUrl}address/${address}?tab=contract`);
+        return;
+    }
+    throw new Error(`Timed out waiting for verification of ${address}`);
+}
+
+/**
  * Verify on whichever explorer the network uses: Blockscout's native v2 API for
- * Blockscout chains, hardhat-verify's Etherscan flow everywhere else.
+ * Blockscout chains, an Etherscan-compatible API for chains listed in
+ * ETHERSCAN_API_NETWORKS, hardhat-verify's Etherscan flow everywhere else.
  *
  * @param {string} network Hardhat network name
  * @param {string} address Deployed contract address
@@ -221,6 +301,15 @@ async function verifyOnBlockscout({network, address, contractFqn, constructorArg
 async function verifyOnExplorer({network, address, contractFqn, constructorArgs}) {
     if (BLOCKSCOUT_NETWORKS[network]) {
         await verifyOnBlockscout({
+            network,
+            address,
+            contractFqn,
+            constructorArgs,
+        });
+        return;
+    }
+    if (ETHERSCAN_API_NETWORKS[network]) {
+        await verifyOnEtherscanApi({
             network,
             address,
             contractFqn,

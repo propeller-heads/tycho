@@ -31,10 +31,10 @@ On Robinhood Chain (`robinhood`) and Elysium (`elysium`), leave
 `BLOCKCHAIN_EXPLORER_API_KEY` unset.
 Arc verifies on [arc.etherscan.io](https://arc.etherscan.io) through the Etherscan v2 API, which needs
 a paid Etherscan plan for Arc.
-The deploy scripts do not verify on Elysium. Submit each contract's standard JSON input to the
+On Elysium, the deploy scripts submit each contract's standard JSON input to the
 Etherscan-compatible API of [Elysium's Blockscout](https://elysium.kinetiq.xyz) at
-`https://elysium.kinetiq.xyz/api/verify` (no API key). hardhat-verify cannot reach it, because a
-single `apiKey` sends every chain to the Etherscan v2 API.
+`https://elysium.kinetiq.xyz/api/verify` (no API key) and wait for the result. hardhat-verify cannot
+reach it, because a single `apiKey` sends every chain to the Etherscan v2 API.
 
 If verification reports that Blockscout has not indexed the contract, re-run the deploy script
 later. Re-running skips a deployment that already exists.
