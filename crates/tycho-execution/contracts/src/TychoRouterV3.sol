@@ -139,10 +139,21 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     );
     event FeesTaken(address indexed token, FeeRecipient[] fees);
 
+    /**
+     * @param permit2_ The Permit2 contract.
+     * @param feeCalculator The fee calculator, active from deployment.
+     * @param executors Executors approved from deployment, without the
+     *  timelock that applies to executors added later with `setExecutors`.
+     * @param pauserAdmin Initial holder of `PAUSER_ROLE`.
+     * @param unpauserAdmin Initial holder of `UNPAUSER_ROLE`.
+     * @param executorSetterAdmin Initial holder of `EXECUTOR_SETTER_ROLE`.
+     * @param routerFeeSetterAdmin Initial holder of `ROUTER_FEE_SETTER_ROLE`.
+     */
     constructor(
         address permit2_,
         // forge-lint: disable-next-line(missing-zero-check) The code-length check rejects address(0).
         address feeCalculator,
+        address[] memory executors,
         address pauserAdmin,
         address unpauserAdmin,
         address executorSetterAdmin,
@@ -152,6 +163,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             revert TychoRouter__NotAContract(feeCalculator);
         }
         _feeCalculator = feeCalculator;
+        for (uint256 i = 0; i < executors.length; i++) {
+            _setExecutor(executors[i], 0);
+        }
 
         // Make each role its own admin so role holders can manage their own role
         _setRoleAdmin(PAUSER_ROLE, PAUSER_ROLE);
@@ -1171,7 +1185,8 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     }
 
     /**
-     * @dev Entrypoint to add or replace an approved executor contract address
+     * @dev Entrypoint to add approved executor contract addresses. Each
+     *  executor can be used once `DELAY_EXECUTOR_ACTIVATION` has passed.
      * @param targets address of the executor contract
      */
     function setExecutors(address[] memory targets)
@@ -1180,7 +1195,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         whenNotPaused
     {
         for (uint256 i = 0; i < targets.length; i++) {
-            _setExecutor(targets[i]);
+            _setExecutor(targets[i], DELAY_EXECUTOR_ACTIVATION);
         }
     }
 

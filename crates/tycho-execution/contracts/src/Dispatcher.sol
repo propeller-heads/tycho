@@ -70,19 +70,20 @@ contract Dispatcher is TransferManager {
     /**
      * @dev Adds an approved executor contract address if it is a contract.
      * @param target address of the executor contract
+     * @param delay seconds until the executor can be used
      */
-    function _setExecutor(address target) internal {
+    function _setExecutor(address target, uint256 delay) internal {
         if (target.code.length == 0) {
-            // forge-lint: disable-next-line(require-revert-in-loop) setExecutors applies a batch completely or not at all.
+            // forge-lint: disable-next-line(require-revert-in-loop) An executor batch applies completely or not at all.
             revert Dispatcher__NonContractExecutor();
         }
 
         if (executorsActivationTimestamp[target] != 0) {
-            // forge-lint: disable-next-line(require-revert-in-loop) setExecutors applies a batch completely or not at all.
+            // forge-lint: disable-next-line(require-revert-in-loop) An executor batch applies completely or not at all.
             revert Dispatcher__ExecutorAlreadyExists(target);
         }
 
-        uint256 timelockExpiresAt = block.timestamp + DELAY_EXECUTOR_ACTIVATION;
+        uint256 timelockExpiresAt = block.timestamp + delay;
         executorsActivationTimestamp[target] = timelockExpiresAt;
         emit ExecutorSet(target, timelockExpiresAt);
     }
