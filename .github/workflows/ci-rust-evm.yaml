@@ -1,9 +1,12 @@
 name: Rust CI
 
 on:
+  # This job needs RPC secrets, so fork PRs run here after maintainer approval.
+  # The regular Rust CI workflow stays on pull_request for non-secret checks.
   pull_request_target:
-    # This job needs RPC secrets, so fork PRs run here after maintainer approval.
-    # The regular Rust CI workflow stays on pull_request for non-secret checks.
+  # Merge queue groups run on a branch of this repository, so secrets are
+  # available; only maintainers can add a PR to the queue.
+  merge_group:
   push:
     branches: [main]
     paths:
@@ -62,7 +65,7 @@ jobs:
   test-evm:
     name: EVM tests (requires RPC)
     needs: [changes]
-    if: needs.changes.outputs.rust != 'false' || github.event_name != 'pull_request_target'
+    if: needs.changes.outputs.rust != 'false' || !(github.event_name == 'pull_request_target' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Runs fork code (cargo build/test) with RPC secrets in scope; gate fork PRs
@@ -102,7 +105,7 @@ jobs:
   test-evm-skip:
     name: EVM tests (requires RPC)
     needs: [changes]
-    if: needs.changes.outputs.rust == 'false' && github.event_name == 'pull_request_target'
+    if: needs.changes.outputs.rust == 'false' && (github.event_name == 'pull_request_target' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Rust changes detected, skipping EVM tests"

@@ -1,11 +1,13 @@
 name: Foundry CI
 
 on:
+  # No path filter on pull_request_target and merge_group. Path filtering is
+  # handled inside the `changes` job so that the skip-* jobs below always
+  # execute on every PR and merge queue group. GitHub branch protection
+  # requires a check to appear (pass or skip) on each commit — if the workflow
+  # never runs, required checks remain pending and block the PR.
   pull_request_target:
-  # No path filter here. Path filtering is handled inside the `changes` job so
-  # that the skip-* jobs below always execute on every PR. GitHub branch
-  # protection requires a check to appear (pass or skip) on each commit — if
-  # the workflow never runs, required checks remain pending and block the PR.
+  merge_group:
   push:
     branches: [ main ]
     paths:
@@ -20,12 +22,13 @@ permissions:
   contents: read
 
 jobs:
-  # Detects whether any Foundry-relevant paths changed in the PR.
-  # On a PR, the matching skip-* jobs run in place of the real CI jobs only
-  # when this outputs foundry == 'false', producing green checks so branch
-  # protection rules that require "Foundry CI / <job-name>" are satisfied. An
-  # empty output (detection failed) runs the real jobs. Outside a PR
-  # (push/workflow_dispatch) the real jobs always run.
+  # Detects whether any Foundry-relevant paths changed in the PR, or in the
+  # merge queue group (diffed against the group's base on main).
+  # On a PR or merge queue group, the matching skip-* jobs run in place of the
+  # real CI jobs only when this outputs foundry == 'false', producing green
+  # checks so branch protection rules that require "Foundry CI / <job-name>"
+  # are satisfied. An empty output (detection failed) runs the real jobs.
+  # Outside a PR (push/workflow_dispatch) the real jobs always run.
   changes:
     name: Detect Foundry changes
     runs-on: ubuntu-latest
@@ -58,7 +61,7 @@ jobs:
   forge-test:
     name: Forge build, fmt, test (${{ matrix.project.path }})
     needs: [ changes ]
-    if: needs.changes.outputs.foundry != 'false' || github.event_name != 'pull_request_target'
+    if: needs.changes.outputs.foundry != 'false' || !(github.event_name == 'pull_request_target' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # forge test runs fork-controlled Solidity (and can shell out via ffi) with
@@ -121,7 +124,7 @@ jobs:
   forge-test-skip-execution:
     name: Forge build, fmt, test (crates/tycho-execution/contracts)
     needs: [ changes ]
-    if: needs.changes.outputs.foundry == 'false' && github.event_name == 'pull_request_target'
+    if: needs.changes.outputs.foundry == 'false' && (github.event_name == 'pull_request_target' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Foundry changes detected, skipping forge-test"
@@ -129,7 +132,7 @@ jobs:
   forge-test-skip-adapter:
     name: Forge build, fmt, test (protocols/adapter-integration/evm)
     needs: [ changes ]
-    if: needs.changes.outputs.foundry == 'false' && github.event_name == 'pull_request_target'
+    if: needs.changes.outputs.foundry == 'false' && (github.event_name == 'pull_request_target' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Foundry changes detected, skipping forge-test"
@@ -137,7 +140,7 @@ jobs:
   forge-test-skip-token-proxy:
     name: Forge build, fmt, test (crates/tycho-simulation/token-proxy-contracts)
     needs: [ changes ]
-    if: needs.changes.outputs.foundry == 'false' && github.event_name == 'pull_request_target'
+    if: needs.changes.outputs.foundry == 'false' && (github.event_name == 'pull_request_target' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Foundry changes detected, skipping forge-test"
@@ -145,7 +148,7 @@ jobs:
   slither:
     name: Slither static analysis
     needs: [ changes ]
-    if: needs.changes.outputs.foundry != 'false' || github.event_name != 'pull_request_target'
+    if: needs.changes.outputs.foundry != 'false' || !(github.event_name == 'pull_request_target' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # No secrets here, but it compiles fork code; gate for consistency.
@@ -177,7 +180,7 @@ jobs:
   slither-skip:
     name: Slither static analysis
     needs: [ changes ]
-    if: needs.changes.outputs.foundry == 'false' && github.event_name == 'pull_request_target'
+    if: needs.changes.outputs.foundry == 'false' && (github.event_name == 'pull_request_target' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Foundry changes detected, skipping Slither"
