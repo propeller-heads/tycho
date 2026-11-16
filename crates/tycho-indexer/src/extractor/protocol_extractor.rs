@@ -401,6 +401,13 @@ where
                     .component_count()
                     .await as f64,
             );
+            if let Some(price_age) = self.protocol_cache.price_age().await {
+                gauge!(
+                    "protocol_cache_price_age_seconds",
+                    "chain" => self.chain.to_string(),
+                )
+                .set(price_age.num_seconds() as f64);
+            }
 
             if let Some(dci_plugin) = &self.dci_plugin {
                 async {

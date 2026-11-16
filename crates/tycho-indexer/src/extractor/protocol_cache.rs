@@ -45,6 +45,9 @@ pub trait ProtocolDataCache: Send + Sync {
     ) -> Result<(), StorageError>;
 }
 
+/// Longest time a background price refresh may take before it is abandoned.
+const PRICE_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 type ProtocolComponentStore = HashMap<String, HashMap<ComponentId, ProtocolComponent>>;
 
 #[derive(Clone)]
@@ -62,7 +65,8 @@ pub struct ProtocolMemoryCache {
 #[derive(Default)]
 struct TokenPrices {
     prices: HashMap<Bytes, f64>,
-    last_price_update: NaiveDateTime,
+    /// `None` until the first load.
+    last_price_update: Option<NaiveDateTime>,
 }
 
 impl ProtocolMemoryCache {
@@ -132,7 +136,7 @@ impl ProtocolMemoryCache {
         let old_prices = {
             let mut token_prices = self.token_prices.write().await;
             debug!(last_price_update = ?token_prices.last_price_update, ?n_fetched, resource = "prices", "CacheMiss");
-            token_prices.last_price_update = Local::now().naive_utc();
+            token_prices.last_price_update = Some(Local::now().naive_utc());
             std::mem::replace(&mut token_prices.prices, prices)
         };
         // Free the old prices after the write lock is released.
@@ -141,8 +145,9 @@ impl ProtocolMemoryCache {
     }
 
     /// Refreshes the token prices on a new task, so the caller does not wait for the load.
-    /// Does nothing when a refresh already runs. A failed refresh logs a warning; the next
-    /// call that finds the prices too old starts a new one.
+    /// Does nothing when a refresh already runs. A refresh that fails or takes longer than
+    /// [`PRICE_REFRESH_TIMEOUT`] logs a warning; the next call that finds the prices too old
+    /// starts a new one.
     fn spawn_price_refresh(&self) {
         let Ok(running) = self
             .price_refresh
@@ -153,11 +158,30 @@ impl ProtocolMemoryCache {
         };
         let cache = self.clone();
         tokio::spawn(async move {
-            if let Err(error) = cache.update_prices_cache().await {
-                warn!(%error, "Token price refresh failed");
+            match tokio::time::timeout(PRICE_REFRESH_TIMEOUT, cache.update_prices_cache()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => warn!(%error, "Token price refresh failed"),
+                Err(_) => warn!(
+                    timeout_s = PRICE_REFRESH_TIMEOUT.as_secs(),
+                    "Token price refresh timed out"
+                ),
             }
             drop(running);
         });
+    }
+
+    /// Returns the time since the last price load, or `None` before the first load.
+    pub async fn price_age(&self) -> Option<chrono::Duration> {
+        let last_update = self
+            .token_prices
+            .read()
+            .await
+            .last_price_update?;
+        Some(
+            Local::now()
+                .naive_utc()
+                .signed_duration_since(last_update),
+        )
     }
 
     /// Returns the number of cached tokens.
@@ -182,18 +206,13 @@ impl ProtocolDataCache for ProtocolMemoryCache {
         &'a self,
         addresses: &'a [Bytes],
     ) -> Result<Vec<Option<f64>>, StorageError> {
-        let last_update = self
-            .token_prices
-            .read()
-            .await
-            .last_price_update;
-
-        let now = Local::now().naive_utc();
-        if last_update == NaiveDateTime::default() {
+        match self.price_age().await {
             // No prices loaded yet, so there are no prices to answer with during the load.
-            self.update_prices_cache().await?;
-        } else if now.signed_duration_since(last_update) > self.max_price_age {
-            self.spawn_price_refresh();
+            None => {
+                self.update_prices_cache().await?;
+            }
+            Some(age) if age > self.max_price_age => self.spawn_price_refresh(),
+            Some(_) => {}
         }
         let mut res = Vec::with_capacity(addresses.len());
         let inner = self.token_prices.read().await;
@@ -399,14 +418,21 @@ mod tests {
     async fn test_old_prices_are_served_during_refresh() {
         let chain = Chain::Ethereum;
         let (release_load, load_released) = tokio::sync::oneshot::channel::<()>();
+        let load_released = std::sync::Mutex::new(Some(load_released));
+        // Counted here, not with `times`: a mock panic inside the refresh task would be lost.
+        let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut gateway = MockGateway::new();
+        let counted_loads = loads.clone();
         gateway
             .expect_get_token_prices()
             .with(eq(chain))
-            .times(1)
-            .return_once(move |_| {
+            .returning(move |_| {
+                counted_loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let load_released = load_released.lock().unwrap().take();
                 Box::pin(async move {
-                    load_released.await.unwrap();
+                    if let Some(load_released) = load_released {
+                        load_released.await.unwrap();
+                    }
                     Ok(HashMap::from([(Bytes::from("0x01"), 10.0)]))
                 })
             });
@@ -414,7 +440,8 @@ mod tests {
         {
             let mut token_prices = cache.token_prices.write().await;
             token_prices.prices = prices();
-            token_prices.last_price_update = Local::now().naive_utc() - Duration::seconds(120);
+            token_prices.last_price_update =
+                Some(Local::now().naive_utc() - Duration::seconds(120));
         }
         let addresses = &[Bytes::from("0x01")];
         let wait = std::time::Duration::from_millis(100);
@@ -424,7 +451,7 @@ mod tests {
             .await
             .expect("get_token_prices waited for the price load")
             .unwrap();
-        // A second call does not start a second refresh (the mock allows one load).
+        // A second call during the load does not start a second refresh.
         let second = tokio::time::timeout(wait, cache.get_token_prices(addresses))
             .await
             .expect("get_token_prices waited for the price load")
@@ -448,6 +475,7 @@ mod tests {
         assert_eq!(during_load, vec![Some(1.0)]);
         assert_eq!(second, vec![Some(1.0)]);
         assert_eq!(after_load, vec![Some(10.0)]);
+        assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
