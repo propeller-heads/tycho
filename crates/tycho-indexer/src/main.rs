@@ -62,7 +62,7 @@ use tycho_indexer::{
         SubstreamsArgs,
     },
     extractor::{
-        factory::{check_stored_block, earlier_blocks_in_second, ExtractorFactory},
+        factory::{earlier_blocks_in_second, ExtractorFactory},
         protocol_cache::ProtocolMemoryCache,
         runner::ExtractorHandle,
         supervisor::{DCIType, ExtractorConfig, ExtractorSupervisor, ProtocolTypeConfig},
@@ -807,9 +807,6 @@ async fn initialize_accounts(
         return;
     }
     let (block, extracted_accounts) = get_accounts_data(accounts, block_id, rpc, chain).await;
-    check_stored_block(cached_gw, &block)
-        .await
-        .expect("Failed to check the stored init block");
 
     info!(block_number = block.number, "Initializing accounts");
 
