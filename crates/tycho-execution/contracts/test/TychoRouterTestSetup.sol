@@ -61,7 +61,6 @@ contract TychoRouterExposed is TychoRouterV3 {
         address permit2_,
         address feeCalculator,
         address[] memory executors,
-        address pauser,
         address[] memory pausers,
         address unpauser,
         address executorSetter,
@@ -71,7 +70,6 @@ contract TychoRouterExposed is TychoRouterV3 {
             permit2_,
             feeCalculator,
             executors,
-            pauser,
             pausers,
             unpauser,
             executorSetter,
@@ -220,6 +218,12 @@ contract TychoRouterTestSetup is
         vm.warp(forkTimestamp);
     }
 
+    function listTestPausers() internal view returns (address[] memory) {
+        address[] memory pausers = new address[](1);
+        pausers[0] = PAUSER;
+        return pausers;
+    }
+
     function deployRouter() public returns (TychoRouterExposed) {
         // Use vm.etch to place dummy bytecode at address(123) so it passes the
         // .code.length check in the constructor without deploying a contract
@@ -231,8 +235,7 @@ contract TychoRouterTestSetup is
             PERMIT2_ADDRESS,
             placeholderFeeCalculator,
             new address[](0),
-            PAUSER,
-            new address[](0),
+            listTestPausers(),
             UNPAUSER,
             EXECUTOR_SETTER,
             FEE_SETTER

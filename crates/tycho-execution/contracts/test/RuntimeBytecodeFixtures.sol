@@ -53,7 +53,7 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
     function _listFixtures() internal {
         _deployments = vm.readFile(DEPLOYMENTS);
 
-        // TychoRouterV3(permit2, feeCalculator, executors, pauserAdmin, pausers, unpauserAdmin,
+        // TychoRouterV3(permit2, feeCalculator, executors, pausers, unpauserAdmin,
         // executorSetterAdmin, routerFeeSetterAdmin): permit2 is the only immutable, so it has to
         // be the canonical Permit2. feeCalculator only needs deployed code, so Permit2 stands in —
         // simulation points the router at a planted one through storage. Executors live in
@@ -64,7 +64,6 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
                 PERMIT2,
                 PERMIT2,
                 new address[](0),
-                PLACEHOLDER_ADMIN,
                 new address[](0),
                 PLACEHOLDER_ADMIN,
                 PLACEHOLDER_ADMIN,

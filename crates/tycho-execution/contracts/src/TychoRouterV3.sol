@@ -144,8 +144,8 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param feeCalculator The fee calculator, active from deployment.
      * @param executors Executors approved from deployment, without the
      *  timelock that applies to executors added later with `setExecutors`.
-     * @param pauserAdmin Initial holder of `PAUSER_ROLE`.
-     * @param pausers Further holders of `PAUSER_ROLE`.
+     * @param pausers Holders of `PAUSER_ROLE`. `UNPAUSER_ROLE` administers
+     *  the role, so these wallets can pause but not grant or revoke it.
      * @param unpauserAdmin Initial holder of `UNPAUSER_ROLE`.
      * @param executorSetterAdmin Initial holder of `EXECUTOR_SETTER_ROLE`.
      * @param routerFeeSetterAdmin Initial holder of `ROUTER_FEE_SETTER_ROLE`.
@@ -155,7 +155,6 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         // forge-lint: disable-next-line(missing-zero-check) The code-length check rejects address(0).
         address feeCalculator,
         address[] memory executors,
-        address pauserAdmin,
         address[] memory pausers,
         address unpauserAdmin,
         address executorSetterAdmin,
@@ -177,8 +176,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         _setRoleAdmin(EXECUTOR_SETTER_ROLE, EXECUTOR_SETTER_ROLE);
         _setRoleAdmin(ROUTER_FEE_SETTER_ROLE, ROUTER_FEE_SETTER_ROLE);
 
-        // Grant initial roles - only these ones are admin of the corresponding role
-        _grantRole(PAUSER_ROLE, pauserAdmin);
+        // Grant initial roles
         for (uint256 i = 0; i < pausers.length; i++) {
             _grantRole(PAUSER_ROLE, pausers[i]);
         }

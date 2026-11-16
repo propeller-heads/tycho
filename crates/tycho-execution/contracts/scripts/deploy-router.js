@@ -63,7 +63,6 @@ async function main() {
     console.log(`- feeCalculator: ${feeCalculator}`);
     console.log(`- executors (${executors.length}):`);
     executors.forEach((executor) => console.log(`    ${executor}`));
-    console.log(`- pauserAdmin: ${unpauser}`);
     console.log(`- pausers (${pausers.length}):`);
     pausers.forEach((pauser) => console.log(`    ${pauser}`));
     console.log(`- unpauserAdmin: ${unpauser}`);
@@ -85,7 +84,6 @@ async function main() {
         permit2,
         feeCalculator,
         executors,
-        unpauser,
         pausers,
         unpauser,
         executorSetter,
@@ -147,7 +145,6 @@ async function main() {
                 permit2,
                 feeCalculator,
                 executors,
-                unpauser,
                 pausers,
                 unpauser,
                 executorSetter,

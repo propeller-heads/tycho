@@ -226,8 +226,7 @@ contract TychoRouterTest is TychoRouterTestSetup {
             PERMIT2_ADDRESS,
             nonContract,
             new address[](0),
-            PAUSER,
-            new address[](0),
+            listTestPausers(),
             UNPAUSER,
             EXECUTOR_SETTER,
             FEE_SETTER
@@ -248,8 +247,7 @@ contract TychoRouterTest is TychoRouterTestSetup {
             nonContract,
             address(newFeeCalculator),
             new address[](0),
-            PAUSER,
-            new address[](0),
+            listTestPausers(),
             UNPAUSER,
             EXECUTOR_SETTER,
             FEE_SETTER
@@ -264,14 +262,13 @@ contract TychoRouterTest is TychoRouterTestSetup {
             PERMIT2_ADDRESS,
             address(feeCalculator),
             new address[](0),
-            PAUSER,
             pausers,
             UNPAUSER,
             EXECUTOR_SETTER,
             FEE_SETTER
         );
 
-        assertTrue(router.hasRole(PAUSER_ROLE, PAUSER));
+        assertFalse(router.hasRole(PAUSER_ROLE, UNPAUSER));
         assertTrue(router.hasRole(PAUSER_ROLE, pausers[0]));
         assertTrue(router.hasRole(PAUSER_ROLE, pausers[1]));
 
@@ -347,8 +344,7 @@ contract TychoRouterTest is TychoRouterTestSetup {
             PERMIT2_ADDRESS,
             address(feeCalculator),
             executors,
-            PAUSER,
-            new address[](0),
+            listTestPausers(),
             UNPAUSER,
             EXECUTOR_SETTER,
             FEE_SETTER
