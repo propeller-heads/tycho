@@ -615,12 +615,12 @@ async fn download_file_from_s3(
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDateTime;
-    use mockito::{Matcher, ServerGuard};
-    use serde_json::json;
-    use tycho_ethereum::rpc::config::RPCRetryConfig;
 
     use super::*;
-    use crate::testing::MockGateway;
+    use crate::testing::{
+        mock_node::{block_response, node},
+        MockGateway,
+    };
 
     const SECOND: i64 = 1_700_000_000;
 
@@ -641,77 +641,8 @@ mod tests {
         )
     }
 
-    /// An `eth_getBlockByNumber` response for block `number` in second `second`.
-    fn block_response(number: u64, second: i64) -> String {
-        let zero_hash = format!("0x{:064x}", 0);
-        json!({
-            "jsonrpc": "2.0",
-            "id": 0,
-            "result": {
-                "number": format!("{number:#x}"),
-                "hash": format!("0x{number:064x}"),
-                "parentHash": format!("0x{:064x}", number.saturating_sub(1)),
-                "timestamp": format!("{second:#x}"),
-                "sha3Uncles": zero_hash,
-                "miner": format!("0x{:040x}", 0),
-                "stateRoot": zero_hash,
-                "transactionsRoot": zero_hash,
-                "receiptsRoot": zero_hash,
-                "logsBloom": format!("0x{}", "0".repeat(512)),
-                "difficulty": "0x0",
-                "gasLimit": "0x0",
-                "gasUsed": "0x0",
-                "extraData": "0x",
-                "mixHash": zero_hash,
-                "nonce": "0x0000000000000000",
-                "size": "0x0",
-                "transactions": [],
-            },
-        })
-        .to_string()
-    }
-
-    /// Starts a node that serves the given blocks, as (number, second) pairs, and a client for
-    /// it that does not retry.
-    async fn node(blocks: &[(u64, i64)]) -> (ServerGuard, EthereumRpcClient) {
-        let mut server = mockito::Server::new_async().await;
-        for &(number, second) in blocks {
-            server
-                .mock("POST", "/")
-                .match_body(Matcher::PartialJson(json!({
-                    "method": "eth_getBlockByNumber",
-                    "params": [format!("{number:#x}"), false],
-                })))
-                .with_body(block_response(number, second))
-                .create_async()
-                .await;
-        }
-        let rpc = EthereumRpcClient::new(&server.url())
-            .expect("valid url")
-            .with_retry(RPCRetryConfig::new(0, 1, 1));
-        (server, rpc)
-    }
-
-    #[test]
-    fn test_stamped_block_before_without_earlier_blocks() {
-        assert_eq!(stamped_block_before(&[]), None);
-    }
-
-    #[test]
-    fn test_stamped_block_before_with_one_earlier_block() {
-        let earlier = [block(9, ts_at(SECOND, 0))];
-
-        assert_eq!(stamped_block_before(&earlier), Some(block(9, ts_at(SECOND, 0))));
-    }
-
-    #[test]
-    fn test_stamped_block_before_with_three_earlier_blocks() {
-        let earlier =
-            [block(9, ts_at(SECOND, 0)), block(8, ts_at(SECOND, 0)), block(7, ts_at(SECOND, 0))];
-
-        assert_eq!(stamped_block_before(&earlier), Some(block(9, ts_at(SECOND, 2))));
-    }
-
+    // The node of `test_extractors_starting_at_different_blocks_stamp_the_same` in
+    // `protocol_extractor.rs`: there every extractor stamps block 8 at S and block 10 at S + 2 µs.
     #[tokio::test]
     async fn test_earlier_blocks_in_second_stops_at_earlier_second() {
         let (_server, rpc) = node(&[(7, SECOND - 1), (8, SECOND), (9, SECOND), (10, SECOND)]).await;
@@ -720,7 +651,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(blocks, vec![block(9, ts_at(SECOND, 0)), block(8, ts_at(SECOND, 0))]);
+        assert_eq!(
+            blocks,
+            vec![
+                block(8, ts_at(SECOND, 0)),
+                block(9, ts_at(SECOND, 1)),
+                block(10, ts_at(SECOND, 2))
+            ]
+        );
     }
 
     #[tokio::test]
@@ -731,7 +669,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(blocks, vec![]);
+        assert_eq!(blocks, vec![block(10, ts_at(SECOND, 0))]);
     }
 
     #[tokio::test]
@@ -742,7 +680,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(blocks, vec![block(1, ts_at(SECOND, 0)), block(0, ts_at(SECOND, 0))]);
+        assert_eq!(
+            blocks,
+            vec![
+                block(0, ts_at(SECOND, 0)),
+                block(1, ts_at(SECOND, 1)),
+                block(2, ts_at(SECOND, 2))
+            ]
+        );
     }
 
     #[tokio::test]
@@ -753,7 +698,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(blocks, vec![]);
+        assert_eq!(blocks, vec![block(0, ts_at(SECOND, 0))]);
     }
 
     #[tokio::test]
@@ -778,31 +723,6 @@ mod tests {
         let res = earlier_blocks_in_second(&rpc, Chain::Ethereum, 10).await;
 
         assert!(matches!(res, Err(ExtractionError::Setup(_))));
-    }
-
-    // The node of `test_extractors_starting_at_different_blocks_stamp_the_same` in
-    // `protocol_extractor.rs`: there every extractor stamps block 8 at S and block 10 at S + 2 µs.
-
-    #[tokio::test]
-    async fn test_stamped_block_first_in_its_second() {
-        let (_server, rpc) = node(&[(7, SECOND - 1), (8, SECOND)]).await;
-
-        let stamped = stamped_block(&rpc, Chain::Ethereum, 8)
-            .await
-            .unwrap();
-
-        assert_eq!(stamped, block(8, ts_at(SECOND, 0)));
-    }
-
-    #[tokio::test]
-    async fn test_stamped_block_with_two_earlier_blocks() {
-        let (_server, rpc) = node(&[(7, SECOND - 1), (8, SECOND), (9, SECOND), (10, SECOND)]).await;
-
-        let stamped = stamped_block(&rpc, Chain::Ethereum, 10)
-            .await
-            .unwrap();
-
-        assert_eq!(stamped, block(10, ts_at(SECOND, 2)));
     }
 
     /// A gateway whose `get_block` returns `stored`.

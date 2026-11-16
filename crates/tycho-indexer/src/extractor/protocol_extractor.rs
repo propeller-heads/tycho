@@ -2269,9 +2269,9 @@ mod test {
 
     use super::*;
     use crate::{
-        extractor::MockExtractorExtension,
+        extractor::{factory::earlier_blocks_in_second, MockExtractorExtension},
         pb::sf::substreams::v1::BlockRef,
-        testing::{fixtures as pb_fixtures, MockGateway},
+        testing::{fixtures as pb_fixtures, mock_node::node, MockGateway},
     };
 
     mock! {
@@ -2359,9 +2359,13 @@ mod test {
         assert_eq!(res, "cursor");
     }
 
-    /// Starts a new extractor at block `first` the way the factory does, then sends it the
-    /// blocks from `first` to `last`. `node` gives the second of each block.
-    async fn run_new_extractor(node: &[(u64, i64)], first: u64, last: u64) -> Vec<NaiveDateTime> {
+    /// Starts a new extractor at block `first` the way the factory does, with a node that serves
+    /// `seconds` as (number, second) pairs, then sends it the blocks from `first` to `last`.
+    async fn run_new_extractor(
+        seconds: &[(u64, i64)],
+        first: u64,
+        last: u64,
+    ) -> Vec<NaiveDateTime> {
         let mut gw = MockExtractorGateway::new();
         gw.expect_ensure_protocol_types()
             .returning(|_| Ok(()));
@@ -2371,31 +2375,22 @@ mod test {
             .returning(|| None);
         let extractor = create_extractor(gw).await;
         let second_of = |number: u64| {
-            node.iter()
+            seconds
+                .iter()
                 .find(|(n, _)| *n == number)
                 .map(|(_, second)| *second)
                 .unwrap()
         };
 
-        // The blocks before `first` in its second, newest first, as the node returns them.
-        let earlier_blocks: Vec<Block> = (0..first)
-            .rev()
-            .take_while(|number| second_of(*number) == second_of(first))
-            .map(|number| {
-                Block::new(
-                    number,
-                    Chain::Ethereum,
-                    Bytes::from(number).lpad(32, 0),
-                    Bytes::from(number.saturating_sub(1)).lpad(32, 0),
-                    chrono::DateTime::from_timestamp(second_of(number), 0)
-                        .unwrap()
-                        .naive_utc(),
-                )
-            })
-            .collect();
-        if let Some(reference) = crate::extractor::factory::stamped_block_before(&earlier_blocks) {
+        // The factory sets the block before `first` in its second as the last processed block.
+        let (_server, rpc) = node(seconds).await;
+        let blocks = earlier_blocks_in_second(&rpc, Chain::Ethereum, first)
+            .await
+            .unwrap();
+        let (_first, earlier) = blocks.split_last().unwrap();
+        if let Some(before) = earlier.last() {
             extractor
-                .update_last_processed_block(reference)
+                .update_last_processed_block(before.clone())
                 .await;
         }
 
