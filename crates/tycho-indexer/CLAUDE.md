@@ -91,13 +91,13 @@ extension `E`. It is the single point that turns raw Substreams messages into ty
 Several blocks of a fast chain share one second. The extractor stamps such a block one
 microsecond after the block before it, so every extractor gives a block the same timestamp. An
 extractor with no stored block has no block before its first one. The factory reads the blocks of
-that second up to the first one from the node, stamped (`earlier_blocks_in_second`), and sets the
-block before the first one as the last processed block. It never reads the stamp from the
-database, so the stamp depends only on the chain. Then it runs `check_stored_block` on the first
-block: when the block is already stored with another timestamp, the extractor stops with a setup
-error. The blocks after the first one are stamped from it, so this one check at start is enough,
-and the write path has no check. Account initialisation (used in tests) stores its block outside
-an extractor, so it takes the stamp from `earlier_blocks_in_second` too.
+that second up to the first one from the node, stamped (`earlier_blocks_in_second`). It never
+reads the stamp from the database, so the stamp depends only on the chain. Then it runs
+`check_stored_block` on the first block: when the block is already stored with another timestamp,
+the extractor stops with a setup error. After the check, it sets the block before the first one as
+the last processed block. The blocks after the first one are stamped from it, so this one check
+at start is enough, and the write path has no check. Account initialisation (used in tests)
+stores its block outside an extractor, so it takes the stamp from `earlier_blocks_in_second` too.
 
 ### Partial-block path
 
