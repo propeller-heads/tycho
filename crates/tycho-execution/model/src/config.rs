@@ -35,22 +35,20 @@ pub const ENABLE_NONZERO_FEE_BPS: bool = false;
 pub const ENABLE_POSITIVE_SLIPPAGE: bool = false;
 
 /// Setting this to `true` introduces a fault,
-/// a transfer of 1000 WETH to `msg.sender` inside `singleSwap`,
+/// the router pulling 1000 WETH from [Address::Victim](crate::Address::Victim) to `msg.sender`
+/// through the victim's standing approval inside `singleSwap`,
 /// and should result in the output of suspicious [Outcome](crate::Outcome)s.
 /// useful as a sanity check or when debugging the code that finds
 /// [Outcome](crate::Outcome)s suspicious and serializes them.
 pub const INTRODUCE_FAULT: bool = false;
 
-/// Whether to simulate `singleSwap` (unless [ENABLE_BASE_SWAP_FUNCTIONS] is `false`),
-/// `singleSwapUsingVault` (unless [ENABLE_VAULT_SWAP_FUNCTIONS] is `false`),
+/// Whether to simulate `singleSwap` (unless [ENABLE_BASE_SWAP_FUNCTIONS] is `false`)
 /// and `singleSwapPermit2` (unless [ENABLE_PERMIT2_SWAP_FUNCTIONS] is `false`).
 pub const ENABLE_SINGLE_SWAP_FUNCTIONS: bool = true;
-/// Whether to simulate `sequentialSwap` (unless [ENABLE_BASE_SWAP_FUNCTIONS] is `false`),
-/// `sequentialSwapUsingVault` (unless [ENABLE_VAULT_SWAP_FUNCTIONS] is `false`),
+/// Whether to simulate `sequentialSwap` (unless [ENABLE_BASE_SWAP_FUNCTIONS] is `false`)
 /// and `sequentialSwapPermit2` (unless [ENABLE_PERMIT2_SWAP_FUNCTIONS] is `false`).
 pub const ENABLE_SEQUENTIAL_SWAP_FUNCTIONS: bool = true;
-/// Whether to simulate `splitSwap` (unless [ENABLE_BASE_SWAP_FUNCTIONS] is `false`),
-/// `splitSwapUsingVault` (unless [ENABLE_VAULT_SWAP_FUNCTIONS] is `false`),
+/// Whether to simulate `splitSwap` (unless [ENABLE_BASE_SWAP_FUNCTIONS] is `false`)
 /// and `splitSwapPermit2` (unless [ENABLE_PERMIT2_SWAP_FUNCTIONS] is `false`).
 pub const ENABLE_SPLIT_SWAP_FUNCTIONS: bool = true;
 
@@ -63,16 +61,10 @@ const _: () = assert!(
 /// `sequentialSwap` (unless [ENABLE_SEQUENTIAL_SWAP_FUNCTIONS] is `false`),
 /// and `splitSwap` (unless [ENABLE_SPLIT_SWAP_FUNCTIONS] is `false`).
 pub const ENABLE_BASE_SWAP_FUNCTIONS: bool = true;
-/// Whether to simulate `singleSwapUsingVault` (unless [ENABLE_SINGLE_SWAP_FUNCTIONS] is `false`),
-/// `sequentialSwapUsingVault` (unless [ENABLE_SEQUENTIAL_SWAP_FUNCTIONS] is `false`),
-/// and `splitSwapUsingVault` (unless [ENABLE_SPLIT_SWAP_FUNCTIONS] is `false`).
-pub const ENABLE_VAULT_SWAP_FUNCTIONS: bool = true;
 /// Whether to simulate `singleSwapPermit2` (unless [ENABLE_SINGLE_SWAP_FUNCTIONS] is `false`),
 /// `sequentialSwapPermit2` (unless [ENABLE_SEQUENTIAL_SWAP_FUNCTIONS] is `false`),
 /// and `splitSwapPermit2` (unless [ENABLE_SPLIT_SWAP_FUNCTIONS] is `false`).
 pub const ENABLE_PERMIT2_SWAP_FUNCTIONS: bool = true;
 
 /// compile time assertion that ensures one set of functions is enabled
-const _: () = assert!(
-    ENABLE_BASE_SWAP_FUNCTIONS || ENABLE_VAULT_SWAP_FUNCTIONS || ENABLE_PERMIT2_SWAP_FUNCTIONS
-);
+const _: () = assert!(ENABLE_BASE_SWAP_FUNCTIONS || ENABLE_PERMIT2_SWAP_FUNCTIONS);

@@ -1,7 +1,7 @@
 # Migration Guide
 
 This guide covers the breaking changes between Router versions from the perspective of users who consume the Rust
-encoding library or interact with the TychoRouterV3 contracts. Migrating from V2 means working through both sections in
+encoding library or interact with the TychoRouterV3 contracts. Migrating from V2 means working through all sections in
 order.
 
 ## V2 to V3
@@ -275,7 +275,7 @@ The TychoRouterV3 now includes an ERC6909 vault. Key changes:
 * Deposit tokens via `router.deposit(token, amount)` before swapping with vault funds.
 * Fees (both client and router fees) are credited to the receiver's vault balance rather than transferred immediately.
 
-For more see [Vault](vault.md).
+V3.2 removes the vault again — see [V3.1 to V3.2](#v3.1-to-v3.2).
 
 #### No More Wrap/Unwrap Flags
 
@@ -454,3 +454,122 @@ struct FeeInput {
 | `TychoRouter__FeesExceedOutput(totalFees, actualAmountOut)`          | Calculated fees exceed the swap output                    |
 
 `TychoRouter__UndefinedMinAmountOut` is removed — the first two errors replace it.
+
+## V3.1 to V3.2
+
+{% hint style="warning" %}
+Router V3.1 is paused. Do not pin a `tycho-execution` release to keep using it: every release from
+this change on targets V3.2.
+{% endhint %}
+
+V3.2 removes the vault. The router holds no user balances between transactions.
+
+### Before You Switch
+
+V3.2 is a new deployment, so it cannot reach anything you left on the V3.1 router:
+
+1. Withdraw your V3.1 vault balances, including client fees the router credited to you. For each
+   token, read `balanceOf(yourAddress, uint256(uint160(token)))` on the V3.1 router and call
+   `withdraw(token, amount)`. Use `ETH_ADDRESS` as the token for native ETH. `withdraw` works while
+   the router is paused.
+2. Revoke the ERC-20 allowances you granted the V3.1 router, and the Permit2 allowances whose spender
+   is the V3.1 router.
+
+### Encoding Changes
+
+#### UserTransferType
+
+V3.2 removes `UserTransferType::UseVaultsFunds`. Use `TransferFrom` or `TransferFromPermit2`.
+
+#### ClientFeeParams Struct
+
+V3.2 removes `max_client_contribution` and `.with_max_client_contribution()`. `into_abi_params` returns
+four values instead of five:
+
+```rust
+// V3.1
+let (bps, receiver, max_contribution, deadline, signature) = params.into_abi_params();
+
+// V3.2
+let (bps, receiver, deadline, signature) = params.into_abi_params();
+```
+
+### Execution Changes
+
+#### Router Function Signatures
+
+V3.2 removes `singleSwapUsingVault`, `sequentialSwapUsingVault`, `splitSwapUsingVault`, `deposit`,
+`withdraw` and the ERC6909 methods. `ClientFeeParams` loses `maxClientContribution`, so the selectors of the six
+remaining swap methods change:
+
+```solidity
+// V3.1
+struct ClientFeeParams {
+    uint32 clientFeeBps;
+    address clientFeeReceiver;
+    uint256 maxClientContribution;
+    uint256 deadline;
+    bytes clientSignature;
+}
+
+// V3.2
+struct ClientFeeParams {
+    uint32 clientFeeBps;
+    address clientFeeReceiver;
+    uint256 deadline;
+    bytes clientSignature;
+}
+```
+
+#### Client Fee Signature
+
+The `ClientFee` typehash loses `maxClientContribution`, so every V3.1 signature fails verification
+against V3.2:
+
+```solidity
+// V3.2
+ClientFee(uint32 clientFeeBps, address clientFeeReceiver, uint256 deadline,
+          uint256 amountIn, address tokenIn, address tokenOut,
+          uint256 expectedAmountOut, uint256 minAmountOut, address receiver, bytes swaps)
+```
+
+#### FeeCalculator Interface
+
+`mustOutputThroughRouter` takes the swap's tokens, so a token pair fee routes only that pair's output
+through the router:
+
+```solidity
+// V3.1
+function mustOutputThroughRouter(uint32 clientFeeBps, address client) external view returns (bool);
+
+// V3.2
+function mustOutputThroughRouter(uint32 clientFeeBps, address client, address tokenIn, address tokenOut)
+    external view returns (bool);
+```
+
+#### Fees and Output
+
+* The router transfers each fee to its recipient during the swap. A fee recipient that cannot accept the
+  token reverts the swap.
+* An output below `minAmountOut` always reverts with `TychoRouter__NegativeSlippage`. No client
+  contribution covers the shortfall.
+* The `receiver` cannot be the router. The router reverts with `TychoRouter__InvalidReceiver`.
+* The only check on the result is that the receiver got at least `minAmountOut` of `tokenOut`. You lose
+  the tokens that a route leaves in the router, including an unspent `msg.value`: any later swap can
+  spend them.
+* `msg.value` must equal `amountIn` for native ETH input and must be zero for any other input. V3.1
+  also reverted these swaps.
+* The Permit2 methods reject native ETH input, because they are not payable. Use `singleSwap`,
+  `sequentialSwap` or `splitSwap` with `msg.value` instead.
+* A Permit2 `amountIn` above `type(uint160).max` reverts. V3.1 truncated it to the lower 160 bits.
+
+#### Revert Reasons
+
+| Error                                              | Cause                                          |
+|----------------------------------------------------|------------------------------------------------|
+| `TychoRouter__InvalidReceiver(receiver)`           | `receiver` is the TychoRouterV3 address        |
+| `TransferManager__Permit2AmountTooLarge(amountIn)` | A Permit2 `amountIn` above `type(uint160).max` |
+| `TychoRouter__InvalidMsgValue(msgValue, expectedMsgValue)` | `msg.value` differs from `amountIn` for native ETH input, or is non-zero for any other input |
+
+The router no longer raises any `Vault__*` or `ERC6909*` error, or `TychoRouter__NegativeOutputDelta`.
+`TychoRouter__InvalidMsgValue` replaces `TychoRouter__MsgValueDoesNotMatchAmountIn`, with the same fields.

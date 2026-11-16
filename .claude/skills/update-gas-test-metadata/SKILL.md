@@ -33,15 +33,15 @@ Read each of these files in parallel:
 - `crates/tycho-execution/contracts/test/TychoRouterSequentialSwap.t.sol`
 - `crates/tycho-execution/contracts/test/TychoRouterSplitSwap.t.sol`
 - `crates/tycho-execution/contracts/test/TychoRouterFees.t.sol`
-- `crates/tycho-execution/contracts/test/TychoRouterVault.t.sol`
+- `crates/tycho-execution/contracts/test/TychoRouterChecks.t.sol`
 - `crates/tycho-execution/contracts/test/TychoRouterProtocolIntegration.t.sol`
 
 For each `function test...` found, determine:
 
 **`router_function`** — the TychoRouter entry-point called in the test body. One of:
-`singleSwap`, `singleSwapPermit2`, `singleSwapUsingVault`,
-`sequentialSwap`, `sequentialSwapPermit2`, `sequentialSwapUsingVault`,
-`splitSwap`, `splitSwapPermit2`, `splitSwapUsingVault`,
+`singleSwap`, `singleSwapPermit2`,
+`sequentialSwap`, `sequentialSwapPermit2`,
+`splitSwap`, `splitSwapPermit2`,
 `exposedSplitSwap`, `exposedSequentialSwap`
 
 **`protocols`** — sorted, deduplicated list. Infer from executor variables and encode helpers used in the test body:
@@ -74,7 +74,7 @@ For tests that load calldata from a file (`loadCallDataFromFile("test_...")`), i
 
 **Exclude**:
 - Tests that contain `vm.expectRevert` — error-path tests, not benchmarks
-- Tests that do not call any router entry-point: pure admin/config tests, vault-only tests (`testCannotDepositWhenPaused`), and tests in `TychoRouter.t.sol` that only test access control
+- Tests that do not call any router entry-point: pure admin/config tests and tests in `TychoRouter.t.sol` that only test access control
 
 ### Step 3: Diff and report
 

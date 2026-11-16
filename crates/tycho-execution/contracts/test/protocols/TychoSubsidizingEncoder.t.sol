@@ -114,10 +114,6 @@ contract TychoSubsidizingEncoderTest is TychoRouterTestSetup {
         return ALICE.balance;
     }
 
-    function _aliceVaultDai() internal view returns (uint256) {
-        return tychoRouter.balanceOf(ALICE, uint256(uint160(DAI_ADDR)));
-    }
-
     function testSubsidizedUniswapV2SingleSwap() public {
         (uint256 unsignedOut, uint256 signedOut) = _run(
             "test_subsidized_uniswap_v2_single_swap",
@@ -203,19 +199,6 @@ contract TychoSubsidizingEncoderTest is TychoRouterTestSetup {
         assertEq(unsignedOut, 1475644707225677606);
         assertEq(signedOut, unsignedOut + WETH_SUBSIDY);
         assertEq(IERC20(WETH_ADDR).balanceOf(tychoRouterAddr), 0);
-    }
-
-    function testSubsidizedVaultCreditSwap() public {
-        (uint256 unsignedOut, uint256 signedOut) = _run(
-            "test_subsidized_vault_credit_swap",
-            WETH_ADDR,
-            1 ether,
-            _aliceVaultDai
-        );
-
-        assertEq(unsignedOut, 2018817438608734439722);
-        assertEq(signedOut, unsignedOut + DAI_SUBSIDY);
-        assertEq(IERC20(DAI_ADDR).balanceOf(tychoRouterAddr), signedOut);
     }
 
     function testSubsidizedPoolSwapBeforeWrap() public {

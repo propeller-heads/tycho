@@ -1652,12 +1652,9 @@ contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
         assertEq(amountOut, FEE_WETH_OUT);
         assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), amountOut);
         // fee == gross / 100, where gross == amountOut + fee.
-        uint256 fee = tychoRouter.balanceOf(
-            routerFeeReceiver, uint256(uint160(WETH_ADDR))
-        );
+        uint256 fee = IERC20(WETH_ADDR).balanceOf(routerFeeReceiver);
         assertEq(fee, (amountOut + fee) / 100);
-        // The fee stays in the router as the vault balance's backing.
-        assertEq(IERC20(WETH_ADDR).balanceOf(tychoRouterAddr), fee);
+        assertEq(IERC20(WETH_ADDR).balanceOf(tychoRouterAddr), 0);
         assertEq(IERC20(WETH_ADDR).balanceOf(address(propAMMFallbackRouter)), 0);
     }
 

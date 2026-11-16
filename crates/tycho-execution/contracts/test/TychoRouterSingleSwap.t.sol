@@ -3,7 +3,7 @@ pragma solidity ^0.8.26;
 import {TychoRouterV3, ClientFeeParams} from "@src/TychoRouterV3.sol";
 import {Dispatcher__UnsupportedSingleHopCycle} from "@src/Dispatcher.sol";
 import "./TychoRouterTestSetup.sol";
-import {Vault__InsufficientBalance} from "@src/Vault.sol";
+import {TransferManager__Permit2AmountTooLarge} from "@src/TransferManager.sol";
 import {UniswapV4Executor} from "@src/executors/UniswapV4Executor.sol";
 import {UniswapV4Utils} from "./protocols/UniswapV4Utils.sol";
 
@@ -85,6 +85,42 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         assertEq(daiBalance, 2018817438608734439722);
         assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), 0);
 
+        vm.stopPrank();
+    }
+
+    function testPermit2AmountInAboveUint160() public {
+        // Permit2 moves uint160 amounts. A larger input amount must revert
+        // instead of pulling a truncated amount.
+        uint256 amountIn = uint256(type(uint160).max) + 1;
+        deal(WETH_ADDR, ALICE, 1 ether);
+
+        bytes memory swap = encodeSingleSwap(
+            address(usv2Executor),
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
+        );
+
+        vm.startPrank(ALICE);
+        (
+            IAllowanceTransfer.PermitSingle memory permitSingle,
+            bytes memory signature
+        ) = handlePermit2Approval(WETH_ADDR, tychoRouterAddr, type(uint160).max);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TransferManager__Permit2AmountTooLarge.selector, amountIn
+            )
+        );
+        tychoRouter.singleSwapPermit2(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            1, // expected amount out
+            1, // min amount out
+            ALICE,
+            noClientFee(),
+            permitSingle,
+            signature,
+            swap
+        );
         vm.stopPrank();
     }
 
@@ -252,13 +288,10 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         // and USDT as output.
         //
         // Without the fix:
-        // 1. singleSwapUsingVault(amountIn=0) with Slipstreams - fake pool
+        // 1. singleSwap(amountIn=0) with Slipstreams - fake pool
         // 2. Callback manipulates data to transfer USDC to the fake pool
-        // 3. Creates negative USDC delta (nonZeroDeltaCount=1)
         //
-        // Blocked by two independent checks:
-        //   a) amountIn == 0 reverts (TychoRouter__ZeroInput)
-        //   b) inputDelta == 0 would otherwise revert when nonZeroDeltaCount == 1
+        // Blocked: amountIn == 0 reverts (TychoRouter__ZeroInput)
 
         uint256 stolenAmount = 1_000_000e6;
         deal(USDC_ADDR, tychoRouterAddr, stolenAmount);
@@ -274,8 +307,8 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             encodeSingleSwap(address(slipstreamsExecutor), protocolData);
 
         vm.expectRevert(TychoRouter__ZeroInput.selector);
-        tychoRouter.singleSwapUsingVault(
-            0, WETH_ADDR, DAI_ADDR, 1, 1, tychoRouterAddr, noClientFee(), swap
+        tychoRouter.singleSwap(
+            0, WETH_ADDR, DAI_ADDR, 1, 1, ALICE, noClientFee(), swap
         );
 
         // No USDC was stolen
@@ -347,235 +380,6 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             noClientFee(),
             swap
         );
-    }
-
-    function testSingleSwapClientContribution() public {
-        // Trade 1 WETH for DAI with 1 swap on Uniswap V2
-        // The minAmountOut is higher than the output amount from the pool
-        // The client contribution is sent with the final amount out to the receiver (not optimized last transfer)
-        uint256 amountIn = 1 ether;
-
-        deal(WETH_ADDR, ALICE, amountIn);
-        vm.startPrank(ALICE);
-        // Approve the tokenIn to be transferred to the router
-        IERC20(WETH_ADDR).approve(address(tychoRouterAddr), amountIn);
-
-        // The client will contribute to this swap with their own funds
-        uint256 maxContribution = 20 * 1e18;
-        deal(DAI_ADDR, ALICE, maxContribution);
-        IERC20(DAI_ADDR).approve(address(tychoRouterAddr), maxContribution);
-
-        tychoRouter.deposit(DAI_ADDR, maxContribution);
-
-        bytes memory protocolData =
-            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
-
-        uint256 minAmountOut = 2020 * 1e18;
-        ClientFeeParams memory feeParams = ClientFeeParams({
-            clientFeeBps: 0,
-            clientFeeReceiver: ALICE,
-            maxClientContribution: maxContribution,
-            deadline: block.timestamp + 1 hours,
-            clientSignature: new bytes(0)
-        });
-        feeParams.clientSignature = signClientFee(
-            feeParams,
-            amountIn,
-            WETH_ADDR,
-            DAI_ADDR,
-            minAmountOut,
-            minAmountOut,
-            ALICE,
-            swap,
-            tychoRouterAddr,
-            ALICE_PK
-        );
-
-        uint256 amountOut = tychoRouter.singleSwap(
-            amountIn,
-            WETH_ADDR,
-            DAI_ADDR,
-            minAmountOut,
-            minAmountOut,
-            ALICE,
-            feeParams,
-            swap
-        );
-
-        assertEq(amountOut, minAmountOut);
-        uint256 daiBalance = IERC20(DAI_ADDR).balanceOf(ALICE);
-        assertEq(daiBalance, minAmountOut);
-        assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), 0);
-        uint256 swapAmount = 2018817438608734439722;
-        assertEq(
-            tychoRouter.balanceOf(ALICE, uint256(uint160(DAI_ADDR))),
-            maxContribution - (minAmountOut - swapAmount)
-        );
-
-        vm.stopPrank();
-    }
-
-    function testSingleSwapClientContributionNotEnough() public {
-        // Trade 1 WETH for DAI with 1 swap on Uniswap V2
-        // The minAmountOut is higher than the output amount from the pool
-        // and there won't be enough client contribution to cover the difference.
-        uint256 amountIn = 1 ether;
-
-        deal(WETH_ADDR, ALICE, amountIn);
-        vm.startPrank(ALICE);
-        // Approve the tokenIn to be transferred to the router
-        IERC20(WETH_ADDR).approve(address(tychoRouterAddr), amountIn);
-
-        bytes memory protocolData =
-            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
-
-        uint256 minAmountOut = 2020 * 1e18;
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                TychoRouter__NegativeSlippage.selector,
-                2018817438608734439722, // actual amountOut
-                minAmountOut
-            )
-        );
-
-        tychoRouter.singleSwap(
-            amountIn,
-            WETH_ADDR,
-            DAI_ADDR,
-            minAmountOut,
-            minAmountOut,
-            ALICE,
-            noClientFee(),
-            swap
-        );
-
-        vm.stopPrank();
-    }
-
-    function testSingleSwapClientContributionNotEnoughFunds() public {
-        // Trade 1 WETH for DAI with 1 swap on Uniswap V2
-        // The minAmountOut is higher than the output amount from the pool
-        // the client contribution is high enough but there won't be enough funds in the vault
-        uint256 amountIn = 1 ether;
-
-        deal(WETH_ADDR, ALICE, amountIn);
-        vm.startPrank(ALICE);
-        // Approve the tokenIn to be transferred to the router
-        IERC20(WETH_ADDR).approve(address(tychoRouterAddr), amountIn);
-
-        bytes memory protocolData =
-            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
-
-        uint256 minAmountOut = 2020 * 1e18;
-        uint256 swapAmount = 2018817438608734439722;
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                Vault__InsufficientBalance.selector,
-                0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2,
-                0x6B175474E89094C44Da98b954EedeAC495271d0F,
-                minAmountOut - swapAmount,
-                0
-            )
-        );
-
-        ClientFeeParams memory feeParams = makeClientFeeParams(
-            0,
-            20 * 1e18,
-            amountIn,
-            WETH_ADDR,
-            DAI_ADDR,
-            minAmountOut,
-            minAmountOut,
-            ALICE,
-            swap,
-            tychoRouterAddr,
-            ALICE_PK
-        );
-
-        tychoRouter.singleSwap(
-            amountIn,
-            WETH_ADDR,
-            DAI_ADDR,
-            minAmountOut,
-            minAmountOut,
-            ALICE,
-            feeParams,
-            swap
-        );
-
-        vm.stopPrank();
-    }
-
-    function testSingleSwapClientContributionDirectlyToReceiver() public {
-        // Trade 1 WETH for DAI with 1 swap on Uniswap V2
-        // The minAmountOut is higher than the output amount from the pool
-        // The client contribution is sent separately to the user (the last transfer is optimized)
-        uint256 amountIn = 1 ether;
-
-        deal(WETH_ADDR, ALICE, amountIn);
-        vm.startPrank(ALICE);
-        // Approve the tokenIn to be transferred to the router
-        IERC20(WETH_ADDR).approve(address(tychoRouterAddr), amountIn);
-
-        // The client will contribute to this swap with their own funds
-        uint256 maxContribution = 20 * 1e18;
-        deal(DAI_ADDR, ALICE, maxContribution);
-        IERC20(DAI_ADDR).approve(address(tychoRouterAddr), maxContribution);
-
-        tychoRouter.deposit(DAI_ADDR, maxContribution);
-
-        bytes memory protocolData =
-            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
-
-        uint256 minAmountOut = 2020 * 1e18;
-        ClientFeeParams memory feeParams = makeClientFeeParams(
-            0,
-            maxContribution,
-            amountIn,
-            WETH_ADDR,
-            DAI_ADDR,
-            minAmountOut,
-            minAmountOut,
-            ALICE,
-            swap,
-            tychoRouterAddr,
-            ALICE_PK
-        );
-
-        uint256 amountOut = tychoRouter.singleSwap(
-            amountIn,
-            WETH_ADDR,
-            DAI_ADDR,
-            minAmountOut,
-            minAmountOut,
-            ALICE,
-            feeParams,
-            swap
-        );
-
-        assertEq(amountOut, minAmountOut);
-        uint256 daiBalance = IERC20(DAI_ADDR).balanceOf(ALICE);
-        assertEq(daiBalance, minAmountOut);
-        assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), 0);
-        uint256 swapAmount = 2018817438608734439722;
-        assertEq(
-            tychoRouter.balanceOf(ALICE, uint256(uint160(DAI_ADDR))),
-            maxContribution - (minAmountOut - swapAmount)
-        );
-
-        vm.stopPrank();
     }
 
     function testSingleSwapFeeOnTransferToken() public {
@@ -749,8 +553,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
         return 22689128;
     }
 
-    // TODO(ENG-6054): skip until ENG-6054 is merged
-    function skip_testFinalFeeBelowMinAmount() public {
+    function testFinalFeeBelowMinAmount() public {
         // Swap USDC → TWIF (6% fee-on-transfer) via UniswapV4.
         // A small client fee forces the output through the router instead of going
         // directly to ALICE, causing an extra TWIF transfer (and an extra 6% tax).
@@ -779,7 +582,6 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
 
         ClientFeeParams memory feeParams = makeClientFeeParams(
             1, // 1 bps (0.01%)
-            0,
             amountIn,
             USDC_ADDR,
             TWIF,
@@ -794,13 +596,13 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
         // Output after the UniswapV4 swap is 107508473722887877019425641400
         // The user has correctly calculated this and set their min amount to be
         // 106000000000000000000000000000, which is even enough to account for the
-        // client fee. They however forgot to account for the final transfer fee, so
-        // they only end up with 101057965299514598220586024960 in their wallet.
-        // TychoRouterV3 reverts.
+        // client fee. They however forgot to account for the 6% tax on the
+        // router's final transfer, so they would only end up with
+        // 101057964288934951403114058934 in their wallet. TychoRouterV3 reverts.
         vm.expectRevert(
             abi.encodeWithSelector(
                 TychoRouter__NegativeSlippage.selector,
-                101047859502984652937820276907,
+                101057964288934951403114058934,
                 106000000000000000000000000000
             )
         );
@@ -810,83 +612,6 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
             TWIF,
             106000000000000000000000000000,
             106000000000000000000000000000,
-            ALICE,
-            feeParams,
-            swap
-        );
-        vm.stopPrank();
-    }
-
-    function testFinalFeeClientContributionBelowMinAmount() public {
-        // Swap USDC → TWIF (6% fee-on-transfer) via UniswapV4.
-        // There is no client fee so the final swap is optimized and sent straight
-        // to the user. However, the final amount is not enough, so a client
-        // contribution is sent. Unfortunately, the fee on the client contribution
-        // means this client contribution is not enough in the end - swap should still
-        // revert.
-        address TWIF = 0x2Dd636C514Bb4705c756D161585Ff9ec665f18A2;
-        uint256 amountIn = 100_000000; // 100 USDC
-
-        address CLIENT = vm.addr(CLIENT_FEE_RECEIVER_PK);
-
-        uint256 clientBalance = 200000000000000000000000000000;
-        deal(TWIF, CLIENT, clientBalance);
-        vm.startPrank(CLIENT);
-        IERC20(TWIF).approve(tychoRouterAddr, clientBalance);
-        tychoRouter.deposit(TWIF, clientBalance);
-        vm.stopPrank();
-
-        deal(USDC_ADDR, ALICE, amountIn);
-        vm.startPrank(ALICE);
-        IERC20(USDC_ADDR).approve(tychoRouterAddr, amountIn);
-
-        UniswapV4Executor.UniswapV4Pool[] memory pools =
-            new UniswapV4Executor.UniswapV4Pool[](1);
-        pools[0] = UniswapV4Executor.UniswapV4Pool({
-            intermediaryToken: TWIF,
-            fee: 10000,
-            tickSpacing: int24(200),
-            hook: address(0),
-            hookData: new bytes(0)
-        });
-        bytes memory protocolData = UniswapV4Utils.encodeExactInput(
-            USDC_ADDR, TWIF, false, false, pools
-        );
-        bytes memory swap =
-            encodeSingleSwap(address(usv4Executor), protocolData);
-
-        ClientFeeParams memory feeParams = makeClientFeeParams(
-            0, // no client fee
-            500000000000000000000000000, // max client contribution
-            amountIn,
-            USDC_ADDR,
-            TWIF,
-            108000000000000000000000000000, // expected amount out
-            108000000000000000000000000000, // min amount out
-            ALICE,
-            swap,
-            tychoRouterAddr,
-            CLIENT_FEE_RECEIVER_PK
-        );
-
-        // Output after the UniswapV4 swap is 107508473722887877019425641400
-        // The user wants 108000000000000000000000000000. Client attempts to contribute,
-        // but since fees are taken on the contribution amount, this is not enough.
-        // Swap should revert.
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                TychoRouter__NegativeSlippage.selector,
-                // 107508473722887877019425641400 + 0.94 * expected client contribution
-                107970508423373272621165538484,
-                108000000000000000000000000000
-            )
-        );
-        uint256 amountOut = tychoRouter.singleSwap(
-            amountIn,
-            USDC_ADDR,
-            TWIF,
-            108000000000000000000000000000,
-            108000000000000000000000000000,
             ALICE,
             feeParams,
             swap

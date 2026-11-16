@@ -16,10 +16,8 @@
 //! These swap sequences can transfer assets out of the router, give allowance
 //! to spend the router's assets,
 //! and increase balances, which allow withdrawal of assets from the router.
-//! At the same time, the router acts as a vault that can hold potentially significant amounts of
-//! user's assets.
-//! This functionality was added with V3 and allows users to efficiently
-//! use those assets using swap.
+//! At the time, the router also acted as a vault that could hold potentially significant amounts
+//! of user's assets. V3.2 removed the vault, so the router no longer holds user balances.
 //! Earlier security assessments warned that assets owned by the router
 //! must not be considered safe.
 //! As a result, Tycho Router V3 is a risky product with a large attack surface.

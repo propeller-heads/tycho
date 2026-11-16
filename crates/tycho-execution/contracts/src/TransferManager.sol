@@ -10,7 +10,6 @@ import {
     IAllowanceTransfer
 } from "@permit2/src/interfaces/IAllowanceTransfer.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
-import {Vault} from "./Vault.sol";
 import {ETH_ADDRESS} from "../lib/NativeETH.sol";
 
 error TransferManager__NotAContract(address addr);
@@ -21,31 +20,30 @@ error TransferManager__DifferentTokenIn(
     address tokenIn, address tokenInStorage
 );
 error TransferManager__UnknownTransferType();
+error TransferManager__Permit2AmountTooLarge(uint256 amount);
 
 /**
  * @title TransferManager
- * @dev Orchestrates all token transfers during swap execution. Inherits from Vault
- * (ERC6909) and sits between TychoRouterV3 and Dispatcher in the inheritance chain.
+ * @dev Makes every token transfer of a swap. Sits between
+ * TychoRouterV3 and Dispatcher in the inheritance chain.
  *
  * Responsibilities:
- * - Routes each transfer through one of 6 scenarios based on: TransferType returned
+ * - Routes each transfer through one of 5 scenarios based on: TransferType returned
  *   by the executor, whether it is the first swap, whether it is a split swap,
- *   whether the call is inside a callback, and whether vault funds are in use.
+ *   and whether the call is inside a callback.
  * - Caps `transferFrom` to the declared input amount (stored in transient storage at
  *   swap start). This prevents maliciously encoded split swaps from withdrawing more
  *   than the user authorised. Reverts if the cap is exceeded or a different token is
  *   attempted.
  * - Supports both standard ERC20 `transferFrom` and Permit2's `transferFrom`.
- * - Handles native ETH accounting for executors that forward ETH as `msg.value`
- *   directly to the protocol (e.g. Fluid, Rocketpool, Lido).
- * - When vault-funded, skips `transferFrom` entirely and relies on vault delta
- *   accounting (`_updateDeltaAccounting`) to settle balances at the end of the swap.
+ * - Makes no transfer for executors that forward ETH as `msg.value` directly to
+ *   the protocol (e.g. Fluid, Rocketpool, Lido); they spend the router's ETH.
  *
  * Per-swap state is kept in transient storage (EIP-1153): token in, allowed amount,
- * Permit2 flag, original sender, and vault-in-use flag. These are written once at
+ * Permit2 flag and original sender. These are written once at
  * swap entry (`_tstoreTransferFromInfo`) and consumed throughout the swap.
  */
-contract TransferManager is Vault {
+contract TransferManager {
     // One directive per slot type: Slither 0.11.6 can fail to analyse a
     // contract that uses `using TransientSlot for *`.
     using TransientSlot for TransientSlot.AddressSlot;
@@ -88,15 +86,12 @@ contract TransferManager is Vault {
     function _tstoreTransferFromInfo(
         address tokenIn,
         uint256 amountIn,
-        bool isPermit2,
-        bool useVault
+        bool isPermit2
     ) internal {
-        uint256 amountAllowed = useVault ? 0 : amountIn;
         _TOKEN_IN_SLOT.tstore(tokenIn);
-        _AMOUNT_ALLOWED_SLOT.tstore(amountAllowed);
+        _AMOUNT_ALLOWED_SLOT.tstore(amountIn);
         _IS_PERMIT2_SLOT.tstore(isPermit2);
         _SENDER_SLOT.tstore(msg.sender);
-        _USE_VAULT_SLOT.tstore(useVault);
     }
 
     /**
@@ -108,15 +103,13 @@ contract TransferManager is Vault {
      * - isFirstSwap: Whether this is the first swap or subsequent
      * - isSplitSwap: Whether this is part of a split swap strategy
      * - inCallback: Whether being called from within a callback (e.g., UniswapV3)
-     * - useVault: Whether using vault funds
      *
-     * Handles 6 transfer scenarios (in order of execution):
-     * 1. None - no transfer needed
-     * 2. Native ETH sent via executor - perform accounting but do no transfers
-     * 3. TransferFrom user wallet to router, then approve protocol to debit
-     * 4. Protocol debits from router/vault (with approval if needed). No transferFrom needed
-     * 5. TransferFrom user wallet directly to protocol
-     * 6. Transfer from router balance to protocol (either from vault or previous swap funds)
+     * Handles 5 transfer scenarios (in order of execution):
+     * 1. None, or native ETH sent by the executor - the router transfers nothing
+     * 2. TransferFrom user wallet to router, then approve protocol to debit
+     * 3. Protocol debits from router (with approval if needed). No transferFrom needed
+     * 4. TransferFrom user wallet directly to protocol
+     * 5. Transfer the funds the previous swap left in the router to the protocol
      */
     function _transfer(
         address receiver,
@@ -127,39 +120,24 @@ contract TransferManager is Vault {
         bool isSplitSwap,
         bool inCallback
     ) internal returns (uint256) {
-        // Scenario 1: No transfer needed. Likely called from outside the callback,
-        // when funds are only transferred in callback for this protocol (e.g.
-        // UniswapV3).
-        if (transferType == TransferType.None) {
+        // Scenario 1: The router transfers nothing. The protocol is paid
+        // inside a callback (e.g. UniswapV3), or the executor sends native ETH
+        // as msg.value when it calls the protocol (e.g. Fluid, Lido).
+        if (
+            transferType == TransferType.None
+                || transferType == TransferType.TransferNativeInExecutor
+        ) {
             return amount;
         }
 
-        // Scenario 2: Native ETH sent via executor - accounting only
-        if (transferType == TransferType.TransferNativeInExecutor) {
-            // Protocols like Fluid or Lido require us to send the ETH as
-            // msg.value when calling the swap function from inside the executor.
-            // forge-lint: disable-next-line(unsafe-typecast) amount is sent as native currency; no chain's native supply comes near 2^255.
-            _updateDeltaAccounting(tokenIn, -int256(amount));
-            return amount;
-        }
-
-        // Determine if we need to transfer from user wallet (first swap + not using vault)
-        bool useVault;
-        useVault = _USE_VAULT_SLOT.tload();
-        bool needsTransferFromUser = isFirstSwap && !useVault;
-
-        // Scenario 3 & 4: Protocol will debit tokens from router
+        // Scenario 2 & 3: Protocol will debit tokens from router
         if (transferType == TransferType.ProtocolWillDebit) {
-            if (needsTransferFromUser) {
-                // Scenario 3: First swap with user funds - transfer to router, then approve
+            // Scenario 2: the first swap pulls the user's funds into the router.
+            // Scenario 3: a later swap uses the funds the previous swap left.
+            if (isFirstSwap) {
                 amount = _transferFromUser(tokenIn, address(this), amount);
-                _approveIfNeeded(tokenIn, receiver, amount);
-            } else {
-                // Scenario 4: Funds already in router (from vault or previous swap)
-                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                _updateDeltaAccounting(tokenIn, -int256(amount));
-                _approveIfNeeded(tokenIn, receiver, amount);
             }
+            _approveIfNeeded(tokenIn, receiver, amount);
             return amount;
         }
 
@@ -176,15 +154,12 @@ contract TransferManager is Vault {
                 return amount;
             }
 
-            if (needsTransferFromUser) {
-                // Scenario 5: First swap with user funds - transfer directly to pool
+            if (isFirstSwap) {
+                // Scenario 4: First swap with user funds - transfer directly to pool
                 amount = _transferFromUser(tokenIn, receiver, amount);
             } else {
-                // Scenario 6: Transfer from router balance to pool
-                // This could mean the funds come from the user's vault (first swap with vault)
-                // or funds are in the router from the previous swap.
-                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                _updateDeltaAccounting(tokenIn, -int256(amount));
+                // Scenario 5: Transfer the funds the previous swap left in
+                // the router to the pool.
                 amount = _transferOut(tokenIn, receiver, amount);
             }
             return amount;
@@ -263,7 +238,12 @@ contract TransferManager is Vault {
         // Perform the actual transfer
         if (isPermit2) {
             // Permit2.permit is already called from the TychoRouterV3
-            // forge-lint: disable-next-line(calls-loop, unsafe-typecast) Each split from the input token pulls its share from the user; a failing pull fails the route. Permit2 amounts are uint160, and the balance diff below measures what arrived.
+            // Permit2 amounts are uint160: a larger amount reverts instead of truncating.
+            if (amount > type(uint160).max) {
+                // forge-lint: disable-next-line(require-revert-in-loop) An amount Permit2 cannot carry fails the route.
+                revert TransferManager__Permit2AmountTooLarge(amount);
+            }
+            // forge-lint: disable-next-line(calls-loop, unsafe-typecast) Each split from the input token pulls its share from the user; a failing pull fails the route. The check above keeps the amount within uint160.
             permit2.transferFrom(sender, receiver, uint160(amount), token);
         } else {
             // forge-lint: disable-next-line(arbitrary-send-erc20) sender is the router's msg.sender, stored by the entry point.

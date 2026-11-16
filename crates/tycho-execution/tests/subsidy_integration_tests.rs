@@ -105,7 +105,6 @@ fn write_signed_calldata(test_identifier: &str, solution: Solution, client_fee_b
             Some(get_signer()),
             client_fee_bps,
             &client_fee_receiver,
-            &BigUint::ZERO,
         )
         .unwrap()
         .data
@@ -321,24 +320,6 @@ fn test_subsidized_pool_swap_before_wrap() {
     );
 
     write_signed_calldata("test_subsidized_pool_swap_before_wrap", solution, 0);
-}
-
-#[test]
-fn test_subsidized_vault_credit_swap() {
-    // WETH ──(USV2, subsidized)──> DAI, credited to ALICE's vault balance
-    let solution = Solution::new(
-        alice_address(),
-        router_address(),
-        weth(),
-        dai(),
-        one_weth(),
-        BigUint::from(DAI_SUBSIDY) + 1u32,
-        BigUint::from(1u32),
-        vec![usv2(DAI_WETH_USV2, &weth(), &dai())],
-    )
-    .with_subsidy(terms(DAI_SUBSIDY, 0));
-
-    write_signed_calldata("test_subsidized_vault_credit_swap", solution, 0);
 }
 
 #[test]

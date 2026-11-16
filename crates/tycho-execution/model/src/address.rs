@@ -29,6 +29,10 @@ pub enum Address {
     ClientFeeReceiver,
     /// Address chosen by tycho to receive router fee.
     RouterFeeReceiver,
+    /// A user who is not the caller and has approved the router and Permit2
+    /// for WETH. Its standing approvals are what an attacker can still steal.
+    #[serde(rename = "victim")]
+    Victim,
     /// Sometimes other addresses are needed. they can be represented using this variant
     #[serde(untagged)]
     Named(&'static str),

@@ -44,13 +44,17 @@ interface IFeeCalculator {
      * @dev Covers: slippage enabled, fees > 0, or any future condition.
      * @param clientFeeBps Client fee in fee units (100_000_000 = 100%)
      * @param client The client address to check
+     * @param tokenIn The swap's input token
+     * @param tokenOut The swap's output token
      * @return True if funds must pass through the router after the
      *         final swap instead of going directly to the receiver
      */
-    function mustOutputThroughRouter(uint32 clientFeeBps, address client)
-        external
-        view
-        returns (bool);
+    function mustOutputThroughRouter(
+        uint32 clientFeeBps,
+        address client,
+        address tokenIn,
+        address tokenOut
+    ) external view returns (bool);
 
     /**
      * @notice Returns a page of clients with custom fee overrides and their current settings

@@ -103,7 +103,7 @@ contract TychoRouterExposed is TychoRouterV3 {
         address receiver,
         bool isCyclical
     ) external returns (uint256) {
-        _tstoreTransferFromInfo(tokenIn, amountIn, false, false);
+        _tstoreTransferFromInfo(tokenIn, amountIn, false);
         return _splitSwap(amountIn, nTokens, swaps, receiver, isCyclical);
     }
 
@@ -114,12 +114,8 @@ contract TychoRouterExposed is TychoRouterV3 {
         bytes calldata swaps,
         address receiver
     ) external returns (uint256) {
-        _tstoreTransferFromInfo(tokenIn, amountIn, false, false);
+        _tstoreTransferFromInfo(tokenIn, amountIn, false);
         return _sequentialSwap(amountIn, swaps, receiver);
-    }
-
-    function exposedDeltaAccounting(address token, uint256 amount) external {
-        _updateDeltaAccounting(token, int256(amount));
     }
 
     function exposedGetFeeCalculator() external view returns (address) {

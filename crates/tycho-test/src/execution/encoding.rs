@@ -456,13 +456,9 @@ pub fn calculate_executor_storage_slot(key: Address) -> FixedBytes<32> {
 
     // Storage layout (from `forge inspect TychoRouterV3 storageLayout`):
     //   slot 0: _roles             (AccessControl)
-    //   slot 1: _balances          (ERC6909)
-    //   slot 2: _operatorApprovals (ERC6909)
-    //   slot 3: _allowances        (ERC6909)
-    //   slot 4: _paused            (Pausable)
-    //   slot 5: _vaultBalances     (Vault)
-    //   slot 6: executorsActivationTimestamp (Dispatcher)
-    let slot = U256::from(6);
+    //   slot 1: _paused            (Pausable)
+    //   slot 2: executorsActivationTimestamp (Dispatcher)
+    let slot = U256::from(2);
 
     // Convert U256 slot to 32-byte big-endian array
     let slot_bytes = slot.to_be_bytes::<32>();
@@ -697,8 +693,8 @@ pub fn setup_router_overwrites(
     // The FeeCalculator override returns zero fees for all clients, so it acts as a no-op.
     if let Some(fee_calculator_bytecode) = data.fee_calculator_bytecode {
         let fee_calculator_address = Address::from_str(FEE_CALCULATOR_ADDRESS).into_diagnostic()?;
-        // Storage layout slot 9 = _feeCalculator (see `forge inspect TychoRouterV3 storageLayout`)
-        let fee_calculator_slot = FixedBytes::<32>::from(U256::from(9));
+        // Storage layout slot 5 = _feeCalculator (see `forge inspect TychoRouterV3 storageLayout`)
+        let fee_calculator_slot = FixedBytes::<32>::from(U256::from(5));
         let mut fee_calculator_slot_value = [0u8; 32];
         fee_calculator_slot_value[12..].copy_from_slice(fee_calculator_address.as_slice());
         router_state_diff
@@ -1067,7 +1063,7 @@ mod tests {
         let mut fee_calculator_slot_value = [0u8; 32];
         fee_calculator_slot_value[12..].copy_from_slice(fee_calculator.as_slice());
         assert_eq!(
-            state_diff.get(&FixedBytes::<32>::from(U256::from(9))),
+            state_diff.get(&FixedBytes::<32>::from(U256::from(5))),
             Some(&FixedBytes::<32>::from(fee_calculator_slot_value)),
             "the router does not point at the overwritten fee calculator"
         );

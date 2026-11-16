@@ -40,8 +40,7 @@ contract NonERC1271Wallet {}
 
 contract ClientFeeTestHelper is Test, Constants {
     bytes32 private constant _CLIENT_FEE_TYPEHASH = keccak256(
-        "ClientFee(uint32 clientFeeBps,address clientFeeReceiver,"
-        "uint256 maxClientContribution,uint256 deadline,"
+        "ClientFee(uint32 clientFeeBps,address clientFeeReceiver,uint256 deadline,"
         "uint256 amountIn,address tokenIn,address tokenOut,"
         "uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)"
     );
@@ -111,7 +110,6 @@ contract ClientFeeTestHelper is Test, Constants {
                 _CLIENT_FEE_TYPEHASH,
                 params.clientFeeBps,
                 params.clientFeeReceiver,
-                params.maxClientContribution,
                 params.deadline,
                 amountIn,
                 tokenIn,
@@ -140,7 +138,6 @@ contract ClientFeeTestHelper is Test, Constants {
         params = ClientFeeParams({
             clientFeeBps: 0,
             clientFeeReceiver: address(0),
-            maxClientContribution: 0,
             deadline: 0,
             clientSignature: new bytes(0)
         });
@@ -152,7 +149,6 @@ contract ClientFeeTestHelper is Test, Constants {
      */
     function makeClientFeeParams(
         uint32 clientFeeBps,
-        uint256 maxClientContribution,
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
@@ -167,7 +163,6 @@ contract ClientFeeTestHelper is Test, Constants {
         params = ClientFeeParams({
             clientFeeBps: clientFeeBps,
             clientFeeReceiver: feeReceiver,
-            maxClientContribution: maxClientContribution,
             deadline: block.timestamp + 1 hours,
             clientSignature: new bytes(0)
         });

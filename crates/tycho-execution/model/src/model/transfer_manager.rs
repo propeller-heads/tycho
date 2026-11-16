@@ -1,4 +1,4 @@
-//! <https://github.com/propeller-heads/tycho-execution/blob/main/foundry/src/TransferManager.sol>
+//! <https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/TransferManager.sol>
 use serde::Serialize;
 
 use crate::{
@@ -6,7 +6,6 @@ use crate::{
     error::Error,
     log::{Event, Log},
     math::checked_subtract,
-    model::vault::Vault,
     state::State,
 };
 
@@ -24,13 +23,11 @@ pub fn _tstore_transfer_from_info(
     token_in: Address,
     amount_in: i64,
     is_permit2: bool,
-    use_vault: bool,
 ) {
     state.tstore("token_in", token_in);
-    state.tstore("amount_allowed", if use_vault { 0 } else { amount_in });
+    state.tstore("amount_allowed", amount_in);
     state.tstore("is_permit2", is_permit2);
     state.tstore("sender", state.msg_sender());
-    state.tstore("use_vault", use_vault);
 }
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TransferManager.sol#L130>
@@ -40,7 +37,6 @@ pub fn _tstore_transfer_from_info(
 )]
 pub fn _transfer(
     state: &mut State,
-    vault: &mut Vault,
     log: &mut impl Log,
     receiver: Address,
     transfer_type: TransferType,
@@ -50,35 +46,16 @@ pub fn _transfer(
     is_split_swap: bool,
     in_callback: bool,
 ) -> Result<i64, Error> {
-    let needs_transfer_from_user = is_first_swap && !state.tload("use_vault")?;
     match transfer_type {
-        TransferType::None => Ok(amount),
-        TransferType::TransferNativeInExecutor => {
-            vault._update_delta_accounting(token_in, -amount);
-            log.append(Event::UpdateDeltaAccounting {
-                token: token_in,
-                delta_change: -amount,
-                nonzero_delta_count_after: vault._get_nonzero_delta_count(),
-                context_hint: "_transfer: TransferNativeInExecutor",
-            });
-            Ok(amount)
-        }
+        TransferType::None | TransferType::TransferNativeInExecutor => Ok(amount),
         TransferType::ProtocolWillDebit => {
-            if needs_transfer_from_user {
-                let amount = _transfer_from_user(state, token_in, Address::Router, amount)?;
-                _approve_if_needed(state, token_in, receiver, amount)?;
-                Ok(amount)
+            let amount = if is_first_swap {
+                _transfer_from_user(state, token_in, Address::Router, amount)?
             } else {
-                vault._update_delta_accounting(token_in, -amount);
-                log.append(Event::UpdateDeltaAccounting {
-                    token: token_in,
-                    delta_change: -amount,
-                    nonzero_delta_count_after: vault._get_nonzero_delta_count(),
-                    context_hint: "_transfer: ProtocolWillDebit && !needs_transfer_from_user",
-                });
-                _approve_if_needed(state, token_in, receiver, amount)?;
-                Ok(amount)
-            }
+                amount
+            };
+            _approve_if_needed(state, token_in, receiver, amount)?;
+            Ok(amount)
         }
         TransferType::Transfer => {
             let can_use_sequential_swap_optimization =
@@ -88,22 +65,15 @@ pub fn _transfer(
                 return Ok(amount);
             }
 
-            if needs_transfer_from_user {
+            if is_first_swap {
                 _transfer_from_user(state, token_in, receiver, amount)
             } else {
-                vault._update_delta_accounting(token_in, -amount);
-                log.append(Event::UpdateDeltaAccounting {
-                    token: token_in,
-                    delta_change: -amount,
-                    nonzero_delta_count_after: vault._get_nonzero_delta_count(),
-                    context_hint: "_transfer: Transfer && !needs_transfer_from_user",
-                });
                 let amount = _transfer_out(state, token_in, receiver, amount)?;
                 log.append(Event::TransferOut {
                     token: token_in,
                     receiver,
                     amount,
-                    context_hint: "_transfer: Transfer && !needs_transfer_from_user",
+                    context_hint: "_transfer: Transfer && !is_first_swap",
                 });
                 Ok(amount)
             }

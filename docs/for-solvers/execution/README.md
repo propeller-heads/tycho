@@ -15,11 +15,10 @@ The source code for **Tycho Execution** lives at <a href="https://github.com/pro
 
 ## Token transfers
 
-You can transfer tokens in one of three ways with Tycho Execution:
+You can transfer tokens in one of two ways with Tycho Execution:
 
 * Permit2
 * Standard ERC20 Approvals
-* Using Vault funds
 
 See how to change between these options when encoding [here](encoding/#models).
 
@@ -35,16 +34,6 @@ For more details on Permit2 and how to use it, see the <a href="https://docs.uni
 
 Tycho also supports traditional ERC20 approvals. In this model, you explicitly call `approve` on the token contract to grant the router permission to transfer tokens on your behalf. This is widely supported and may be preferred in environments where Permit2 is not yet available.
 
-### Using the Vault
-
-The TychoRouterV3 includes a built-in vault (<a href="https://eips.ethereum.org/EIPS/eip-6909" target="_blank" rel="noopener noreferrer">ERC6909</a>) that lets you deposit, hold, and withdraw tokens directly in the router contract. The vault tracks per-user balances, so your tokens are only accessible by you.
-
-The router draws from your deposited balance instead of performing a `transferFrom` on your wallet. This saves gas (no approval or external transfer needed) and lets you use fees, proceeds from previous trades, or pre-positioned liquidity directly.
-
-Fees earned through the fee-taking system are automatically credited to the fee receiver's vault balance, making them immediately available for future swaps or withdrawals.
-
-More on the Vault [here](vault.md).
-
 ## Security and Audits
 
 The Tycho Router V2 and V3 have been audited by <a href="https://snd.github.io/" target="_blank" rel="noopener noreferrer">Maximilian Krüger</a>. Past audits are <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-execution/docs/audits" target="_blank" rel="noopener noreferrer">here</a>.
@@ -58,6 +47,7 @@ Follow this checklist when using TychoRouterV3. It covers essential security req
   * `minAmountOut` must be non-zero and no greater than `expectedAmountOut` — see [Slippage bounds](encoding/#slippage-bounds).
   * The router sets no lower bound, so a `minAmountOut` far below your quote still passes: a faulty swap sequence, slippage or an attack can then leave you with far less than you quoted.
 * **Verify the price data behind `minAmountOut`** against at least one other independent price source. A `minAmountOut` derived from a bad quote can sit far below the fair output, so the guardrail fails to protect you and the losses can be large.
+* **Never leave tokens in the router.** The router holds no user balances. Its only check on a swap's result is that the receiver got at least `minAmountOut` of `tokenOut`. You lose any tokens left in the router, because any later swap can spend them. This includes tokens sent to the router directly, and ETH sent as `msg.value` that your swap sequence does not spend.
 * **Never approve infinite allowances**, including those for Permit2.
 * **Set Permit2 allowance and deadline as low as is practical.**
 

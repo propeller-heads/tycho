@@ -74,7 +74,6 @@ fn test_single_encoding_strategy_ekubo() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -136,7 +135,6 @@ fn test_single_encoding_strategy_ekubo_erc20() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -198,7 +196,6 @@ fn test_single_encoding_strategy_ekubo_mev_resist() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -249,7 +246,6 @@ fn test_single_encoding_strategy_maverick() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -311,7 +307,6 @@ fn test_evm_single_encoding_strategy_usv4_eth_in() {
         Some(get_signer()),
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -379,7 +374,6 @@ fn test_evm_single_encoding_strategy_usv4_eth_out() {
         Some(get_signer()),
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -465,13 +459,12 @@ fn test_evm_single_encoding_strategy_usv4_grouped_swap() {
         Some(get_signer()),
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
 
     let expected_input = [
-        "ca931073", // selector (singleSwapPermit2)
+        "9ba2d134", // selector (singleSwapPermit2)
         "000000000000000000000000000000000000000000000000000000003b9aca00", // amount in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
         "0000000000000000000000006982508145454ce325ddbe47a25d4ec3d2311933", // token out
@@ -515,7 +508,7 @@ fn test_evm_single_encoding_strategy_usv4_grouped_swap() {
     let hex_calldata = encode(&calldata);
 
     assert_eq!(hex_calldata[..456], expected_input);
-    assert_eq!(hex_calldata[1608..], expected_swaps);
+    assert_eq!(hex_calldata[1544..], expected_swaps);
     write_calldata_to_file(
         "test_single_encoding_strategy_usv4_grouped_swap",
         hex_calldata.as_str(),
@@ -599,7 +592,6 @@ fn test_evm_single_encoding_strategy_usv4_and_hooks_grouped_swap() {
         Some(get_signer()),
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -687,7 +679,6 @@ fn test_single_encoding_strategy_ekubo_grouped_swap() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -754,7 +745,6 @@ fn test_single_encoding_strategy_curve() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -821,93 +811,12 @@ fn test_single_encoding_strategy_curve_st_eth() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
 
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_single_encoding_strategy_curve_st_eth", hex_calldata.as_str());
-}
-
-#[test]
-fn test_single_encoding_strategy_curve_protocol_will_debit_from_vault() {
-    // Test ProtocolWillDebit with Curve where funds are taken from user's vault
-    // First swap: DAI from vault -> (Curve TriPool) -> USDC
-    //
-    // This tests the case where:
-    // 1. User has DAI in their vault
-    // 2. First swap uses the vault (via singleSwapUsingVault)
-    // 3. Curve uses ProtocolWillDebit to pull funds from router
-    // 4. Funds are successfully taken from the vault balance
-
-    let dai = Bytes::from_str("0x6B175474E89094C44Da98b954EedeAC495271d0F").unwrap();
-    let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
-
-    let static_attributes = HashMap::from([
-        (
-            "factory".to_string(),
-            Bytes::from(
-                "0x0000000000000000000000000000000000000000"
-                    .as_bytes()
-                    .to_vec(),
-            ),
-        ),
-        ("coins".to_string(), Bytes::from_str("0x5b22307836623137353437346538393039346334346461393862393534656564656163343935323731643066222c22307861306238363939316336323138623336633164313964346132653965623063653336303665623438222c22307864616331376639353864326565353233613232303632303639393435393763313364383331656337225d").unwrap()),
-    ]);
-
-    let curve_tripool = ProtocolComponent {
-        id: String::from("0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"),
-        protocol_system: String::from("vm:curve"),
-        static_attributes,
-        ..Default::default()
-    };
-
-    let swap = Swap::new(
-        curve_tripool,
-        default_token(dai.clone()),
-        default_token(usdc.clone()),
-        BigUint::ZERO,
-    );
-
-    let encoder = get_tycho_router_encoder(Chain::Ethereum);
-
-    let solution = Solution::new(
-        alice_address(),
-        alice_address(),
-        dai,
-        usdc,
-        BigUint::from_str("1000_000000000000000000").unwrap(), // 1000 DAI
-        BigUint::from_str("1").unwrap(),
-        // Dummy 1-wei quote with a matching minAmountOut, so any output is accepted
-        BigUint::from_str("1").unwrap(),
-        vec![swap],
-    )
-    .with_user_transfer_type(UserTransferType::UseVaultsFunds);
-
-    let encoded_solution = encoder
-        .encode_solutions(vec![solution.clone()])
-        .unwrap()[0]
-        .clone();
-
-    let calldata = encode_tycho_router_call(
-        eth_chain().id(),
-        &encoded_solution,
-        &solution,
-        &eth(),
-        None,
-        0,
-        &Bytes::zero(20),
-        &BigUint::ZERO,
-    )
-    .unwrap()
-    .data;
-
-    let hex_calldata = encode(&calldata);
-    write_calldata_to_file(
-        "test_single_encoding_strategy_curve_protocol_will_debit_from_vault",
-        hex_calldata.as_str(),
-    );
 }
 
 #[test]
@@ -953,7 +862,6 @@ fn test_single_encoding_strategy_balancer_v3() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1039,7 +947,6 @@ fn test_single_encoding_strategy_bebop() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1125,7 +1032,6 @@ fn test_single_encoding_strategy_bebop_aggregate() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1207,7 +1113,6 @@ fn test_single_encoding_strategy_bebop_partial_fill() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1325,7 +1230,6 @@ fn test_single_encoding_strategy_hashflow() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1377,7 +1281,6 @@ fn test_single_encoding_strategy_fluid() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1440,7 +1343,6 @@ fn test_sequential_encoding_strategy_fluid() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1493,7 +1395,6 @@ fn test_single_encoding_strategy_rocketpool_deposit() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1550,7 +1451,6 @@ fn test_single_encoding_strategy_rocketpool_burn() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1602,7 +1502,6 @@ fn test_single_encoding_strategy_bopamm_weth_usdc() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1673,7 +1572,6 @@ fn test_single_encoding_strategy_ring_swap_v2() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1729,7 +1627,6 @@ fn test_sequential_encoding_strategy_uniswap_v2_ring_swap_v2() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1782,7 +1679,6 @@ fn test_single_encoding_strategy_fermiswap_weth_usdc() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1845,7 +1741,6 @@ fn test_single_encoding_strategy_propamm_weth_usdc() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1905,7 +1800,6 @@ fn test_single_encoding_strategy_biconomy_weth_usdc() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1965,7 +1859,6 @@ fn test_single_encoding_strategy_fallback_usdc_weth() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2028,7 +1921,6 @@ fn test_single_encoding_strategy_fallback_sushiswap_v2_alias() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2088,7 +1980,6 @@ fn test_single_encoding_strategy_slipstreams() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2139,7 +2030,6 @@ fn test_single_encoding_strategy_aero_cl() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2210,7 +2100,6 @@ fn test_sequential_encoding_strategy_aero_cl() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2281,7 +2170,6 @@ fn test_sequential_encoding_strategy_slipstreams() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2332,7 +2220,6 @@ fn test_single_encoding_strategy_aerodrome_v1() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2395,7 +2282,6 @@ fn test_sequential_encoding_strategy_aerodrome_v1() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2446,7 +2332,6 @@ fn test_single_encoding_strategy_aero_basic() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2505,7 +2390,6 @@ fn test_sequential_encoding_strategy_aero_basic() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2556,7 +2440,6 @@ fn test_single_encoding_strategy_erc4626() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2615,7 +2498,6 @@ fn test_sequential_encoding_strategy_erc4626() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2660,7 +2542,6 @@ fn test_single_encoding_strategy_lido_v4_submit() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2705,7 +2586,6 @@ fn test_single_encoding_strategy_lido_v4_submit_and_wrap() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2758,7 +2638,6 @@ fn test_single_encoding_strategy_lido_v4_wrap() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2808,7 +2687,6 @@ fn test_single_encoding_strategy_lido_v4_unwrap() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2861,7 +2739,6 @@ fn test_sequential_encoding_strategy_lido_v4_submit_then_wrap() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2930,7 +2807,6 @@ fn test_single_swap_with_univ4_angstrom() {
         Some(get_signer()),
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2981,7 +2857,6 @@ fn test_single_encoding_strategy_weth_wrap() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3028,7 +2903,6 @@ fn test_single_encoding_strategy_weth_unwrap() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3090,7 +2964,6 @@ fn test_single_encoding_strategy_ekubo_v3() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3156,7 +3029,6 @@ fn test_single_encoding_strategy_ekubo_v3_mev_capture_v21() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3239,7 +3111,6 @@ fn test_single_ekubo_v3_grouped_swap() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3300,7 +3171,6 @@ fn test_sequential_encoding_strategy_etherfi_unwrap_weeth() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3358,7 +3228,6 @@ fn test_sequential_encoding_strategy_etherfi_wrap_eeth() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3432,7 +3301,6 @@ fn test_evm_single_encoding_strategy_usv4_twif_fee_token() {
         Some(get_signer()),
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .expect("calldata generation failed for TWIF fee token")
     .data;
@@ -3510,7 +3378,6 @@ fn test_evm_single_encoding_strategy_usv4_twif_fee_token_output() {
         Some(get_signer()),
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .expect("calldata generation failed for TWIF output fee token")
     .data;
@@ -3651,7 +3518,6 @@ fn test_single_encoding_strategy_liquorice_settle_single() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3715,7 +3581,6 @@ fn test_single_encoding_strategy_metric() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3806,7 +3671,6 @@ fn test_evm_two_hop_usv4_twif_intermediary() {
         Some(get_signer()),
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .expect("calldata generation failed for grouped TWIF intermediary swap")
     .data;
@@ -3964,7 +3828,6 @@ fn test_single_encoding_strategy_liquorice_settle() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4020,7 +3883,6 @@ fn test_single_encoding_strategy_uniswap_v3_arbitrum() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4078,7 +3940,6 @@ fn test_single_encoding_strategy_uniswap_v3_polygon() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4136,7 +3997,6 @@ fn test_single_encoding_strategy_uniswap_v3_bsc() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4206,7 +4066,6 @@ fn test_single_encoding_strategy_native() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4272,7 +4131,6 @@ fn test_single_encoding_strategy_native_eth_input() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4334,7 +4192,6 @@ fn test_single_encoding_strategy_sky() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4392,7 +4249,6 @@ fn test_sequential_encoding_strategy_sky() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4438,7 +4294,6 @@ fn write_baibai_single_swap(name: &str, sell_base: bool, amount: u64) {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4509,7 +4364,6 @@ fn test_sequential_encoding_strategy_baibai() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4578,7 +4432,6 @@ fn test_single_encoding_strategy_pancakeswap_infinity_bin_eth_in() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4655,7 +4508,6 @@ fn test_sequential_encoding_strategy_pancakeswap_infinity_cl_to_bin() {
         None,
         0,
         &Bytes::zero(20),
-        &BigUint::ZERO,
     )
     .unwrap()
     .data;

@@ -47,9 +47,9 @@ The FeeCalculator must be deployed **before** the TychoRouterV3, as the router r
 1. Define the `ROUTER_FEE_SETTER` address for your network in `scripts/roles.json`. The first
    address receives `ROUTER_FEE_SETTER_ROLE` to manage fee configuration.
 2. Define `ROUTER_FEE_RECEIVER` for your network in the same file. The first address is passed to
-   the constructor and owns the vault balance every router fee is credited to, so it must be an
-   address that can call `withdraw()` on the router. It is a constructor argument because the
-   deployment goes through the CREATE2 factory, which can never withdraw.
+   the constructor and receives every router fee by transfer, so it must be an address that can
+   move those tokens. It is a constructor argument because the deployment goes through the CREATE2
+   factory, which cannot move the fees it receives.
 3. Deploy: `npx hardhat run scripts/deploy-fee-calculator.js --network NETWORK`
 4. Note the deployed address — you will need it in the next step.
 

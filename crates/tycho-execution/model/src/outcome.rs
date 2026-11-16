@@ -1,55 +1,70 @@
 use serde::{Serialize, ser::SerializeMap};
 
-use crate::{Address, State, log::Log, model::Vault, params::Params};
+use crate::{Address, State, log::Log, params::Params};
 
 /// Combines all elements of a successful [Result] of [simulate](crate::simulate::simulate):
-/// The input [Params] and the output [State], [Vault] and [Log].
+/// The input [Params] and the output [State] and [Log].
 /// Serialized into the YAML that's written to stdout for every suspicious state.
 pub struct Outcome<T> {
     params: Params,
     state: State,
-    vault: Vault,
     log: T,
 }
 
 impl<T: Log> Outcome<T> {
-    pub fn new(params: Params, mut state: State, mut vault: Vault, log: T) -> Self {
+    pub fn new(params: Params, mut state: State, log: T) -> Self {
         // in order to keep the serialized output readable and compact
         // remove zero valued entries in various maps
         state.drop_zero_entries();
-        vault.drop_zero_entries();
 
-        Self { params, state, vault, log }
+        Self { params, state, log }
     }
 
-    /// The [Outcome] is considered suspicious if:
-    /// 1. The caller ends up with more ETH or WETH on the addresses they control
-    ///    ([Address::is_sender_controlled]) than they had before the transaction (stealing assets).
-    /// 2. The router's on-chain ETH/WETH loss exceeds the reduction in vault balances. A client
-    ///    contribution that debits a vault balance to cover the router's outflow is not suspicious
-    ///    — the client paid for it.
+    /// The [Outcome] is considered suspicious if [Address::Victim] lost ETH or WETH, or if the
+    /// caller ends up with more ETH or WETH on the addresses they control
+    /// ([Address::is_sender_controlled]) than the router lost or approved to them.
+    ///
+    /// Tokens held by the router are considered lost, so taking them is not suspicious. Any gain
+    /// beyond them came from someone else, for example the router fee receiver.
     pub fn is_suspicious(&self) -> bool {
+        if self.final_victim_eth_balance() < 0 {
+            return true;
+        }
         let msg_value: i64 = self
             .params
             .get("msg_value")
             .unwrap_or(0);
-        self.final_caller_eth_balance() > msg_value ||
-            self.final_router_eth_balance() < self.sender_vault_eth_change()
+        let caller_gain = self.final_caller_eth_balance() - msg_value;
+        caller_gain > self.router_eth_lost_or_approved()
     }
 
-    /// ETH/WETH vault balance change for sender-controlled addresses.
-    /// These parties consented: msg.sender by calling the function,
-    /// ClientFeeReceiver by signing the client fee params.
-    fn sender_vault_eth_change(&self) -> i64 {
-        let mut total = 0;
-        for ((owner, token), balance) in self.vault.token_balances() {
-            if owner.is_sender_controlled() &&
-                (*token == Address::NativeETH || *token == Address::WETH)
+    /// On-chain ETH and WETH balance delta of [Address::Victim].
+    /// A negative value means someone took the victim's tokens.
+    fn final_victim_eth_balance(&self) -> i64 {
+        self.state
+            .eth_balances()
+            .get(&Address::Victim)
+            .copied()
+            .unwrap_or(0) +
+            self.state
+                .token_balances()
+                .get(&(Address::Victim, Address::WETH))
+                .copied()
+                .unwrap_or(0)
+    }
+
+    /// ETH and WETH the router lost or approved to addresses the caller controls.
+    fn router_eth_lost_or_approved(&self) -> i64 {
+        let mut total = -self.final_router_eth_balance();
+        for ((token, owner, spender), allowance) in self.state.allowances() {
+            if *owner == Address::Router &&
+                spender.is_sender_controlled() &&
+                *token == Address::WETH
             {
-                total += balance;
+                total += allowance;
             }
         }
-        total
+        total.max(0)
     }
 
     /// On-chain ETH and WETH balance delta of [Address::Router].
@@ -97,16 +112,6 @@ impl<T: Log> Outcome<T> {
                 }
             }
         }
-        for ((owner, token), balance) in self.vault.token_balances() {
-            if owner.is_sender_controlled() {
-                // TODO if you introduce other value holding erc20 tokens,
-                // make sure to add code for them here and introduce
-                // some fixed conversion rate to eth
-                if *token == Address::NativeETH || *token == Address::WETH {
-                    total_eth += balance;
-                }
-            }
-        }
         total_eth
     }
 }
@@ -123,7 +128,7 @@ impl<T: Log + Serialize> Serialize for Outcome<T> {
             s.serialize_entry("final_caller_eth_balance", &final_caller_eth_balance)?;
         }
         let final_router_eth_balance = self.final_router_eth_balance();
-        if final_router_eth_balance < 0 {
+        if final_router_eth_balance != 0 {
             s.serialize_entry("final_router_eth_balance", &final_router_eth_balance)?;
         }
 
@@ -139,21 +144,45 @@ impl<T: Log + Serialize> Serialize for Outcome<T> {
             s.serialize_entry("erc20_allowance", self.state.allowances())?;
         }
 
-        if !self.vault.token_balances().is_empty() {
-            s.serialize_entry("vault_balance", self.vault.token_balances())?;
-        }
-
-        if self.vault._get_nonzero_delta_count() > 0 {
-            s.serialize_entry("nonzero_delta_count", &self.vault._get_nonzero_delta_count())?;
-        }
-
-        if !self.vault.deltas().is_empty() {
-            s.serialize_entry("vault_delta", self.vault.deltas())?;
-        }
-
         if !self.log.is_empty() {
             s.serialize_entry("log", &self.log)?;
         }
         s.end()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log::NopLog;
+
+    #[test]
+    fn test_is_suspicious_victim_weth_taken() {
+        let mut state = State::default();
+        state
+            .erc20_safe_transfer_from(
+                Address::WETH,
+                Address::Router,
+                Address::Victim,
+                Address::Named("pool"),
+                1000,
+            )
+            .expect("transfer");
+
+        let outcome = Outcome::new(Params::default(), state, NopLog);
+
+        assert!(outcome.is_suspicious());
+    }
+
+    #[test]
+    fn test_is_suspicious_router_weth_taken() {
+        let mut state = State::default();
+        state
+            .erc20_safe_transfer(Address::WETH, Address::Router, Address::Sender, 1000)
+            .expect("transfer");
+
+        let outcome = Outcome::new(Params::default(), state, NopLog);
+
+        assert!(!outcome.is_suspicious());
     }
 }

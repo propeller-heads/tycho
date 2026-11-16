@@ -9,6 +9,10 @@ import {
     IAccessControl
 } from "@openzeppelin/contracts/access/IAccessControl.sol";
 import "@src/TransferManager.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {
+    IAllowanceTransfer
+} from "@permit2/src/interfaces/IAllowanceTransfer.sol";
 import "./TychoRouterTestSetup.sol";
 
 contract TychoRouterTest is TychoRouterTestSetup {
@@ -18,9 +22,6 @@ contract TychoRouterTest is TychoRouterTestSetup {
         0x65d7a28e3265b37a6474929f336521b332c1681b933f6cb9f3376673440d862a;
 
     event CallbackVerifierSet(address indexed callbackVerifier);
-    event Withdrawal(
-        address indexed token, uint256 amount, address indexed receiver
-    );
 
     function testSetExecutorsValidRole() public {
         // Set single executor
@@ -80,6 +81,110 @@ contract TychoRouterTest is TychoRouterTestSetup {
         vm.expectRevert();
         tychoRouter.unpause();
         vm.stopPrank();
+    }
+
+    function testPausedSingleSwap() public {
+        vm.prank(PAUSER);
+        tychoRouter.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        tychoRouter.singleSwap(
+            1, WETH_ADDR, DAI_ADDR, 1, 1, ALICE, noClientFee(), ""
+        );
+    }
+
+    function testPausedSequentialSwap() public {
+        vm.prank(PAUSER);
+        tychoRouter.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        tychoRouter.sequentialSwap(
+            1, WETH_ADDR, DAI_ADDR, 1, 1, ALICE, noClientFee(), ""
+        );
+    }
+
+    function testPausedSplitSwap() public {
+        vm.prank(PAUSER);
+        tychoRouter.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        tychoRouter.splitSwap(
+            1, WETH_ADDR, DAI_ADDR, 1, 1, 2, ALICE, noClientFee(), ""
+        );
+    }
+
+    function testPausedSingleSwapPermit2() public {
+        IAllowanceTransfer.PermitSingle memory permitSingle;
+        vm.prank(PAUSER);
+        tychoRouter.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        tychoRouter.singleSwapPermit2(
+            1,
+            WETH_ADDR,
+            DAI_ADDR,
+            1,
+            1,
+            ALICE,
+            noClientFee(),
+            permitSingle,
+            "",
+            ""
+        );
+    }
+
+    function testPausedSequentialSwapPermit2() public {
+        IAllowanceTransfer.PermitSingle memory permitSingle;
+        vm.prank(PAUSER);
+        tychoRouter.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        tychoRouter.sequentialSwapPermit2(
+            1,
+            WETH_ADDR,
+            DAI_ADDR,
+            1,
+            1,
+            ALICE,
+            noClientFee(),
+            permitSingle,
+            "",
+            ""
+        );
+    }
+
+    function testPausedSplitSwapPermit2() public {
+        IAllowanceTransfer.PermitSingle memory permitSingle;
+        vm.prank(PAUSER);
+        tychoRouter.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        tychoRouter.splitSwapPermit2(
+            1,
+            WETH_ADDR,
+            DAI_ADDR,
+            1,
+            1,
+            2,
+            ALICE,
+            noClientFee(),
+            permitSingle,
+            "",
+            ""
+        );
+    }
+
+    function testPausedCallback() public {
+        vm.prank(PAUSER);
+        tychoRouter.pause();
+
+        (bool success, bytes memory revertData) =
+            tychoRouterAddr.call(hex"12345678");
+
+        assertFalse(success);
+        assertEq(
+            revertData, abi.encodeWithSelector(Pausable.EnforcedPause.selector)
+        );
     }
 
     function testPauseNonRole() public {

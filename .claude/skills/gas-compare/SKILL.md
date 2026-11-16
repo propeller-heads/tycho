@@ -18,7 +18,7 @@ Compare per-test gas between the current branch and a base branch.
 ## When to Use
 
 - Before opening a PR, to check gas impact of your changes
-- After refactoring router/executor/vault code
+- After refactoring router/executor code
 - To benchmark gas improvements across protocol integrations
 - To catch gas regressions early
 
@@ -50,26 +50,26 @@ Check whether `crates/tycho-execution/.gas-compare/test_metadata.json` exists in
 - `TychoRouterSequentialSwap.t.sol`
 - `TychoRouterSplitSwap.t.sol`
 - `TychoRouterFees.t.sol`
-- `TychoRouterVault.t.sol`
+- `TychoRouterChecks.t.sol`
 - `TychoRouterProtocolIntegration.t.sol`
 
 For each `function test...` in these files, record:
 - `"test"`: the function name
 - `"file"`: the filename (not the full path)
-- `"router_function"`: the TychoRouter entry-point called — one of `singleSwap`, `singleSwapPermit2`, `singleSwapUsingVault`, `sequentialSwap`, `sequentialSwapPermit2`, `sequentialSwapUsingVault`, `splitSwap`, `splitSwapPermit2`, `splitSwapUsingVault`, `exposedSplitSwap`, `exposedSequentialSwap`
+- `"router_function"`: the TychoRouter entry-point called — one of `singleSwap`, `singleSwapPermit2`, `sequentialSwap`, `sequentialSwapPermit2`, `splitSwap`, `splitSwapPermit2`, `exposedSplitSwap`, `exposedSequentialSwap`
 - `"protocols"`: sorted, deduplicated list of protocol names used — infer from executor variable names (`usv2Executor` → `UniswapV2`, `usv3Executor` → `UniswapV3`, `usv4Executor` → `UniswapV4`, `balancerv2Executor` → `BalancerV2`, `balancerv3Executor` → `BalancerV3`, `curveExecutor` → `Curve`, `ekuboExecutor` → `Ekubo`, `rocketpoolExecutor` → `Rocketpool`, `bebopExecutor` → `Bebop`, `erc4626Executor` → `ERC4626`, `wethExecutor` → `WETH`) or from calldata file names loaded via `loadCallDataFromFile`
 - `"skipped"`: `true` if the test uses `vm.skip(true)` (omit otherwise)
 
 Exclude:
 - Tests that contain `vm.expectRevert` — error-path tests, not benchmarks
-- Tests that do not call any router entry-point (pure admin/config tests, vault deposit/pause tests, and tests in `TychoRouter.t.sol` that only test access control)
+- Tests that do not call any router entry-point (pure admin/config tests and tests in `TychoRouter.t.sol` that only test access control)
 
 Write the result to `crates/tycho-execution/.gas-compare/test_metadata.json` in this format:
 
 ```json
 {
   "last_updated": "<today's date>",
-  "note": "High-level TychoRouter swap tests only. Excluded: tests that expect a revert, admin/config tests, vault deposit/pause tests, and GasTest.t.sol.",
+  "note": "High-level TychoRouter swap tests only. Excluded: tests that expect a revert, admin/config tests, and GasTest.t.sol.",
   "tests": [
     {
       "test": "testSingleSwapPermit2",

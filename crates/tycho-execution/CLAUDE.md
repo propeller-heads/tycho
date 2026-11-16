@@ -1,7 +1,7 @@
 # Tycho Execution
 
 DeFi swap execution framework: Solidity smart contracts (TychoRouterV3) + Rust encoding library. Multi-protocol token
-swaps with fee-taking, vault-based accounting, and 20+ DEX integrations.
+swaps with fee-taking and 20+ DEX integrations.
 
 **Docs**: https://docs.propellerheads.xyz/tycho
 **License**: Fynd License 1.1 (Solidity and Rust). See [LICENSING.md](../../LICENSING.md).
@@ -11,9 +11,10 @@ swaps with fee-taking, vault-based accounting, and 20+ DEX integrations.
 ```
 TychoRouterV3 (entry point)
   inherits AccessControl           -- role-based admin (add executors, set fees)
+  inherits ReentrancyGuard         -- every swap entry point is nonReentrant
+  inherits Pausable                -- pause and unpause swaps
   inherits Dispatcher              -- executor dispatch via delegatecall
-    inherits TransferManager       -- input/output transfers, Permit2/ERC20/Vault funding
-      inherits Vault (ERC6909)     -- multi-token vault, transient storage deltas
+    inherits TransferManager       -- input/output transfers, Permit2/ERC20 funding
   inherits EIP712                  -- client fee signature verification
 
 FeeCalculator (separate contract, called via staticcall -- read only)
@@ -30,20 +31,18 @@ Entry (e.g. splitSwap)
       balance snapshot (balanceOf after)
       → amountOut = diff (single source of truth)
       → if outputToRouter: forward to receiver via _transferOut
-  → _takeFees (deduct client fee + router fees, credit vault balances)
-  → _maybeAddClientContribution (cap slippage contribution)
-  → _settleOutput (transfer/credit final amount to receiver or vault)
-  → _finalizeBalances (verify all transient deltas settled)
+  → _finalizeSwap:
+      → if intercepting: _takeFees (transfer each fee to its recipient), then _transferOut to receiver
+      → check the receiver's amount against minAmountOut
 ```
 
 ### Core Contracts (`contracts/src/`)
 
 | Contract                       | Purpose                                                                                                                                                                                                                                                        |
 |--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `TychoRouterV3.sol`              | Entry point. 3 swap strategies (single/sequential/split) x 3 funding modes (transferFrom/Permit2/vault) = 9 public methods. `_takeFees()` deducts fees, `_settleOutput()` transfers/credits final output to receiver or vault                                  |
-| `Vault.sol`                    | ERC6909 multi-token vault (see subsection below)                                                                                                                                                                                                               |
+| `TychoRouterV3.sol`              | Entry point. 3 swap strategies (single/sequential/split) x 2 funding modes (transferFrom/Permit2) = 6 public methods. `_finalizeSwap()` takes fees, transfers the final output to the receiver and checks it against `minAmountOut`. The receiver cannot be the router |
 | `Dispatcher.sol`               | Executor dispatch. 1-day timelock on new executors. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
-| `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 6 transfer scenarios depending on context                                                                                  |
+| `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 5 transfer scenarios depending on context                                                                                  |
 | `FeeCalculator.sol`            | Dual fee system: router fee on output + router fee on client fee. Per-client custom rates. Upgradeable without redeploying router                                                                                                                              |
 | `SubsidyPayer.sol`             | Holds the subsidy budget (ERC20 and native ETH) and pays one EIP-712-signed `Subsidy` per nonce (unordered bitmap). Only the router may call `pay`. Any other failed check emits `SubsidySkipped` with a `SkipReason` and returns false. `boundTo` must be the router's caller or `tx.origin`. ETH goes out with a capped gas stipend |
 | `fallback/TychoFallbackRouter.sol` | Abstract standalone contract (not an executor, never delegatecalled). Holds `tokenIn` for one leg, quotes a primary venue against the caller's chosen fallback protocol and runs whichever quotes more; a primary that wins the quote but fails still falls through. `fallback/PropAMMFallbackRouter.sol` is the pAMM primary. See "Protocol fallback" below. |
@@ -52,42 +51,29 @@ Entry (e.g. splitSwap)
 Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
 getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRouter],
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
-calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client → bool],
+calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client, tokenIn, tokenOut → bool],
 getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)], getEffectiveRouterFees [takes
 client, tokenIn, tokenOut → (routerFeeOnOutputBps, routerFeeOnClientFeeBps)]). Also
 `IPropAMM` (the pAMM standard), `IUniversalRouter` and `ISubsidyPayer` (`pay`, the `Subsidy` struct, `SkipReason`).
 
-### Vault (`Vault.sol`)
+### Router balances and output check
 
-ERC6909 multi-token vault with dual storage:
+The router holds no user balances. Tokens left in the router after a swap (dust, mistaken transfers, an unspent
+`msg.value`) are lost: any later swap can spend them.
 
-**Transient storage** (tload/tstore, ~100 gas per op): Tracks per-token deltas (credits/debits) during a swap. Positive
-delta when tokens arrive at the router, negative when they leave. `nonZeroDeltaCount` tracks unsettled deltas.
+**Output check** (`_finalizeSwap`): the only check on a swap's result. The output amount is a balance difference at
+the receiver, measured by the Dispatcher or, for output the router intercepts for fees, by `_transferOut`. The swap
+reverts with `TychoRouter__NegativeSlippage` when it is below `minAmountOut`.
 
-**Persistent storage** (ERC6909 balances): User token balances for deposits, withdrawals, and fee credits.
-
-**Settlement** (`_finalizeBalances`): Called at the end of every swap. Validates:
-
-- Non-vault swaps: all deltas must be zero (`nonZeroDeltaCount == 0`)
-- Vault-funded swaps: at most one negative delta (the input token), which gets burned from the user's vault balance
-
-**External methods**: `deposit(token, amount)` and `withdraw(token, amount)`. Supports native ETH via `address(0)`.
-
-**Fee accounting**: Fees credited directly to fee receivers' vault balances via `_creditVault()` -- persistent storage
-writes (~22k gas each) but no ERC20 transfers.
-
-**Why transient storage is kept** (even with balance-diff verification): The delta system is a cheap (~100 gas per op)
-safety guardrail that catches routing logic bugs and exploits. Example: a malicious encoder inserts a third split
-through a compromised protocol whose callback tells TransferManager to transfer PEPE instead of the expected token. The
-router would lose PEPE, but transient storage detects the negative PEPE delta and reverts. It also prevents overpayment
-in vault-funded split swaps where split percentages don't sum to 100%.
+**Fee accounting**: `_takeFees()` transfers each fee to its recipient (`safeTransfer`, or `sendValue` for native ETH).
+A recipient that cannot accept the token reverts the swap.
 
 ### Fee System (`FeeCalculator.sol`)
 
 Three fee layers, deducted from swap output:
 
 1. **Client fee** (EIP-712 signed): Passed per-swap via `ClientFeeParams` struct
-   containing `clientFeeBps`, `clientFeeReceiver`, `maxClientContribution`, `deadline`, and `clientSignature`. The
+   containing `clientFeeBps`, `clientFeeReceiver`, `deadline`, and `clientSignature`. The
    client signs a `ClientFee` typehash that covers both the fee params **and** the full swap
    intent (`amountIn`, `tokenIn`, `tokenOut`, `expectedAmountOut`, `minAmountOut`, `receiver`, `swap`); the router verifies the EIP-712
    signature on-chain before applying any fee. Binding the signature to swap data (including the encoded swap bytes)
@@ -97,8 +83,7 @@ Three fee layers, deducted from swap output:
    `SignatureChecker`). ECDSA runs first so an EOA carrying delegated code (EIP-7702) keeps signing with its own key.
    Contract signatures are revocable — one that verifies in a given block may stop verifying later.
    The `clientFeeReceiver` address doubles as the client
-   identifier. `maxClientContribution` caps how much the client contributes from their vault balance to cover a
-   shortfall below `minAmountOut`. Passing zero `ClientFeeParams` is allowed (no fee, no client tracking).
+   identifier. Passing zero `ClientFeeParams` is allowed (no fee, no client tracking).
 2. **Router fee on output** (stored): `_routerFeeOnOutputBps` -- Tycho's cut of the swap output amount.
 3. **Router fee on client fee** (stored): `_routerFeeOnClientFeeBps` -- Tycho's cut of the client fee (deducted from the
    client's portion, not from the user).
@@ -106,7 +91,7 @@ Three fee layers, deducted from swap output:
 **Fee receiver**: `FeeCalculator(routerFeeSetter, routerFeeReceiver)` takes the receiver as a constructor argument
 and emits `RouterFeeReceiverUpdated(address(0), routerFeeReceiver)` at deployment; `setRouterFeeReceiver` changes it
 later. It is explicit rather than defaulted to `msg.sender` because deployment goes through the CREATE2 factory
-(`0x4e59b448…`), which can never call `withdraw` on the router — fees credited to it are lost.
+(`0x4e59b448…`), which cannot move the fees it receives.
 
 **Per-client overrides**: Both router fees can be overridden per client address via `_customRouterFees`
 mapping (`CustomFees` struct, single storage slot). If set, the custom rate replaces the default for that client. Can be
@@ -116,8 +101,8 @@ applies to a client and token pair, pair fee included, so integrators can model 
 **Token pair fees** (`_tokenPairFees`, set via `setTokenPairFee`, removed via `removeTokenPairFee`, read via
 `getTokenPairFee`): a router fee on output for swaps between two tokens, in both directions. A set pair fee replaces
 the default router fee on output, so it can raise or lower it, and zero removes it for the pair. For a client with a
-custom fee on output, the lower of the custom fee and the pair fee applies. The router does not pass the swap tokens
-to `mustOutputThroughRouter`, so it returns true while any pair fee is set (`_tokenPairFeeCount > 0`).
+custom fee on output, the lower of the custom fee and the pair fee applies. `mustOutputThroughRouter` applies the pair
+fee for the swap's tokens, so a pair fee routes only that pair's output through the router.
 
 **Client resolution** (`_resolveClient`): When `client == address(0)` (no EIP-712 signature supplied),
 `calculateFee`, `mustOutputThroughRouter` and `getEffectiveRouterFees` fall back to `tx.origin` for the custom fee
@@ -140,7 +125,7 @@ that stops capture for every client: a global router positive slippage bps of ze
 bps of zero leaves the surplus in the swap output, fees compute on `actualAmountOut`, and a client with no fees skips
 the forced router hop.
 Per-client shares (`setClientPositiveSlippageShare`, `_clientPositiveSlippageShareBps` mapping, fee units) give the
-resolved client part of the captured surplus, credited with its client fee; the router keeps the rest, rounded in its
+resolved client part of the captured surplus, transferred with its client fee; the router keeps the rest, rounded in its
 favour. The default share of zero leaves the full surplus to the router.
 Per-client caps (`setPositiveSlippageCap`, `_positiveSlippageCaps` mapping of `{isSet, capBps}`, fee units of
 `actualAmountOut`) limit the captured surplus of the resolved client's swaps, after the router positive slippage bps,
@@ -150,9 +135,9 @@ to `actualAmountOut * capBps / MAX_BPS`. The surplus above the cap stays in the 
 **Deduction order**: client fee calculated first, then router's cut of client fee subtracted from it, then router fee on
 output. `amountOut = amountIn - clientPortion - totalRouterFee`.
 
-**Accounting**: FeeCalculator only computes amounts (called via staticcall). Actual distribution happens in
-TychoRouterV3's `_takeFees()`, which credits fee receivers' vault balances via `_creditVault()`. `_settleOutput()` then
-handles the remaining output (transfer to receiver or vault credit).
+**Accounting**: FeeCalculator only computes amounts (called via staticcall). When the router intercepted the
+output, TychoRouterV3's `_finalizeSwap()` calls `_takeFees()`, which transfers each fee to its recipient, and then
+transfers the rest to the receiver. `_finalizeSwap()` then checks the receiver's amount against `minAmountOut`.
 
 ### Executors (`contracts/src/executors/`)
 
@@ -369,7 +354,7 @@ pool and the hop. Data shorter than 207 bytes reverts `TychoSubsidizingExecutor_
   router's fallback sends pool callbacks straight to it. It clears the slot before calling the payer, so a contract
   the payer sends funds to cannot reach the inner executor through the fallback.
 - The payer pays into the Dispatcher's `measureAt` (`outputToRouter ? router : receiver`), inside `swap()`, so the
-  Dispatcher counts the subsidy as hop output. Fees, slippage capture, `minAmountOut`, vault credits and later hops
+  Dispatcher counts the subsidy as hop output. Fees, slippage capture, `minAmountOut` and later hops
   then see it like any other output. The quote's `expectedAmountOut` has to include the subsidy, or positive slippage
   capture takes it.
 - `pay` runs in `try/catch`. A payer revert emits `SubsidyPayerReverted(nonce, reason)` from the router, with `nonce`
@@ -396,7 +381,7 @@ caller keeps it there. `EncodedSolution::write_subsidy_signature` documents the 
 
 **Balance-diff verification**: The Dispatcher independently verifies every swap output. It
 measures `balanceOf(measureAt, tokenOut)` before and after every `swap()` delegatecall. The measured diff becomes the
-single source of truth for fees, delta accounting, and sequential chaining. This eliminates trust in protocol-reported
+single source of truth for fees, the output check, and sequential chaining. This eliminates trust in protocol-reported
 amounts and handles fee-on-transfer/rebasing tokens for every executor the Dispatcher pays directly. `FallbackExecutor`
 is the exception: `TychoFallbackRouter` transfers to the protocol itself, outside this measurement.
 
@@ -443,11 +428,10 @@ enum TransferType {
 
 **Transfer resolution** (`_callSwapOnExecutor`): Before every swap, the Dispatcher **staticcalls** `getTransferData()`
 on the current executor. Returns a hardcoded `TransferType`, receiver address, `tokenIn`, `tokenOut`,
-and `outputToRouter`. `_transfer()` handles 6 scenarios based on (TransferType, isFirstSwap, isSplitSwap, isCallback).
+and `outputToRouter`. `_transfer()` handles 5 scenarios based on (TransferType, isFirstSwap, isSplitSwap, isCallback).
 
-**Output settlement** (in TychoRouterV3): After all swaps complete, `_takeFees()` deducts fees and credits fee receivers'
-vault balances. Then `_settleOutput()` updates delta accounting and either credits the user's vault balance or transfers
-tokens to the receiver.
+**Output settlement** (in TychoRouterV3): After all swaps complete, `_finalizeSwap()` takes fees and transfers the rest
+to the receiver when the router intercepted the output, then checks the receiver's amount against `minAmountOut`.
 
 **Receiver resolution** (`_sequentialSwap`): For sequential routes (A -> Pool1 -> Pool2 -> D), the Dispatcher determines
 each swap's output receiver by peeking ahead and **staticcalling** `fundsExpectedAddress()` on the **next** executor.
@@ -456,7 +440,7 @@ Returns either:
 - The pool address (direct-transfer protocols -- tokens go straight to pool)
 - `address(this)` (callback protocols -- tokens stay in router)
 
-Last swap's receiver is the final user/vault address.
+Last swap's receiver is the final user address.
 
 ## Rust Encoding Pipeline (`src/encoding/`)
 
@@ -481,9 +465,9 @@ group is PLE-encoded (`[len: u16][data]...`); Ekubo uses concatenation instead (
 
 | Strategy                        | Router methods                              | Encoding                                                                                                                           |
 |---------------------------------|---------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
-| `SingleSwapStrategyEncoder`     | `singleSwap` / `Permit2` / `UsingVault`     | Groups swaps, encodes via SwapEncoder, prepends executor address                                                                   |
-| `SequentialSwapStrategyEncoder` | `sequentialSwap` / `Permit2` / `UsingVault` | Validates path connectivity, groups by protocol, PLE-encodes each group with executor header                                       |
-| `SplitSwapStrategyEncoder`      | `splitSwap` / `Permit2` / `UsingVault`      | Builds token array [tokenIn, intermediaries, tokenOut], encodes token indices + split percentages (U24) + executor + protocol data |
+| `SingleSwapStrategyEncoder`     | `singleSwap` / `Permit2`                    | Groups swaps, encodes via SwapEncoder, prepends executor address                                                                   |
+| `SequentialSwapStrategyEncoder` | `sequentialSwap` / `Permit2`                | Validates path connectivity, groups by protocol, PLE-encodes each group with executor header                                       |
+| `SplitSwapStrategyEncoder`      | `splitSwap` / `Permit2`                     | Builds token array [tokenIn, intermediaries, tokenOut], encodes token indices + split percentages (U24) + executor + protocol data |
 
 **Parallel encoding**: `encode_swap_groups` (`strategy_encoders.rs`) and `TychoRouterEncoder::encode_solutions`
 spawn threads via `map_on_threads` (`evm/utils.rs`) **only when an encoder in the batch blocks on a quote** —

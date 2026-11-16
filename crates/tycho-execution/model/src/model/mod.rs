@@ -5,5 +5,3 @@ pub mod executors;
 pub mod fee_calculator;
 pub mod transfer_manager;
 pub mod tycho_router;
-mod vault;
-pub use vault::Vault;
