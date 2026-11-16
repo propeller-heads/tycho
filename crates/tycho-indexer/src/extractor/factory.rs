@@ -391,19 +391,20 @@ impl ExtractorFactory {
             let first_block = u64::try_from(start_block).map_err(|_negative| {
                 ExtractionError::Setup(format!("start block {start_block} must not be negative"))
             })?;
-            let stamped_first_block =
-                stamped_block(&self.rpc_client, self.config.chain, first_block).await?;
-            check_stored_block(&fresh_gw, &stamped_first_block).await?;
-            let earlier_blocks =
+            let blocks =
                 earlier_blocks_in_second(&self.rpc_client, self.config.chain, first_block).await?;
-            if let Some(reference) = stamped_block_before(&earlier_blocks) {
+            let Some((first, earlier)) = blocks.split_last() else {
+                return Err(ExtractionError::Setup(format!("No block {first_block} on the node")));
+            };
+            check_stored_block(&fresh_gw, first).await?;
+            if let Some(before) = earlier.last() {
                 info!(
                     start_block,
-                    reference_ts = %reference.ts,
+                    reference_ts = %before.ts,
                     "New extractor: stamps its first block after the block before it"
                 );
                 extractor
-                    .update_last_processed_block(reference)
+                    .update_last_processed_block(before.clone())
                     .await;
             }
         }
@@ -487,78 +488,49 @@ impl ExtractorFactory {
     }
 }
 
-/// Most blocks that [`earlier_blocks_in_second`] reads back within one second.
+/// Most blocks before a block that [`earlier_blocks_in_second`] reads in its second.
 const MAX_BLOCKS_PER_SECOND: usize = 1_000;
 
-/// Reads from the node the blocks before block `number` that are in the same second, newest
-/// first.
-async fn earlier_blocks_in_second(
+/// Reads from the node the blocks of the second of block `number`, up to and including
+/// `number`, oldest first, with the timestamp every extractor stamps on them.
+///
+/// On a fast chain several blocks share one second. Each extractor stamps such a block one
+/// microsecond after the block before it, so the i-th block of a second gets the second plus
+/// i µs. The stamp depends only on the chain, never on what is stored.
+pub async fn earlier_blocks_in_second(
     rpc: &EthereumRpcClient,
     chain: Chain,
     number: u64,
 ) -> Result<Vec<Block>, ExtractionError> {
-    let second = rpc
-        .get_block(number, chain)
-        .await
-        .map_err(|err| ExtractionError::Setup(err.to_string()))?
-        .ts
-        .and_utc()
-        .timestamp();
-
-    let mut blocks = Vec::new();
-    for earlier in (0..number).rev() {
-        let block = rpc
-            .get_block(earlier, chain)
+    let read = |number| async move {
+        rpc.get_block(number, chain)
             .await
-            .map_err(|err| ExtractionError::Setup(err.to_string()))?;
-        if block.ts.and_utc().timestamp() != second {
+            .map_err(|err| ExtractionError::Setup(err.to_string()))
+    };
+    let last = read(number).await?;
+    let second = last.ts;
+
+    let mut blocks = vec![last];
+    for earlier in (0..number).rev() {
+        let block = read(earlier).await?;
+        if block.ts != second {
             break;
         }
-        if blocks.len() == MAX_BLOCKS_PER_SECOND {
+        if blocks.len() > MAX_BLOCKS_PER_SECOND {
             return Err(ExtractionError::Setup(format!(
                 "More than {MAX_BLOCKS_PER_SECOND} blocks share the second of block {number}"
             )));
         }
         blocks.push(block);
     }
+    blocks.reverse();
+
+    let mut ts = second;
+    for block in &mut blocks {
+        block.ts = ts;
+        ts += Duration::microseconds(1);
+    }
     Ok(blocks)
-}
-
-/// Returns the block before the first block of a new extractor, with the timestamp every
-/// extractor stamps on it.
-///
-/// On a fast chain several blocks share one second, and each extractor stamps such a block one
-/// microsecond after the block before it. `earlier_blocks` are the blocks before the first block
-/// that are in its second, newest first, as [`earlier_blocks_in_second`] returns them. The newest
-/// one is stamped one microsecond after the second for each older one. The stamp depends only on
-/// the chain, never on what is stored.
-///
-/// Returns `None` when there are no such blocks: the first block then keeps its bare second, as
-/// on every extractor.
-pub(crate) fn stamped_block_before(earlier_blocks: &[Block]) -> Option<Block> {
-    let (newest, older) = earlier_blocks.split_first()?;
-    let mut block = newest.clone();
-    for _ in older {
-        block.ts += Duration::microseconds(1);
-    }
-    Some(block)
-}
-
-/// Reads block `number` from the node and gives it the timestamp every extractor stamps on it.
-pub async fn stamped_block(
-    rpc: &EthereumRpcClient,
-    chain: Chain,
-    number: u64,
-) -> Result<Block, ExtractionError> {
-    let mut block = rpc
-        .get_block(number, chain)
-        .await
-        .map_err(|err| ExtractionError::Setup(err.to_string()))?;
-    let earlier_blocks = earlier_blocks_in_second(rpc, chain, number).await?;
-    if let Some(before) = stamped_block_before(&earlier_blocks) {
-        block.ts = before.ts + Duration::microseconds(1);
-    }
-    Ok(block)
 }
 
 /// Fails when `block` is stored with another timestamp.
