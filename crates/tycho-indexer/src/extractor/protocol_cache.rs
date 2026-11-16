@@ -396,6 +396,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_old_prices_are_served_during_refresh() {
+        let chain = Chain::Ethereum;
+        let (release_load, load_released) = tokio::sync::oneshot::channel::<()>();
+        let mut gateway = MockGateway::new();
+        gateway
+            .expect_get_token_prices()
+            .with(eq(chain))
+            .times(1)
+            .return_once(move |_| {
+                Box::pin(async move {
+                    load_released.await.unwrap();
+                    Ok(HashMap::from([(Bytes::from("0x01"), 10.0)]))
+                })
+            });
+        let cache = ProtocolMemoryCache::new(chain, Duration::seconds(60), Arc::new(gateway));
+        {
+            let mut token_prices = cache.token_prices.write().await;
+            token_prices.prices = prices();
+            token_prices.last_price_update = Local::now().naive_utc() - Duration::seconds(120);
+        }
+        let addresses = &[Bytes::from("0x01")];
+        let wait = std::time::Duration::from_millis(100);
+
+        // The prices are too old: the call starts a refresh and answers with the old prices.
+        let during_load = tokio::time::timeout(wait, cache.get_token_prices(addresses))
+            .await
+            .expect("get_token_prices waited for the price load")
+            .unwrap();
+        // A second call does not start a second refresh (the mock allows one load).
+        let second = tokio::time::timeout(wait, cache.get_token_prices(addresses))
+            .await
+            .expect("get_token_prices waited for the price load")
+            .unwrap();
+        release_load.send(()).unwrap();
+        let after_load = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let prices = cache
+                    .get_token_prices(addresses)
+                    .await
+                    .unwrap();
+                if prices == vec![Some(10.0)] {
+                    return prices;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the refresh did not replace the prices");
+
+        assert_eq!(during_load, vec![Some(1.0)]);
+        assert_eq!(second, vec![Some(1.0)]);
+        assert_eq!(after_load, vec![Some(10.0)]);
+    }
+
+    #[tokio::test]
     async fn test_entry_counts() {
         let cache = ProtocolMemoryCache::new(
             Chain::Ethereum,
