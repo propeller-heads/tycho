@@ -150,3 +150,39 @@ impl<T: Log + Serialize> Serialize for Outcome<T> {
         s.end()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log::NopLog;
+
+    #[test]
+    fn test_is_suspicious_victim_weth_taken() {
+        let mut state = State::default();
+        state
+            .erc20_safe_transfer_from(
+                Address::WETH,
+                Address::Router,
+                Address::Victim,
+                Address::Named("pool"),
+                1000,
+            )
+            .expect("transfer");
+
+        let outcome = Outcome::new(Params::default(), state, NopLog);
+
+        assert!(outcome.is_suspicious());
+    }
+
+    #[test]
+    fn test_is_suspicious_router_weth_taken() {
+        let mut state = State::default();
+        state
+            .erc20_safe_transfer(Address::WETH, Address::Router, Address::Sender, 1000)
+            .expect("transfer");
+
+        let outcome = Outcome::new(Params::default(), state, NopLog);
+
+        assert!(!outcome.is_suspicious());
+    }
+}
