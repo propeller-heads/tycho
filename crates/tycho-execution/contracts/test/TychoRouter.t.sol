@@ -220,6 +220,7 @@ contract TychoRouterTest is TychoRouterTestSetup {
         new TychoRouterExposed(
             PERMIT2_ADDRESS,
             nonContract,
+            new address[](0),
             PAUSER,
             UNPAUSER,
             EXECUTOR_SETTER,
@@ -240,6 +241,7 @@ contract TychoRouterTest is TychoRouterTestSetup {
         new TychoRouterExposed(
             nonContract,
             address(newFeeCalculator),
+            new address[](0),
             PAUSER,
             UNPAUSER,
             EXECUTOR_SETTER,

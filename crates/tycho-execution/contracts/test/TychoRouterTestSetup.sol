@@ -60,6 +60,7 @@ contract TychoRouterExposed is TychoRouterV3 {
     constructor(
         address permit2_,
         address feeCalculator,
+        address[] memory executors,
         address pauser,
         address unpauser,
         address executorSetter,
@@ -68,6 +69,7 @@ contract TychoRouterExposed is TychoRouterV3 {
         TychoRouterV3(
             permit2_,
             feeCalculator,
+            executors,
             pauser,
             unpauser,
             executorSetter,
@@ -226,6 +228,7 @@ contract TychoRouterTestSetup is
         tychoRouter = new TychoRouterExposed(
             PERMIT2_ADDRESS,
             placeholderFeeCalculator,
+            new address[](0),
             PAUSER,
             UNPAUSER,
             EXECUTOR_SETTER,
