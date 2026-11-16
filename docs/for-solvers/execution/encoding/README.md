@@ -52,7 +52,13 @@ quote.
 {% tab title="UserTransferType" %}
 Specifies how user funds (the input token) enter the router:
 
-<table><thead><tr><th width="210.01953125" align="center">Variant</th><th>Description</th></tr></thead><tbody><tr><td align="center"><strong>TransferFromPermit2</strong></td><td>Use Permit2 for token transfer. You must approve the Permit2 contract and sign the permit externally.</td></tr><tr><td align="center"><strong>TransferFrom</strong> <em>(default)</em></td><td>Use standard ERC-20 approve + transferFrom. You must approve the TychoRouterV3 to spend your tokens.</td></tr></tbody></table>
+<table>
+<thead><tr><th width="210.01953125" align="center">Variant</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td align="center"><strong>TransferFromPermit2</strong></td><td>Use Permit2 for token transfer. You must approve the Permit2 contract and sign the permit externally.</td></tr>
+<tr><td align="center"><strong>TransferFrom</strong> <em>(default)</em></td><td>Use standard ERC-20 approve + transferFrom. You must approve the TychoRouterV3 to spend your tokens.</td></tr>
+</tbody>
+</table>
 {% endtab %}
 
 {% tab title="Swap" %}
@@ -234,7 +240,7 @@ The `ClientFeeParams` struct is defined as:
 <thead><tr><th width="210">Field</th><th width="490">Description</th></tr></thead>
 <tbody>
 <tr><td><code>clientFeeBps</code></td><td>Client fee as a <code>uint32</code> in fee units, where <code>100_000_000</code> = 100% (see <a href="#fee-units">Fee units</a>). Set to <code>0</code> to take no fee</td></tr>
-<tr><td><code>clientFeeReceiver</code></td><td>Address that identifies the client and receives the client fee by transfer. The router resolves negotiated fee rates and positive-slippage exemptions against it, so a signed receiver is worth passing even with <code>clientFeeBps</code> set to <code>0</code></td></tr>
+<tr><td><code>clientFeeReceiver</code></td><td>Address that identifies the client and receives the client fee. The router resolves negotiated fee rates and positive-slippage exemptions against it, so a signed receiver is worth passing even with <code>clientFeeBps</code> set to <code>0</code></td></tr>
 <tr><td><code>deadline</code></td><td>Unix timestamp after which the signature is no longer valid</td></tr>
 <tr><td><code>clientSignature</code></td><td>EIP-712 signature over the fee fields <strong>and</strong> the full swap intent, signed by <code>clientFeeReceiver</code>: a 65-byte ECDSA signature when that address is an EOA, or an ERC-1271 signature of any length when it is a contract</td></tr>
 </tbody>

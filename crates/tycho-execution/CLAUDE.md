@@ -11,8 +11,10 @@ swaps with fee-taking and 20+ DEX integrations.
 ```
 TychoRouterV3 (entry point)
   inherits AccessControl           -- role-based admin (add executors, set fees)
+  inherits ReentrancyGuard         -- every swap entry point is nonReentrant
+  inherits Pausable                -- pause and unpause swaps
   inherits Dispatcher              -- executor dispatch via delegatecall
-    inherits TransferManager       -- input/output transfers, Permit2/ERC20 funding, reentrancy guard, pause
+    inherits TransferManager       -- input/output transfers, Permit2/ERC20 funding
   inherits EIP712                  -- client fee signature verification
 
 FeeCalculator (separate contract, called via staticcall -- read only)
@@ -30,7 +32,7 @@ Entry (e.g. splitSwap)
       → amountOut = diff (single source of truth)
       → if outputToRouter: forward to receiver via _transferOut
   → _finalizeSwap:
-      → if intercepting: _takeFees (transfer each fee to its receiver), then _transferOut to receiver
+      → if intercepting: _takeFees (transfer each fee to its recipient), then _transferOut to receiver
       → check the receiver's amount against minAmountOut
 ```
 
@@ -63,8 +65,8 @@ The router holds no user balances. Tokens left in the router after a swap (dust,
 the receiver, measured by the Dispatcher or, for output the router intercepts for fees, by `_transferOut`. The swap
 reverts with `TychoRouter__NegativeSlippage` when it is below `minAmountOut`.
 
-**Fee accounting**: `_takeFees()` transfers each fee to its receiver (`safeTransfer`, or `sendValue` for native ETH).
-A receiver that cannot accept the token reverts the swap.
+**Fee accounting**: `_takeFees()` transfers each fee to its recipient (`safeTransfer`, or `sendValue` for native ETH).
+A recipient that cannot accept the token reverts the swap.
 
 ### Fee System (`FeeCalculator.sol`)
 
@@ -134,7 +136,7 @@ to `actualAmountOut * capBps / MAX_BPS`. The surplus above the cap stays in the 
 output. `amountOut = amountIn - clientPortion - totalRouterFee`.
 
 **Accounting**: FeeCalculator only computes amounts (called via staticcall). When the router intercepted the
-output, TychoRouterV3's `_finalizeSwap()` calls `_takeFees()`, which transfers each fee to its receiver, and then
+output, TychoRouterV3's `_finalizeSwap()` calls `_takeFees()`, which transfers each fee to its recipient, and then
 transfers the rest to the receiver. `_finalizeSwap()` then checks the receiver's amount against `minAmountOut`.
 
 ### Executors (`contracts/src/executors/`)

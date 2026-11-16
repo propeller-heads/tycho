@@ -15,7 +15,7 @@ For an example of how to execute trades using the Tycho Router, refer to the [Qu
 
 The TychoRouterV3 supports a dual fee system:
 
-* **Client fees**: Construct a `ClientFeeParams` with your `client_fee_bps`, `client_fee_receiver`, and signature, and pass it when calling the router. The router transfers the fee to the receiver in the same transaction.
+* **Client fees**: Construct a `ClientFeeParams` with your `client_fee_bps`, `client_fee_receiver`, and signature, and pass it when calling the router. The router transfers the fee to `client_fee_receiver` in the same transaction.
 * **Router fees**: Configured on-chain by Propeller Heads. These are mandatory and cannot be bypassed through encoding. The router can charge a fee on the output amount and/or a percentage of the client fee. Currently set to 0.1 bps (0.001%) on the swap output and 20% share of the client fee (the integrator keeps 80%).
 
 All fee rates — yours and the router's — use 8-decimal fee units where `100_000_000` = 100%. See [Fee units](encoding/#fee-units).

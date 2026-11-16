@@ -401,8 +401,8 @@ fn _validate_addresses(
     Ok(())
 }
 
-/// Mirrors `TychoRouter._finalizeSwap` in Solidity: shared post-swap
-/// finalization (fees, output transfer, output check).
+/// Mirrors `TychoRouter._finalizeSwap` in Solidity: takes fees, transfers the
+/// output and checks it against `min_amount_out`.
 fn _finalize_swap(
     params: &Params,
     state: &mut State,

@@ -457,12 +457,23 @@ struct FeeInput {
 
 ## V3.1 to V3.2
 
-{% hint style="info" %}
-Router V3.1 stays available on the `tycho-execution` releases that precede this change. Pin your
-dependency to the last of those releases to keep using it. All later versions target V3.2.
+{% hint style="warning" %}
+Router V3.1 is paused. Do not pin a `tycho-execution` release to keep using it: every release from
+this change on targets V3.2.
 {% endhint %}
 
 V3.2 removes the vault. The router holds no user balances between transactions.
+
+### Before You Switch
+
+V3.2 is a new deployment, so it cannot reach anything you left on the V3.1 router:
+
+1. Withdraw your V3.1 vault balances, including client fees the router credited to you. For each
+   token, read `balanceOf(yourAddress, uint256(uint160(token)))` on the V3.1 router and call
+   `withdraw(token, amount)`. Use `ETH_ADDRESS` as the token for native ETH. `withdraw` works while
+   the router is paused.
+2. Revoke the ERC-20 allowances you granted the V3.1 router, and the Permit2 allowances whose spender
+   is the V3.1 router.
 
 ### Encoding Changes
 
@@ -538,7 +549,7 @@ function mustOutputThroughRouter(uint32 clientFeeBps, address client, address to
 
 #### Fees and Output
 
-* The router transfers each fee to its receiver during the swap. A fee receiver that cannot accept the
+* The router transfers each fee to its recipient during the swap. A fee recipient that cannot accept the
   token reverts the swap.
 * An output below `minAmountOut` always reverts with `TychoRouter__NegativeSlippage`. No client
   contribution covers the shortfall.
@@ -547,7 +558,7 @@ function mustOutputThroughRouter(uint32 clientFeeBps, address client, address to
   the tokens that a route leaves in the router, including an unspent `msg.value`: any later swap can
   spend them.
 * `msg.value` must equal `amountIn` for native ETH input and must be zero for any other input. V3.1
-  credited a mismatched `msg.value` to the vault, which then reverted the swap.
+  also reverted these swaps.
 * The Permit2 methods reject native ETH input, because they are not payable. Use `singleSwap`,
   `sequentialSwap` or `splitSwap` with `msg.value` instead.
 * A Permit2 `amountIn` above `type(uint160).max` reverts. V3.1 truncated it to the lower 160 bits.

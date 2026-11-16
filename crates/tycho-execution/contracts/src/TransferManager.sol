@@ -24,7 +24,7 @@ error TransferManager__Permit2AmountTooLarge(uint256 amount);
 
 /**
  * @title TransferManager
- * @dev Orchestrates all token transfers during swap execution. Sits between
+ * @dev Makes every token transfer of a swap. Sits between
  * TychoRouterV3 and Dispatcher in the inheritance chain.
  *
  * Responsibilities:
@@ -36,8 +36,8 @@ error TransferManager__Permit2AmountTooLarge(uint256 amount);
  *   than the user authorised. Reverts if the cap is exceeded or a different token is
  *   attempted.
  * - Supports both standard ERC20 `transferFrom` and Permit2's `transferFrom`.
- * - Handles native ETH accounting for executors that forward ETH as `msg.value`
- *   directly to the protocol (e.g. Fluid, Rocketpool, Lido).
+ * - Makes no transfer for executors that forward ETH as `msg.value` directly to
+ *   the protocol (e.g. Fluid, Rocketpool, Lido); they spend the router's ETH.
  *
  * Per-swap state is kept in transient storage (EIP-1153): token in, allowed amount,
  * Permit2 flag and original sender. These are written once at
@@ -105,11 +105,11 @@ contract TransferManager {
      * - inCallback: Whether being called from within a callback (e.g., UniswapV3)
      *
      * Handles 5 transfer scenarios (in order of execution):
-     * 1. None, or native ETH sent by the executor - no transfer here
+     * 1. None, or native ETH sent by the executor - the router transfers nothing
      * 2. TransferFrom user wallet to router, then approve protocol to debit
      * 3. Protocol debits from router (with approval if needed). No transferFrom needed
      * 4. TransferFrom user wallet directly to protocol
-     * 5. Transfer from router balance to protocol (previous swap funds)
+     * 5. Transfer the funds the previous swap left in the router to the protocol
      */
     function _transfer(
         address receiver,
@@ -120,9 +120,9 @@ contract TransferManager {
         bool isSplitSwap,
         bool inCallback
     ) internal returns (uint256) {
-        // Scenario 1: No transfer here. The protocol is paid inside a callback
-        // (e.g. UniswapV3), or the executor sends native ETH as msg.value
-        // when it calls the protocol (e.g. Fluid, Lido).
+        // Scenario 1: The router transfers nothing. The protocol is paid
+        // inside a callback (e.g. UniswapV3), or the executor sends native ETH
+        // as msg.value when it calls the protocol (e.g. Fluid, Lido).
         if (
             transferType == TransferType.None
                 || transferType == TransferType.TransferNativeInExecutor
@@ -158,8 +158,8 @@ contract TransferManager {
                 // Scenario 4: First swap with user funds - transfer directly to pool
                 amount = _transferFromUser(tokenIn, receiver, amount);
             } else {
-                // Scenario 5: Transfer from router balance to pool. The funds are
-                // in the router from the previous swap.
+                // Scenario 5: Transfer the funds the previous swap left in
+                // the router to the pool.
                 amount = _transferOut(tokenIn, receiver, amount);
             }
             return amount;

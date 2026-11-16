@@ -103,6 +103,13 @@ error TychoRouter__TimelockNotExpired(
 error TychoRouter__NoPendingFeeCalculator();
 error TychoRouter__FeesExceedOutput(uint256 totalFees, uint256 actualAmountOut);
 
+/**
+ * @title TychoRouterV3
+ * @notice Swaps tokens through one or more protocols in a single
+ *         transaction. The router holds no user balances: tokens sent to it,
+ *         or left in it by a route, are lost to their owner, and any later
+ *         swap can spend them. The swap receiver cannot be the router.
+ */
 contract TychoRouterV3 is
     AccessControl,
     ReentrancyGuard,
@@ -183,7 +190,7 @@ contract TychoRouterV3 is
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
-     * @param receiver The address to receive the output tokens.
+     * @param receiver The address to receive the output tokens. Cannot be the router (reverts with `TychoRouter__InvalidReceiver`).
      * @param clientFeeParams Client fee parameters including fee bps, receiver, deadline and signature.
      * @param swaps Encoded swap graph data containing details of each swap.
      *
@@ -231,17 +238,17 @@ contract TychoRouterV3 is
      *         This function enables multi-step swaps and validates the output amount against a user-specified minimum.
      *
      * @dev
-     * - For ERC20 tokens, Permit2 is used to approve and transfer tokens from the caller to the router.
+     * - Permit2 approves and transfers the input token from the caller to the router.
      * - Swaps are executed sequentially using the `_swap` function.
      * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`.
      *
      * @param amountIn The input token amount to be swapped.
-     * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
+     * @param tokenIn The address of the input token. Native ETH is not accepted: use the method without Permit2 and send `msg.value`.
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
-     * @param receiver The address to receive the output tokens.
+     * @param receiver The address to receive the output tokens. Cannot be the router (reverts with `TychoRouter__InvalidReceiver`).
      * @param clientFeeParams Client fee parameters including fee bps, receiver, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
      * @param signature A valid signature authorizing the Permit2 approval.
@@ -303,7 +310,7 @@ contract TychoRouterV3 is
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
-     * @param receiver The address to receive the output tokens.
+     * @param receiver The address to receive the output tokens. Cannot be the router (reverts with `TychoRouter__InvalidReceiver`).
      * @param clientFeeParams Client fee parameters including fee bps, receiver, deadline and signature.
      * @param swaps Encoded swap graph data containing details of each swap.
      *
@@ -349,15 +356,15 @@ contract TychoRouterV3 is
      *         This function enables multi-step swaps and validates the output amount against a user-specified minimum.
      *
      * @dev
-     * - For ERC20 tokens, Permit2 is used to approve and transfer tokens from the caller to the router.
+     * - Permit2 approves and transfers the input token from the caller to the router.
      * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`.
      *
      * @param amountIn The input token amount to be swapped.
-     * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
+     * @param tokenIn The address of the input token. Native ETH is not accepted: use the method without Permit2 and send `msg.value`.
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
-     * @param receiver The address to receive the output tokens.
+     * @param receiver The address to receive the output tokens. Cannot be the router (reverts with `TychoRouter__InvalidReceiver`).
      * @param clientFeeParams Client fee parameters including fee bps, receiver, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
      * @param signature A valid signature authorizing the Permit2 approval.
@@ -417,7 +424,7 @@ contract TychoRouterV3 is
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
-     * @param receiver The address to receive the output tokens.
+     * @param receiver The address to receive the output tokens. Cannot be the router (reverts with `TychoRouter__InvalidReceiver`).
      * @param clientFeeParams Client fee parameters including fee bps, receiver, deadline and signature.
      * @param swapData Encoded swap details.
      *
@@ -463,15 +470,15 @@ contract TychoRouterV3 is
      *         This function validates the output amount against a user-specified minimum.
      *
      * @dev
-     * - For ERC20 tokens, Permit2 is used to approve and transfer tokens from the caller to the router.
+     * - Permit2 approves and transfers the input token from the caller to the router.
      * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`.
      *
      * @param amountIn The input token amount to be swapped.
-     * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
+     * @param tokenIn The address of the input token. Native ETH is not accepted: use the method without Permit2 and send `msg.value`.
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
-     * @param receiver The address to receive the output tokens.
+     * @param receiver The address to receive the output tokens. Cannot be the router (reverts with `TychoRouter__InvalidReceiver`).
      * @param clientFeeParams Client fee parameters including fee bps, receiver, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
      * @param signature A valid signature authorizing the Permit2 approval.
@@ -704,7 +711,8 @@ contract TychoRouterV3 is
 
     /**
      * @dev Validates the address inputs shared by all swap strategies.
-     *      The router holds no balances, so it cannot be the receiver.
+     *      Output sent to the router is lost, so the router cannot be the
+     *      receiver.
      */
     function _validateAddresses(
         address receiver,
@@ -1042,8 +1050,8 @@ contract TychoRouterV3 is
     }
 
     /**
-     * @dev Sends a fee to its recipient. A recipient that cannot receive the
-     *      token reverts the swap.
+     * @dev Sends a fee to its recipient. Reverts if the recipient is
+     *      address(0) or the transfer fails.
      */
     function _transferFee(address token, address recipient, uint256 amount)
         internal
