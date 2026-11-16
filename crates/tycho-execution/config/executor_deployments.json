@@ -136,6 +136,10 @@
         "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
         "0xDadEf1fFBFeaAB4f68A9fD181395F68b4e4E7Ae0"
       ]
+    },
+    "subsidy": {
+      "contract": "TychoSubsidizingExecutor",
+      "args": ["0x08A2427C12Cf9e90Cb7EA57f8242A828c9dc4987"]
     }
   },
   "base": {
@@ -203,6 +207,10 @@
     "rfq:native": {
       "contract": "NativeExecutor",
       "args": ["0x9706D3fff42571305Fc201F996ADC0e768d72911"]
+    },
+    "subsidy": {
+      "contract": "TychoSubsidizingExecutor",
+      "args": ["0x75Ad3d90b69632EE9dd27E8eA796A93513aB7B4b"]
     }
   },
   "unichain": {
@@ -333,7 +341,11 @@
         "0xC697d2898e0D09264376196696c51D7aBbbAA4a9"
       ]
     },
-    "lunarbase": { "contract": "LunarBaseExecutor", "args": [] }
+    "lunarbase": { "contract": "LunarBaseExecutor", "args": [] },
+    "subsidy": {
+      "contract": "TychoSubsidizingExecutor",
+      "args": ["0xB4a06a31b74A5345EE5507593F77923b5E4f0ee7"]
+    }
   },
   "plasma": {
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
