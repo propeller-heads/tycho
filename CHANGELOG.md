@@ -1,3 +1,24 @@
+## [0.520.0](https://github.com/propeller-heads/tycho/compare/0.519.2...0.520.0) (2026-11-16)
+
+
+### Features
+
+* **tycho-simulation:** share oracle observations across state clones ([#1821](https://github.com/propeller-heads/tycho/issues/1821)) ([cc5f720](https://github.com/propeller-heads/tycho/commit/cc5f7204cd48cfeaa3fb3bfb4dd781c0336559c9))
+
+
+### Performance Improvements
+
+* **tycho-simulation:** avoid copying the oracle ring on swaps ([da4adae](https://github.com/propeller-heads/tycho/commit/da4adae6e12622bc768d54ecedc0a9e543fda517))
+* **tycho-simulation:** share oracle observations across state clones ([a398a37](https://github.com/propeller-heads/tycho/commit/a398a377b5f87262fa9b45fa5a8874a39a40858f))
+
+## [0.519.2](https://github.com/propeller-heads/tycho/compare/0.519.1...0.519.2) (2026-11-15)
+
+
+### Bug Fixes
+
+* **indexer:** use clock milliseconds in substreams lag metric ([16f4b3d](https://github.com/propeller-heads/tycho/commit/16f4b3d17b357e703dc51bba1b57597ae182d3cf))
+* **indexer:** use clock milliseconds in substreams lag metric ([#1812](https://github.com/propeller-heads/tycho/issues/1812)) ([52ae8a1](https://github.com/propeller-heads/tycho/commit/52ae8a1e407627fe0f82debc28334e1ce5cbb490))
+
 ## [0.519.1](https://github.com/propeller-heads/tycho/compare/0.519.0...0.519.1) (2026-11-13)
 
 
