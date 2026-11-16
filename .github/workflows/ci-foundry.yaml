@@ -134,8 +134,27 @@ jobs:
             ${{ matrix.project.path }}/cache
           key: ${{ steps.build-cache-restore.outputs.cache-primary-key }}
 
+      # Fork state at a pinned block never changes, so no entry goes stale.
+      - name: Restore RPC cache
+        id: rpc-cache-restore
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: ~/.foundry/cache/rpc
+          key: foundry-rpc-${{ matrix.project.path }}-${{ github.sha }}
+          restore-keys: foundry-rpc-${{ matrix.project.path }}-
+
       - name: Run tests
         run: forge test -vvv
+
+      # Failed tests still fetched valid state.
+      - name: Save RPC cache
+        if: >-
+          ${{ !cancelled() && github.event_name == 'push' &&
+          steps.rpc-cache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: ~/.foundry/cache/rpc
+          key: ${{ steps.rpc-cache-restore.outputs.cache-primary-key }}
 
       - name: Gas snapshot
         run: NO_COLOR=1 forge snapshot >> "$GITHUB_STEP_SUMMARY"
