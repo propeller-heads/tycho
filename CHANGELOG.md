@@ -1,3 +1,28 @@
+## [0.525.0](https://github.com/propeller-heads/tycho/compare/0.524.0...0.525.0) (2026-11-16)
+
+
+### Features
+
+* **execution:** approve constructor executors without a timelock ([4441e10](https://github.com/propeller-heads/tycho/commit/4441e10ca6dc4bed32515aca0cba4ec924b086ea))
+* **execution:** deploy the router with the network's executors ([599fa35](https://github.com/propeller-heads/tycho/commit/599fa35140cb4603e8072c779dfa4e676c5adc64))
+* **execution:** deploy the router with the vault paused ([ebd85c2](https://github.com/propeller-heads/tycho/commit/ebd85c227a0ee7a03c387847288e7e35e980ff2d))
+* **execution:** grant PAUSER_ROLE to the pauser wallets only ([f1cbf9c](https://github.com/propeller-heads/tycho/commit/f1cbf9c81d5cffbf9570760ab358f806fe7d6572))
+* **execution:** grant the pauser wallets at router deployment ([e14b6cb](https://github.com/propeller-heads/tycho/commit/e14b6cbda65611e74357698e627b49db3e1a7f43))
+* **execution:** let only unpausers manage the pauser role ([4ffa1e0](https://github.com/propeller-heads/tycho/commit/4ffa1e0d612b695bf8003e62ad3db7c4f3179f4c))
+* **execution:** list the redeployed TychoRouterV3 on every chain ([8aab890](https://github.com/propeller-heads/tycho/commit/8aab890549e09358f5de1b3fc3eb3d6af9906a92))
+* **execution:** read the router's FeeCalculator from the registry ([f3c90ac](https://github.com/propeller-heads/tycho/commit/f3c90ac8207976b9d98593f29bc2992b5b40d09e))
+* **execution:** set initial fees when deploying a FeeCalculator ([0473380](https://github.com/propeller-heads/tycho/commit/0473380b5e03aa6ffed473ff1fe8eaa32b4c7033))
+* **execution:** verify Arc deployments on arc.etherscan.io ([3795805](https://github.com/propeller-heads/tycho/commit/37958054989b7967ed193638d7825b84a1c56fa6))
+* **execution:** verify Elysium deployments from the deploy scripts ([23d7701](https://github.com/propeller-heads/tycho/commit/23d77015c8bd3792b64955406704053198b1fbae))
+* router redeploy with cast fix and disabled vault ([#1828](https://github.com/propeller-heads/tycho/issues/1828)) ([a2d6402](https://github.com/propeller-heads/tycho/commit/a2d640221435c74ffa407888fda1d4951ceb5d8f))
+* **router-trades:** index the redeployed TychoRouterV3 ([d59f9e5](https://github.com/propeller-heads/tycho/commit/d59f9e57204e157728d1887de3819698b7486ebc))
+
+
+### Bug Fixes
+
+* **execution:** revert when a Permit2 amount does not fit in uint160 ([169ca0d](https://github.com/propeller-heads/tycho/commit/169ca0d93d920cef9e0c944da83f81fe90f1ace8))
+* **simulation:** price BaiBai books for the redeployed Base router ([6f61f03](https://github.com/propeller-heads/tycho/commit/6f61f038b70f41d124bef72b761b8c357cc16a40))
+
 ## [0.524.0](https://github.com/propeller-heads/tycho/compare/0.523.0...0.524.0) (2026-11-16)
 
 
