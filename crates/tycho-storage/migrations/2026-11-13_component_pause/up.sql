@@ -4,7 +4,9 @@ CREATE TABLE IF NOT EXISTS component_pause (
     id                 BIGSERIAL PRIMARY KEY,
     chain_id           BIGINT NOT NULL REFERENCES chain(id),
     protocol_system_id BIGINT NOT NULL REFERENCES protocol_system(id),
-    -- External id of the component. No foreign key, so an id can be paused before it is indexed.
+    -- External id of the component. No foreign key: reverting a reorg deletes the components
+    -- created after the fork, and a foreign key would delete their pauses or block the revert.
+    -- It also lets an operator pause an id the indexer has not reached yet.
     component_id       VARCHAR(255) NOT NULL,
     -- Operator audit fields. No logic depends on them.
     reason             TEXT,
