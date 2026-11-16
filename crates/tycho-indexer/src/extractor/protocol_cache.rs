@@ -360,6 +360,33 @@ mod tests {
         drop((tokens_reader, components_reader));
     }
 
+    #[tokio::test]
+    async fn test_entry_counts() {
+        let cache = ProtocolMemoryCache::new(
+            Chain::Ethereum,
+            Duration::seconds(60),
+            Arc::new(MockGateway::new()),
+        );
+        let mut other_system = components()[0].clone();
+        other_system.protocol_system = "sys2".to_string();
+
+        cache
+            .add_tokens(tokens())
+            .await
+            .unwrap();
+        cache
+            .add_components(
+                components()
+                    .into_iter()
+                    .chain([other_system]),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(cache.token_count().await, 2);
+        assert_eq!(cache.component_count().await, 3);
+    }
+
     fn prices() -> HashMap<Bytes, f64> {
         HashMap::from([(Bytes::from("0x01"), 1.0), (Bytes::from("0x02"), 2.0)])
     }
