@@ -28,6 +28,8 @@ done
 
 psql_in <"$workspace_dir/schema.sql"
 psql_in <"$workspace_dir/views.sql"
+# Every container applies views.sql on start, so it has to apply on top of itself.
+psql_in <"$workspace_dir/views.sql"
 psql_in <"$workspace_dir/test_views.sql"
 
 echo "Views integration test passed"

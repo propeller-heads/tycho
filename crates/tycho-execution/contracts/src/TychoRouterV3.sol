@@ -723,6 +723,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address client = clientFeeParams.clientFeeReceiver;
         // Stack pressure in this function prevents keeping finalReceiver in scope
         // outside the block, so we cache the interception decision as a bool instead.
+        // On the next router deployment, pass tokenIn and tokenOut here.
+        // Without them, any token pair fee makes every swap output pass
+        // through the router, which costs gas on swaps that pay no fee.
         bool intercepting = IFeeCalculator(_feeCalculator)
             .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
 
@@ -778,6 +781,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         _validateAddresses(receiver, tokenIn, tokenOut);
 
         address client = clientFeeParams.clientFeeReceiver;
+        // On the next router deployment, pass tokenIn and tokenOut here.
+        // Without them, any token pair fee makes every swap output pass
+        // through the router, which costs gas on swaps that pay no fee.
         bool intercepting = IFeeCalculator(_feeCalculator)
             .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
 
@@ -838,6 +844,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         }
 
         address client = clientFeeParams.clientFeeReceiver;
+        // On the next router deployment, pass tokenIn and tokenOut here.
+        // Without them, any token pair fee makes every swap output pass
+        // through the router, which costs gas on swaps that pay no fee.
         bool intercepting = IFeeCalculator(_feeCalculator)
             .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
 

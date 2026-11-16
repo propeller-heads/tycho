@@ -156,22 +156,30 @@ WHERE protocol_systems = ARRAY[]::TEXT[] GROUP BY 1, 2 ORDER BY 3 DESC;
 ### Positive slippage
 
 A v3_1 trade carries `expected_amount_out`, so `positive_slippage` is the surplus the swaps
-produced above it. Who keeps that surplus takes two flags:
+produced above it. Who keeps that surplus takes three columns:
 
-| `positive_slippage_enabled` | `positive_slippage_exempt` | who keeps the surplus |
-| --- | --- | --- |
-| false | — | the receiver |
-| true | false | the router, as part of `router_fee_amount` |
-| true | true | the receiver |
+1. When `positive_slippage_enabled` is false, the receiver keeps all of it. Only a calculator
+   that emits `PositiveSlippageToggled` can turn capture off. A calculator with a router positive slippage bps has
+   no switch and always reports true.
+2. Otherwise the router captures `router_positive_slippage_bps` of it, and the receiver keeps the
+   rest.
+3. The client gets `client_positive_slippage_share_bps` of the captured amount, and the router
+   keeps the remainder, rounded in its favour.
 
-The exemption is FeeCalculator state, a `mapping(address => bool)` set by
-`setPositiveSlippageExempt` under `ROUTER_FEE_SETTER_ROLE`, and it emits
-`PositiveSlippageExemptionSet(address indexed client, bool exempt)`. `store_fee_config` keys it by
-calculator and client, so an exemption on one calculator does not follow a rotation to another.
+Both values are in fee units (100000000 = all of it). The router positive slippage bps is the client's custom
+value (`CustomRouterPositiveSlippageBpsUpdated`, `CustomRouterPositiveSlippageBpsRemoved`) when
+one is set, otherwise the calculator's global value (`RouterPositiveSlippageBpsUpdated`). A
+calculator that never emitted a router positive slippage event captures the full surplus. The client share comes from
+`ClientPositiveSlippageShareUpdated` and defaults to zero.
+
+The calculator generation before per-client router positive slippage bps exempted a client instead, with
+`PositiveSlippageExemptionSet(address indexed client, bool exempt)`. `store_fee_config` stores an
+exemption as a custom router positive slippage bps of zero and its removal as no custom router positive slippage bps, so trades on
+both generations resolve the same way. Every value is keyed by calculator and client, so a value
+on one calculator does not follow a rotation to another.
 
 The client is the one the FeeCalculator resolves: the signed `client_fee_receiver`, or `eoa`
-(`tx.origin`) when that is zero. Only the calculator generation that has the exemption emits the
-event, so a trade on an older calculator resolves to `false`.
+(`tx.origin`) when that is zero.
 
 `positive_slippage` is what the swaps produced, not what was taken. Read `router_fee_amount`,
 which comes from the `FeesTaken` event, for what the router actually collected.
@@ -225,9 +233,11 @@ column was not merely mislabelled there but wrong.
 `pricing/price_trades.sql` values a trade from one side only, preferring a side that holds a
 pinned token (lowest `priority` first: stablecoins, then the native token and its wrapper, then
 BTC wrappers) and otherwise any side Tycho happens to price. The unit price of the token on the
-other side is then implied from the trade itself. That is what gives the long tail a price at all:
-Tycho prices 7852 tokens on ethereum but only 29 on unichain and 126 on arbitrum, while nearly
-every trade has a stablecoin, WETH or the native token on one side.
+other side is always implied from the trade itself, even when Tycho prices that token too. That is
+what gives the long tail a price at all — Tycho prices 7852 tokens on ethereum but only 29 on
+unichain and 126 on arbitrum — and it keeps a row consistent, so `price x amount` equals
+`volume_usd` on both sides. A Tycho price there would be a price of today on a trade that may be
+a year old.
 
 Pinning is by address, never by symbol. Tycho holds many tokens with a copied symbol — base has
 about 40 `cbBTC` rows and ethereum a second 18-decimal `USDC` — and their prices are nonsense.
@@ -246,6 +256,14 @@ calls](#discarded-calls)).
 A probe is priced like any other call that returned, on purpose: the quote it read is real market
 activity and worth reading in USD. Leaving it out of a volume figure is the view's job, not the
 pricer's.
+
+The pricer polls: it runs a pass over every chain each `INTERVAL` seconds (60 in dev), so a new
+trade is valued about a minute after the sink writes it. Nothing prices a row on insert. A trade
+stays eligible while `priced_at IS NULL`, so a pass that is skipped costs nothing — with one
+exception: a trade that needs a non-stable basis is only eligible for `MAX_AGE` after its block
+time, so a pricer that is down longer than that leaves those rows unpriced for good. Re-running
+the values later is possible with `pricing/reprice.sql`, which offers priced rows to the logic
+again.
 
 The trades live in their own database (all chains in one table). Each chain has its own Tycho
 database, reached through `postgres_fdw`: one server and one `tycho_<chain>` schema per chain,
@@ -530,8 +548,9 @@ hand. ABIs come from the verified sources on Sourcify
 (`TychoRouterV2` = `0xfD0b31d2…`, `TychoRouterV3_0` = `0x1f8dB310…`, `TychoRouterV3_1` =
 `0xea290cE3…`, `FeeCalculator` = `0xA236E1F0…`). Two ABI files hold events that deployment does not have:
 `FeeCalculatorV3_0.json` the `uint16` event signatures of the earlier FeeCalculator, and
-`FeeCalculatorExemption.json` the `PositiveSlippageExemptionSet` of the later one. Each is
-events-only, and the decoders try them in turn. `SubsidyPayer.json` holds the two events of
+`FeeCalculatorExemption.json` the `PositiveSlippageExemptionSet` of the later one, and
+`FeeCalculatorRouterPositiveSlippage.json` the router positive slippage events of the one after it.
+Each is events-only, and the decoders try them in turn. `SubsidyPayer.json` holds the two events of
 `contracts/interfaces/ISubsidyPayer.sol`, events-only as well.
 
 Regenerate protobuf bindings after editing `proto/` with `make protogen`. The abigen output under

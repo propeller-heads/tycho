@@ -119,13 +119,20 @@ message RouterFeeConfig {
   uint64 fee_on_client_fee_bps = 3;
   bool custom_fee_on_output = 4;
   bool custom_fee_on_client_fee = 5;
+  // False only when an older calculator turned capture off with PositiveSlippageToggled. A
+  // calculator with a router positive slippage bps has no switch and reports true.
   bool positive_slippage_enabled = 6;
   // Denominator of the bps values: 10000 for v3_0, 100000000 for v3_1.
   uint64 bps_scale = 7;
-  // Whether this trade's client is exempt from positive slippage capture. The client is the
-  // signed clientFeeReceiver, or tx.origin when that is zero, the same resolution the
-  // FeeCalculator does. Only the calculator generation that has exemptions can set it.
-  bool positive_slippage_exempt = 8;
+  reserved 8;
+  reserved "positive_slippage_exempt";
+  // Part of the surplus the router captures for this trade's client, in fee units (100000000 =
+  // the full surplus): the client's custom value if set, otherwise the calculator's global one.
+  // The client is the signed clientFeeReceiver, or tx.origin when that is zero, the same
+  // resolution the FeeCalculator does. An exemption on an older calculator reads as zero.
+  uint64 router_positive_slippage_bps = 9;
+  // The client's share of the captured surplus, in fee units. The router keeps the rest.
+  uint64 client_positive_slippage_share_bps = 10;
 }
 
 // One recipient of the FeesTaken event.
