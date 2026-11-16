@@ -183,6 +183,10 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         _grantRole(UNPAUSER_ROLE, unpauserAdmin);
         _grantRole(EXECUTOR_SETTER_ROLE, executorSetterAdmin);
         _grantRole(ROUTER_FEE_SETTER_ROLE, routerFeeSetterAdmin);
+
+        // Vault deposits and vault-funded swaps start paused. An unpauser
+        // enables them with `unpauseVault`.
+        _pauseVault();
     }
 
     /**

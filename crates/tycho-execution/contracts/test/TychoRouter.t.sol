@@ -10,7 +10,7 @@ import {
 } from "@openzeppelin/contracts/access/IAccessControl.sol";
 import "@src/TransferManager.sol";
 import "./TychoRouterTestSetup.sol";
-import {Vault} from "@src/Vault.sol";
+import {Vault, Vault__Paused} from "@src/Vault.sol";
 import {
     Dispatcher__ExecutorAlreadyExists,
     Dispatcher__ExecutorIsTimelocked,
@@ -252,6 +252,28 @@ contract TychoRouterTest is TychoRouterTestSetup {
             EXECUTOR_SETTER,
             FEE_SETTER
         );
+    }
+
+    function testConstructorPausesVault() public {
+        TychoRouterExposed router = new TychoRouterExposed(
+            PERMIT2_ADDRESS,
+            address(feeCalculator),
+            new address[](0),
+            listTestPausers(),
+            UNPAUSER,
+            EXECUTOR_SETTER,
+            FEE_SETTER
+        );
+        assertTrue(router.vaultPaused());
+
+        vm.deal(ALICE, 1 ether);
+        vm.prank(ALICE);
+        vm.expectRevert(Vault__Paused.selector);
+        router.deposit{value: 1 ether}(ETH_ADDR, 1 ether);
+
+        vm.prank(UNPAUSER);
+        router.unpauseVault();
+        assertFalse(router.vaultPaused());
     }
 
     function testConstructorPausersCanPause() public {

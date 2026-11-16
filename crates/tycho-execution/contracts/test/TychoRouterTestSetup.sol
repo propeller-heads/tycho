@@ -198,6 +198,9 @@ contract TychoRouterTestSetup is
         tychoRouter = deployRouter();
         deployDummyContract();
         vm.stopPrank();
+        // The router deploys with the vault paused; most tests use the vault.
+        vm.prank(UNPAUSER);
+        tychoRouter.unpauseVault();
 
         address[] memory executors = deployExecutors();
         vm.startPrank(EXECUTOR_SETTER);
