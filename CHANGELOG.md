@@ -1,3 +1,16 @@
+## [0.522.0](https://github.com/propeller-heads/tycho/compare/0.521.0...0.522.0) (2026-11-16)
+
+
+### Features
+
+* **execution:** add a vault pause for deposits and vault-funded swaps ([1830169](https://github.com/propeller-heads/tycho/commit/183016958bf9abc99c816145900313ab8209d24d))
+* **execution:** check delta casts and add a vault pause ([#1826](https://github.com/propeller-heads/tycho/issues/1826)) ([04524cd](https://github.com/propeller-heads/tycho/commit/04524cddeabed78eec92981a718570e64f28e812))
+
+
+### Bug Fixes
+
+* **execution:** revert when a delta amount does not fit in int256 ([e56ac62](https://github.com/propeller-heads/tycho/commit/e56ac62f4b0e2e26d8574ee1b82cc2554009d614))
+
 ## [0.521.0](https://github.com/propeller-heads/tycho/compare/0.520.0...0.521.0) (2026-11-16)
 
 
