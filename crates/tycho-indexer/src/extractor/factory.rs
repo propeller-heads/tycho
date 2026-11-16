@@ -16,6 +16,7 @@ use tycho_common::{
         blockchain::Block, Address, Chain, ExtractorIdentity, FinancialType, ImplementationType,
         ProtocolType,
     },
+    storage::{BlockIdentifier, ChainGateway, StorageError},
     Bytes,
 };
 use tycho_ethereum::{
@@ -390,6 +391,9 @@ impl ExtractorFactory {
             let first_block = u64::try_from(start_block).map_err(|_negative| {
                 ExtractionError::Setup(format!("start block {start_block} must not be negative"))
             })?;
+            let stamped_first_block =
+                stamped_block(&self.rpc_client, self.config.chain, first_block).await?;
+            check_stored_block(&fresh_gw, &stamped_first_block).await?;
             let earlier_blocks =
                 earlier_blocks_in_second(&self.rpc_client, self.config.chain, first_block).await?;
             if let Some(reference) = stamped_block_before(&earlier_blocks) {
@@ -541,9 +545,6 @@ pub(crate) fn stamped_block_before(earlier_blocks: &[Block]) -> Option<Block> {
 }
 
 /// Reads block `number` from the node and gives it the timestamp every extractor stamps on it.
-///
-/// Use it for a block that is stored outside an extractor, so that the extractors find it with
-/// the same timestamp.
 pub async fn stamped_block(
     rpc: &EthereumRpcClient,
     chain: Chain,
@@ -558,6 +559,30 @@ pub async fn stamped_block(
         block.ts = before.ts + Duration::microseconds(1);
     }
     Ok(block)
+}
+
+/// Fails when `block` is stored with another timestamp.
+///
+/// A new extractor and account initialisation stamp their first block from the node. Versions refer
+/// to their block by timestamp, so a stored row with another timestamp would make them refer to a
+/// timestamp that no stored block has. The blocks after the first one are stamped from it, so one
+/// check at start is enough.
+pub async fn check_stored_block(
+    gateway: &(impl ChainGateway + Sync),
+    block: &Block,
+) -> Result<(), ExtractionError> {
+    match gateway
+        .get_block(&BlockIdentifier::Hash(block.hash.clone()))
+        .await
+    {
+        Ok(stored) if stored.ts != block.ts => Err(ExtractionError::Setup(format!(
+            "Block {} ({}) is stored with timestamp {}, but the chain gives it {}: correct the \
+             stored timestamp",
+            block.number, block.hash, stored.ts, block.ts
+        ))),
+        Ok(_) | Err(StorageError::NotFound(..)) => Ok(()),
+        Err(err) => Err(ExtractionError::Storage(err)),
+    }
 }
 
 async fn ensure_spkg(spkg_path: &str, s3_bucket: Option<&str>) -> Result<(), ExtractionError> {
