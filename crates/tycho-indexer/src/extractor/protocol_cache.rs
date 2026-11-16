@@ -1,8 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use chrono::{Duration, Local, NaiveDateTime};
-use deepsize::DeepSizeOf;
+use chrono::{Local, NaiveDateTime};
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument};
 use tycho_common::{
@@ -129,22 +128,19 @@ impl ProtocolMemoryCache {
         Ok(n_fetched)
     }
 
-    /// Returns the approximate size of the cache in bytes.
-    pub async fn size_of(&self) -> usize {
-        self.chain.deep_size_of() +
-            self.tokens.read().await.deep_size_of() +
-            self.token_prices
-                .read()
-                .await
-                .prices
-                .deep_size_of() +
-            size_of::<NaiveDateTime>() +
-            self.components
-                .read()
-                .await
-                .deep_size_of() +
-            size_of::<Duration>() +
-            size_of_val(&self.gateway)
+    /// Returns the number of cached tokens.
+    pub async fn token_count(&self) -> usize {
+        self.tokens.read().await.len()
+    }
+
+    /// Returns the number of cached protocol components, over all protocol systems.
+    pub async fn component_count(&self) -> usize {
+        self.components
+            .read()
+            .await
+            .values()
+            .map(HashMap::len)
+            .sum()
     }
 }
 

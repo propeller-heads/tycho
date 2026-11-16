@@ -384,12 +384,23 @@ where
             )
             .set(partial_block_buffer_size as f64);
 
-            // As the protocol cache is shared with other extractors, we only index it by chain
+            // As the protocol cache is shared with other extractors, we only index it by chain.
+            // Counts, not a deep size: a size walk visits every entry and takes about 1 s on a
+            // large cache, during which it blocks an extraction runtime thread.
             gauge!(
-                "protocol_cache_size",
+                "protocol_cache_tokens",
                 "chain" => self.chain.to_string(),
             )
-            .set(self.protocol_cache.size_of().await as f64);
+            .set(self.protocol_cache.token_count().await as f64);
+            gauge!(
+                "protocol_cache_components",
+                "chain" => self.chain.to_string(),
+            )
+            .set(
+                self.protocol_cache
+                    .component_count()
+                    .await as f64,
+            );
 
             if let Some(dci_plugin) = &self.dci_plugin {
                 async {
