@@ -588,7 +588,113 @@ async fn download_file_from_s3(
 
 #[cfg(test)]
 mod tests {
+    use chrono::NaiveDateTime;
+
     use super::*;
+    use crate::testing::mock_node::{block_response, node};
+
+    const SECOND: i64 = 1_700_000_000;
+
+    fn ts_at(second: i64, micros: i64) -> NaiveDateTime {
+        chrono::DateTime::from_timestamp(second, 0)
+            .expect("valid timestamp")
+            .naive_utc() +
+            Duration::microseconds(micros)
+    }
+
+    fn block(number: u64, ts: NaiveDateTime) -> Block {
+        Block::new(
+            number,
+            Chain::Ethereum,
+            Bytes::from(number).lpad(32, 0),
+            Bytes::from(number.saturating_sub(1)).lpad(32, 0),
+            ts,
+        )
+    }
+
+    // The node of `test_extractors_starting_at_different_blocks_stamp_the_same` in
+    // `protocol_extractor.rs`: there every extractor stamps block 8 at S and block 10 at S + 2 µs.
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_stops_at_earlier_second() {
+        let (_server, rpc) = node(&[(7, SECOND - 1), (8, SECOND), (9, SECOND), (10, SECOND)]).await;
+
+        let blocks = earlier_blocks_in_second(&rpc, Chain::Ethereum, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            blocks,
+            vec![
+                block(8, ts_at(SECOND, 0)),
+                block(9, ts_at(SECOND, 1)),
+                block(10, ts_at(SECOND, 2))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_with_block_before_in_earlier_second() {
+        let (_server, rpc) = node(&[(9, SECOND - 1), (10, SECOND)]).await;
+
+        let blocks = earlier_blocks_in_second(&rpc, Chain::Ethereum, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(blocks, vec![block(10, ts_at(SECOND, 0))]);
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_down_to_block_zero() {
+        let (_server, rpc) = node(&[(0, SECOND), (1, SECOND), (2, SECOND)]).await;
+
+        let blocks = earlier_blocks_in_second(&rpc, Chain::Ethereum, 2)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            blocks,
+            vec![
+                block(0, ts_at(SECOND, 0)),
+                block(1, ts_at(SECOND, 1)),
+                block(2, ts_at(SECOND, 2))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_of_block_zero() {
+        let (_server, rpc) = node(&[(0, SECOND)]).await;
+
+        let blocks = earlier_blocks_in_second(&rpc, Chain::Ethereum, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(blocks, vec![block(0, ts_at(SECOND, 0))]);
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_with_too_many_blocks_fails() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/")
+            .with_body(block_response(5_000, SECOND))
+            .create_async()
+            .await;
+        let rpc = EthereumRpcClient::new(&server.url()).unwrap();
+
+        let res = earlier_blocks_in_second(&rpc, Chain::Ethereum, 5_000).await;
+
+        assert!(matches!(res, Err(ExtractionError::Setup(_))));
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_node_error_fails() {
+        let (_server, rpc) = node(&[(10, SECOND)]).await;
+
+        let res = earlier_blocks_in_second(&rpc, Chain::Ethereum, 10).await;
+
+        assert!(matches!(res, Err(ExtractionError::Setup(_))));
+    }
 
     #[test]
     fn test_extractor_config_without_dci_plugin() {
