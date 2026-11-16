@@ -14,6 +14,7 @@ use tokio_retry2::{
     strategy::{jitter, ExponentialFactorBackoff},
     Retry, RetryError,
 };
+use tracing::warn;
 use tycho_common::Bytes;
 use tycho_execution::encoding::evm::utils::bytes_to_address;
 use tycho_simulation::evm::protocol::u256_num::u256_to_biguint;
@@ -406,11 +407,9 @@ fn simulation_overwrites<'a>(
 }
 
 /// Adds `accounts` to one simulation's overwrites. An account's balance and nonce replace the ones
-/// set before, and its `state_diff` slots merge in slot by slot.
-///
-/// # Panics
-/// In debug builds, if an account sets `code`, `state` or `move_precompile_to`: pAMM simulation
-/// overrides set none of them, and merging them needs rules this function does not have.
+/// set before, and its `state_diff` slots merge in slot by slot. An account's `code`, `state` and
+/// `move_precompile_to` are dropped with a warning: pAMM simulation overrides set none of them,
+/// and merging them needs rules this function does not have.
 fn merge_account_overwrites(
     overwrites: &mut AddressHashMap<AccountOverride>,
     accounts: &AddressHashMap<AccountOverride>,
@@ -418,10 +417,12 @@ fn merge_account_overwrites(
     for (address, account) in accounts {
         let AccountOverride { balance, nonce, code, state, state_diff, move_precompile_to } =
             account;
-        debug_assert!(
-            code.is_none() && state.is_none() && move_precompile_to.is_none(),
-            "account overwrite of {address} sets a field the merge does not handle"
-        );
+        if code.is_some() || state.is_some() || move_precompile_to.is_some() {
+            warn!(
+                %address,
+                "Account overwrite sets code, state or move_precompile_to; dropping those fields"
+            );
+        }
         let merged = overwrites.entry(*address).or_default();
         if balance.is_some() {
             merged.balance = *balance;
