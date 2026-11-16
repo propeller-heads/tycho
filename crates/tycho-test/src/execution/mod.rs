@@ -106,7 +106,6 @@ pub async fn simulate_swap_transaction_next_block(
     execution_info: HashMap<String, TychoExecutionInput>,
     block: &Block,
     router_overwrites_data: RouterOverwritesData,
-    oracle_overwrites: Option<AddressHashMap<B256HashMap<B256>>>,
     block_time_secs: u64,
 ) -> SwapSimulationResult {
     simulate_swap_transaction_on(
@@ -114,7 +113,6 @@ pub async fn simulate_swap_transaction_next_block(
         execution_info,
         block,
         router_overwrites_data,
-        oracle_overwrites,
         SimulationBase::NextBlock { block_time_secs },
     )
     .await

@@ -1481,7 +1481,6 @@ async fn process_update(
                 next_block,
                 &block,
                 router_overwrites_data.clone(),
-                None,
                 chain.block_time_secs(),
             )
             .await
