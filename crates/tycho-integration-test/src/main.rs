@@ -2265,9 +2265,10 @@ fn record_swaps_without_simulation_overrides(
     }
 }
 
-/// The account overwrites a state's swaps are simulated with at `block_number`: for a price level
-/// stream state, the account state Titan priced its quote on. `None` for any other state, and for
-/// a price level stream state that carries no simulation overrides.
+/// The account overwrites a state's swaps are simulated with: for a price level stream state, the
+/// account state Titan priced its quote on. `None` for any other state, and for a price level
+/// stream state that carries no simulation overrides. Overrides that name a block other than
+/// `block_number`, the block the swaps are simulated at, are logged at debug level.
 fn simulation_overwrites(
     state: &dyn ProtocolSim,
     block_number: u64,
@@ -2276,15 +2277,13 @@ fn simulation_overwrites(
         .as_any()
         .downcast_ref::<PriceLevelStreamState>()?
         .simulation_overrides()?;
-    // A venue's freshness guard can reject overrides built for another block, so a revert of
-    // such a swap may not be the overrides' fault.
-    if let Some(overrides_block) = overrides.block_number {
-        if overrides_block != block_number {
-            debug!(
-                overrides_block,
-                block_number, "Simulation overrides name a different block than the swap's"
-            );
-        }
+    // A freshness-guard revert of such a swap may come from the block mismatch rather than from
+    // the overridden values, and `is_stale_quote` counts it as a real revert.
+    if let Some(overrides_block) = overrides
+        .block_number
+        .filter(|overrides_block| *overrides_block != block_number)
+    {
+        debug!(overrides_block, block_number, "Simulation overrides name a different block");
     }
     Some(pamm_account_overwrites(overrides))
 }

@@ -14,7 +14,6 @@ use tokio_retry2::{
     strategy::{jitter, ExponentialFactorBackoff},
     Retry, RetryError,
 };
-use tracing::warn;
 use tycho_common::Bytes;
 use tycho_execution::encoding::evm::utils::bytes_to_address;
 use tycho_simulation::evm::protocol::u256_num::u256_to_biguint;
@@ -52,10 +51,11 @@ const MAX_CONCURRENT_BATCHES: usize = 4;
 /// overwritten — see [`RouterOverwritesData`]; its default simulates everything as deployed.
 ///
 /// Each input's own [`account_overwrites`](TychoExecutionInput::account_overwrites) are merged in
-/// after the balance, allowance and protocol overwrites, to that simulation only.
+/// last, after every other overwrite, to that simulation only.
 ///
 /// # Errors
-/// Per-simulation failures are reported as `TychoExecutionResult::Failed`/`Revert`. An `Err`
+/// Per-simulation failures are reported as `TychoExecutionResult::Failed`/`Revert`; an input whose
+/// `account_overwrites` set an unsupported field is `Failed` without being simulated. An `Err`
 /// signals that the whole batch could not be simulated, and carries the state overwrites and
 /// metadata of the batch when they were already built, for Tenderly link generation.
 pub async fn simulate_swap_transaction(
@@ -251,7 +251,7 @@ async fn simulate_swap_transaction_on(
                 }
             }
         }
-        let state_overwrites = simulation_overwrites(
+        let state_overwrites = match state_overwrites(
             user_overwrites,
             [
                 Some(&router_overwrites),
@@ -262,7 +262,14 @@ async fn simulate_swap_transaction_on(
             .into_iter()
             .flatten(),
             info.account_overwrites.as_ref(),
-        );
+        ) {
+            Ok(state_overwrites) => state_overwrites,
+            Err(error_msg) => {
+                tycho_execution_results
+                    .insert(simulation_id.clone(), TychoExecutionResult::Failed { error_msg });
+                continue;
+            }
+        };
 
         inputs.insert(
             simulation_id.clone(),
@@ -412,40 +419,56 @@ fn split_into_batches(
     batches
 }
 
-/// One simulation's state overwrites: `user`'s, then each map of `shared` in order, each replacing
-/// the accounts set before it, then the simulation's own `accounts`, merged in last so that its
-/// balances, nonces and slots win over every earlier one.
-fn simulation_overwrites<'a>(
-    mut user: AddressHashMap<AccountOverride>,
-    shared: impl IntoIterator<Item = &'a AddressHashMap<AccountOverride>>,
+/// One simulation's state overwrites: `user`'s, then each map of `earlier` in order, each replacing
+/// the accounts set before it, then the simulation's own `accounts`, merged in last as
+/// [`merge_account_overwrites`] does.
+///
+/// # Errors
+/// The message of [`merge_account_overwrites`]'s error.
+fn state_overwrites<'a>(
+    user: AddressHashMap<AccountOverride>,
+    earlier: impl IntoIterator<Item = &'a AddressHashMap<AccountOverride>>,
     accounts: Option<&AddressHashMap<AccountOverride>>,
-) -> AddressHashMap<AccountOverride> {
-    for overwrites in shared {
-        user.extend(overwrites.clone());
+) -> Result<AddressHashMap<AccountOverride>, String> {
+    let mut overwrites = user;
+    for earlier_overwrites in earlier {
+        overwrites.extend(earlier_overwrites.clone());
     }
     if let Some(accounts) = accounts {
-        merge_account_overwrites(&mut user, accounts);
+        merge_account_overwrites(&mut overwrites, accounts)?;
     }
-    user
+    Ok(overwrites)
 }
 
-/// Adds `accounts` to one simulation's overwrites. An account's balance and nonce replace the ones
-/// set before, and its `state_diff` slots merge in slot by slot. An account's `code`, `state` and
-/// `move_precompile_to` are dropped with a warning: pAMM simulation overrides set none of them,
-/// and merging them needs rules this function does not have.
+/// Merges `accounts` into one simulation's overwrites by the rules of
+/// [`TychoExecutionInput::account_overwrites`].
+///
+/// # Errors
+/// A message naming the account, when an account sets `code`, `state` or `move_precompile_to`:
+/// pAMM simulation overrides set none of them, and merging them needs rules this function does not
+/// have. `overwrites` is left unchanged then.
 fn merge_account_overwrites(
     overwrites: &mut AddressHashMap<AccountOverride>,
     accounts: &AddressHashMap<AccountOverride>,
-) {
+) -> Result<(), String> {
     for (address, account) in accounts {
-        let AccountOverride { balance, nonce, code, state, state_diff, move_precompile_to } =
-            account;
+        let AccountOverride { code, state, move_precompile_to, .. } = account;
         if code.is_some() || state.is_some() || move_precompile_to.is_some() {
-            warn!(
-                %address,
-                "Account overwrite sets code, state or move_precompile_to; dropping those fields"
-            );
+            return Err(format!(
+                "Account overwrite of {address} sets code, state or move_precompile_to, which are \
+                 not supported"
+            ));
         }
+    }
+    for (address, account) in accounts {
+        let AccountOverride {
+            balance,
+            nonce,
+            state_diff,
+            code: _,
+            state: _,
+            move_precompile_to: _,
+        } = account;
         let merged = overwrites.entry(*address).or_default();
         if balance.is_some() {
             merged.balance = *balance;
@@ -464,6 +487,7 @@ fn merge_account_overwrites(
                 );
         }
     }
+    Ok(())
 }
 
 fn collect_fermiswap_pairs(
@@ -565,7 +589,7 @@ mod tests {
                 .with_state_diff(vec![(OTHER_LANE, VALUE)]),
         )]);
 
-        merge_account_overwrites(&mut overwrites, &accounts);
+        merge_account_overwrites(&mut overwrites, &accounts).expect("only supported fields");
 
         let merged = &overwrites[&REGISTRY];
         assert_eq!((merged.balance, merged.nonce), (Some(U256::from(2)), Some(2)));
@@ -589,7 +613,7 @@ mod tests {
             AccountOverride::default().with_state_diff(vec![(LANE, VALUE)]),
         )]);
 
-        merge_account_overwrites(&mut overwrites, &accounts);
+        merge_account_overwrites(&mut overwrites, &accounts).expect("only supported fields");
 
         assert_eq!(overwrites[&REGISTRY].balance, Some(U256::from(1)));
     }
@@ -609,7 +633,8 @@ mod tests {
             AccountOverride::default().with_state_diff(vec![(LANE, VALUE)]),
         )]);
 
-        let overwrites = simulation_overwrites(user, [&registry], Some(&accounts));
+        let overwrites =
+            state_overwrites(user, [&registry], Some(&accounts)).expect("only supported fields");
 
         let state_diff = overwrites[&REGISTRY]
             .state_diff
@@ -617,6 +642,26 @@ mod tests {
             .expect("state diff is set");
         assert_eq!(state_diff.get(&LANE), Some(&VALUE));
         assert_eq!(state_diff.get(&OTHER_LANE), Some(&VALUE));
+    }
+
+    /// A simulation's own account that sets code is refused, and the overwrites set before it
+    /// stay as they were.
+    #[test]
+    fn an_input_account_with_code_is_refused() {
+        let before = AccountOverride::default().with_balance(U256::from(1));
+        let mut overwrites = AddressHashMap::from_iter([(REGISTRY, before.clone())]);
+        let accounts = AddressHashMap::from_iter([(
+            REGISTRY,
+            AccountOverride::default()
+                .with_balance(U256::from(2))
+                .with_code(vec![0x60, 0x01]),
+        )]);
+
+        let error = merge_account_overwrites(&mut overwrites, &accounts)
+            .expect_err("code is not supported");
+
+        assert!(error.contains(&REGISTRY.to_string()), "error names the account: {error}");
+        assert_eq!(overwrites[&REGISTRY], before);
     }
 
     fn simulation_inputs(n: usize) -> HashMap<String, SimulationInput> {
