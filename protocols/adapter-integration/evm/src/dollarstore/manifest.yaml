@@ -1,0 +1,28 @@
+# information about the author helps us reach out in case of issues.
+author:
+  name: Coasify
+  email: henryk@coasify.com
+
+# Protocol Constants
+constants:
+  # The expected average gas cost of a swap: swapExactInput on a hub pair with
+  # the store cold, measured by testSwapGasIsMeasuredCold at block 26424000
+  protocol_gas: 133000
+  # Minimum capabilities we can expect, individual pools may extend these
+  capabilities:
+    - SellSide
+    - PriceFunction
+    - ConstantPrice
+    - HardLimits
+    - MarginalPrice
+
+# The file containing the adapter contract
+contract: DollarStoreAdapter.sol
+
+# Deployment instances used to generate chain specific bytecode.
+instances:
+  - chain:
+      name: mainnet
+      id: 1
+    arguments:
+      - "0x825e1e13D804816b8ccdA405F1a7B7915461dDc4" # DollarStore proxy

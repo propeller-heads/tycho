@@ -39,6 +39,7 @@ members = [
     "ethereum-bopamm",
     "ethereum-ring-swap-v2",
     "ethereum-sky",
+    "ethereum-dollarstore",
     "polygon-ramses-v3",
     "ethereum-etherfi",
     "base-pancakeswap-infinity-cl",

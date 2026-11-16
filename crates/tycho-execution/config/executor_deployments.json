@@ -116,6 +116,10 @@
       "contract": "EuclidExecutor",
       "args": ["0x1111111254EEB25477B68fb85Ed929f73A960582"]
     },
+    "vm:dollarstore": {
+      "contract": "DollarStoreExecutor",
+      "args": ["0x825e1e13D804816b8ccdA405F1a7B7915461dDc4"]
+    },
     "sky": {
       "contract": "SkyExecutor",
       "args": [
