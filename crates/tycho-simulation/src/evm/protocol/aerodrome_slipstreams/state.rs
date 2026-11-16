@@ -593,6 +593,9 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         if self.liquidity == 0 {
             return Ok((BigUint::zero(), BigUint::zero()));
         }
+        // The limits do not depend on the fee, but a quote does: a pool whose fee cannot be
+        // resolved fails every quote, so it reports no limits to size one from.
+        self.get_fee()?;
 
         let zero_for_one = sell_token < buy_token;
         let mut current_tick = self.tick;
@@ -1093,6 +1096,37 @@ mod tests {
         };
 
         assert_eq!(partial.new_state.fee(), 2700.0 / 1_000_000.0);
+    }
+
+    #[test]
+    fn ring_that_cannot_answer_observe_fails_limits_like_quotes() {
+        // A non-zero scaling factor, with the slots around the 600 s target missing from this
+        // copy of the ring: the fee is unknown, so no quote can be given and no limit either.
+        let mut pool = create_basic_test_pool();
+        pool.dfc = DynamicFeeConfig::new(0, 10_000, 1_000_000, false, 0);
+        pool.observation_index = 5;
+        pool.observation_cardinality = 300;
+        let mut slots = vec![Observation::default(); 7];
+        slots[5] =
+            Observation { block_timestamp: 999_990, initialized: true, ..Default::default() };
+        slots[6] =
+            Observation { block_timestamp: 999_000, initialized: true, ..Default::default() };
+        pool.observations = Observations::new(slots);
+        let token_a =
+            Token::new(&Bytes::from([0x11; 20]), "A", 18, 0, &[Some(10_000)], Chain::Base, 100);
+        let token_b =
+            Token::new(&Bytes::from([0x22; 20]), "B", 18, 0, &[Some(10_000)], Chain::Base, 100);
+
+        assert!(pool.get_fee().is_err());
+        assert!(pool
+            .spot_price(&token_a, &token_b)
+            .is_err());
+        assert!(pool
+            .get_amount_out(BigUint::from(1_000u32), &token_a, &token_b)
+            .is_err());
+        assert!(pool
+            .get_limits(token_a.address, token_b.address)
+            .is_err());
     }
 
     #[test]
