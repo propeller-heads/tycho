@@ -2,8 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{Local, NaiveDateTime};
-use tokio::sync::RwLock;
-use tracing::{debug, info, instrument};
+use tokio::sync::{Mutex, RwLock};
+use tracing::{debug, info, instrument, warn};
 use tycho_common::{
     models::{
         protocol::{ProtocolComponent, QualityRange},
@@ -55,6 +55,8 @@ pub struct ProtocolMemoryCache {
     components: Arc<RwLock<ProtocolComponentStore>>,
     max_price_age: chrono::Duration,
     gateway: Arc<dyn ProtocolGateway + Send + Sync>,
+    /// Held while a price refresh runs, so that at most one runs at a time.
+    price_refresh: Arc<Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -76,6 +78,7 @@ impl ProtocolMemoryCache {
             tokens: Arc::new(RwLock::new(HashMap::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
             token_prices: Arc::new(RwLock::new(TokenPrices::default())),
+            price_refresh: Arc::new(Mutex::new(())),
         }
     }
 
@@ -115,17 +118,46 @@ impl ProtocolMemoryCache {
         Ok(())
     }
 
+    /// Loads all token prices of the chain and replaces the cached prices.
+    ///
+    /// Takes the write lock only to swap the prices: readers keep the old prices during the
+    /// load.
     #[instrument(skip_all)]
     async fn update_prices_cache(&self) -> Result<usize, StorageError> {
-        let mut token_prices = self.token_prices.write().await;
-        token_prices.prices = self
+        let prices = self
             .gateway
             .get_token_prices(&self.chain)
             .await?;
-        let n_fetched = token_prices.prices.len();
-        debug!(last_price_update = ?token_prices.last_price_update, ?n_fetched, resource = "prices", "CacheMiss");
-        token_prices.last_price_update = Local::now().naive_utc();
+        let n_fetched = prices.len();
+        let old_prices = {
+            let mut token_prices = self.token_prices.write().await;
+            debug!(last_price_update = ?token_prices.last_price_update, ?n_fetched, resource = "prices", "CacheMiss");
+            token_prices.last_price_update = Local::now().naive_utc();
+            std::mem::replace(&mut token_prices.prices, prices)
+        };
+        // Free the old prices after the write lock is released.
+        drop(old_prices);
         Ok(n_fetched)
+    }
+
+    /// Refreshes the token prices on a new task, so the caller does not wait for the load.
+    /// Does nothing when a refresh already runs. A failed refresh logs a warning; the next
+    /// call that finds the prices too old starts a new one.
+    fn spawn_price_refresh(&self) {
+        let Ok(running) = self
+            .price_refresh
+            .clone()
+            .try_lock_owned()
+        else {
+            return;
+        };
+        let cache = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = cache.update_prices_cache().await {
+                warn!(%error, "Token price refresh failed");
+            }
+            drop(running);
+        });
     }
 
     /// Returns the number of cached tokens.
@@ -157,8 +189,11 @@ impl ProtocolDataCache for ProtocolMemoryCache {
             .last_price_update;
 
         let now = Local::now().naive_utc();
-        if now.signed_duration_since(last_update) > self.max_price_age {
+        if last_update == NaiveDateTime::default() {
+            // No prices loaded yet, so there are no prices to answer with during the load.
             self.update_prices_cache().await?;
+        } else if now.signed_duration_since(last_update) > self.max_price_age {
+            self.spawn_price_refresh();
         }
         let mut res = Vec::with_capacity(addresses.len());
         let inner = self.token_prices.read().await;
