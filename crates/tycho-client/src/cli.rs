@@ -57,7 +57,7 @@ struct CliArgs {
     add_tvl_threshold: Option<f64>,
 
     /// Expected block time in seconds. Defaults to the canonical block time for the selected
-    /// chain (e.g. 12s for Ethereum, 2s for Base).
+    /// chain (e.g. 12s for Ethereum, 1s for Base).
     ///
     /// Adjusting `block_time` helps balance efficiency and responsiveness:
     /// - **Low values**: Increase sync frequency but may waste resources on retries.
