@@ -1,3 +1,25 @@
+## [0.521.0](https://github.com/propeller-heads/tycho/compare/0.520.0...0.521.0) (2026-11-16)
+
+
+### Features
+
+* index SwapHood V3 on Robinhood Chain ([06885db](https://github.com/propeller-heads/tycho/commit/06885dba1170aef4d53d525b3a5c841caf9293dc))
+* index SwapHood V3 on Robinhood Chain ([#1584](https://github.com/propeller-heads/tycho/issues/1584)) ([727b407](https://github.com/propeller-heads/tycho/commit/727b40714a5e51bbc37fbc1621295a2f6535f661))
+
+
+### Bug Fixes
+
+* **execution:** keep the fork names in PROTOCOLS_CALLBACK ([6c79d00](https://github.com/propeller-heads/tycho/commit/6c79d00086dc1f695e8919ce942fd9428615e7b9))
+* **execution:** treat every Uniswap V3 and Slipstream fork as callback ([5d37cdb](https://github.com/propeller-heads/tycho/commit/5d37cdbb00caf884d7238c5dafcda399428c4166))
+* **slipstreams:** fail get_limits when the fee cannot be resolved ([a7d855d](https://github.com/propeller-heads/tycho/commit/a7d855da76b290f8d58a2c909d4652a83e6527e8))
+* **slipstreams:** keep observation slots at their ring index on delete ([5f8ac76](https://github.com/propeller-heads/tycho/commit/5f8ac769225ccf54ba95bd6833a1dea7cf81bc53))
+* **slipstreams:** keep quoting zero-scaling pools on the swap hook path ([5adeb55](https://github.com/propeller-heads/tycho/commit/5adeb55f69ecedb7e0b91a8590c83f40ce159ba4))
+* **slipstreams:** keep quoting zero-scaling pools the ring cannot answer ([c53b5ea](https://github.com/propeller-heads/tycho/commit/c53b5eae081175137e69b62d4ac8e03a30c89ddb))
+* **slipstreams:** price dynamic fees over each module's oracle window ([ec50e4c](https://github.com/propeller-heads/tycho/commit/ec50e4c8ecf4d6ce36b57296378d77b70160e395))
+* **slipstreams:** price dynamic fees over each module's oracle window ([#1741](https://github.com/propeller-heads/tycho/issues/1741)) ([a5ccfe8](https://github.com/propeller-heads/tycho/commit/a5ccfe85bf54f56e2e4aec25ccd416f0363eda04))
+* **slipstreams:** reject observation slots past the ring ([e6d2500](https://github.com/propeller-heads/tycho/commit/e6d2500256114fc3e24e73748f0e639bb9721a4b))
+* **substreams:** reject unknown pancakeswap-v3 params, fix comments ([8520fc6](https://github.com/propeller-heads/tycho/commit/8520fc616873518dfa882bcf34ba0d7e9717ee34))
+
 ## [0.520.0](https://github.com/propeller-heads/tycho/compare/0.519.2...0.520.0) (2026-11-16)
 
 
