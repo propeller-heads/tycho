@@ -55,6 +55,9 @@ The FeeCalculator must be deployed **before** the TychoRouterV3, as the router r
 
 ### Deploy executors
 
+Executors must be deployed **before** the TychoRouterV3: the router approves every executor in
+`config/executor_addresses.json` for the network at deployment, with no timelock.
+
 1. In `scripts/deploy-executors.js` define the executors to be deployed
 2. Deploy executors: `npx hardhat run scripts/deploy-executors.js --network NETWORK`
 3. Fill in the executor addresses in `config/executor_addresses.json`
@@ -67,14 +70,20 @@ The FeeCalculator must be deployed **before** the TychoRouterV3, as the router r
    ```
    export FEE_CALCULATOR=<fee-calculator-address-from-previous-step>
    ```
-3. Deploy router: `npx hardhat run scripts/deploy-router.js --network NETWORK`
+3. Deploy router: `npx hardhat run scripts/deploy-router.js --network NETWORK`. The script
+   passes the network's executors from `config/executor_addresses.json`, deduplicated and
+   sorted, and stops if any of them has no code. The fee calculator and these executors are
+   active at deployment. The router address depends on both, so a different executor set gives
+   a different address.
 4. Fill in the router address in `config/router_addresses.json`
 
 Via the safe wallet UI:
 
-5. Set the executors addresses
-6. Set fee amounts in FeeCalculator
-7. Set the pauser wallets
+5. Set fee amounts in FeeCalculator
+6. Set the pauser wallets
+
+Executors added after deployment with `setExecutors`, and fee calculators set with
+`setFeeCalculator`, wait 1 day before they take effect.
 
 ### Publish the deployment
 
