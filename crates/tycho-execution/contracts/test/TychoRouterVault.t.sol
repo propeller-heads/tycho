@@ -9,6 +9,7 @@ import {
 import {
     Vault__UnexpectedInputDelta,
     Vault__UnexpectedNonZeroCount,
+    Vault__Paused,
     ERC6909
 } from "@src/Vault.sol";
 import {TransferManager__DifferentTokenIn} from "@src/TransferManager.sol";
@@ -180,6 +181,85 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
 
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), backing);
         assertEq(IERC20(USDC_ADDR).balanceOf(ALICE), 0);
+    }
+
+    // ==================== Vault pause tests ====================
+    function testVaultPausedRejectsDepositsAndVaultSwaps() public {
+        vm.prank(PAUSER);
+        tychoRouter.pauseVault();
+
+        bytes memory swap = new bytes(0); // IRRELEVANT - should fail before this
+
+        vm.startPrank(ALICE);
+        vm.expectRevert(Vault__Paused.selector);
+        tychoRouter.deposit(WETH_ADDR, 1 ether);
+        vm.expectRevert(Vault__Paused.selector);
+        tychoRouter.singleSwapUsingVault(
+            1 ether, WETH_ADDR, WBTC_ADDR, 1, 1, ALICE, noClientFee(), swap
+        );
+        vm.expectRevert(Vault__Paused.selector);
+        tychoRouter.sequentialSwapUsingVault(
+            1 ether, WETH_ADDR, WBTC_ADDR, 1, 1, ALICE, noClientFee(), swap
+        );
+        vm.expectRevert(Vault__Paused.selector);
+        tychoRouter.splitSwapUsingVault(
+            1 ether, WETH_ADDR, WBTC_ADDR, 1, 1, 2, ALICE, noClientFee(), swap
+        );
+        vm.stopPrank();
+    }
+
+    function testVaultPausedKeepsSwapsAndWithdrawals() public {
+        uint256 amountIn = 1 ether;
+        deal(WETH_ADDR, ALICE, amountIn * 2);
+        bytes memory swap = encodeSingleSwap(
+            address(usv2Executor),
+            encodeUniswapV2Swap(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
+        );
+
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn * 2);
+        tychoRouter.deposit(WETH_ADDR, amountIn);
+        vm.stopPrank();
+
+        vm.prank(PAUSER);
+        tychoRouter.pauseVault();
+
+        vm.startPrank(ALICE);
+        uint256 amountOut = tychoRouter.singleSwap(
+            amountIn, WETH_ADDR, WBTC_ADDR, 1, 1, ALICE, noClientFee(), swap
+        );
+        tychoRouter.withdraw(WETH_ADDR, amountIn);
+        vm.stopPrank();
+
+        assertGt(amountOut, 0);
+        assertEq(IERC20(WBTC_ADDR).balanceOf(ALICE), amountOut);
+        assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), amountIn);
+        assertEq(tychoRouter.balanceOf(ALICE, uint256(uint160(WETH_ADDR))), 0);
+    }
+
+    function testUnpauseVaultRestoresDepositsAndVaultSwaps() public {
+        uint256 amountIn = 1 ether;
+        deal(WETH_ADDR, ALICE, amountIn);
+        bytes memory swap = encodeSingleSwap(
+            address(usv2Executor),
+            encodeUniswapV2Swap(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
+        );
+
+        vm.prank(PAUSER);
+        tychoRouter.pauseVault();
+        vm.prank(UNPAUSER);
+        tychoRouter.unpauseVault();
+
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
+        tychoRouter.deposit(WETH_ADDR, amountIn);
+        uint256 amountOut = tychoRouter.singleSwapUsingVault(
+            amountIn, WETH_ADDR, WBTC_ADDR, 1, 1, ALICE, noClientFee(), swap
+        );
+        vm.stopPrank();
+
+        assertEq(IERC20(WBTC_ADDR).balanceOf(ALICE), amountOut);
+        assertEq(tychoRouter.balanceOf(ALICE, uint256(uint160(WETH_ADDR))), 0);
     }
 
     // ==================== Transfer tests ====================
