@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use chrono::NaiveDateTime;
 use diesel::{pg::Pg, prelude::*};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::{
@@ -11,12 +12,14 @@ use tycho_common::{
     Bytes,
 };
 
-use super::version::check_current;
+use super::version::{check_current, resolve_version, unique_by_key, ReadAt};
 use crate::postgres::{
     instance::{
         active::active_instance_head,
         gateway::PostgresGatewayNew,
-        schema::tycho::{component_balance, protocol_component, protocol_state},
+        schema::tycho::{
+            component_balance, component_balance_history, protocol_component, protocol_state,
+        },
         InstanceId,
     },
     PostgresError,
@@ -30,7 +33,9 @@ impl PostgresGatewayNew {
     ///   id can repeat across protocol systems. `NotFound` for an unknown name. A protocol system
     ///   without an active instance has no balances.
     /// - `ids`: only components with these external ids.
-    /// - `at`: the version. `Unsupported` for a version before the head of the instance.
+    /// - `at`: the version. Before the head of the instance, the history tables answer too.
+    ///   `Unsupported` for a version before the history retention horizon or before the base block
+    ///   of the instance.
     ///
     /// Components without balances are absent. `modify_tx` is always 32 zero bytes. `NotFound` for
     /// an unknown chain.
@@ -47,24 +52,30 @@ impl PostgresGatewayNew {
         let Some(instance) = active_instance_head(system, conn).await? else {
             return Ok(HashMap::new());
         };
-        check_current(&instance, at, conn).await?;
 
-        let rows = current_balance_rows(instance.id, ids, conn).await?;
-        let mut balances: HashMap<ComponentId, HashMap<Address, ComponentBalance>> = HashMap::new();
-        for (external_id, token, balance, balance_float) in rows {
-            let balance = ComponentBalance::new(
-                token.clone(),
-                balance,
-                balance_float,
-                Bytes::zero(32),
-                &external_id,
-            );
-            balances
-                .entry(external_id)
-                .or_default()
-                .insert(token, balance);
-        }
-        Ok(balances)
+        let read = resolve_version(&instance, at, conn).await?;
+
+        Ok(component_balances_at(instance.id, ids, read, conn)
+            .await?
+            .into_iter()
+            .fold(
+                HashMap::new(),
+                |mut balances: HashMap<ComponentId, HashMap<Address, ComponentBalance>>,
+                 ((external_id, token), (balance, balance_float))| {
+                    let balance = ComponentBalance::new(
+                        token.clone(),
+                        balance,
+                        balance_float,
+                        Bytes::zero(32),
+                        &external_id,
+                    );
+                    balances
+                        .entry(external_id)
+                        .or_default()
+                        .insert(token, balance);
+                    balances
+                },
+            ))
     }
 
     /// Returns the state of the components of `system`'s active instance. The total is always
@@ -152,17 +163,25 @@ async fn states_of(
             .insert(name, value);
     }
 
-    let mut balances: HashMap<ComponentId, HashMap<Address, Balance>> = HashMap::new();
-    if retrieve_balances {
-        for (external_id, token, balance, _) in current_balance_rows(instance, ids, conn).await? {
-            if attributes.contains_key(&external_id) {
-                balances
-                    .entry(external_id)
-                    .or_default()
-                    .insert(token, balance);
-            }
-        }
-    }
+    let mut balances = if retrieve_balances {
+        component_balances_at(instance, ids, ReadAt::Current(None), conn)
+            .await?
+            .into_iter()
+            .filter(|((external_id, _), _)| attributes.contains_key(external_id))
+            .fold(
+                HashMap::new(),
+                |mut balances: HashMap<ComponentId, HashMap<Address, Balance>>,
+                 ((external_id, token), (balance, _))| {
+                    balances
+                        .entry(external_id)
+                        .or_default()
+                        .insert(token, balance);
+                    balances
+                },
+            )
+    } else {
+        HashMap::new()
+    };
 
     let states = attributes
         .into_iter()
@@ -180,10 +199,11 @@ async fn states_of(
 type BalanceRow = (ComponentId, Address, Balance, f64);
 
 /// Loads the current balance rows of the components of `instance`.
-/// `ids`: only components with these external ids.
+/// `ids`: only components with these external ids. `ts`: only rows with `valid_from <= ts`.
 async fn current_balance_rows(
     instance: InstanceId,
     ids: Option<&[&str]>,
+    ts: Option<NaiveDateTime>,
     conn: &mut AsyncPgConnection,
 ) -> Result<Vec<BalanceRow>, StorageError> {
     let mut query = component_balance::table
@@ -201,6 +221,9 @@ async fn current_balance_rows(
             component_balance::balance_float,
         ))
         .into_boxed::<Pg>();
+    if let Some(ts) = ts {
+        query = query.filter(component_balance::valid_from.le(ts));
+    }
     if let Some(ids) = ids {
         query = query.filter(protocol_component::external_id.eq_any(ids));
     }
@@ -208,6 +231,69 @@ async fn current_balance_rows(
         .load(conn)
         .await
         .map_err(PostgresError::from)?)
+}
+
+/// Loads the history balance rows of the components of `instance` that are valid at `ts`:
+/// `valid_from <= ts < valid_to`, with `valid_to <= head`.
+/// `ids`: only components with these external ids.
+async fn history_balance_rows(
+    instance: InstanceId,
+    ids: Option<&[&str]>,
+    ts: NaiveDateTime,
+    head: NaiveDateTime,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<BalanceRow>, StorageError> {
+    let mut query = component_balance_history::table
+        .inner_join(
+            protocol_component::table.on(protocol_component::instance_id
+                .eq(component_balance_history::instance_id)
+                .and(protocol_component::id.eq(component_balance_history::protocol_component_id))),
+        )
+        .filter(component_balance_history::instance_id.eq(instance))
+        .filter(protocol_component::instance_id.eq(instance))
+        .filter(component_balance_history::valid_from.le(ts))
+        .filter(component_balance_history::valid_to.gt(ts))
+        .filter(component_balance_history::valid_to.le(head))
+        .select((
+            protocol_component::external_id,
+            component_balance_history::token,
+            component_balance_history::new_balance,
+            component_balance_history::balance_float,
+        ))
+        .into_boxed::<Pg>();
+    if let Some(ids) = ids {
+        query = query.filter(protocol_component::external_id.eq_any(ids));
+    }
+    Ok(query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
+}
+
+/// Returns the balances valid at `read`, as balance and float value by external id and token.
+/// `ids`: only components with these external ids.
+///
+/// A `Past` read adds the history rows to the current rows. `Unexpected` when two rows of one
+/// component and token are valid at the version.
+async fn component_balances_at(
+    instance: InstanceId,
+    ids: Option<&[&str]>,
+    read: ReadAt,
+    conn: &mut AsyncPgConnection,
+) -> Result<HashMap<(ComponentId, Address), (Balance, f64)>, StorageError> {
+    let rows = match read {
+        ReadAt::Current(_) => current_balance_rows(instance, ids, None, conn).await?,
+        ReadAt::Past { ts, head } => {
+            let mut rows = current_balance_rows(instance, ids, Some(ts), conn).await?;
+            rows.extend(history_balance_rows(instance, ids, ts, head, conn).await?);
+            rows
+        }
+    };
+    unique_by_key(
+        "component_balance",
+        rows.into_iter()
+            .map(|(id, token, balance, float)| ((id, token), (balance, float))),
+    )
 }
 
 #[cfg(test)]
