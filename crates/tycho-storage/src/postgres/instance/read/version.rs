@@ -41,7 +41,7 @@ pub(super) async fn check_current(
 
 #[cfg(test)]
 mod tests {
-    use chrono::{NaiveDate, NaiveDateTime};
+    use chrono::{Duration, NaiveDate, NaiveDateTime};
     use tycho_common::{
         models::Chain,
         storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
@@ -64,7 +64,12 @@ mod tests {
     }
 
     fn instance(head: Option<NaiveDateTime>) -> ActiveInstance {
-        ActiveInstance { id: InstanceId(1), head }
+        ActiveInstance {
+            id: InstanceId(1),
+            head,
+            base: None,
+            retention_horizon: day(1) - Duration::days(1),
+        }
     }
 
     #[tokio::test]

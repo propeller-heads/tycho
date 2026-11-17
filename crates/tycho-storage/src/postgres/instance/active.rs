@@ -232,12 +232,11 @@ mod tests {
         db_fixtures::set_instance_head(&mut conn, setup.curve, day(2)).await;
         db_fixtures::set_instance_head(&mut conn, setup.uniswap_v4, day(3)).await;
 
-        assert_eq!(
-            active_instance_head("vm:curve", &mut conn)
-                .await
-                .unwrap(),
-            Some(ActiveInstance { id: setup.curve, head: Some(day(2)) })
-        );
+        let found = active_instance_head("vm:curve", &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(found.map(|i| (i.id, i.head)), Some((setup.curve, Some(day(2)))));
     }
 
     #[tokio::test]
@@ -245,12 +244,11 @@ mod tests {
         let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
 
-        assert_eq!(
-            active_instance_head("vm:curve", &mut conn)
-                .await
-                .unwrap(),
-            Some(ActiveInstance { id: setup.curve, head: None })
-        );
+        let found = active_instance_head("vm:curve", &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(found.map(|i| (i.id, i.head)), Some((setup.curve, None)));
     }
 
     #[tokio::test]
