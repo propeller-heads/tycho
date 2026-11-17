@@ -209,6 +209,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_active_protocols_lists_names_with_their_instance() {
+        let mut conn = instance_test_connection().await;
+        let setup = setup_protocols(&mut conn).await;
+
+        assert_eq!(
+            active_protocols(&mut conn)
+                .await
+                .unwrap(),
+            vec![
+                ("vm:curve".to_string(), setup.curve),
+                ("uniswap_v4".to_string(), setup.uniswap_v4)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_active_protocols_is_empty_without_pointers() {
+        let mut conn = instance_test_connection().await;
+        let setup = setup_protocols(&mut conn).await;
+        db_fixtures::set_active_instance(&mut conn, setup.curve_system_id, None).await;
+        db_fixtures::set_active_instance(&mut conn, setup.uniswap_v4_system_id, None).await;
+
+        assert_eq!(
+            active_protocols(&mut conn)
+                .await
+                .unwrap(),
+            Vec::new()
+        );
+    }
+
     fn day(d: u32) -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2020, 1, d)
             .and_then(|date| date.and_hms_opt(0, 0, 0))
