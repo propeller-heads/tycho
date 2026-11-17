@@ -15,5 +15,7 @@ ignore = [
     "RUSTSEC-2026-0368", # zip 0.6.6: extract creates symlinks outside the destination; same chain and blocker as RUSTSEC-2026-0367
     "RUSTSEC-2026-0369", # zip 0.6.6: extract applies permissions through symlinks; same chain and blocker as RUSTSEC-2026-0367
     "RUSTSEC-2026-0429", # zip 0.6.6: extract aborts on an oversized symlink entry; same chain and blocker as RUSTSEC-2026-0367
+    "RUSTSEC-2026-0545", # zip 0.6.6: AES entries returned unauthenticated when data ends early; same chain and blocker as RUSTSEC-2026-0367, and utoipa-swagger-ui builds zip without the aes-crypto feature
+    "RUSTSEC-2026-0548", # zip 0.6.6: ZipStreamReader trusts local-header names; same chain and blocker as RUSTSEC-2026-0367, and the build script reads with ZipArchive, not ZipStreamReader
     "RUSTSEC-2026-0387", # crypto-bigint 0.4.9/0.5.5: timing variability; via aws-sigv4 (aws-sdk-s3, aws-config) and elliptic-curve 0.12/0.13 (alloy-signer, k256); fixed in 0.7.6, which neither the latest aws-sigv4 nor any alloy 1.x release allows
 ]
