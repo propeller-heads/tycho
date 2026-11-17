@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::Utc;
+use chrono::{NaiveDateTime, Utc};
 use diesel::{dsl::exists, pg::Pg, prelude::*};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tracing::warn;
@@ -13,13 +13,15 @@ use tycho_common::{
     Bytes,
 };
 
-use super::version::check_current;
+use super::version::{check_current, resolve_version, unique_by_key, ReadAt};
 use crate::postgres::{
     count_to_i64,
     instance::{
         active::active_instance_head,
         gateway::PostgresGatewayNew,
-        schema::tycho::{account, account_balance, contract_code, contract_storage},
+        schema::tycho::{
+            account, account_balance, account_balance_history, contract_code, contract_storage,
+        },
         InstanceId,
     },
     PostgresError,
@@ -173,8 +175,15 @@ impl PostgresGatewayNew {
             .iter()
             .map(|(_, address, _)| address.clone())
             .collect();
-        let mut balances =
-            load_account_balances(chain, instance, Some(&page_addresses), true, conn).await?;
+        let mut balances = load_account_balances(
+            chain,
+            instance,
+            Some(&page_addresses),
+            true,
+            ReadAt::Current(None),
+            conn,
+        )
+        .await?;
 
         let mut slots: HashMap<i64, HashMap<Bytes, Bytes>> = HashMap::new();
         if include_slots {
@@ -236,7 +245,9 @@ impl PostgresGatewayNew {
     /// - `protocol_system`: the protocol system whose copy of the accounts to read. `NotFound` for
     ///   an unknown name. A protocol system without an active instance has no balances.
     /// - `accounts`: only these accounts.
-    /// - `at`: the version. `Unsupported` for a version before the head of the instance.
+    /// - `at`: the version. Before the head of the instance, the history tables answer too.
+    ///   `Unsupported` for a version before the history retention horizon or before the base block
+    ///   of the instance.
     /// - `include_native`: add the balance of the chain's native token.
     ///
     /// Accounts without balances are absent. `modify_tx` is always 32 zero bytes. `NotFound` for
@@ -255,20 +266,69 @@ impl PostgresGatewayNew {
         let Some(active) = active_instance_head(protocol_system, conn).await? else {
             return Ok(HashMap::new());
         };
-        check_current(&active, at, conn).await?;
-        load_account_balances(chain, active.id, accounts, include_native, conn).await
+        let read = resolve_version(&active, at, conn).await?;
+        load_account_balances(chain, active.id, accounts, include_native, read, conn).await
     }
 }
 
-/// Loads the token balances of the accounts of `instance`, by account address and token address.
-/// `accounts`: only these accounts; `None` for all of them.
+/// Returns the token balances valid at `read` of the accounts of `instance`, by account address and
+/// token address. `accounts`: only these accounts; `None` for all of them.
+///
+/// A `Past` read adds the history rows to the current rows. `Unexpected` when two rows of one
+/// account and token are valid at the version.
 async fn load_account_balances(
     chain: &Chain,
     instance: InstanceId,
     accounts: Option<&[Address]>,
     include_native: bool,
+    read: ReadAt,
     conn: &mut AsyncPgConnection,
 ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
+    let native = chain.native_token().address;
+    let skip = (!include_native).then_some(&native);
+    let rows = match read {
+        ReadAt::Current(_) => {
+            current_account_balance_rows(instance, accounts, skip, None, conn).await?
+        }
+        ReadAt::Past { ts, head } => {
+            let mut rows =
+                current_account_balance_rows(instance, accounts, skip, Some(ts), conn).await?;
+            rows.extend(
+                history_account_balance_rows(instance, accounts, skip, ts, head, conn).await?,
+            );
+            rows
+        }
+    };
+    Ok(unique_by_key(
+        "account_balance",
+        rows.into_iter()
+            .map(|(address, token, balance)| ((address, token), balance)),
+    )?
+    .into_iter()
+    .fold(HashMap::new(), |mut balances, ((address, token), balance)| {
+        let account_balance =
+            AccountBalance::new(address.clone(), token.clone(), balance, Bytes::zero(32));
+        balances
+            .entry(address)
+            .or_default()
+            .insert(token, account_balance);
+        balances
+    }))
+}
+
+/// An account balance row: account address, token and balance.
+type AccountBalanceRow = (Address, Address, Balance);
+
+/// Loads the current balance rows of the accounts of `instance`.
+/// `accounts`: only these accounts; `None` for all of them. `skip`: leave out the balances of this
+/// token. `ts`: only rows with `valid_from <= ts`.
+async fn current_account_balance_rows(
+    instance: InstanceId,
+    accounts: Option<&[Address]>,
+    skip: Option<&Address>,
+    ts: Option<NaiveDateTime>,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<AccountBalanceRow>, StorageError> {
     let mut query = account_balance::table
         .inner_join(
             account::table.on(account::instance_id
@@ -279,27 +339,60 @@ async fn load_account_balances(
         .filter(account::instance_id.eq(instance))
         .select((account::address, account_balance::token, account_balance::balance))
         .into_boxed::<Pg>();
+    if let Some(ts) = ts {
+        query = query.filter(account_balance::valid_from.le(ts));
+    }
     if let Some(accounts) = accounts {
         query = query.filter(account::address.eq_any(accounts));
     }
-    if !include_native {
-        query = query.filter(account_balance::token.ne(chain.native_token().address));
+    if let Some(skip) = skip {
+        query = query.filter(account_balance::token.ne(skip));
     }
-    let rows: Vec<(Address, Address, Balance)> = query
+    Ok(query
         .load(conn)
         .await
-        .map_err(PostgresError::from)?;
+        .map_err(PostgresError::from)?)
+}
 
-    let mut balances: HashMap<Address, HashMap<Address, AccountBalance>> = HashMap::new();
-    for (address, token, balance) in rows {
-        let account_balance =
-            AccountBalance::new(address.clone(), token.clone(), balance, Bytes::zero(32));
-        balances
-            .entry(address)
-            .or_default()
-            .insert(token, account_balance);
+/// Loads the history balance rows of the accounts of `instance` that are valid at `ts`:
+/// `valid_from <= ts < valid_to`, with `valid_to <= head`.
+/// `accounts`: only these accounts; `None` for all of them. `skip`: leave out the balances of this
+/// token.
+async fn history_account_balance_rows(
+    instance: InstanceId,
+    accounts: Option<&[Address]>,
+    skip: Option<&Address>,
+    ts: NaiveDateTime,
+    head: NaiveDateTime,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<AccountBalanceRow>, StorageError> {
+    let mut query = account_balance_history::table
+        .inner_join(
+            account::table.on(account::instance_id
+                .eq(account_balance_history::instance_id)
+                .and(account::id.eq(account_balance_history::account_id))),
+        )
+        .filter(account_balance_history::instance_id.eq(instance))
+        .filter(account::instance_id.eq(instance))
+        .filter(account_balance_history::valid_from.le(ts))
+        .filter(account_balance_history::valid_to.gt(ts))
+        .filter(account_balance_history::valid_to.le(head))
+        .select((
+            account::address,
+            account_balance_history::token,
+            account_balance_history::balance,
+        ))
+        .into_boxed::<Pg>();
+    if let Some(accounts) = accounts {
+        query = query.filter(account::address.eq_any(accounts));
     }
-    Ok(balances)
+    if let Some(skip) = skip {
+        query = query.filter(account_balance_history::token.ne(skip));
+    }
+    Ok(query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
 }
 
 #[cfg(test)]
