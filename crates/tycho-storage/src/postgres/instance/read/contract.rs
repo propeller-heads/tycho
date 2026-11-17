@@ -13,14 +13,15 @@ use tycho_common::{
     Bytes,
 };
 
-use super::version::{check_current, resolve_version, unique_by_key, ReadAt};
+use super::version::{resolve_version, unique_by_key, ReadAt};
 use crate::postgres::{
     count_to_i64,
     instance::{
         active::active_instance_head,
         gateway::PostgresGatewayNew,
         schema::tycho::{
-            account, account_balance, account_balance_history, contract_code, contract_storage,
+            account, account_balance, account_balance_history, contract_code,
+            contract_code_history, contract_storage, contract_storage_history,
         },
         InstanceId,
     },
@@ -55,8 +56,9 @@ impl PostgresGatewayNew {
     ///   an unknown name. A protocol system without an active instance has no contracts.
     /// - `addresses`: only the accounts at these addresses. An account without code is left out
     ///   with a warning. Without addresses, all accounts with code.
-    /// - `at`: the version. `Unsupported` for a version before the head of the instance. Accounts
-    ///   created after it or deleted at or before it are left out.
+    /// - `at`: the version. Before the head of the instance, the history tables answer too.
+    ///   `Unsupported` for a version before the history retention horizon or before the base block
+    ///   of the instance. Accounts created after it or deleted at or before it are left out.
     /// - `include_slots`: add the storage slots. A slot without a value has empty bytes.
     /// - `pagination_params`: the page of accounts to return, in account id order. The total is
     ///   then the number of matching accounts on all pages. With `addresses`, accounts without code
@@ -81,11 +83,14 @@ impl PostgresGatewayNew {
         let Some(active) = active_instance_head(protocol_system, conn).await? else {
             return Ok(WithTotal { entity: Vec::new(), total: Some(0) });
         };
-        // The latest version is the head: no account was created or deleted after it.
-        let ts = check_current(&active, at, conn)
-            .await?
-            .or(active.head)
-            .unwrap_or_else(|| Utc::now().naive_utc());
+        let read = resolve_version(&active, at, conn).await?;
+        let ts = match read {
+            ReadAt::Current(Some(ts)) | ReadAt::Past { ts, .. } => ts,
+            // The latest version is the head: no account was created or deleted after it.
+            ReadAt::Current(None) => active
+                .head
+                .unwrap_or_else(|| Utc::now().naive_utc()),
+        };
         let instance = active.id;
 
         let filtered = || {
@@ -105,11 +110,24 @@ impl PostgresGatewayNew {
             match addresses {
                 Some(addresses) => query = query.filter(account::address.eq_any(addresses)),
                 None => {
-                    query = query.filter(exists(
-                        contract_code::table
-                            .filter(contract_code::instance_id.eq(instance))
-                            .filter(contract_code::account_id.eq(account::id)),
-                    ))
+                    let current = contract_code::table
+                        .filter(contract_code::instance_id.eq(instance))
+                        .filter(contract_code::account_id.eq(account::id));
+                    query = match read {
+                        ReadAt::Current(_) => query.filter(exists(current)),
+                        // The writer can move the code of a deleted account to history, so an
+                        // account deleted after `ts` can have no current code row.
+                        ReadAt::Past { head, .. } => query.filter(
+                            exists(current.filter(contract_code::valid_from.le(ts))).or(exists(
+                                contract_code_history::table
+                                    .filter(contract_code_history::instance_id.eq(instance))
+                                    .filter(contract_code_history::account_id.eq(account::id))
+                                    .filter(contract_code_history::valid_from.le(ts))
+                                    .filter(contract_code_history::valid_to.gt(ts))
+                                    .filter(contract_code_history::valid_to.le(head)),
+                            )),
+                        ),
+                    };
                 }
             }
             query
@@ -147,18 +165,7 @@ impl PostgresGatewayNew {
             .map(|(id, _, _)| *id)
             .collect();
 
-        let mut codes: HashMap<i64, (Bytes, Bytes, Bytes)> = contract_code::table
-            .filter(contract_code::instance_id.eq(instance))
-            .filter(contract_code::account_id.eq_any(&ids))
-            .select((
-                contract_code::account_id,
-                (contract_code::code, contract_code::hash, contract_code::modify_tx_hash),
-            ))
-            .load::<(i64, (Bytes, Bytes, Bytes))>(conn)
-            .await
-            .map_err(PostgresError::from)?
-            .into_iter()
-            .collect();
+        let mut codes = codes_at(instance, &ids, read, conn).await?;
         let missing: Vec<String> = accounts
             .iter()
             .filter(|(id, _, _)| !codes.contains_key(id))
@@ -175,36 +182,13 @@ impl PostgresGatewayNew {
             .iter()
             .map(|(_, address, _)| address.clone())
             .collect();
-        let mut balances = load_account_balances(
-            chain,
-            instance,
-            Some(&page_addresses),
-            true,
-            ReadAt::Current(None),
-            conn,
-        )
-        .await?;
-
-        let mut slots: HashMap<i64, HashMap<Bytes, Bytes>> = HashMap::new();
-        if include_slots {
-            let rows: Vec<(i64, Bytes, Option<Bytes>)> = contract_storage::table
-                .filter(contract_storage::instance_id.eq(instance))
-                .filter(contract_storage::account_id.eq_any(&ids))
-                .select((
-                    contract_storage::account_id,
-                    contract_storage::slot,
-                    contract_storage::value,
-                ))
-                .load(conn)
-                .await
-                .map_err(PostgresError::from)?;
-            for (account_id, slot, value) in rows {
-                slots
-                    .entry(account_id)
-                    .or_default()
-                    .insert(slot, value.unwrap_or_default());
-            }
-        }
+        let mut balances =
+            load_account_balances(chain, instance, Some(&page_addresses), true, read, conn).await?;
+        let mut slots = if include_slots {
+            slots_at(instance, &ids, read, conn).await?
+        } else {
+            HashMap::new()
+        };
 
         let mut contracts = Vec::with_capacity(accounts.len());
         for (id, address, title) in accounts {
@@ -314,6 +298,168 @@ async fn load_account_balances(
             .insert(token, account_balance);
         balances
     }))
+}
+
+/// A code row: account id, and code, code hash and the hash of the transaction that set it.
+type CodeRow = (i64, (Bytes, Bytes, Bytes));
+
+/// Returns the code valid at `read` of the accounts `ids` of `instance`, by account id, as code,
+/// code hash and the hash of the transaction that set it.
+///
+/// A `Past` read adds the history rows to the current rows. `Unexpected` when two code rows of one
+/// account are valid at the version.
+async fn codes_at(
+    instance: InstanceId,
+    ids: &[i64],
+    read: ReadAt,
+    conn: &mut AsyncPgConnection,
+) -> Result<HashMap<i64, (Bytes, Bytes, Bytes)>, StorageError> {
+    let rows = match read {
+        ReadAt::Current(_) => current_code_rows(instance, ids, None, conn).await?,
+        ReadAt::Past { ts, head } => {
+            let mut rows = current_code_rows(instance, ids, Some(ts), conn).await?;
+            rows.extend(history_code_rows(instance, ids, ts, head, conn).await?);
+            rows
+        }
+    };
+    unique_by_key("contract_code", rows)
+}
+
+/// Loads the current code rows of the accounts `ids` of `instance`.
+/// `ts`: only rows with `valid_from <= ts`.
+async fn current_code_rows(
+    instance: InstanceId,
+    ids: &[i64],
+    ts: Option<NaiveDateTime>,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<CodeRow>, StorageError> {
+    let mut query = contract_code::table
+        .filter(contract_code::instance_id.eq(instance))
+        .filter(contract_code::account_id.eq_any(ids))
+        .select((
+            contract_code::account_id,
+            (contract_code::code, contract_code::hash, contract_code::modify_tx_hash),
+        ))
+        .into_boxed::<Pg>();
+    if let Some(ts) = ts {
+        query = query.filter(contract_code::valid_from.le(ts));
+    }
+    Ok(query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
+}
+
+/// Loads the history code rows of the accounts `ids` of `instance` that are valid at `ts`:
+/// `valid_from <= ts < valid_to`, with `valid_to <= head`.
+async fn history_code_rows(
+    instance: InstanceId,
+    ids: &[i64],
+    ts: NaiveDateTime,
+    head: NaiveDateTime,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<CodeRow>, StorageError> {
+    Ok(contract_code_history::table
+        .filter(contract_code_history::instance_id.eq(instance))
+        .filter(contract_code_history::account_id.eq_any(ids))
+        .filter(contract_code_history::valid_from.le(ts))
+        .filter(contract_code_history::valid_to.gt(ts))
+        .filter(contract_code_history::valid_to.le(head))
+        .select((
+            contract_code_history::account_id,
+            (
+                contract_code_history::code,
+                contract_code_history::hash,
+                contract_code_history::modify_tx_hash,
+            ),
+        ))
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
+}
+
+/// A slot row: account id, slot and value. A deleted slot has no value.
+type SlotRow = (i64, Bytes, Option<Bytes>);
+
+/// Returns the storage slots valid at `read` of the accounts `ids` of `instance`, by account id and
+/// slot. A slot without a value has empty bytes.
+///
+/// A `Past` read adds the history rows to the current rows. `Unexpected` when two rows of one
+/// account and slot are valid at the version.
+async fn slots_at(
+    instance: InstanceId,
+    ids: &[i64],
+    read: ReadAt,
+    conn: &mut AsyncPgConnection,
+) -> Result<HashMap<i64, HashMap<Bytes, Bytes>>, StorageError> {
+    let rows = match read {
+        ReadAt::Current(_) => current_slot_rows(instance, ids, None, conn).await?,
+        ReadAt::Past { ts, head } => {
+            let mut rows = current_slot_rows(instance, ids, Some(ts), conn).await?;
+            rows.extend(history_slot_rows(instance, ids, ts, head, conn).await?);
+            rows
+        }
+    };
+    Ok(unique_by_key(
+        "contract_storage",
+        rows.into_iter()
+            .map(|(account_id, slot, value)| ((account_id, slot), value)),
+    )?
+    .into_iter()
+    .fold(HashMap::new(), |mut slots, ((account_id, slot), value)| {
+        slots
+            .entry(account_id)
+            .or_default()
+            .insert(slot, value.unwrap_or_default());
+        slots
+    }))
+}
+
+/// Loads the current slot rows of the accounts `ids` of `instance`.
+/// `ts`: only rows with `valid_from <= ts`.
+async fn current_slot_rows(
+    instance: InstanceId,
+    ids: &[i64],
+    ts: Option<NaiveDateTime>,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<SlotRow>, StorageError> {
+    let mut query = contract_storage::table
+        .filter(contract_storage::instance_id.eq(instance))
+        .filter(contract_storage::account_id.eq_any(ids))
+        .select((contract_storage::account_id, contract_storage::slot, contract_storage::value))
+        .into_boxed::<Pg>();
+    if let Some(ts) = ts {
+        query = query.filter(contract_storage::valid_from.le(ts));
+    }
+    Ok(query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
+}
+
+/// Loads the history slot rows of the accounts `ids` of `instance` that are valid at `ts`:
+/// `valid_from <= ts < valid_to`, with `valid_to <= head`.
+async fn history_slot_rows(
+    instance: InstanceId,
+    ids: &[i64],
+    ts: NaiveDateTime,
+    head: NaiveDateTime,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<SlotRow>, StorageError> {
+    Ok(contract_storage_history::table
+        .filter(contract_storage_history::instance_id.eq(instance))
+        .filter(contract_storage_history::account_id.eq_any(ids))
+        .filter(contract_storage_history::valid_from.le(ts))
+        .filter(contract_storage_history::valid_to.gt(ts))
+        .filter(contract_storage_history::valid_to.le(head))
+        .select((
+            contract_storage_history::account_id,
+            contract_storage_history::slot,
+            contract_storage_history::value,
+        ))
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
 }
 
 /// An account balance row: account address, token and balance.
