@@ -763,6 +763,126 @@ fn test_single_encoding_strategy_curve() {
     write_calldata_to_file("test_single_encoding_strategy_curve", hex_calldata.as_str());
 }
 
+alloy::sol! {
+    struct Grant {
+        address taker;
+        uint8 coin_in;
+        uint256 min_amount_in;
+        uint256 max_amount_in;
+        uint256 fee;
+        uint64 nonce;
+        uint32 deadline;
+    }
+}
+
+#[test]
+fn test_single_encoding_strategy_curve_fynd_grant() {
+    //   USDC ──(curve twocrypto pool with FyndPolicy, granted fee)──> WETH
+    use alloy::{
+        primitives::{Address, U256},
+        signers::{local::PrivateKeySigner, SignerSync as _},
+        sol_types::{eip712_domain, SolStruct as _},
+    };
+
+    // The pool and policy that CurveFyndGrant.t.sol deploys at fork block 26408000, and its
+    // controller key.
+    let pool = "0x7258667ECB50273151d04C8932181F7c5fa2e31c";
+    let policy = Address::from_str("0xF1Fd000000000000000000000000000000C0FFEE").unwrap();
+    let controller = PrivateKeySigner::from_str(
+        "0x1b6f2b1f4a8f0c1e5d3a7b9c2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a1b3c5d7e9f",
+    )
+    .unwrap();
+    let amount_in = U256::from(3_000_000_000_u64);
+    // Timestamp of fork block 26408000, plus 60 s.
+    let deadline = 1_794_596_519_u32;
+
+    let grant = Grant {
+        taker: Address::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        coin_in: 0,
+        min_amount_in: amount_in,
+        max_amount_in: amount_in,
+        fee: U256::from(100_000_u64),
+        nonce: 1,
+        deadline,
+    };
+    let domain = eip712_domain! {
+        name: "FyndPolicy",
+        version: "1",
+        chain_id: 1,
+        verifying_contract: policy,
+    };
+    let signature = controller
+        .sign_hash_sync(&grant.eip712_signing_hash(&domain))
+        .unwrap();
+
+    let mut user_data = Vec::with_capacity(173);
+    user_data.extend_from_slice(&grant.min_amount_in.to_be_bytes::<32>());
+    user_data.extend_from_slice(&grant.max_amount_in.to_be_bytes::<32>());
+    user_data.extend_from_slice(&grant.fee.to_be_bytes::<32>());
+    user_data.extend_from_slice(&grant.nonce.to_be_bytes());
+    user_data.extend_from_slice(&grant.deadline.to_be_bytes());
+    user_data.extend_from_slice(&signature.as_bytes());
+
+    let token_in = usdc();
+    let token_out = weth();
+    let coins = r#"["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"]"#;
+    let static_attributes = HashMap::from([
+        (
+            "factory".to_string(),
+            Bytes::from(
+                "0x98ee851a00abee0d95d08cf4ca2bdce32aeaaf7f"
+                    .as_bytes()
+                    .to_vec(),
+            ),
+        ),
+        ("coins".to_string(), Bytes::from(coins.as_bytes().to_vec())),
+    ]);
+    let component = ProtocolComponent {
+        id: String::from(pool),
+        protocol_system: String::from("vm:curve"),
+        static_attributes,
+        ..Default::default()
+    };
+    let swap = Swap::new(
+        component,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    )
+    .with_user_data(Bytes::from(user_data));
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from(3_000_000_000_u64),
+        BigUint::from_str("1").unwrap(),
+        // Dummy 1-wei quote with a matching minAmountOut, so any output is accepted
+        BigUint::from_str("1").unwrap(),
+        vec![swap],
+    );
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        &encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+
+    write_calldata_to_file("test_single_encoding_strategy_curve_fynd_grant", &encode(&calldata));
+}
+
 #[test]
 fn test_single_encoding_strategy_curve_st_eth() {
     //   ETH ──(curve stETH pool)──> STETH

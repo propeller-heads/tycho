@@ -17,7 +17,14 @@ use crate::encoding::{
     swap_encoder::SwapEncoder,
 };
 
+/// Byte length of a Twocrypto policy grant in `user_data`:
+/// `min_amount_in(32) | max_amount_in(32) | fee(32) | nonce(8) | deadline(4) | signature(65)`.
+const GRANT_LEN: usize = 32 + 32 + 32 + 8 + 4 + 65;
+
 /// Encodes a swap on a Curve pool through the given executor address.
+///
+/// A swap whose `user_data` holds a grant for the pool's policy carries the grant after the pool
+/// data. The executor submits it to the policy before the swap.
 ///
 /// # Fields
 /// * `executor_address` - The address of the executor contract that will perform the swap.
@@ -184,7 +191,17 @@ impl SwapEncoder for CurveSwapEncoder {
             j.to_be_bytes::<1>(),
         );
 
-        Ok(args.abi_encode_packed())
+        let mut encoded = args.abi_encode_packed();
+        if let Some(grant) = swap.user_data() {
+            if grant.len() != GRANT_LEN {
+                return Err(EncodingError::InvalidInput(format!(
+                    "Curve grant user_data must be {GRANT_LEN} bytes, got {}",
+                    grant.len()
+                )));
+            }
+            encoded.extend_from_slice(grant);
+        }
+        Ok(encoded)
     }
 
     fn executor_address(&self) -> &Bytes {
@@ -483,6 +500,115 @@ mod tests {
                 // j index
                 "01",
             ))
+        );
+    }
+
+    fn twocrypto_usdc_weth_swap(user_data: Bytes) -> Swap {
+        let mut static_attributes: HashMap<String, Bytes> = HashMap::new();
+        static_attributes.insert(
+            "factory".into(),
+            Bytes::from(
+                "0x98EE851a00abeE0d95D08cF4CA2BdCE32aeaAF7F"
+                    .as_bytes()
+                    .to_vec(),
+            ),
+        );
+        let coins = r#"["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"]"#;
+        static_attributes.insert("coins".into(), Bytes::from(coins.as_bytes().to_vec()));
+        let component = ProtocolComponent {
+            id: String::from("0x1111111111111111111111111111111111111111"),
+            protocol_system: String::from("vm:curve"),
+            static_attributes,
+            ..Default::default()
+        };
+        Swap::new(
+            component,
+            default_token(Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")),
+            default_token(Bytes::from("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")),
+            BigUint::ZERO,
+        )
+        .with_user_data(user_data)
+    }
+
+    fn encode_twocrypto_swap(swap: &Swap) -> Result<Vec<u8>, EncodingError> {
+        let encoding_context = EncodingContext {
+            router_address: None,
+            group_token_in: swap.token_in().address.clone(),
+            group_token_out: swap.token_out().address.clone(),
+            origin: None,
+        };
+        CurveSwapEncoder::new(
+            Bytes::from("0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f"),
+            Chain::Ethereum,
+            curve_config(),
+        )?
+        .encode_swap(swap, &encoding_context)
+    }
+
+    #[test]
+    fn test_curve_encode_grant() {
+        let grant = Bytes::from_str(concat!(
+            // min amount in
+            "00000000000000000000000000000000000000000000000000000000b2d05e00",
+            // max amount in
+            "00000000000000000000000000000000000000000000000000000000b2d05e00",
+            // fee
+            "00000000000000000000000000000000000000000000000000000000000186a0",
+            // nonce
+            "0000000000000001",
+            // deadline
+            "6a0b3c4d",
+            // signature
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "1b",
+        ))
+        .unwrap();
+
+        let encoded_swap = encode_twocrypto_swap(&twocrypto_usdc_weth_swap(grant)).unwrap();
+
+        assert_eq!(
+            encode(&encoded_swap),
+            String::from(concat!(
+                // token in
+                "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                // token out
+                "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                // pool address
+                "1111111111111111111111111111111111111111",
+                // pool type 2
+                "02",
+                // i index
+                "00",
+                // j index
+                "01",
+                // min amount in
+                "00000000000000000000000000000000000000000000000000000000b2d05e00",
+                // max amount in
+                "00000000000000000000000000000000000000000000000000000000b2d05e00",
+                // fee
+                "00000000000000000000000000000000000000000000000000000000000186a0",
+                // nonce
+                "0000000000000001",
+                // deadline
+                "6a0b3c4d",
+                // signature
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "1b",
+            ))
+        );
+    }
+
+    #[test]
+    fn test_curve_encode_rejects_grant_of_wrong_length() {
+        let swap = twocrypto_usdc_weth_swap(Bytes::from(vec![0u8; GRANT_LEN - 1]));
+
+        assert_eq!(
+            encode_twocrypto_swap(&swap).unwrap_err(),
+            EncodingError::InvalidInput(
+                "Curve grant user_data must be 173 bytes, got 172".to_string()
+            )
         );
     }
 }
