@@ -1,3 +1,10 @@
+## [0.527.1](https://github.com/propeller-heads/tycho/compare/0.527.0...0.527.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **ci:** skip required jobs only when change detection reports false ([75c10ff](https://github.com/propeller-heads/tycho/commit/75c10ffacfe12ce4fdd2b81b6ce0585f8829fbe7))
+
 ## [0.527.0](https://github.com/propeller-heads/tycho/compare/0.526.1...0.527.0) (2026-11-17)
 
 
