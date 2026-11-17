@@ -22,7 +22,11 @@
 //! # Cost
 //!
 //! The memory of the store, plus about 20 to 30 bytes per traded token per unit.
-use std::{collections::HashMap, sync::RwLock, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
 
 use chrono::NaiveDateTime;
 use diesel::{dsl::max, prelude::*};
@@ -30,7 +34,7 @@ use diesel_async::{
     pooled_connection::deadpool::Pool, scoped_futures::ScopedFutureExt, AsyncPgConnection,
     RunQueryDsl,
 };
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use tycho_common::{
     models::{token::Token, Address, Chain},
     storage::{StorageError, WithTotal},
@@ -40,7 +44,7 @@ use crate::postgres::{
     count_to_i64,
     instance::{
         active::active_protocols,
-        cache::token_store::{ChainTokenStore, TokenQuery, LOAD_BATCH_SIZE},
+        cache::token_store::{ChainTokenStore, TokenQuery, LOAD_BATCH_SIZE, REFRESH_OVERLAP_SECS},
         schema::tycho::component_balance,
         InstanceId,
     },
@@ -55,7 +59,6 @@ pub struct TokenCache {
     chain: Chain,
     tokens: RwLock<Tokens>,
     /// Largest `token.modified_ts` seen; the poll reads rows newer than this, less an overlap.
-    #[cfg_attr(test, expect(dead_code, reason = "the token poll reads it"))]
     last_sync: RwLock<NaiveDateTime>,
 }
 
@@ -242,6 +245,86 @@ impl TokenCache {
                 .upsert(token.clone(), overwrite)?;
         }
         Ok(())
+    }
+
+    /// Reads the token rows that changed since the last poll and writes them into the cache, so
+    /// the cache sees writes of other processes, like the token analysis job. Returns the number
+    /// of rows read, which counts rows re-read unchanged.
+    ///
+    /// The poll re-reads the [`REFRESH_OVERLAP_SECS`] before the marker: a transaction that was
+    /// open during the last poll writes a `modified_ts` from before that poll. The marker moves
+    /// only on success, so a failed poll runs again on the next tick.
+    pub(crate) async fn refresh(
+        &self,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<usize, StorageError> {
+        let last_sync = *self
+            .last_sync
+            .read()
+            .expect("token cache lock poisoned");
+        let since = last_sync - chrono::Duration::seconds(REFRESH_OVERLAP_SECS);
+
+        let rows: Vec<(orm::Token, Address)> = token::table
+            .filter(token::modified_ts.gt(since))
+            .order(token::id.asc())
+            .select((orm::Token::as_select(), token::address.assume_not_null()))
+            .load(conn)
+            .await
+            .map_err(PostgresError::from)?;
+
+        let n_refreshed = rows.len();
+        // Start from `last_sync`, so an empty poll does not move the marker back.
+        let max_modified_ts = rows
+            .iter()
+            .map(|(row, _)| row.modified_ts)
+            .fold(last_sync, NaiveDateTime::max);
+        let refreshed = rows
+            .into_iter()
+            .map(|(row, address)| row.to_model(&address, self.chain))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.upsert_tokens(&refreshed)?;
+
+        *self
+            .last_sync
+            .write()
+            .expect("token cache lock poisoned") = max_modified_ts;
+        Ok(n_refreshed)
+    }
+
+    /// Spawns a detached task that calls `refresh` every `period`.
+    #[cfg_attr(test, expect(dead_code, reason = "a test cannot give the task a connection pool"))]
+    pub(crate) fn spawn_refresh_task(
+        self: &Arc<Self>,
+        pool: Pool<AsyncPgConnection>,
+        period: Duration,
+    ) {
+        let cache = Arc::clone(self);
+        tokio::spawn(async move {
+            info!(period_secs = period.as_secs(), "Token cache refresh task started");
+            let mut interval = tokio::time::interval(period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick fires immediately; skip it, the cache was just loaded.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                // A bounded wait so pool starvation is visible instead of a
+                // silently stalled task.
+                match tokio::time::timeout(Duration::from_secs(30), pool.get()).await {
+                    Ok(Ok(mut conn)) => match cache.refresh(&mut conn).await {
+                        Ok(n_rows_in_window) => {
+                            // Counts every row in the lookback window, most of which
+                            // were re-read unchanged — not the number of new changes.
+                            debug!(n_rows_in_window, "Token cache refresh completed");
+                        }
+                        Err(err) => error!(%err, "Token cache refresh failed"),
+                    },
+                    Ok(Err(err)) => error!(%err, "Token cache refresh could not get a connection"),
+                    Err(_) => {
+                        error!("Token cache refresh timed out waiting for a DB connection")
+                    }
+                }
+            }
+        });
     }
 
     /// Marks trades of `instance`. Does nothing when `instance` has no unit, or for a token that
