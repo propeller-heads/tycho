@@ -1031,7 +1031,7 @@ impl PostgresGateway {
         conn: &mut AsyncPgConnection,
     ) -> Result<WithTotal<Vec<Token>>, StorageError> {
         if let Some(token_cache) = &self.token_cache {
-            return token_cache.query_tokens(&super::token_cache::TokenQuery {
+            return token_cache.query_tokens(&super::instance::cache::token_store::TokenQuery {
                 chain,
                 addresses: addresses.map(|addrs| {
                     addrs
