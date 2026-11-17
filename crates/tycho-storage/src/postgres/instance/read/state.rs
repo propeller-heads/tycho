@@ -300,7 +300,7 @@ async fn component_balances_at(
 mod tests {
     use std::collections::HashMap;
 
-    use chrono::{NaiveDate, NaiveDateTime};
+    use chrono::{Duration, NaiveDate, NaiveDateTime, Utc};
     use diesel::prelude::*;
     use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
     use tycho_common::{
@@ -354,6 +354,13 @@ mod tests {
         NaiveDate::from_ymd_opt(2020, 1, d)
             .and_then(|date| date.and_hms_opt(0, 0, 0))
             .expect("a valid date")
+    }
+
+    /// Midnight UTC of the day `d` days after the day 10 days ago: inside the default retention.
+    fn recent(d: i64) -> NaiveDateTime {
+        (Utc::now().date_naive() - Duration::days(10 - d))
+            .and_hms_opt(0, 0, 0)
+            .expect("a valid time")
     }
 
     fn at(ts: NaiveDateTime) -> Version {
@@ -519,15 +526,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_balances_before_head_are_unsupported() {
+    async fn test_balances_before_retention_are_unsupported() {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         component_with_balance(&mut conn, s.curve, "a", "0x01").await;
-        db_fixtures::set_instance_head(&mut conn, s.curve, day(2)).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
 
-        let result = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(day(1)))).await;
+        let result =
+            balances(&s.gateway, &mut conn, "vm:curve", Some(&at(recent(5) - Duration::days(40))))
+                .await;
 
-        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+        let Err(StorageError::Unsupported(msg)) = result else {
+            panic!("expected Unsupported, got {result:?}");
+        };
+        assert!(msg.contains("retention"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn test_balances_at_a_past_version_read_history() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        db_fixtures::insert_instance_component_balance_version(
+            &mut conn,
+            s.curve,
+            a,
+            b("0x01"),
+            b("0x10"),
+            recent(1),
+            Some(recent(3)),
+        )
+        .await;
+        db_fixtures::insert_instance_component_balance_version(
+            &mut conn,
+            s.curve,
+            a,
+            b("0x01"),
+            b("0x20"),
+            recent(3),
+            None,
+        )
+        .await;
+        component_with_balance(&mut conn, s.curve, "c", "0x30").await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for (ts, expected) in [(recent(2), "0x10"), (recent(4), "0x20")] {
+            let result = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(ts)))
+                .await
+                .unwrap();
+
+            assert_eq!(result["a"].len(), 1, "{ts}");
+            assert_eq!(result["a"][&b("0x01")].balance, b(expected), "{ts}");
+            assert_eq!(result["c"][&b("0x01")].balance, b("0x30"), "{ts}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_balances_at_a_past_version_skip_deleted_balances() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        db_fixtures::insert_instance_component_balance_version(
+            &mut conn,
+            s.curve,
+            a,
+            b("0x01"),
+            b("0x10"),
+            recent(1),
+            Some(recent(3)),
+        )
+        .await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let before = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(recent(2))))
+            .await
+            .unwrap();
+        let deleted = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(recent(3))))
+            .await
+            .unwrap();
+
+        assert_eq!(before["a"][&b("0x01")].balance, b("0x10"));
+        assert!(deleted.is_empty(), "{deleted:?}");
     }
 
     async fn states(

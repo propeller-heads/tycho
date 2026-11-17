@@ -1706,6 +1706,60 @@ pub mod db_fixtures {
             .expect("inserting the component balance failed");
     }
 
+    /// Inserts a version of the balance of `token` in a component of the instance, with balance
+    /// float 1.0, previous value `0x00` and transaction index 0. `valid_to` `None`: the current
+    /// row. `Some`: a history row, after the creation of the history partition of that day.
+    pub async fn insert_instance_component_balance_version(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        token: Bytes,
+        balance: Bytes,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        let Some(valid_to) = valid_to else {
+            diesel::insert_into(instance::schema::tycho::component_balance::table)
+                .values(instance::orm::NewComponentBalance {
+                    instance_id,
+                    protocol_component_id: component_id,
+                    token,
+                    new_balance: balance,
+                    previous_value: Bytes::from("0x00"),
+                    balance_float: 1.0,
+                    valid_from,
+                    tx_index: 0,
+                })
+                .execute(conn)
+                .await
+                .expect("inserting the component balance failed");
+            return;
+        };
+        sql_query(
+            "SELECT partman.create_partition_time('tycho.component_balance_history', ARRAY[$1])",
+        )
+        .bind::<diesel::sql_types::Timestamp, _>(valid_to)
+        .execute(conn)
+        .await
+        .expect("creating the history partition failed");
+        diesel::insert_into(instance::schema::tycho::component_balance_history::table)
+            .values(instance::orm::ComponentBalanceHistory {
+                instance_id,
+                protocol_component_id: component_id,
+                token,
+                new_balance: balance,
+                previous_value: Bytes::from("0x00"),
+                balance_float: 1.0,
+                valid_from,
+                valid_to,
+                tx_index: 0,
+                inserted_ts: valid_from,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the component balance history failed");
+    }
+
     /// Inserts the state attribute `attribute_name` of a component of the instance, valid from
     /// 2020-01-01 00:00 at transaction index 0, with no previous value.
     pub async fn insert_instance_state(
