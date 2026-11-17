@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.0
+
+- Report a negative balance tally as zero. The tally sums `Transfer` deltas, so it goes negative
+  when a pool's rebasing-token balance grew without a `Transfer` and the pool is then drained; the
+  two's-complement bytes were read back by Tycho as a huge balance (a drained STRCx/USDC pool
+  showed 18.4 STRCx instead of 0). This changes the output for those balances.
+
 ## v0.3.10
 
 - Update `tycho-substreams` from `0.8.1` to `0.8.2`. Native balance changes recorded on the
