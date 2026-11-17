@@ -1,3 +1,12 @@
+## [0.527.2](https://github.com/propeller-heads/tycho/compare/0.527.1...0.527.2) (2026-11-17)
+
+
+### Bug Fixes
+
+* **deps:** bump actix-http to 3.22.0 for three request-parsing advisories ([efb7893](https://github.com/propeller-heads/tycho/commit/efb7893f0d26b4e12ef3daae354cf8e9be49af27))
+* **deps:** clear the new cargo audit advisories ([#1837](https://github.com/propeller-heads/tycho/issues/1837)) ([ebff230](https://github.com/propeller-heads/tycho/commit/ebff230fe9c92c73f8330256f9e76bdaa8e91f76))
+* **deps:** drop the legacy rustls client and sigv4a from aws-sdk-s3 ([8ed57f7](https://github.com/propeller-heads/tycho/commit/8ed57f7efc52acaedd2c3b0c58dda739a0fa6477))
+
 ## [0.527.1](https://github.com/propeller-heads/tycho/compare/0.527.0...0.527.1) (2026-11-17)
 
 
