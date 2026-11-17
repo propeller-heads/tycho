@@ -626,6 +626,60 @@ mod tests {
         ]
     }
 
+    fn component_of(id: &str, system: &str) -> ProtocolComponent {
+        ProtocolComponent::new(
+            id,
+            system,
+            "pool1",
+            Chain::Ethereum,
+            Vec::new(),
+            Vec::new(),
+            HashMap::new(),
+            ChangeType::Creation,
+            Bytes::default(),
+            NaiveDateTime::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_add_instance_components_adds_to_the_unit() {
+        let cache = ProtocolMemoryCache::new(
+            Chain::Ethereum,
+            Duration::seconds(60),
+            Arc::new(MockGateway::new()),
+        )
+        .with_instances(HashMap::from([("vm:curve".to_string(), InstanceId(1))]));
+
+        cache
+            .add_instance_components(InstanceId(1), [component_of("a", "vm:curve")])
+            .await
+            .unwrap();
+
+        let components = cache.components.read().await;
+        assert!(components["vm:curve"].contains_key("a"));
+    }
+
+    #[tokio::test]
+    async fn test_add_instance_components_skips_other_instances() {
+        let cache = ProtocolMemoryCache::new(
+            Chain::Ethereum,
+            Duration::seconds(60),
+            Arc::new(MockGateway::new()),
+        )
+        .with_instances(HashMap::from([("vm:curve".to_string(), InstanceId(1))]));
+
+        cache
+            .add_instance_components(InstanceId(2), [component_of("a", "vm:curve")])
+            .await
+            .unwrap();
+        cache
+            .add_instance_components(InstanceId(1), [component_of("b", "uniswap_v4")])
+            .await
+            .unwrap();
+
+        assert!(cache.components.read().await.is_empty());
+    }
+
     #[tokio::test]
     async fn test_get_protocol_components() {
         let chain = Chain::Ethereum;
