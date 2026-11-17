@@ -11,7 +11,7 @@
 //!
 //! Only the instances that are active at load time get a unit, and each of them gets one, also
 //! when it has no components. When a pointer moves later, the index keeps the unit of the old
-//! instance until restart, and the new instance has no unit.
+//! instance until the next full reload, and the new instance has no unit until then.
 //!
 //! # Unexpected cases
 //!
@@ -30,24 +30,28 @@
 //!   ids above the highest id of the unit.
 use std::{
     collections::HashMap,
-    sync::{Mutex, RwLock},
-    time::Instant,
+    sync::{Arc, Mutex, RwLock},
+    time::{Duration, Instant},
 };
 
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel_async::{
-    pooled_connection::deadpool::Pool, scoped_futures::ScopedFutureExt, AsyncPgConnection,
-    RunQueryDsl,
+    pooled_connection::deadpool::{Object, Pool},
+    scoped_futures::ScopedFutureExt,
+    AsyncPgConnection, RunQueryDsl,
 };
-use metrics::gauge;
-use tracing::info;
+use metrics::{counter, gauge};
+use tracing::{debug, error, info};
 use tycho_common::{models::PaginationParams, storage::StorageError};
 
 use crate::postgres::{
     instance::{
         active::active_protocols,
-        cache::component_page::{index_tvl, unix_now, ComponentPage, SystemIndex, TvlRow, NO_TVL},
+        cache::component_page::{
+            index_tvl, unix_now, ComponentPage, RefreshOutcome, SystemIndex, TvlRow,
+            MAX_REFRESH_BACKOFF, NO_TVL, REFRESH_TIMEOUT,
+        },
         schema::tycho::{component_tvl, protocol_component},
         InstanceId,
     },
@@ -59,13 +63,11 @@ use crate::postgres::{
 /// The components of each active instance (see the module docs).
 pub struct ComponentIndex {
     units: RwLock<HashMap<InstanceId, InstanceIndex>>,
-    #[cfg_attr(test, expect(dead_code, reason = "the poll reads it"))]
     refresh_state: Mutex<RefreshState>,
 }
 
 /// Bookkeeping of the refresh loop.
 #[derive(Debug)]
-#[cfg_attr(test, expect(dead_code, reason = "the poll reads it"))]
 struct RefreshState {
     /// Newest `modified_ts` among the TVL rows read so far.
     newest_tvl_ts: NaiveDateTime,
@@ -77,7 +79,6 @@ struct InstanceIndex {
     protocol: String,
     components: SystemIndex,
     /// Highest component id of the instance, 0 when empty.
-    #[cfg_attr(test, expect(dead_code, reason = "the poll reads it"))]
     max_id: i64,
 }
 
@@ -142,9 +143,202 @@ impl ComponentIndex {
         }))
     }
 
+    /// Brings the units up to date with the database. When the last full reload is older than
+    /// `full_reload_interval`, it reads the units again from the active instances. Otherwise it
+    /// adds the new components of each unit and applies the TVL rows written since the newest one
+    /// read so far.
+    ///
+    /// Starts no transaction. Run it in one `snapshot_transaction` with
+    /// `bound_snapshot_reads` and `force_custom_plans`, so that every TVL row it reads belongs to a
+    /// component it can see, and each read touches only the leaves of the units.
+    pub(crate) async fn refresh(
+        &self,
+        full_reload_interval: Duration,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<RefreshOutcome, StorageError> {
+        if self
+            .refresh_state()
+            .last_full_reload
+            .elapsed() >=
+            full_reload_interval
+        {
+            let n_components = self.full_reload(conn).await?;
+            return Ok(RefreshOutcome::FullReload { n_components });
+        }
+
+        let max_ids: Vec<(InstanceId, i64)> = self
+            .read_units()
+            .iter()
+            .map(|(&instance, unit)| (instance, unit.max_id))
+            .collect();
+        let newest = self.refresh_state().newest_tvl_ts;
+        // One statement per unit, so each statement plans and locks only the leaf of its instance.
+        let mut new_ids = HashMap::new();
+        for &(instance, max_id) in &max_ids {
+            let ids = load_new_ids(instance, max_id, conn).await?;
+            if !ids.is_empty() {
+                new_ids.insert(instance, ids);
+            }
+        }
+        let instances: Vec<InstanceId> = max_ids
+            .iter()
+            .map(|&(instance, _)| instance)
+            .collect();
+        let changed_tvl = load_instance_tvl(&instances, Some(newest), conn).await?;
+
+        let n_components = {
+            let mut units = self.write_units();
+            for (instance, unit) in units.iter_mut() {
+                if let Some(ids) = new_ids.get(instance) {
+                    debug!(
+                        %instance,
+                        n_components = ids.len(),
+                        "Component index polled new components"
+                    );
+                    for &id in ids {
+                        unit.components.insert(id, NO_TVL);
+                    }
+                    unit.max_id = unit
+                        .max_id
+                        .max(ids.last().copied().unwrap_or(0));
+                }
+                if let Some(rows) = changed_tvl.get(instance) {
+                    unit.components.apply_tvl(rows);
+                }
+            }
+            n_components(&units)
+        };
+        let n_rows: usize = changed_tvl.values().map(Vec::len).sum();
+        self.advance_newest_tvl_ts(
+            changed_tvl
+                .values()
+                .flatten()
+                .map(|row| row.modified_ts)
+                .max(),
+        );
+        gauge!("component_index_components").set(n_components as f64);
+        gauge!("component_index_last_refresh_timestamp_seconds").set(unix_now());
+        Ok(if n_rows == 0 {
+            RefreshOutcome::TvlUnchanged
+        } else {
+            RefreshOutcome::TvlDelta { n_rows }
+        })
+    }
+
+    /// Reads the units again from the active instances and swaps them in. Returns the number of
+    /// components.
+    async fn full_reload(&self, conn: &mut AsyncPgConnection) -> Result<usize, StorageError> {
+        let start = Instant::now();
+        let (units, newest_tvl_ts) = load_units(conn).await?;
+        let n_components = report_load(&units, start);
+        *self.write_units() = units;
+        self.advance_newest_tvl_ts(newest_tvl_ts);
+        self.refresh_state().last_full_reload = Instant::now();
+        Ok(n_components)
+    }
+
+    fn advance_newest_tvl_ts(&self, newest: Option<NaiveDateTime>) {
+        if let Some(newest) = newest {
+            let mut state = self.refresh_state();
+            state.newest_tvl_ts = state.newest_tvl_ts.max(newest);
+        }
+    }
+
+    /// Spawns a detached task that calls [`Self::refresh`] every `period` in one snapshot, with a
+    /// full reload at least every `full_reload_interval`.
+    #[cfg_attr(test, expect(dead_code, reason = "a test cannot give the task a connection pool"))]
+    pub(crate) fn spawn_refresh_task(
+        self: &Arc<Self>,
+        pool: Pool<AsyncPgConnection>,
+        period: Duration,
+        full_reload_interval: Duration,
+    ) {
+        let index = Arc::clone(self);
+        tokio::spawn(async move {
+            info!(
+                period_secs = period.as_secs(),
+                full_reload_interval_secs = full_reload_interval.as_secs(),
+                "Component index refresh task started"
+            );
+            let mut interval = tokio::time::interval(period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick fires immediately; skip it, the index was just loaded.
+            interval.tick().await;
+            let mut failures: u32 = 0;
+            loop {
+                interval.tick().await;
+                let started = Instant::now();
+                // A bounded wait so pool starvation is visible instead of a silently stalled task.
+                let result = match tokio::time::timeout(Duration::from_secs(30), pool.get()).await {
+                    Ok(Ok(mut conn)) => {
+                        let index = &index;
+                        let refresh = async {
+                            snapshot_transaction(&mut conn)
+                                .run(|conn| {
+                                    async move {
+                                        bound_snapshot_reads(conn).await?;
+                                        force_custom_plans(conn).await?;
+                                        Result::<_, PostgresError>::Ok(
+                                            index
+                                                .refresh(full_reload_interval, conn)
+                                                .await?,
+                                        )
+                                    }
+                                    .scope_boxed()
+                                })
+                                .await
+                                .map_err(StorageError::from)
+                        };
+                        match tokio::time::timeout(REFRESH_TIMEOUT, refresh).await {
+                            Ok(result) => result.map_err(|err| err.to_string()),
+                            Err(_) => {
+                                drop(Object::take(conn));
+                                Err(format!("timed out after {REFRESH_TIMEOUT:?}"))
+                            }
+                        }
+                    }
+                    Ok(Err(err)) => Err(format!("no DB connection: {err}")),
+                    Err(_) => Err("timed out waiting for a DB connection".to_string()),
+                };
+                match result {
+                    Ok(outcome) => {
+                        if failures > 0 {
+                            info!(failures, "Component index refresh recovered");
+                        }
+                        failures = 0;
+                        counter!("component_index_refreshes_total", "outcome" => outcome.label())
+                            .increment(1);
+                        if outcome != RefreshOutcome::TvlUnchanged {
+                            info!(?outcome, elapsed = ?started.elapsed(), "Component index refreshed");
+                        }
+                    }
+                    Err(err) => {
+                        failures += 1;
+                        counter!("component_index_refreshes_total", "outcome" => "error")
+                            .increment(1);
+                        error!(%err, failures, "Component index refresh failed; the index is getting stale");
+                        tokio::time::sleep((period * failures).min(MAX_REFRESH_BACKOFF)).await;
+                    }
+                }
+            }
+        });
+    }
+
     fn read_units(&self) -> std::sync::RwLockReadGuard<'_, HashMap<InstanceId, InstanceIndex>> {
         self.units
             .read()
+            .expect("component index lock poisoned")
+    }
+
+    fn write_units(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<InstanceId, InstanceIndex>> {
+        self.units
+            .write()
+            .expect("component index lock poisoned")
+    }
+
+    fn refresh_state(&self) -> std::sync::MutexGuard<'_, RefreshState> {
+        self.refresh_state
+            .lock()
             .expect("component index lock poisoned")
     }
 }
@@ -179,6 +373,23 @@ fn n_components(units: &HashMap<InstanceId, InstanceIndex>) -> usize {
         .values()
         .map(|unit| unit.components.ids.len())
         .sum()
+}
+
+/// Reads the ids of `instance`'s components above `after_id`, in ascending order.
+async fn load_new_ids(
+    instance: InstanceId,
+    after_id: i64,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<i64>, PostgresError> {
+    let mut ids: Vec<i64> = protocol_component::table
+        .filter(protocol_component::instance_id.eq(instance))
+        .filter(protocol_component::id.gt(after_id))
+        .select(protocol_component::id)
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?;
+    ids.sort_unstable();
+    Ok(ids)
 }
 
 /// Reads a unit for each active instance, and the newest `modified_ts` of the TVL rows it read.
