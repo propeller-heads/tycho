@@ -374,7 +374,9 @@ impl IntegrationTestsConfig {
 
     /// The limit declared for `direction` of `component`, from the most specific declaration:
     /// the component's for that direction, the component's default, the package's for that
-    /// direction, then the package's default.
+    /// direction, then the package's default. The runner reads [`Self::declaration_for`]; the
+    /// tests compare this with the shared reader's.
+    #[cfg(test)]
     pub fn limits_for<'a>(
         &'a self,
         component: &'a ProtocolComponentWithTestConfig,
@@ -387,7 +389,9 @@ impl IntegrationTestsConfig {
         )
     }
 
-    /// [`Self::limits_for`], with which declaration it comes from.
+    /// The limit declared for `direction` of `component`, with which declaration it comes from:
+    /// the component's for that direction, the component's default, the package's for that
+    /// direction, then the package's default.
     pub fn declaration_for<'a>(
         &'a self,
         component: &'a ProtocolComponentWithTestConfig,
@@ -405,11 +409,11 @@ impl IntegrationTestsConfig {
     /// - each has the fields its kind requires;
     /// - a component's direction is one of its token pairs, and a package's direction is one of
     ///   some expected component's;
-    /// - in strict mode, every direction of every expected component that does not skip simulation
-    ///   has a declaration.
+    /// - in strict mode, the package declares a default (`limits: {kind: ...}`, or a `default` in
+    ///   its map), so every direction of every pool has a declaration: `full` and the cluster test
+    ///   check pools the tests do not list, against the package's declarations.
     fn check_limits(&self, source: &str) -> miette::Result<()> {
         let mut problems = Vec::new();
-        let mut undeclared = Vec::new();
         let mut all_directions = HashSet::new();
 
         for test in &self.tests {
@@ -424,16 +428,6 @@ impl IntegrationTestsConfig {
                                 "{location}: {direction} is not one of its directions"
                             ));
                         }
-                    }
-                }
-                // A component that skips simulation tests none of its limits.
-                let tested = !component.skip_simulation.is_skipped();
-                for direction in &directions {
-                    if tested &&
-                        self.limits_for(component, direction)
-                            .is_none()
-                    {
-                        undeclared.push(format!("{location}, {direction}"));
                     }
                 }
                 all_directions.extend(directions);
@@ -456,13 +450,17 @@ impl IntegrationTestsConfig {
                 problems.join("; ")
             ));
         }
-        if self.harness == Harness::Strict && !undeclared.is_empty() {
+        let package_default = self
+            .limits
+            .as_ref()
+            .is_some_and(|declaration| declaration.default.is_some());
+        if self.harness == Harness::Strict && !package_default {
             return Err(miette!(
-                "{source} declares `harness: strict`, where every direction of every component \
-                 declares its limit (`limits: {{kind: hard | soft | under_cap, ...}}`, on the \
-                 package or the component, for every direction or per direction), but these \
-                 have none: {}",
-                undeclared.join("; ")
+                "{source} declares `harness: strict`, which needs a package-level `limits` \
+                 default: `full` and the cluster test check every pool of the protocol, those the \
+                 tests do not list included, against the package's declarations. Declare \
+                 `limits: {{kind: hard | soft | under_cap, ...}}` for the package, or a `default` \
+                 in its `limits` map; a component's own `limits` overrides it"
             ));
         }
         Ok(())
@@ -669,7 +667,7 @@ tests:
     #[test]
     fn component_keys_reach_the_component() {
         let config = parse(&yaml(
-            "harness: strict",
+            STRICT_WITH_LIMITS,
             "        static_attributes: {fee: \"0x0bb8\"}\n        skip_execution: \"r\"\n        limits: {kind: hard}",
         ))
         .unwrap();
@@ -942,29 +940,26 @@ tests:
     const UNDER_CAP: &str = "{kind: under_cap, reason: \"r; gives up 2%\"}";
 
     #[test]
-    fn strict_mode_requires_a_declaration_for_every_direction() {
-        let err = parse(&yaml("harness: strict", ""))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("component 0xAbC, 0x01->0x02"), "{err}");
-        assert!(err.contains("component 0xAbC, 0x02->0x01"), "{err}");
+    fn strict_mode_requires_a_package_limits_default() {
+        let needs_default = |package: &str, component: &str| {
+            let err = parse(&yaml(&format!("harness: strict\n{package}"), component))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("needs a package-level `limits` default"), "{err}");
+        };
+        needs_default("", "");
+        // A component that declares every direction still needs it, for the pools no test lists.
+        needs_default("", "        limits: {kind: hard}");
+        needs_default("limits: {\"0x01->0x02\": {kind: hard}}", "");
 
-        let one_direction = "        limits: {\"0x01->0x02\": {kind: hard}}";
-        let err = parse(&yaml("harness: strict", one_direction))
-            .unwrap_err()
-            .to_string();
-        assert!(!err.contains("0x01->0x02"), "{err}");
-        assert!(err.contains("component 0xAbC, 0x02->0x01"), "{err}");
-
+        assert!(parse(&yaml("harness: strict\nlimits: {kind: hard}", "")).is_ok());
+        assert!(parse(&yaml(
+            "harness: strict\nlimits: {default: {kind: hard}, \"0x01->0x02\": {kind: soft, reason: r}}",
+            ""
+        ))
+        .is_ok());
         // Legacy mode tests no limits, so it needs no declaration.
         assert!(parse(&yaml("", "")).is_ok());
-    }
-
-    #[test]
-    fn a_component_that_skips_simulation_needs_no_declaration() {
-        assert!(
-            parse(&yaml("harness: strict", "        skip_simulation: \"no fork state\"")).is_ok()
-        );
     }
 
     #[test]
@@ -1020,7 +1015,7 @@ tests:
                 assert!(err.contains(problem), "{declaration}: {err}");
             }
         }
-        assert!(parse(&yaml("harness: strict", &format!("        limits: {UNDER_CAP}"))).is_ok());
+        assert!(parse(&yaml(STRICT_WITH_LIMITS, &format!("        limits: {UNDER_CAP}"))).is_ok());
     }
 
     #[test]
@@ -1049,7 +1044,7 @@ tests:
     #[test]
     fn a_hard_limit_can_declare_its_rounding() {
         let config =
-            parse(&yaml("harness: strict", "        limits: {kind: hard, rounding: 2}")).unwrap();
+            parse(&yaml(STRICT_WITH_LIMITS, "        limits: {kind: hard, rounding: 2}")).unwrap();
         let component = &config.tests[0].expected_components[0];
         assert_eq!(
             config.limits_for(component, &direction("0x01->0x02")),

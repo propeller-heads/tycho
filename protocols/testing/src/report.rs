@@ -65,6 +65,8 @@ pub struct Checks {
     drift: Option<Observed>,
     /// The largest `executed - simulated` in magnitude, with its token out.
     largest_difference: Option<(BigInt, String)>,
+    /// The block the checks recorded now run at, while `full` checks an update.
+    block: Option<u64>,
 }
 
 impl Checks {
@@ -75,7 +77,13 @@ impl Checks {
             results: Vec::new(),
             drift: None,
             largest_difference: None,
+            block: None,
         }
+    }
+
+    /// Records the checks that follow as run at `block`, or at the snapshot for `None`.
+    pub fn at_block(&mut self, block: Option<u64>) {
+        self.block = block;
     }
 
     /// Notes an execution's output against its simulation, keeping the largest difference.
@@ -265,6 +273,7 @@ impl Checks {
             check,
             component: component.map(str::to_lowercase),
             direction: direction.map(str::to_string),
+            block: self.block,
             outcome,
             limit: limit.cloned(),
         });
@@ -298,6 +307,20 @@ impl Report {
         std::fs::write(path, json)
             .into_diagnostic()
             .wrap_err_with(|| format!("Failed to write the test report to {}", path.display()))
+    }
+
+    /// Appends the report to `path` as one line of JSON, for a run that reports as it goes.
+    pub fn append_line(&self, path: &Path) -> miette::Result<()> {
+        use std::io::Write;
+        let mut line = serde_json::to_string(self).into_diagnostic()?;
+        line.push('\n');
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut file| file.write_all(line.as_bytes()))
+            .into_diagnostic()
+            .wrap_err_with(|| format!("Failed to append to the test report {}", path.display()))
     }
 }
 
@@ -378,10 +401,54 @@ mod tests {
                 check: CheckId::ExecLadder,
                 component: Some("0xabc".to_string()),
                 direction: None,
+                block: None,
                 outcome: Outcome::Skipped { reason: "no fork state".to_string() },
                 limit: None,
             }]
         );
+    }
+
+    #[test]
+    fn a_report_appends_one_line_per_call() {
+        let path = std::env::temp_dir().join(format!("report-lines-{}.jsonl", std::process::id()));
+        std::fs::write(&path, "").unwrap();
+        let report = |block: u64| {
+            let mut checks = Checks::new(Harness::Strict, "full");
+            checks.at_block(Some(block));
+            checks.skip(CheckId::ExecLadder, "off");
+            Report {
+                package: "ethereum-foo".to_string(),
+                chain: "ethereum".to_string(),
+                harness: Harness::Strict,
+                results: checks.finish().results,
+                drift: vec![],
+            }
+        };
+        report(7).append_line(&path).unwrap();
+        report(8).append_line(&path).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let blocks: Vec<u64> = written
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["results"][0]["block"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(blocks, vec![7, 8]);
+    }
+
+    #[test]
+    fn checks_carry_the_block_they_ran_at() {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.at_block(Some(21_000_005));
+        checks.skip(CheckId::ExecLadder, "off");
+        checks.at_block(None);
+        checks.skip(CheckId::Balances, "off");
+        let results = checks.finish().results;
+        assert_eq!(results[0].block, Some(21_000_005));
+        assert_eq!(results[1].block, None);
     }
 
     #[test]
@@ -407,6 +474,7 @@ mod tests {
                     check: CheckId::SimLadder,
                     component: None,
                     direction: None,
+                    block: None,
                     outcome: Outcome::Fail { detail: "boom".to_string() },
                     limit: None,
                 },
@@ -415,6 +483,7 @@ mod tests {
                     check: CheckId::LimitsPastLimit,
                     component: Some("0x01".to_string()),
                     direction: Some("0x02->0x03".to_string()),
+                    block: Some(7),
                     outcome: Outcome::Skipped { reason: "off".to_string() },
                     limit: Some(LimitReport::new(
                         &Limits::Soft { reason: "constant product".to_string() },
@@ -441,6 +510,10 @@ mod tests {
         assert_eq!(json["results"][1]["direction"], "0x02->0x03");
         assert_eq!(json["results"][1]["outcome"], "skipped");
         assert_eq!(json["results"][1]["reason"], "off");
+        assert_eq!(json["results"][1]["block"], 7);
+        assert!(json["results"][0]
+            .get("block")
+            .is_none());
         assert!(json["results"][0]
             .get("limit")
             .is_none());

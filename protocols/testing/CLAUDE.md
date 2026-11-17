@@ -40,8 +40,11 @@ Strict mode checks every expected component's balances against its declared `bal
 (`balances.tvl_only`), and rejects `skip_balance_check`.
 Strict mode also tests each direction's declared limit (README, "Limits").
 Strict mode also requires executions to match simulation exactly unless the package declares
-`execution_tolerance: {bps and/or wei, cause, measured}`; legacy mode allows 0.5%. Only `range`
-reads these; `full` allows 0.5% for every package.
+`execution_tolerance: {bps and/or wei, cause, measured}`; legacy mode allows 0.5%.
+Strict `full` runs the ladder, the limit checks and the tolerance on every update, for every pool
+(unlisted pools get the package's `limits`, so a strict yaml declares a package-level `limits`
+default), logs every failed check and keeps going; `full --report` appends each failing update as
+a line of JSON (README, "Full mode").
 `range --report <path>` writes each check's outcome as JSON. See `README.md`, "Strict mode".
 
 ### Declaring limits
@@ -53,6 +56,9 @@ Agents write these yamls, and a `soft` declaration passes with one line of text,
 - Never change a kind, or drop a declaration, to make a failing limit check pass. Fix
   `get_limits` or `get_amount_out`, or declare `under_cap` with its evidence and the capacity it
   gives up, or a hard limit's `rounding` with the division that causes it.
-- Declare no package-level `soft` when a component has a cap: declare that component's limits on
-  the component.
+- The package-level `limits` default, which strict mode requires, is the claim for every pool of
+  the protocol, those no test lists included: `full` and the cluster test check them against it.
+  Declare the kind that holds for all of them. A component's own `limits` is for a listed pool
+  that differs; an unlisted pool like it is still checked against the default, so say in the PR
+  description which kinds of pool differ from it.
 - A PR that changes an existing kind says so in its description.

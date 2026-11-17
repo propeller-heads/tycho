@@ -103,6 +103,10 @@ pub struct CheckResult {
     /// only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direction: Option<String>,
+    /// The block a check ran at, when a runner checks several blocks of one test, as protocol-
+    /// testing's `full` does; none for the checks at a test's snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block: Option<u64>,
     #[serde(flatten)]
     pub outcome: Outcome,
     /// For a `limits.*` result, the declaration it is checked against and the limit.

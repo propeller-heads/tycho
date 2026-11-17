@@ -224,11 +224,12 @@ balances, being slightly off only moves TVL, and the component can declare a tol
 
 The ladder trades at most 10% of a direction's limit, so on its own it passes a limit ten times too
 high. Strict mode also tests the limit itself, per direction, after the `int128` cap the runner
-applies for execution. Every direction of every expected component declares the kind of limit
-`get_limits` reports, unless the component skips simulation. A `limits` value is one declaration for every direction, or a map from
+applies for execution. A strict package declares a package-level default, the kind of limit
+`get_limits` reports for every pool of the protocol, since `full` and the cluster test check pools
+no test lists against it. A `limits` value is one declaration for every direction, or a map from
 directions to declarations, keyed `0x<token in>->0x<token out>`, with an optional `default` for the
-directions it does not list. A package declares limits for all its components, and a component can
-override them:
+directions it does not list (the package's map must have one). A component can override the
+package's declarations:
 
 ```yaml
 harness: strict
@@ -299,9 +300,9 @@ Legacy mode reads the declarations but runs none of these checks.
 ### Execution tolerance
 
 An execution matches its simulation when the executed amount out is within the tolerance: a number
-of basis points of the executed amount, a number of base units of the token out, or either. Legacy mode allows 0.5% for every package. In `range`, strict mode
-requires an exact match (`full` reads neither `harness` nor `execution_tolerance`, and allows 0.5%
-for every package): a simulation that ports the venue's math, or runs its bytecode, should not differ by
+of basis points of the executed amount, a number of base units of the token out, or either. Legacy
+mode allows 0.5% for every package. Strict mode, in `range` and in `full`, requires an exact match:
+a simulation that ports the venue's math, or runs its bytecode, should not differ by
 a wei, and 0.5% hides rounding and fee bugs. Where exact is out of reach, the package declares a
 tolerance, with why and what a run measured:
 
@@ -333,6 +334,30 @@ over- or underquotes, since those are different defects. At least one of `bps` (
 `wei` (1 or more) is required, as are `cause` and `measured`, in both modes; legacy mode keeps
 0.5% whatever is declared. The report's `drift` gives the largest difference of each test, within
 tolerance or not, so `measured` can be checked against a run.
+
+### Full mode
+
+`full` indexes from the protocol's start block and then tests every update the stream delivers,
+for every pool of the protocol, not only the expected components. A legacy package runs the ladder
+and executes its quotes within 0.5%, logs whatever fails, and keeps going.
+
+A strict package runs, on every update:
+
+- the ladder (`sim.ladder`) and its executions (`exec.ladder`), within the package's tolerance;
+- the limit checks (`limits.at_limit`, `limits.past_limit`, `limits.max_output`) on every
+  direction: an expected component's own `limits`, or else the package's. A strict package
+  declares a package-level `limits` default, so a pool the tests do not list is checked against
+  it. Declare as the default the kind that holds for every pool of the protocol: a component's own
+  `limits` covers only that listed pool, and an unlisted pool like it is checked against the
+  default.
+
+Skips do not apply: a skip covers one test's range, and `full` has none. A failed check does not
+stop the run. Each update with a failed check is logged, naming the block, the checks and their
+reasons, with a running count of the updates that failed so far, and `full --report <path>`
+appends that update's checks to the file as one line of JSON, in the report format below, each
+result with its `block`. The file is emptied when the run starts. A block the node does not serve
+is logged, and that update is judged from the simulation alone; executions that cannot be
+simulated fail the checks that need them, with the reason.
 
 ### Test report
 
@@ -411,8 +436,8 @@ docker compose down
 
 By default this runs `range` tests. To run the `full` test (continuous sync from the initial block
 to the chain tip) set `MODE=full`. In full mode the optional `=` suffix is the start block
-(`--initial-block`). Full mode never exits, so omit `--abort-on-container-exit` and tear down
-manually:
+(`--initial-block`). Full mode never exits on its own, in either mode, so omit
+`--abort-on-container-exit` and tear down manually:
 
 ```bash
 export MODE=full

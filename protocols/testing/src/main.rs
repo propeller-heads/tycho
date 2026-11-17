@@ -44,11 +44,17 @@ pub struct FullTestCommand {
     /// protocol's substreams configuration.
     #[arg(long)]
     initial_block: Option<u64>,
+
+    /// In strict mode, write the checks of every update with a failed check to this file, one line
+    /// of JSON per update
+    #[arg(long)]
+    report: Option<PathBuf>,
 }
 
 impl FullTestCommand {
     fn run(self) -> miette::Result<()> {
-        let test_type = TestType::Full(TestTypeFull { initial_block: self.initial_block });
+        let test_type =
+            TestType::Full(TestTypeFull { initial_block: self.initial_block, report: self.report });
         TestRunner::new(
             self.common_args
                 .into_config(test_type)?,
