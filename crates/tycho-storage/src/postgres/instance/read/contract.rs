@@ -399,7 +399,7 @@ async fn history_account_balance_rows(
 mod tests {
     use std::collections::HashMap;
 
-    use chrono::{NaiveDate, NaiveDateTime};
+    use chrono::{Duration, NaiveDate, NaiveDateTime, Utc};
     use diesel_async::AsyncPgConnection;
     use tycho_common::{
         models::{
@@ -450,6 +450,13 @@ mod tests {
         NaiveDate::from_ymd_opt(2020, 1, d)
             .and_then(|date| date.and_hms_opt(0, 0, 0))
             .expect("a valid date")
+    }
+
+    /// Midnight UTC of the day `d` days after the day 10 days ago: inside the default retention.
+    fn recent(d: i64) -> NaiveDateTime {
+        (Utc::now().date_naive() - Duration::days(10 - d))
+            .and_hms_opt(0, 0, 0)
+            .expect("a valid time")
     }
 
     fn at(ts: NaiveDateTime) -> Version {
@@ -604,15 +611,101 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_account_balances_before_head_are_unsupported() {
+    async fn test_account_balances_before_retention_are_unsupported() {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         account_with_balances(&mut conn, s.curve, "0xaa", "0x01", "0x05").await;
-        db_fixtures::set_instance_head(&mut conn, s.curve, day(2)).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
 
-        let result = balances(&s.gateway, &mut conn, "vm:curve", true, Some(&at(day(1)))).await;
+        let result = balances(
+            &s.gateway,
+            &mut conn,
+            "vm:curve",
+            true,
+            Some(&at(recent(5) - Duration::days(40))),
+        )
+        .await;
 
-        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+        let Err(StorageError::Unsupported(msg)) = result else {
+            panic!("expected Unsupported, got {result:?}");
+        };
+        assert!(msg.contains("retention"), "{msg}");
+    }
+
+    /// Inserts a version of the balance of `token` in an account of curve.
+    async fn balance_version(
+        conn: &mut AsyncPgConnection,
+        s: &Setup,
+        account: i64,
+        token: Address,
+        value: &str,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        db_fixtures::insert_instance_account_balance_version(
+            conn,
+            s.curve,
+            account,
+            token,
+            b(value),
+            valid_from,
+            valid_to,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_account_balances_at_a_past_version() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id = db_fixtures::insert_instance_account(&mut conn, s.curve, b("0xaa")).await;
+        db_fixtures::insert_instance_account_balance(&mut conn, s.curve, id, eth(), b("0x01"))
+            .await;
+        balance_version(&mut conn, &s, id, b("0x02"), "0x04", recent(1), Some(recent(3))).await;
+        balance_version(&mut conn, &s, id, b("0x02"), "0x05", recent(3), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for (ts, token_balance) in [(recent(2), "0x04"), (recent(4), "0x05")] {
+            let result = balances(&s.gateway, &mut conn, "vm:curve", true, Some(&at(ts)))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                result,
+                [(
+                    b("0xaa"),
+                    [balance("0xaa", eth(), "0x01"), balance("0xaa", b("0x02"), token_balance)]
+                        .into()
+                )]
+                .into(),
+                "{ts}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_account_balances_at_a_past_version_skip_other_instances() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id = db_fixtures::insert_instance_account(&mut conn, s.curve, b("0xaa")).await;
+        balance_version(&mut conn, &s, id, b("0x02"), "0x04", recent(1), Some(recent(3))).await;
+        db_fixtures::insert_instance_account_balance_version(
+            &mut conn,
+            s.uniswap_v4,
+            id,
+            b("0x02"),
+            b("0x06"),
+            recent(1),
+            Some(recent(3)),
+        )
+        .await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = balances(&s.gateway, &mut conn, "vm:curve", true, Some(&at(recent(2))))
+            .await
+            .unwrap();
+
+        assert_eq!(result, [(b("0xaa"), [balance("0xaa", b("0x02"), "0x04")].into())].into());
     }
 
     /// Inserts an account at `address` with the code `code`, code hash `0xc1`, code tx `0xc2`, the
