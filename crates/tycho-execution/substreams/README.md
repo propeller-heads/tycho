@@ -364,6 +364,14 @@ a second time fails on the `TEXT PRIMARY KEY` and takes the container down. So w
 restarts below its previous cursor, delete that chain's rows in the range that will be re-read —
 in practice, all of them.
 
+### Changing a table
+
+`setup` applies `schema.sql`, which only creates a table it does not find, so a new column or
+index never reaches a database that already exists. Add it to `schema.sql` and, as an idempotent
+`ADD COLUMN IF NOT EXISTS` or `CREATE INDEX IF NOT EXISTS`, to `migrate_schema.sql`. Every sink and
+the pricer apply the migration on start, before `views.sql`, so the views can read the column on
+any database. A table change never goes in `views.sql`.
+
 ### Procedure
 
 1. Merge the change, release the packages (see "Releasing a package") and pin the new keys for
