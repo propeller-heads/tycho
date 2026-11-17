@@ -4,6 +4,8 @@
 //! returns what it found. Where the blocks come from, which components are checked and where the
 //! results go is each runner's own; protocol-testing, for one, writes a JSON report.
 
+pub mod execution;
+pub mod limits;
 pub mod outcome;
 pub mod sheet;
 pub mod tvl_only;

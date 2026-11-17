@@ -15,7 +15,7 @@
 
 use num_bigint::BigUint;
 
-use crate::{config::Limits, report::CheckId};
+use crate::{checks::outcome::CheckId, expectations::Limits};
 
 /// A quote: what `get_amount_out` returns, without the new state.
 #[derive(Debug, Clone, PartialEq, Eq)]

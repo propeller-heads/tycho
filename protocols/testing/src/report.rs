@@ -10,35 +10,15 @@ use std::path::Path;
 use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, WrapErr};
 use num_bigint::{BigInt, BigUint};
-use num_rational::BigRational;
-use num_traits::{Signed, ToPrimitive, Zero};
+use num_traits::Signed;
 use serde::Serialize;
 use tracing::error;
-pub use tycho_test::checks::outcome::{CheckId, CheckResult, LimitReport, Outcome};
+pub use tycho_test::checks::{
+    execution::drift,
+    outcome::{CheckId, CheckResult, LimitReport, Outcome},
+};
 
-use crate::config::{DeclaredBy, Harness, Limits};
-
-/// The [`LimitReport`] of a direction checked against `limits`, declared by `declared_by`.
-/// `sizes` is `get_limits`' max input and max output, when the direction was quoted.
-pub fn limit_report(
-    limits: &Limits,
-    declared_by: DeclaredBy,
-    sizes: Option<(&BigUint, &BigUint)>,
-    capped: bool,
-) -> LimitReport {
-    LimitReport {
-        kind: limits.kind().to_string(),
-        reason: limits.reason().map(str::to_string),
-        rounding: match limits {
-            Limits::Hard { rounding } => Some(*rounding),
-            Limits::Soft { .. } | Limits::UnderCap { .. } => None,
-        },
-        declared_by: declared_by.as_str().to_string(),
-        max_input: sizes.map(|(max_input, _)| max_input.to_string()),
-        max_output: sizes.map(|(_, max_output)| max_output.to_string()),
-        capped,
-    }
-}
+use crate::config::Harness;
 
 /// The largest difference between a simulated and an executed amount out in one test, whether or
 /// not it was within tolerance. A declared tolerance's `measured` can be checked against it.
@@ -57,18 +37,6 @@ pub struct Drift {
     pub largest_difference: String,
     /// The token out `largest_difference` is in.
     pub largest_difference_token: String,
-}
-
-/// `executed - simulated`, and that difference in basis points of `executed`. `None` for a zero
-/// executed amount, which no relative difference can be expressed against.
-pub fn drift(simulated: &BigUint, executed: &BigUint) -> Option<(BigInt, f64)> {
-    if executed.is_zero() {
-        return None;
-    }
-    let executed = BigInt::from(executed.clone());
-    let difference = &executed - BigInt::from(simulated.clone());
-    let bps = BigRational::new(&difference * 10_000, executed).to_f64()?;
-    Some((difference, bps))
 }
 
 /// The execution furthest off in relative terms so far, before it becomes a [`Drift`].
@@ -336,9 +304,10 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{DeclaredBy, Limits};
 
     fn limit() -> LimitReport {
-        limit_report(&Limits::Hard { rounding: 0 }, DeclaredBy::Component, None, false)
+        LimitReport::new(&Limits::Hard { rounding: 0 }, DeclaredBy::Component, None, false)
     }
 
     fn failing() -> miette::Result<()> {
@@ -447,7 +416,7 @@ mod tests {
                     component: Some("0x01".to_string()),
                     direction: Some("0x02->0x03".to_string()),
                     outcome: Outcome::Skipped { reason: "off".to_string() },
-                    limit: Some(limit_report(
+                    limit: Some(LimitReport::new(
                         &Limits::Soft { reason: "constant product".to_string() },
                         DeclaredBy::PackageDefault,
                         Some((&BigUint::from(1000u32), &BigUint::from(2000u32))),

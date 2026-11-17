@@ -2,7 +2,6 @@ mod adapter_builder;
 mod balances;
 mod config;
 mod execution;
-mod limits;
 mod report;
 mod rpc;
 mod state_registry;
@@ -215,8 +214,12 @@ fn main() -> miette::Result<()> {
         Err(e) => return Err(miette::miette!("Failed to load .env file: {e}")),
     }
 
+    // The checks protocol-testing runs from tycho-test log their failures under `tycho_test`, so
+    // the default shows both.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("protocol_testing=info,tycho_test=info"));
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(filter)
         .with_target(false)
         .init();
 

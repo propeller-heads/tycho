@@ -3,7 +3,10 @@
 
 use std::fmt;
 
+use num_bigint::BigUint;
 use serde::Serialize;
+
+use crate::expectations::{DeclaredBy, Limits};
 
 /// A check, named by [`CheckId::as_str`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,4 +132,28 @@ pub struct LimitReport {
     pub max_output: Option<String>,
     /// Whether the `int128` cap replaced a larger limit.
     pub capped: bool,
+}
+
+impl LimitReport {
+    /// The report of a direction checked against `limits`, declared by `declared_by`. `sizes` is
+    /// `get_limits`' max input and max output, when the direction was quoted.
+    pub fn new(
+        limits: &Limits,
+        declared_by: DeclaredBy,
+        sizes: Option<(&BigUint, &BigUint)>,
+        capped: bool,
+    ) -> Self {
+        Self {
+            kind: limits.kind().to_string(),
+            reason: limits.reason().map(str::to_string),
+            rounding: match limits {
+                Limits::Hard { rounding } => Some(*rounding),
+                Limits::Soft { .. } | Limits::UnderCap { .. } => None,
+            },
+            declared_by: declared_by.as_str().to_string(),
+            max_input: sizes.map(|(max_input, _)| max_input.to_string()),
+            max_output: sizes.map(|(_, max_output)| max_output.to_string()),
+            capped,
+        }
+    }
 }
