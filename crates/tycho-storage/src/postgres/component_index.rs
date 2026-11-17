@@ -716,6 +716,23 @@ mod test {
         assert!(above(system_8, 50.0).is_empty());
     }
 
+    #[test]
+    fn test_system_apply_tvl_skips_other_ids() {
+        let mut system = system(&[(2, None), (4, None)]);
+
+        system.apply_tvl(&[
+            tvl_row(1, 9.0),
+            tvl_row(2, 2.0),
+            tvl_row(3, 9.0),
+            tvl_row(4, 4.0),
+            tvl_row(5, 9.0),
+        ]);
+
+        assert_eq!(above(&system, f64::MIN), vec![2, 4]);
+        assert_eq!(above(&system, 3.0), vec![4]);
+        assert!(above(&system, 5.0).is_empty());
+    }
+
     fn index_with(rows: &[(i64, i64)]) -> ComponentIndex {
         let mut sorted: Vec<(i64, i64)> = rows
             .iter()
