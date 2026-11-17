@@ -492,16 +492,21 @@ async fn load_instance_tvl(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use diesel::{
         sql_query,
-        sql_types::{BigInt, Int4, Text},
+        sql_types::{BigInt, Double, Int4, Text},
     };
     use diesel_async::{AsyncPgConnection, RunQueryDsl};
 
     use super::ComponentIndex;
     use crate::postgres::{
         db_fixtures,
-        instance::{cache::component_page::ComponentPage, InstanceId},
+        instance::{
+            cache::component_page::{ComponentPage, RefreshOutcome},
+            InstanceId,
+        },
         testing::instance_test_connection,
     };
 
@@ -547,6 +552,55 @@ mod tests {
         .execute(conn)
         .await
         .expect("inserting the component failed");
+    }
+
+    /// Writes the TVL of a component with a `modified_ts` one hour after the transaction start, so
+    /// the row is newer than every row a load in the same test transaction read.
+    async fn set_tvl_later(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        tvl: f64,
+    ) {
+        sql_query(
+            "DELETE FROM tycho.component_tvl WHERE instance_id = $1 AND protocol_component_id = $2",
+        )
+        .bind::<Int4, _>(instance_id)
+        .bind::<BigInt, _>(component_id)
+        .execute(conn)
+        .await
+        .expect("deleting the component TVL failed");
+        sql_query(
+            "INSERT INTO tycho.component_tvl
+                 (instance_id, protocol_component_id, tvl, modified_ts)
+             VALUES ($1, $2, $3, now() + interval '1 hour')",
+        )
+        .bind::<Int4, _>(instance_id)
+        .bind::<BigInt, _>(component_id)
+        .bind::<Double, _>(tvl)
+        .execute(conn)
+        .await
+        .expect("inserting the component TVL failed");
+    }
+
+    /// Deletes a component and its token links.
+    async fn delete_component(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+    ) {
+        for statement in [
+            "DELETE FROM tycho.protocol_component_holds_token
+             WHERE instance_id = $1 AND protocol_component_id = $2",
+            "DELETE FROM tycho.protocol_component WHERE instance_id = $1 AND id = $2",
+        ] {
+            sql_query(statement)
+                .bind::<Int4, _>(instance_id)
+                .bind::<BigInt, _>(component_id)
+                .execute(conn)
+                .await
+                .expect("deleting the component failed");
+        }
     }
 
     fn page(ids: &[i64], total: i64) -> ComponentPage {
@@ -618,5 +672,113 @@ mod tests {
 
         assert_eq!(index.query(s.curve, None, None), Ok(Some(page(&[a], 1))));
         assert_eq!(index.query(s.inactive, None, None), Ok(None));
+    }
+
+    #[tokio::test]
+    async fn test_poll_adds_new_components_to_their_unit() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[]).await;
+        let b = db_fixtures::insert_instance_component(&mut conn, s.curve, "b", &[]).await;
+        let index = ComponentIndex::load(&mut conn)
+            .await
+            .expect("load failed");
+        let c = db_fixtures::insert_instance_component(&mut conn, s.curve, "c", &[]).await;
+        db_fixtures::insert_instance_component(&mut conn, s.inactive, "y", &[]).await;
+
+        let outcome = index
+            .refresh(Duration::MAX, &mut conn)
+            .await
+            .expect("refresh failed");
+
+        assert_eq!(outcome, RefreshOutcome::TvlUnchanged);
+        assert_eq!(index.query(s.curve, None, None), Ok(Some(page(&[a, b, c], 3))));
+        assert_eq!(index.query(s.inactive, None, None), Ok(None));
+    }
+
+    #[tokio::test]
+    async fn test_poll_applies_tvl_to_the_unit_of_its_instance() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        insert_component_with_id(&mut conn, s.curve, 1, "a").await;
+        insert_component_with_id(&mut conn, s.uniswap_v4, 1, "u").await;
+        db_fixtures::insert_instance_tvl(&mut conn, s.curve, 1, 10.0).await;
+        db_fixtures::insert_instance_tvl(&mut conn, s.uniswap_v4, 1, 0.0).await;
+        let x = db_fixtures::insert_instance_component(&mut conn, s.inactive, "x", &[]).await;
+        let index = ComponentIndex::load(&mut conn)
+            .await
+            .expect("load failed");
+        set_tvl_later(&mut conn, s.curve, 1, 50.0).await;
+        set_tvl_later(&mut conn, s.uniswap_v4, 1, 2.0).await;
+        set_tvl_later(&mut conn, s.inactive, x, 50.0).await;
+
+        let outcome = index
+            .refresh(Duration::MAX, &mut conn)
+            .await
+            .expect("refresh failed");
+
+        assert_eq!(outcome, RefreshOutcome::TvlDelta { n_rows: 2 });
+        assert_eq!(index.query(s.curve, Some(40.0), None), Ok(Some(page(&[1], 1))));
+        assert_eq!(index.query(s.uniswap_v4, Some(40.0), None), Ok(Some(page(&[], 0))));
+        assert_eq!(index.query(s.uniswap_v4, Some(1.0), None), Ok(Some(page(&[1], 1))));
+    }
+
+    #[tokio::test]
+    async fn test_refresh_reloads_after_the_interval() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[]).await;
+        let b = db_fixtures::insert_instance_component(&mut conn, s.curve, "b", &[]).await;
+        let index = ComponentIndex::load(&mut conn)
+            .await
+            .expect("load failed");
+        delete_component(&mut conn, s.curve, b).await;
+
+        let outcome = index
+            .refresh(Duration::ZERO, &mut conn)
+            .await
+            .expect("refresh failed");
+
+        assert_eq!(outcome, RefreshOutcome::FullReload { n_components: 1 });
+        assert_eq!(index.query(s.curve, None, None), Ok(Some(page(&[a], 1))));
+    }
+
+    #[tokio::test]
+    async fn test_poll_applies_tvl_to_a_new_component() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[]).await;
+        let index = ComponentIndex::load(&mut conn)
+            .await
+            .expect("load failed");
+        let c = db_fixtures::insert_instance_component(&mut conn, s.curve, "c", &[]).await;
+        set_tvl_later(&mut conn, s.curve, c, 50.0).await;
+
+        index
+            .refresh(Duration::MAX, &mut conn)
+            .await
+            .expect("refresh failed");
+
+        assert_eq!(index.query(s.curve, Some(40.0), None), Ok(Some(page(&[c], 1))));
+    }
+
+    #[tokio::test]
+    async fn test_full_reload_picks_up_a_moved_pointer() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[]).await;
+        let x = db_fixtures::insert_instance_component(&mut conn, s.inactive, "x", &[]).await;
+        let index = ComponentIndex::load(&mut conn)
+            .await
+            .expect("load failed");
+        db_fixtures::set_active_instance(&mut conn, s.curve_system_id, Some(s.inactive)).await;
+
+        index
+            .refresh(Duration::ZERO, &mut conn)
+            .await
+            .expect("refresh failed");
+
+        assert_eq!(index.query(s.inactive, None, None), Ok(Some(page(&[x], 1))));
+        assert_eq!(index.query(s.curve, None, None), Ok(None));
     }
 }
