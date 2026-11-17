@@ -280,7 +280,7 @@ mod tests {
     use diesel::prelude::*;
     use diesel_async::{AsyncPgConnection, RunQueryDsl};
     use tycho_common::{
-        models::{protocol::QualityRange, Address, Chain, PaginationParams},
+        models::{protocol::QualityRange, token::Token, Address, Chain, PaginationParams},
         storage::StorageError,
     };
 
@@ -299,6 +299,7 @@ mod tests {
     const D: &str = "0x00000000000000000000000000000000000000d1";
     const UNKNOWN: &str = "0x00000000000000000000000000000000000000dd";
     const NO_ROW: &str = "0x00000000000000000000000000000000000000ee";
+    const E: &str = "0x00000000000000000000000000000000000000e1";
 
     fn day(d: u32) -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2020, 1, d)
@@ -498,5 +499,103 @@ mod tests {
             matches!(&result, Err(StorageError::NotFound(entity, _)) if entity == "Chain"),
             "{result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_trade_of_an_instance_without_a_unit_changes_nothing() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        token(&mut conn, s.chain_id, C, "C", 100).await;
+        let cache = load(&mut conn).await;
+
+        cache.update_last_traded(s.inactive, [(&b(C), day(9))].into_iter());
+        let result = cache
+            .query_tokens(&traded_after(day(8)))
+            .unwrap();
+
+        assert_eq!(addresses(&result.entity), Vec::<Address>::new());
+    }
+
+    #[tokio::test]
+    async fn test_trade_of_a_unit_marks_the_token() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        token(&mut conn, s.chain_id, C, "C", 100).await;
+        let cache = load(&mut conn).await;
+
+        cache.update_last_traded(s.active, [(&b(C), day(9))].into_iter());
+        let result = cache
+            .query_tokens(&traded_after(day(8)))
+            .unwrap();
+
+        assert_eq!(addresses(&result.entity), vec![b(C)]);
+    }
+
+    #[tokio::test]
+    async fn test_trade_keeps_the_newest_time() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        token(&mut conn, s.chain_id, A, "A", 100).await;
+        trade(&mut conn, s.active, "curve_pool", A, day(4)).await;
+        let cache = load(&mut conn).await;
+
+        cache.update_last_traded(s.active, [(&b(A), day(2))].into_iter());
+        let result = cache
+            .query_tokens(&traded_after(day(3)))
+            .unwrap();
+
+        assert_eq!(addresses(&result.entity), vec![b(A)]);
+    }
+
+    #[tokio::test]
+    async fn test_trade_of_an_unknown_token_is_ignored() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        token(&mut conn, s.chain_id, A, "A", 100).await;
+        let cache = load(&mut conn).await;
+        let all = TokenQuery { last_traded_ts_threshold: None, ..traded_after(day(1)) };
+        let before = cache.query_tokens(&all).unwrap();
+
+        cache.update_last_traded(s.active, [(&b(NO_ROW), day(9))].into_iter());
+        let after = cache.query_tokens(&all).unwrap();
+
+        assert_eq!(before.entity, after.entity);
+        assert_eq!(before.total, after.total);
+    }
+
+    #[tokio::test]
+    async fn test_add_keeps_and_upsert_replaces() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        token(&mut conn, s.chain_id, A, "A", 100).await;
+        let cache = load(&mut conn).await;
+        let all = TokenQuery { last_traded_ts_threshold: None, ..traded_after(day(1)) };
+        let at_zero = Token::new(&b(A), "A", 18, 0, &[], Chain::Ethereum, 0);
+
+        cache
+            .add_tokens(&[
+                at_zero.clone(),
+                Token::new(&b(E), "E", 18, 0, &[], Chain::Ethereum, 100),
+            ])
+            .unwrap();
+        let kept = cache.query_tokens(&all).unwrap();
+        assert_eq!(
+            kept.entity
+                .iter()
+                .find(|t| t.address == b(A))
+                .unwrap()
+                .quality,
+            100
+        );
+        assert!(addresses(&kept.entity).contains(&b(E)));
+
+        cache.upsert_tokens(&[at_zero]).unwrap();
+        let replaced = cache
+            .query_tokens(&TokenQuery {
+                quality_range: QualityRange { min: None, max: Some(0) },
+                ..all
+            })
+            .unwrap();
+        assert_eq!(addresses(&replaced.entity), vec![b(A)]);
     }
 }
