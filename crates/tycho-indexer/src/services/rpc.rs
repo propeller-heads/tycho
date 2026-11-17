@@ -9,6 +9,7 @@ use anyhow::Error;
 use chrono::{Duration, Utc};
 use diesel_async::pooled_connection::deadpool;
 use thiserror::Error;
+use tokio::sync::watch;
 use tracing::{debug, error, info, instrument, trace, warn};
 use tycho_common::{
     dto::{self, PaginationResponse},
@@ -102,6 +103,21 @@ impl ResponseError for RpcError {
             RpcError::Unknown(e) => HttpResponse::InternalServerError().body(e.to_string()),
             RpcError::PlanRestrictionViolation(e) => HttpResponse::BadRequest().body(e.to_owned()),
         }
+    }
+}
+
+/// Clears `handler`'s pause-dependent response caches each time `changes` is notified, until its
+/// sender is dropped. Several changes that arrive during one clear trigger a single further clear.
+pub async fn clear_caches_on_pause_change<G, T>(
+    handler: web::Data<RpcHandler<G, T>>,
+    mut changes: watch::Receiver<()>,
+) where
+    G: Gateway,
+    T: EntryPointTracer + Sync,
+{
+    while changes.changed().await.is_ok() {
+        debug!("Admin pauses changed; clearing the pause-dependent response caches");
+        handler.clear_pause_dependent_caches();
     }
 }
 
@@ -208,6 +224,12 @@ where
             }
         }
         self
+    }
+
+    /// Drops the cached `/protocol_components` and `/protocol_state` responses.
+    pub(crate) fn clear_pause_dependent_caches(&self) {
+        self.component_cache.clear();
+        self.protocol_state_cache.clear();
     }
 
     /// Sets which path answers the state endpoints.
