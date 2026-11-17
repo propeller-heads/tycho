@@ -206,7 +206,7 @@ mod tests {
 
     use super::*;
     use crate::evm::protocol::uniswap_v4::{
-        hooks::models::{BalanceDelta, StateContext},
+        hooks::models::{BalanceDelta, PoolAfterSwap, StateContext},
         state::UniswapV4Fees,
     };
 
@@ -314,9 +314,7 @@ mod tests {
                 I128::try_from(128499868287523768i128).unwrap(),
             ),
             hook_data: Bytes::new(),
-            sqrt_price_after_swap: U256::ZERO,
-            tick_after_swap: 0,
-            liquidity_after_swap: 0,
+            pool_after_swap: PoolAfterSwap::default(),
         };
 
         let result = handler

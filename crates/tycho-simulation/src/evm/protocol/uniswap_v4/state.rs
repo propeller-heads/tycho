@@ -30,11 +30,12 @@ use crate::{
                 hook_handler::HookHandler,
                 models::{
                     AfterSwapParameters, BalanceDelta, BeforeSwapDelta, BeforeSwapParameters,
-                    StateContext, SwapParams,
+                    PoolAfterSwap, StateContext, SwapFeeAccrual, SwapParams,
                 },
             },
             utils::{
                 add_fee_markup,
+                solidity_math::mul_div,
                 uniswap::{
                     i24_be_bytes_to_i32, liquidity_math,
                     lp_fee::{self, is_dynamic},
@@ -49,7 +50,7 @@ use crate::{
                         get_sqrt_ratio_at_tick_cached, MAX_SQRT_RATIO, MAX_TICK, MIN_SQRT_RATIO,
                         MIN_TICK,
                     },
-                    StepComputation, SwapResults, SwapState,
+                    StepComputation, SwapResults, SwapState, FEE_PIPS_DENOMINATOR,
                 },
             },
             vm::constants::EXTERNAL_ACCOUNT,
@@ -318,12 +319,15 @@ impl UniswapV4State {
         state
     }
 
+    /// Swaps natively. With `fee_accrual`, also records the fees the swap accrues the way
+    /// `Pool.swap` accounts them, which needs every step, so the step cache is not used.
     fn swap(
         &self,
         zero_for_one: bool,
         amount_specified: I256,
         sqrt_price_limit: Option<U256>,
         lp_fee_override: Option<u32>,
+        mut fee_accrual: Option<&mut SwapFeeAccrual>,
     ) -> Result<SwapResults, SimulationError> {
         if amount_specified == I256::ZERO {
             return Ok(SwapResults {
@@ -373,7 +377,11 @@ impl UniswapV4State {
         // Only exact-input swaps with no price limit use the step cache. The cache finds a step by
         // its input, which an exact-output swap does not know. A cached step can also lie past a
         // price limit.
-        let cache_key = if exact_input && sqrt_price_limit.is_none() && lp_fee_override.is_none() {
+        let cache_key = if exact_input &&
+            sqrt_price_limit.is_none() &&
+            lp_fee_override.is_none() &&
+            fee_accrual.is_none()
+        {
             let fee_pips = self
                 .fees
                 .calculate_swap_fees_pips(zero_for_one, None)?;
@@ -440,14 +448,12 @@ impl UniswapV4State {
                 .calculate_swap_fees_pips(zero_for_one, lp_fee_override)?;
 
             let sqrt_price_start = state.sqrt_price;
+            let sqrt_price_target =
+                UniswapV4State::get_sqrt_ratio_target(sqrt_price_next, price_limit, zero_for_one);
             let SwapStepResult { sqrt_price, amount_in_with_fee, amount_out } =
                 swap_math::compute_swap_step(
                     state.sqrt_price,
-                    UniswapV4State::get_sqrt_ratio_target(
-                        sqrt_price_next,
-                        price_limit,
-                        zero_for_one,
-                    ),
+                    sqrt_price_target,
                     state.liquidity,
                     // The core univ4 swap logic assumes that if the amount is > 0 it's exact in,
                     // and if it's < 0 it's exact out. The compute_swap_step
@@ -476,6 +482,19 @@ impl UniswapV4State {
                 state.amount_calculated +=
                     I256::checked_from_sign_and_abs(Sign::Positive, step.amount_in_with_fee)
                         .unwrap();
+            }
+            if let Some(accrual) = fee_accrual.as_deref_mut() {
+                let stopped_short = exact_input && state.sqrt_price != sqrt_price_target;
+                let fee =
+                    step_fee(&step, state.sqrt_price, state.liquidity, stopped_short, fee_pips)?;
+                let protocol_fee =
+                    if zero_for_one { self.fees.zero_for_one } else { self.fees.one_for_zero };
+                accrue_step_fee(accrual, &step, fee, (fee_pips, protocol_fee), state.liquidity);
+                if state.sqrt_price == step.sqrt_price_next && next_tick_info.is_some() {
+                    accrual
+                        .crossed_ticks
+                        .push((step.tick_next, accrual.fee_growth));
+                }
             }
             if state.sqrt_price == step.sqrt_price_next {
                 if let Some(info) = next_tick_info {
@@ -643,6 +662,63 @@ impl UniswapV4State {
         }
 
         Ok(Some(rate))
+    }
+}
+
+/// The fee of a swap step as v4-core's `SwapMath.computeSwapStep` splits it from the step's input:
+/// what remains above the input less fee when an exact-input step stops short of its target,
+/// otherwise the input with fee less the input the price move needs. v3 splits a short step
+/// differently, so this is not in the shared swap math.
+fn step_fee(
+    step: &StepComputation,
+    sqrt_price_end: U256,
+    liquidity: u128,
+    stopped_short: bool,
+    fee_pips: u32,
+) -> Result<U256, SimulationError> {
+    if stopped_short {
+        let less_fee = mul_div(
+            step.amount_in_with_fee,
+            U256::from(FEE_PIPS_DENOMINATOR - fee_pips),
+            U256::from(FEE_PIPS_DENOMINATOR),
+        )?;
+        return safe_sub_u256(step.amount_in_with_fee, less_fee);
+    }
+    let amount_in = if sqrt_price_end <= step.sqrt_price_start {
+        get_amount0_delta(sqrt_price_end, step.sqrt_price_start, liquidity, true)?
+    } else {
+        get_amount1_delta(step.sqrt_price_start, sqrt_price_end, liquidity, true)?
+    };
+    safe_sub_u256(step.amount_in_with_fee, amount_in)
+}
+
+/// Adds a step's fee to `accrual` as `Pool.swap` does: the protocol takes its share of the step's
+/// input first, and the rest grows the fee per unit of liquidity. `fee_pips` is (swap fee,
+/// protocol fee). The arithmetic wraps where `Pool.swap`'s is unchecked.
+fn accrue_step_fee(
+    accrual: &mut SwapFeeAccrual,
+    step: &StepComputation,
+    fee: U256,
+    (swap_fee, protocol_fee): (u32, u32),
+    liquidity: u128,
+) {
+    let mut lp_fee = fee;
+    if protocol_fee > 0 {
+        let to_protocol = if swap_fee == protocol_fee {
+            fee
+        } else {
+            step.amount_in_with_fee
+                .wrapping_mul(U256::from(protocol_fee)) /
+                U256::from(FEE_PIPS_DENOMINATOR)
+        };
+        lp_fee = lp_fee.wrapping_sub(to_protocol);
+        accrual.protocol_fee = accrual
+            .protocol_fee
+            .wrapping_add(to_protocol);
+    }
+    if liquidity > 0 {
+        let growth = lp_fee.wrapping_mul(U256::from(1) << 128) / U256::from(liquidity);
+        accrual.fee_growth = accrual.fee_growth.wrapping_add(growth);
     }
 }
 
@@ -860,7 +936,15 @@ impl ProtocolSim for UniswapV4State {
         }
 
         // Perform the swap with potential hook modifications
-        let result = self.swap(zero_for_one, amount_to_swap, None, lp_fee_override)?;
+        let mut fee_accrual = self
+            .hook
+            .as_ref()
+            .filter(|hook| {
+                hook.has_permission(HookOptions::AfterSwap) && hook.needs_swap_fee_accrual()
+            })
+            .map(|_| SwapFeeAccrual::default());
+        let result =
+            self.swap(zero_for_one, amount_to_swap, None, lp_fee_override, fee_accrual.as_mut())?;
 
         // Create BalanceDelta from swap result using the proper constructor
         let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
@@ -878,9 +962,12 @@ impl ProtocolSim for UniswapV4State {
                     swap_params,
                     delta: swap_delta,
                     hook_data: Bytes::new(),
-                    sqrt_price_after_swap: result.sqrt_price,
-                    tick_after_swap: result.tick.value(),
-                    liquidity_after_swap: result.liquidity,
+                    pool_after_swap: PoolAfterSwap {
+                        sqrt_price: result.sqrt_price,
+                        tick: result.tick.value(),
+                        liquidity: result.liquidity,
+                        fees: fee_accrual,
+                    },
                 };
 
                 let after_swap_result = hook
@@ -1225,7 +1312,13 @@ impl ProtocolSim for UniswapV4State {
                     fee_pips,
                     Sign::Negative, // V4 uses negative for exact input
                     |zero_for_one, amount_specified, sqrt_price_limit| {
-                        self.swap(zero_for_one, amount_specified, Some(sqrt_price_limit), None)
+                        self.swap(
+                            zero_for_one,
+                            amount_specified,
+                            Some(sqrt_price_limit),
+                            None,
+                            None,
+                        )
                     },
                 )?;
 
@@ -2240,6 +2333,220 @@ mod tests {
             .get_amount_out(BigUint::from(130_000_000_000_000_000u64), &eth(), &cbbtc)
             .expect_err("the hook rejects a sell that ends below its lower price bound");
         assert!(format!("{past_bound:?}").contains("ccb2e471"), "{past_bound:?}");
+    }
+
+    #[test]
+    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
+    fn test_generic_hook_modifying_its_position_after_a_tick_crossing() {
+        // VIBE/ETH pool 0x415829f72e9f54531c26eae76f107618540e898a45d6ae35959e143f5faca704. Its
+        // CappedBurnHook collects its position's fees in afterSwap, and the position starts at
+        // tick 75780, which this VIBE sell crosses. The hook reads that tick's fee growth
+        // outside, so it only quotes when the tick is crossed as on chain. The V4 quoter at this
+        // block returns 4706330068709201748 wei.
+        let block = BlockHeader {
+            number: 26435833,
+            hash: Bytes::from_str(
+                "0xa81315d4e295bbe52cbd461c6267e2a863fe265bb6277bfd1289e9e49309868f",
+            )
+            .unwrap(),
+            timestamp: 1794931367,
+            ..Default::default()
+        };
+        let mut state = UniswapV4State::new(
+            204008201760653912541,
+            U256::from_str("1939998867938438185707906760302").unwrap(),
+            UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 10000 },
+            63965,
+            60,
+            vec![
+                TickInfo::new(-887220, 204008201760653912541).unwrap(),
+                TickInfo::new(75780, 1539643993256027183732).unwrap(),
+                TickInfo::new(887220, -1743652195016681096273).unwrap(),
+            ],
+        )
+        .unwrap();
+        let db = SimulationDB::new(get_client(None).unwrap(), get_runtime().unwrap(), Some(block));
+        let hook_handler = GenericVMHookHandler::new(
+            Address::from_str("0xc6c965bd164c483e87d0b550671798e9a3602840").unwrap(),
+            create_engine(db, true).unwrap(),
+            Address::from_str("0x000000000004444c5dc75cb358380d2e3de08a90").unwrap(),
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            false,
+        )
+        .unwrap();
+        state.set_hook_handler(Box::new(hook_handler));
+        let vibe = Token::new(
+            &Bytes::from_str("0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7").unwrap(),
+            "VIBE",
+            18,
+            0,
+            &[Some(10_000)],
+            Default::default(),
+            100,
+        );
+
+        let out = state
+            .get_amount_out(BigUint::from_str("6067362436548989931004").unwrap(), &vibe, &eth())
+            .unwrap();
+
+        assert_eq!(out.amount, BigUint::from(4706330068709201748u64));
+    }
+
+    /// A mainnet swap that crossed one initialized tick, with the pool before it and the
+    /// PoolManager storage it changed.
+    struct RecordedSwap {
+        pool: UniswapV4State,
+        zero_for_one: bool,
+        amount_in: u128,
+        lp_fee_override: Option<u32>,
+        amount_out: u128,
+        sqrt_price_after: &'static str,
+        /// Fee growth of the input token, then of the other token, before the swap.
+        fee_growth_before: [&'static str; 2],
+        input_fee_growth_after: &'static str,
+        crossed_tick: i32,
+        /// The crossed tick's fee growth outside of token 0 and token 1, before and after.
+        outside_before: [&'static str; 2],
+        outside_after: [&'static str; 2],
+    }
+
+    fn word(hex: &str) -> U256 {
+        U256::from_str(hex).unwrap()
+    }
+
+    /// A 0.265 ETH sell on ETH/cbBTC pool
+    /// 0x8514479827d1884c2957e8015b2aed79c4422e89e44476a170a70101b5422203 in block 26399072 (tx
+    /// 0x45787888fc2dd109dd2ef1fe5df796d713b2b16a54f7e9db9ac5ab6c0e6bbf63; LP fee 750 from its
+    /// hook, no protocol fee).
+    fn eth_cbbtc_sell() -> RecordedSwap {
+        RecordedSwap {
+            pool: UniswapV4State::new(
+                287751570427245,
+                U256::from_str("131899408666490343900873").unwrap(),
+                UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 0x800000 },
+                -266130,
+                10,
+                vec![
+                    TickInfo::new(-266720, 3357011528574).unwrap(),
+                    TickInfo::new(-266570, 228824122692015).unwrap(),
+                    TickInfo::new(-266140, 55570436206656).unwrap(),
+                    TickInfo::new(-266000, -55570436206656).unwrap(),
+                    TickInfo::new(-265500, 545141848435037).unwrap(),
+                    TickInfo::new(-265310, -545141848435037).unwrap(),
+                    TickInfo::new(-264580, -228824122692015).unwrap(),
+                    TickInfo::new(-262670, -3357011528574).unwrap(),
+                ],
+            )
+            .unwrap(),
+            zero_for_one: true,
+            amount_in: 264876065113123394,
+            lp_fee_override: Some(750),
+            amount_out: 732337,
+            sqrt_price_after: "131666296751652001327224",
+            fee_growth_before: [
+                "0x19629d1724f23b6d2c61c11e60a272b85e5",
+                "0x3a52f6d24ef7e520358c6c315",
+            ],
+            input_fee_growth_after: "0x196f62884d7dd5cf55b66cc34f053fd5a90",
+            crossed_tick: -266140,
+            outside_before: [
+                "0x18efb0a967816426f502e0fcb9d9a5fb752",
+                "0x39290b807e5895d1952750e10",
+            ],
+            outside_after: ["0x76c2e71c314d924abdaf230d852dc02f6", "0x129eb51d09f4f4ea0651b505"],
+        }
+    }
+
+    /// A 2764 USDC buy of ETH on hookless ETH/USDC pool
+    /// 0x21c67e77068de97969ba93d4aab21826d33ca12bb9f565d8496e8fda8a82ca27 in block 26437415 (tx
+    /// 0x60c621c2fb33d1ba68c4c97c5d220429d145476480a778c03d74e4e92822b961; LP fee 500, protocol
+    /// fee 125 in each direction).
+    fn eth_usdc_buy() -> RecordedSwap {
+        RecordedSwap {
+            pool: UniswapV4State::new(
+                66420678841621718,
+                U256::from_str("3361698241084044207915833").unwrap(),
+                UniswapV4Fees { zero_for_one: 125, one_for_zero: 125, lp_fee: 500 },
+                -201363,
+                10,
+                vec![
+                    TickInfo::new(-201420, -97835694571045).unwrap(),
+                    TickInfo::new(-201390, 176714900096).unwrap(),
+                    TickInfo::new(-201380, 8353592860).unwrap(),
+                    TickInfo::new(-201370, 73942609341).unwrap(),
+                    TickInfo::new(-201360, 2730418515073443).unwrap(),
+                    TickInfo::new(-201320, 435352623583966).unwrap(),
+                    TickInfo::new(-201300, 504009147482).unwrap(),
+                    TickInfo::new(-201290, 10155954859657).unwrap(),
+                ],
+            )
+            .unwrap(),
+            zero_for_one: false,
+            amount_in: 2764077465,
+            lp_fee_override: None,
+            amount_out: 1532876437017993081,
+            sqrt_price_after: "3364882276308783914745758",
+            fee_growth_before: [
+                "0x37b83f84f010344b3399123c0005",
+                "0x553c6fce0c9399e3b3c305c0eaa1663b7dd",
+            ],
+            input_fee_growth_after: "0x37b855a07685a0ac94de1612b93f",
+            crossed_tick: -201360,
+            outside_before: [
+                "0x40128e35ef9624ac229cc071fb0efc170fb",
+                "0x2eae27c67e5dda447d95075b4582",
+            ],
+            outside_after: [
+                "0x1529e1981cfd75379126454eef926a246e2",
+                "0x90a1b1c1bad77adc18738181234",
+            ],
+        }
+    }
+
+    /// The fee accrual a swap records reproduces the PoolManager storage the same swap changed on
+    /// chain: the input token's fee growth and the crossed tick's flipped fee growth outside.
+    #[rstest]
+    #[case::sell_without_protocol_fee(eth_cbbtc_sell())]
+    #[case::buy_with_protocol_fee(eth_usdc_buy())]
+    fn test_swap_fee_accrual_matches_the_pool_managers_storage(#[case] swap: RecordedSwap) {
+        let mut accrual = SwapFeeAccrual::default();
+        let amount_specified = -I256::try_from(swap.amount_in).unwrap();
+
+        let result = swap
+            .pool
+            .swap(
+                swap.zero_for_one,
+                amount_specified,
+                None,
+                swap.lp_fee_override,
+                Some(&mut accrual),
+            )
+            .unwrap();
+
+        assert_eq!(result.amount_calculated.unsigned_abs(), U256::from(swap.amount_out));
+        assert_eq!(result.sqrt_price, word(swap.sqrt_price_after));
+        let [input_growth, other_growth] = swap.fee_growth_before.map(word);
+        assert_eq!(
+            input_growth.wrapping_add(accrual.fee_growth),
+            word(swap.input_fee_growth_after)
+        );
+        let [(tick, growth_at_cross)] = accrual.crossed_ticks[..] else {
+            panic!("the swap crosses one tick: {:?}", accrual.crossed_ticks);
+        };
+        assert_eq!(tick, swap.crossed_tick);
+        let input_global = input_growth.wrapping_add(growth_at_cross);
+        let globals = if swap.zero_for_one {
+            [input_global, other_growth]
+        } else {
+            [other_growth, input_global]
+        };
+        let [outside0, outside1] = swap.outside_before.map(word);
+        assert_eq!(
+            [globals[0].wrapping_sub(outside0), globals[1].wrapping_sub(outside1)],
+            swap.outside_after.map(word)
+        );
     }
 
     #[test]
@@ -3311,7 +3618,7 @@ mod tests {
 
     fn two_range_swap_gas(pool: &UniswapV4State) -> u64 {
         let amount = -I256::from_raw(U256::from(TWO_RANGE_SWAP_AMOUNT));
-        pool.swap(true, amount, None, None)
+        pool.swap(true, amount, None, None, None)
             .expect("the swap ends inside the outer range")
             .gas_used
             .to::<u64>()
@@ -3380,7 +3687,7 @@ mod tests {
         let amount = -I256::from_raw(U256::from(100_000_000_000_000_000u64));
 
         let result = pool
-            .swap(true, amount, None, None)
+            .swap(true, amount, None, None, None)
             .expect("swap should stay within the current liquidity range");
         let expected_tick =
             get_tick_at_sqrt_ratio(result.sqrt_price).expect("new sqrt price should map to a tick");
@@ -3398,7 +3705,7 @@ mod tests {
         let amount = -I256::from_raw(U256::from(1u64));
 
         let result = pool
-            .swap(true, amount, None, None)
+            .swap(true, amount, None, None, None)
             .expect("swap should consume the input as fee without moving price");
 
         assert_eq!(result.sqrt_price, pool.sqrt_price);
@@ -3788,19 +4095,19 @@ mod tests {
         let amount = -I256::from_raw(U256::from(1000u64)); // V4 uses negative for exact input
 
         // zero_for_one: price_limit equal to sqrt_price is invalid (must be strictly less)
-        let result = pool.swap(true, amount, Some(pool.sqrt_price), None);
+        let result = pool.swap(true, amount, Some(pool.sqrt_price), None, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
 
         // zero_for_one: price_limit at MIN_SQRT_RATIO is invalid (must be strictly greater)
-        let result = pool.swap(true, amount, Some(MIN_SQRT_RATIO), None);
+        let result = pool.swap(true, amount, Some(MIN_SQRT_RATIO), None, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
 
         // one_for_zero: price_limit equal to sqrt_price is invalid (must be strictly greater)
-        let result = pool.swap(false, amount, Some(pool.sqrt_price), None);
+        let result = pool.swap(false, amount, Some(pool.sqrt_price), None, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
 
         // one_for_zero: price_limit at MAX_SQRT_RATIO is invalid (must be strictly less)
-        let result = pool.swap(false, amount, Some(MAX_SQRT_RATIO), None);
+        let result = pool.swap(false, amount, Some(MAX_SQRT_RATIO), None, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
     }
 
@@ -3828,7 +4135,7 @@ mod tests {
 
         let amount = -I256::from_raw(U256::from(1000u64));
         // Default price limit for zero_for_one is MIN_SQRT_RATIO + 1 == sqrt_price, so invalid
-        let result = pool.swap(true, amount, None, None);
+        let result = pool.swap(true, amount, None, None, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
     }
 
