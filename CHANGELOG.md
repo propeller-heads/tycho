@@ -1,3 +1,67 @@
+## [0.525.0](https://github.com/propeller-heads/tycho/compare/0.524.0...0.525.0) (2026-11-16)
+
+
+### Features
+
+* **execution:** approve constructor executors without a timelock ([4441e10](https://github.com/propeller-heads/tycho/commit/4441e10ca6dc4bed32515aca0cba4ec924b086ea))
+* **execution:** deploy the router with the network's executors ([599fa35](https://github.com/propeller-heads/tycho/commit/599fa35140cb4603e8072c779dfa4e676c5adc64))
+* **execution:** deploy the router with the vault paused ([ebd85c2](https://github.com/propeller-heads/tycho/commit/ebd85c227a0ee7a03c387847288e7e35e980ff2d))
+* **execution:** grant PAUSER_ROLE to the pauser wallets only ([f1cbf9c](https://github.com/propeller-heads/tycho/commit/f1cbf9c81d5cffbf9570760ab358f806fe7d6572))
+* **execution:** grant the pauser wallets at router deployment ([e14b6cb](https://github.com/propeller-heads/tycho/commit/e14b6cbda65611e74357698e627b49db3e1a7f43))
+* **execution:** let only unpausers manage the pauser role ([4ffa1e0](https://github.com/propeller-heads/tycho/commit/4ffa1e0d612b695bf8003e62ad3db7c4f3179f4c))
+* **execution:** list the redeployed TychoRouterV3 on every chain ([8aab890](https://github.com/propeller-heads/tycho/commit/8aab890549e09358f5de1b3fc3eb3d6af9906a92))
+* **execution:** read the router's FeeCalculator from the registry ([f3c90ac](https://github.com/propeller-heads/tycho/commit/f3c90ac8207976b9d98593f29bc2992b5b40d09e))
+* **execution:** set initial fees when deploying a FeeCalculator ([0473380](https://github.com/propeller-heads/tycho/commit/0473380b5e03aa6ffed473ff1fe8eaa32b4c7033))
+* **execution:** verify Arc deployments on arc.etherscan.io ([3795805](https://github.com/propeller-heads/tycho/commit/37958054989b7967ed193638d7825b84a1c56fa6))
+* **execution:** verify Elysium deployments from the deploy scripts ([23d7701](https://github.com/propeller-heads/tycho/commit/23d77015c8bd3792b64955406704053198b1fbae))
+* router redeploy with cast fix and disabled vault ([#1828](https://github.com/propeller-heads/tycho/issues/1828)) ([a2d6402](https://github.com/propeller-heads/tycho/commit/a2d640221435c74ffa407888fda1d4951ceb5d8f))
+* **router-trades:** index the redeployed TychoRouterV3 ([d59f9e5](https://github.com/propeller-heads/tycho/commit/d59f9e57204e157728d1887de3819698b7486ebc))
+
+
+### Bug Fixes
+
+* **execution:** revert when a Permit2 amount does not fit in uint160 ([169ca0d](https://github.com/propeller-heads/tycho/commit/169ca0d93d920cef9e0c944da83f81fe90f1ace8))
+* **simulation:** price BaiBai books for the redeployed Base router ([6f61f03](https://github.com/propeller-heads/tycho/commit/6f61f038b70f41d124bef72b761b8c357cc16a40))
+
+## [0.524.0](https://github.com/propeller-heads/tycho/compare/0.523.0...0.524.0) (2026-11-16)
+
+
+### Features
+
+* **indexer:** add spans for protocol cache locks and memory report ([601bde6](https://github.com/propeller-heads/tycho/commit/601bde642f2994a0797e7925f823f88d1cc82e53))
+* **indexer:** warn when the extraction runtime stalls ([c7d8dc6](https://github.com/propeller-heads/tycho/commit/c7d8dc6608fb69e70d7717dd7023e5758179c55a))
+
+
+### Bug Fixes
+
+* **indexer:** bound and expose the background token price refresh ([b21e7b1](https://github.com/propeller-heads/tycho/commit/b21e7b1ea8fd57d43f14c38055ff7fd2e76d6e28))
+* **indexer:** refresh token prices without stopping the extractors ([bb01aa3](https://github.com/propeller-heads/tycho/commit/bb01aa3db969dde837355e703738f1cb3bfd50e2))
+* **indexer:** report protocol cache entry counts instead of its size ([c4173c9](https://github.com/propeller-heads/tycho/commit/c4173c9b7ce3489c6cdbb4d0e5cb377bbbd920d1))
+* **indexer:** skip the cache write lock when there is nothing to add ([4f261a9](https://github.com/propeller-heads/tycho/commit/4f261a9d2f2047c98dacbb013ca07a67b47398c6))
+* **indexer:** stop the cache size walk and price refresh from stalling extractors ([#1813](https://github.com/propeller-heads/tycho/issues/1813)) ([9db4502](https://github.com/propeller-heads/tycho/commit/9db4502c77f1398ef0d0fc32e6f3d30c215732a8))
+
+## [0.523.0](https://github.com/propeller-heads/tycho/compare/0.522.0...0.523.0) (2026-11-16)
+
+
+### Features
+
+* **execution:** list the new FeeCalculator on every chain ([37e95a7](https://github.com/propeller-heads/tycho/commit/37e95a7af65659b699806846309e52e590dd0cb5))
+* list the new FeeCalculator and index slippage caps and pair fees ([#1803](https://github.com/propeller-heads/tycho/issues/1803)) ([3c3ea2f](https://github.com/propeller-heads/tycho/commit/3c3ea2f1b4f1f0cbbb9b8d3aa80b984ac622429c))
+* **router-trades:** index positive slippage caps and token pair fees ([6ebb7de](https://github.com/propeller-heads/tycho/commit/6ebb7de4057601e3ed83ac5212cedea6d83cfff3))
+
+## [0.522.0](https://github.com/propeller-heads/tycho/compare/0.521.0...0.522.0) (2026-11-16)
+
+
+### Features
+
+* **execution:** add a vault pause for deposits and vault-funded swaps ([1830169](https://github.com/propeller-heads/tycho/commit/183016958bf9abc99c816145900313ab8209d24d))
+* **execution:** check delta casts and add a vault pause ([#1826](https://github.com/propeller-heads/tycho/issues/1826)) ([04524cd](https://github.com/propeller-heads/tycho/commit/04524cddeabed78eec92981a718570e64f28e812))
+
+
+### Bug Fixes
+
+* **execution:** revert when a delta amount does not fit in int256 ([e56ac62](https://github.com/propeller-heads/tycho/commit/e56ac62f4b0e2e26d8574ee1b82cc2554009d614))
+
 ## [0.521.0](https://github.com/propeller-heads/tycho/compare/0.520.0...0.521.0) (2026-11-16)
 
 
