@@ -16,7 +16,6 @@ use crate::postgres::{
     instance::{
         active::active_instance_head,
         gateway::PostgresGatewayNew,
-        orm as iorm,
         schema::tycho::{component_balance, protocol_component, protocol_state},
         InstanceId,
     },
@@ -50,20 +49,20 @@ impl PostgresGatewayNew {
         };
         check_current(&instance, at, conn).await?;
 
-        let rows = balance_rows(instance.id, ids, conn).await?;
+        let rows = current_balance_rows(instance.id, ids, conn).await?;
         let mut balances: HashMap<ComponentId, HashMap<Address, ComponentBalance>> = HashMap::new();
-        for (external_id, row) in rows {
+        for (external_id, token, balance, balance_float) in rows {
             let balance = ComponentBalance::new(
-                row.token.clone(),
-                row.new_balance,
-                row.balance_float,
+                token.clone(),
+                balance,
+                balance_float,
                 Bytes::zero(32),
                 &external_id,
             );
             balances
                 .entry(external_id)
                 .or_default()
-                .insert(row.token, balance);
+                .insert(token, balance);
         }
         Ok(balances)
     }
@@ -155,12 +154,12 @@ async fn states_of(
 
     let mut balances: HashMap<ComponentId, HashMap<Address, Balance>> = HashMap::new();
     if retrieve_balances {
-        for (external_id, row) in balance_rows(instance, ids, conn).await? {
+        for (external_id, token, balance, _) in current_balance_rows(instance, ids, conn).await? {
             if attributes.contains_key(&external_id) {
                 balances
                     .entry(external_id)
                     .or_default()
-                    .insert(row.token, row.new_balance);
+                    .insert(token, balance);
             }
         }
     }
@@ -177,13 +176,16 @@ async fn states_of(
     Ok(WithTotal { entity: states, total: None })
 }
 
-/// Loads the balance rows of the components of `instance`, each with its component's external id.
+/// A balance row: external id of the component, token, balance and its float value.
+type BalanceRow = (ComponentId, Address, Balance, f64);
+
+/// Loads the current balance rows of the components of `instance`.
 /// `ids`: only components with these external ids.
-async fn balance_rows(
+async fn current_balance_rows(
     instance: InstanceId,
     ids: Option<&[&str]>,
     conn: &mut AsyncPgConnection,
-) -> Result<Vec<(ComponentId, iorm::ComponentBalance)>, StorageError> {
+) -> Result<Vec<BalanceRow>, StorageError> {
     let mut query = component_balance::table
         .inner_join(
             protocol_component::table.on(protocol_component::instance_id
@@ -192,7 +194,12 @@ async fn balance_rows(
         )
         .filter(component_balance::instance_id.eq(instance))
         .filter(protocol_component::instance_id.eq(instance))
-        .select((protocol_component::external_id, iorm::ComponentBalance::as_select()))
+        .select((
+            protocol_component::external_id,
+            component_balance::token,
+            component_balance::new_balance,
+            component_balance::balance_float,
+        ))
         .into_boxed::<Pg>();
     if let Some(ids) = ids {
         query = query.filter(protocol_component::external_id.eq_any(ids));
