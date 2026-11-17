@@ -30,7 +30,9 @@ postgres/
     ├── origins.rs      — BatchOrigins: block number, timestamp and tx index of each change in a batch
     ├── cache/          — read caches of PostgresGatewayNew, one unit per active instance; nothing loads them before cut-over
     │   ├── token_store.rs — token list, address map and quality bitmaps; also used by `postgres/token_cache.rs`
-    │   └── token.rs    — token cache; trade times per instance unit
+    │   ├── token.rs    — token cache; trade times per instance unit
+    │   ├── component_page.rs — ids, TVL and pages of one protocol's components; also used by `postgres/component_index.rs`
+    │   └── component_index.rs — component index with one unit per instance
     ├── read/           — its read methods, one file per domain
     │   ├── component.rs — protocol components and their TVL from the active instance of each protocol
     │   ├── contract.rs — contracts, slots and account balances of a protocol's active instance at the latest version
@@ -118,6 +120,14 @@ reads and `force_custom_plans`: `active_protocols` and the token rows come from 
 it. The write-through (`add_tokens`, `upsert_tokens`, `update_last_traded`) updates the cache. Only
 `update_last_traded` takes the instance.
 `refresh` polls `public.token` for out-of-process writers.
+
+The new component index (`instance/cache/component_index.rs`) has one unit per active instance. It
+loads in one `snapshot_transaction` with bounded reads and `force_custom_plans`. Each poll reads
+only its units: one statement per unit for new components, and one tick runs in its own snapshot
+with the same settings. A full reload also re-reads the active pointers.
+`PostgresGatewayNew::with_component_index` gives the index to the gateway. For one protocol without
+ids, `get_protocol_components` pages from the index when it has a unit for the instance of the
+read. Otherwise it uses SQL.
 
 Every gateway checkout and the DB writer checkout go through `pool::checkout`. It opens a
 `db_pool_checkout` span and records the wait in `db_pool_checkout_duration_seconds{pool}`. The
