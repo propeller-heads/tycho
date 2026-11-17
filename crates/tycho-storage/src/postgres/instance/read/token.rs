@@ -209,7 +209,7 @@ impl PostgresGatewayNew {
 
 #[cfg(test)]
 pub mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::Arc};
 
     use chrono::{NaiveDate, NaiveDateTime};
     use diesel::prelude::*;
@@ -226,7 +226,7 @@ pub mod tests {
 
     use crate::postgres::{
         db_fixtures,
-        instance::{gateway::PostgresGatewayNew, InstanceId},
+        instance::{cache::token::TokenCache, gateway::PostgresGatewayNew, InstanceId},
         schema,
         testing::instance_test_connection,
     };
@@ -551,5 +551,39 @@ pub mod tests {
             .unwrap();
 
         assert_eq!(owners, HashMap::from([(b(A), owner("vm:curve", "pool", "0x01"))]));
+    }
+
+    #[tokio::test]
+    async fn test_get_tokens_reads_the_token_cache() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        token(&mut conn, s.chain_id, A, "A", 100).await;
+        let cache = TokenCache::load(Chain::Ethereum, &mut conn)
+            .await
+            .expect("loading the token cache failed");
+        let g = "0x00000000000000000000000000000000000000f1";
+        token(&mut conn, s.chain_id, g, "G", 100).await;
+        let cached = s
+            .gateway
+            .with_token_cache(Arc::new(cache));
+        let uncached = PostgresGatewayNew::from_connection(&mut conn).await;
+
+        let from_cache = cached
+            .get_tokens(Chain::Ethereum, None, QualityRange::None(), None, None, &mut conn)
+            .await
+            .unwrap();
+        let from_sql = uncached
+            .get_tokens(Chain::Ethereum, None, QualityRange::None(), None, None, &mut conn)
+            .await
+            .unwrap();
+
+        let symbols = |tokens: &[Token]| {
+            tokens
+                .iter()
+                .map(|token| token.symbol.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(symbols(&from_cache.entity), vec!["A"]);
+        assert_eq!(symbols(&from_sql.entity), vec!["A", "G"]);
     }
 }
