@@ -9,8 +9,8 @@
 #
 # Both modes wait for the database first, so the container can start together with Postgres.
 # `sink` applies schema.sql with `substreams-sink-sql setup`; `price` registers the postgres_fdw
-# servers (scripts/fdw_setup.sh). Both apply executors.sql and views.sql, which take an advisory
-# lock so the containers do not race. Every step is idempotent.
+# servers (scripts/fdw_setup.sh). Both apply migrate_schema.sql, executors.sql and views.sql, which
+# take an advisory lock so the containers do not race. Every step is idempotent.
 set -euo pipefail
 
 # SPKG is a local path when that file exists, otherwise a key in the release bucket. Same rule as
@@ -64,6 +64,7 @@ sink)
 	[ -n "${SUBSTREAMS_ENDPOINT:-}" ] && args+=(-e "$SUBSTREAMS_ENDPOINT")
 	wait_for_db "$DSN"
 	substreams-sink-sql setup "$DSN" "$spkg" "${system_table_args[@]}"
+	apply_sql -f /opt/router-trades/migrate_schema.sql
 	apply_sql -f /opt/router-trades/executors.sql
 	apply_sql -f /opt/router-trades/views.sql
 	exec substreams-sink-sql run "${args[@]}" \
@@ -79,6 +80,7 @@ price)
 	else
 		/opt/router-trades/scripts/fdw_setup.sh
 	fi
+	apply_sql -f /opt/router-trades/migrate_schema.sql
 	apply_sql -f /opt/router-trades/pricing/migrate_usd.sql
 	apply_sql -f /opt/router-trades/pricing/preferred_tokens.sql
 	apply_sql -f /opt/router-trades/executors.sql

@@ -66,6 +66,7 @@ run: build
 
 setup:
 	substreams-sink-sql setup "$(DSN)" $(MANIFEST)
+	psql "$(PSQL_DSN)" -v ON_ERROR_STOP=1 -f migrate_schema.sql
 	psql "$(PSQL_DSN)" -v ON_ERROR_STOP=1 -f executors.sql
 	psql "$(PSQL_DSN)" -v ON_ERROR_STOP=1 -f views.sql
 

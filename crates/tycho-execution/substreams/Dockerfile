@@ -21,7 +21,7 @@ RUN apt-get update \
     && apt-get clean
 COPY --from=tools /out/substreams-sink-sql /usr/local/bin/
 WORKDIR /opt/router-trades
-COPY crates/tycho-execution/substreams/schema.sql crates/tycho-execution/substreams/executors.sql crates/tycho-execution/substreams/views.sql ./
+COPY crates/tycho-execution/substreams/schema.sql crates/tycho-execution/substreams/migrate_schema.sql crates/tycho-execution/substreams/executors.sql crates/tycho-execution/substreams/views.sql ./
 COPY crates/tycho-execution/substreams/pricing ./pricing
 COPY crates/tycho-execution/substreams/scripts/price_trades.sh crates/tycho-execution/substreams/scripts/fdw_setup.sh ./scripts/
 COPY crates/tycho-execution/substreams/docker/entrypoint.sh /usr/local/bin/entrypoint
