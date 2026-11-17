@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS trades (
     router_positive_slippage_bps BIGINT,
     -- The client's share of the captured surplus, in fee units. The router keeps the rest.
     client_positive_slippage_share_bps BIGINT,
+    -- Most surplus the router captures, as a part of gross_amount_out in fee units: the router
+    -- captured at most floor(gross_amount_out * positive_slippage_cap_bps / 100000000).
+    -- 100000000 when the client has no cap. NULL on a row indexed before this column existed.
+    positive_slippage_cap_bps  BIGINT,
+    -- Whether the calculator has a pair fee for token_in and token_out. router_fee_on_output_bps
+    -- already applies it. NULL on a row indexed before this column existed.
+    token_pair_fee             BOOLEAN,
     fee_bps_scale              BIGINT,
     router_fee_amount          NUMERIC(78, 0),
     client_fee_amount          NUMERIC(78, 0),
@@ -164,6 +171,9 @@ CREATE TABLE IF NOT EXISTS fee_config_events (
     emitter      TEXT NOT NULL,
     event        TEXT NOT NULL,
     client       TEXT,
+    -- The token pair of TokenPairFee* events, lower address first.
+    token0       TEXT,
+    token1       TEXT,
     old_value    TEXT,
     new_value    TEXT,
     -- Denominator the old_value and new_value bps are on, when this event gives its emitter's

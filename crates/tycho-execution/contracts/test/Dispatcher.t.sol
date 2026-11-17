@@ -65,7 +65,7 @@ contract DispatcherExposed is Dispatcher {
     }
 
     function exposedSetExecutor(address target) external {
-        _setExecutor(target);
+        _setExecutor(target, DELAY_EXECUTOR_ACTIVATION);
     }
 
     function exposedRemoveExecutor(address target) external {
