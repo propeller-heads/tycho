@@ -3,10 +3,12 @@
 
 use std::fmt;
 
-use num_bigint::BigUint;
 use serde::Serialize;
 
-use crate::expectations::{DeclaredBy, Limits};
+use crate::{
+    checks::limits::LimitSizes,
+    expectations::{DeclaredBy, DeclaredTolerance, Limits},
+};
 
 /// A check, named by [`CheckId::as_str`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,11 +82,14 @@ pub enum Outcome {
         /// What the problem is.
         detail: String,
     },
-    /// The check was turned off, for `reason`.
+    /// The check did not apply, for `reason`: the configuration turned it off, the limit is zero
+    /// at this block, or the swap it needs is not executed at this block.
     Skipped {
         reason: String,
     },
-    /// An earlier check failed and this one needs its result.
+    /// The check could not run, for `reason`: an earlier check it needs failed, or what it tests
+    /// cannot be observed, as past a limit at the `int128` execution cap or past a limit whose
+    /// quote already contradicted the declaration.
     NotRun {
         reason: String,
     },
@@ -103,8 +108,7 @@ pub struct CheckResult {
     /// only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direction: Option<String>,
-    /// The block a check ran at, when a runner checks several blocks of one test, as protocol-
-    /// testing's `full` does; none for the checks at a test's snapshot.
+    /// The block a check ran at, when a runner checks several blocks; none at a test's snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block: Option<u64>,
     #[serde(flatten)]
@@ -112,52 +116,53 @@ pub struct CheckResult {
     /// For a `limits.*` result, the declaration it is checked against and the limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<LimitReport>,
+    /// For a `balances` or `balances.tvl_only` result of a component declared `tvl_only`, that
+    /// declaration: the tolerance its balances are checked within, and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tvl_only: Option<DeclaredTolerance>,
 }
 
 /// The declaration a `limits.*` result is checked against, and the limit it tested, whatever the
 /// outcome, so a reader sees which directions pass on a `soft` or `under_cap` claim and how large
-/// a non-hard limit is.
+/// a non-hard limit is. Serialized flat: `kind` and the declaration's `reason` when its kind has
+/// one, `declared_by`, then the sizes when `get_limits` was read for the direction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LimitReport {
-    /// `hard`, `soft` or `under_cap`.
-    pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// A hard limit's declared rounding.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rounding: Option<u64>,
-    /// Which declaration applies: `component`, `component_default`, `package` or
-    /// `package_default`.
-    pub declared_by: String,
-    /// `get_limits`' max input, after the `int128` cap, when the direction was quoted.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_input: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_output: Option<String>,
-    /// Whether the `int128` cap replaced a larger limit.
+    /// The declaration the direction is checked against.
+    #[serde(flatten)]
+    pub declared: Limits,
+    /// Which declaration applies: the component's for the direction or by default, or the
+    /// package's.
+    pub declared_by: DeclaredBy,
+    /// What `get_limits` reported, when it was read for the direction: a zero limit included,
+    /// a direction the ladder never reached not.
+    #[serde(flatten)]
+    pub sizes: Option<LimitReportSizes>,
+}
+
+/// What `get_limits` reported for a direction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LimitReportSizes {
+    /// `get_limits`' max input, after the `int128` cap.
+    pub max_input: String,
+    /// `get_limits`' max output.
+    pub max_output: String,
+    /// Whether the limit is at or above `int128::MAX`, so the cap, not the venue, bounds it.
     pub capped: bool,
 }
 
 impl LimitReport {
-    /// The report of a direction checked against `limits`, declared by `declared_by`. `sizes` is
-    /// `get_limits`' max input and max output, when the direction was quoted.
-    pub fn new(
-        limits: &Limits,
-        declared_by: DeclaredBy,
-        sizes: Option<(&BigUint, &BigUint)>,
-        capped: bool,
-    ) -> Self {
+    /// The report of a direction checked against `limits`, declared by `declared_by`, with
+    /// `sizes` when `get_limits` was read for it.
+    pub fn new(limits: &Limits, declared_by: DeclaredBy, sizes: Option<&LimitSizes<'_>>) -> Self {
         Self {
-            kind: limits.kind().to_string(),
-            reason: limits.reason().map(str::to_string),
-            rounding: match limits {
-                Limits::Hard { rounding } => Some(*rounding),
-                Limits::Soft { .. } | Limits::UnderCap { .. } => None,
-            },
-            declared_by: declared_by.as_str().to_string(),
-            max_input: sizes.map(|(max_input, _)| max_input.to_string()),
-            max_output: sizes.map(|(_, max_output)| max_output.to_string()),
-            capped,
+            declared: limits.clone(),
+            declared_by,
+            sizes: sizes.map(|sizes| LimitReportSizes {
+                max_input: sizes.max_input.to_string(),
+                max_output: sizes.max_output.to_string(),
+                capped: sizes.capped,
+            }),
         }
     }
 }

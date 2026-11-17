@@ -9,13 +9,11 @@ use miette::{miette, IntoDiagnostic, WrapErr};
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
 use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
-use tycho_test::expectations::{check_declaration, execution_tolerance, tolerance_problems};
+use tycho_test::expectations::check_declaration;
 pub use tycho_test::expectations::{
-    DeclaredBy, Direction, ExecutionTolerance, Harness, LimitKind, Limits, LimitsDeclaration, Skip,
-    Tolerance, TvlOnly,
+    DeclaredBy, DeclaredTolerance, Direction, ExecutionTolerances, Harness, LimitKind, Limits,
+    LimitsDeclaration, Skip, Tolerance,
 };
-
-use crate::balances::BalanceCheck;
 
 /// Represents a ProtocolComponent with its main attributes
 #[derive(Debug, Clone, Deserialize)]
@@ -38,12 +36,15 @@ pub struct ProtocolComponentWithTestConfig {
     /// What the component's limits are, overriding the package's
     /// [`IntegrationTestsConfig::limits`].
     pub limits: Option<LimitsDeclaration>,
-    /// Where strict mode reads the component's balances on chain; `balanceOf(component id)`
-    /// without it.
-    pub balance_check: Option<BalanceCheck>,
+    /// Strict: why the package's balance lens cannot read this component's balances, such as a
+    /// singleton that keeps no per-pool amount. Its `balances` is then reported skipped.
+    pub skip_balance_check: Skip,
+    /// Strict: how far the component's executions may differ from simulation, overriding the
+    /// package's [`IntegrationTestsConfig::execution_tolerance`].
+    pub execution_tolerance: Option<DeclaredTolerance>,
     /// Strict: the component's balances feed only TVL, so they are checked within a tolerance.
     /// The runner verifies that simulation ignores them.
-    pub tvl_only: Option<TvlOnly>,
+    pub tvl_only: Option<DeclaredTolerance>,
 }
 
 /// An `expected_components` entry as written in the yaml, with every key at one level.
@@ -64,9 +65,11 @@ struct ExpectedComponentEntry {
     #[serde(default)]
     limits: Option<LimitsDeclaration>,
     #[serde(default)]
-    balance_check: Option<BalanceCheck>,
+    skip_balance_check: Skip,
     #[serde(default)]
-    tvl_only: Option<TvlOnly>,
+    execution_tolerance: Option<DeclaredTolerance>,
+    #[serde(default)]
+    tvl_only: Option<DeclaredTolerance>,
 }
 
 impl ProtocolComponentWithTestConfig {
@@ -89,7 +92,8 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
             skip_simulation,
             skip_execution,
             limits,
-            balance_check,
+            skip_balance_check,
+            execution_tolerance,
             tvl_only,
         } = entry;
         Self {
@@ -97,7 +101,8 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
             skip_simulation,
             skip_execution,
             limits,
-            balance_check,
+            skip_balance_check,
+            execution_tolerance,
             tvl_only,
         }
     }
@@ -219,21 +224,68 @@ pub struct IntegrationTestsConfig {
     pub adapter_build_signature: Option<String>,
     pub adapter_build_args: Option<String>,
     pub initialized_accounts: Option<Vec<String>>,
-    /// Off by default. Strict mode rejects it: each component declares its `balance_check`.
+    /// Off by default. Strict mode rejects it: the package declares its `balance_lens`, and a
+    /// component its lens cannot read sets its own `skip_balance_check`.
     #[serde(default)]
     pub skip_balance_check: Skip,
+    /// Strict: the Solidity contract that reads each expected component's balances on chain, by
+    /// name, from `protocols/adapter-integration/evm/src/` (`IBalanceLens`). Required unless every
+    /// expected component skips the balance check.
+    #[serde(default)]
+    pub balance_lens: Option<String>,
     /// What the components' limits are, unless a component declares its own. Strict mode requires
-    /// a declaration for every direction of every expected component, here or on the component.
+    /// a package-level default, here: `full` and the cluster test check every pool of the
+    /// protocol against it, those the tests do not list included.
     #[serde(default)]
     pub limits: Option<LimitsDeclaration>,
-    /// How far executions may differ from simulation, in strict mode. Without it, strict mode
-    /// requires an exact match.
+    /// How far executions may differ from simulation, in strict mode, unless a component declares
+    /// its own. Without either, strict mode requires an exact match.
     #[serde(default)]
-    pub execution_tolerance: Option<ExecutionTolerance>,
+    pub execution_tolerance: Option<DeclaredTolerance>,
     pub protocol_type_names: Vec<String>,
     pub protocol_system: String,
     pub module_name: Option<String>,
     pub tests: Vec<IntegrationTest>,
+}
+
+/// The first declaration of each component's key, by lowercase id, for checking that every test
+/// that lists the component declares the same.
+struct FirstDeclared<'a, T> {
+    first: HashMap<(String, &'static str), (&'a T, &'a str)>,
+}
+
+impl<T> Default for FirstDeclared<'_, T> {
+    fn default() -> Self {
+        Self { first: HashMap::new() }
+    }
+}
+
+impl<'a, T: PartialEq> FirstDeclared<'a, T> {
+    /// Notes what component `id` declares for `key` in `test`, and the problem when an earlier
+    /// test declared something else.
+    fn differs(
+        &mut self,
+        id: &str,
+        key: &'static str,
+        declared: &'a T,
+        test: &'a str,
+    ) -> Option<String> {
+        match self
+            .first
+            .entry((id.to_lowercase(), key))
+        {
+            Entry::Vacant(entry) => {
+                entry.insert((declared, test));
+                None
+            }
+            Entry::Occupied(entry) => {
+                let (first, first_test) = entry.get();
+                (*first != declared).then(|| {
+                    format!("{id} declares a different `{key}` in test {test} than in test {first_test}")
+                })
+            }
+        }
+    }
 }
 
 impl IntegrationTestsConfig {
@@ -242,12 +294,15 @@ impl IntegrationTestsConfig {
     /// Errors when the yaml does not parse, or a skip is an empty string or reads as yes or no. In
     /// strict mode it also errors, listing every problem at once, on keys the runner does not read,
     /// on skips written as `true` or `false` or that can have no effect, on a package-level
-    /// `skip_balance_check` of any value, and on a test with no expected components. In legacy mode
+    /// `skip_balance_check` of any value, on a missing `balance_lens` unless every expected
+    /// component skips the balance check, and on a test with no expected components. In legacy mode
     /// unknown keys are a warning, and the package keeps running as before. In both modes a
-    /// `limits` declaration must have the fields its kind requires, and in strict mode every
-    /// direction of every expected component needs one. In both modes a `tvl_only` must have the
-    /// fields a tolerance needs and be the same in every test that lists its component; in strict
-    /// mode a component with `tvl_only` must not skip simulation.
+    /// `limits` declaration must have the fields its kind requires, and in strict mode the package
+    /// needs a `limits` default. In both modes a declared tolerance
+    /// (`execution_tolerance`, `tvl_only`) must declare `bps` or `wei` and a reason, and a
+    /// component's must be the same in every test that lists it, as must its `limits`; in strict
+    /// mode a component with `tvl_only` must not skip simulation. In both modes the file name of
+    /// `substreams_yaml_path` must name a chain (see `tycho_test::expectations::package_chain`).
     pub fn from_yaml(reader: impl Read, source: &str) -> miette::Result<Self> {
         let mut unknown_keys = Vec::new();
         let config: Self =
@@ -261,6 +316,7 @@ impl IntegrationTestsConfig {
             Harness::Strict => {
                 let mut problems = config.skip_problems();
                 problems.extend(config.balance_skip_problem());
+                problems.extend(config.balance_lens_problem());
                 problems.extend(config.empty_tests_problem());
                 if !unknown_keys.is_empty() {
                     problems.push(format!(
@@ -276,6 +332,7 @@ impl IntegrationTestsConfig {
                 }
             }
             Harness::Legacy => {
+                unknown_keys.extend(config.strict_only_keys());
                 if !unknown_keys.is_empty() {
                     tracing::warn!(
                         "{source} has keys the runner does not read: {}",
@@ -284,98 +341,86 @@ impl IntegrationTestsConfig {
                 }
             }
         }
-        // The shared reader of package declarations finds a package's chain this way, so a name it
-        // cannot read is caught where the package is tested.
+        // `tycho_test::expectations::load_packages` picks each package's chain with
+        // `package_chain`, so a name it cannot read is caught where the package is tested.
         tycho_test::expectations::package_chain(&config.substreams_yaml_path)
             .map_err(|e| miette!("{source}: {e}"))?;
         config.check_limits(source)?;
-        config.check_tolerance(source)?;
-        config.check_tvl_only(source)?;
+        config.check_tolerances(source)?;
         Ok(config)
     }
 
-    /// The tolerance executions are checked with: in strict mode, the declared one, or exact
-    /// without a declaration; in legacy mode, [`Tolerance::LEGACY`] whatever is declared.
-    pub fn tolerance(&self) -> Tolerance {
-        execution_tolerance(self.harness, self.execution_tolerance.as_ref())
+    /// The tolerances executions are checked with: in strict mode, a component's declaration,
+    /// else the package's, else exact; in legacy mode, [`Tolerance::LEGACY`] whatever is declared.
+    pub fn tolerances(&self) -> ExecutionTolerances {
+        ExecutionTolerances::new(
+            self.harness,
+            self.execution_tolerance.as_ref(),
+            self.tests
+                .iter()
+                .flat_map(|test| &test.expected_components)
+                .filter_map(|component| {
+                    component
+                        .execution_tolerance
+                        .as_ref()
+                        .map(|declared| (component.base.id.as_str(), declared))
+                }),
+        )
     }
 
-    /// A declared tolerance has a nonzero `bps` below 100%, a nonzero `wei`, or both, and states
-    /// its cause and measurement, in both modes.
-    fn check_tolerance(&self, source: &str) -> miette::Result<()> {
-        let Some(tolerance) = &self.execution_tolerance else {
-            return Ok(());
-        };
-        let problems =
-            tolerance_problems(tolerance.bps, tolerance.wei, &tolerance.cause, &tolerance.measured);
-        if problems.is_empty() {
-            return Ok(());
-        }
-        Err(miette!("{source} has an invalid `execution_tolerance`: {}", problems.join("; ")))
-    }
-
-    /// A component's `tvl_only` has the fields a tolerance needs, in both modes, and is the same
-    /// in every test that lists the component, since it describes the component's simulation,
-    /// whatever the block. In strict mode the component must also be simulated, since the runner
-    /// verifies the declaration by quoting.
-    fn check_tvl_only(&self, source: &str) -> miette::Result<()> {
+    /// Every declared tolerance declares `bps` or `wei` and a reason, in both modes. A component's
+    /// `execution_tolerance` and `tvl_only` describe its simulation whatever the block, so each is
+    /// the same in every test that lists the component. In strict mode a component with
+    /// `tvl_only` must also be simulated, since the runner verifies the declaration by quoting.
+    fn check_tolerances(&self, source: &str) -> miette::Result<()> {
         let mut invalid = Vec::new();
-        let mut first_declared: HashMap<String, (&Option<TvlOnly>, &str)> = HashMap::new();
+        if let Some(declared) = &self.execution_tolerance {
+            let problems = declared.problems();
+            if !problems.is_empty() {
+                invalid.push(format!("`execution_tolerance`: {}", problems.join("; ")));
+            }
+        }
+        let mut first_declared = FirstDeclared::default();
         for test in &self.tests {
             for component in &test.expected_components {
                 let id = &component.base.id;
-                match first_declared.entry(id.to_lowercase()) {
-                    Entry::Vacant(entry) => {
-                        entry.insert((&component.tvl_only, &test.name));
+                for (key, declared) in [
+                    ("execution_tolerance", &component.execution_tolerance),
+                    ("tvl_only", &component.tvl_only),
+                ] {
+                    invalid.extend(first_declared.differs(id, key, declared, &test.name));
+                    let Some(declared) = declared else {
+                        continue;
+                    };
+                    let mut problems = declared.problems();
+                    if let ("tvl_only", Harness::Strict, Some(reason)) =
+                        (key, self.harness, component.skip_simulation.reason())
+                    {
+                        problems.push(format!(
+                            "the runner verifies `tvl_only` by quoting the component, but it sets \
+                             `skip_simulation` ({reason})"
+                        ));
                     }
-                    Entry::Occupied(entry) => {
-                        let (declared, first_test) = entry.get();
-                        if **declared != component.tvl_only {
-                            invalid.push(format!(
-                                "{id} declares a different `tvl_only` in test {} than in test \
-                                 {first_test}",
-                                test.name
-                            ));
-                        }
+                    if !problems.is_empty() {
+                        invalid.push(format!(
+                            "{id}'s `{key}` in test {}: {}",
+                            test.name,
+                            problems.join("; ")
+                        ));
                     }
-                }
-                let Some(tvl_only) = &component.tvl_only else {
-                    continue;
-                };
-                let mut problems = tolerance_problems(
-                    tvl_only.bps,
-                    tvl_only.wei,
-                    &tvl_only.cause,
-                    &tvl_only.measured,
-                );
-                if let (Harness::Strict, Some(reason)) =
-                    (self.harness, component.skip_simulation.reason())
-                {
-                    problems.push(format!(
-                        "the runner verifies `tvl_only` by quoting the component, but it sets \
-                         `skip_simulation` ({reason})"
-                    ));
-                }
-                if !problems.is_empty() {
-                    invalid.push(format!(
-                        "{} in test {}: {}",
-                        component.base.id,
-                        test.name,
-                        problems.join("; ")
-                    ));
                 }
             }
         }
         if invalid.is_empty() {
             return Ok(());
         }
-        Err(miette!("{source} has an invalid `tvl_only`: {}", invalid.join(". ")))
+        Err(miette!("{source} has invalid tolerances: {}", invalid.join(". ")))
     }
 
     /// The limit declared for `direction` of `component`, from the most specific declaration:
     /// the component's for that direction, the component's default, the package's for that
     /// direction, then the package's default. The runner reads [`Self::declaration_for`]; the
-    /// tests compare this with the shared reader's.
+    /// tests compare this with `PackageExpectations::limits_for`.
     #[cfg(test)]
     pub fn limits_for<'a>(
         &'a self,
@@ -407,6 +452,8 @@ impl IntegrationTestsConfig {
     /// Every check on the `limits` declarations, in both modes:
     ///
     /// - each has the fields its kind requires;
+    /// - a component declares the same `limits` in every test that lists it, since a pool's limits
+    ///   do not depend on the block, and `full` and the cluster test read one declaration per pool;
     /// - a component's direction is one of its token pairs, and a package's direction is one of
     ///   some expected component's;
     /// - in strict mode, the package declares a default (`limits: {kind: ...}`, or a `default` in
@@ -415,14 +462,21 @@ impl IntegrationTestsConfig {
     fn check_limits(&self, source: &str) -> miette::Result<()> {
         let mut problems = Vec::new();
         let mut all_directions = HashSet::new();
+        let mut first_declared = FirstDeclared::default();
 
         for test in &self.tests {
             for component in &test.expected_components {
                 let location = format!("test `{}`, component {}", test.name, component.base.id);
+                problems.extend(first_declared.differs(
+                    &component.base.id,
+                    "limits",
+                    &component.limits,
+                    &test.name,
+                ));
                 let directions = component_directions(component);
                 if let Some(declaration) = &component.limits {
                     check_declaration(declaration, &location, &mut problems);
-                    for direction in declaration.directions.keys().sorted() {
+                    for direction in declaration.directions().sorted() {
                         if !directions.contains(direction) {
                             problems.push(format!(
                                 "{location}: {direction} is not one of its directions"
@@ -435,7 +489,7 @@ impl IntegrationTestsConfig {
         }
         if let Some(declaration) = &self.limits {
             check_declaration(declaration, "package", &mut problems);
-            for direction in declaration.directions.keys().sorted() {
+            for direction in declaration.directions().sorted() {
                 if !all_directions.contains(direction) {
                     problems.push(format!(
                         "package: {direction} is not a direction of any expected component"
@@ -453,7 +507,7 @@ impl IntegrationTestsConfig {
         let package_default = self
             .limits
             .as_ref()
-            .is_some_and(|declaration| declaration.default.is_some());
+            .is_some_and(|declaration| declaration.default_limits().is_some());
         if self.harness == Harness::Strict && !package_default {
             return Err(miette!(
                 "{source} declares `harness: strict`, which needs a package-level `limits` \
@@ -479,12 +533,14 @@ impl IntegrationTestsConfig {
             Skip::Bool(false) => redundant.push(format!("{flag} ({location})")),
             Skip::No | Skip::Reason(_) => {}
         };
-        // `skip_balance_check` is rejected whatever its value, by `balance_skip_problem`.
+        // The package's `skip_balance_check` is rejected whatever its value, by
+        // `balance_skip_problem`.
         for test in &self.tests {
             for component in &test.expected_components {
                 let location = format!("test `{}`, component {}", test.name, component.base.id);
                 note("skip_simulation", &location, &component.skip_simulation);
                 note("skip_execution", &location, &component.skip_execution);
+                note("skip_balance_check", &location, &component.skip_balance_check);
                 if component.skip_simulation.is_skipped() && component.skip_execution.is_skipped() {
                     unread.push(location);
                 }
@@ -516,18 +572,73 @@ impl IntegrationTestsConfig {
     }
 
     /// Strict mode's problem with the package-level `skip_balance_check`, whatever its value:
-    /// strict mode checks every expected component's balances against the source it declares.
+    /// strict mode checks every expected component's balances with the package's lens.
+    /// The strict-mode keys the yaml writes that legacy mode does not read: `balance_lens` and a
+    /// component's `skip_balance_check`, as `serde_ignored` names a key it does not know, so legacy
+    /// mode warns about them as it did before strict mode read them.
+    fn strict_only_keys(&self) -> Vec<String> {
+        let lens = self
+            .balance_lens
+            .is_some()
+            .then(|| "balance_lens".to_string());
+        let component_skips = self
+            .tests
+            .iter()
+            .enumerate()
+            .flat_map(|(test, config)| {
+                config
+                    .expected_components
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, component)| component.skip_balance_check != Skip::No)
+                    .map(move |(component, _)| {
+                        format!("tests.{test}.expected_components.{component}.skip_balance_check")
+                    })
+            });
+        lens.into_iter()
+            .chain(component_skips)
+            .collect()
+    }
+
     fn balance_skip_problem(&self) -> Option<String> {
         if self.skip_balance_check == Skip::No {
             return None;
         }
-        Some(format!(
-            "`skip_balance_check`, which strict mode does not accept, since it checks every \
-             expected component against the source it declares. Remove it, and declare where a \
-             component's balances are held where that is not the component's own address, with \
-             `balance_check`: {}",
-            crate::balances::SHAPE
-        ))
+        Some(
+            "`skip_balance_check` on the package, which strict mode does not accept, since it \
+             checks every expected component's balances. Remove it, name the contract that reads \
+             them with `balance_lens` (README, \"Balances\"), and give a component the lens \
+             cannot read its own `skip_balance_check` with the reason"
+                .to_string(),
+        )
+    }
+
+    /// Strict mode's problem with a missing `balance_lens`, when some expected component does not
+    /// skip the balance check.
+    fn balance_lens_problem(&self) -> Option<String> {
+        if self.balance_lens.is_some() {
+            return None;
+        }
+        let checked: Vec<&str> = self
+            .tests
+            .iter()
+            .flat_map(|test| &test.expected_components)
+            .filter(|component| {
+                !component
+                    .skip_balance_check
+                    .is_skipped()
+            })
+            .map(|component| component.base.id.as_str())
+            .unique()
+            .collect();
+        (!checked.is_empty()).then(|| {
+            format!(
+                "no `balance_lens` to read the balances of {}: name the contract that reads them \
+                 (README, \"Balances\"), such as `ComponentIdBalances` for a component that holds \
+                 its own tokens",
+                checked.join(", ")
+            )
+        })
     }
 
     /// Strict mode's problem with tests that list no expected component: strict mode checks each
@@ -591,8 +702,12 @@ tests:
         )
     }
 
+    /// Strict mode with a balance lens, for tests about something else.
+    const STRICT: &str = "harness: strict\nbalance_lens: ComponentIdBalances";
+
     /// Strict mode with every direction's limit declared, for tests about something else.
-    const STRICT_WITH_LIMITS: &str = "harness: strict\nlimits: {kind: hard}";
+    const STRICT_WITH_LIMITS: &str =
+        "harness: strict\nlimits: {kind: hard}\nbalance_lens: ComponentIdBalances";
 
     fn parse(yaml: &str) -> miette::Result<IntegrationTestsConfig> {
         IntegrationTestsConfig::from_yaml(yaml.as_bytes(), "test.yaml")
@@ -617,18 +732,17 @@ tests:
             .is_empty());
     }
 
-    /// `PackageExpectations`, the shared reader of declarations, agrees with the test
-    /// configuration on fixtures that declare limits on the package and a component, a tolerance
-    /// and `tvl_only`, which no repository yaml does yet.
+    /// `PackageExpectations` agrees with the test configuration on fixtures that declare limits
+    /// on the package and a component, a tolerance and `tvl_only`.
     #[test]
     fn the_shared_reader_agrees_with_the_configuration_on_declared_fixtures() {
         let fixtures = [
             yaml(STRICT_WITH_LIMITS, ""),
             yaml(
-                "harness: strict\nlimits: {kind: soft, reason: \"r\"}\nexecution_tolerance: {bps: \
-                 3, cause: \"c\", measured: \"m\"}",
+                "harness: strict\nbalance_lens: ComponentIdBalances\nlimits: {kind: soft, reason: \"r\"}\nexecution_tolerance: {bps: \
+                 3, reason: \"r\"}",
                 "        limits: {\"0x01->0x02\": {kind: hard}}\n        tvl_only: {bps: 5, \
-                 cause: \"c\", measured: \"m\"}",
+                 reason: \"r\"}\n        execution_tolerance: {wei: 2, reason: \"r\"}",
             ),
         ];
         for fixture in fixtures {
@@ -638,7 +752,7 @@ tests:
                 "test.yaml",
             )
             .unwrap();
-            assert_eq!(package.tolerance(), config.tolerance(), "{fixture}");
+            assert_eq!(package.tolerances(), config.tolerances(), "{fixture}");
             let component = &config.tests[0].expected_components[0];
             for direction in component_directions(component) {
                 assert_eq!(
@@ -676,16 +790,15 @@ tests:
         assert_eq!(component.base.static_attributes["fee"], Bytes::from("0x0bb8"));
         assert!(!component.skip_simulation.is_skipped());
         assert!(component.skip_execution.is_skipped());
-        assert_eq!(
-            component.limits,
-            Some(LimitsDeclaration { default: Some(hard()), directions: HashMap::new() })
-        );
+        let limits = component.limits.as_ref().unwrap();
+        assert_eq!(limits.default_limits(), Some(&hard()));
+        assert_eq!(limits.directions().count(), 0);
     }
 
     #[test]
     fn strict_mode_rejects_unknown_keys_and_names_each() {
         let err = parse(&yaml(
-            "harness: strict\nskip_balance_checks: true",
+            "harness: strict\nbalance_lens: ComponentIdBalances\nskip_balance_checks: true",
             "        skip_simulaton: true",
         ))
         .unwrap_err()
@@ -697,7 +810,7 @@ tests:
 
     #[test]
     fn strict_mode_rejects_unknown_keys_in_a_test() {
-        let config = yaml("harness: strict", "")
+        let config = yaml(STRICT, "")
             .replace("    stop_block: 200\n", "    stop_block: 200\n    expected_state: {}\n");
         let err = parse(&config).unwrap_err().to_string();
         assert!(err.contains("expected_state"), "{err}");
@@ -755,7 +868,7 @@ tests:
 
     #[test]
     fn strict_mode_rejects_true_and_names_each_flag_and_component() {
-        let err = parse(&yaml("harness: strict", "        skip_simulation: true"))
+        let err = parse(&yaml(STRICT, "        skip_simulation: true"))
             .unwrap_err()
             .to_string();
         assert!(
@@ -770,15 +883,17 @@ tests:
     #[test]
     fn strict_mode_gives_a_balance_skip_one_error_whatever_its_value() {
         for value in ["true", "false", "\"held by the vault\""] {
-            let err = parse(&yaml(&format!("harness: strict\nskip_balance_check: {value}"), ""))
+            let err = parse(&yaml(&format!("harness: strict\nbalance_lens: ComponentIdBalances\nskip_balance_check: {value}"), ""))
                 .unwrap_err()
                 .to_string();
             assert!(
-                err.contains("`skip_balance_check`, which strict mode does not accept"),
+                err.contains(
+                    "`skip_balance_check` on the package, which strict mode does not accept"
+                ),
                 "{err}"
             );
             assert!(!err.contains("skips written as"), "{value}: {err}");
-            assert!(err.contains("{tokens: {0x<token>"), "{value}: {err}");
+            assert!(err.contains("its own `skip_balance_check` with the reason"), "{value}: {err}");
         }
     }
 
@@ -808,29 +923,41 @@ tests:
     }
 
     #[test]
-    fn a_component_declares_its_balance_source_in_either_mode() {
-        let declared = "        balance_check: {min_of: [self, \"attribute:vault\"]}";
-        for harness in ["", STRICT_WITH_LIMITS] {
-            let config = parse(&yaml(harness, declared)).unwrap();
-            assert_eq!(
-                config.tests[0].expected_components[0].balance_check,
-                Some(BalanceCheck::MinOf(vec![
-                    crate::balances::Holder::Component,
-                    crate::balances::Holder::Attribute("vault".to_string()),
-                ]))
-            );
-            assert_eq!(
-                parse(&yaml(harness, "")).unwrap().tests[0].expected_components[0].balance_check,
-                None
-            );
-            let err = parse(&yaml(harness, "        balance_check: {holder: vault}")).unwrap_err();
-            assert!(format!("{err:?}").contains("not a holder"), "{err:?}");
-        }
+    fn strict_mode_needs_a_balance_lens_unless_every_component_skips_the_check() {
+        let strict = "harness: strict\nlimits: {kind: hard}";
+        let err = parse(&yaml(strict, ""))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no `balance_lens` to read the balances of 0xAbC"), "{err}");
+        assert_eq!(
+            parse(&yaml(&format!("{strict}\nbalance_lens: ComponentIdBalances"), ""))
+                .unwrap()
+                .balance_lens
+                .as_deref(),
+            Some("ComponentIdBalances")
+        );
+        let skipped = parse(&yaml(strict, "        skip_balance_check: \"a singleton\"")).unwrap();
+        assert_eq!(
+            skipped.tests[0].expected_components[0]
+                .skip_balance_check
+                .reason(),
+            Some("a singleton")
+        );
+        // Legacy mode needs no lens.
+        assert!(parse(&yaml("", "")).is_ok());
+    }
+
+    #[test]
+    fn strict_mode_needs_a_reason_for_a_component_balance_skip() {
+        let err = parse(&yaml(STRICT_WITH_LIMITS, "        skip_balance_check: true"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("skip_balance_check (test `test_foo`, component 0xAbC)"), "{err}");
     }
 
     #[test]
     fn strict_mode_rejects_false_and_names_each_flag_and_component() {
-        let err = parse(&yaml("harness: strict", "        skip_execution: false"))
+        let err = parse(&yaml(STRICT, "        skip_execution: false"))
             .unwrap_err()
             .to_string();
         assert!(
@@ -845,7 +972,7 @@ tests:
     #[test]
     fn strict_mode_rejects_a_skip_execution_next_to_a_skip_simulation() {
         let both = "        skip_simulation: \"no adapter\"\n        skip_execution: \"no fork\"";
-        let err = parse(&yaml("harness: strict", both))
+        let err = parse(&yaml(STRICT, both))
             .unwrap_err()
             .to_string();
         assert!(
@@ -859,9 +986,35 @@ tests:
     }
 
     #[test]
+    fn legacy_mode_names_the_strict_only_keys_it_ignores_as_it_names_unknown_keys() {
+        let config = parse(&yaml(
+            "balance_lens: ComponentIdBalances",
+            "        skip_balance_check: \"held by the vault\"",
+        ))
+        .unwrap();
+        assert_eq!(
+            config.strict_only_keys(),
+            ["balance_lens", "tests.0.expected_components.0.skip_balance_check"]
+        );
+        // The same path serde_ignored gives a key it does not know at that place.
+        let mut unknown = Vec::new();
+        let _: IntegrationTestsConfig = serde_ignored::deserialize(
+            serde_yaml::Deserializer::from_str(&yaml("", "        skip_balance_checkx: x")),
+            |path| unknown.push(path.to_string()),
+        )
+        .unwrap();
+        assert_eq!(unknown, ["tests.0.expected_components.0.skip_balance_checkx"]);
+        // Nothing written, nothing named.
+        assert!(parse(&yaml("", ""))
+            .unwrap()
+            .strict_only_keys()
+            .is_empty());
+    }
+
+    #[test]
     fn strict_mode_reports_skip_problems_and_unknown_keys_together() {
         let err = parse(&yaml(
-            "harness: strict\nskip_balance_checks: x",
+            "harness: strict\nbalance_lens: ComponentIdBalances\nskip_balance_checks: x",
             "        skip_execution: false",
         ))
         .unwrap_err()
@@ -873,7 +1026,7 @@ tests:
     #[test]
     fn a_skip_that_reads_as_yes_or_no_is_an_error_in_both_modes() {
         for word in ["no", "\"false\"", "off", "Yes", "\"TRUE\"", "n"] {
-            for harness in ["", "harness: strict"] {
+            for harness in ["", STRICT] {
                 let err = parse(&yaml(harness, &format!("        skip_execution: {word}")))
                     .unwrap_err()
                     .chain()
@@ -908,7 +1061,7 @@ tests:
             ("        skip_execution: {reason: \"r\"}", "the reason for the skip, as a string"),
             ("        skip_execution: 3", "the reason for the skip, as a string"),
         ] {
-            for harness in ["", "harness: strict"] {
+            for harness in ["", STRICT] {
                 let err = format!("{:?}", parse(&yaml(harness, component_extra)).unwrap_err());
                 assert!(err.contains(expected), "{component_extra} ({harness}): {err}");
             }
@@ -920,7 +1073,7 @@ tests:
     }
 
     fn hard() -> Limits {
-        Limits::Hard { rounding: 0 }
+        Limits::Hard {}
     }
 
     /// The kind declared for each direction of the one expected component.
@@ -942,7 +1095,7 @@ tests:
     #[test]
     fn strict_mode_requires_a_package_limits_default() {
         let needs_default = |package: &str, component: &str| {
-            let err = parse(&yaml(&format!("harness: strict\n{package}"), component))
+            let err = parse(&yaml(&format!("{STRICT}\n{package}"), component))
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("needs a package-level `limits` default"), "{err}");
@@ -952,9 +1105,13 @@ tests:
         needs_default("", "        limits: {kind: hard}");
         needs_default("limits: {\"0x01->0x02\": {kind: hard}}", "");
 
-        assert!(parse(&yaml("harness: strict\nlimits: {kind: hard}", "")).is_ok());
         assert!(parse(&yaml(
-            "harness: strict\nlimits: {default: {kind: hard}, \"0x01->0x02\": {kind: soft, reason: r}}",
+            "harness: strict\nbalance_lens: ComponentIdBalances\nlimits: {kind: hard}",
+            ""
+        ))
+        .is_ok());
+        assert!(parse(&yaml(
+            "harness: strict\nbalance_lens: ComponentIdBalances\nlimits: {default: {kind: hard}, \"0x01->0x02\": {kind: soft, reason: r}}",
             ""
         ))
         .is_ok());
@@ -967,7 +1124,7 @@ tests:
         let soft = "{kind: soft, reason: \"constant product\"}";
         // The package's default, and its entry for one direction.
         let package =
-            format!("harness: strict\nlimits: {{default: {soft}, \"0x02->0x01\": {UNDER_CAP}}}");
+            format!("harness: strict\nbalance_lens: ComponentIdBalances\nlimits: {{default: {soft}, \"0x02->0x01\": {UNDER_CAP}}}");
         assert_eq!(
             kinds(&parse(&yaml(&package, "")).unwrap()),
             vec![
@@ -1005,7 +1162,7 @@ tests:
             ("{kind: soft, reason: \" \"}", "component 0xAbC, default: the reason is empty"),
             ("{\"0x01->0x02\": {kind: soft}}", "limits `0x01->0x02`: missing field `reason`"),
         ] {
-            for harness in ["", "harness: strict"] {
+            for harness in ["", STRICT] {
                 let err = parse(&yaml(harness, &format!("        limits: {declaration}")))
                     .unwrap_err()
                     .chain()
@@ -1042,15 +1199,14 @@ tests:
     }
 
     #[test]
-    fn a_hard_limit_can_declare_its_rounding() {
-        let config =
-            parse(&yaml(STRICT_WITH_LIMITS, "        limits: {kind: hard, rounding: 2}")).unwrap();
-        let component = &config.tests[0].expected_components[0];
-        assert_eq!(
-            config.limits_for(component, &direction("0x01->0x02")),
-            Some(&Limits::Hard { rounding: 2 })
-        );
-        assert!(parse(&yaml("", "        limits: {kind: hard, rounding: -1}")).is_err());
+    fn a_limit_declares_only_its_kind_and_reason() {
+        for invalid in [
+            "{kind: hard, bound: output}",
+            "{kind: under_cap, reason: r, bound: input}",
+            "{kind: hard, rounding: 2}",
+        ] {
+            assert!(parse(&yaml("", &format!("        limits: {invalid}"))).is_err(), "{invalid}");
+        }
     }
 
     #[test]
@@ -1110,83 +1266,90 @@ tests:
     }
 
     const TOLERANCE: &str =
-        "execution_tolerance: {bps: 3, cause: \"vault rounding\", measured: \"2.1 bps over 100 blocks\"}";
+        "execution_tolerance: {bps: 3, reason: \"vault rounding; 2.1 bps over 100 blocks\"}";
+
+    /// The tolerance `config` checks an execution of the fixture's component with.
+    fn tolerance_of(config: &IntegrationTestsConfig) -> Tolerance {
+        config
+            .tolerances()
+            .get("0xabc", &Bytes::from("0x02"))
+    }
 
     #[test]
     fn strict_mode_is_exact_unless_a_tolerance_is_declared() {
-        assert_eq!(
-            parse(&yaml(STRICT_WITH_LIMITS, ""))
-                .unwrap()
-                .tolerance(),
-            Tolerance::EXACT
-        );
+        assert_eq!(tolerance_of(&parse(&yaml(STRICT_WITH_LIMITS, "")).unwrap()), Tolerance::EXACT);
         let declared = parse(&yaml(&format!("{STRICT_WITH_LIMITS}\n{TOLERANCE}"), "")).unwrap();
-        assert_eq!(declared.tolerance(), Tolerance { bps: 3, wei: 0 });
+        assert_eq!(tolerance_of(&declared), Tolerance { centi_bps: 300, wei: 0 });
         for (declaration, expected) in [
-            ("{wei: 2, cause: \"c\", measured: \"m\"}", Tolerance { bps: 0, wei: 2 }),
-            ("{bps: 1, wei: 2, cause: \"c\", measured: \"m\"}", Tolerance { bps: 1, wei: 2 }),
+            ("{wei: 2, reason: r}", Tolerance { centi_bps: 0, wei: 2 }),
+            ("{bps: 0.25, wei: 2, reason: r}", Tolerance { centi_bps: 25, wei: 2 }),
         ] {
             let config = parse(&yaml(
                 &format!("{STRICT_WITH_LIMITS}\nexecution_tolerance: {declaration}"),
                 "",
             ))
             .unwrap();
-            assert_eq!(config.tolerance(), expected, "{declaration}");
+            assert_eq!(tolerance_of(&config), expected, "{declaration}");
         }
+    }
+
+    #[test]
+    fn a_component_tolerance_overrides_the_package_one() {
+        let config = parse(&yaml(
+            &format!("{STRICT_WITH_LIMITS}\n{TOLERANCE}"),
+            "        execution_tolerance: {wei: 2, reason: \"stETH rounding\"}",
+        ))
+        .unwrap();
+        assert_eq!(tolerance_of(&config), Tolerance { centi_bps: 0, wei: 2 });
+        assert_eq!(
+            config
+                .tolerances()
+                .get("0xdef", &Bytes::from("0x02")),
+            Tolerance { centi_bps: 300, wei: 0 }
+        );
     }
 
     #[test]
     fn legacy_mode_keeps_half_a_percent_whatever_is_declared() {
-        assert_eq!(
-            parse(&yaml("", ""))
-                .unwrap()
-                .tolerance(),
-            Tolerance::LEGACY
-        );
-        assert_eq!(
-            parse(&yaml(TOLERANCE, ""))
-                .unwrap()
-                .tolerance(),
-            Tolerance::LEGACY
-        );
+        assert_eq!(tolerance_of(&parse(&yaml("", "")).unwrap()), Tolerance::LEGACY);
+        let declared =
+            parse(&yaml(TOLERANCE, "        execution_tolerance: {wei: 2, reason: r}")).unwrap();
+        assert_eq!(tolerance_of(&declared), Tolerance::LEGACY);
     }
 
     #[test]
-    fn a_tolerance_needs_a_cause_a_measurement_and_a_sensible_size() {
+    fn a_tolerance_needs_a_reason_and_a_sensible_size() {
         for (declaration, problem) in [
-            ("{bps: 0, cause: \"c\", measured: \"m\"}", "`bps: 0` allows nothing"),
-            ("{wei: 0, cause: \"c\", measured: \"m\"}", "`wei: 0` allows nothing"),
-            ("{bps: 2, wei: 0, cause: \"c\", measured: \"m\"}", "`wei: 0` allows nothing"),
-            ("{cause: \"c\", measured: \"m\"}", "neither `bps` nor `wei`"),
-            ("{bps: 10000, cause: \"c\", measured: \"m\"}", "`bps` must be 1 to 9999"),
-            ("{bps: 10000, wei: 0, cause: \"c\", measured: \"m\"}", "`bps` must be 1 to 9999"),
-            ("{bps: 3, cause: \" \", measured: \"m\"}", "`cause` is empty"),
-            ("{bps: 3, cause: \"c\", measured: \"\"}", "`measured` is empty"),
+            ("{bps: 0, reason: r}", "from 0.01 to 9999.99"),
+            ("{bps: 0.001, reason: r}", "from 0.01 to 9999.99"),
+            ("{bps: 10000, reason: r}", "from 0.01 to 9999.99"),
+            ("{wei: 0, reason: r}", "nonzero"),
+            ("{bps: 2, wei: 0, reason: r}", "nonzero"),
+            ("{reason: r}", "neither `bps` nor `wei`"),
+            ("{bps: 3, reason: \" \"}", "the reason is empty"),
+            ("{bps: 3}", "missing field `reason`"),
+            ("{bps: 3, reason: r, cause: c}", "unknown field `cause`"),
         ] {
             for harness in ["", STRICT_WITH_LIMITS] {
-                let err =
-                    parse(&yaml(&format!("{harness}\nexecution_tolerance: {declaration}"), ""))
+                for (package, component) in [
+                    (format!("{harness}\nexecution_tolerance: {declaration}"), String::new()),
+                    (harness.to_string(), format!("        execution_tolerance: {declaration}")),
+                    (harness.to_string(), format!("        tvl_only: {declaration}")),
+                ] {
+                    let err = parse(&yaml(&package, &component))
                         .unwrap_err()
-                        .to_string();
-                assert!(err.contains(problem), "{declaration}: {err}");
+                        .chain()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(": ");
+                    assert!(err.contains(problem), "{package} {component}: {err}");
+                }
             }
-        }
-        for (declaration, expected) in [
-            ("{bps: 3, cause: \"c\"}", "missing field `measured`"),
-            ("{bps: 3, cause: \"c\", measured: \"m\", why: \"x\"}", "unknown field `why`"),
-        ] {
-            let err = parse(&yaml(&format!("execution_tolerance: {declaration}"), ""))
-                .unwrap_err()
-                .chain()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(": ");
-            assert!(err.contains(expected), "{declaration}: {err}");
         }
     }
 
     const TVL_ONLY: &str =
-        "        tvl_only: {bps: 10, cause: \"fee bucket\", measured: \"6 bps over 40 components\"}";
+        "        tvl_only: {bps: 10, reason: \"fee bucket; 6 bps over 40 components\"}";
 
     #[test]
     fn tvl_only_parses_in_both_modes_into_a_tolerance() {
@@ -1196,7 +1359,10 @@ tests:
                 .tvl_only
                 .as_ref()
                 .unwrap();
-            assert_eq!(tvl_only.tolerance(), Tolerance { bps: 10, wei: 0 });
+            assert_eq!(
+                tvl_only.tolerance(&Bytes::from("0x01")),
+                Tolerance { centi_bps: 1000, wei: 0 }
+            );
         }
         let config = parse(&yaml("", "")).unwrap();
         assert!(config.tests[0].expected_components[0]
@@ -1205,48 +1371,83 @@ tests:
     }
 
     #[test]
-    fn tvl_only_needs_a_cause_a_measurement_and_a_sensible_size() {
-        for (declaration, problem) in [
-            ("{cause: \"c\", measured: \"m\"}", "neither `bps` nor `wei`"),
-            ("{bps: 0, cause: \"c\", measured: \"m\"}", "`bps: 0` allows nothing"),
-            ("{bps: 10000, cause: \"c\", measured: \"m\"}", "`bps` must be 1 to 9999"),
-            ("{wei: 5, cause: \"\", measured: \"m\"}", "`cause` is empty"),
-            ("{bps: 5, cause: \"c\"}", "missing field `measured`"),
-            ("{bps: 5, cause: \"c\", measured: \"m\", reason: \"r\"}", "unknown field `reason`"),
-        ] {
+    fn a_component_declares_one_tolerance_of_each_kind_in_every_test() {
+        for key in ["tvl_only", "execution_tolerance"] {
+            let declared = format!("        {key}: {{bps: 10, reason: \"fee bucket\"}}");
             for harness in ["", STRICT_WITH_LIMITS] {
-                let err = parse(&yaml(harness, &format!("        tvl_only: {declaration}")))
-                    .unwrap_err()
-                    .chain()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(": ");
-                assert!(err.contains(problem), "{declaration}: {err}");
+                let config = yaml(harness, &declared);
+                let tests = &config[config.find("tests:").unwrap() + "tests:\n".len()..];
+                let differs = format!(
+                    "{config}{}",
+                    tests
+                        .replace("test_foo", "test_bar")
+                        .replace("bps: 10", "bps: 20")
+                );
+                let err = parse(&differs).unwrap_err().to_string();
+                assert!(
+                    err.contains(&format!(
+                        "declares a different `{key}` in test test_bar than in test test_foo"
+                    )),
+                    "{err}"
+                );
+                let same = format!("{config}{}", tests.replace("test_foo", "test_bar"));
+                assert!(parse(&same).is_ok(), "{same}");
+
+                // A test that declares none differs from one that does.
+                let undeclared = yaml(harness, "");
+                let undeclared_tests =
+                    &undeclared[undeclared.find("tests:").unwrap() + "tests:\n".len()..];
+                let one_declares =
+                    format!("{config}{}", undeclared_tests.replace("test_foo", "test_bar"));
+                assert!(
+                    parse(&one_declares)
+                        .unwrap_err()
+                        .to_string()
+                        .contains(&format!("declares a different `{key}`")),
+                    "{one_declares}"
+                );
+                // The id is matched whatever its case.
+                let other_case = format!(
+                    "{config}{}",
+                    tests
+                        .replace("test_foo", "test_bar")
+                        .replace("0xAbC", "0xABC")
+                        .replace("bps: 10", "bps: 20")
+                );
+                assert!(parse(&other_case).is_err(), "{other_case}");
             }
         }
     }
 
     #[test]
-    fn a_component_declares_one_tvl_only_in_every_test() {
-        let tvl_only = "        tvl_only: {bps: 10, cause: \"fee bucket\", measured: \"6 bps\"}";
+    fn a_component_declares_the_same_limits_in_every_test() {
         for harness in ["", STRICT_WITH_LIMITS] {
-            let config = yaml(harness, tvl_only);
+            let config = yaml(harness, "        limits: {kind: hard}");
             let tests = &config[config.find("tests:").unwrap() + "tests:\n".len()..];
-            let differs = format!(
-                "{config}{}",
-                tests
-                    .replace("test_foo", "test_bar")
-                    .replace("bps: 10", "bps: 20")
-            );
+            let second = |tests: &str| format!("{config}{}", tests.replace("test_foo", "test_bar"));
+
+            let differs = second(&tests.replace("{kind: hard}", "{kind: soft, reason: \"r\"}"));
             let err = parse(&differs).unwrap_err().to_string();
             assert!(
                 err.contains(
-                    "declares a different `tvl_only` in test test_bar than in test test_foo"
+                    "0xAbC declares a different `limits` in test test_bar than in test test_foo"
                 ),
                 "{err}"
             );
-            let same = format!("{config}{}", tests.replace("test_foo", "test_bar"));
-            assert!(parse(&same).is_ok(), "{same}");
+            assert!(parse(&second(tests)).is_ok());
+
+            // A test that leaves the pool to the package's default differs from one that declares.
+            let undeclared = yaml(harness, "");
+            let undeclared_tests =
+                &undeclared[undeclared.find("tests:").unwrap() + "tests:\n".len()..];
+            assert!(parse(&second(undeclared_tests)).is_err());
+            // The id is matched whatever its case.
+            assert!(parse(&second(
+                &tests
+                    .replace("0xAbC", "0xABC")
+                    .replace("hard", "soft, reason: \"r\"")
+            ))
+            .is_err());
         }
     }
 
@@ -1256,7 +1457,7 @@ tests:
         let err = parse(&yaml(STRICT_WITH_LIMITS, &skipped))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("0xAbC in test test_foo"), "{err}");
+        assert!(err.contains("0xAbC's `tvl_only` in test test_foo"), "{err}");
         assert!(err.contains("sets `skip_simulation` (no adapter)"), "{err}");
         let skipped = format!("{TVL_ONLY}\n        skip_simulation: true");
         assert!(parse(&yaml("", &skipped)).is_ok());

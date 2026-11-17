@@ -18,10 +18,11 @@ pub use tycho_test::checks::{
     outcome::{CheckId, CheckResult, LimitReport, Outcome},
 };
 
-use crate::config::Harness;
+use crate::config::{DeclaredTolerance, Harness};
 
 /// The largest difference between a simulated and an executed amount out in one test, whether or
-/// not it was within tolerance. A declared tolerance's `measured` can be checked against it.
+/// not it was within tolerance. A declared `execution_tolerance`'s reason, which names what a run
+/// measured, can be checked against it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Drift {
     pub test: String,
@@ -57,6 +58,16 @@ pub struct Finished {
     pub drift: Option<Drift>,
 }
 
+/// The declaration a result carries, so the report shows what it was checked against.
+#[derive(Clone, Copy)]
+enum Declared<'a> {
+    Nothing,
+    /// A limit check's limit and its declaration.
+    Limit(&'a LimitReport),
+    /// A balance check's `tvl_only` tolerance.
+    TvlOnly(&'a DeclaredTolerance),
+}
+
 /// Runs the checks of one test and records how each ended.
 pub struct Checks {
     harness: Harness,
@@ -65,7 +76,7 @@ pub struct Checks {
     drift: Option<Observed>,
     /// The largest `executed - simulated` in magnitude, with its token out.
     largest_difference: Option<(BigInt, String)>,
-    /// The block the checks recorded now run at, while `full` checks an update.
+    /// The block of `full` these checks run at; `None` for a test's checks.
     block: Option<u64>,
 }
 
@@ -81,9 +92,10 @@ impl Checks {
         }
     }
 
-    /// Records the checks that follow as run at `block`, or at the snapshot for `None`.
-    pub fn at_block(&mut self, block: Option<u64>) {
-        self.block = block;
+    /// The checks of one block of `full`: every check recorded carries `block`.
+    pub fn with_block(mut self, block: u64) -> Self {
+        self.block = Some(block);
+        self
     }
 
     /// Notes an execution's output against its simulation, keeping the largest difference.
@@ -134,11 +146,17 @@ impl Checks {
     ) -> miette::Result<Option<T>> {
         match check() {
             Ok(value) => {
-                self.record(id, None, None, Outcome::Pass, None);
+                self.record(id, None, None, Outcome::Pass, Declared::Nothing);
                 Ok(Some(value))
             }
             Err(e) => {
-                self.record(id, None, None, Outcome::Fail { detail: format!("{e:#}") }, None);
+                self.record(
+                    id,
+                    None,
+                    None,
+                    Outcome::Fail { detail: format!("{e:#}") },
+                    Declared::Nothing,
+                );
                 match self.harness {
                     Harness::Legacy => Err(e),
                     Harness::Strict => {
@@ -152,7 +170,13 @@ impl Checks {
 
     /// Records a check the package's configuration turned off.
     pub fn skip(&mut self, id: CheckId, reason: &str) {
-        self.record(id, None, None, Outcome::Skipped { reason: reason.to_string() }, None);
+        self.record(
+            id,
+            None,
+            None,
+            Outcome::Skipped { reason: reason.to_string() },
+            Declared::Nothing,
+        );
     }
 
     /// Records a check the package's configuration turned off for one component, by its lowercase
@@ -163,7 +187,7 @@ impl Checks {
             Some(component),
             None,
             Outcome::Skipped { reason: reason.to_string() },
-            None,
+            Declared::Nothing,
         );
     }
 
@@ -174,13 +198,51 @@ impl Checks {
             None,
             None,
             Outcome::NotRun { reason: format!("{prerequisite} failed") },
-            None,
+            Declared::Nothing,
         );
+    }
+
+    /// Records a check that could not run, for `reason`, when no earlier check's failure is the
+    /// cause.
+    pub fn not_run_for(&mut self, id: CheckId, reason: &str) {
+        self.record(
+            id,
+            None,
+            None,
+            Outcome::NotRun { reason: reason.to_string() },
+            Declared::Nothing,
+        );
+    }
+
+    /// Strict: records the three limit checks as not run, because `prerequisite` failed. Legacy
+    /// mode runs no limit checks, so this records nothing there.
+    pub fn limits_not_run(&mut self, prerequisite: CheckId) {
+        if self.harness == Harness::Strict {
+            for id in CheckId::LIMITS {
+                self.not_run(id, prerequisite);
+            }
+        }
+    }
+
+    /// Strict: records the three limit checks as skipped, for `reason`. Legacy mode runs no limit
+    /// checks, so this records nothing there.
+    pub fn limits_skipped(&mut self, reason: &str) {
+        if self.harness == Harness::Strict {
+            for id in CheckId::LIMITS {
+                self.skip(id, reason);
+            }
+        }
     }
 
     /// Records a failure that happened outside [`Checks::run`], such as an indexing error.
     pub fn fail(&mut self, id: CheckId, error: &miette::Report) {
-        self.record(id, None, None, Outcome::Fail { detail: format!("{error:#}") }, None);
+        self.record(
+            id,
+            None,
+            None,
+            Outcome::Fail { detail: format!("{error:#}") },
+            Declared::Nothing,
+        );
     }
 
     /// Ends the test: an error naming every failed check if any failed, `Ok` otherwise, with the
@@ -230,13 +292,28 @@ impl Checks {
         unfailed: Outcome,
         failures: &[String],
     ) {
-        self.record_scoped(id, component, Some(direction), Some(limit), unfailed, failures);
+        self.record_scoped(
+            id,
+            component,
+            Some(direction),
+            Declared::Limit(limit),
+            unfailed,
+            failures,
+        );
     }
 
-    /// Records the outcome of a check on one component: a failure listing `failures` if there
-    /// are any, else a pass.
-    pub fn record_component(&mut self, id: CheckId, component: &str, failures: &[String]) {
-        self.record_scoped(id, component, None, None, Outcome::Pass, failures);
+    /// Records the outcome of a balance check on one component: a failure listing `failures` if
+    /// there are any, else a pass, with the component's `tvl_only` declaration when it has one, so
+    /// the report shows the tolerance a pass was within.
+    pub fn record_balances(
+        &mut self,
+        id: CheckId,
+        component: &str,
+        tvl_only: Option<&DeclaredTolerance>,
+        failures: &[String],
+    ) {
+        let declared = tvl_only.map_or(Declared::Nothing, Declared::TvlOnly);
+        self.record_scoped(id, component, None, declared, Outcome::Pass, failures);
     }
 
     fn record_scoped(
@@ -244,7 +321,7 @@ impl Checks {
         id: CheckId,
         component: &str,
         direction: Option<&str>,
-        limit: Option<&LimitReport>,
+        declared: Declared<'_>,
         unfailed: Outcome,
         failures: &[String],
     ) {
@@ -257,7 +334,7 @@ impl Checks {
             error!("[{}] {id} failed for {scope}: {detail}", self.test);
             Outcome::Fail { detail }
         };
-        self.record(id, Some(component), direction, outcome, limit);
+        self.record(id, Some(component), direction, outcome, declared);
     }
 
     fn record(
@@ -266,8 +343,13 @@ impl Checks {
         component: Option<&str>,
         direction: Option<&str>,
         outcome: Outcome,
-        limit: Option<&LimitReport>,
+        declared: Declared<'_>,
     ) {
+        let (limit, tvl_only) = match declared {
+            Declared::Nothing => (None, None),
+            Declared::Limit(limit) => (Some(limit.clone()), None),
+            Declared::TvlOnly(tvl_only) => (None, Some(tvl_only.clone())),
+        };
         self.results.push(CheckResult {
             test: self.test.clone(),
             check,
@@ -275,7 +357,8 @@ impl Checks {
             direction: direction.map(str::to_string),
             block: self.block,
             outcome,
-            limit: limit.cloned(),
+            limit,
+            tvl_only,
         });
     }
 }
@@ -330,7 +413,7 @@ mod tests {
     use crate::config::{DeclaredBy, Limits};
 
     fn limit() -> LimitReport {
-        LimitReport::new(&Limits::Hard { rounding: 0 }, DeclaredBy::Component, None, false)
+        LimitReport::new(&Limits::Hard {}, DeclaredBy::Component, None)
     }
 
     fn failing() -> miette::Result<()> {
@@ -404,8 +487,34 @@ mod tests {
                 block: None,
                 outcome: Outcome::Skipped { reason: "no fork state".to_string() },
                 limit: None,
+                tvl_only: None,
             }]
         );
+    }
+
+    #[test]
+    fn a_balance_result_carries_the_tvl_only_declaration() {
+        let declared: DeclaredTolerance =
+            serde_yaml::from_str("{bps: 10, reason: \"a fee bucket the contract also holds\"}")
+                .unwrap();
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.record_balances(CheckId::Balances, "0xAbC", Some(&declared), &[]);
+        checks.record_balances(
+            CheckId::BalancesTvlOnly,
+            "0xAbC",
+            Some(&declared),
+            &["moved".to_string()],
+        );
+        checks.record_balances(CheckId::Balances, "0xDef", None, &[]);
+        let results = checks.finish().results;
+        assert_eq!(results[0].tvl_only.as_ref(), Some(&declared));
+        assert_eq!(results[1].outcome, Outcome::Fail { detail: "moved".to_string() });
+        assert_eq!(results[1].tvl_only.as_ref(), Some(&declared));
+        assert_eq!(results[2].tvl_only, None);
+        let json = serde_json::to_value(&results).unwrap();
+        assert_eq!(json[0]["tvl_only"]["bps"], "10");
+        assert_eq!(json[0]["tvl_only"]["reason"], "a fee bucket the contract also holds");
+        assert!(json[2].get("tvl_only").is_none());
     }
 
     #[test]
@@ -413,8 +522,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("report-lines-{}.jsonl", std::process::id()));
         std::fs::write(&path, "").unwrap();
         let report = |block: u64| {
-            let mut checks = Checks::new(Harness::Strict, "full");
-            checks.at_block(Some(block));
+            let mut checks = Checks::new(Harness::Strict, "full").with_block(block);
             checks.skip(CheckId::ExecLadder, "off");
             Report {
                 package: "ethereum-foo".to_string(),
@@ -441,14 +549,12 @@ mod tests {
 
     #[test]
     fn checks_carry_the_block_they_ran_at() {
-        let mut checks = Checks::new(Harness::Strict, "t");
-        checks.at_block(Some(21_000_005));
+        let mut checks = Checks::new(Harness::Strict, "t").with_block(21_000_005);
         checks.skip(CheckId::ExecLadder, "off");
-        checks.at_block(None);
-        checks.skip(CheckId::Balances, "off");
-        let results = checks.finish().results;
-        assert_eq!(results[0].block, Some(21_000_005));
-        assert_eq!(results[1].block, None);
+        assert_eq!(checks.finish().results[0].block, Some(21_000_005));
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.skip(CheckId::ExecLadder, "off");
+        assert_eq!(checks.finish().results[0].block, None);
     }
 
     #[test]
@@ -477,6 +583,7 @@ mod tests {
                     block: None,
                     outcome: Outcome::Fail { detail: "boom".to_string() },
                     limit: None,
+                    tvl_only: None,
                 },
                 CheckResult {
                     test: "t".to_string(),
@@ -488,9 +595,13 @@ mod tests {
                     limit: Some(LimitReport::new(
                         &Limits::Soft { reason: "constant product".to_string() },
                         DeclaredBy::PackageDefault,
-                        Some((&BigUint::from(1000u32), &BigUint::from(2000u32))),
-                        false,
+                        Some(&tycho_test::checks::limits::LimitSizes {
+                            max_input: &BigUint::from(1000u32),
+                            max_output: &BigUint::from(2000u32),
+                            capped: false,
+                        }),
                     )),
+                    tvl_only: None,
                 },
             ],
         };
@@ -589,8 +700,8 @@ mod tests {
     #[test]
     fn a_check_recorded_per_component_has_no_direction() {
         let mut checks = Checks::new(Harness::Strict, "t");
-        checks.record_component(CheckId::Balances, "0x01", &[]);
-        checks.record_component(CheckId::Balances, "0x02", &["A: indexed 1".to_string()]);
+        checks.record_balances(CheckId::Balances, "0x01", None, &[]);
+        checks.record_balances(CheckId::Balances, "0x02", None, &["A: indexed 1".to_string()]);
 
         let Finished { outcome, results, .. } = checks.finish();
         assert_eq!(outcome.unwrap_err().to_string(), "Failed checks: balances");

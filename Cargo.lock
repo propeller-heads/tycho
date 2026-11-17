@@ -10214,6 +10214,7 @@ dependencies = [
  "rand 0.9.5",
  "rstest 0.24.0",
  "serde_json",
+ "strum_macros 0.25.3",
  "tokio",
  "tracing",
  "tracing-subscriber 0.3.20",

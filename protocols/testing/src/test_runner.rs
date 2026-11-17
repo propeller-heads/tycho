@@ -13,7 +13,6 @@ use alloy::{
 use futures::StreamExt;
 use itertools::Itertools;
 use miette::{ensure, miette, IntoDiagnostic, WrapErr};
-use num_bigint::BigUint;
 use postgres::NoTls;
 use tokio::runtime::Runtime;
 use tracing::{debug, error, info, warn};
@@ -56,10 +55,10 @@ use tycho_test::{
 
 use crate::{
     adapter_builder::AdapterContractBuilder,
-    balances::{self, BalanceCheck},
+    balances,
     config::{
-        component_directions, Direction, Harness, IntegrationTest, IntegrationTestsConfig,
-        LimitKind, ProtocolComponentWithTestConfig, Skip, Tolerance,
+        component_directions, DeclaredTolerance, Direction, ExecutionTolerances, Harness,
+        IntegrationTest, IntegrationTestsConfig, LimitKind, ProtocolComponentWithTestConfig, Skip,
     },
     execution,
     report::{CheckId, Checks, Finished, Report},
@@ -112,40 +111,25 @@ struct RpcChain<'a> {
 }
 
 impl balances::Chain for RpcChain<'_> {
-    fn balance_of(&self, token: &Bytes, holder: &Bytes) -> Result<BigUint, String> {
-        let token = bytes_to_address(token).map_err(|e| e.to_string())?;
-        let holder = bytes_to_address(holder).map_err(|e| e.to_string())?;
-        let balance = self
-            .runner
-            .runtime
-            .block_on(
-                self.runner
-                    .rpc_provider
-                    .get_token_balance(token, holder, self.block),
-            )
-            .map_err(|e| format!("{e:#}"))?;
-        Ok(BigUint::from_bytes_be(&balance.to_be_bytes::<32>()))
-    }
-
-    fn call(&self, to: &Bytes, calldata: &Bytes) -> Result<Bytes, String> {
-        let to = bytes_to_address(to).map_err(|e| e.to_string())?;
+    fn call_code(&self, code: Bytes, calldata: Bytes) -> Result<Bytes, String> {
+        // Both `Bytes` wrap `bytes::Bytes`, so the conversions copy nothing.
         let returned = self
             .runner
             .runtime
-            .block_on(
-                self.runner
-                    .rpc_provider
-                    .call(to, calldata.to_vec().into(), self.block),
-            )
+            .block_on(self.runner.rpc_provider.call_code(
+                alloy::primitives::Bytes(code.0),
+                alloy::primitives::Bytes(calldata.0),
+                self.block,
+            ))
             .map_err(|e| format!("{e:#}"))?;
-        Ok(Bytes::from(returned.to_vec()))
+        Ok(Bytes(returned.0))
     }
 }
 
 /// The limit `package` declares for every direction of every component in `update`, with where it
 /// comes from, keyed as [`ladder::run_ladder`] reads it: by lowercase id and direction. A strict
 /// package declares a default, so every direction has a declaration.
-fn update_limits(
+fn declared_limits_of(
     update: &Update,
     protocol_components: &HashMap<String, ProtocolComponentModel>,
     package: &PackageExpectations,
@@ -166,26 +150,121 @@ fn update_limits(
     declared
 }
 
-/// How many updates strict `full` has checked, and how many of them had a failed check.
+/// Strict mode's balance checks of one test: each expected component's `balances`, read by the
+/// package's `lens` (`check_component`), or skipped for the component's reason.
+///
+/// A lens that failed to build fails `balances` once for the test, not once per component: the
+/// build failed, not a component's balances. `lens` is `Ok(None)` only when no `balance_lens` is
+/// declared, which `from_yaml` allows only when every component skips the check. The error
+/// [`Checks::run`] returns in legacy mode is passed on; in strict mode this returns `Ok`.
+fn record_strict_balances(
+    checks: &mut Checks,
+    lens: miette::Result<Option<balances::Lens>>,
+    components: &[ProtocolComponentWithTestConfig],
+    mut check_component: impl FnMut(&ProtocolComponentWithTestConfig, &balances::Lens) -> Vec<String>,
+) -> miette::Result<()> {
+    let lens = match lens {
+        Ok(lens) => Some(lens),
+        Err(e) => {
+            checks.run(CheckId::Balances, || Err::<(), _>(e))?;
+            None
+        }
+    };
+    for component in components {
+        let id = &component.base.id;
+        if let Some(reason) = component.skip_balance_check.reason() {
+            info!("[{id}] Skipping the balance check: {reason}");
+            checks.skip_component(CheckId::Balances, id, reason);
+            continue;
+        }
+        // A failed lens build was recorded once, above.
+        let Some(lens) = &lens else {
+            continue;
+        };
+        let failures = match lens {
+            Some(lens) => check_component(component, lens),
+            None => vec!["no `balance_lens` is declared".to_string()],
+        };
+        checks.record_balances(CheckId::Balances, id, component.tvl_only.as_ref(), &failures);
+    }
+    Ok(())
+}
+
+/// What became of one update's swaps in strict `full`.
+enum UpdateExecutions {
+    /// The ladder queued no swap.
+    Nothing,
+    /// The node did not serve the update's block, with its error, so nothing was executed.
+    Unserved(String),
+    /// The swaps were executed, or the batch failed with this error.
+    Ran(miette::Result<HashMap<String, TychoExecutionResult>>),
+}
+
+/// Strict `full`'s checks of one update at `block_number`: the ladder's `output`, then the
+/// executions of its swaps.
+///
+/// A pool that trades no direction at this block is passed over (`failure_of_traded`): every
+/// pool of the protocol is laddered at every update, and one with no capacity says nothing about
+/// the package. At a block the node does not serve, `exec.ladder` is not run, with the node's
+/// error, so the report says why nothing was executed.
+fn judge_strict_update(
+    block_number: u64,
+    output: &LadderOutput,
+    executions: UpdateExecutions,
+    tolerances: &ExecutionTolerances,
+) -> Checks {
+    let mut checks = Checks::new(Harness::Strict, "full").with_block(block_number);
+    let failure = output.failure_of_traded();
+    let ladder_failed = failure.is_some();
+    // Strict mode records each failure and goes on, so neither of these returns an error.
+    if let Err(e) = checks.run(CheckId::SimLadder, || failure.map_or(Ok(()), Err)) {
+        error!("Recording the ladder of block {block_number} failed: {e:#}");
+    }
+    let executed = match executions {
+        UpdateExecutions::Ran(executed) => Some(executed),
+        UpdateExecutions::Nothing | UpdateExecutions::Unserved(_) if ladder_failed => {
+            checks.not_run(CheckId::ExecLadder, CheckId::SimLadder);
+            None
+        }
+        UpdateExecutions::Nothing => None,
+        UpdateExecutions::Unserved(error) => {
+            checks.not_run_for(
+                CheckId::ExecLadder,
+                &format!("the node does not serve block {block_number}: {error}"),
+            );
+            None
+        }
+    };
+    if let Err(e) = record_strict_executions(output, executed, tolerances, None, &mut checks) {
+        error!("Recording the executions of block {block_number} failed: {e:#}");
+    }
+    checks
+}
+
+/// How many updates strict `full` has checked, how many of them had a failed check, and at how
+/// many the node did not serve the block, so nothing was executed.
 #[derive(Default)]
 struct StrictTally {
     checked: usize,
     failed: usize,
+    unexecuted: usize,
 }
 
 impl StrictTally {
-    fn add(&mut self, failed: bool) {
+    fn add(&mut self, update: UpdateVerdict) {
         self.checked += 1;
-        self.failed += usize::from(failed);
+        self.failed += usize::from(update.failed);
+        self.unexecuted += usize::from(update.unexecuted);
     }
 }
 
-/// Every execution strict mode checks after a ladder: its quotes, and the swaps at and past each
-/// declared limit, by simulation id.
-fn strict_inputs(output: &LadderOutput) -> HashMap<String, TychoExecutionInput> {
-    let mut inputs = output.executions.clone();
-    inputs.extend(output.limit_executions.clone());
-    inputs
+/// How one update of strict `full` ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UpdateVerdict {
+    /// A check failed.
+    failed: bool,
+    /// The node did not serve the block, so its swaps were not executed.
+    unexecuted: bool,
 }
 
 /// Records strict mode's execution checks for `output`: the ladder, then per direction the quote
@@ -193,39 +272,30 @@ fn strict_inputs(output: &LadderOutput) -> HashMap<String, TychoExecutionInput> 
 ///
 /// `executed` is `None` when nothing was executed, as at an update with nothing to execute:
 /// nothing is recorded for the ladder, and the limit checks are recorded from the simulation
-/// alone. An error fails the ladder and every limit check that needs an execution. With
+/// alone. An error fails the ladder and `limits.at_limit`, and leaves a hard or under-cap limit's
+/// `limits.past_limit` not run, since nothing past a limit that did not execute proves anything; a
+/// soft limit's still passes on its simulation, and a capped one is still not run. With
 /// `execution_skip_reason`, the reason every component skips execution, the ladder is recorded as
 /// skipped.
 fn record_strict_executions(
     output: &LadderOutput,
     executed: Option<miette::Result<HashMap<String, TychoExecutionResult>>>,
-    tolerance: Tolerance,
+    tolerances: &ExecutionTolerances,
     execution_skip_reason: Option<&str>,
     checks: &mut Checks,
 ) -> miette::Result<()> {
     let executed = match executed {
         None => None,
         Some(Ok(results)) => {
-            observe_executions(checks, &output.executions, &results);
+            observe_executions(checks, output.executions(), &results);
             // A swap past the limit pays against the quote at the limit, so only the swaps at the
             // limit measure drift.
-            let at_limit_executions: HashMap<String, TychoExecutionInput> = output
-                .limit_directions
-                .iter()
-                .filter_map(|direction_limits| direction_limits.at_limit_execution())
-                .filter_map(|id| {
-                    output
-                        .limit_executions
-                        .get_key_value(id)
-                })
-                .map(|(id, input)| (id.clone(), input.clone()))
-                .collect();
-            observe_executions(checks, &at_limit_executions, &results);
+            observe_executions(checks, &output.at_limit_executions(), &results);
             match execution_skip_reason {
                 Some(reason) => checks.skip(CheckId::ExecLadder, reason),
                 None => {
                     checks.run(CheckId::ExecLadder, || {
-                        check_executions_match(&output.executions, &results, tolerance)
+                        check_executions_match(output.executions(), &results, tolerances)
                     })?;
                 }
             }
@@ -242,7 +312,7 @@ fn record_strict_executions(
             .as_ref()
             .map_err(String::as_str)
     });
-    for judged in ladder::judge_limits(output, executed, tolerance) {
+    for judged in ladder::judge_limits(output, executed, tolerances) {
         checks.record_direction(
             judged.check,
             &judged.component,
@@ -285,7 +355,8 @@ pub enum TestType {
 
 pub struct TestTypeFull {
     pub initial_block: Option<u64>,
-    /// Strict: where to write the checks of the block that failed, if anywhere.
+    /// Strict: where to append the checks of every update with a failed check, one line of JSON
+    /// per update, if anywhere.
     pub report: Option<PathBuf>,
 }
 
@@ -435,6 +506,20 @@ impl TestRunner {
         substreams_yaml_path: &PathBuf,
         test_type: &TestTypeFull,
     ) -> miette::Result<()> {
+        // Read before the build and the sync, so a yaml it rejects fails at the start.
+        let strict = match config.harness {
+            Harness::Strict => Some(self.package_expectations()?),
+            Harness::Legacy => {
+                if let Some(path) = &test_type.report {
+                    warn!(
+                        "`--report {}` is ignored: `full` writes a report for a strict package \
+                         only",
+                        path.display()
+                    );
+                }
+                None
+            }
+        };
         let start_block = match test_type.initial_block {
             Some(b) => b,
             None => {
@@ -497,7 +582,7 @@ impl TestRunner {
         self.run_tvl_import()?;
 
         // Start live testing with streaming (updates will come as indexer catches up)
-        self.run_live_testing(&config, test_type.report.as_deref())
+        self.run_live_testing(&config, strict.as_ref(), test_type.report.as_deref())
             .await
     }
 
@@ -510,14 +595,11 @@ impl TestRunner {
     async fn run_live_testing(
         &self,
         config: &IntegrationTestsConfig,
+        strict: Option<&PackageExpectations>,
         report: Option<&Path>,
     ) -> miette::Result<()> {
         info!("Starting live testing for protocol {}", &config.protocol_system);
-        let strict = match config.harness {
-            Harness::Strict => Some(self.package_expectations()?),
-            Harness::Legacy => None,
-        };
-        if let (Some(_), Some(path)) = (&strict, report) {
+        if let (Some(_), Some(path)) = (strict, report) {
             // A new run starts a new report, rather than appending to an earlier run's.
             std::fs::write(path, "")
                 .into_diagnostic()
@@ -630,22 +712,23 @@ impl TestRunner {
                         }
                     };
 
-                    match &strict {
+                    match strict {
                         Some(package) => {
-                            let failed = self
-                                .check_strict_update(
-                                    &update,
-                                    &protocol_components,
-                                    config,
-                                    package,
-                                    report,
-                                )
+                            let verdict = self
+                                .check_strict_update(&update, &protocol_components, package, report)
                                 .await;
-                            tally.add(failed);
-                            if failed {
+                            tally.add(verdict);
+                            if verdict.failed {
                                 error!(
                                     "{} of the {} updates checked so far have a failed check",
                                     tally.failed, tally.checked
+                                );
+                            }
+                            if verdict.unexecuted {
+                                warn!(
+                                    "The node did not serve the block of {} of the {} updates \
+                                     checked so far, so their swaps were not executed",
+                                    tally.unexecuted, tally.checked
                                 );
                             }
                         }
@@ -687,26 +770,27 @@ impl TestRunner {
         config: &IntegrationTestsConfig,
     ) {
         // Step 1: Run simulation get amount out
-        let execution_data = match self.run_simulation(
+        let output = self.run_simulation(
             update,
             protocol_components,
             &[], // No skip filters for live testing
             &config.protocol_system,
             None,
-        ) {
-            Ok(output) => output.executions,
-            Err(e) => {
-                error!("Failed to run simulation: {:#}", e);
-                return;
-            }
-        };
+        );
+        if let Some(e) = output.failure() {
+            error!("Failed to run simulation: {:#}", e);
+        }
+        let execution_data = output.into_executions();
 
         if execution_data.is_empty() {
             info!("No simulation data to execute for this update");
             return;
         }
 
-        info!("Gathered {} simulation entries, sleeping for block time...", execution_data.len());
+        info!(
+            "Gathered {} simulation entries, fetching the update's block...",
+            execution_data.len()
+        );
 
         // Step 2: Get the actual block from RPC
         let block = match self
@@ -743,84 +827,61 @@ impl TestRunner {
 
     /// Strict full mode on one update: runs the ladder and the declared limits' checks, executes
     /// at the update's block, and records every check at that block. Returns whether a check
-    /// failed; a failed update is logged, naming its checks, and appended to `report`.
+    /// failed and whether the swaps were executed; a failed update is logged, naming its checks,
+    /// and appended to `report`.
     ///
-    /// A block the node does not serve is logged, and the update is judged from the simulation
-    /// alone. Executions that cannot be simulated fail every check that needs them, with the
-    /// reason, so a package whose swaps cannot be executed fails rather than going unnoticed.
+    /// At a block the node does not serve, the update is judged from the simulation alone, with
+    /// `exec.ladder` not run. Executions that cannot be simulated fail every check that needs them,
+    /// with the reason, so a package whose swaps cannot be executed fails rather than going
+    /// unnoticed.
     async fn check_strict_update(
         &self,
         update: &Update,
         protocol_components: &HashMap<String, ProtocolComponentModel>,
-        config: &IntegrationTestsConfig,
         package: &PackageExpectations,
         report: Option<&Path>,
-    ) -> bool {
+    ) -> UpdateVerdict {
         let block_number = update.block_number;
-        let mut checks = Checks::new(Harness::Strict, "full");
-        checks.at_block(Some(block_number));
-        let declared = update_limits(update, protocol_components, package);
-        let no_skips = HashMap::new();
-        // Strict mode records a failed check and returns `Ok(None)`.
-        let ladder = checks
-            .run(CheckId::SimLadder, || {
-                ladder::run_ladder(
-                    self.chain,
-                    update,
-                    protocol_components,
-                    ladder::Skips { simulation: &no_skips, execution: &no_skips },
-                    &config.protocol_system,
-                    Some(&declared),
-                )
-            })
-            .ok()
-            .flatten();
-        match ladder {
-            None => {
-                checks.not_run(CheckId::ExecLadder, CheckId::SimLadder);
-                for id in CheckId::LIMITS {
-                    checks.not_run(id, CheckId::SimLadder);
+        let declared = declared_limits_of(update, protocol_components, package);
+        let output = self.run_simulation(
+            update,
+            protocol_components,
+            &[],
+            &package.protocol_system,
+            Some(&declared),
+        );
+        let inputs = output.all_executions();
+        let executions = if inputs.is_empty() {
+            UpdateExecutions::Nothing
+        } else {
+            match self
+                .rpc_provider
+                .get_block(BlockNumberOrTag::Number(block_number))
+                .await
+            {
+                Ok(block) => UpdateExecutions::Ran(
+                    self.simulate_executions(inputs, &block, &package.protocol_system)
+                        .await,
+                ),
+                Err(e) => {
+                    warn!(
+                        "The node does not serve block {block_number}, so its swaps are not \
+                         executed; judging the update from the simulation alone: {e}"
+                    );
+                    UpdateExecutions::Unserved(format!("{e:#}"))
                 }
             }
-            Some(output) => {
-                let inputs = strict_inputs(&output);
-                let executed = if inputs.is_empty() {
-                    None
-                } else {
-                    match self
-                        .rpc_provider
-                        .get_block(BlockNumberOrTag::Number(block_number))
-                        .await
-                    {
-                        Ok(block) => Some(
-                            self.simulate_executions(inputs, &block, &config.protocol_system)
-                                .await,
-                        ),
-                        Err(e) => {
-                            warn!(
-                                "The node does not serve block {block_number}, so its swaps are \
-                                 not executed; judging the update from the simulation alone: {e}"
-                            );
-                            None
-                        }
-                    }
-                };
-                // Strict mode records each failure and goes on, so this never returns an error.
-                if let Err(e) = record_strict_executions(
-                    &output,
-                    executed,
-                    config.tolerance(),
-                    None,
-                    &mut checks,
-                ) {
-                    error!("Recording the executions of block {block_number} failed: {e:#}");
-                }
-            }
-        }
+        };
+        let unexecuted = matches!(executions, UpdateExecutions::Unserved(_));
+        let checks = judge_strict_update(block_number, &output, executions, &package.tolerances());
         let Finished { outcome, results, drift } = checks.finish();
         let Err(failed) = outcome else {
-            info!("Block {block_number}: every check passed");
-            return false;
+            if unexecuted {
+                info!("Block {block_number}: every check that ran passed; nothing was executed");
+            } else {
+                info!("Block {block_number}: every check passed");
+            }
+            return UpdateVerdict { failed: false, unexecuted };
         };
         error!("Block {block_number}: {failed}");
         if let Some(path) = report {
@@ -839,7 +900,7 @@ impl TestRunner {
                 Err(e) => error!("{e:#}"),
             }
         }
-        true
+        UpdateVerdict { failed: true, unexecuted }
     }
 
     fn run_tests_in_range(
@@ -975,12 +1036,16 @@ impl TestRunner {
             .collect::<Vec<String>>();
         // Strict: the components whose balances are declared to feed only TVL, which the runner
         // verifies by quoting them again with their balances scaled down.
-        let tvl_only_ids: Vec<String> = match config.harness {
+        let tvl_only: Vec<(String, &DeclaredTolerance)> = match config.harness {
             Harness::Strict => test
                 .expected_components
                 .iter()
-                .filter(|component| component.tvl_only.is_some())
-                .map(|component| component.base.id.clone())
+                .filter_map(|component| {
+                    component
+                        .tvl_only
+                        .as_ref()
+                        .map(|declared| (component.base.id.clone(), declared))
+                })
                 .collect(),
             Harness::Legacy => Vec::new(),
         };
@@ -1010,14 +1075,10 @@ impl TestRunner {
             ] {
                 checks.not_run(id, CheckId::Index);
             }
-            if !tvl_only_ids.is_empty() {
+            if !tvl_only.is_empty() {
                 checks.not_run(CheckId::BalancesTvlOnly, CheckId::Index);
             }
-            if config.harness == Harness::Strict {
-                for id in CheckId::LIMITS {
-                    checks.not_run(id, CheckId::Index);
-                }
-            }
+            checks.limits_not_run(CheckId::Index);
             return Ok(());
         };
 
@@ -1048,22 +1109,23 @@ impl TestRunner {
         })?;
 
         if config.harness == Harness::Strict {
-            // `from_yaml` rejected a package-level skip.
-            for component in &test.expected_components {
-                let tolerance = component
-                    .tvl_only
-                    .as_ref()
-                    .map_or(Tolerance::EXACT, |tvl_only| tvl_only.tolerance());
-                let failures = self.check_component_balances(
+            // `from_yaml` rejected a package-level skip, and a missing lens unless every
+            // component skips the check.
+            let lens = config
+                .balance_lens
+                .as_deref()
+                .map(|name| self.build_balance_lens(name))
+                .transpose();
+            record_strict_balances(checks, lens, &test.expected_components, |component, lens| {
+                self.check_component_balances(
                     component,
-                    tolerance,
+                    lens,
                     &protocol_components,
                     &response_protocol_states_by_id,
                     &all_tokens,
                     block,
-                );
-                checks.record_component(CheckId::Balances, &component.base.id, &failures);
-            }
+                )
+            })?;
         } else if let Some(reason) = config.skip_balance_check.reason() {
             info!("Skipping balance check: {reason}");
             checks.skip(CheckId::Balances, reason);
@@ -1102,9 +1164,13 @@ impl TestRunner {
         // The copy with scaled-down balances holds only the `tvl_only` components, and is decoded
         // first: VM states read a shared database each decode replaces, so the original decode
         // below must come last for the ladders to run on it.
-        let scaled = (!tvl_only_ids.is_empty()).then(|| {
+        let scaled = (!tvl_only.is_empty()).then(|| {
             let mut scaled = snapshot.clone();
-            let changed = tvl_only::scale_balances(&mut scaled, &tvl_only_ids);
+            let ids: Vec<String> = tvl_only
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect();
+            let changed = tvl_only::scale_balances(&mut scaled, &ids);
             let decoded = adapter_contract_path().and_then(|path| {
                 self.decode_snapshot(
                     &config.protocol_system,
@@ -1142,25 +1208,21 @@ impl TestRunner {
             if scaled.is_some() {
                 checks.not_run(CheckId::BalancesTvlOnly, CheckId::Decode);
             }
-            if config.harness == Harness::Strict {
-                for id in CheckId::LIMITS {
-                    checks.not_run(id, CheckId::Decode);
-                }
-            }
+            checks.limits_not_run(CheckId::Decode);
             return Ok(());
         };
 
         if let Some((decoded, changed)) = &scaled {
-            for id in &tvl_only_ids {
+            for (id, declared) in &tvl_only {
                 let failures = match decoded {
-                    Ok(scaled) => {
-                        tvl_only::check(id, &update, scaled, changed, executable_max_input)
-                    }
+                    Ok(scaled) => tvl_only::check(id, &update, scaled, changed, |limit| {
+                        executable_max_input(limit).amount
+                    }),
                     Err(e) => vec![format!(
                         "decoding the snapshot with scaled-down balances failed: {e:#}"
                     )],
                 };
-                checks.record_component(CheckId::BalancesTvlOnly, id, &failures);
+                checks.record_balances(CheckId::BalancesTvlOnly, id, Some(declared), &failures);
             }
         }
 
@@ -1207,32 +1269,24 @@ impl TestRunner {
         if let Some(reason) = ladder_skips.simulation {
             checks.skip(CheckId::SimLadder, reason);
             checks.skip(CheckId::ExecLadder, reason);
-            if declared_limits.is_some() {
-                for id in CheckId::LIMITS {
-                    checks.skip(id, reason);
-                }
-            }
+            checks.limits_skipped(reason);
             return Ok(());
         }
 
-        let Some(output) = checks.run(CheckId::SimLadder, || {
-            self.run_simulation(
-                &update,
-                &protocol_components_simulation,
-                &test.expected_components,
-                &config.protocol_system,
-                declared_limits.as_ref(),
-            )
-        })?
-        else {
+        // A component whose ladder fails fails `sim.ladder`; in strict mode the other components
+        // are still executed and their limits checked, and legacy mode stops here.
+        let output = self.run_simulation(
+            &update,
+            &protocol_components_simulation,
+            &test.expected_components,
+            &config.protocol_system,
+            declared_limits.as_ref(),
+        );
+        checks.run(CheckId::SimLadder, || output.failure().map_or(Ok(()), Err))?;
+        if output.failure().is_some() && !output.has_executions() {
             checks.not_run(CheckId::ExecLadder, CheckId::SimLadder);
-            if declared_limits.is_some() {
-                for id in CheckId::LIMITS {
-                    checks.not_run(id, CheckId::SimLadder);
-                }
-            }
-            return Ok(());
-        };
+            return record_strict_executions(&output, None, &config.tolerances(), None, checks);
+        }
 
         let execution_skip_reason = ladder_skips.execution;
         if declared_limits.is_some() {
@@ -1240,7 +1294,7 @@ impl TestRunner {
                 &output,
                 &header,
                 &config.protocol_system,
-                config.tolerance(),
+                &config.tolerances(),
                 execution_skip_reason,
                 checks,
             );
@@ -1252,14 +1306,18 @@ impl TestRunner {
 
         let executed = self
             .runtime
-            .block_on(self.execute_inputs(output.executions, &header, &config.protocol_system));
+            .block_on(self.execute_inputs(
+                output.into_executions(),
+                &header,
+                &config.protocol_system,
+            ));
         // Noted before the check, so a failing run still reports how far off it was.
         if let Ok((inputs, results)) = &executed {
             observe_executions(checks, inputs, results);
         }
         checks.run(CheckId::ExecLadder, || {
             let (inputs, results) = executed?;
-            check_executions_match(&inputs, &results, config.tolerance())
+            check_executions_match(&inputs, &results, &config.tolerances())
         })?;
 
         Ok(())
@@ -1718,7 +1776,7 @@ impl TestRunner {
         expected_components: &[ProtocolComponentWithTestConfig],
         protocol_system: &str,
         declared_limits: Option<&DeclaredLimits>,
-    ) -> miette::Result<LadderOutput> {
+    ) -> LadderOutput {
         ladder::run_ladder(
             self.chain,
             update,
@@ -1755,7 +1813,7 @@ impl TestRunner {
         let (inputs, results) = self
             .execute_inputs(execution_data, block, protocol_system)
             .await?;
-        check_executions_match(&inputs, &results, Tolerance::LEGACY)
+        check_executions_match(&inputs, &results, &ExecutionTolerances::legacy())
     }
 
     /// Simulates executing every input, returning the inputs and their results.
@@ -1800,31 +1858,33 @@ impl TestRunner {
     }
 
     /// Strict mode's execution checks: the ladder, then per direction the quote at the limit,
-    /// the revert one unit past a hard limit, and the max output. Every execution is simulated in
-    /// one call to [`Self::simulate_executions`], which splits them into JSON-RPC batches, and each
-    /// limit check is recorded per component and direction. With `execution_skip_reason`, the
+    /// the swap one unit past it (reverting past a hard limit, executing past an under-cap one),
+    /// and the max output. Every execution is simulated in one call to
+    /// [`Self::simulate_executions`], which splits them into JSON-RPC batches, and each limit check
+    /// is recorded per component and direction. With `execution_skip_reason`, the
     /// reason every component skips execution, the ladder is recorded as skipped.
     fn check_strict_executions(
         &self,
         output: &LadderOutput,
         block: &Block,
         protocol_system: &str,
-        tolerance: Tolerance,
+        tolerances: &ExecutionTolerances,
         execution_skip_reason: Option<&str>,
         checks: &mut Checks,
     ) -> miette::Result<()> {
         let executed = self
             .runtime
-            .block_on(self.simulate_executions(strict_inputs(output), block, protocol_system));
-        record_strict_executions(output, Some(executed), tolerance, execution_skip_reason, checks)
+            .block_on(self.simulate_executions(output.all_executions(), block, protocol_system));
+        record_strict_executions(output, Some(executed), tolerances, execution_skip_reason, checks)
     }
 
-    /// Strict: checks an expected component's indexed balances against the source it declares,
-    /// at `block`, within `tolerance`. Returns every failure, empty when all its balances match.
+    /// Strict: checks an expected component's indexed balances against what the package's lens
+    /// reads on chain at `block`, exactly or within its `tvl_only`. Returns every failure, empty
+    /// when all its balances match.
     fn check_component_balances(
         &self,
         expected: &ProtocolComponentWithTestConfig,
-        tolerance: Tolerance,
+        lens: &balances::Lens,
         indexed_components: &[ProtocolComponent],
         states: &HashMap<String, ProtocolComponentState>,
         all_tokens: &HashMap<Bytes, Token>,
@@ -1858,11 +1918,8 @@ impl TestRunner {
         };
         balances::check_component(
             &component,
-            expected
-                .balance_check
-                .as_ref()
-                .unwrap_or(&BalanceCheck::Default),
-            tolerance,
+            lens,
+            expected.tvl_only.as_ref(),
             &RpcChain { runner: self, block },
         )
     }
@@ -1919,7 +1976,21 @@ impl TestRunner {
         Ok(())
     }
 
-    /// Gets the adapter contract path if needed, building it if not found
+    /// Builds the balance lens `name` from `protocols/adapter-integration/evm/src/` and reads its
+    /// runtime bytecode. It is built every time, so a changed lens is never read stale; forge
+    /// recompiles only what changed.
+    fn build_balance_lens(&self, name: &str) -> miette::Result<balances::Lens> {
+        let path = self
+            .adapter_contract_builder
+            .build_target(name, None, None)
+            .wrap_err_with(|| format!("Failed to build the balance lens {name}"))?;
+        let code = std::fs::read(&path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("Failed to read {}", path.display()))?;
+        Ok(balances::Lens { name: name.to_string(), code: Bytes::from(code) })
+    }
+
+    /// Gets the adapter contract path if needed, building it if not found.
     fn get_adapter_contract_path(
         &self,
         adapter_contract: Option<&str>,
@@ -2056,6 +2127,7 @@ mod tests {
     use std::{collections::HashMap, env, str::FromStr};
 
     use dotenvy::dotenv;
+    use num_bigint::BigUint;
     use num_traits::Zero;
     use tycho_execution::encoding::models::Solution;
     use tycho_simulation::tycho_common::{
@@ -2087,13 +2159,47 @@ mod tests {
             skip_simulation,
             skip_execution,
             limits: None,
-            balance_check: None,
+            skip_balance_check: Skip::No,
+            execution_tolerance: None,
             tvl_only: None,
         }
     }
 
     fn reason(text: &str) -> Skip {
         Skip::Reason(text.to_string())
+    }
+
+    #[test]
+    fn a_lens_that_does_not_build_fails_balances_once_for_the_test() {
+        let mut skipped = component("0xb", Skip::No, Skip::No);
+        skipped.skip_balance_check = reason("a singleton");
+        let components =
+            [component("0xa", Skip::No, Skip::No), skipped, component("0xc", Skip::No, Skip::No)];
+        let mut checks = Checks::new(Harness::Strict, "t");
+        record_strict_balances(
+            &mut checks,
+            Err(miette!("Failed to build the balance lens PoolLens")),
+            &components,
+            |component, _| vec![format!("{} was checked without a lens", component.base.id)],
+        )
+        .unwrap();
+        let results = checks.finish().results;
+        let balances: Vec<(Option<&str>, &Outcome)> = results
+            .iter()
+            .map(|result| (result.component.as_deref(), &result.outcome))
+            .collect();
+        assert_eq!(
+            balances,
+            vec![
+                (
+                    None,
+                    &Outcome::Fail {
+                        detail: "Failed to build the balance lens PoolLens".to_string()
+                    }
+                ),
+                (Some("0xb"), &Outcome::Skipped { reason: "a singleton".to_string() }),
+            ]
+        );
     }
 
     /// The skips recorded for `components`, as `(check, component, reason)`, and what the whole
@@ -2118,6 +2224,14 @@ mod tests {
 
     /// An update with a uniswap v2 pool for each id, all over tokens 0x01 and 0x02.
     fn pools_update(ids: &[&str]) -> (Update, HashMap<String, ProtocolComponentModel>) {
+        pools_update_over(ids, ["0x01", "0x02"])
+    }
+
+    /// An update with a uniswap v2 pool for each id, all over `tokens`.
+    fn pools_update_over(
+        ids: &[&str],
+        tokens: [&str; 2],
+    ) -> (Update, HashMap<String, ProtocolComponentModel>) {
         use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
         let token = |address: &str| {
             Token::new(&Bytes::from_str(address).unwrap(), "T", 18, 0, &[], Chain::Ethereum, 100)
@@ -2134,7 +2248,10 @@ mod tests {
                     "vault".to_string(),
                     "pool".to_string(),
                     Chain::Ethereum,
-                    vec![token("0x01"), token("0x02")],
+                    tokens
+                        .iter()
+                        .map(|address| token(address))
+                        .collect(),
                     Vec::new(),
                     HashMap::new(),
                     Bytes::default(),
@@ -2146,7 +2263,7 @@ mod tests {
     }
 
     #[test]
-    fn full_mode_checks_a_listed_pool_as_declared_and_any_other_by_the_package_default() {
+    fn full_mode_checks_a_listed_pool_as_declared_and_an_unlisted_one_by_the_package_default() {
         let package = PackageExpectations::from_yaml(
             r#"
 protocol_system: "vault"
@@ -2166,7 +2283,7 @@ tests:
         )
         .unwrap();
         let (update, components) = pools_update(&["0xAA", "0xbb"]);
-        let declared = update_limits(&update, &components, &package);
+        let declared = declared_limits_of(&update, &components, &package);
         let kind = |id: &str, token_in: &str, token_out: &str| {
             let direction = Direction {
                 token_in: Bytes::from_str(token_in).unwrap(),
@@ -2187,11 +2304,202 @@ tests:
             Some((LimitKind::Soft, DeclaredBy::PackageDefault))
         );
         assert_eq!(declared.len(), 4);
+    }
 
-        // Without a package default, an unlisted pool's directions are left unchecked.
-        let listed_only = PackageExpectations { limits: None, ..package };
-        let declared = update_limits(&update, &components, &listed_only);
-        assert_eq!(declared.len(), 1);
+    const POOL_A: &str = "0x00000000000000000000000000000000000000aa";
+    const POOL_B: &str = "0x00000000000000000000000000000000000000bb";
+
+    /// The ladder of strict `full` over `ids`, every direction declared soft; `missing` is left
+    /// out of the components, so its ladder fails.
+    fn strict_full_ladder(ids: &[&str], missing: Option<&str>) -> LadderOutput {
+        strict_full_ladder_with(ids, missing, None)
+    }
+
+    /// [`strict_full_ladder`], with the pool `empty` holding no reserves, so every direction of it
+    /// has a zero limit.
+    fn strict_full_ladder_with(
+        ids: &[&str],
+        missing: Option<&str>,
+        empty: Option<&str>,
+    ) -> LadderOutput {
+        use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
+        // Addresses the router encodes, unlike `pools_update`'s.
+        let (mut update, mut components) = pools_update_over(
+            ids,
+            [
+                "0x00000000000000000000000000000000000000a1",
+                "0x00000000000000000000000000000000000000b1",
+            ],
+        );
+        let package = PackageExpectations::from_yaml(
+            "protocol_system: \"uniswap_v2\"\nharness: strict\nlimits: {kind: soft, reason: \"r\"}\nsubstreams_yaml_path: ./substreams.yaml\ntests: []\n"
+                .as_bytes(),
+            "uniswap_v2",
+        )
+        .unwrap();
+        let declared = declared_limits_of(&update, &components, &package);
+        for component in components.values_mut() {
+            component.protocol_system = "uniswap_v2".to_string();
+        }
+        if let Some(id) = missing {
+            components.remove(id);
+        }
+        if let Some(id) = empty {
+            update
+                .states
+                .insert(id.to_string(), Box::new(UniswapV2State::new(U256::ZERO, U256::ZERO)));
+        }
+        let no_skips = HashMap::new();
+        ladder::run_ladder(
+            Chain::Ethereum,
+            &update,
+            &components,
+            ladder::Skips { simulation: &no_skips, execution: &no_skips },
+            "uniswap_v2",
+            Some(&declared),
+        )
+    }
+
+    /// A check's result: the check, its component, and its outcome's kind.
+    type Kind = (CheckId, Option<String>, &'static str);
+
+    /// The error naming the failed checks, if any, and each check's outcome kind.
+    fn outcomes(checks: Checks) -> (Option<String>, Vec<Kind>) {
+        let Finished { outcome, results, .. } = checks.finish();
+        assert!(results
+            .iter()
+            .all(|result| result.block == Some(7)));
+        let kinds = results
+            .into_iter()
+            .map(|result| {
+                let kind = match result.outcome {
+                    Outcome::Pass => "pass",
+                    Outcome::Fail { .. } => "fail",
+                    Outcome::Skipped { .. } => "skipped",
+                    Outcome::NotRun { .. } => "not_run",
+                };
+                (result.check, result.component, kind)
+            })
+            .dedup()
+            .collect();
+        (outcome.err().map(|e| e.to_string()), kinds)
+    }
+
+    #[test]
+    fn strict_full_fails_the_checks_whose_executions_could_not_be_simulated() {
+        let output = strict_full_ladder(&[POOL_A], None);
+        let (failed, kinds) = outcomes(judge_strict_update(
+            7,
+            &output,
+            UpdateExecutions::Ran(Err(miette!("the RPC is down"))),
+            &ExecutionTolerances::exact(),
+        ));
+        assert!(failed
+            .unwrap()
+            .contains(CheckId::ExecLadder.as_str()));
+        assert!(kinds.contains(&(CheckId::SimLadder, None, "pass")));
+        assert!(kinds.contains(&(CheckId::ExecLadder, None, "fail")));
+    }
+
+    #[test]
+    fn strict_full_judges_an_update_the_node_does_not_serve_from_the_simulation() {
+        let output = strict_full_ladder(&[POOL_A], None);
+        let unserved = UpdateExecutions::Unserved("block 7 not found".to_string());
+        let Finished { outcome, results, .. } =
+            judge_strict_update(7, &output, unserved, &ExecutionTolerances::exact()).finish();
+        assert!(outcome.is_ok(), "{results:?}");
+        let outcome_of = |check: CheckId| {
+            results
+                .iter()
+                .find(|result| result.check == check)
+                .map(|result| result.outcome.clone())
+        };
+        assert_eq!(outcome_of(CheckId::SimLadder), Some(Outcome::Pass));
+        assert_eq!(
+            outcome_of(CheckId::ExecLadder),
+            Some(Outcome::NotRun {
+                reason: "the node does not serve block 7: block 7 not found".to_string()
+            })
+        );
+        assert!(results
+            .iter()
+            .any(|result| CheckId::LIMITS.contains(&result.check)));
+    }
+
+    #[test]
+    fn strict_full_passes_over_a_pool_that_trades_nothing_at_the_block() {
+        let output = strict_full_ladder_with(&[POOL_A, POOL_B], None, Some(POOL_B));
+        // `range` still fails it: a test lists the pools it expects to trade.
+        assert!(output.failure().is_some());
+        let (failed, kinds) = outcomes(judge_strict_update(
+            7,
+            &output,
+            UpdateExecutions::Nothing,
+            &ExecutionTolerances::exact(),
+        ));
+        assert_eq!(failed, None, "{kinds:?}");
+        assert!(kinds.contains(&(CheckId::SimLadder, None, "pass")));
+        for check in CheckId::LIMITS {
+            assert!(kinds.contains(&(check, Some(POOL_B.to_string()), "skipped")), "{kinds:?}");
+        }
+    }
+
+    #[test]
+    fn strict_full_checks_the_other_pools_of_an_update_one_pool_fails() {
+        let output = strict_full_ladder(&[POOL_A, POOL_B], Some(POOL_B));
+        assert!(output
+            .executions()
+            .keys()
+            .all(|id| id.contains(POOL_A)));
+        assert!(!output.executions().is_empty());
+        let (failed, kinds) = outcomes(judge_strict_update(
+            7,
+            &output,
+            UpdateExecutions::Nothing,
+            &ExecutionTolerances::exact(),
+        ));
+        assert!(failed
+            .unwrap()
+            .contains(CheckId::SimLadder.as_str()));
+        assert!(kinds.contains(&(CheckId::SimLadder, None, "fail")));
+        for check in CheckId::LIMITS {
+            assert!(kinds.contains(&(check, Some(POOL_B.to_string()), "not_run")), "{kinds:?}");
+            assert!(kinds
+                .iter()
+                .any(|(c, component, kind)| *c == check &&
+                    component.as_deref() == Some(POOL_A) &&
+                    *kind != "not_run"));
+        }
+    }
+
+    #[test]
+    fn without_a_package_default_only_the_declared_directions_are_checked() {
+        let package = PackageExpectations::from_yaml(
+            r#"
+protocol_system: "vault"
+substreams_yaml_path: ./substreams.yaml
+tests:
+  - name: first
+    expected_components:
+      - id: "0xAA"
+        tokens: ["0x01", "0x02"]
+        limits:
+          "0x01->0x02": {kind: hard}
+"#
+            .as_bytes(),
+            "vault",
+        )
+        .unwrap();
+        let (update, components) = pools_update(&["0xAA", "0xbb"]);
+        let declared = declared_limits_of(&update, &components, &package);
+        let direction = Direction { token_in: Bytes::from("0x01"), token_out: Bytes::from("0x02") };
+        assert_eq!(
+            declared
+                .into_iter()
+                .map(|(key, (limits, by))| (key, limits.kind(), by))
+                .collect::<Vec<_>>(),
+            [(("0xaa".to_string(), direction), LimitKind::Hard, DeclaredBy::Component)]
+        );
     }
 
     #[test]
@@ -2354,7 +2662,7 @@ tests:
             ("test_a".to_string(), success(999)),
             ("at_limit_b".to_string(), success(1000)),
         ]);
-        assert!(check_executions_match(&ladder, &results, Tolerance::EXACT).is_err());
+        assert!(check_executions_match(&ladder, &results, &ExecutionTolerances::exact()).is_err());
 
         let mut checks = Checks::new(Harness::Strict, "t");
         observe_executions(&mut checks, &ladder, &results);
@@ -2448,7 +2756,7 @@ tests:
                 &path,
             )
             .unwrap();
-            assert_eq!(package.tolerance(), config.tolerance(), "{path}");
+            assert_eq!(package.tolerances(), config.tolerances(), "{path}");
             for component in config
                 .tests
                 .iter()

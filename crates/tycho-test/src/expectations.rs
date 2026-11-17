@@ -9,24 +9,29 @@
 use std::{
     collections::HashMap,
     fmt, fs,
+    hash::Hash,
     io::Read,
+    num::{NonZeroU32, NonZeroU64},
     path::{Path, PathBuf},
     str::FromStr,
 };
 
+use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, WrapErr};
+use num_bigint::BigUint;
 use serde::{
-    de::{self, Visitor},
+    de::{self, DeserializeOwned, Visitor},
     Deserialize, Deserializer, Serialize,
 };
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 /// Which checks a package's tests run.
 ///
-/// `Legacy` runs the checks every package on main was written against. `Strict` is for new
+/// `Legacy` runs the checks the existing packages are written against. `Strict` is for new
 /// packages: it rejects keys the runner does not read, and runs every check of a test and reports
-/// all failures instead of stopping at the first. Later checks are added to `Strict` only, so a
-/// legacy package keeps passing or failing exactly as before. The one exception applies to both:
+/// all failures instead of stopping at the first. The checks added with it (limits, balance
+/// lenses, exact execution) run in `Strict` only, so they do not change a legacy package's
+/// result. The one exception applies to both:
 /// the package's `substreams_yaml_path` must name its chain ([`package_chain`]), since
 /// [`load_packages`] cannot place a package without it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -125,42 +130,28 @@ pub enum LimitKind {
     UnderCap,
 }
 
-impl fmt::Display for LimitKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            LimitKind::Hard => "hard",
-            LimitKind::Soft => "soft",
-            LimitKind::UnderCap => "under_cap",
-        })
-    }
-}
-
 /// What one direction's limit is. Every kind must be quotable and executable at the limit itself.
 ///
 /// ```yaml
 /// {kind: hard}
-/// {kind: hard, rounding: 1}
 /// {kind: soft, reason: "constant product: any input trades, at a worse price"}
 /// {kind: under_cap, reason: "a keeper-set rate we do not index; gives up to 2% of the cap"}
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Limits {
-    /// The venue rejects any input above its bound (a vault cap, a redemption limit, the end of
-    /// the liquidity range), and the limit is that bound, or below it by at most `rounding` units
-    /// where `get_limits` derives it with a rounding division, such as an input from an
-    /// output-side bound. Past the bound, `get_amount_out` must error and execution must revert.
-    Hard {
-        #[serde(default)]
-        rounding: u64,
-    },
+    /// `max_input` is the largest input the venue accepts (a vault cap, a redemption limit, the
+    /// end of the liquidity range), whichever side of the swap the venue bounds. One unit more,
+    /// `get_amount_out` must error and execution must revert.
+    Hard {},
     /// The venue has no bound on the input, so the limit is a recommended size, as the
     /// `ProtocolSim::get_limits` documentation allows. The reason names the code that shows it.
     /// Twice the limit must still quote.
     Soft { reason: String },
-    /// The venue has a bound, and the limit stays below it on purpose because the exact bound
-    /// cannot be derived. The reason shows why, and what capacity the limit gives up. One unit
-    /// past the limit must still quote and execute.
+    /// The venue has a bound, and `max_input` stays below it because `get_limits` cannot report
+    /// the largest input the venue accepts, such as a bound on the output without an exact
+    /// inverse. The reason shows why, and what capacity the limit gives up. One unit past the
+    /// limit, the quote and the execution must still succeed.
     UnderCap { reason: String },
 }
 
@@ -177,139 +168,483 @@ impl Limits {
     pub fn reason(&self) -> Option<&str> {
         match self {
             Limits::Hard { .. } => None,
-            Limits::Soft { reason } | Limits::UnderCap { reason } => Some(reason),
+            Limits::Soft { reason } | Limits::UnderCap { reason, .. } => Some(reason),
         }
     }
 }
 
-/// A package's declared tolerance between simulated and executed amounts:
+/// A tolerance a package declares, with why exact is out of reach:
 ///
 /// ```yaml
 /// execution_tolerance:
-///   bps: 3
-///   cause: "the vault rounds shares down on deposit; the simulation rounds at the end"
-///   measured: "2.1 bps at most over blocks 21000000-21000100 (range --report)"
+///   bps: 0.02
+///   reason: "the vault prices from a share price rounded to 6 digits; 0.011 bps at most over
+///     blocks 21000000-21000100 (range --report)"
+/// execution_tolerance:
+///   wei: {default: 2, "0x<USDC>": 1}
+///   reason: "stETH transfers move shares, rounding the amount down by up to 2 wei"
 /// ```
 ///
-/// `bps` is relative to the executed amount; `wei` is absolute, in base units of the token out,
-/// for a fixed rounding loss such as stETH's 1-2 wei per transfer. Either or both can be declared,
-/// and a difference within either passes.
+/// `bps` is relative to the reference amount (the executed amount for `execution_tolerance`, the
+/// on-chain amount for `tvl_only`), with up to two decimals, from 0.01 to 9999.99. `wei` is
+/// absolute, in base units of the token: one amount for every token, or a map from token address
+/// to amount with an optional `default` for the tokens it does not list. At least one of the two
+/// is declared, and a difference within either passes.
 ///
-/// A tolerance can hide a fee or rounding bug as well as a known artifact, so it states why
-/// exact is out of reach and the drift a run measured.
+/// A tolerance can hide a fee or rounding bug as well as a known artifact, so its reason says
+/// why exact is out of reach, and how far the run that measured it saw the amounts drift.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionTolerance {
-    /// The largest difference allowed, in basis points of the executed amount.
+pub struct DeclaredTolerance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bps: Option<u32>,
-    /// The largest difference allowed, in base units of the token out.
+    pub bps: Option<Bps>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wei: Option<u64>,
-    /// Why simulation cannot match execution exactly.
-    pub cause: String,
-    /// The largest drift a run measured, and which run.
-    pub measured: String,
+    pub wei: Option<Wei>,
+    pub reason: String,
 }
 
-/// How far an executed amount out may differ from the simulated one: up to `bps` basis points of
-/// the executed amount, or up to `wei` base units of the token out, whichever allows more. Both
-/// zero is exact.
+impl DeclaredTolerance {
+    /// The tolerance for amounts of `token`.
+    pub fn tolerance(&self, token: &Bytes) -> Tolerance {
+        Tolerance {
+            centi_bps: self.bps.map_or(0, |bps| bps.0.get()),
+            wei: self
+                .wei
+                .as_ref()
+                .map_or(0, |wei| wei.of(token)),
+        }
+    }
+
+    /// What is wrong with the declaration, if anything: it declares neither `bps` nor `wei`, or
+    /// its reason is blank. serde already rejects a zero, an out-of-range `bps` and an unknown
+    /// field.
+    pub fn problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if self.bps.is_none() && self.wei.is_none() {
+            problems.push(
+                "it declares neither `bps` nor `wei`: declare one, or remove the declaration (in \
+                 strict mode, exact is the default)"
+                    .to_string(),
+            );
+        }
+        if self.reason.trim().is_empty() {
+            problems.push("the reason is empty".to_string());
+        }
+        problems
+    }
+}
+
+/// A relative tolerance in hundredths of a basis point, from 1 (0.01 bps) to 999_999 (9999.99
+/// bps). Written in the yaml as a number or a string with up to two decimals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bps(NonZeroU32);
+
+impl Bps {
+    /// The tolerance in hundredths of a basis point.
+    pub fn centi(&self) -> u32 {
+        self.0.get()
+    }
+}
+
+impl fmt::Display for Bps {
+    /// As the yaml writes it: `3`, `0.5` or `0.02`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        CentiBps::from(self.centi()).fmt(f)
+    }
+}
+
+/// An amount in hundredths of a basis point, printed in basis points with no trailing zero: `3`,
+/// `0.5` or `0.02`. The one formatter of a bps amount: [`Bps`], [`Tolerance`] and the execution
+/// mismatch messages print through it.
+pub(crate) struct CentiBps(pub BigUint);
+
+impl From<u32> for CentiBps {
+    fn from(centi: u32) -> Self {
+        CentiBps(BigUint::from(centi))
+    }
+}
+
+impl fmt::Display for CentiBps {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let whole = &self.0 / 100u32;
+        let hundredths = (&self.0 % 100u32)
+            .to_u32_digits()
+            .first()
+            .copied()
+            .unwrap_or(0);
+        match hundredths {
+            0 => write!(f, "{whole}"),
+            h if h % 10 == 0 => write!(f, "{whole}.{}", h / 10),
+            h => write!(f, "{whole}.{h:02}"),
+        }
+    }
+}
+
+impl Serialize for Bps {
+    /// As a string, so no decimal is lost to a float.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl FromStr for Bps {
+    type Err = String;
+
+    fn from_str(written: &str) -> Result<Self, String> {
+        let invalid = || {
+            format!("`bps: {written}` is not a number of basis points from 0.01 to 9999.99, with up to two decimals")
+        };
+        let (whole, fraction) = written
+            .trim()
+            .split_once('.')
+            .unwrap_or_else(|| (written.trim(), ""));
+        if whole.is_empty() ||
+            fraction.len() > 2 ||
+            !whole
+                .chars()
+                .chain(fraction.chars())
+                .all(|c| c.is_ascii_digit())
+        {
+            return Err(invalid());
+        }
+        let whole: u32 = whole
+            .parse()
+            .map_err(|_not_a_number| invalid())?;
+        let fraction: u32 = format!("{fraction:0<2}")
+            .parse()
+            .map_err(|_not_a_number| invalid())?;
+        whole
+            .checked_mul(100)
+            .and_then(|centi| centi.checked_add(fraction))
+            .filter(|centi| *centi < 1_000_000)
+            .and_then(NonZeroU32::new)
+            .map(Bps)
+            .ok_or_else(invalid)
+    }
+}
+
+impl<'de> Deserialize<'de> for Bps {
+    /// From the scalar as the yaml writes it, quoted or not, so `0.5` is read as written rather
+    /// than through a float.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Written;
+
+        impl Visitor<'_> for Written {
+            type Value = Bps;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("`bps`, a number of basis points from 0.01 to 9999.99")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Bps, E> {
+                v.parse().map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_str(Written)
+    }
+}
+
+/// A declaration that is one value for every key, or a map of an optional `default` and values
+/// keyed by [`KeyedField::Key`], with the default applying to every key without an entry:
+///
+/// ```yaml
+/// wei: 2
+/// wei: {default: 1000, "0x<usdc>": 1}
+/// limits: {kind: hard}
+/// limits: {default: {kind: soft, reason: "..."}, "0x<usdc>->0x<susdc>": {kind: hard}}
+/// ```
+///
+/// Built only by deserializing, which rejects an empty map and a key declared twice, so its fields
+/// stay private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Keyed<F: KeyedField> {
+    /// The value of every key without an entry of its own; the one value, in that form.
+    default: Option<F::Value>,
+    entries: HashMap<F::Key, F::Value>,
+}
+
+/// What a [`Keyed`] declaration holds, and how the yaml writes it.
+pub trait KeyedField {
+    type Key: fmt::Debug + fmt::Display + Clone + Eq + Hash + Ord;
+    type Value: fmt::Debug + Clone + Eq + Serialize + DeserializeOwned;
+    /// The declaration's key in the yaml, for messages.
+    const NAME: &'static str;
+    /// The forms the declaration takes, for a message when it is neither.
+    const SHAPE: &'static str;
+    /// A key of the value itself, which makes a map one value rather than a map of keys, as
+    /// `kind` does for limits; `None` when a value is never a map.
+    const VALUE_KEY: Option<&'static str>;
+
+    /// Reads a key other than `default`.
+    fn parse_key(key: &str) -> Result<Self::Key, String>;
+}
+
+impl<F: KeyedField> Keyed<F> {
+    /// The value of every key without an entry of its own, if declared.
+    fn default_value(&self) -> Option<&F::Value> {
+        self.default.as_ref()
+    }
+
+    /// The value of `key`: its own entry, else the default.
+    fn value_for(&self, key: &F::Key) -> Option<&F::Value> {
+        self.entries
+            .get(key)
+            .or(self.default.as_ref())
+    }
+
+    /// Every declaration with its key as written, `default` first, then the keys in order.
+    fn as_written(&self) -> Vec<(String, &F::Value)> {
+        let mut entries: Vec<(String, &F::Value)> = self
+            .default
+            .iter()
+            .map(|value| ("default".to_string(), value))
+            .collect();
+        entries.extend(
+            self.entries
+                .iter()
+                .sorted_by(|a, b| a.0.cmp(b.0))
+                .map(|(key, value)| (key.to_string(), value)),
+        );
+        entries
+    }
+}
+
+impl<F: KeyedField> Serialize for Keyed<F> {
+    /// As the yaml writes it: the one value, or a map of `default` and the keys in order.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match (&self.default, self.entries.is_empty()) {
+            (Some(value), true) => value.serialize(serializer),
+            _ => {
+                let mut map = serializer.serialize_map(None)?;
+                for (key, value) in self.as_written() {
+                    map.serialize_entry(&key, value)?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de, F: KeyedField> Deserialize<'de> for Keyed<F> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_yaml::Value::deserialize(deserializer)?;
+        let one = |value: serde_yaml::Value| {
+            // The shape is restated only when it is what is wrong: a value of the right shape
+            // with a bad field names the field.
+            let right_shape = match &value {
+                serde_yaml::Value::Mapping(_) => true,
+                serde_yaml::Value::Bool(_) |
+                serde_yaml::Value::Number(_) |
+                serde_yaml::Value::String(_) => F::VALUE_KEY.is_none(),
+                serde_yaml::Value::Null |
+                serde_yaml::Value::Sequence(_) |
+                serde_yaml::Value::Tagged(_) => false,
+            };
+            serde_yaml::from_value(value)
+                .map(|value| Self { default: Some(value), entries: HashMap::new() })
+                .map_err(|e| {
+                    de::Error::custom(if right_shape {
+                        format!("`{}`: {e}", F::NAME)
+                    } else {
+                        format!("`{}` is {}: {e}", F::NAME, F::SHAPE)
+                    })
+                })
+        };
+        // A map is the keyed form, unless it holds the key that marks a single value.
+        let serde_yaml::Value::Mapping(map) = value else {
+            return one(value);
+        };
+        if F::VALUE_KEY.is_some_and(|key| map.contains_key(key)) {
+            return one(serde_yaml::Value::Mapping(map));
+        }
+        if map.is_empty() {
+            return Err(de::Error::custom(format!("`{}` is an empty map", F::NAME)));
+        }
+        let mut declaration = Self { default: None, entries: HashMap::new() };
+        for (key, value) in map {
+            let serde_yaml::Value::String(key) = key else {
+                return Err(de::Error::custom(format!(
+                    "a `{}` key is not a string: {}",
+                    F::NAME,
+                    yaml_text(&key)
+                )));
+            };
+            let parsed = if key == "default" {
+                None
+            } else {
+                Some(F::parse_key(&key).map_err(de::Error::custom)?)
+            };
+            let value = serde_yaml::from_value::<F::Value>(value)
+                .map_err(|e| de::Error::custom(format!("{} `{key}`: {e}", F::NAME)))?;
+            let Some(parsed) = parsed else {
+                declaration.default = Some(value);
+                continue;
+            };
+            // Keys written differently, in case or spacing, can be one key.
+            if declaration
+                .entries
+                .insert(parsed.clone(), value)
+                .is_some()
+            {
+                return Err(de::Error::custom(format!("{}: {parsed} is declared twice", F::NAME)));
+            }
+        }
+        Ok(declaration)
+    }
+}
+
+/// An absolute tolerance in base units of the token: one amount for every token, or an amount per
+/// token address with an optional default for the others.
+pub type Wei = Keyed<WeiField>;
+
+/// The [`KeyedField`] of [`Wei`]: amounts keyed by token address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeiField;
+
+impl KeyedField for WeiField {
+    type Key = Bytes;
+    type Value = NonZeroU64;
+    const NAME: &'static str = "wei";
+    const SHAPE: &'static str = "an amount, or a map of `default` and token addresses to amounts";
+    const VALUE_KEY: Option<&'static str> = None;
+
+    fn parse_key(key: &str) -> Result<Bytes, String> {
+        Bytes::from_str(key)
+            .ok()
+            .filter(|token| token.len() == 20)
+            .ok_or_else(|| format!("a `wei` key is `default` or a token address, not `{key}`"))
+    }
+}
+
+impl Wei {
+    /// The amount for `token`, 0 when the declaration names no amount for it.
+    pub fn of(&self, token: &Bytes) -> u64 {
+        self.value_for(token)
+            .map_or(0, |wei| wei.get())
+    }
+}
+
+/// A yaml value as it was written, for messages.
+fn yaml_text(value: &serde_yaml::Value) -> String {
+    serde_yaml::to_string(value)
+        .map(|text| format!("`{}`", text.trim_end()))
+        .unwrap_or_else(|_| "a value that cannot be shown".to_string())
+}
+
+/// How far an amount may differ from the one it is checked against: up to `centi_bps`
+/// hundredths of a basis point of the reference amount, or up to `wei` base units of the token,
+/// whichever allows more. Both zero is exact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tolerance {
-    pub bps: u32,
+    pub centi_bps: u32,
     pub wei: u64,
 }
 
 impl Tolerance {
-    pub const EXACT: Tolerance = Tolerance { bps: 0, wei: 0 };
+    pub const EXACT: Tolerance = Tolerance { centi_bps: 0, wei: 0 };
     /// Legacy mode's tolerance for every package: 0.5%.
-    pub const LEGACY: Tolerance = Tolerance { bps: 50, wei: 0 };
+    pub const LEGACY: Tolerance = Tolerance { centi_bps: 5_000, wei: 0 };
+
+    /// Whether `gap`, the magnitude of a difference, is within the tolerance of `reference`.
+    pub fn allows(&self, gap: &BigUint, reference: &BigUint) -> bool {
+        gap <= &BigUint::from(self.wei) || gap * 1_000_000u32 <= reference * self.centi_bps
+    }
 }
 
 impl fmt::Display for Tolerance {
+    /// `exact`, `0.5 bps`, `2 wei` or `0.5 bps or 2 wei`, the bps as [`Bps`] writes them.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (self.bps, self.wei) {
-            (0, 0) => f.write_str("exact"),
-            (bps, 0) => write!(f, "{bps} bps"),
-            (0, wei) => write!(f, "{wei} wei"),
-            (bps, wei) => write!(f, "{bps} bps or {wei} wei"),
+        if self.centi_bps == 0 && self.wei == 0 {
+            return f.write_str("exact");
         }
+        if self.centi_bps != 0 {
+            write!(f, "{} bps", CentiBps::from(self.centi_bps))?;
+            if self.wei != 0 {
+                f.write_str(" or ")?;
+            }
+        }
+        if self.wei != 0 {
+            write!(f, "{} wei", self.wei)?;
+        }
+        Ok(())
     }
 }
 
-/// A component whose indexed balances feed only TVL, not simulation, so they are checked within a
-/// tolerance instead of exactly:
-///
-/// ```yaml
-/// tvl_only:
-///   bps: 10
-///   cause: "the indexed reserves exclude the protocol fee bucket the contract also holds"
-///   measured: "6.2 bps at most over 40 components, blocks 21000000-21000100 (range --report)"
-/// ```
-///
-/// `bps` is relative to the on-chain amount; `wei` is absolute, in base units of the token. A
-/// difference within either passes. A plain skip would also hide a dropped or doubled balance
-/// delta, which puts TVL off by 100%; the tolerance sits well below that.
-///
-/// The declaration is checked, not trusted: the runner decodes the snapshot again with the
-/// component's balances scaled down, and every limit, spot price and quote must stay the same
-/// (`balances.tvl_only`).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct TvlOnly {
-    /// The largest difference allowed, in basis points of the on-chain amount.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bps: Option<u32>,
-    /// The largest difference allowed, in base units of the token.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wei: Option<u64>,
-    /// Why the indexed balances drift from the chain.
-    pub cause: String,
-    /// The largest drift a run measured, and which run.
-    pub measured: String,
+/// The tolerance every execution of a package is checked with: in legacy mode
+/// [`Tolerance::LEGACY`], whatever is declared; in strict mode the component's
+/// `execution_tolerance`, else the package's, else exact, for the execution's token out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExecutionTolerances {
+    legacy: bool,
+    package: Option<DeclaredTolerance>,
+    /// By lowercase component id.
+    components: HashMap<String, DeclaredTolerance>,
 }
 
-impl TvlOnly {
-    pub fn tolerance(&self) -> Tolerance {
-        Tolerance { bps: self.bps.unwrap_or(0), wei: self.wei.unwrap_or(0) }
+impl ExecutionTolerances {
+    /// Exact for every execution: strict mode without declarations.
+    pub fn exact() -> Self {
+        Self::default()
+    }
+
+    /// [`Tolerance::LEGACY`] for every execution.
+    pub fn legacy() -> Self {
+        Self { legacy: true, ..Self::default() }
+    }
+
+    /// The tolerances `harness` checks with, from the package's declaration and its components',
+    /// keyed by component id in any case.
+    pub fn new<'a>(
+        harness: Harness,
+        package: Option<&DeclaredTolerance>,
+        components: impl IntoIterator<Item = (&'a str, &'a DeclaredTolerance)>,
+    ) -> Self {
+        match harness {
+            Harness::Legacy => Self::legacy(),
+            Harness::Strict => Self {
+                legacy: false,
+                package: package.cloned(),
+                components: components
+                    .into_iter()
+                    .map(|(id, declared)| (id.to_lowercase(), declared.clone()))
+                    .collect(),
+            },
+        }
+    }
+
+    /// The tolerance of an execution of `component_id` paying `token_out`.
+    pub fn get(&self, component_id: &str, token_out: &Bytes) -> Tolerance {
+        resolve_tolerance(
+            self.legacy,
+            self.components
+                .get(&component_id.to_lowercase()),
+            self.package.as_ref(),
+            token_out,
+        )
     }
 }
 
-/// What is wrong with a declared tolerance, if anything: it needs a nonzero `bps` below 100%, a
-/// nonzero `wei`, or both, and a cause and a measurement.
-pub fn tolerance_problems(
-    bps: Option<u32>,
-    wei: Option<u64>,
-    cause: &str,
-    measured: &str,
-) -> Vec<String> {
-    let mut problems = Vec::new();
-    if bps.is_none() && wei.is_none() {
-        problems.push(
-            "it declares neither `bps` nor `wei`: declare one, or remove the declaration (in \
-             strict mode, exact is the default)"
-                .to_string(),
-        );
+/// The tolerance an execution paying `token_out` is checked with: [`Tolerance::LEGACY`] in legacy
+/// mode; in strict mode the component's declaration, else the package's, else exact.
+fn resolve_tolerance(
+    legacy: bool,
+    component: Option<&DeclaredTolerance>,
+    package: Option<&DeclaredTolerance>,
+    token_out: &Bytes,
+) -> Tolerance {
+    if legacy {
+        return Tolerance::LEGACY;
     }
-    for (field, value) in [("bps", bps.map(u64::from)), ("wei", wei)] {
-        if value == Some(0) {
-            problems.push(format!("`{field}: 0` allows nothing: leave it out"));
-        }
-    }
-    if let Some(bps) = bps.filter(|bps| *bps >= 10_000) {
-        problems.push(format!("`bps: {bps}` is out of range: `bps` must be 1 to 9999"));
-    }
-    for (field, value) in [("cause", cause), ("measured", measured)] {
-        if value.trim().is_empty() {
-            problems.push(format!("`{field}` is empty"));
-        }
-    }
-    problems
+    component
+        .or(package)
+        .map_or(Tolerance::EXACT, |declared| declared.tolerance(token_out))
 }
 
 /// Which `limits` declaration a direction's limit comes from, most specific first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeclaredBy {
     /// The component's entry for the direction.
     Component,
@@ -319,18 +654,6 @@ pub enum DeclaredBy {
     Package,
     /// The package's `default`, or its one declaration for every direction.
     PackageDefault,
-}
-
-impl DeclaredBy {
-    /// The name a report gives it.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            DeclaredBy::Component => "component",
-            DeclaredBy::ComponentDefault => "component_default",
-            DeclaredBy::Package => "package",
-            DeclaredBy::PackageDefault => "package_default",
-        }
-    }
 }
 
 /// A swap direction, as a `limits` declaration keys it: `"0x<token in>->0x<token out>"`.
@@ -376,14 +699,38 @@ impl fmt::Display for Direction {
 ///   default: {kind: soft, reason: "..."}
 ///   "0x<usdc>->0x<susdc>": {kind: hard}
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LimitsDeclaration {
-    /// The limit of every direction without its own entry.
-    pub default: Option<Limits>,
-    pub directions: HashMap<Direction, Limits>,
+///
+/// Deserializing rejects a direction declared twice and one between a token and itself.
+pub type LimitsDeclaration = Keyed<LimitsField>;
+
+/// The [`KeyedField`] of [`LimitsDeclaration`]: limits keyed by direction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LimitsField;
+
+impl KeyedField for LimitsField {
+    type Key = Direction;
+    type Value = Limits;
+    const NAME: &'static str = "limits";
+    const SHAPE: &'static str =
+        "`{kind: ...}` or a map of `default` and directions to `{kind: ...}`";
+    const VALUE_KEY: Option<&'static str> = Some("kind");
+
+    fn parse_key(key: &str) -> Result<Direction, String> {
+        Direction::from_str(key)
+    }
 }
 
 impl LimitsDeclaration {
+    /// The limit of every direction without its own entry, if declared.
+    pub fn default_limits(&self) -> Option<&Limits> {
+        self.default_value()
+    }
+
+    /// The directions with an entry of their own.
+    pub fn directions(&self) -> impl Iterator<Item = &Direction> {
+        self.entries.keys()
+    }
+
     /// The declaration of `direction`, with `own` when it is the direction's entry and `default`
     /// when it is the declaration's default.
     fn get(
@@ -392,69 +739,12 @@ impl LimitsDeclaration {
         own: DeclaredBy,
         default: DeclaredBy,
     ) -> Option<(&Limits, DeclaredBy)> {
-        match self.directions.get(direction) {
+        match self.entries.get(direction) {
             Some(limits) => Some((limits, own)),
             None => self
-                .default
-                .as_ref()
+                .default_value()
                 .map(|limits| (limits, default)),
         }
-    }
-
-    /// Every declaration with its key, `default` first, then the directions in order.
-    fn entries(&self) -> Vec<(String, &Limits)> {
-        let mut entries: Vec<(String, &Limits)> = self
-            .default
-            .iter()
-            .map(|limits| ("default".to_string(), limits))
-            .collect();
-        let mut directions: Vec<_> = self.directions.iter().collect();
-        directions.sort_by(|a, b| a.0.cmp(b.0));
-        entries.extend(
-            directions
-                .into_iter()
-                .map(|(direction, limits)| (direction.to_string(), limits)),
-        );
-        entries
-    }
-}
-
-impl<'de> Deserialize<'de> for LimitsDeclaration {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let parse = |key: &str, value| {
-            serde_yaml::from_value::<Limits>(value)
-                .map_err(|e| de::Error::custom(format!("limits `{key}`: {e}")))
-        };
-        let serde_yaml::Value::Mapping(map) = serde_yaml::Value::deserialize(deserializer)? else {
-            return Err(de::Error::custom(
-                "`limits` is `{kind: ...}` or a map of `default` and directions to `{kind: ...}`",
-            ));
-        };
-        if map.contains_key("kind") {
-            return serde_yaml::from_value(serde_yaml::Value::Mapping(map))
-                .map(|limits| Self { default: Some(limits), directions: HashMap::new() })
-                .map_err(|e| de::Error::custom(format!("limits: {e}")));
-        }
-        let mut declaration = Self::default();
-        for (key, limits) in map {
-            let serde_yaml::Value::String(key) = key else {
-                return Err(de::Error::custom("a `limits` key is not a string"));
-            };
-            if key == "default" {
-                declaration.default = Some(parse(&key, limits)?);
-            } else {
-                let direction = Direction::from_str(&key).map_err(de::Error::custom)?;
-                // Keys that differ only in case or spacing are one direction.
-                if declaration
-                    .directions
-                    .insert(direction.clone(), parse(&key, limits)?)
-                    .is_some()
-                {
-                    return Err(de::Error::custom(format!("limits: {direction} is declared twice")));
-                }
-            }
-        }
-        Ok(declaration)
     }
 }
 
@@ -465,24 +755,12 @@ pub fn check_declaration(
     location: &str,
     problems: &mut Vec<String>,
 ) {
-    for (key, limits) in declaration.entries() {
+    for (key, limits) in declaration.as_written() {
         if limits
             .reason()
             .is_some_and(|reason| reason.trim().is_empty())
         {
             problems.push(format!("{location}, {key}: the reason is empty"));
-        }
-    }
-}
-
-/// The tolerance executions are checked with: in strict mode, the declared one, or exact without
-/// a declaration; in legacy mode, [`Tolerance::LEGACY`] whatever is declared.
-pub fn execution_tolerance(harness: Harness, declared: Option<&ExecutionTolerance>) -> Tolerance {
-    match (harness, declared) {
-        (Harness::Legacy, _) => Tolerance::LEGACY,
-        (Harness::Strict, None) => Tolerance::EXACT,
-        (Harness::Strict, Some(declared)) => {
-            Tolerance { bps: declared.bps.unwrap_or(0), wei: declared.wei.unwrap_or(0) }
         }
     }
 }
@@ -516,12 +794,13 @@ pub fn declaration_for<'a>(
 }
 
 /// What a package declares about one of its expected components that holds whatever the block:
-/// its limits and its `tvl_only`. Skips are left out, since a test skips a check for its own
-/// range, and another test of the same component may run it.
+/// its limits, its execution tolerance and its `tvl_only`. Skips are left out, since a test skips
+/// a check for its own range, and another test of the same component may run it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ComponentExpectations {
     pub limits: Option<LimitsDeclaration>,
-    pub tvl_only: Option<TvlOnly>,
+    pub execution_tolerance: Option<DeclaredTolerance>,
+    pub tvl_only: Option<DeclaredTolerance>,
 }
 
 /// What a package declares, without its test cases: the declarations that apply to every pool
@@ -529,9 +808,11 @@ pub struct ComponentExpectations {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageExpectations {
     pub protocol_system: String,
+    /// The chain the package indexes, from its `substreams_yaml_path` ([`package_chain`]).
+    pub chain: Chain,
     pub harness: Harness,
     pub limits: Option<LimitsDeclaration>,
-    pub execution_tolerance: Option<ExecutionTolerance>,
+    pub execution_tolerance: Option<DeclaredTolerance>,
     pub components: HashMap<String, ComponentExpectations>,
 }
 
@@ -540,12 +821,13 @@ pub struct PackageExpectations {
 #[derive(Deserialize)]
 struct PackageEntry {
     protocol_system: String,
+    substreams_yaml_path: String,
     #[serde(default)]
     harness: Harness,
     #[serde(default)]
     limits: Option<LimitsDeclaration>,
     #[serde(default)]
-    execution_tolerance: Option<ExecutionTolerance>,
+    execution_tolerance: Option<DeclaredTolerance>,
     #[serde(default)]
     tests: Vec<TestEntry>,
 }
@@ -562,36 +844,39 @@ struct ComponentEntry {
     #[serde(default)]
     limits: Option<LimitsDeclaration>,
     #[serde(default)]
-    tvl_only: Option<TvlOnly>,
+    execution_tolerance: Option<DeclaredTolerance>,
+    #[serde(default)]
+    tvl_only: Option<DeclaredTolerance>,
 }
 
 impl PackageExpectations {
     /// Reads the declarations of a package's test yaml; `source` names it in messages.
     ///
-    /// Errors when the yaml does not parse, when a declaration is invalid as the test runner
-    /// would reject it (a limit missing a field its kind requires, a tolerance without a cause,
-    /// ...), or when a component listed by several tests declares different limits or `tvl_only`
-    /// in them, naming which.
+    /// Errors when the yaml does not parse, when the file name of its `substreams_yaml_path`
+    /// names no chain ([`package_chain`]), when a declaration is invalid on its own (a limit
+    /// missing a field its kind requires, a tolerance without a reason, ...), or when a component
+    /// listed by several tests declares different limits, execution tolerances or `tvl_only` in
+    /// them, naming which. The test runner's own parser checks more: that a strict package has a
+    /// package-level `limits` default, and that each declared direction is one of a component's;
+    /// a repository test runs it on every package yaml.
     pub fn from_yaml(reader: impl Read, source: &str) -> miette::Result<Self> {
         let entry: PackageEntry = serde_yaml::from_reader(reader)
             .into_diagnostic()
             .wrap_err_with(|| format!("Failed to read the declarations of {source}"))?;
+        let chain =
+            package_chain(&entry.substreams_yaml_path).map_err(|e| miette!("{source}: {e}"))?;
         let mut problems = Vec::new();
         if let Some(declaration) = &entry.limits {
             check_declaration(declaration, "package", &mut problems);
         }
         if let Some(tolerance) = &entry.execution_tolerance {
-            for problem in tolerance_problems(
-                tolerance.bps,
-                tolerance.wei,
-                &tolerance.cause,
-                &tolerance.measured,
-            ) {
+            for problem in tolerance.problems() {
                 problems.push(format!("execution_tolerance: {problem}"));
             }
         }
         let mut package = Self {
             protocol_system: entry.protocol_system,
+            chain,
             harness: entry.harness,
             limits: entry.limits,
             execution_tolerance: entry.execution_tolerance,
@@ -606,18 +891,22 @@ impl PackageExpectations {
             if let Some(declaration) = &component.limits {
                 check_declaration(declaration, &location, &mut problems);
             }
-            if let Some(tvl_only) = &component.tvl_only {
-                for problem in tolerance_problems(
-                    tvl_only.bps,
-                    tvl_only.wei,
-                    &tvl_only.cause,
-                    &tvl_only.measured,
-                ) {
-                    problems.push(format!("{location}, tvl_only: {problem}"));
+            for (key, declared) in [
+                ("execution_tolerance", &component.execution_tolerance),
+                ("tvl_only", &component.tvl_only),
+            ] {
+                for problem in declared
+                    .iter()
+                    .flat_map(DeclaredTolerance::problems)
+                {
+                    problems.push(format!("{location}, {key}: {problem}"));
                 }
             }
-            let expectations =
-                ComponentExpectations { limits: component.limits, tvl_only: component.tvl_only };
+            let expectations = ComponentExpectations {
+                limits: component.limits,
+                execution_tolerance: component.execution_tolerance,
+                tvl_only: component.tvl_only,
+            };
             if let Err(e) = package.add_component(&component.id, expectations) {
                 problems.push(format!("{e}, in several tests"));
             }
@@ -643,6 +932,9 @@ impl PackageExpectations {
         let mut differ = Vec::new();
         if seen.limits != expectations.limits {
             differ.push("limits");
+        }
+        if seen.execution_tolerance != expectations.execution_tolerance {
+            differ.push("execution_tolerance");
         }
         if seen.tvl_only != expectations.tvl_only {
             differ.push("tvl_only");
@@ -676,9 +968,34 @@ impl PackageExpectations {
         Ok(())
     }
 
-    /// The tolerance executions of this package's pools are checked with.
-    pub fn tolerance(&self) -> Tolerance {
-        execution_tolerance(self.harness, self.execution_tolerance.as_ref())
+    /// The tolerances executions of this package's pools are checked with.
+    pub fn tolerances(&self) -> ExecutionTolerances {
+        ExecutionTolerances::new(
+            self.harness,
+            self.execution_tolerance.as_ref(),
+            self.components
+                .iter()
+                .filter_map(|(id, component)| {
+                    component
+                        .execution_tolerance
+                        .as_ref()
+                        .map(|declared| (id.as_str(), declared))
+                }),
+        )
+    }
+
+    /// The tolerance of an execution of `component_id` paying `token_out`, as
+    /// [`Self::tolerances`] gives it, without building them all: in legacy mode
+    /// [`Tolerance::LEGACY`]; in strict mode the component's `execution_tolerance`, else the
+    /// package's, else exact.
+    pub fn tolerance(&self, component_id: &str, token_out: &Bytes) -> Tolerance {
+        resolve_tolerance(
+            self.harness == Harness::Legacy,
+            self.component(component_id)
+                .and_then(|component| component.execution_tolerance.as_ref()),
+            self.execution_tolerance.as_ref(),
+            token_out,
+        )
     }
 
     /// What the package declares about `component_id`, if its tests list it.
@@ -738,20 +1055,16 @@ pub fn load_packages(
 
 /// [`load_packages`] over yamls already read, each with the name its errors give it: for a
 /// runner that carries the yamls instead of a checkout. Merges and errors as `load_packages` does.
-pub fn load_packages_from(
-    yamls: impl IntoIterator<Item = (String, String)>,
+pub fn load_packages_from<S: AsRef<str>, Y: AsRef<str>>(
+    yamls: impl IntoIterator<Item = (S, Y)>,
     chain: Chain,
 ) -> miette::Result<HashMap<String, PackageExpectations>> {
     let mut packages: HashMap<String, (PackageExpectations, String)> = HashMap::new();
     for (source, yaml) in yamls {
-        let manifest: ManifestEntry = serde_yaml::from_str(&yaml)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("Failed to read the substreams_yaml_path of {source}"))?;
-        let package_chain =
-            package_chain(&manifest.substreams_yaml_path).map_err(|e| miette!("{source}: {e}"))?;
+        let source = source.as_ref().to_string();
         // Read before the chain is filtered, so an invalid yaml fails every chain, as documented.
-        let package = PackageExpectations::from_yaml(yaml.as_bytes(), &source)?;
-        if package_chain != chain {
+        let package = PackageExpectations::from_yaml(yaml.as_ref().as_bytes(), &source)?;
+        if package.chain != chain {
             continue;
         }
         match packages.get_mut(&package.protocol_system) {
@@ -770,12 +1083,6 @@ pub fn load_packages_from(
         .into_iter()
         .map(|(system, (package, _))| (system, package))
         .collect())
-}
-
-/// The part of a test yaml that names the package's substreams manifest.
-#[derive(Deserialize)]
-struct ManifestEntry {
-    substreams_yaml_path: String,
 }
 
 /// Every `integration_test*.tycho.yaml` under `root`, outside build output, sorted; with
@@ -846,7 +1153,7 @@ mod tests {
 protocol_system: "vault"
 harness: strict
 limits: {kind: soft, reason: "any input trades"}
-execution_tolerance: {bps: 3, cause: "vault rounding", measured: "2.1 bps over 100 blocks"}
+execution_tolerance: {bps: 3, reason: "vault rounding; 2.1 bps over 100 blocks"}
 substreams_yaml_path: ./substreams.yaml
 tests:
   - name: first
@@ -869,7 +1176,8 @@ tests:
     fn a_package_declares_for_its_listed_components_and_for_every_other_pool() {
         let package = PackageExpectations::from_yaml(PACKAGE.as_bytes(), "vault").unwrap();
         assert_eq!(package.protocol_system, "vault");
-        assert_eq!(package.tolerance(), Tolerance { bps: 3, wei: 0 });
+        let usdc = Bytes::from("0x01");
+        assert_eq!(package.tolerances().get("0xAA", &usdc), Tolerance { centi_bps: 300, wei: 0 });
         let kind = |component: &str, key: &str| {
             package
                 .limits_for(component, &direction(key))
@@ -912,7 +1220,7 @@ tests:
 
     #[test]
     fn a_component_must_declare_the_same_tvl_only_in_every_test() {
-        let tvl_only = "        tvl_only: {bps: 5, cause: \"fee bucket\", measured: \"4 bps\"}\n";
+        let tvl_only = "        tvl_only: {bps: 5, reason: \"fee bucket; 4 bps\"}\n";
         let once =
             PACKAGE.replacen("        limits:\n", &format!("{tvl_only}        limits:\n"), 1);
         let err = PackageExpectations::from_yaml(once.as_bytes(), "vault").unwrap_err();
@@ -928,8 +1236,8 @@ tests:
             package
                 .component("0xAA")
                 .and_then(|component| component.tvl_only.as_ref())
-                .map(TvlOnly::tolerance),
-            Some(Tolerance { bps: 5, wei: 0 })
+                .map(|tvl_only| tvl_only.tolerance(&Bytes::from("0x01"))),
+            Some(Tolerance { centi_bps: 500, wei: 0 })
         );
     }
 
@@ -946,11 +1254,27 @@ tests:
                 "{kind: soft}",
                 "missing field `reason`",
             ),
-            ("bps: 3, cause", "bps: 20000, cause", "`bps` must be 1 to 9999"),
+            ("bps: 3, reason", "bps: 20000, reason", "from 0.01 to 9999.99"),
+            (
+                "reason: \"vault rounding; 2.1 bps over 100 blocks\"",
+                "reason: \" \"",
+                "execution_tolerance: the reason is empty",
+            ),
             (
                 "{kind: hard}",
                 "{kind: under_cap, reason: \"r\", lost_capacity: \"2%\"}",
                 "unknown field `lost_capacity`",
+            ),
+            // A component's own declarations are checked as the package's are.
+            (
+                "{kind: hard}",
+                "{kind: soft, reason: \" \"}",
+                "component 0xAA, 0x01->0x02: the reason is empty",
+            ),
+            (
+                "        limits:\n          \"0x01",
+                "        tvl_only: {bps: 5, reason: \" \"}\n        limits:\n          \"0x01",
+                "component 0xAA, tvl_only: the reason is empty",
             ),
         ] {
             let invalid = PACKAGE.replace(from, to);
@@ -962,79 +1286,318 @@ tests:
                 .join(": ");
             assert!(err.contains(problem), "{to}: {err}");
         }
+
+        // A component listed by two tests declares the same in both.
+        let (first, second) = PACKAGE.split_at(
+            PACKAGE
+                .find("  - name: second")
+                .unwrap(),
+        );
+        let differs =
+            format!("{first}{}", second.replace("{kind: hard}", "{kind: soft, reason: \"r\"}"));
+        let err = PackageExpectations::from_yaml(differs.as_bytes(), "vault")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("component 0xaa declares different limits, in several tests"),
+            "{err}"
+        );
     }
 
-    /// A directory under the system's temporary one, empty, for yamls.
-    fn yaml_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tycho-test-{name}-{}", std::process::id()));
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
-        }
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    /// The packages of `yamls` on Ethereum, each yaml named by its index.
+    fn ethereum_packages(yamls: &[&str]) -> miette::Result<HashMap<String, PackageExpectations>> {
+        load_packages_from(
+            yamls
+                .iter()
+                .enumerate()
+                .map(|(i, yaml)| (format!("yaml {i}"), *yaml)),
+            Chain::Ethereum,
+        )
     }
 
     #[test]
     fn two_yamls_of_one_system_merge_their_components() {
-        let dir = yaml_dir("merge");
         let other_pool = PACKAGE
             .replace("0xAA", "0xBB")
             .replace("0xaa", "0xbb");
-        fs::write(dir.join("integration_test.tycho.yaml"), PACKAGE).unwrap();
-        fs::write(dir.join("integration_test_second.tycho.yaml"), &other_pool).unwrap();
-        let packages = load_packages(&dir, Chain::Ethereum).unwrap();
+        let packages = ethereum_packages(&[PACKAGE, &other_pool]).unwrap();
         let vault = &packages["vault"];
         assert!(vault.component("0xaa").is_some() && vault.component("0xbb").is_some());
 
-        let other_limits = other_pool
-            .replace("limits: {kind: soft, reason: \"any input trades\"}", "limits: {kind: hard}");
-        fs::write(dir.join("integration_test_second.tycho.yaml"), other_limits).unwrap();
-        let err = load_packages(&dir, Chain::Ethereum).unwrap_err();
+        for (from, to, differs) in [
+            (
+                "limits: {kind: soft, reason: \"any input trades\"}",
+                "limits: {kind: hard}",
+                "different package limits",
+            ),
+            ("harness: strict", "harness: legacy", "different package harness"),
+            ("bps: 3, reason", "bps: 4, reason", "different package execution_tolerance"),
+        ] {
+            let err = ethereum_packages(&[PACKAGE, &other_pool.replace(from, to)]).unwrap_err();
+            assert!(err.to_string().contains(differs), "{err}");
+        }
+
+        // A pool both yamls list must be declared the same in both.
+        let shared = PACKAGE.replace("{kind: hard}", "{kind: soft, reason: \"r\"}");
+        let err = ethereum_packages(&[PACKAGE, &shared]).unwrap_err();
         assert!(
             err.to_string()
-                .contains("different package limits"),
+                .contains("declares different limits"),
             "{err}"
         );
-        fs::remove_dir_all(&dir).unwrap();
+        assert!(ethereum_packages(&[PACKAGE, PACKAGE]).is_ok());
     }
 
     #[test]
-    fn packages_load_the_same_from_memory_as_from_disk() {
-        let dir = yaml_dir("memory");
-        fs::write(dir.join("integration_test.tycho.yaml"), PACKAGE).unwrap();
-        let from_disk = load_packages(&dir, Chain::Ethereum).unwrap();
-        let from_memory =
-            load_packages_from([("vault".to_string(), PACKAGE.to_string())], Chain::Ethereum)
-                .unwrap();
-        assert_eq!(from_memory, from_disk);
-        assert!(load_packages_from([("vault".to_string(), PACKAGE.to_string())], Chain::Base)
+    fn packages_are_kept_for_their_own_chain() {
+        let packages = ethereum_packages(&[PACKAGE]).unwrap();
+        assert_eq!(packages.keys().collect::<Vec<_>>(), ["vault"]);
+        let vault = &packages["vault"];
+        assert_eq!(vault.chain, Chain::Ethereum);
+        assert_eq!(vault.limits_for("0xAA", &direction("0x01->0x02")), Some(&Limits::Hard {}));
+        assert!(load_packages_from([("vault", PACKAGE)], Chain::Base)
             .unwrap()
             .is_empty());
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn an_invalid_yaml_for_another_chain_fails_every_chain() {
-        let dir = yaml_dir("other-chain");
-        fs::write(dir.join("integration_test.tycho.yaml"), PACKAGE).unwrap();
         let invalid_on_base = PACKAGE
             .replace("./substreams.yaml", "./base-vault.yaml")
             .replace("{kind: soft, reason: \"any input trades\"}", "{kind: soft, reason: \" \"}");
-        fs::write(dir.join("integration_test_base.tycho.yaml"), invalid_on_base).unwrap();
-        let err = load_packages(&dir, Chain::Ethereum).unwrap_err();
+        let err = ethereum_packages(&[PACKAGE, &invalid_on_base]).unwrap_err();
         assert!(
             err.to_string()
                 .contains("the reason is empty"),
             "{err}"
         );
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn legacy_mode_keeps_half_a_percent() {
         let legacy = PACKAGE.replace("harness: strict\n", "");
         let package = PackageExpectations::from_yaml(legacy.as_bytes(), "vault").unwrap();
-        assert_eq!(package.tolerance(), Tolerance::LEGACY);
+        assert_eq!(package.tolerances(), ExecutionTolerances::legacy());
+    }
+
+    fn declared(yaml: &str) -> Result<DeclaredTolerance, String> {
+        serde_yaml::from_str(yaml).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn bps_takes_up_to_two_decimals_from_a_hundredth_to_under_100_percent() {
+        // Decimals a float does not hold exactly are read as written, quoted or not.
+        for (written, centi_bps) in [
+            ("3", 300),
+            ("0.02", 2),
+            ("\"0.02\"", 2),
+            ("1.5", 150),
+            ("9999.99", 999_999),
+            ("0.07", 7),
+            ("0.29", 29),
+            ("1.10", 110),
+            ("\"0.5\"", 50),
+            ("'2.01'", 201),
+            ("4097.73", 409_773),
+        ] {
+            let tolerance = declared(&format!("{{bps: {written}, reason: r}}")).unwrap();
+            assert_eq!(
+                tolerance
+                    .tolerance(&Bytes::from("0x01"))
+                    .centi_bps,
+                centi_bps,
+                "{written}"
+            );
+        }
+        for written in ["0", "0.00", "0.001", "10000", "-1", "\"1e2\"", "\".5\"", "[1]"] {
+            let err = declared(&format!("{{bps: {written}, reason: r}}")).unwrap_err();
+            assert!(err.contains("bps"), "{written}: {err}");
+        }
+    }
+
+    #[test]
+    fn wei_is_one_amount_or_one_per_token_with_a_default() {
+        let usdc = Bytes::from("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        let weth = Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
+        let all = declared("{wei: 2, reason: r}").unwrap();
+        assert_eq!(all.tolerance(&usdc).wei, 2);
+        let per_token = declared(
+            "{wei: {default: 1000, \"0xA0b86991c6218b36c1d19d4a2e9eB0cE3606eB48\": 1}, reason: r}",
+        )
+        .unwrap();
+        assert_eq!(per_token.tolerance(&usdc).wei, 1);
+        assert_eq!(per_token.tolerance(&weth).wei, 1000);
+        let without_default =
+            declared("{wei: {\"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48\": 1}, reason: r}")
+                .unwrap();
+        assert_eq!(without_default.tolerance(&weth), Tolerance::EXACT);
+
+        for (written, problem) in [
+            ("0", "nonzero"),
+            ("{default: 0}", "nonzero"),
+            ("{}", "empty map"),
+            ("{usdc: 1}", "not `usdc`"),
+            ("{\"0x01\": 1}", "not `0x01`"),
+        ] {
+            let err = declared(&format!("{{wei: {written}, reason: r}}")).unwrap_err();
+            assert!(err.contains(problem), "{written}: {err}");
+        }
+        assert!(declared("{bps: 1, reason: r, cause: c}")
+            .unwrap_err()
+            .contains("unknown field `cause`"));
+        assert_eq!(
+            declared("{reason: r}")
+                .unwrap()
+                .problems()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_component_tolerance_overrides_the_package_one_in_strict_mode_only() {
+        let token = Bytes::from("0x01");
+        let package = declared("{bps: 3, reason: r}").unwrap();
+        let component = declared("{wei: 2, reason: r}").unwrap();
+        let strict =
+            ExecutionTolerances::new(Harness::Strict, Some(&package), [("0xAA", &component)]);
+        assert_eq!(strict.get("0xaa", &token), Tolerance { centi_bps: 0, wei: 2 });
+        assert_eq!(strict.get("0xbb", &token), Tolerance { centi_bps: 300, wei: 0 });
+        assert_eq!(
+            ExecutionTolerances::new(Harness::Strict, None, []).get("0xbb", &token),
+            Tolerance::EXACT
+        );
+        assert_eq!(
+            ExecutionTolerances::new(Harness::Legacy, Some(&package), [("0xAA", &component)])
+                .get("0xaa", &token),
+            Tolerance::LEGACY
+        );
+    }
+
+    #[test]
+    fn a_component_tolerance_read_from_yaml_overrides_the_package_one_in_strict_mode_only() {
+        // PACKAGE declares 3 bps for the package; 0xAA adds its own, in both tests.
+        let own = "        execution_tolerance: {wei: 2, reason: \"rounding\"}\n        limits:\n";
+        let yaml = PACKAGE.replace("        limits:\n", own);
+        let token = Bytes::from("0x02");
+        let strict = PackageExpectations::from_yaml(yaml.as_bytes(), "vault").unwrap();
+        let legacy = PackageExpectations::from_yaml(
+            yaml.replace("harness: strict\n", "")
+                .as_bytes(),
+            "vault",
+        )
+        .unwrap();
+        let exact = PackageExpectations::from_yaml(
+            yaml.replace(
+                "execution_tolerance: {bps: 3, reason: \"vault rounding; 2.1 bps over 100 blocks\"}\n",
+                "",
+            )
+            .as_bytes(),
+            "vault",
+        )
+        .unwrap();
+        for (package, component, expected) in [
+            (&strict, "0xaa", Tolerance { centi_bps: 0, wei: 2 }),
+            (&strict, "0xAA", Tolerance { centi_bps: 0, wei: 2 }),
+            (&strict, "0xbb", Tolerance { centi_bps: 300, wei: 0 }),
+            (&legacy, "0xaa", Tolerance::LEGACY),
+            (&legacy, "0xbb", Tolerance::LEGACY),
+            (&exact, "0xaa", Tolerance { centi_bps: 0, wei: 2 }),
+            (&exact, "0xbb", Tolerance::EXACT),
+        ] {
+            assert_eq!(
+                package
+                    .tolerances()
+                    .get(component, &token),
+                expected,
+                "{component}"
+            );
+            assert_eq!(package.tolerance(component, &token), expected, "{component}");
+        }
+    }
+
+    #[test]
+    fn a_declaration_of_the_right_shape_names_its_bad_field_not_the_shape() {
+        let err = serde_yaml::from_str::<LimitsDeclaration>("{kind: soft}")
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("`limits`: missing field `reason`"), "{err}");
+        let err = serde_yaml::from_str::<LimitsDeclaration>("5")
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("`limits` is `{kind: ...}`"), "{err}");
+        let err = declared("{wei: 0, reason: r}").unwrap_err();
+        assert!(err.contains("`wei`: invalid value"), "{err}");
+    }
+
+    #[test]
+    fn a_limits_or_wei_map_is_a_default_and_keys() {
+        let limits: LimitsDeclaration = serde_yaml::from_str(
+            "{default: {kind: hard}, \"0x01->0x02\": {kind: soft, reason: r}}",
+        )
+        .unwrap();
+        assert_eq!(limits.default_limits(), Some(&Limits::Hard {}));
+        assert_eq!(limits.directions().collect::<Vec<_>>(), [&direction("0x01->0x02")]);
+        // One value and a map of only `default` are the same declaration.
+        let one: Wei = serde_yaml::from_str("2").unwrap();
+        let only_default: Wei = serde_yaml::from_str("{default: 2}").unwrap();
+        assert_eq!(one, only_default);
+        assert_eq!(serde_json::to_value(&only_default).unwrap(), serde_json::json!(2));
+        for (yaml, problem) in [
+            ("{\"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48\": 1, \"0xA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48\": 2}", "is declared twice"),
+            ("{1: 2}", "a `wei` key is not a string: `1`"),
+            ("{default: x}", "wei `default`: invalid type"),
+            ("[1]", "`wei` is an amount, or a map"),
+        ] {
+            let err = serde_yaml::from_str::<Wei>(yaml).unwrap_err().to_string();
+            assert!(err.contains(problem), "{yaml}: {err}");
+        }
+        assert!(serde_yaml::from_str::<LimitsDeclaration>("{}")
+            .unwrap_err()
+            .to_string()
+            .contains("`limits` is an empty map"));
+    }
+
+    #[test]
+    fn a_declaration_serializes_as_the_yaml_writes_it() {
+        let tolerance = declared(
+            "{bps: 0.5, wei: {default: 2, \"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48\": 1}, \
+             reason: r}",
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&tolerance).unwrap(),
+            serde_json::json!({
+                "bps": "0.5",
+                "wei": {"default": 2, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": 1},
+                "reason": "r",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(declared("{bps: 0.02, reason: r}").unwrap()).unwrap(),
+            serde_json::json!({"bps": "0.02", "reason": "r"})
+        );
+        assert_eq!(
+            serde_json::to_value(declared("{wei: 3, reason: r}").unwrap()).unwrap(),
+            serde_json::json!({"wei": 3, "reason": "r"})
+        );
+    }
+
+    #[test]
+    fn a_tolerance_prints_its_hundredths_of_a_bps() {
+        assert_eq!(Tolerance { centi_bps: 2, wei: 0 }.to_string(), "0.02 bps");
+        assert_eq!(Tolerance { centi_bps: 300, wei: 2 }.to_string(), "3 bps or 2 wei");
+        assert_eq!(Tolerance::EXACT.to_string(), "exact");
+        assert_eq!(Tolerance { centi_bps: 50, wei: 0 }.to_string(), "0.5 bps");
+        assert_eq!(Tolerance { centi_bps: 0, wei: 2 }.to_string(), "2 wei");
+        // The same text as the declaration it comes from.
+        let declared = declared("{bps: 0.5, reason: r}").unwrap();
+        assert_eq!(
+            declared
+                .tolerance(&Bytes::from("0x01"))
+                .to_string(),
+            format!("{} bps", declared.bps.unwrap())
+        );
     }
 
     #[test]
@@ -1079,10 +1642,11 @@ tests:
     fn every_package_in_the_repository_names_a_known_chain() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocols/substreams");
         for path in test_yamls(&root, false).unwrap() {
-            let manifest: ManifestEntry =
-                serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-            if let Err(e) = package_chain(&manifest.substreams_yaml_path) {
-                panic!("{}: {e}", path.display());
+            let yaml = fs::read_to_string(&path).unwrap();
+            if let Err(e) =
+                PackageExpectations::from_yaml(yaml.as_bytes(), &path.display().to_string())
+            {
+                panic!("{e:?}");
             }
         }
     }

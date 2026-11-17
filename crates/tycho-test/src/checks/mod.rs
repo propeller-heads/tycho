@@ -1,4 +1,5 @@
-//! Checks a test runner can share, taken from protocol-testing, its only runner so far.
+//! Checks a test runner can share. protocol-testing runs all of them; the cluster test,
+//! tycho-integration-test, runs the limit and execution checks on live pools.
 //!
 //! A check works on a snapshot or a decoded state, or on simulation and execution results, and
 //! returns what it found. Where the blocks come from, which components are checked and where the
@@ -8,5 +9,4 @@ pub mod execution;
 pub mod ladder;
 pub mod limits;
 pub mod outcome;
-pub mod sheet;
 pub mod tvl_only;

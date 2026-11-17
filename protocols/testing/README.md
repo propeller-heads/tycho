@@ -21,7 +21,7 @@ export SUBSTREAMS_API_TOKEN=..
 # This type of tests are constrained to a specific block range defined
 cargo run -- range --package "ethereum-balancer-v2"
 
-# To run the full test, that will index from the protocol creation block to the latest:
+# To run the full test, that will index from the manifest's initialBlock (or --initial-block) to the latest:
 cargo run -- full --package "ethereum-balancer-v2"
 
 # Run tests on a specific chain. Default is Ethereum.
@@ -49,6 +49,17 @@ export TYCHO_SERVER_PORT=4243   # or pass --tycho-server-port 4243
 cargo run -- range --package "ethereum-balancer-v2"
 ```
 
+### How a range run ends
+
+- `--match-test <text>` runs the test cases whose name contains the text.
+- A package without a test yaml, or whose substreams manifest is missing, logs a warning and
+  exits successfully: nothing was tested.
+- A test whose spkg build or indexing fails fails `index` and ends the whole run: the report is
+  written and the later test cases do not run. A test whose snapshot block is off fails `index`
+  and the run moves on to the next test.
+- Otherwise every test runs, the report is written at the end, and the run fails listing the
+  tests that failed.
+
 ## Strict mode
 
 A package's `integration_test.tycho.yaml` (and each clone's `integration_test_<clone>.tycho.yaml`)
@@ -61,7 +72,8 @@ substreams_yaml_path: ./substreams.yaml
 ```
 
 - **Legacy** (no `harness` key, the default) runs the checks every existing package was written
-  against. Its checks and their pass or fail are unchanged.
+  against. Its checks and their pass or fail are unchanged, with one exception that applies in
+  both modes: the file name of `substreams_yaml_path` must name the package's chain (below).
 - **Strict** is opt-in. It is being built up check by check, and is not required of any package
   yet; the yaml format stays backwards compatible until it is complete.
 
@@ -84,7 +96,9 @@ In strict mode:
 - A skip that reads as yes or no, such as `no` or `"false"`, is an error in both modes, since
   `no` would otherwise turn the check off.
 - Every check of a test runs, and the test fails at the end listing every failed check, instead of
-  stopping at the first. A check that needs the result of a failed one is reported as not run.
+  stopping at the first. A check that needs the result of a failed one is reported as not run. A
+  component whose ladder fails fails `sim.ladder`; the other components are still executed and
+  their limits checked, and that component's limit checks are reported as not run.
 - Every expected component's balances are checked, against where the component declares they are
   held, and `skip_balance_check` is an error (below).
 - Every direction of every expected component declares what kind of limit `get_limits` reports,
@@ -92,7 +106,12 @@ In strict mode:
 - An execution must pay exactly the simulated amount, unless the package declares a tolerance
   (below, "Execution tolerance").
 - New checks are added to strict mode only, so a legacy package never starts failing because the
-  harness grew.
+  harness grew. The one exception is the chain in the manifest's name, below.
+
+In both modes, the file name of `substreams_yaml_path` names the chain the package is built for:
+its first word, or the word after a `test-` prefix (`base-aero-cl.yaml`,
+`test-base-lunarbase.yaml`), and a plain `substreams.yaml` is Ethereum. A name that names no chain
+is an error, because `full` and the cluster test pick each chain's packages by it.
 
 A missing executor deployment is not a reason to skip execution, in either mode, when the
 protocol's executor has a runtime bytecode fixture in `src/execution.rs`: the harness overrides the
@@ -103,91 +122,77 @@ fixture added first.
 
 Legacy mode checks every component in the snapshot against `balanceOf(component id)`, or skips the
 check for the whole package. Strict mode checks each expected component, and reports each
-separately, against the source it declares:
+separately, against the amounts the package's balance lens reads on chain:
 
 ```yaml
-expected_components:
-  - id: "0x..."
-    balance_check: default                               # balanceOf(component id), the default
-  - id: "0x..."
-    balance_check: {holder: "attribute:vault"}           # the address in an attribute
-  - id: "0x..."
-    balance_check: {holder: "0xBA12222222228d8Ba445958a75a0704d566BF2C8"}   # a fixed address
-  - id: "0x..."
-    balance_check: {min_of: [self, "attribute:vault"]}   # the smallest of several holders
+harness: strict
+balance_lens: ComponentIdBalances
 ```
 
-Where the tokens are held in different places, each token gets its own source, and a token not
-listed is read from the component itself. `token` reads another token's balance, for a component
-whose inventory mirrors an underlying. Sky's USDS/USDC wrapper holds nothing itself: its USDC
-sits in the PSM's pocket, and the USDS it can pay out is the PSM's DAI:
+A lens is a Solidity contract implementing `IBalanceLens`
+(`protocols/adapter-integration/evm/src/balance-lenses/IBalanceLens.sol`). It takes a component's
+id, its tokens and its attributes, and returns, for each token, the amount the indexed balance
+must equal. The runner builds it with forge, as it builds an adapter, and calls it once per
+expected component with an `eth_call` at the snapshot block, placing the lens's code by a state
+override, so nothing is deployed and any RPC that serves overrides works.
 
-```yaml
-  - id: "0xa188eec8f81263234da3622a406892f3d630f98c"   # Sky USDS/USDC wrapper
-    balance_check:
-      tokens:
-        # USDC: held by the PSM's pocket
-        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {holder: "0x37305b1cd40574e4c5ce33f8e8306be057fd7341"}
-        # USDS: the PSM's DAI balance
-        "0xdc035d45d973e3ec169d2276ddab16f1e407384f":
-          holder: "0xf6e72db5454dd049d0788e411b06cfaf16853042"
-          token: "0x6b175474e89094c44da98b954eedeac495271d0f"
+Two stock lenses cover the common cases:
+
+| Lens | Reads |
+|---|---|
+| `ComponentIdBalances` | each token's `balanceOf(component id)`, for a component that holds its own tokens |
+| `BalanceOwnerBalances` | each token's `balanceOf` of the address in the `balance_owner` attribute, for a component whose tokens sit at an address that holds only its own |
+
+A package whose amounts sit elsewhere writes its own lens, next to its adapter under
+`protocols/adapter-integration/evm/src/`, inheriting `BalanceLens` for its helpers (a token's
+balance, the native one included, `balancesOf` over all the tokens, an attribute by name, an
+attribute as an address). A singleton vault's per-pool view, protocol accounting kept as a number,
+or a token held as another token's balance are read there, with the protocol's constants in the
+contract, and components read differently are branches of one lens. A token the protocol does not
+account per component reads 0, and the indexer must then report no balance for it:
+
+```solidity
+interface ILido {
+    function getTotalPooledEther() external view returns (uint256);
+}
+
+/// Lido: the pooled ether is protocol accounting; stETH and wstETH are traded, but no balance
+/// is tracked for them.
+contract LidoBalances is BalanceLens {
+    address constant STETH = 0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84;
+
+    function balances(bytes calldata, address[] calldata tokens, Attribute[] calldata)
+        external
+        view
+        returns (uint256[] memory amounts)
+    {
+        amounts = new uint256[](tokens.length);
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (tokens[i] == address(0)) {
+                amounts[i] = ILido(STETH).getTotalPooledEther();
+            }
+        }
+    }
+}
 ```
 
-Where a balance is protocol accounting rather than a token balance, or a singleton vault keeps
-every pool's funds, a view call returning a `uint` gives the amount, per token or for every token:
-
-```yaml
-  - id: "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"   # Lido
-    balance_check:
-      tokens:
-        # ETH: the protocol's pooled ether
-        "0x0000000000000000000000000000000000000000": {call: {to: self, fn: "getTotalPooledEther()"}}
-        # stETH, wstETH: traded, but the indexer tracks no balance for them
-        "0xae7ab96520de3a18e5e111b5eaab095312d7fe84": {unindexed: "only the pooled ether is tracked"}
-        "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0": {unindexed: "only the pooled ether is tracked"}
-  - id: "0x3225737a9bbb6473cb4a45b7244aca2befdb276a"   # Sky DAI/USDS converter
-    balance_check:
-      tokens:
-        # DAI: the DAI join's escrow in the vat, kept in rad (1e45) for an 18-decimal token
-        "0x6b175474e89094c44da98b954eedeac495271d0f":
-          call:
-            to: "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"   # vat
-            fn: "dai(address)"
-            args: ["0x9759a6ac90977b93b58547b4a71c78317f391a28"]   # DAI join
-            divide_by: "1e27"
-  - id: "0xe96a45f66bdda121b24f0a861372a72e8889523d00020000000000000000069b"   # Balancer V2
-    # every token: the pool's cash in the vault, the first of the four values it returns
-    balance_check: {call: {to: "0xBA12222222228d8Ba445958a75a0704d566BF2C8", fn: "getPoolTokenInfo(bytes32,address) returns (uint256,uint256,uint256,address)", args: [self, token]}}
-```
-
-- `fn` is the signature, `name(type,...)`. A function that returns anything but a single
-  `uint256` declares its outputs, `name(type,...) returns (type,...)`; the amount is the first, or
-  the one `output` gives by index. That output must be a `uint`: an `int` or a dynamic type is
-  rejected at load. Without declared outputs, a call that returns more than one word fails.
-- `to` is `self`, `attribute:NAME` or a `0x` address, as for a holder.
-- `args` has one entry per parameter: `self` (the component id), `token` (the token being
-  checked), `attribute:NAME`, or a literal of the parameter's type. An `attribute:` argument to an
-  `address` parameter takes 20 bytes or a 32-byte word; other types take its raw hex. A call for
-  the whole component serves every token, so it must take `token`.
-- `divide_by` (an integer or `1eN`, quoted or not) divides the result, rounding down.
-- `unindexed` passes only while the indexer reports no balance (or zero) for the token.
-
-- An `attribute:NAME` holder is read from the component's static attributes, then from its state
-  attributes at the snapshot block; a 32-byte ABI-encoded address is accepted.
-- `min_of` compares the indexed balance with the smallest of the holders' balances, for an amount
-  bounded by each of them. It needs at least two holders.
+- The lens gets the id's bytes when it is hex, else its UTF-8 bytes, and the static attributes
+  followed by the state attributes at the snapshot block, so the last entry of a name is current.
 - The comparison is exact, unless the component is `tvl_only` (below), and a token without an
   indexed balance counts as zero.
-- A `tokens` entry for a token the component does not have fails the component, and two entries
-  for one token (keys that differ only in case) are an error.
+- A lens that reverts, or returns a different number of amounts than the component has tokens,
+  fails the component, naming the lens.
+- A component the lens cannot read, such as a singleton that keeps liquidity rather than
+  per-pool amounts, sets `skip_balance_check` with the reason; its `balances` is reported
+  `skipped`, and every other check of it still runs. A lens is required unless every expected
+  component skips the check. Write a lens rather than a skip wherever the chain has the amount: a
+  skip never makes a failing balance check pass.
 - A test in strict mode must list its expected components: an empty list, which elsewhere means
   every component of the protocol, would leave the balances unchecked.
-- A component whose id is not an address needs a holder.
-- The package-level `skip_balance_check` is an error in strict mode, whatever its value; leave
-  it out, as the check runs by default.
+- The package-level `skip_balance_check` is an error in strict mode, whatever its value.
 
-`balance_check` is read in legacy mode, where it is ignored.
+Legacy mode does not read `balance_lens` or a component's `skip_balance_check`: it warns about
+them as keys the runner does not read, and checks the balances as before.
 
 #### Balances that feed only TVL
 
@@ -199,18 +204,18 @@ balances, being slightly off only moves TVL, and the component can declare a tol
   - id: "0x..."
     tvl_only:
       bps: 10        # of the on-chain amount; or `wei`, or both
-      cause: "the indexed reserves exclude the protocol fee bucket the contract also holds"
-      measured: "6.2 bps at most over 40 components, blocks 21000000-21000100 (range --report)"
+      reason: "the indexed reserves exclude the protocol fee bucket the contract also holds, which reaches 6 bps of the reserves (feeBucket() against getReserves() at block 21000000)"
 ```
 
-- The tolerance takes the same fields as `execution_tolerance`, checked the same way in both modes.
-  It applies to every source but `unindexed`, `default` and unlisted tokens included. An
-  `unindexed` token must still have no balance.
+- The tolerance takes the same fields as `execution_tolerance` (below), checked the same way in
+  both modes, with `wei` in base units of each token. A component listed in several tests
+  declares the same `tvl_only` in each. It applies to every token, those the lens reads as 0
+  included: their indexed balance may then be up to the tolerance's `wei`.
 - **The runner verifies the declaration** (`balances.tvl_only`). It decodes the snapshot again
   with the component's balances scaled down, each token's by a different factor (1/2, 1/3, ...,
   in token address order) so their ratios change too, and every limit, spot price and quote at
-  0.1%, 1% and 10% of the limit must come out the same, in every direction. If one changes, simulation reads the
-  balances, and the check fails, naming each change:
+  0.1%, 1% and 10% of the limit must come out the same, in every direction. If one changes,
+  simulation reads the balances, and the check fails, naming each change:
   ```
   WBTC -> WETH: limits is max input 8384236, max output 683094418215225792, but max input 3889669, max output 499999999548736461 with the balances scaled down
   ```
@@ -253,41 +258,49 @@ component's).
 
 | Kind | Meaning | Required | Tested |
 |---|---|---|---|
-| `hard` | the venue rejects any input above its bound, and the limit is that bound | optional `rounding` | at the limit; past the bound, the quote errors and the swap reverts |
+| `hard` | the limit is the largest input the venue accepts, whichever side of the swap the venue bounds | nothing | at the limit; one unit past it, the quote errors and the swap reverts |
 | `soft` | the venue has no bound on the input; the limit is a recommended size, as the `ProtocolSim::get_limits` documentation allows | `reason`, naming the code that shows it | at the limit; twice the limit still quotes |
-| `under_cap` | the venue has a bound, and the limit stays below it because the exact bound cannot be derived | `reason`: why, such as a command and its output, and the capacity given up | at the limit; one unit past it, the quote and the swap succeed |
+| `under_cap` | the venue has a bound, and the limit stays below it because `get_limits` cannot report the largest input the venue accepts | `reason`: why, such as a command and its output, and the capacity given up | at the limit; one unit past it, the quote and the swap succeed |
 
 - **At the limit** (`limits.at_limit`): `get_amount_out(max_input)` succeeds, and executing it
   does not revert and matches the simulation.
 - **Max output** (`limits.max_output`): the quote at `max_input` pays no more than `max_output`.
-- **Past the limit** (`limits.past_limit`): the venue behaves as the kind claims, so a wrong
-  declaration fails.
-  - `hard`: `get_amount_out(max_input + rounding + 1)` errors, and executing it reverts.
-    `rounding` is 0 unless declared: where `get_limits` derives the input from an output-side
-    bound with a rounding division, the bound can exceed the limit by a few units, and
-    `{kind: hard, rounding: 2}` probes past them. The swap's minimum output is set from the quote
-    at the limit, so a venue that accepts the input executes the swap and fails the check. The
-    check accepts any revert from the chain, but not a node error on the call, which proves
-    nothing.
-  - `under_cap`: `get_amount_out(max_input + 1)` succeeds, and executing it does not revert, so
-    the bound is above the limit.
+- **Past the limit** (`limits.past_limit`): past the limit, the venue behaves as the kind claims,
+  so a wrong declaration fails. Whichever side the venue bounds, `hard` claims that `max_input` is
+  the largest input it accepts. A venue that bounds the output, such as a pool's reserve of the
+  token out, accepts every input that pays no more than that bound; a `get_limits` that inverts
+  the bound with a floor division reports less than that, so one unit past it still quotes, and
+  the limit is `under_cap`, with the capacity it gives up in its reason. By kind:
+  - `hard`: the quote one unit past the limit, `max_input + 1`, errors, and executing it reverts.
+    Its minimum output is 80% of the quote at the limit, which a larger input easily meets: a
+    venue that accepts the input executes the swap and fails the check. The check
+    accepts any revert from the chain, but not a node error on the call, which proves nothing.
+  - `under_cap`: the quote one unit past the limit succeeds, and executing it does not revert, so the
+    bound is above the limit.
   - `soft`: `get_amount_out(2 × max_input)` succeeds, so the venue has no bound near the limit.
-    Nothing past it is executed.
+    Its claim is checked in simulation alone, and nothing past it is executed.
 
-  When the limit is at or above the `int128` cap, the cap is not the venue's bound, and nothing is
-  probed past it.
+  When the limit is at or above the `int128` cap, the cap is not the venue's bound: nothing is
+  probed past it, and `limits.past_limit` is not run. The cap is Uniswap V4's bound on an
+  executed amount; both runners apply it to every protocol, including those whose executor takes
+  more.
 
 Each of the three checks is reported per component and direction, with `component` and
-`direction` keys in the report. A check passes only once everything it tests ran. Unless the
+`direction` keys in the report, and the `limit` it was checked against: the declaration, which
+declaration applies, and the sizes when the direction was quoted. A limit check recorded for the
+whole test, not run or skipped because an earlier step failed or every component skips, has no
+`limit`. A check passes only once everything it tests ran. Unless the
 simulation already failed it:
 
-- `limits.past_limit` is skipped for a limit at the cap.
-- When the quote at the limit fails, `limits.max_output` is `not_run`, and so is
-  `limits.past_limit` for a hard or under-cap limit. When the swap at the limit does not execute,
-  `limits.past_limit` is `not_run` too: what happens past a limit that does not execute either
-  proves nothing.
-- A component with `skip_execution` runs the checks in simulation only: `limits.at_limit` and
-  `limits.past_limit` are skipped with its reason.
+- `limits.past_limit` is `not_run` for a limit at the cap, which is not the venue's bound.
+- When the quote at the limit fails, nothing is probed past it, whatever the kind, and
+  `limits.max_output` and `limits.past_limit` are `not_run`. For a hard or under-cap limit,
+  `limits.past_limit` is also `not_run` when the swap at the limit does not execute, as when the
+  execution batch fails: what happens past a limit that does not execute proves nothing. A soft
+  limit's `limits.past_limit` is judged in simulation alone, so it passes on its quote at twice
+  the limit.
+- A component with `skip_execution` runs the checks in simulation only: `limits.at_limit`, and
+  `limits.past_limit` for a hard or under-cap limit, are skipped with its reason.
 - A component with `skip_simulation` has all three skipped.
 - A direction whose limit is zero at the tested block has all three skipped. A declared direction
   the runner never quotes, because the indexed tokens differ from the expected ones, fails all
@@ -304,42 +317,48 @@ of basis points of the executed amount, a number of base units of the token out,
 mode allows 0.5% for every package. Strict mode, in `range` and in `full`, requires an exact match:
 a simulation that ports the venue's math, or runs its bytecode, should not differ by
 a wei, and 0.5% hides rounding and fee bugs. Where exact is out of reach, the package declares a
-tolerance, with why and what a run measured:
+tolerance, with a reason that says why and what a run measured:
 
 ```yaml
 harness: strict
 execution_tolerance:
-  bps: 3
-  cause: "the vault rounds shares down on deposit; the simulation rounds once at the end"
-  measured: "2.1 bps at most, blocks 21000000-21000100 (range --report)"
+  bps: 0.02
+  reason: "the vault prices from a share price rounded to 6 significant digits; 0.011 bps at most, blocks 21000000-21000100 (range --report)"
 ```
 
-`bps` is relative to the executed amount. Where the loss is a fixed amount whatever the trade's
-size, such as stETH's 1-2 wei per transfer, declare `wei` instead, in base units of the token out;
-a bps loose enough for a small trade allows ether on a large one:
+`bps` is relative to the executed amount, with up to two decimals, from 0.01 to 9999.99. Where
+the loss is a fixed amount whatever the trade's size, such as stETH's 1-2 wei per transfer,
+declare `wei` instead, in base units of the token out; a bps loose enough for a small trade allows
+ether on a large one. `wei` is one amount for every token, or an amount per token address with an
+optional `default`, since one raw amount means different things for tokens of different decimals:
 
 ```yaml
 execution_tolerance:
-  wei: 2
-  cause: "stETH transfers move shares, rounding the amount down by up to 2 wei"
-  measured: "1 wei at most, blocks 25603204-25603404 (range --report)"
+  wei: {default: 2, "0xA0b86991c6218b36c1d19d4a2e9eB0cE3606eB48": 1}
+  reason: "stETH transfers move shares, rounding the amount down by up to 2 wei; 1 wei at most, blocks 25603204-25603404 (range --report)"
 ```
 
-For a known artifact, declare its documented bound, and give the run in `measured` as support: a
+For a known artifact, declare its documented bound, and give the run in the reason as support: a
 short range can show less than the bound, as this one shows 1 wei, and a tolerance cut to the run
 fails at random.
 
-With both declared, a difference within either passes. A mismatch says whether the simulation
-over- or underquotes, since those are different defects. At least one of `bps` (1 to 9999) and
-`wei` (1 or more) is required, as are `cause` and `measured`, in both modes; legacy mode keeps
-0.5% whatever is declared. The report's `drift` gives the largest difference of each test, within
-tolerance or not, so `measured` can be checked against a run.
+A component can declare its own `execution_tolerance`, which overrides the package's for its
+executions, so a pool with a known artifact does not loosen every other pool of the package. A
+component listed in several tests declares the same one in each.
+
+With both `bps` and `wei` declared, a difference within either passes. A mismatch says whether the
+simulation over- or underquotes, since those are different defects. At least one of `bps` and
+`wei` is required, and a reason, in both modes; legacy mode keeps 0.5% whatever is declared. The
+report's `drift` gives the largest difference of each test, within tolerance or not, so the
+number a reason gives can be checked against a run.
 
 ### Full mode
 
-`full` indexes from the protocol's start block and then tests every update the stream delivers,
-for every pool of the protocol, not only the expected components. A legacy package runs the ladder
-and executes its quotes within 0.5%, logs whatever fails, and keeps going.
+`full` indexes from the manifest's `initialBlock` (or `--initial-block`) and then tests every
+update the stream delivers, for every pool in it, not only the expected components. The stream
+leaves out pools below its TVL threshold, and pools whose state does not decode, which it logs as
+a warning (`range` fails `decode` for those). A legacy package runs the ladder and executes its
+quotes within 0.5%, logs whatever fails, and keeps going.
 
 A strict package runs, on every update:
 
@@ -351,17 +370,33 @@ A strict package runs, on every update:
   `limits` covers only that listed pool, and an unlisted pool like it is checked against the
   default.
 
-Skips do not apply: a skip covers one test's range, and `full` has none. A failed check does not
-stop the run. Each update with a failed check is logged, naming the block, the checks and their
-reasons, with a running count of the updates that failed so far, and `full --report <path>`
-appends that update's checks to the file as one line of JSON, in the report format below, each
-result with its `block`. The file is emptied when the run starts. A block the node does not serve
-is logged, and that update is judged from the simulation alone; executions that cannot be
-simulated fail the checks that need them, with the reason.
+How a strict `full` run reports:
+
+- Skips do not apply: a skip covers one test's range, and `full` has none.
+- A failed check does not stop the run. A pool whose ladder fails fails `sim.ladder` without
+  stopping the other pools of its update from being executed and checked.
+- A pool whose every direction has a zero limit at the block is passed over, with its limit checks
+  skipped for the zero limit: `full` ladders every pool at every update, and one without capacity
+  says nothing about the package. `range` still fails `sim.ladder` for it, since a test lists the
+  pools it expects to trade.
+- Each update with a failed check is logged, naming the block, the checks and their reasons, with a
+  running count of the updates that failed so far.
+- `full --report <path>` appends each such update's checks to the file as one line of JSON, in the
+  report format below, each result with `"test": "full"` and its `block`. The file is emptied when
+  the run starts; a legacy package writes no report, and `--report` logs a warning saying so.
+- The package's yaml is read before the build, so a declaration it rejects fails at the start, not
+  after the sync.
+- When fetching the update's block fails, the update is judged from the simulation alone:
+  `exec.ladder` is not run, with the node's error, and the limit checks' executions are skipped.
+  Any error counts, a block the node has not reached as well as a timeout or an RPC that is down,
+  and none is retried. The log keeps a running count of such updates, so a node that serves no
+  block shows.
+- Executions that cannot be simulated fail the checks that need them, with the reason.
 
 ### Test report
 
-`range --report <path>` writes every check's outcome, per test, as JSON, in either mode:
+`range --report <path>` writes every check's outcome, per test, as JSON, in either mode
+(`full --report` appends one such report per failed update, above):
 
 ```json
 {
@@ -370,7 +405,8 @@ simulated fail the checks that need them, with the reason.
   "harness": "strict",
   "results": [
     { "test": "first", "check": "state.components", "outcome": "pass" },
-    { "test": "first", "check": "balances", "outcome": "pass" },
+    { "test": "first", "check": "balances", "component": "0x...", "outcome": "pass",
+      "tvl_only": { "bps": "10", "reason": "the indexed reserves exclude the protocol fee bucket ..." } },
     { "test": "first", "check": "exec.ladder", "component": "0xabc...", "outcome": "skipped", "reason": "range predates Shanghai; the router needs PUSH0" },
     { "test": "first", "check": "sim.ladder", "outcome": "fail", "detail": "Error calculating amount out ..." },
     { "test": "first", "check": "exec.ladder", "outcome": "not_run", "reason": "sim.ladder failed" },
@@ -385,10 +421,10 @@ simulated fail the checks that need them, with the reason.
 
 | Check | What it checks |
 |---|---|
-| `index` | the range indexes, and the snapshot can be read at the stop block |
+| `index` | the range indexes, the last committed block is the stop block or the one after it, and the snapshot, components, entry points and tokens can be fetched there |
 | `state.components` | every expected component is indexed, with its tokens and static attributes |
 | `state.excluded` | no excluded component is indexed |
-| `balances` | indexed balances match `balanceOf` on chain; strict: per component, against its declared source |
+| `balances` | indexed balances match `balanceOf` on chain; strict: per component, against the amounts the package's `balance_lens` reads, or `skipped` with a component's `skip_balance_check` |
 | `balances.tvl_only` | strict: a `tvl_only` component quotes the same with its balances scaled down |
 | `decode` | the snapshot decodes, and so does every expected component |
 | `sim.ladder` | limits, spot prices and quotes at 0.1%, 1% and 10% of the limit, every direction |
@@ -397,11 +433,17 @@ simulated fail the checks that need them, with the reason.
 | `limits.past_limit` | strict: past the limit, the venue behaves as the declared kind claims |
 | `limits.max_output` | strict: the quote at the limit pays no more than the limit's max output |
 
-Every `limits.*` result carries its `limit`, whatever the outcome: the declared `kind`, its
-`reason` (and a hard limit's `rounding`), which declaration applies (`declared_by`: `component`,
-`component_default`, `package` or `package_default`), and `get_limits`' `max_input` (after the
-`int128` cap) and `max_output`, with `capped` saying whether the cap applied. The run also logs a
-count per test, such as `limits: 3 hard, 8 soft, 1 under_cap`.
+Every `limits.*` result of a direction carries its `limit`, whatever the outcome: the declaration
+(`kind` and its `reason`), which
+declaration applies (`declared_by`: `component`, `component_default`, `package` or
+`package_default`), and, when `get_limits` was read for the direction, `get_limits`' `max_input`
+(after the `int128` cap) and `max_output`, with `capped` saying whether the limit is at or above the
+cap. A zero limit reports the `max_output` `get_limits` gave with it. The run also logs a count per
+test, such as `limits: 3 hard, 8 soft, 1 under_cap`.
+
+Likewise, the `balances` and `balances.tvl_only` results of a component declared `tvl_only`
+carry that declaration, as written in the yaml, so a pass within a tolerance shows which one and
+why.
 
 A skipped check is reported with its reason, per component (by lowercase id) for
 `skip_simulation` and `skip_execution`; a legacy `true` reads "no reason given". A test-wide
@@ -444,6 +486,16 @@ export MODE=full
 export PROTOCOLS="ethereum-balancer-v2=12345678"
 docker compose up --build
 ```
+
+Set `REPORT_DIR=/reports` to write each package's test report (`--report`) to `./reports` on the
+host: `<package>.json` in range mode, `<package>.jsonl` in full mode. The file is named after the
+package alone, so a package listed twice in `PROTOCOLS` writes both runs to one file, and the
+later run's report replaces the earlier one. Without `REPORT_DIR`, no report is written, though
+`./reports` is still mounted.
+
+The image ships the EVM project (sources, `lib/`, Foundry config) compiled at
+`/app/adapter-integration/evm`, so a VM package's adapter is built with its own constructor
+arguments, and a strict package's balance lens with `forge script`, when its test runs.
 
 ## Runtime Bytecode Fixtures
 

@@ -19,7 +19,44 @@ use tycho_simulation::{
     tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes},
 };
 
-use crate::checks::sheet::{Quoter, LADDER_THOUSANDTHS};
+use crate::checks::ladder::ProbeSize;
+
+/// What a check asks a decoded state.
+pub(crate) trait Quoter {
+    /// `(max input, max output)` of selling `token_in` for `token_out`, or the error, printed.
+    fn limits(&self, token_in: &Token, token_out: &Token) -> Result<(BigUint, BigUint), String>;
+    /// The price of `base` in `quote`, or the error, printed.
+    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, String>;
+    /// What selling `amount_in` of `token_in` pays in `token_out`, or the error, printed.
+    fn amount_out(
+        &self,
+        amount_in: BigUint,
+        token_in: &Token,
+        token_out: &Token,
+    ) -> Result<BigUint, String>;
+}
+
+impl Quoter for dyn ProtocolSim {
+    fn limits(&self, token_in: &Token, token_out: &Token) -> Result<(BigUint, BigUint), String> {
+        self.get_limits(token_in.address.clone(), token_out.address.clone())
+            .map_err(|e| e.to_string())
+    }
+
+    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, String> {
+        ProtocolSim::spot_price(self, base, quote).map_err(|e| e.to_string())
+    }
+
+    fn amount_out(
+        &self,
+        amount_in: BigUint,
+        token_in: &Token,
+        token_out: &Token,
+    ) -> Result<BigUint, String> {
+        self.get_amount_out(amount_in, token_in, token_out)
+            .map(|quote| quote.amount)
+            .map_err(|e| e.to_string())
+    }
+}
 
 /// Keeps only the components `ids` in `snapshot`, matched case-insensitively, and scales down
 /// every indexed balance of theirs, keeping each value's byte length: in token address order, the
@@ -28,17 +65,13 @@ use crate::checks::sheet::{Quoter, LADDER_THOUSANDTHS};
 /// declared id found in the snapshot: only a zero balance stays the same, and a component with
 /// nothing to scale verifies nothing.
 pub fn scale_balances(snapshot: &mut Snapshot, ids: &[String]) -> HashMap<String, usize> {
-    snapshot.states.retain(|id, _| {
-        ids.iter()
-            .any(|declared| declared.eq_ignore_ascii_case(id))
-    });
     let mut changed = HashMap::new();
-    for (id, component) in &mut snapshot.states {
+    snapshot.states.retain(|id, component| {
         let Some(declared) = ids
             .iter()
             .find(|declared| declared.eq_ignore_ascii_case(id))
         else {
-            continue;
+            return false;
         };
         let count = changed
             .entry(declared.clone())
@@ -57,14 +90,16 @@ pub fn scale_balances(snapshot: &mut Snapshot, ids: &[String]) -> HashMap<String
             *balance = Bytes::from(scaled.to_bytes_be()).lpad(balance.len(), 0);
             *count += 1;
         }
-    }
+        true
+    });
     changed
 }
 
 /// Verifies that component `id`, declared `tvl_only`, quotes the same in `scaled`, the snapshot
-/// decoded with its balances scaled down, as in `original`, with [`compare`]. `changed` counts the
-/// balances the scaling changed, per declared id. Returns every difference, or why the check could
-/// not be made: no balance to scale, or the component missing from either decode.
+/// decoded with its balances scaled down, as in `original`, at each rung of the ladder. `changed`
+/// counts the balances the scaling changed, per declared id. Returns every difference, or why the
+/// check could not be made: the component is not in the snapshot, it has no balance to scale, or it
+/// is missing from either decode.
 pub fn check(
     id: &str,
     original: &Update,
@@ -106,20 +141,33 @@ pub fn check(
 /// every direction between `tokens`: limits, spot price, and a quote at 0.1%, 1% and 10% of the
 /// original max input after `sizing`, which caps it as the ladder does. Returns every difference.
 ///
-/// A question both states fail to answer with the same error is no difference. When the original
-/// state answers no question at all, nothing was compared, and that is returned as a difference
-/// too: the scaling would otherwise verify nothing.
-pub fn compare<Q: Quoter + ?Sized>(
+/// A token is named by its symbol, followed by its address when another of `tokens` has the same
+/// symbol. A question both states fail to answer with the same error is no difference. When the
+/// original state answers no question at all, nothing was compared, and that is returned as a
+/// difference too: the scaling would otherwise verify nothing.
+pub(crate) fn compare<Q: Quoter + ?Sized>(
     original: &Q,
     scaled: &Q,
     tokens: &[Token],
     sizing: impl Fn(&BigUint) -> BigUint,
 ) -> Vec<String> {
+    let name = |token: &Token| {
+        let shared = tokens
+            .iter()
+            .filter(|other| other.symbol == token.symbol)
+            .count() >
+            1;
+        if shared {
+            format!("{} ({})", token.symbol, token.address)
+        } else {
+            token.symbol.clone()
+        }
+    };
     let mut changes = Vec::new();
     let mut answered = 0usize;
     for pair in tokens.iter().permutations(2) {
         let (token_in, token_out) = (pair[0], pair[1]);
-        let direction = format!("{} -> {}", token_in.symbol, token_out.symbol);
+        let direction = format!("{} -> {}", name(token_in), name(token_out));
         let limits = original.limits(token_in, token_out);
         answered += usize::from(limits.is_ok());
         if let Some(change) =
@@ -140,8 +188,8 @@ pub fn compare<Q: Quoter + ?Sized>(
             continue;
         };
         let max_input = sizing(&max_input);
-        for thousandths in LADDER_THOUSANDTHS {
-            let amount_in = &max_input * thousandths / 1000u32;
+        for size in ProbeSize::LADDER {
+            let amount_in = size.amount(&max_input);
             if amount_in.is_zero() {
                 continue;
             }
@@ -154,7 +202,7 @@ pub fn compare<Q: Quoter + ?Sized>(
             ) {
                 changes.push(format!(
                     "{direction}: the quote for {amount_in} {} {change}",
-                    token_in.symbol
+                    name(token_in)
                 ));
             }
         }
@@ -287,6 +335,28 @@ mod tests {
         assert_eq!(
             changes[3],
             "A -> B: the quote for 1000 A is 1980, but 1307 with the balances scaled down"
+        );
+    }
+
+    #[test]
+    fn tokens_that_share_a_symbol_are_named_by_their_address_too() {
+        let (original, scaled) = pair(true);
+        let tokens = [
+            token("0x00000000000000000000000000000000000000a1", "A"),
+            token("0x00000000000000000000000000000000000000a2", "A"),
+        ];
+        let changes = compare(&original, &scaled, &tokens, BigUint::clone);
+        assert!(
+            changes[0].starts_with(
+                "A (0x00000000000000000000000000000000000000a1) -> A \
+                 (0x00000000000000000000000000000000000000a2): limits"
+            ),
+            "{changes:#?}"
+        );
+        assert!(
+            changes[3]
+                .contains("the quote for 1000 A (0x00000000000000000000000000000000000000a1)"),
+            "{changes:#?}"
         );
     }
 

@@ -129,9 +129,10 @@ struct CommonArgs {
     #[arg(long, default_value_t = false)]
     prebuilt_wasm: bool,
 
-    /// If false (default), clears the DB and re-syncs from start. If true:
-    ///   - for the ranged test, it skips indexing and uses the current state
-    ///   - for the full test, it starts syncing from the last block in the db
+    /// If false (default), clears the DB and re-syncs from start. If true, the DB is kept:
+    ///   - for the ranged test, indexing is skipped and the current state is used
+    ///   - for the full test, the indexer still runs from the start block; whether it resumes from
+    ///     what the DB holds is the indexer's behaviour
     #[arg(long, default_value_t = false)]
     reuse_last_sync: bool,
 }
