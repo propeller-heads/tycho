@@ -121,13 +121,15 @@ pub(super) fn unique_by_key<K: Eq + Hash + Debug, V>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use chrono::{Duration, NaiveDate, NaiveDateTime};
     use tycho_common::{
         models::Chain,
         storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
     };
 
-    use super::{check_current, resolve_version, ReadAt};
+    use super::{check_current, resolve_version, unique_by_key, ReadAt};
     use crate::postgres::{
         instance::{active::ActiveInstance, InstanceId},
         testing::instance_test_connection,
@@ -328,5 +330,23 @@ mod tests {
             panic!("expected Unsupported, got {result:?}");
         };
         assert!(msg.contains("base block"), "{msg}");
+    }
+
+    #[test]
+    fn test_unique_by_key_collects_rows() {
+        let map = unique_by_key("protocol_state", [(1, "a"), (2, "b"), (3, "c")]).unwrap();
+
+        assert_eq!(map, HashMap::from([(1, "a"), (2, "b"), (3, "c")]));
+    }
+
+    #[test]
+    fn test_unique_by_key_fails_on_a_repeated_key() {
+        let result = unique_by_key("protocol_state", [(1, "a"), (1, "b")]);
+
+        let Err(StorageError::Unexpected(msg)) = result else {
+            panic!("expected Unexpected, got {result:?}");
+        };
+        assert!(msg.contains("protocol_state"), "{msg}");
+        assert!(msg.contains('1'), "{msg}");
     }
 }
