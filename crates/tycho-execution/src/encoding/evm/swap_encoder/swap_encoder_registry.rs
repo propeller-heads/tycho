@@ -46,6 +46,11 @@ const PANCAKESWAP_INFINITY_BIN: &str = "pancakeswap_infinity_bin";
 const PANCAKESWAP_INFINITY_CL: &str = "pancakeswap_infinity_cl";
 const PANCAKESWAP_INFINITY_CL_HOOKS: &str = "pancakeswap_infinity_cl_hooks";
 
+/// The chains where Aqua0 has a hook and signs binding quotes for the Tycho router. The `rfq:aqua0`
+/// encoder is registered on these and no others.
+pub const AQUA0_CHAINS: [Chain; 5] =
+    [Chain::Base, Chain::Arbitrum, Chain::Polygon, Chain::Robinhood, Chain::Arc];
+
 /// Registry containing all supported `SwapEncoders`.
 #[derive(Clone)]
 pub struct SwapEncoderRegistry {
@@ -107,9 +112,7 @@ impl SwapEncoderRegistry {
         }
         // Aqua0 supplies signed hookData to the existing V4 executor. It has no Solidity executor
         // deployment of its own, and must follow a caller's configured V4 address as well.
-        if matches!(self.chain, Chain::Base | Chain::Arbitrum | Chain::Polygon | Chain::Robinhood) &&
-            !self.encoders.contains_key("rfq:aqua0")
-        {
+        if AQUA0_CHAINS.contains(&self.chain) && !self.encoders.contains_key("rfq:aqua0") {
             if let Some(v4) = self.encoders.get("uniswap_v4") {
                 let encoder =
                     Aqua0SwapEncoder::new(v4.executor_address().clone(), self.chain, None)?;
@@ -604,7 +607,7 @@ mod tests {
 
     #[test]
     fn aqua0_reuses_the_existing_v4_executor() {
-        for chain in [Chain::Base, Chain::Arbitrum, Chain::Polygon, Chain::Robinhood] {
+        for chain in AQUA0_CHAINS {
             let registry = SwapEncoderRegistry::new_with_defaults(chain).unwrap();
             let aqua0 = registry
                 .get_encoder("rfq:aqua0")

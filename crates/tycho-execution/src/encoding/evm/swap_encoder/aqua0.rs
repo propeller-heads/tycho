@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use tokio::runtime::Handle;
 use tycho_common::{
@@ -6,7 +9,7 @@ use tycho_common::{
     Bytes,
 };
 
-use super::uniswap_v4::UniswapV4SwapEncoder;
+use super::uniswap_v4::{UniswapV4SwapEncoder, UniswapV4UserData};
 use crate::encoding::{
     errors::EncodingError,
     evm::utils::{
@@ -82,6 +85,26 @@ impl SwapEncoder for Aqua0SwapEncoder {
                     "Tycho Router V3 address is required for Aqua0 RFQ".into(),
                 )
             })?;
+
+        // The caller's V4 options are kept; the hook data is the binding quote's.
+        let mut user_data = UniswapV4UserData::from_swap_user_data(swap.user_data().as_ref())?;
+        if !user_data.hook_data.is_empty() {
+            return Err(EncodingError::InvalidInput(
+                "Aqua0 sets hook_data from its binding quote; leave it out of user_data".into(),
+            ));
+        }
+
+        // The binding quote reserves backing, so everything that can be checked without it is
+        // checked first: a positive amount within the backed sizes, then every static check of
+        // the V4 encoding.
+        protocol_state.get_amount_out(amount_in.clone(), swap.token_in(), swap.token_out())?;
+        self.v4.encode_swap(
+            &swap
+                .clone()
+                .with_user_data(v4_user_data(&user_data)?),
+            encoding_context,
+        )?;
+
         let params = GetAmountOutParams {
             amount_in: amount_in.clone(),
             token_in: swap.token_in().address.clone(),
@@ -108,7 +131,8 @@ impl SwapEncoder for Aqua0SwapEncoder {
                 "Aqua0 binding quote does not match the encoded swap".into(),
             ));
         }
-        let hook_data = signed_quote
+        check_deadline(&signed_quote.quote_attributes)?;
+        user_data.hook_data = signed_quote
             .quote_attributes
             .get("hook_data")
             .filter(|data| !data.is_empty())
@@ -116,16 +140,13 @@ impl SwapEncoder for Aqua0SwapEncoder {
                 EncodingError::FatalError(
                     "Aqua0 binding quote must contain non-empty hook_data".into(),
                 )
-            })?;
+            })?
+            .clone();
 
-        let user_data = serde_json::to_vec(&serde_json::json!({
-            "hook_data": hook_data.to_string(),
-        }))
-        .map_err(|error| EncodingError::FatalError(error.to_string()))?;
         self.v4.encode_swap(
             &swap
                 .clone()
-                .with_user_data(user_data.into()),
+                .with_user_data(v4_user_data(&user_data)?),
             encoding_context,
         )
     }
@@ -143,6 +164,40 @@ impl SwapEncoder for Aqua0SwapEncoder {
     }
 }
 
+fn v4_user_data(user_data: &UniswapV4UserData) -> Result<Bytes, EncodingError> {
+    serde_json::to_vec(user_data)
+        .map(Bytes::from)
+        .map_err(|error| EncodingError::FatalError(error.to_string()))
+}
+
+/// The binding quote's signed deadline, which the hook enforces, must not have passed.
+fn check_deadline(attributes: &HashMap<String, Bytes>) -> Result<(), EncodingError> {
+    let deadline = attributes
+        .get("deadline_timestamp")
+        .ok_or_else(|| {
+            EncodingError::FatalError("Aqua0 quote must have a deadline_timestamp attribute".into())
+        })?;
+    let deadline = u64::from_be_bytes(
+        deadline
+            .as_ref()
+            .try_into()
+            .map_err(|_wrong_length| {
+                EncodingError::InvalidInput(format!(
+                    "Aqua0 deadline_timestamp must be 8 bytes, got {}",
+                    deadline.len()
+                ))
+            })?,
+    );
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_before_epoch| EncodingError::FatalError("SystemTime before UNIX EPOCH".into()))?
+        .as_secs();
+    if deadline <= now {
+        return Err(EncodingError::RecoverableError(format!("Aqua0 quote expired at {deadline}")));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -152,6 +207,133 @@ mod tests {
 
     use super::*;
     use crate::encoding::{evm::testing_utils::MockRFQState, models::default_token};
+
+    fn quote_data(hook_data: Bytes, deadline: u64) -> HashMap<String, Bytes> {
+        HashMap::from([
+            ("hook_data".into(), hook_data),
+            ("deadline_timestamp".into(), Bytes::from(deadline.to_be_bytes().to_vec())),
+        ])
+    }
+
+    /// The quote requests a mock state received, one per request.
+    type Quotes = Arc<std::sync::Mutex<Vec<Option<Bytes>>>>;
+
+    /// A first-hop WETH -> USDC swap on a V4 pool with a hook, and the encoder for it.
+    fn fixture(
+        static_attributes: HashMap<String, Bytes>,
+        level_amount_out: Option<BigUint>,
+        deadline: u64,
+        user_data: Option<&str>,
+    ) -> (Swap, EncodingContext, Aqua0SwapEncoder, Quotes) {
+        let token_in = Bytes::from("0x4200000000000000000000000000000000000006");
+        let token_out = Bytes::from("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
+        let component = ProtocolComponent {
+            protocol_system: "rfq:aqua0".into(),
+            static_attributes,
+            ..Default::default()
+        };
+        let state = MockRFQState {
+            quote_amount_in: Some(BigUint::from(1_000u32)),
+            quote_amount_out: BigUint::from(2_000u32),
+            quote_data: quote_data(Bytes::from("0xdeadbeef"), deadline),
+            level_amount_out,
+            delay: Default::default(),
+            received_origins: Default::default(),
+        };
+        let quotes = Arc::clone(&state.received_origins);
+        let mut swap = Swap::new(
+            component,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        )
+        .with_protocol_state(Arc::new(state))
+        .with_estimated_amount_in(BigUint::from(1_000u32));
+        if let Some(user_data) = user_data {
+            swap = swap.with_user_data(Bytes::from(user_data.as_bytes().to_vec()));
+        }
+        let context = EncodingContext {
+            router_address: Some(Bytes::from("0x9bA632d83e9eF57571256Cf4cc951b8aF1158e9C")),
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
+        };
+        let encoder = Aqua0SwapEncoder::new(
+            Bytes::from("0x78db9684220541601E9215bB16b219e5DF6cF0fb"),
+            Chain::Base,
+            None,
+        )
+        .unwrap();
+        (swap, context, encoder, quotes)
+    }
+
+    fn pool_attributes() -> HashMap<String, Bytes> {
+        HashMap::from([
+            ("key_lp_fee".into(), Bytes::from(BigInt::from(3000).to_signed_bytes_be())),
+            ("tick_spacing".into(), Bytes::from(BigInt::from(60).to_signed_bytes_be())),
+            ("hooks".into(), Bytes::from("0xACaF2945890AB6caea62bDa459d1922532A500C8")),
+        ])
+    }
+
+    /// The caller's V4 options survive; only the hook data comes from the quote.
+    #[test]
+    fn keeps_the_callers_v4_user_data() {
+        let (swap, context, encoder, _) = fixture(
+            pool_attributes(),
+            Some(BigUint::from(2_000u32)),
+            u64::MAX,
+            Some(r#"{"skip_unlock":true}"#),
+        );
+        let encoded = encoder
+            .encode_swap(&swap, &context)
+            .unwrap();
+        // group token in | group token out | zero_for_one | skip_unlock | pool params
+        assert_eq!(encoded[41], 1, "skip_unlock was dropped");
+        assert!(encoded.ends_with(&Bytes::from("0xdeadbeef")));
+    }
+
+    #[test]
+    fn refuses_caller_hook_data_before_requesting_a_quote() {
+        let (swap, context, encoder, quotes) = fixture(
+            pool_attributes(),
+            Some(BigUint::from(2_000u32)),
+            u64::MAX,
+            Some(r#"{"hook_data":"0x01"}"#),
+        );
+        assert!(encoder
+            .encode_swap(&swap, &context)
+            .unwrap_err()
+            .to_string()
+            .contains("hook_data"));
+        assert!(quotes.lock().unwrap().is_empty(), "no quote was requested");
+    }
+
+    /// An amount the state does not price (zero, under the minimum, over the backed depth) and a
+    /// pool key the V4 encoder cannot pack are refused before backing is reserved.
+    #[test]
+    fn refuses_unpriced_amounts_and_bad_pool_keys_before_requesting_a_quote() {
+        let mut missing_fee = pool_attributes();
+        missing_fee.remove("key_lp_fee");
+        for (attributes, level) in
+            [(pool_attributes(), None), (missing_fee, Some(BigUint::from(2_000u32)))]
+        {
+            let (swap, context, encoder, quotes) = fixture(attributes, level, u64::MAX, None);
+            assert!(encoder
+                .encode_swap(&swap, &context)
+                .is_err());
+            assert!(quotes.lock().unwrap().is_empty(), "no quote was requested");
+        }
+    }
+
+    #[test]
+    fn refuses_an_expired_quote() {
+        let (swap, context, encoder, _) =
+            fixture(pool_attributes(), Some(BigUint::from(2_000u32)), 1, None);
+        assert!(matches!(
+            encoder.encode_swap(&swap, &context),
+            Err(EncodingError::RecoverableError(message)) if message.contains("expired")
+        ));
+    }
 
     #[test]
     fn forwards_backend_hook_data_through_the_existing_v4_encoding() {
@@ -174,7 +356,7 @@ mod tests {
         let state = MockRFQState {
             quote_amount_in: Some(amount_in.clone()),
             quote_amount_out: BigUint::from(2_000u32),
-            quote_data: HashMap::from([("hook_data".into(), hook_data.clone())]),
+            quote_data: quote_data(hook_data.clone(), u64::MAX),
             level_amount_out: Some(BigUint::from(2_000u32)),
             delay: Default::default(),
             received_origins: Default::default(),
@@ -230,7 +412,7 @@ mod tests {
         let state = MockRFQState {
             quote_amount_in: Some(BigUint::from(1_000u32)),
             quote_amount_out: BigUint::from(2_000u32),
-            quote_data: HashMap::from([("hook_data".into(), Bytes::from("0xdeadbeef"))]),
+            quote_data: quote_data(Bytes::from("0xdeadbeef"), u64::MAX),
             level_amount_out: Some(BigUint::from(2_000u32)),
             delay: Default::default(),
             received_origins: Default::default(),

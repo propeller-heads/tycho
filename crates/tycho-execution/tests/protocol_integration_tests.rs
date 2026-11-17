@@ -1256,7 +1256,12 @@ fn test_single_encoding_strategy_aqua0() {
     let state = MockRFQState {
         quote_amount_in: Some(amount_in.clone()),
         quote_amount_out: amount_out.clone(),
-        quote_data: HashMap::from([("hook_data".to_string(), hook_data)]),
+        // The hook enforces the signed deadline inside the hook data when the calldata replays;
+        // the client's copy of it only has to be unexpired to encode.
+        quote_data: HashMap::from([
+            ("hook_data".to_string(), hook_data),
+            ("deadline_timestamp".to_string(), Bytes::from(u64::MAX.to_be_bytes().to_vec())),
+        ]),
         level_amount_out: Some(amount_out.clone()),
         ..Default::default()
     };
