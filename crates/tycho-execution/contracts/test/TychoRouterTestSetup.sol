@@ -60,7 +60,8 @@ contract TychoRouterExposed is TychoRouterV3 {
     constructor(
         address permit2_,
         address feeCalculator,
-        address pauser,
+        address[] memory executors,
+        address[] memory pausers,
         address unpauser,
         address executorSetter,
         address routerFeeSetter
@@ -68,7 +69,8 @@ contract TychoRouterExposed is TychoRouterV3 {
         TychoRouterV3(
             permit2_,
             feeCalculator,
-            pauser,
+            executors,
+            pausers,
             unpauser,
             executorSetter,
             routerFeeSetter
@@ -196,6 +198,9 @@ contract TychoRouterTestSetup is
         tychoRouter = deployRouter();
         deployDummyContract();
         vm.stopPrank();
+        // The router deploys with the vault paused; most tests use the vault.
+        vm.prank(UNPAUSER);
+        tychoRouter.unpauseVault();
 
         address[] memory executors = deployExecutors();
         vm.startPrank(EXECUTOR_SETTER);
@@ -216,6 +221,12 @@ contract TychoRouterTestSetup is
         vm.warp(forkTimestamp);
     }
 
+    function listTestPausers() internal view returns (address[] memory) {
+        address[] memory pausers = new address[](1);
+        pausers[0] = PAUSER;
+        return pausers;
+    }
+
     function deployRouter() public returns (TychoRouterExposed) {
         // Use vm.etch to place dummy bytecode at address(123) so it passes the
         // .code.length check in the constructor without deploying a contract
@@ -226,7 +237,8 @@ contract TychoRouterTestSetup is
         tychoRouter = new TychoRouterExposed(
             PERMIT2_ADDRESS,
             placeholderFeeCalculator,
-            PAUSER,
+            new address[](0),
+            listTestPausers(),
             UNPAUSER,
             EXECUTOR_SETTER,
             FEE_SETTER
