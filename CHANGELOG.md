@@ -1,3 +1,10 @@
+## [0.527.4](https://github.com/propeller-heads/tycho/compare/0.527.3...0.527.4) (2026-11-17)
+
+
+### Bug Fixes
+
+* **substreams:** report negative curve balance tallies as zero ([390fd29](https://github.com/propeller-heads/tycho/commit/390fd29a31d478a3cfb5e7b54a6ab2d12829f78a))
+
 ## [0.527.3](https://github.com/propeller-heads/tycho/compare/0.527.2...0.527.3) (2026-11-17)
 
 
