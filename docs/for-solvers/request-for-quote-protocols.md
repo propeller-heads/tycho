@@ -9,7 +9,7 @@ Two kinds share that shape, and the difference shows at execution:
 
 | Protocol    | Kind | Simulation Time | Credentials | Chains                                            | Protocol system  |
 |-------------|------|-----------------|-------------|---------------------------------------------------|------------------|
-| `aqua0`     | RFQ  | -               | None        | Base, Arbitrum, Polygon, Robinhood                | `rfq:aqua0`      |
+| `aqua0`     | RFQ  | -               | None        | Base, Arbitrum, Polygon, Robinhood, Arc           | `rfq:aqua0`      |
 | `bebop`     | RFQ  | 0.5 µs          | Required    | Ethereum, BSC, Polygon, Base, Arbitrum, Robinhood | `rfq:bebop`      |
 | `hashflow`  | RFQ  | 0.4 µs          | Required    | Ethereum, BSC, Polygon, Base, Arbitrum            | `rfq:hashflow`   |
 | `liquorice` | RFQ  | 0.4 µs          | Required    | Ethereum, Arbitrum                                | `rfq:liquorice`  |
@@ -98,9 +98,9 @@ let bebop_feed = BebopFeedBuilder::new(config.clone(), usd_quote_tokens.clone(),
 
 **Minimum TVL** (`min_tvl_usd`) counts in USD. This setting filters out token pairs whose book is thin on the venue's side, helping avoid illiquid quotes.
 
-**USD quote tokens:** The Bebop, Hashflow, Liquorice and Native builders take a set of USD-priced tokens that their feeds normalize book TVL into before applying `min_tvl_usd`. The feeds use the set only to filter by TVL, never for quote requests or trade execution. Metric's API reports USD TVL directly, so its builder takes none.
+**USD quote tokens:** The Aqua0, Bebop, Hashflow, Liquorice and Native builders take a set of USD-priced tokens that their feeds normalize book TVL into before applying `min_tvl_usd`. The feeds use the set only to filter by TVL, never for quote requests or trade execution. Metric's API reports USD TVL directly, so its builder takes none.
 
-You should specify USD-priced stablecoins (e.g., USDC, USDT, DAI) as quote tokens, since the supported venues price most of their liquidity in USD stablecoins. This ensures the feed calculates TVL accurately when comparing pairs with different quote tokens. For instance, if you receive price levels for an ETH/WBTC pair where WBTC is the quote token, the feed will look up the WBTC price in one of your approved quote tokens (USD stablecoins) to properly calculate the TVL in dollar terms. `usd_stablecoins_for_chain` returns the curated set for a chain Tycho has one for, and `None` for the rest; an empty set filters out every pair, so always pass a non-empty one.
+You should specify USD-priced stablecoins (e.g., USDC, USDT, DAI) as quote tokens, since the supported venues price most of their liquidity in USD stablecoins. This ensures the feed calculates TVL accurately when comparing pairs with different quote tokens. For instance, if you receive price levels for an ETH/WBTC pair where WBTC is the quote token, the feed will look up the WBTC price in one of your approved quote tokens (USD stablecoins) to properly calculate the TVL in dollar terms. `usd_stablecoins_for_chain` returns the curated set for a chain Tycho has one for, and `None` for the rest; an empty set filters out every pair, so always pass a non-empty one. Aqua0 differs here: a pair with neither token in the set clears only a zero `min_tvl_usd`.
 
 **Note:** Some venues may support tokens that Tycho does not. Because execution happens through the Tycho Router, it’s important to ensure that every token you trade out of these books is also supported by Tycho.
 
@@ -229,6 +229,10 @@ This mechanism also makes RFQs composable with other on-chain swaps. That enable
 
 {% hint style="warning" %}
 After encoding, a signed RFQ quote is valid for only 1–3 seconds. Execution must follow immediately, otherwise the transaction will revert.
+{% endhint %}
+
+{% hint style="info" %}
+**Aqua0 is different.** Its quote binds the exact input, so an Aqua0 swap must be the first hop of the solution and its input must equal the solution's input. Set `estimated_amount_in` to that exact amount, not a padded one, and do not place Aqua0 after another hop: a path like Uniswap → Aqua0 → Curve is refused at encoding. A route may use one Aqua0 market once. Aqua0's quote is valid for 45 seconds, and it reserves Aqua0 liquidity until then, so encode an Aqua0 route only to execute it.
 {% endhint %}
 
 #### Encode solution
