@@ -27,12 +27,12 @@ Please see the included 3 examples for `3pool`, `steth`, and `tricrypto2`.
 
 ## Open tasks
 
-### Add underlying tokens in metapools
+### Index the metapools of the older factories
 
-Currently, metapools are not working properly due to the way we override token balances.
-The issue arises because when we modify token balances, we end up changing the token contract code and storage.
-This issue will be resolved once we implement a flexible method to adjust token balances without affecting the contract’s functionality.
-We will also need to index additional contract such as the base pool lp token.
+StableSwap NG metapools list the coins of their base pool (`underlying_coins`). The metapool
+branches of the MetaPool factory, its predecessor and the StableSwap factory are still commented
+out in `pool_factories.rs`. Their base pools keep the LP token in a contract of its own, which
+would have to be indexed as well for a consumer to quote underlying swaps.
 
 ### Handle rebasing, ERC4644 and others special kind of tokens
 
@@ -49,3 +49,4 @@ To handle these tokens properly, we will likely need to use the dynamic contract
 | factory      | bytes | The address of the factory that created the pool. "0x000..." if the pool was manually created.              |
 | lp_token     | bytes | The pool lp token, set if the lp token is not the pool itself                                               |
 | base_pool    | bytes | The base pool related to this pool, set only for metapools.                                                 |
+| underlying_coins | str | JSON list of the metapool's coin followed by the base pool's coins, the index order of `exchange_underlying`. Set only for StableSwap NG metapools. |

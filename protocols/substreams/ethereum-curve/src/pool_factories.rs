@@ -617,6 +617,12 @@ pub fn address_map(
                         .meta_registry,
                     &pool_added.base_pool,
                 );
+                let base_coins = get_pool_coins(&pool_added.base_pool);
+                // `exchange_underlying` indexes the meta coin first, then the base pool's coins.
+                let mut underlying_coins = vec![pool_added.coin.clone()];
+                underlying_coins.extend(base_coins.iter().cloned());
+                let mut tokens = vec![pool_added.coin.clone(), lp_token.clone()];
+                tokens.extend(base_coins);
                 let mut static_attrs = vec![
                     Attribute {
                         name: "pool_type".into(),
@@ -626,6 +632,11 @@ pub fn address_map(
                     Attribute {
                         name: "name".into(),
                         value: add_pool.name.into(),
+                        change: ChangeType::Creation.into(),
+                    },
+                    Attribute {
+                        name: "underlying_coins".into(),
+                        value: json_serialize_address_list(&underlying_coins),
                         change: ChangeType::Creation.into(),
                     },
                     Attribute {
@@ -687,7 +698,7 @@ pub fn address_map(
                 Some((
                     ProtocolComponent {
                         id: address_to_string_with_0x(component_id),
-                        tokens: vec![pool_added.coin.clone(), lp_token.clone()],
+                        tokens,
                         contracts: vec![
                             component_id.into(),
                             curve_params
@@ -1356,6 +1367,24 @@ fn get_token_from_pool(meta_registry: [u8; 20], pool: &Vec<u8>) -> Vec<u8> {
             }
         })
         .unwrap()
+}
+
+/// The most coins a Curve pool holds.
+const MAX_POOL_COINS: u32 = 8;
+
+/// Reads the coins of `pool` through its `coins(uint256)` getter, in the pool's own order.
+fn get_pool_coins(pool: &[u8]) -> Vec<Vec<u8>> {
+    let mut coins = Vec::new();
+    for index in 0..MAX_POOL_COINS {
+        let Some(coin) =
+            abi::set_oracle_implementation::functions::Coins { arg0: BigInt::from(index) }
+                .call(pool.to_vec())
+        else {
+            break;
+        };
+        coins.push(coin);
+    }
+    coins
 }
 
 fn extract_eip1167_target_from_code(code: &[u8]) -> [u8; 20] {

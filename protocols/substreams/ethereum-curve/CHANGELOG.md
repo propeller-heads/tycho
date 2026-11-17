@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.0
+
+- StableSwap NG metapool components list the coins of their base pool after their own two, and
+  carry a new `underlying_coins` static attribute: the metapool's coin first, then the base pool's
+  coins in the base pool's order, the index order `exchange_underlying` takes. Consumers can then
+  quote and encode swaps between the metapool's coin and the base pool's coins. Component tokens
+  are set at creation, so existing deployments need a resync to pick this up.
+
 ## v0.3.10
 
 - Update `tycho-substreams` from `0.8.1` to `0.8.2`. Native balance changes recorded on the
