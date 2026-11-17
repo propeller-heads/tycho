@@ -9,7 +9,7 @@ use actix_web::{dev::ServerHandle, http, middleware as actix_middleware, web, Ap
 use actix_web_opentelemetry::RequestTracing;
 use deltas_buffer::PendingDeltasBuffer;
 use futures03::future::try_join_all;
-use tokio::task::JoinHandle;
+use tokio::{sync::watch, task::JoinHandle};
 use tracing::info;
 use tycho_common::storage::Gateway;
 use tycho_ethereum::{
@@ -74,6 +74,8 @@ pub struct ServicesBuilder<G> {
     shadow_sample_rate: f64,
     /// RPC response caches that stay off.
     disabled_rpc_caches: Vec<RpcCacheKind>,
+    /// Notified whenever the set of paused components changes.
+    pause_changes: watch::Receiver<()>,
 }
 
 /// Resolves with the first error either service task produces, or with `Ok` once both end
@@ -95,7 +97,14 @@ impl<G> ServicesBuilder<G>
 where
     G: Gateway + Send + Sync + 'static,
 {
-    pub fn new(db_gateway: G, rpc: EthereumRpcClient, api_key: String) -> Self {
+    /// Creates a builder. `pause_changes` is notified whenever the set of paused components
+    /// changes; each notification clears the response caches that depend on it.
+    pub fn new(
+        db_gateway: G,
+        rpc: EthereumRpcClient,
+        api_key: String,
+        pause_changes: watch::Receiver<()>,
+    ) -> Self {
         Self {
             prefix: "v1".to_owned(),
             port: 4242,
@@ -112,6 +121,7 @@ where
             entity_cache: EntityCacheSetup::Off,
             shadow_sample_rate: 0.0,
             disabled_rpc_caches: Vec::new(),
+            pause_changes,
         }
     }
 
@@ -316,6 +326,7 @@ where
             .with_disabled_caches(&self.disabled_rpc_caches)
             .with_state_service(state_service),
         );
+        tokio::spawn(rpc::clear_caches_on_pause_change(rpc_data.clone(), self.pause_changes));
 
         let server = HttpServer::new(move || {
             let cors = Cors::default()
