@@ -143,3 +143,100 @@ pub fn index_tvl(tvl: f64) -> f64 {
         tvl
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn system(entries: &[(i64, Option<f64>)]) -> SystemIndex {
+        let mut system = SystemIndex::default();
+        for (id, tvl) in entries {
+            system.insert(*id, tvl.map_or(NO_TVL, index_tvl));
+        }
+        system
+    }
+
+    fn page(ids: &[i64], total: i64) -> ComponentPage {
+        ComponentPage { ids: ids.to_vec(), total }
+    }
+
+    fn tvl_row(component_id: i64, tvl: f64) -> TvlRow {
+        TvlRow { component_id, tvl, modified_ts: NaiveDateTime::default() }
+    }
+
+    /// Ids of the components with a TVL above `min_tvl`.
+    fn above(system: &SystemIndex, min_tvl: f64) -> Vec<i64> {
+        system
+            .query(Some(min_tvl), 0, usize::MAX)
+            .ids
+    }
+
+    #[test]
+    fn test_query_without_tvl_filter_slices_all_components() {
+        let system = system(&[(1, Some(5.0)), (2, None), (3, Some(0.0)), (4, Some(9.0))]);
+
+        assert_eq!(system.query(None, 0, 2), page(&[1, 2], 4));
+        assert_eq!(system.query(None, 2, 2), page(&[3, 4], 4));
+        assert_eq!(system.query(None, 4, 2), page(&[], 4));
+        assert_eq!(system.query(None, 10, 2), page(&[], 4));
+        assert_eq!(system.query(None, 0, usize::MAX), page(&[1, 2, 3, 4], 4));
+    }
+
+    #[test]
+    fn test_tvl_filter_is_strict_and_excludes_missing_tvl() {
+        let system = system(&[(1, Some(5.0)), (2, None), (3, Some(0.0)), (4, Some(9.0))]);
+
+        assert_eq!(system.query(Some(5.0), 0, 10), page(&[4], 1));
+        assert_eq!(system.query(Some(0.0), 0, 10), page(&[1, 4], 2));
+        // A negative threshold still excludes components without a TVL row.
+        assert_eq!(system.query(Some(-1.0), 0, 10), page(&[1, 3, 4], 3));
+    }
+
+    #[test]
+    fn test_tvl_filter_paginates_over_matches() {
+        let system = system(&[(1, Some(1.0)), (2, None), (3, Some(2.0)), (4, Some(3.0))]);
+
+        assert_eq!(system.query(Some(0.5), 0, 2), page(&[1, 3], 3));
+        assert_eq!(system.query(Some(0.5), 2, 2), page(&[4], 3));
+        assert_eq!(system.query(Some(0.5), 4, 2), page(&[], 3));
+    }
+
+    #[test]
+    fn test_nan_tvl_matches_every_threshold() {
+        let system = system(&[(1, Some(f64::NAN))]);
+
+        assert_eq!(system.query(Some(1e300), 0, 10), page(&[1], 1));
+    }
+
+    #[test]
+    fn test_insert_keeps_ids_sorted_and_ignores_duplicates() {
+        let mut system = system(&[(10, Some(1.0)), (30, Some(3.0))]);
+        system.insert(20, 2.0);
+        system.insert(5, 0.5);
+        system.insert(30, NO_TVL);
+
+        assert_eq!(system.query(None, 0, usize::MAX).ids, vec![5, 10, 20, 30]);
+        // The duplicate insert of 30 kept its TVL of 3.
+        assert_eq!(above(&system, 2.5), vec![30]);
+        assert_eq!(above(&system, 1.5), vec![20, 30]);
+        assert_eq!(above(&system, 0.75), vec![10, 20, 30]);
+        assert_eq!(above(&system, 0.25), vec![5, 10, 20, 30]);
+    }
+
+    #[test]
+    fn test_system_apply_tvl_skips_other_ids() {
+        let mut system = system(&[(2, None), (4, None)]);
+
+        system.apply_tvl(&[
+            tvl_row(1, 9.0),
+            tvl_row(2, 2.0),
+            tvl_row(3, 9.0),
+            tvl_row(4, 4.0),
+            tvl_row(5, 9.0),
+        ]);
+
+        assert_eq!(above(&system, f64::MIN), vec![2, 4]);
+        assert_eq!(above(&system, 3.0), vec![4]);
+        assert!(above(&system, 5.0).is_empty());
+    }
+}
