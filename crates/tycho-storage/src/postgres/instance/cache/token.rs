@@ -216,3 +216,230 @@ impl TokenCache {
         tokens.store.query(query)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::{NaiveDate, NaiveDateTime};
+    use diesel::prelude::*;
+    use diesel_async::{AsyncPgConnection, RunQueryDsl};
+    use tycho_common::{
+        models::{protocol::QualityRange, Address, Chain, PaginationParams},
+        storage::StorageError,
+    };
+
+    use super::TokenCache;
+    use crate::postgres::{
+        db_fixtures,
+        instance::{
+            cache::token_store::TokenQuery,
+            read::token_tests::{addresses, b, pool, setup, token, A, B, C},
+            schema::tycho::{component_balance, protocol_component},
+            InstanceId,
+        },
+        testing::instance_test_connection,
+    };
+
+    const D: &str = "0x00000000000000000000000000000000000000d1";
+    const UNKNOWN: &str = "0x00000000000000000000000000000000000000dd";
+    const NO_ROW: &str = "0x00000000000000000000000000000000000000ee";
+
+    fn day(d: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2020, 1, d)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date")
+    }
+
+    /// Inserts the pool `external_id` of the instance with a balance of `token` that changed at
+    /// `at`.
+    async fn trade(
+        conn: &mut AsyncPgConnection,
+        instance: InstanceId,
+        external_id: &str,
+        token: &str,
+        at: NaiveDateTime,
+    ) {
+        pool(conn, instance, external_id, token, "0x01", 1.0).await;
+        let component = protocol_component::table
+            .filter(protocol_component::instance_id.eq(instance))
+            .filter(protocol_component::external_id.eq(external_id))
+            .select(protocol_component::id);
+        diesel::update(
+            component_balance::table
+                .filter(component_balance::instance_id.eq(instance))
+                .filter(component_balance::protocol_component_id.eq_any(component))
+                .filter(component_balance::token.eq(b(token))),
+        )
+        .set(component_balance::valid_from.eq(at))
+        .execute(conn)
+        .await
+        .expect("setting the balance change time failed");
+    }
+
+    fn traded_after(threshold: NaiveDateTime) -> TokenQuery {
+        TokenQuery {
+            chain: Chain::Ethereum,
+            addresses: None,
+            quality_range: QualityRange::None(),
+            last_traded_ts_threshold: Some(threshold),
+            pagination: None,
+        }
+    }
+
+    async fn load(conn: &mut AsyncPgConnection) -> TokenCache {
+        TokenCache::load(Chain::Ethereum, conn)
+            .await
+            .expect("loading the token cache failed")
+    }
+
+    #[tokio::test]
+    async fn test_load_counts_trades_of_active_instances_only() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        for (address, symbol) in [(A, "A"), (B, "B"), (C, "C")] {
+            token(&mut conn, s.chain_id, address, symbol, 100).await;
+        }
+        trade(&mut conn, s.active, "curve_pool", A, day(2)).await;
+        trade(&mut conn, s.uniswap_v4, "v4_pool", B, day(3)).await;
+        trade(&mut conn, s.inactive, "inactive_pool", C, day(5)).await;
+
+        let cache = load(&mut conn).await;
+        let result = cache
+            .query_tokens(&traded_after(day(1)))
+            .unwrap();
+
+        assert_eq!(addresses(&result.entity), vec![b(A), b(B)]);
+        assert_eq!(result.total, Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_load_takes_the_newest_trade_over_units() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        token(&mut conn, s.chain_id, A, "A", 100).await;
+        trade(&mut conn, s.active, "curve_pool", A, day(2)).await;
+        trade(&mut conn, s.uniswap_v4, "v4_pool", A, day(4)).await;
+
+        let cache = load(&mut conn).await;
+        let before = cache
+            .query_tokens(&traded_after(day(3)))
+            .unwrap();
+        let at = cache
+            .query_tokens(&traded_after(day(4)))
+            .unwrap();
+
+        assert_eq!(addresses(&before.entity), vec![b(A)]);
+        assert_eq!(addresses(&at.entity), Vec::<Address>::new());
+    }
+
+    #[tokio::test]
+    async fn test_cache_matches_sql() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        for (address, symbol, quality) in [(A, "A", 100), (B, "B", 50), (C, "C", 10), (D, "D", 100)]
+        {
+            token(&mut conn, s.chain_id, address, symbol, quality).await;
+        }
+        trade(&mut conn, s.active, "curve_a", A, day(2)).await;
+        trade(&mut conn, s.uniswap_v4, "v4_b", B, day(4)).await;
+        trade(&mut conn, s.inactive, "inactive_c", C, day(5)).await;
+        trade(&mut conn, s.active, "curve_d", D, day(2)).await;
+        trade(&mut conn, s.uniswap_v4, "v4_d", D, day(4)).await;
+        let cache = load(&mut conn).await;
+
+        let qualities = [
+            QualityRange::None(),
+            QualityRange::min_only(50),
+            QualityRange { min: None, max: Some(50) },
+        ];
+        let thresholds = [None, Some(day(1)), Some(day(3))];
+        let pages = [
+            None,
+            Some(PaginationParams::new(0, 2)),
+            Some(PaginationParams::new(1, 2)),
+            Some(PaginationParams::new(5, 2)),
+        ];
+        let address_sets = [None, Some(vec![b(A), b(UNKNOWN)])];
+        for quality_range in &qualities {
+            for threshold in thresholds {
+                for pagination in &pages {
+                    for address_set in &address_sets {
+                        let query = TokenQuery {
+                            chain: Chain::Ethereum,
+                            addresses: address_set.clone(),
+                            quality_range: quality_range.clone(),
+                            last_traded_ts_threshold: threshold,
+                            pagination: pagination.clone(),
+                        };
+                        let address_refs: Option<Vec<&Address>> = address_set
+                            .as_ref()
+                            .map(|set| set.iter().collect());
+
+                        let cached = cache.query_tokens(&query).unwrap();
+                        let sql = s
+                            .gateway
+                            .get_tokens(
+                                Chain::Ethereum,
+                                address_refs.as_deref(),
+                                quality_range.clone(),
+                                threshold,
+                                pagination.as_ref(),
+                                &mut conn,
+                            )
+                            .await
+                            .unwrap();
+
+                        assert_eq!(cached.entity, sql.entity, "{query:?}");
+                        assert_eq!(cached.total, sql.total, "{query:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_skips_balances_of_unknown_tokens() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        trade(&mut conn, s.active, "curve_pool", NO_ROW, day(2)).await;
+
+        let cache = load(&mut conn).await;
+        let result = cache
+            .query_tokens(&TokenQuery { addresses: Some(vec![b(NO_ROW)]), ..traded_after(day(1)) })
+            .unwrap();
+
+        assert_eq!(addresses(&result.entity), Vec::<Address>::new());
+        assert_eq!(result.total, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_pointer_move_after_load_keeps_the_old_unit() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        token(&mut conn, s.chain_id, A, "A", 100).await;
+        token(&mut conn, s.chain_id, C, "C", 100).await;
+        trade(&mut conn, s.active, "curve_pool", A, day(2)).await;
+        trade(&mut conn, s.inactive, "inactive_pool", C, day(2)).await;
+
+        let cache = load(&mut conn).await;
+        db_fixtures::set_active_instance(&mut conn, s.curve_system_id, Some(s.inactive)).await;
+        let result = cache
+            .query_tokens(&traded_after(day(1)))
+            .unwrap();
+
+        assert_eq!(addresses(&result.entity), vec![b(A)]);
+    }
+
+    #[tokio::test]
+    async fn test_query_of_another_chain_is_not_found() {
+        let mut conn = instance_test_connection().await;
+        setup(&mut conn).await;
+
+        let cache = load(&mut conn).await;
+        let result = cache.query_tokens(&TokenQuery { chain: Chain::Base, ..traded_after(day(1)) });
+
+        assert!(
+            matches!(&result, Err(StorageError::NotFound(entity, _)) if entity == "Chain"),
+            "{result:?}"
+        );
+    }
+}

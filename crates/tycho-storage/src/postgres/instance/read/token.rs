@@ -193,7 +193,7 @@ impl PostgresGatewayNew {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use std::collections::HashMap;
 
     use chrono::{NaiveDate, NaiveDateTime};
@@ -216,21 +216,22 @@ mod tests {
         testing::instance_test_connection,
     };
 
-    const A: &str = "0x00000000000000000000000000000000000000a1";
-    const B: &str = "0x00000000000000000000000000000000000000b1";
-    const C: &str = "0x00000000000000000000000000000000000000c1";
+    pub const A: &str = "0x00000000000000000000000000000000000000a1";
+    pub const B: &str = "0x00000000000000000000000000000000000000b1";
+    pub const C: &str = "0x00000000000000000000000000000000000000c1";
 
-    struct Setup {
-        gateway: PostgresGatewayNew,
-        chain_id: i64,
-        active: InstanceId,
-        inactive: InstanceId,
-        uniswap_v4: InstanceId,
+    pub struct Setup {
+        pub gateway: PostgresGatewayNew,
+        pub chain_id: i64,
+        pub curve_system_id: i64,
+        pub active: InstanceId,
+        pub inactive: InstanceId,
+        pub uniswap_v4: InstanceId,
     }
 
     /// "vm:curve" and "uniswap_v4" on ethereum, each pointing to an instance. "vm:curve" has a
     /// second `ready` instance it does not point to.
-    async fn setup(conn: &mut AsyncPgConnection) -> Setup {
+    pub async fn setup(conn: &mut AsyncPgConnection) -> Setup {
         let chain_id = db_fixtures::insert_chain(conn, "ethereum").await;
         let curve_system_id =
             db_fixtures::insert_protocol_system(conn, "vm:curve".to_string()).await;
@@ -242,11 +243,11 @@ mod tests {
         db_fixtures::set_active_instance(conn, curve_system_id, Some(active)).await;
         db_fixtures::set_active_instance(conn, uniswap_v4_system_id, Some(uniswap_v4)).await;
         let gateway = PostgresGatewayNew::from_connection(conn).await;
-        Setup { gateway, chain_id, active, inactive, uniswap_v4 }
+        Setup { gateway, chain_id, curve_system_id, active, inactive, uniswap_v4 }
     }
 
     /// Inserts a token at the `0x`-prefixed `address` and returns its id.
-    async fn token(
+    pub async fn token(
         conn: &mut AsyncPgConnection,
         chain_id: i64,
         address: &str,
@@ -265,7 +266,7 @@ mod tests {
     }
 
     /// Inserts the pool `external_id` of the instance with a balance of `token`.
-    async fn pool(
+    pub async fn pool(
         conn: &mut AsyncPgConnection,
         instance: InstanceId,
         external_id: &str,
@@ -294,11 +295,11 @@ mod tests {
         }
     }
 
-    fn b(hex: &str) -> Bytes {
+    pub fn b(hex: &str) -> Bytes {
         Bytes::from(hex)
     }
 
-    fn addresses(tokens: &[Token]) -> Vec<Address> {
+    pub fn addresses(tokens: &[Token]) -> Vec<Address> {
         tokens
             .iter()
             .map(|token| token.address.clone())
