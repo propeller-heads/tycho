@@ -13,7 +13,8 @@ postgres/
 ├── direct.rs           — DirectGateway: unbuffered read/write path (testing, auditing)
 ├── chain.rs            — block & transaction persistence
 ├── contract.rs         — account, code, storage slot, and native-balance persistence
-├── protocol.rs         — protocol component, attribute, token-balance and admin pause persistence
+├── protocol.rs         — protocol component, attribute, and token-balance persistence
+├── component_pause.rs  — admin pause persistence (ComponentPauseGateway)
 ├── token_cache.rs      — in-memory token store answering get_tokens without SQL (opt-in)
 ├── component_index.rs  — in-memory id/TVL index counting and paging get_protocol_components
 ├── entry_point.rs      — entry point + tracing param/result persistence
@@ -43,8 +44,8 @@ All public DB operations go through one of two gateway structs:
 single-chain; it hard-fails otherwise.
 
 Both delegate every actual SQL call to `PostgresGateway` (unexported). Domain logic lives in
-`chain`, `contract`, `protocol`, `entry_point`, `extraction_state`, and `snapshot`—each adding
-methods to `PostgresGateway` via `impl` blocks in their own file.
+`chain`, `contract`, `protocol`, `component_pause`, `entry_point`, `extraction_state`, and
+`snapshot`—each adding methods to `PostgresGateway` via `impl` blocks in their own file.
 
 `versioning` is the only module without a DB table of its own; it provides the shared traits
 and utilities consumed by `contract` and `protocol`. Two paths: `apply_versioning()` for plain
