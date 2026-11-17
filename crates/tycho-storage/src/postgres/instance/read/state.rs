@@ -384,7 +384,10 @@ mod tests {
         db_fixtures,
         instance::{
             gateway::PostgresGatewayNew,
-            schema::tycho::{extraction_state, protocol_state},
+            orm::ProtocolStateHistory,
+            schema::tycho::{
+                extraction_state, protocol_instance, protocol_state, protocol_state_history,
+            },
             InstanceId,
         },
         snapshot::snapshot_transaction,
@@ -872,17 +875,281 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_states_before_head_are_unsupported() {
+    async fn test_states_before_retention_are_unsupported() {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         component_with_state(&mut conn, s.curve, "a", "0x01").await;
-        db_fixtures::set_instance_head(&mut conn, s.curve, day(2)).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = states(
+            &s.gateway,
+            &mut conn,
+            Some("vm:curve"),
+            None,
+            None,
+            Some(at(recent(5) - Duration::days(40))),
+        )
+        .await;
+
+        let Err(StorageError::Unsupported(msg)) = result else {
+            panic!("expected Unsupported, got {result:?}");
+        };
+        assert!(msg.contains("retention"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn test_states_before_the_base_block_are_unsupported() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        component_with_state(&mut conn, s.curve, "a", "0x01").await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+        diesel::update(protocol_instance::table.find(s.curve))
+            .set(protocol_instance::base_block_ts.eq(recent(2)))
+            .execute(&mut conn)
+            .await
+            .unwrap();
 
         let result =
-            states(&s.gateway, &mut conn, Some("vm:curve"), None, None, Some(at(day(1)))).await;
+            states(&s.gateway, &mut conn, Some("vm:curve"), None, None, Some(at(recent(1)))).await;
 
-        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+        let Err(StorageError::Unsupported(msg)) = result else {
+            panic!("expected Unsupported, got {result:?}");
+        };
+        assert!(msg.contains("base block"), "{msg}");
     }
+
+    /// Inserts a version of the attribute `name` of a component of curve.
+    async fn state_version(
+        conn: &mut AsyncPgConnection,
+        s: &Setup,
+        component: i64,
+        name: &str,
+        value: &str,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        db_fixtures::insert_instance_state_version(
+            conn,
+            s.curve,
+            component,
+            name,
+            b(value),
+            valid_from,
+            valid_to,
+        )
+        .await;
+    }
+
+    async fn curve_states_at(
+        s: &Setup,
+        conn: &mut AsyncPgConnection,
+        ids: Option<&[&str]>,
+        ts: NaiveDateTime,
+    ) -> Result<Vec<ProtocolComponentState>, StorageError> {
+        states(&s.gateway, conn, Some("vm:curve"), ids, None, Some(at(ts)))
+            .await
+            .map(|(states, _)| states)
+    }
+
+    fn state(external_id: &str, attributes: &[(&str, &str)]) -> ProtocolComponentState {
+        ProtocolComponentState::new(
+            external_id,
+            attributes
+                .iter()
+                .map(|(name, value)| (name.to_string(), b(value)))
+                .collect(),
+            HashMap::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_states_at_a_past_version_read_history() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        state_version(&mut conn, &s, a, "x", "0x01", recent(1), Some(recent(3))).await;
+        state_version(&mut conn, &s, a, "x", "0x02", recent(3), None).await;
+        db_fixtures::insert_instance_state(&mut conn, s.curve, a, "y", b("0x0b")).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for (ts, x) in [(recent(2), "0x01"), (recent(4), "0x02")] {
+            let result = curve_states_at(&s, &mut conn, None, ts)
+                .await
+                .unwrap();
+
+            assert_eq!(result, vec![state("a", &[("x", x), ("y", "0x0b")])], "{ts}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_states_at_a_past_version_see_the_last_update_of_a_block() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        state_version(&mut conn, &s, a, "x", "0x01", recent(1), Some(recent(2))).await;
+        state_version(&mut conn, &s, a, "x", "0x02", recent(2), Some(recent(2))).await;
+        state_version(&mut conn, &s, a, "x", "0x03", recent(2), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for (ts, x) in [(recent(2), "0x03"), (recent(1), "0x01")] {
+            let result = curve_states_at(&s, &mut conn, None, ts)
+                .await
+                .unwrap();
+
+            assert_eq!(result, vec![state("a", &[("x", x)])], "{ts}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_states_at_a_past_version_skip_deleted_attributes() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        state_version(&mut conn, &s, a, "x", "0x01", recent(1), Some(recent(3))).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let before = curve_states_at(&s, &mut conn, None, recent(2))
+            .await
+            .unwrap();
+        let deleted = curve_states_at(&s, &mut conn, None, recent(3))
+            .await
+            .unwrap();
+
+        assert_eq!(before, vec![state("a", &[("x", "0x01")])]);
+        assert!(deleted.is_empty(), "{deleted:?}");
+    }
+
+    #[tokio::test]
+    async fn test_states_before_head_read_a_row_replaced_at_the_head() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        state_version(&mut conn, &s, a, "x", "0x01", recent(1), Some(recent(5))).await;
+        state_version(&mut conn, &s, a, "x", "0x02", recent(5), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = curve_states_at(&s, &mut conn, None, recent(4))
+            .await
+            .unwrap();
+
+        assert_eq!(result, vec![state("a", &[("x", "0x01")])]);
+    }
+
+    #[tokio::test]
+    async fn test_states_at_a_past_version_with_ids() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        let c = db_fixtures::insert_instance_component(&mut conn, s.curve, "c", &[b("0x01")]).await;
+        state_version(&mut conn, &s, a, "x", "0x01", recent(1), Some(recent(3))).await;
+        state_version(&mut conn, &s, c, "x", "0x02", recent(1), Some(recent(3))).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = curve_states_at(&s, &mut conn, Some(&["a"]), recent(2))
+            .await
+            .unwrap();
+
+        assert_eq!(result, vec![state("a", &[("x", "0x01")])]);
+    }
+
+    #[tokio::test]
+    async fn test_states_at_a_past_version_skip_other_instances() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        state_version(&mut conn, &s, a, "x", "0x01", recent(1), Some(recent(3))).await;
+        db_fixtures::insert_instance_state_version(
+            &mut conn,
+            s.uniswap_v4,
+            a,
+            "x",
+            b("0x02"),
+            recent(1),
+            Some(recent(3)),
+        )
+        .await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = curve_states_at(&s, &mut conn, None, recent(2))
+            .await
+            .unwrap();
+
+        assert_eq!(result, vec![state("a", &[("x", "0x01")])]);
+    }
+
+    #[tokio::test]
+    async fn test_states_at_a_past_version_have_balances_at_that_version() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = component_with_state(&mut conn, s.curve, "a", "0x01").await;
+        db_fixtures::insert_instance_component_balance_version(
+            &mut conn,
+            s.curve,
+            a,
+            b("0x01"),
+            b("0x10"),
+            recent(1),
+            Some(recent(3)),
+        )
+        .await;
+        db_fixtures::insert_instance_component_balance_version(
+            &mut conn,
+            s.curve,
+            a,
+            b("0x01"),
+            b("0x20"),
+            recent(3),
+            None,
+        )
+        .await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = curve_states_at(&s, &mut conn, None, recent(2))
+            .await
+            .unwrap();
+
+        let expected = vec![ProtocolComponentState::new(
+            "a",
+            [("reserve".to_string(), b("0x01"))].into(),
+            [(b("0x01"), b("0x10"))].into(),
+        )];
+        assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    async fn test_states_with_two_valid_rows_fail() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        state_version(&mut conn, &s, a, "x", "0x01", recent(1), None).await;
+        state_version(&mut conn, &s, a, "x", "0x02", recent(1), Some(recent(3))).await;
+        let c = db_fixtures::insert_instance_component(&mut conn, s.curve, "c", &[b("0x01")]).await;
+        state_version(&mut conn, &s, c, "x", "0x01", recent(1), Some(recent(3))).await;
+        diesel::insert_into(protocol_state_history::table)
+            .values(ProtocolStateHistory {
+                instance_id: s.curve,
+                protocol_component_id: c,
+                attribute_name: "x".to_string(),
+                attribute_value: b("0x02"),
+                previous_value: None,
+                valid_from: recent(1),
+                valid_to: recent(3),
+                tx_index: 1,
+                inserted_ts: recent(1),
+                modified_ts: recent(1),
+            })
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for id in ["a", "c"] {
+            let result = curve_states_at(&s, &mut conn, Some(&[id]), recent(2)).await;
+
+            assert!(matches!(result, Err(StorageError::Unexpected(_))), "{id}: {result:?}");
+        }
+    }
+
     #[tokio::test]
     async fn test_states_by_id_need_a_protocol() {
         let mut conn = instance_test_connection().await;

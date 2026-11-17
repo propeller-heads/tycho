@@ -1787,6 +1787,59 @@ pub mod db_fixtures {
             .expect("inserting the protocol state failed");
     }
 
+    /// Inserts a version of the state attribute `attribute_name` of a component of the instance,
+    /// with no previous value and transaction index 0. `valid_to` `None`: the current row. `Some`:
+    /// a history row, after the creation of the history partition of that day.
+    pub async fn insert_instance_state_version(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        attribute_name: &str,
+        value: Bytes,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        let Some(valid_to) = valid_to else {
+            diesel::insert_into(instance::schema::tycho::protocol_state::table)
+                .values(instance::orm::NewProtocolState {
+                    instance_id,
+                    protocol_component_id: component_id,
+                    attribute_name: attribute_name.to_string(),
+                    attribute_value: value,
+                    previous_value: None,
+                    valid_from,
+                    tx_index: 0,
+                })
+                .execute(conn)
+                .await
+                .expect("inserting the protocol state failed");
+            return;
+        };
+        sql_query(
+            "SELECT partman.create_partition_time('tycho.protocol_state_history', ARRAY[$1])",
+        )
+        .bind::<diesel::sql_types::Timestamp, _>(valid_to)
+        .execute(conn)
+        .await
+        .expect("creating the history partition failed");
+        diesel::insert_into(instance::schema::tycho::protocol_state_history::table)
+            .values(instance::orm::ProtocolStateHistory {
+                instance_id,
+                protocol_component_id: component_id,
+                attribute_name: attribute_name.to_string(),
+                attribute_value: value,
+                previous_value: None,
+                valid_from,
+                valid_to,
+                tx_index: 0,
+                inserted_ts: valid_from,
+                modified_ts: valid_from,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the protocol state history failed");
+    }
+
     /// Inserts the TVL of a component of the instance.
     pub async fn insert_instance_tvl(
         conn: &mut AsyncPgConnection,
