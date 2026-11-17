@@ -113,6 +113,14 @@ module.exports = {
                 }
             },
             {
+                network: "arc",
+                chainId: 5042,
+                urls: {
+                    apiURL: "https://api.etherscan.io/v2/api",
+                    browserURL: "https://arc.etherscan.io/"
+                }
+            },
+            {
                 network: "plasma",
                 chainId: 9745,
                 urls: {

@@ -524,6 +524,7 @@ fn _finalize_swap(
             params,
             vault,
             log,
+            token_in,
             token_out,
             actual_amount_out,
             expected_amount_out,
@@ -740,6 +741,7 @@ fn _take_fees(
     params: &Params,
     vault: &mut Vault,
     log: &mut impl Log,
+    token_in: Address,
     token: Address,
     actual_amount_out: i64,
     expected_amount_out: i64,
@@ -750,8 +752,8 @@ fn _take_fees(
         actual_amount_out,
         expected_amount_out,
         client_fee_bps,
-        Address::Zero,
-        Address::Zero,
+        token_in,
+        token,
         0,
     )?;
 

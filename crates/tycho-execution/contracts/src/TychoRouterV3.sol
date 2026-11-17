@@ -11,6 +11,7 @@ import {
     SafeERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {
     IAllowanceTransfer
 } from "@permit2/src/interfaces/IAllowanceTransfer.sol";
@@ -107,6 +108,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     uint48 private _feeCalculatorActivationTimestamp;
 
     using SafeERC20 for IERC20;
+    using SafeCast for uint256;
     using LibPrefixLengthEncodedByteArray for bytes;
     using LibSwap for bytes;
 
@@ -137,11 +139,23 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     );
     event FeesTaken(address indexed token, FeeRecipient[] fees);
 
+    /**
+     * @param permit2_ The Permit2 contract.
+     * @param feeCalculator The fee calculator, active from deployment.
+     * @param executors Executors approved from deployment, without the
+     *  timelock that applies to executors added later with `setExecutors`.
+     * @param pausers Holders of `PAUSER_ROLE`. `UNPAUSER_ROLE` administers
+     *  the role, so these wallets can pause but not grant or revoke it.
+     * @param unpauserAdmin Initial holder of `UNPAUSER_ROLE`.
+     * @param executorSetterAdmin Initial holder of `EXECUTOR_SETTER_ROLE`.
+     * @param routerFeeSetterAdmin Initial holder of `ROUTER_FEE_SETTER_ROLE`.
+     */
     constructor(
         address permit2_,
         // forge-lint: disable-next-line(missing-zero-check) The code-length check rejects address(0).
         address feeCalculator,
-        address pauserAdmin,
+        address[] memory executors,
+        address[] memory pausers,
         address unpauserAdmin,
         address executorSetterAdmin,
         address routerFeeSetterAdmin
@@ -150,18 +164,29 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
             revert TychoRouter__NotAContract(feeCalculator);
         }
         _feeCalculator = feeCalculator;
+        for (uint256 i = 0; i < executors.length; i++) {
+            _setExecutor(executors[i], 0);
+        }
 
-        // Make each role its own admin so role holders can manage their own role
-        _setRoleAdmin(PAUSER_ROLE, PAUSER_ROLE);
+        // Make each role its own admin so role holders can manage their own
+        // role. Only unpausers grant and revoke PAUSER_ROLE, so a pauser key
+        // cannot add pausers or remove the other pausers.
+        _setRoleAdmin(PAUSER_ROLE, UNPAUSER_ROLE);
         _setRoleAdmin(UNPAUSER_ROLE, UNPAUSER_ROLE);
         _setRoleAdmin(EXECUTOR_SETTER_ROLE, EXECUTOR_SETTER_ROLE);
         _setRoleAdmin(ROUTER_FEE_SETTER_ROLE, ROUTER_FEE_SETTER_ROLE);
 
-        // Grant initial roles - only these ones are admin of the corresponding role
-        _grantRole(PAUSER_ROLE, pauserAdmin);
+        // Grant initial roles
+        for (uint256 i = 0; i < pausers.length; i++) {
+            _grantRole(PAUSER_ROLE, pausers[i]);
+        }
         _grantRole(UNPAUSER_ROLE, unpauserAdmin);
         _grantRole(EXECUTOR_SETTER_ROLE, executorSetterAdmin);
         _grantRole(ROUTER_FEE_SETTER_ROLE, routerFeeSetterAdmin);
+
+        // Vault deposits and vault-funded swaps start paused. An unpauser
+        // enables them with `unpauseVault`.
+        _pauseVault();
     }
 
     /**
@@ -267,7 +292,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
-    ) public nonReentrant whenNotPaused returns (uint256) {
+    ) public nonReentrant whenNotPaused whenVaultNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -442,7 +467,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
-    ) public nonReentrant whenNotPaused returns (uint256) {
+    ) public nonReentrant whenNotPaused whenVaultNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -611,7 +636,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swapData
-    ) public nonReentrant whenNotPaused returns (uint256) {
+    ) public nonReentrant whenNotPaused whenVaultNotPaused returns (uint256) {
         _verifyClientSignature(
             clientFeeParams,
             amountIn,
@@ -723,6 +748,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address client = clientFeeParams.clientFeeReceiver;
         // Stack pressure in this function prevents keeping finalReceiver in scope
         // outside the block, so we cache the interception decision as a bool instead.
+        // On the next router deployment, pass tokenIn and tokenOut here.
+        // Without them, any token pair fee makes every swap output pass
+        // through the router, which costs gas on swaps that pay no fee.
         bool intercepting = IFeeCalculator(_feeCalculator)
             .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
 
@@ -778,6 +806,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         _validateAddresses(receiver, tokenIn, tokenOut);
 
         address client = clientFeeParams.clientFeeReceiver;
+        // On the next router deployment, pass tokenIn and tokenOut here.
+        // Without them, any token pair fee makes every swap output pass
+        // through the router, which costs gas on swaps that pay no fee.
         bool intercepting = IFeeCalculator(_feeCalculator)
             .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
 
@@ -838,6 +869,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         }
 
         address client = clientFeeParams.clientFeeReceiver;
+        // On the next router deployment, pass tokenIn and tokenOut here.
+        // Without them, any token pair fee makes every swap output pass
+        // through the router, which costs gas on swaps that pay no fee.
         bool intercepting = IFeeCalculator(_feeCalculator)
             .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
 
@@ -954,8 +988,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     ) internal returns (uint256) {
         int256 outputDelta = _getDelta(tokenOut);
         if (outputDelta > 0) {
-            // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-            _updateDeltaAccounting(tokenOut, -int256(amountOut));
+            _updateDeltaAccounting(tokenOut, -amountOut.toInt256());
             // out tokens are still in the Router and need to be sent to the final receiver
             // or credited to the vault
             if (receiver == address(this)) {
@@ -1146,7 +1179,23 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     }
 
     /**
-     * @dev Entrypoint to add or replace an approved executor contract address
+     * @notice Pauses deposits and swaps funded from vault balances (the
+     * `*UsingVault` entry points). Other swaps and withdrawals keep working.
+     */
+    function pauseVault() external onlyRole(PAUSER_ROLE) {
+        _pauseVault();
+    }
+
+    /**
+     * @notice Resumes deposits and swaps funded from vault balances.
+     */
+    function unpauseVault() external onlyRole(UNPAUSER_ROLE) {
+        _unpauseVault();
+    }
+
+    /**
+     * @dev Entrypoint to add approved executor contract addresses. Each
+     *  executor can be used once `DELAY_EXECUTOR_ACTIVATION` has passed.
      * @param targets address of the executor contract
      */
     function setExecutors(address[] memory targets)
@@ -1155,7 +1204,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         whenNotPaused
     {
         for (uint256 i = 0; i < targets.length; i++) {
-            _setExecutor(targets[i]);
+            _setExecutor(targets[i], DELAY_EXECUTOR_ACTIVATION);
         }
     }
 
@@ -1263,9 +1312,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                 // accounting without funds will result in an additional negative
                 // delta, and cause the _finalizeBalances method to revert.
                 _updateDeltaAccounting(
-                    feeInput.tokenOut,
-                    // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                    -int256(fees[i].feeAmount)
+                    feeInput.tokenOut, -fees[i].feeAmount.toInt256()
                 );
                 _creditVaultForFees(
                     fees[i].recipient, feeInput.tokenOut, fees[i].feeAmount
@@ -1300,8 +1347,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                     msg.value, amountIn
                 );
             }
-            // forge-lint: disable-next-line(unsafe-typecast) msg.value is native currency the caller sent; no chain's native supply comes near 2^255.
-            _updateDeltaAccounting(ETH_ADDRESS, int256(msg.value));
+            _updateDeltaAccounting(ETH_ADDRESS, msg.value.toInt256());
         }
     }
 
@@ -1333,8 +1379,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                 // Output tokens are still in the Router. This could be because no
                 // output transfer has been performed yet, or the user has specified the
                 // receiver to be the router in order to rebalance their vault.
-                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                _updateDeltaAccounting(tokenOut, int256(requiredContribution));
+                _updateDeltaAccounting(
+                    tokenOut, requiredContribution.toInt256()
+                );
             } else if (outputDelta == 0) {
                 if (receiver == address(this)) {
                     _creditVault(msg.sender, tokenOut, requiredContribution);

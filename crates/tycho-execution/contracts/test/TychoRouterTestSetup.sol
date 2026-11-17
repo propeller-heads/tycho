@@ -60,7 +60,8 @@ contract TychoRouterExposed is TychoRouterV3 {
     constructor(
         address permit2_,
         address feeCalculator,
-        address pauser,
+        address[] memory executors,
+        address[] memory pausers,
         address unpauser,
         address executorSetter,
         address routerFeeSetter
@@ -68,7 +69,8 @@ contract TychoRouterExposed is TychoRouterV3 {
         TychoRouterV3(
             permit2_,
             feeCalculator,
-            pauser,
+            executors,
+            pausers,
             unpauser,
             executorSetter,
             routerFeeSetter
@@ -196,6 +198,9 @@ contract TychoRouterTestSetup is
         tychoRouter = deployRouter();
         deployDummyContract();
         vm.stopPrank();
+        // The router deploys with the vault paused; most tests use the vault.
+        vm.prank(UNPAUSER);
+        tychoRouter.unpauseVault();
 
         address[] memory executors = deployExecutors();
         vm.startPrank(EXECUTOR_SETTER);
@@ -216,6 +221,12 @@ contract TychoRouterTestSetup is
         vm.warp(forkTimestamp);
     }
 
+    function listTestPausers() internal view returns (address[] memory) {
+        address[] memory pausers = new address[](1);
+        pausers[0] = PAUSER;
+        return pausers;
+    }
+
     function deployRouter() public returns (TychoRouterExposed) {
         // Use vm.etch to place dummy bytecode at address(123) so it passes the
         // .code.length check in the constructor without deploying a contract
@@ -226,7 +237,8 @@ contract TychoRouterTestSetup is
         tychoRouter = new TychoRouterExposed(
             PERMIT2_ADDRESS,
             placeholderFeeCalculator,
-            PAUSER,
+            new address[](0),
+            listTestPausers(),
             UNPAUSER,
             EXECUTOR_SETTER,
             FEE_SETTER
@@ -402,12 +414,12 @@ contract TychoRouterTestSetup is
         // clientFeeReceiver is the address corresponding to CLIENT_FEE_RECEIVER_PK
         clientFeeReceiver = vm.addr(CLIENT_FEE_RECEIVER_PK);
         feeCalculator = new FeeCalculator(FEE_SETTER, routerFeeReceiver);
-        // The calculator enables positive slippage capture in its constructor.
+        // The calculator captures the full surplus from its constructor.
         // The swap tests quote a round `expectedAmountOut` below the real pool
-        // output and assert the receiver gets that whole output, so capture is
-        // switched off here and exercised by the tests that opt back in.
+        // output and assert the receiver gets that whole output, so the capture
+        // bps is set to zero here and the capture tests set it back.
         vm.prank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageEnabled(false);
+        feeCalculator.setRouterPositiveSlippageBps(0);
     }
 
     function pleEncode(bytes[] memory data)

@@ -1,5 +1,7 @@
 mod fee_fetcher;
+mod limit_probes;
 mod metrics;
+mod packages;
 mod statistics;
 mod stream_processor;
 
@@ -45,7 +47,9 @@ use tycho_simulation::{
 use tycho_test::{
     execution::{
         encoding::{encode_swap, pamm_account_overwrites},
-        models::{RouterOverwritesData, TychoExecutionInput, TychoExecutionResult},
+        models::{
+            RouterOverwritesData, TychoExecutionInput, TychoExecutionResult, NODE_ERROR_PREFIX,
+        },
         simulate_swap_transaction, simulate_swap_transaction_before_block,
         simulate_swap_transaction_next_block, tenderly,
     },
@@ -56,6 +60,8 @@ use tycho_test::{
 
 use crate::{
     fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
+    limit_probes::{NotRun, Probe, StrictChecks},
+    packages::StrictPackages,
     statistics::TestStatistics,
     stream_processor::{
         book_stream_processor::{BookStreamProcessor, PammSelection, PammVenue, RfqSelection},
@@ -111,10 +117,11 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_pamm: bool,
 
-    /// pAMM book feeds to run, comma-separated (e.g. metric). Replaces the default list
-    /// (metric). A listed venue missing its credentials, or whose feed fails to build, fails the
-    /// run; a default venue is skipped instead. A feed that builds but fails once it runs, for
-    /// example on a chain its venue does not serve, ends with a warning like any other feed.
+    /// pAMM book feeds to run, comma-separated (e.g. metric,baibai). Replaces the default list
+    /// (metric). BaiBai runs on Base only and reads its books over --rpc-url. A listed venue
+    /// missing its credentials, or whose feed fails to build, fails the run; a default venue
+    /// is skipped instead. A feed that builds but fails once it runs, for example on a chain
+    /// its venue does not serve, ends with a warning like any other feed.
     #[arg(long, value_delimiter = ',', conflicts_with = "disable_pamm")]
     pamm: Option<Vec<PammVenue>>,
 
@@ -238,7 +245,7 @@ struct Cli {
     disable_execution: bool,
 
     /// Mark all known executors as activated on the router in the execution simulation's state
-    /// overrides, so executors that are unapproved or still inside their 3-day activation timelock
+    /// overrides, so executors that are unapproved or still inside their 1-day activation timelock
     /// can be validated. Read-only: this affects the simulation call only, never a real
     /// transaction. Leave off to keep the test failing when an executor was never activated.
     #[arg(long, default_value_t = false)]
@@ -454,6 +461,23 @@ async fn run(cli: Cli) -> miette::Result<()> {
         "Loaded router fee on output from on-chain FeeCalculator"
     );
 
+    // The strict packages' declarations, embedded at build time; their protocols get limit
+    // probes on top of the realistic swap.
+    let strict = Arc::new(StrictChecks::new(StrictPackages::load(chain)?));
+    for (protocol, package) in strict.packages() {
+        // The package's own `bps`, which applies to its components that declare none: zero
+        // without a declaration, since strict mode is then exact, and none for a declaration of
+        // `wei` only, which no bps line describes.
+        let bps = match &package.execution_tolerance {
+            None => Some(0.0),
+            Some(declared) => declared
+                .bps
+                .map(|bps| f64::from(bps.centi()) / 100.0),
+        };
+        info!(protocol, ?bps, "Strict package: probing its limits");
+        metrics::record_strict_protocol(protocol, bps);
+    }
+
     // Load tokens from Tycho
     info!(%cli.tycho_url, "Loading tokens...");
     let all_tokens = Arc::new(
@@ -513,6 +537,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
         Duration::from_secs(cli.skip_messages_duration),
         RfqSelection::from_cli(cli.disable_rfq, |name| std::env::var(name).ok()),
         PammSelection::from_cli(cli.disable_pamm, cli.pamm.clone()),
+        cli.rpc_url.clone(),
         cli.rfq_all_pairs,
     );
     let mut book_handle = book_stream_processor
@@ -688,6 +713,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
+                        let strict = strict.clone();
                         let permit = protocol_semaphore
                             .clone()
                             .acquire_owned()
@@ -695,7 +721,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire protocol permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data, strict).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -726,6 +752,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
+                        let strict = strict.clone();
                         let permit = book_semaphore
                             .clone()
                             .acquire_owned()
@@ -733,7 +760,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire book permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data, strict).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -769,6 +796,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
+                        let strict = strict.clone();
                         let permit = price_level_semaphore
                             .clone()
                             .acquire_owned()
@@ -776,7 +804,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire price level stream permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data, strict).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -996,7 +1024,7 @@ async fn poll_rpc_for_block(
 /// Creates the router overwrites for the execution simulation: no bytecode is replaced, since the
 /// deployed contracts are what this test validates, but every executor known for `chain` is marked
 /// as activated on the router. That lets an executor be validated while it is unapproved or still
-/// inside its 3-day activation timelock, which `Dispatcher._validateExecutor` would otherwise
+/// inside its 1-day activation timelock, which `Dispatcher._validateExecutor` would otherwise
 /// reject.
 ///
 /// This cannot help an executor that has no bytecode deployed at its address.
@@ -1040,6 +1068,7 @@ async fn process_update(
     router_fee: RouterFeeOnOutput,
     update: &StreamUpdate,
     router_overwrites_data: RouterOverwritesData,
+    strict: Arc<StrictChecks>,
 ) -> miette::Result<()> {
     match &update.payload {
         StreamUpdatePayload::Protocol(protocol_update) => info!(
@@ -1390,6 +1419,7 @@ async fn process_update(
         let block = block.clone();
         let statistics = statistics.clone();
         let token_prices = token_prices.clone();
+        let strict = strict.clone();
         let permit = semaphore
             .clone()
             .acquire_owned()
@@ -1409,6 +1439,7 @@ async fn process_update(
                 statistics,
                 token_prices,
                 max_swap_directions,
+                &strict,
             )
             .await;
             drop(permit);
@@ -1418,11 +1449,13 @@ async fn process_update(
     }
 
     let mut block_execution_info = HashMap::new();
+    let mut probes = HashMap::new();
 
     for task in tasks {
         match task.await {
-            Ok(execution_data) => {
+            Ok((execution_data, state_probes)) => {
                 block_execution_info.extend(execution_data);
+                probes.extend(state_probes);
             }
             Err(e) => {
                 warn!("Task failed: {:?}", e);
@@ -1436,6 +1469,7 @@ async fn process_update(
     }
 
     if cli.disable_execution {
+        limit_probes::abandon(&probes, NotRun::ExecutionDisabled);
         return Ok(());
     }
 
@@ -1459,52 +1493,61 @@ async fn process_update(
         .into_iter()
         .partition(|(_, info)| full_block_update && executes_in_next_block(&info.protocol_system));
     record_swaps_without_simulation_overrides(&before_block);
+    // A batch that fails ends the update: the probes of the batches before it are judged, and
+    // the others' checks are recorded as not run.
+    let batch_failed = |e: miette::Report, results: &HashMap<String, TychoExecutionResult>| {
+        limit_probes::judge_after_failed_batch(&probes, &block_execution_info, results, router_fee);
+        e
+    };
     let mut results = HashMap::new();
     if !before_block.is_empty() {
-        results.extend(
-            simulate_swap_transaction_before_block(
-                &rpc_tools,
-                before_block,
-                &block,
-                router_overwrites_data.clone(),
-                None,
-            )
-            .await
-            .map_err(|(e, _, _)| e)?,
-        );
+        let batch = simulate_swap_transaction_before_block(
+            &rpc_tools,
+            before_block,
+            &block,
+            router_overwrites_data.clone(),
+            None,
+        )
+        .await
+        .map_err(|(e, _, _)| batch_failed(e, &results))?;
+        results.extend(batch);
     }
     if !next_block.is_empty() {
-        results.extend(
-            simulate_swap_transaction_next_block(
-                &rpc_tools,
-                next_block,
-                &block,
-                router_overwrites_data.clone(),
-                None,
-                chain.block_time_secs(),
-            )
-            .await
-            .map_err(|(e, _, _)| e)?,
-        );
+        let batch = simulate_swap_transaction_next_block(
+            &rpc_tools,
+            next_block,
+            &block,
+            router_overwrites_data.clone(),
+            None,
+            chain.block_time_secs(),
+        )
+        .await
+        .map_err(|(e, _, _)| batch_failed(e, &results))?;
+        results.extend(batch);
     }
     if !after_block.is_empty() {
-        results.extend(
-            simulate_swap_transaction(
-                &rpc_tools,
-                after_block,
-                &block,
-                router_overwrites_data,
-                None,
-            )
-            .await
-            .map_err(|(e, _, _)| e)?,
-        );
+        let batch = simulate_swap_transaction(
+            &rpc_tools,
+            after_block,
+            &block,
+            router_overwrites_data,
+            None,
+        )
+        .await
+        .map_err(|(e, _, _)| batch_failed(e, &results))?;
+        results.extend(batch);
     }
+
+    limit_probes::judge(&probes, &block_execution_info, &results, router_fee);
 
     let mut n_reverts = 0;
     let mut n_failures = 0;
     let total_simulations = results.len();
     for (simulation_id, result) in &results {
+        // A probe is judged on its own, apart from the realistic swaps' metrics.
+        if probes.contains_key(simulation_id) {
+            continue;
+        }
         let execution_info = match block_execution_info.get(simulation_id) {
             Some(info) => info,
             None => {
@@ -1603,8 +1646,8 @@ fn select_components_to_process(
         Vec::new();
 
     // Collect updated components
-    // As the component ordering is semi-random, it is safe to just take the first N components and
-    // have a good coverage
+    // The first N updated states, in the order the update holds them; stale components are added
+    // at random below
     match &update.payload {
         StreamUpdatePayload::Protocol(protocol_update) => {
             for (id, state) in protocol_update
@@ -1765,11 +1808,12 @@ async fn process_state(
     statistics: Option<Arc<RwLock<TestStatistics>>>,
     token_prices: Arc<HashMap<Bytes, f64>>,
     max_swap_directions: usize,
-) -> HashMap<String, TychoExecutionInput> {
+    strict: &StrictChecks,
+) -> (HashMap<String, TychoExecutionInput>, HashMap<String, Probe>) {
     let tokens_len = component.tokens.len();
     if tokens_len < 2 {
         error!("Component has less than 2 tokens, skipping...");
-        return HashMap::new();
+        return Default::default();
     }
     // Get all the possible swap directions
     let swap_directions = match component
@@ -1783,7 +1827,7 @@ async fn process_state(
             Ok(directions) => sample_swap_directions(directions, max_swap_directions),
             Err(e) => {
                 error!("Invalid swap directions attribute, skipping: {e}");
-                return HashMap::new();
+                return Default::default();
             }
         },
         None => component
@@ -1794,7 +1838,9 @@ async fn process_state(
             .collect(),
     };
     let account_overwrites = simulation_overwrites(state.as_ref());
+    let package = strict.package(&component.protocol_system);
     let mut execution_infos = HashMap::new();
+    let mut probes = HashMap::new();
     for (i, (token_in, token_out)) in swap_directions.iter().enumerate() {
         debug!(
             "Processing {} pool {state_id}, from {} to {}",
@@ -1846,6 +1892,32 @@ async fn process_state(
             "Retrieved limits: max input {max_input} {}; max output {max_output} {}",
             token_in.symbol, token_out.symbol
         );
+
+        if let Some(package) = package {
+            match unprobeable(&component.protocol_system) {
+                Some(reason) => {
+                    limit_probes::not_probed(strict, &component, token_in, token_out, reason)
+                }
+                None => {
+                    let target = limit_probes::Target {
+                        chain,
+                        component: &component,
+                        state: state.as_ref(),
+                        token_in,
+                        token_out,
+                        max_input: &max_input,
+                        max_output: &max_output,
+                        simulation_id: format!("{simulation_id}-{i}"),
+                    };
+                    for (id, input, probe) in
+                        limit_probes::probe_direction(strict, package, &target)
+                    {
+                        execution_infos.insert(id.clone(), input);
+                        probes.insert(id, probe);
+                    }
+                }
+            }
+        }
 
         // Cap the limit to a realistic input value (~10k USD) using the weekly token prices.
         // Tick-based protocols (Uniswap V3/V4) report near-infinite limits; tokens missing
@@ -1971,7 +2043,22 @@ async fn process_state(
             },
         );
     }
-    execution_infos
+    (execution_infos, probes)
+}
+
+/// Why a strict protocol's swaps cannot be probed, if they cannot: a price level venue quotes a
+/// block not built yet, a next-block protocol's quote moves with the block it executes in, and
+/// CoWAMM is not executed at all.
+fn unprobeable(protocol_system: &str) -> Option<NotRun> {
+    if simulates_before_block(protocol_system) {
+        Some(NotRun::BookVenue)
+    } else if executes_in_next_block(protocol_system) {
+        Some(NotRun::NextBlock)
+    } else if protocol_system == COWAMM_PROTOCOL_SYSTEM {
+        Some(NotRun::NotExecutable)
+    } else {
+        None
+    }
 }
 
 /// Processes the result of a Tycho simulation execution and emits metrics.
@@ -2026,12 +2113,11 @@ fn process_execution_result(
             // deducts this fee from the swap output, so the simulated amount out (which is
             // fee-free) must be reduced by the same fraction before comparing against the
             // executed amount.
-            let simulated_amount_out_without_fee = &execution_info.expected_amount_out -
-                (&execution_info.expected_amount_out * BigUint::from(router_fee.numerator())) /
-                    BigUint::from(router_fee.denominator());
+            let simulated_amount_out_without_fee =
+                router_fee.deduct(&execution_info.expected_amount_out);
 
-            // Calculate slippage: positive = simulated > expected, negative = simulated <
-            // expected
+            // Slippage in percent of the fee-deducted quote: positive when the execution paid more
+            // than simulated, negative when it paid less
             let slippage = if amount_out >= &simulated_amount_out_without_fee {
                 let diff = amount_out - &simulated_amount_out_without_fee;
                 ((diff * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
@@ -2154,7 +2240,7 @@ fn process_execution_result(
             } else {
                 String::new()
             };
-            let error_category = categorize_error(revert_reason);
+            let error_category = categorize_error(revert_reason).label();
             error!(
                 event_type = "simulation_execution_revert",
                 error_message = %revert_reason,
@@ -2178,7 +2264,7 @@ fn process_execution_result(
         TychoExecutionResult::Failed { error_msg } => {
             *n_failures += 1;
 
-            let error_category = categorize_error(error_msg);
+            let error_category = categorize_error(error_msg).label();
             error!(
                 event_type = "simulation_execution_failure",
                 error_message = %error_msg,
@@ -2323,15 +2409,50 @@ fn extract_error_name(revert_reason: &str) -> String {
     }
 }
 
-fn categorize_error(error_message: &str) -> &'static str {
+fn categorize_error(error_message: &str) -> ErrorCategory {
     // We can add more categories here when we find new meaningful ones
     match error_message {
-        e if e.contains("Couldn't find storage slot") => "Storage slot not found",
-        e if e.contains("TychoRouter__NegativeSlippage") => "TychoRouter__NegativeSlippage",
-        e if e.contains("0xf7bf5832") => "Fee token", /* Decodes to TychoRouter__AmountOutNotFullyReceived */
-        e if e.contains("UniswapV2: K") => "Fee token",
-        e if e.contains("Insufficient balance for amount + tax") => "Fee token",
-        _ => "other",
+        e if e.contains("Couldn't find storage slot") => ErrorCategory::StorageSlot,
+        // OpenZeppelin's `Pausable`: the router is paused, and reverts every swap before it
+        // reaches an executor.
+        e if e.contains("EnforcedPause()") => ErrorCategory::RouterPaused,
+        e if e.contains("TychoRouter__NegativeSlippage") => ErrorCategory::NegativeSlippage,
+        e if e.contains("0xf7bf5832") => ErrorCategory::FeeToken, /* Decodes to TychoRouter__AmountOutNotFullyReceived */
+        e if e.contains("UniswapV2: K") => ErrorCategory::FeeToken,
+        e if e.contains("Insufficient balance for amount + tax") => ErrorCategory::FeeToken,
+        // A node error on one call of a batch: nothing executed.
+        e if e.contains(NODE_ERROR_PREFIX) => ErrorCategory::Node,
+        _ => ErrorCategory::Other,
+    }
+}
+
+/// What an execution error is about, by its message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorCategory {
+    /// The token's balance slot was not found, so the swap could not be simulated.
+    StorageSlot,
+    /// The router paid less than the swap's minimum.
+    NegativeSlippage,
+    /// A fee-on-transfer token.
+    FeeToken,
+    /// The node failed the call.
+    Node,
+    /// The router is paused, so the swap never reached the venue.
+    RouterPaused,
+    Other,
+}
+
+impl ErrorCategory {
+    /// The metric's and the log's label.
+    fn label(self) -> &'static str {
+        match self {
+            ErrorCategory::StorageSlot => "Storage slot not found",
+            ErrorCategory::NegativeSlippage => "TychoRouter__NegativeSlippage",
+            ErrorCategory::FeeToken => "Fee token",
+            ErrorCategory::Node => "Node error",
+            ErrorCategory::RouterPaused => "Router paused",
+            ErrorCategory::Other => "other",
+        }
     }
 }
 
@@ -2364,10 +2485,21 @@ mod tests {
     use tycho_simulation::tycho_common::models::Chain;
 
     use super::{
-        book_swap_directions, executes_in_next_block, is_oracle_stale_revert, is_stale_quote,
-        pamm_venue, sample_swap_directions, should_fetch_block_by_number, Cli, PammVenue,
-        TychoState,
+        book_swap_directions, categorize_error, executes_in_next_block, is_oracle_stale_revert,
+        is_stale_quote, pamm_venue, sample_swap_directions, should_fetch_block_by_number, Cli,
+        ErrorCategory, PammVenue, TychoState,
     };
+
+    #[test]
+    fn a_node_error_on_one_call_is_its_own_category() {
+        assert_eq!(categorize_error("Transaction failed: rate limited"), ErrorCategory::Node);
+        assert_eq!(
+            categorize_error("Couldn't find storage slot for token"),
+            ErrorCategory::StorageSlot
+        );
+        assert_eq!(categorize_error("EnforcedPause()"), ErrorCategory::RouterPaused);
+        assert_eq!(categorize_error("something else"), ErrorCategory::Other);
+    }
 
     #[rstest]
     #[case::direct("pricelevelstream:fermiswap", Some("fermiswap"))]
