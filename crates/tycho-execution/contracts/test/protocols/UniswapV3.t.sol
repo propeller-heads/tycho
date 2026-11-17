@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 import "../TychoRouterTestSetup.sol";
 import "@permit2/src/interfaces/IAllowanceTransfer.sol";
 import "@src/executors/UniswapV3Executor.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {Constants} from "../Constants.sol";
 import {Permit2TestHelper} from "../Permit2TestHelper.sol";
 import {Test} from "../../lib/forge-std/src/Test.sol";
@@ -144,6 +145,20 @@ contract UniswapV3ExecutorTest is Test, TestUtils, Constants {
 
         vm.expectRevert(UniswapV3Executor__InvalidDataLength.selector);
         uniswapV3Exposed.decodeData(invalidParams);
+    }
+
+    /// A negative amount would make the pool run an exact-output swap.
+    function testSwapAmountInAboveInt256Max() public {
+        uint256 amountIn = 1 << 255;
+        bytes memory data =
+            encodeUniswapV3Swap(WETH_ADDR, DAI_ADDR, DAI_WETH_USV3, false);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SafeCast.SafeCastOverflowedUintToInt.selector, amountIn
+            )
+        );
+        uniswapV3Exposed.swap(amountIn, data, address(this));
     }
 
     function testUSV3Callback() public {
