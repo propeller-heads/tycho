@@ -27,13 +27,14 @@ from being stored in the shell history.
    export BLOCKCHAIN_EXPLORER_API_KEY=<blockchain-explorer-api-key>
    ```
 
-On Robinhood Chain (`robinhood`), Arc (`arc`) and Elysium (`elysium`), leave
+On Robinhood Chain (`robinhood`) and Elysium (`elysium`), leave
 `BLOCKCHAIN_EXPLORER_API_KEY` unset.
-Arc verifies through Sourcify, which is where [arc-scan.org](https://arc-scan.org) reads verification from.
-The deploy scripts do not verify on Elysium. Submit each contract's standard JSON input to the
+Arc verifies on [arc.etherscan.io](https://arc.etherscan.io) through the Etherscan v2 API, which needs
+a paid Etherscan plan for Arc.
+On Elysium, the deploy scripts submit each contract's standard JSON input to the
 Etherscan-compatible API of [Elysium's Blockscout](https://elysium.kinetiq.xyz) at
-`https://elysium.kinetiq.xyz/api/verify` (no API key). hardhat-verify cannot reach it, because a
-single `apiKey` sends every chain to the Etherscan v2 API.
+`https://elysium.kinetiq.xyz/api/verify` (no API key) and wait for the result. hardhat-verify cannot
+reach it, because a single `apiKey` sends every chain to the Etherscan v2 API.
 
 If verification reports that Blockscout has not indexed the contract, re-run the deploy script
 later. Re-running skips a deployment that already exists.
@@ -50,10 +51,16 @@ The FeeCalculator must be deployed **before** the TychoRouterV3, as the router r
    the constructor and owns the vault balance every router fee is credited to, so it must be an
    address that can call `withdraw()` on the router. It is a constructor argument because the
    deployment goes through the CREATE2 factory, which can never withdraw.
-3. Deploy: `npx hardhat run scripts/deploy-fee-calculator.js --network NETWORK`
-4. Note the deployed address — you will need it in the next step.
+3. Deploy: `npx hardhat run scripts/deploy-fee-calculator.js --network NETWORK`. The deployer holds
+   `ROUTER_FEE_SETTER_ROLE` at construction, sets the initial fees defined at the top of the script,
+   grants the role to `ROUTER_FEE_SETTER` and renounces it.
+4. Record the deployed address as the chain's `fee_calculator` in
+   `config/deployment_registry.json`. The router deploy script reads it from there.
 
 ### Deploy executors
+
+Executors must be deployed **before** the TychoRouterV3: the router approves every executor in
+`config/executor_addresses.json` for the network at deployment, with no timelock.
 
 1. In `scripts/deploy-executors.js` define the executors to be deployed
 2. Deploy executors: `npx hardhat run scripts/deploy-executors.js --network NETWORK`
@@ -63,18 +70,21 @@ The FeeCalculator must be deployed **before** the TychoRouterV3, as the router r
 
 1. Define the accounts to grant roles to in `scripts/roles.json`. For each role, the first address
    receives the role in the constructor.
-2. Set environment variables:
+2. The script uses the chain's `fee_calculator` from `config/deployment_registry.json`. To use
+   another FeeCalculator, set it explicitly:
    ```
-   export FEE_CALCULATOR=<fee-calculator-address-from-previous-step>
+   export FEE_CALCULATOR=<fee-calculator-address>
    ```
-3. Deploy router: `npx hardhat run scripts/deploy-router.js --network NETWORK`
+3. Deploy router: `npx hardhat run scripts/deploy-router.js --network NETWORK`. The script
+   passes the network's executors from `config/executor_addresses.json`, deduplicated and
+   sorted, and stops if any of them has no code. It grants `PAUSER_ROLE` to the network's
+   `PAUSER_ROLE` wallets in `scripts/roles.json`, and stops if the list is empty. The fee
+   calculator and these executors are active at deployment. The router address depends on both,
+   so a different executor set gives a different address.
 4. Fill in the router address in `config/router_addresses.json`
 
-Via the safe wallet UI:
-
-5. Set the executors addresses
-6. Set fee amounts in FeeCalculator
-7. Set the pauser wallets
+Executors added after deployment with `setExecutors`, and fee calculators set with
+`setFeeCalculator`, wait 1 day before they take effect.
 
 ### Publish the deployment
 

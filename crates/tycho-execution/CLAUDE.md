@@ -42,7 +42,7 @@ Entry (e.g. splitSwap)
 |--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `TychoRouterV3.sol`              | Entry point. 3 swap strategies (single/sequential/split) x 3 funding modes (transferFrom/Permit2/vault) = 9 public methods. `_takeFees()` deducts fees, `_settleOutput()` transfers/credits final output to receiver or vault                                  |
 | `Vault.sol`                    | ERC6909 multi-token vault (see subsection below)                                                                                                                                                                                                               |
-| `Dispatcher.sol`               | Executor dispatch. 1-day timelock on new executors. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
+| `Dispatcher.sol`               | Executor dispatch. Executors passed to the router constructor are active at deployment; ones added later with `setExecutors` wait 1 day. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
 | `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 6 transfer scenarios depending on context                                                                                  |
 | `FeeCalculator.sol`            | Dual fee system: router fee on output + router fee on client fee. Per-client custom rates. Upgradeable without redeploying router                                                                                                                              |
 | `SubsidyPayer.sol`             | Holds the subsidy budget (ERC20 and native ETH) and pays one EIP-712-signed `Subsidy` per nonce (unordered bitmap). Only the router may call `pay`. Any other failed check emits `SubsidySkipped` with a `SkipReason` and returns false. `boundTo` must be the router's caller or `tx.origin`. ETH goes out with a capped gas stipend |
@@ -72,6 +72,14 @@ delta when tokens arrive at the router, negative when they leave. `nonZeroDeltaC
 - Vault-funded swaps: at most one negative delta (the input token), which gets burned from the user's vault balance
 
 **External methods**: `deposit(token, amount)` and `withdraw(token, amount)`. Supports native ETH via `address(0)`.
+
+**Delta casts**: every `uint256` amount enters the deltas through `SafeCast.toInt256`, which reverts above
+`type(int256).max`. A raw cast would turn an amount near 2^256 into a credit for a token the router never received.
+
+**Vault pause**: `pauseVault` (`PAUSER_ROLE`) and `unpauseVault` (`UNPAUSER_ROLE`) on TychoRouterV3 block `deposit`
+and the three `*UsingVault` entry points with `Vault__Paused`; `vaultPaused()` reads the flag. Other swaps and
+withdrawals keep working, and so do vault credits and debits inside them (fees, outputs to the router, client
+contributions). `pause()` still stops everything but `withdraw`.
 
 **Fee accounting**: Fees credited directly to fee receivers' vault balances via `_creditVault()` -- persistent storage
 writes (~22k gas each) but no ERC20 transfers.
