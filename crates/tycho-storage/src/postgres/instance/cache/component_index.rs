@@ -112,29 +112,7 @@ impl ComponentIndex {
     pub(crate) async fn load(conn: &mut AsyncPgConnection) -> Result<Self, StorageError> {
         let start = Instant::now();
         let (units, newest_tvl_ts) = load_units(conn).await?;
-
-        for (instance, unit) in &units {
-            info!(
-                protocol = %unit.protocol,
-                %instance,
-                n_components = unit.components.ids.len(),
-                "Loaded component index unit"
-            );
-        }
-        let n_components: usize = units
-            .values()
-            .map(|unit| unit.components.ids.len())
-            .sum();
-        info!(
-            n_units = units.len(),
-            n_components,
-            elapsed = ?start.elapsed(),
-            "Loaded component index"
-        );
-        let now = unix_now();
-        gauge!("component_index_last_full_reload_timestamp_seconds").set(now);
-        gauge!("component_index_last_refresh_timestamp_seconds").set(now);
-        gauge!("component_index_components").set(n_components as f64);
+        report_load(&units, start);
         Ok(Self {
             units: RwLock::new(units),
             refresh_state: Mutex::new(RefreshState {
@@ -169,6 +147,38 @@ impl ComponentIndex {
             .read()
             .expect("component index lock poisoned")
     }
+}
+
+/// Logs the units of a load and sets the gauges of a full reload. Returns the number of
+/// components.
+fn report_load(units: &HashMap<InstanceId, InstanceIndex>, start: Instant) -> usize {
+    for (instance, unit) in units {
+        info!(
+            protocol = %unit.protocol,
+            %instance,
+            n_components = unit.components.ids.len(),
+            "Loaded component index unit"
+        );
+    }
+    let n_components = n_components(units);
+    info!(
+        n_units = units.len(),
+        n_components,
+        elapsed = ?start.elapsed(),
+        "Loaded component index"
+    );
+    let now = unix_now();
+    gauge!("component_index_last_full_reload_timestamp_seconds").set(now);
+    gauge!("component_index_last_refresh_timestamp_seconds").set(now);
+    gauge!("component_index_components").set(n_components as f64);
+    n_components
+}
+
+fn n_components(units: &HashMap<InstanceId, InstanceIndex>) -> usize {
+    units
+        .values()
+        .map(|unit| unit.components.ids.len())
+        .sum()
 }
 
 /// Reads a unit for each active instance, and the newest `modified_ts` of the TVL rows it read.
