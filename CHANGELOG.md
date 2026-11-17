@@ -1,3 +1,12 @@
+## [0.526.1](https://github.com/propeller-heads/tycho/compare/0.526.0...0.526.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **indexer:** check the stored first block when an extractor starts ([86c759a](https://github.com/propeller-heads/tycho/commit/86c759a6df3565fe512f039058efcf687358a531))
+* **indexer:** stamp fast-chain blocks the same way in every extractor ([#1827](https://github.com/propeller-heads/tycho/issues/1827)) ([4a6c84f](https://github.com/propeller-heads/tycho/commit/4a6c84f84a9aec9a03c20070c205569f196493dd))
+* **indexer:** stamp the first block of a new extractor like the others ([0d80c43](https://github.com/propeller-heads/tycho/commit/0d80c43336a0d54438d859b5721d4d1067edb2c3))
+
 ## [0.526.0](https://github.com/propeller-heads/tycho/compare/0.525.0...0.526.0) (2026-11-17)
 
 
