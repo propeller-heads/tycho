@@ -369,8 +369,10 @@ mod tests {
     use std::collections::HashMap;
 
     use chrono::{Duration, NaiveDate, NaiveDateTime, Utc};
-    use diesel::prelude::*;
-    use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
+    use diesel::{prelude::*, sql_types::Timestamp};
+    use diesel_async::{
+        scoped_futures::ScopedFutureExt, AsyncConnection, AsyncPgConnection, RunQueryDsl,
+    };
     use tycho_common::{
         models::{
             protocol::{ComponentBalance, ProtocolComponentState},
@@ -380,6 +382,9 @@ mod tests {
         Bytes,
     };
 
+    use super::{
+        active_instance_head, current_state_rows, history_state_rows, resolve_version, ReadAt,
+    };
     use crate::postgres::{
         db_fixtures,
         instance::{
@@ -1221,5 +1226,132 @@ mod tests {
             assert_eq!(during, Ok((expected, None)));
         })
         .await;
+    }
+
+    /// Where the race test moves the row, between the statements of a past read.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Gap {
+        BeforeCurrentQuery,
+        BetweenQueries,
+    }
+
+    /// Moves the attribute "x" of `component` to history at `recent(4)` in one transaction, as the
+    /// writer does: a history row with the old value, the new current value and the new head.
+    async fn move_x_to_history(conn: &mut AsyncPgConnection, instance: InstanceId, component: i64) {
+        let counts = conn
+            .transaction::<_, diesel::result::Error, _>(|conn| {
+                async move {
+                    let inserted = diesel::insert_into(protocol_state_history::table)
+                        .values(ProtocolStateHistory {
+                            instance_id: instance,
+                            protocol_component_id: component,
+                            attribute_name: "x".to_string(),
+                            attribute_value: b("0x01"),
+                            previous_value: None,
+                            valid_from: recent(1),
+                            valid_to: recent(4),
+                            tx_index: 0,
+                            inserted_ts: recent(4),
+                            modified_ts: recent(4),
+                        })
+                        .execute(conn)
+                        .await?;
+                    let updated = diesel::update(
+                        protocol_state::table
+                            .filter(protocol_state::instance_id.eq(instance))
+                            .filter(protocol_state::protocol_component_id.eq(component))
+                            .filter(protocol_state::attribute_name.eq("x")),
+                    )
+                    .set((
+                        protocol_state::attribute_value.eq(b("0x02")),
+                        protocol_state::valid_from.eq(recent(4)),
+                    ))
+                    .execute(conn)
+                    .await?;
+                    let head = diesel::update(extraction_state::table.find(instance))
+                        .set(extraction_state::block_ts.eq(recent(4)))
+                        .execute(conn)
+                        .await?;
+                    Ok([inserted, updated, head])
+                }
+                .scope_boxed()
+            })
+            .await
+            .expect("moving the row to history failed");
+        assert_eq!(
+            counts,
+            [1, 1, 1],
+            "rows changed by the history insert, state update, head update"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_serial_db_past_state_read_sees_a_moved_row_once() {
+        for gap in [Gap::BeforeCurrentQuery, Gap::BetweenQueries] {
+            run_against_db(move |pool| async move {
+                let mut reader = pool.get().await.unwrap();
+                let mut writer = pool.get().await.unwrap();
+                let s = setup(&mut writer).await;
+                let a =
+                    db_fixtures::insert_instance_component(&mut writer, s.curve, "a", &[b("0x01")])
+                        .await;
+                db_fixtures::insert_instance_state_version(
+                    &mut writer,
+                    s.curve,
+                    a,
+                    "x",
+                    b("0x01"),
+                    recent(1),
+                    None,
+                )
+                .await;
+                db_fixtures::set_instance_head(&mut writer, s.curve, recent(3)).await;
+                diesel::sql_query(
+                    "SELECT partman.create_partition_time('tycho.protocol_state_history', \
+                     ARRAY[$1])",
+                )
+                .bind::<Timestamp, _>(recent(4))
+                .execute(&mut writer)
+                .await
+                .unwrap();
+
+                let rows = snapshot_transaction(&mut reader)
+                    .run(|reader| {
+                        let writer = &mut writer;
+                        async move {
+                            let active = active_instance_head("vm:curve", reader)
+                                .await
+                                .unwrap()
+                                .expect("vm:curve has an active instance");
+                            let read = resolve_version(&active, Some(&at(recent(2))), reader)
+                                .await
+                                .unwrap();
+                            let (ts, head) = (recent(2), recent(3));
+                            assert_eq!(read, ReadAt::Past { ts, head });
+                            if gap == Gap::BeforeCurrentQuery {
+                                move_x_to_history(writer, s.curve, a).await;
+                            }
+                            let mut rows = current_state_rows(active.id, None, Some(ts), reader)
+                                .await
+                                .unwrap();
+                            if gap == Gap::BetweenQueries {
+                                move_x_to_history(writer, s.curve, a).await;
+                            }
+                            rows.extend(
+                                history_state_rows(active.id, None, ts, head, reader)
+                                    .await
+                                    .unwrap(),
+                            );
+                            Ok::<_, PostgresError>(rows)
+                        }
+                        .scope_boxed()
+                    })
+                    .await
+                    .unwrap();
+
+                assert_eq!(rows, vec![("a".to_string(), "x".to_string(), b("0x01"))], "{gap:?}");
+            })
+            .await;
+        }
     }
 }
