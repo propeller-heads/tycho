@@ -1,3 +1,9 @@
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    fmt::Debug,
+    hash::Hash,
+};
+
 use chrono::NaiveDateTime;
 use diesel_async::AsyncPgConnection;
 use tycho_common::storage::{
@@ -92,6 +98,25 @@ pub(super) async fn resolve_version(
         )));
     }
     Ok(ReadAt::Past { ts, head })
+}
+
+/// Collects `rows` into a map by key. `Unexpected` if two rows have the same key: two rows of
+/// `entity` are then valid at one version, which the writer must prevent.
+pub(super) fn unique_by_key<K: Eq + Hash + Debug, V>(
+    entity: &str,
+    rows: impl IntoIterator<Item = (K, V)>,
+) -> Result<HashMap<K, V>, StorageError> {
+    rows.into_iter()
+        .try_fold(HashMap::new(), |mut map, (key, value)| match map.entry(key) {
+            Entry::Occupied(e) => Err(StorageError::Unexpected(format!(
+                "{entity}: two rows of {:?} are valid at one version",
+                e.key()
+            ))),
+            Entry::Vacant(e) => {
+                e.insert(value);
+                Ok(map)
+            }
+        })
 }
 
 #[cfg(test)]
