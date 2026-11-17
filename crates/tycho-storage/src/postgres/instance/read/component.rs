@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use diesel::{pg::Pg, prelude::*};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use itertools::Itertools;
+use tracing::warn;
 use tycho_common::{
     models::{protocol::ProtocolComponent, Address, Chain, ChangeType, PaginationParams, StoreVal},
     storage::{StorageError, WithTotal},
@@ -53,7 +54,20 @@ impl PostgresGatewayNew {
                 let Some(instance) = active_instance(&system, conn).await? else {
                     return Ok(WithTotal { entity: Vec::new(), total: Some(0) });
                 };
-                load_components_of(instance, &system, ids, min_tvl, pagination_params, conn).await?
+                let page = match (&self.component_index, ids) {
+                    (Some(index), None) => index.query(instance, min_tvl, pagination_params)?,
+                    _ => None,
+                };
+                match page {
+                    Some(page) => (
+                        load_components_by_ids(instance, &system, &page.ids, conn).await?,
+                        page.total,
+                    ),
+                    None => {
+                        load_components_of(instance, &system, ids, min_tvl, pagination_params, conn)
+                            .await?
+                    }
+                }
             }
             (None, Some(_)) => {
                 return Err(StorageError::Unsupported(
@@ -300,6 +314,41 @@ async fn load_components_of(
         .map(|row| (row, system.to_string()))
         .collect();
     Ok((rows, total))
+}
+
+/// Loads the component rows of `instance` with the database ids `ids`, in id order, each with
+/// `system` as its protocol system name. Ids without a row are skipped.
+async fn load_components_by_ids(
+    instance: InstanceId,
+    system: &str,
+    ids: &[i64],
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<(iorm::ProtocolComponent, String)>, StorageError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = protocol_component::table
+        .filter(
+            protocol_component::instance_id
+                .eq(instance)
+                .and(protocol_component::id.eq_any(ids)),
+        )
+        .order_by(protocol_component::id)
+        .select(iorm::ProtocolComponent::as_select())
+        .load::<iorm::ProtocolComponent>(conn)
+        .await
+        .map_err(PostgresError::from)?;
+    if rows.len() != ids.len() {
+        warn!(
+            n_requested = ids.len(),
+            n_found = rows.len(),
+            "Requested component ids without a component row"
+        );
+    }
+    Ok(rows
+        .into_iter()
+        .map(|row| (row, system.to_string()))
+        .collect())
 }
 
 /// Loads the matching component rows of every active instance, each with the name of its
