@@ -268,3 +268,134 @@ async fn load_instance_tvl(
         })
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use diesel::{
+        sql_query,
+        sql_types::{BigInt, Int4, Text},
+    };
+    use diesel_async::{AsyncPgConnection, RunQueryDsl};
+
+    use super::ComponentIndex;
+    use crate::postgres::{
+        db_fixtures,
+        instance::{cache::component_page::ComponentPage, InstanceId},
+        testing::instance_test_connection,
+    };
+
+    struct Setup {
+        curve_system_id: i64,
+        curve: InstanceId,
+        inactive: InstanceId,
+        uniswap_v4: InstanceId,
+    }
+
+    /// "vm:curve" and "uniswap_v4" on ethereum, each pointing to an instance. "vm:curve" has a
+    /// second instance, `inactive`, that it does not point to.
+    async fn setup(conn: &mut AsyncPgConnection) -> Setup {
+        db_fixtures::insert_chain(conn, "ethereum").await;
+        let curve_system_id =
+            db_fixtures::insert_protocol_system(conn, "vm:curve".to_string()).await;
+        let uniswap_v4_system_id =
+            db_fixtures::insert_protocol_system(conn, "uniswap_v4".to_string()).await;
+        let curve = db_fixtures::insert_instance(conn, curve_system_id, "0.0.1").await;
+        let inactive = db_fixtures::insert_instance(conn, curve_system_id, "0.0.2").await;
+        let uniswap_v4 = db_fixtures::insert_instance(conn, uniswap_v4_system_id, "0.0.1").await;
+        db_fixtures::set_active_instance(conn, curve_system_id, Some(curve)).await;
+        db_fixtures::set_active_instance(conn, uniswap_v4_system_id, Some(uniswap_v4)).await;
+        Setup { curve_system_id, curve, inactive, uniswap_v4 }
+    }
+
+    /// Inserts a component with an explicit id, as an import does.
+    async fn insert_component_with_id(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        id: i64,
+        external_id: &str,
+    ) {
+        sql_query(
+            "INSERT INTO tycho.protocol_component
+                 (instance_id, id, external_id, protocol_type, created_at, creation_block,
+                  creation_tx_hash)
+             VALUES ($1, $2, $3, 'pool', '2020-01-01', 1, '\\x01')",
+        )
+        .bind::<Int4, _>(instance_id)
+        .bind::<BigInt, _>(id)
+        .bind::<Text, _>(external_id)
+        .execute(conn)
+        .await
+        .expect("inserting the component failed");
+    }
+
+    fn page(ids: &[i64], total: i64) -> ComponentPage {
+        ComponentPage { ids: ids.to_vec(), total }
+    }
+
+    #[tokio::test]
+    async fn test_index_holds_active_instances_only() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[]).await;
+        let b = db_fixtures::insert_instance_component(&mut conn, s.curve, "b", &[]).await;
+        db_fixtures::insert_instance_component(&mut conn, s.inactive, "x", &[]).await;
+        db_fixtures::insert_instance_component(&mut conn, s.uniswap_v4, "u", &[]).await;
+
+        let index = ComponentIndex::load(&mut conn)
+            .await
+            .expect("load failed");
+
+        assert_eq!(index.query(s.curve, None, None), Ok(Some(page(&[a, b], 2))));
+        assert_eq!(index.query(s.inactive, None, None), Ok(None));
+        let uniswap_v4 = index
+            .query(s.uniswap_v4, None, None)
+            .expect("query failed")
+            .expect("uniswap_v4 has a unit");
+        assert_eq!(uniswap_v4.total, 1);
+    }
+
+    #[tokio::test]
+    async fn test_same_component_id_in_two_instances_stays_apart() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        insert_component_with_id(&mut conn, s.curve, 1, "a").await;
+        insert_component_with_id(&mut conn, s.uniswap_v4, 1, "u").await;
+        db_fixtures::insert_instance_tvl(&mut conn, s.curve, 1, 10.0).await;
+        db_fixtures::insert_instance_tvl(&mut conn, s.uniswap_v4, 1, 0.0).await;
+
+        let index = ComponentIndex::load(&mut conn)
+            .await
+            .expect("load failed");
+
+        assert_eq!(index.query(s.curve, Some(5.0), None), Ok(Some(page(&[1], 1))));
+        assert_eq!(index.query(s.uniswap_v4, Some(5.0), None), Ok(Some(page(&[], 0))));
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_without_components_has_an_empty_unit() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+
+        let index = ComponentIndex::load(&mut conn)
+            .await
+            .expect("load failed");
+
+        assert_eq!(index.query(s.uniswap_v4, None, None), Ok(Some(page(&[], 0))));
+    }
+
+    #[tokio::test]
+    async fn test_pointer_move_after_load_keeps_the_old_unit() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[]).await;
+        db_fixtures::insert_instance_component(&mut conn, s.inactive, "x", &[]).await;
+        let index = ComponentIndex::load(&mut conn)
+            .await
+            .expect("load failed");
+
+        db_fixtures::set_active_instance(&mut conn, s.curve_system_id, Some(s.inactive)).await;
+
+        assert_eq!(index.query(s.curve, None, None), Ok(Some(page(&[a], 1))));
+        assert_eq!(index.query(s.inactive, None, None), Ok(None));
+    }
+}
