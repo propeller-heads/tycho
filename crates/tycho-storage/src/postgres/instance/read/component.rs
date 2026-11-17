@@ -419,7 +419,7 @@ fn group_by_component(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::Arc};
 
     use chrono::NaiveDate;
     use diesel::{
@@ -436,7 +436,10 @@ mod tests {
 
     use crate::postgres::{
         db_fixtures,
-        instance::{gateway::PostgresGatewayNew, orm as iorm, schema::tycho, InstanceId},
+        instance::{
+            cache::component_index::ComponentIndex, gateway::PostgresGatewayNew, orm as iorm,
+            schema::tycho, InstanceId,
+        },
         testing::instance_test_connection,
     };
 
@@ -460,6 +463,16 @@ mod tests {
         db_fixtures::set_active_instance(conn, uniswap_v4_system_id, Some(uniswap_v4)).await;
         let gateway = PostgresGatewayNew::from_connection(conn).await;
         Setup { gateway, curve_system_id, curve, uniswap_v4 }
+    }
+
+    /// A gateway with a component index loaded now.
+    async fn indexed(conn: &mut AsyncPgConnection) -> PostgresGatewayNew {
+        let index = ComponentIndex::load(conn)
+            .await
+            .expect("loading the component index failed");
+        PostgresGatewayNew::from_connection(conn)
+            .await
+            .with_component_index(Arc::new(index))
     }
 
     fn b(hex: &str) -> Bytes {
@@ -975,5 +988,96 @@ mod tests {
             assert_eq!(external_ids(&found), expected, "page {page}");
             assert_eq!(total, Some(4));
         }
+    }
+
+    #[tokio::test]
+    async fn test_indexed_pages_match_sql() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        for (external_id, tvl) in [
+            ("a", Some(1.0)),
+            ("b", None),
+            ("c", Some(5.0)),
+            ("d", Some(9.0)),
+            ("e", Some(f64::NAN)),
+        ] {
+            let id = db_fixtures::insert_instance_component(
+                &mut conn,
+                s.curve,
+                external_id,
+                &[b("0x01")],
+            )
+            .await;
+            if let Some(tvl) = tvl {
+                db_fixtures::insert_instance_tvl(&mut conn, s.curve, id, tvl).await;
+            }
+        }
+        db_fixtures::insert_instance_component(&mut conn, s.uniswap_v4, "u", &[b("0x02")]).await;
+        let indexed = indexed(&mut conn).await;
+
+        for min_tvl in [None, Some(0.0), Some(5.0)] {
+            for pagination in [
+                None,
+                Some(PaginationParams::new(0, 2)),
+                Some(PaginationParams::new(1, 2)),
+                Some(PaginationParams::new(5, 2)),
+            ] {
+                let pagination = pagination.as_ref();
+                let from_index =
+                    components(&indexed, &mut conn, Some("vm:curve"), None, min_tvl, pagination)
+                        .await
+                        .expect("reading from the index failed");
+                let from_sql =
+                    components(&s.gateway, &mut conn, Some("vm:curve"), None, min_tvl, pagination)
+                        .await
+                        .expect("reading from SQL failed");
+                assert_eq!(from_index, from_sql, "min_tvl {min_tvl:?}, page {pagination:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_components_without_an_index_unit_read_sql() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let indexed = indexed(&mut conn).await;
+        let next = db_fixtures::insert_instance(&mut conn, s.curve_system_id, "0.0.2").await;
+        db_fixtures::insert_instance_component(&mut conn, next, "z", &[b("0x01")]).await;
+
+        db_fixtures::set_active_instance(&mut conn, s.curve_system_id, Some(next)).await;
+        let (found, total) = components(&indexed, &mut conn, Some("vm:curve"), None, None, None)
+            .await
+            .expect("reading the moved pointer failed");
+        assert_eq!(external_ids(&found), vec!["z"]);
+        assert_eq!(total, Some(1));
+
+        db_fixtures::set_active_instance(&mut conn, s.curve_system_id, None).await;
+        let (found, total) = components(&indexed, &mut conn, Some("vm:curve"), None, None, None)
+            .await
+            .expect("reading the cleared pointer failed");
+        assert!(found.is_empty());
+        assert_eq!(total, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_components_by_id_skip_the_index() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let indexed = indexed(&mut conn).await;
+        db_fixtures::insert_instance_component(&mut conn, s.curve, "c", &[b("0x01")]).await;
+
+        // The index loaded vm:curve without components, so a read without ids misses "c".
+        let (found, total) = components(&indexed, &mut conn, Some("vm:curve"), None, None, None)
+            .await
+            .expect("reading from the index failed");
+        assert!(found.is_empty());
+        assert_eq!(total, Some(0));
+
+        let (found, total) =
+            components(&indexed, &mut conn, Some("vm:curve"), Some(&["c"]), None, None)
+                .await
+                .expect("reading by id failed");
+        assert_eq!(external_ids(&found), vec!["c"]);
+        assert_eq!(total, Some(1));
     }
 }
