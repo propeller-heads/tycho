@@ -89,6 +89,20 @@ pub async fn active_instance_ids(
         .map_err(PostgresError::from)?)
 }
 
+/// The protocol systems that have an active instance, each with that instance, in instance id
+/// order. Empty if no protocol system has one.
+pub async fn active_protocols(
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<(String, InstanceId)>, StorageError> {
+    Ok(protocol_system::table
+        .filter(protocol_system::active_instance_id.is_not_null())
+        .order(protocol_system::active_instance_id)
+        .select((protocol_system::name, protocol_system::active_instance_id.assume_not_null()))
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
