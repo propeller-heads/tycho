@@ -30,7 +30,7 @@ use diesel_async::{
     pooled_connection::deadpool::Pool, scoped_futures::ScopedFutureExt, AsyncPgConnection,
     RunQueryDsl,
 };
-use tracing::info;
+use tracing::{error, info};
 use tycho_common::{
     models::{token::Token, Address, Chain},
     storage::{StorageError, WithTotal},
@@ -62,7 +62,6 @@ pub struct TokenCache {
 struct Tokens {
     /// `last_traded` holds the newest time over all units.
     store: ChainTokenStore,
-    #[cfg_attr(test, expect(dead_code, reason = "the write-through reads it"))]
     units: HashMap<InstanceId, TradedUnit>,
 }
 
@@ -214,6 +213,64 @@ impl TokenCache {
             .read()
             .expect("token cache lock poisoned");
         tokens.store.query(query)
+    }
+
+    /// Adds tokens that are not cached; a cached token stays as it is (`ON CONFLICT DO NOTHING`).
+    pub(crate) fn add_tokens(&self, tokens: &[Token]) -> Result<(), StorageError> {
+        self.write_tokens(tokens, false)
+    }
+
+    /// Adds tokens, or replaces the cached values.
+    pub(crate) fn upsert_tokens(&self, tokens: &[Token]) -> Result<(), StorageError> {
+        self.write_tokens(tokens, true)
+    }
+
+    fn write_tokens(&self, tokens: &[Token], overwrite: bool) -> Result<(), StorageError> {
+        let mut guard = self
+            .tokens
+            .write()
+            .map_err(|_poisoned| {
+                StorageError::Unexpected("token cache lock poisoned".to_string())
+            })?;
+        for token in tokens {
+            if token.chain != self.chain {
+                error!(chain = %token.chain, "Token write for a chain other than the cache's chain");
+                continue;
+            }
+            guard
+                .store
+                .upsert(token.clone(), overwrite)?;
+        }
+        Ok(())
+    }
+
+    /// Marks trades of `instance`. Does nothing when `instance` has no unit, or for a token that
+    /// is not cached. A time never moves back.
+    pub(crate) fn update_last_traded<'a>(
+        &self,
+        instance: InstanceId,
+        updates: impl Iterator<Item = (&'a Address, NaiveDateTime)>,
+    ) {
+        let mut guard = self
+            .tokens
+            .write()
+            .expect("token cache lock poisoned");
+        let Tokens { store, units } = &mut *guard;
+        let Some(unit) = units.get_mut(&instance) else {
+            return;
+        };
+        for (address, ts) in updates {
+            let Some(&pos) = store.idx_by_address.get(address) else {
+                continue;
+            };
+            let micros = ts.and_utc().timestamp_micros();
+            let traded = unit
+                .last_traded
+                .entry(pos)
+                .or_insert(micros);
+            *traded = (*traded).max(micros);
+            store.update_last_traded(address, ts);
+        }
     }
 }
 
