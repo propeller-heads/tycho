@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Aqua0MarketsResponse {
-    pub markets: Vec<Aqua0Market>,
+    /// Read one by one, so a malformed entry does not fail the list.
+    pub markets: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]

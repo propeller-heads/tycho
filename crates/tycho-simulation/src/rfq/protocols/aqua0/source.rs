@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     str::FromStr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -15,12 +15,12 @@ use tycho_common::{models::token::Token, Bytes};
 use crate::{
     book::{
         component::{encode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE},
-        Book, BookFeedConfig, BookSnapshot, Books, ReceivedAt,
+        sim, Book, BookFeedConfig, BookSnapshot, Books, ReceivedAt,
     },
     protocol::models::ProtocolComponent,
     rfq::protocols::aqua0::{
         client::{backend_component_id, unix_now, Aqua0Client, Aqua0Pool, StateAnswer},
-        models::{Aqua0Market, Aqua0StateResponse},
+        models::{Aqua0Level, Aqua0Market, Aqua0StateResponse},
         state::Aqua0State,
         PROTOCOL_SYSTEM, PROTOCOL_TYPE,
     },
@@ -31,6 +31,12 @@ use crate::{
 /// empty the book.
 const STALE_MARKETS_FACTOR: u32 = 5;
 
+/// The first wait before reading a failed market list again; it doubles up to `markets_refresh`.
+const MARKETS_RETRY: Duration = Duration::from_secs(5);
+
+/// V4's largest static LP fee. A pool key fee above it is the dynamic-fee flag or invalid.
+const MAX_LP_FEE: u32 = 1_000_000;
+
 /// Fetches every Aqua0 market on the chain once per poll: the market list on its own slower
 /// cadence, then each listed pool's state. Markets the backend stops listing, or that cannot be
 /// quoted right now, are left out of the snapshot, which removes them.
@@ -38,22 +44,37 @@ const STALE_MARKETS_FACTOR: u32 = 5;
 pub struct Aqua0BookSource {
     pub(crate) client: Arc<Aqua0Client>,
     pub(crate) book_config: BookFeedConfig,
+    /// The USD stablecoins a market's depth is valued in for `min_tvl_usd`.
+    #[debug(skip)]
+    pub(crate) usd_quote_tokens: Arc<HashSet<Bytes>>,
     /// Sample sizes by token address; a token missing here samples 1 to 10,000 whole units.
     #[debug(skip)]
     pub(crate) sample_sizes: Arc<HashMap<Bytes, Vec<BigUint>>>,
     pub(crate) markets_refresh: Duration,
     #[debug(skip)]
     pub(crate) markets: Mutex<Option<(Instant, Vec<Aqua0Market>)>>,
+    /// Failed market list reads in a row, and when the next read may go out.
+    #[debug(skip)]
+    markets_retry: Mutex<(u32, Option<Instant>)>,
 }
 
 impl Aqua0BookSource {
     pub(crate) fn new(
         client: Arc<Aqua0Client>,
         book_config: BookFeedConfig,
+        usd_quote_tokens: Arc<HashSet<Bytes>>,
         sample_sizes: Arc<HashMap<Bytes, Vec<BigUint>>>,
         markets_refresh: Duration,
     ) -> Self {
-        Self { client, book_config, sample_sizes, markets_refresh, markets: Mutex::new(None) }
+        Self {
+            client,
+            book_config,
+            usd_quote_tokens,
+            sample_sizes,
+            markets_refresh,
+            markets: Mutex::new(None),
+            markets_retry: Mutex::new((0, None)),
+        }
     }
 
     fn cached_markets(&self) -> Option<(Instant, Vec<Aqua0Market>)> {
@@ -65,8 +86,23 @@ impl Aqua0BookSource {
 
     async fn listed_markets(&self) -> Result<Vec<Aqua0Market>, FeedError> {
         let cached = self.cached_markets();
+        let usable = cached
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < self.markets_refresh * STALE_MARKETS_FACTOR)
+            .map(|(_, markets)| markets.clone());
         if let Some((at, markets)) = &cached {
             if at.elapsed() < self.markets_refresh {
+                return Ok(markets.clone());
+            }
+        }
+        // After a failed read, the last list is served until the backoff has passed.
+        let retry_at = self
+            .markets_retry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .1;
+        if let (Some(markets), Some(retry_at)) = (&usable, retry_at) {
+            if Instant::now() < retry_at {
                 return Ok(markets.clone());
             }
         }
@@ -77,18 +113,52 @@ impl Aqua0BookSource {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) =
                     Some((Instant::now(), markets.clone()));
+                *self
+                    .markets_retry
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = (0, None);
                 Ok(markets)
             }
-            Err(error) if !error.is_fatal() => match cached {
-                Some((at, markets))
-                    if at.elapsed() < self.markets_refresh * STALE_MARKETS_FACTOR =>
-                {
-                    warn!(%error, "Aqua0 market list unavailable, using the last one");
-                    Ok(markets)
+            Err(error) if !error.is_fatal() => {
+                let mut retry = self
+                    .markets_retry
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let wait = MARKETS_RETRY
+                    .saturating_mul(2u32.saturating_pow(retry.0))
+                    .min(self.markets_refresh);
+                *retry = (retry.0.saturating_add(1), Some(Instant::now() + wait));
+                match usable {
+                    Some(markets) => {
+                        warn!(%error, "Aqua0 market list unavailable, using the last one");
+                        Ok(markets)
+                    }
+                    None => Err(error),
                 }
-                _ => Err(error),
-            },
+            }
             Err(error) => Err(error),
+        }
+    }
+
+    /// Whether a market's depth clears `min_tvl_usd`. Depth is the largest backed fill each way,
+    /// valued in the market's USD stablecoin; a market with none clears only a zero floor.
+    fn clears_min_tvl(
+        &self,
+        state: &Aqua0StateResponse,
+        token0: &Token,
+        token1: &Token,
+        component_id: &str,
+    ) -> bool {
+        let id = Bytes::from_str(component_id).unwrap_or_default();
+        match depth_usd(state, token0, token1, &self.usd_quote_tokens) {
+            Some(tvl) => self
+                .book_config
+                .clears_min_tvl(tvl, &id),
+            None if self.book_config.min_tvl_usd <= 0.0 => true,
+            None => {
+                debug!(book = %id, "skipping Aqua0 pool, no USD stablecoin values its depth");
+                false
+            }
         }
     }
 
@@ -159,9 +229,15 @@ impl HttpSource for Aqua0BookSource {
         for ((market, token0, token1), answer) in wanted.iter().zip(answers) {
             match answer {
                 Ok(StateAnswer::Quotable(state)) => {
+                    let component_id = state.component_id.clone();
+                    let clears = self.clears_min_tvl(&state, token0, token1, &component_id);
                     match book(&self.client, market, *state, token0, token1, now) {
-                        Ok(book) => books.insert(book),
-                        Err(why) => warn!(pool = %market.pool_id, %why, "skipping Aqua0 pool"),
+                        Ok(book) if clears => books.insert(book),
+                        Ok(_) => {}
+                        Err(why) => {
+                            failed += 1;
+                            warn!(pool = %market.pool_id, %why, "skipping Aqua0 pool");
+                        }
                     }
                 }
                 Ok(StateAnswer::NoLiquidity) => {
@@ -173,14 +249,45 @@ impl HttpSource for Aqua0BookSource {
                 }
             }
         }
-        // Only a poll where every pool failed is a failed poll, which backs off.
+        // Only a poll where every pool failed, to answer or to check, is a failed poll, which
+        // backs off.
         if failed > 0 && failed == wanted.len() {
             return Err(FeedError::Connection(format!(
-                "every Aqua0 state request failed ({failed} pools)"
+                "every Aqua0 pool failed to load or to check ({failed} pools)"
             )));
         }
         Ok(BookSnapshot::received_now(books))
     }
+}
+
+/// The largest backed fill each way, in whole units of the market's USD stablecoin: what selling
+/// token0 pays out of it plus what selling it takes in, or the same from token0's side.
+fn depth_usd(
+    state: &Aqua0StateResponse,
+    token0: &Token,
+    token1: &Token,
+    usd_quote_tokens: &HashSet<Bytes>,
+) -> Option<f64> {
+    let largest = |levels: &[Aqua0Level], amount: fn(&Aqua0Level) -> &str| {
+        levels
+            .iter()
+            .filter(|level| level.fully_supported)
+            .filter_map(|level| BigUint::from_str(amount(level)).ok())
+            .max()
+            .unwrap_or_default()
+    };
+    let (sell0, sell1) = (&state.directions.zero_for_one, &state.directions.one_for_zero);
+    if usd_quote_tokens.contains(&token1.address) {
+        let paid = largest(sell0, |level| &level.amount_out);
+        let taken = largest(sell1, |level| &level.amount_in);
+        return Some(sim::to_human(&(paid + taken), token1.decimals));
+    }
+    if usd_quote_tokens.contains(&token0.address) {
+        let taken = largest(sell0, |level| &level.amount_in);
+        let paid = largest(sell1, |level| &level.amount_out);
+        return Some(sim::to_human(&(paid + taken), token0.decimals));
+    }
+    None
 }
 
 /// A 20-byte address from `0x` hex; anything else is refused up front.
@@ -254,8 +361,9 @@ fn book(
     }
     let hooks = address(&state.hooks)?;
     let pool_manager = address(&state.pool_manager)?;
-    if state.fee > 0xFF_FFFF || !(1..=0x7F_FFFF).contains(&state.tick_spacing) {
-        return Err("fee or tickSpacing out of range".into());
+    // A dynamic-fee pool (fee flag 0x800000) has no fee to report, and Aqua0 lists none.
+    if state.fee > MAX_LP_FEE || !(1..=0x7F_FFFF).contains(&state.tick_spacing) {
+        return Err("dynamic or out-of-range fee, or tickSpacing out of range".into());
     }
     let pool_id = Bytes::from_str(&state.pool_id).map_err(|error| error.to_string())?;
     if pool_id.as_ref() != v4_pool_id(&currency0, &currency1, state.fee, state.tick_spacing, &hooks)
@@ -427,8 +535,8 @@ pub mod tests {
         }
     }
 
-    /// A poll publishes the quotable markets, leaves out the empty and the malformed ones, and
-    /// keeps the market list between refreshes.
+    /// A poll publishes the quotable markets, leaves out the empty and the malformed ones (in
+    /// `/markets` as well as `/state`), and keeps the market list between refreshes.
     #[tokio::test]
     async fn a_poll_publishes_quotable_markets_and_skips_the_rest() {
         let polygon = recorded(POLYGON_STATE);
@@ -441,6 +549,7 @@ pub mod tests {
             { "chainId": 137, "poolId": empty_pool, "classId": "1", "tokens": good.tokens },
             { "chainId": 137, "poolId": broken_pool, "classId": "1", "tokens": good.tokens },
             { "chainId": 137, "poolId": quiet_pool, "classId": "1", "tokens": good.tokens },
+            { "chainId": "137", "poolId": 7 },
         ]})
         .to_string();
         let mut state_json: serde_json::Value = serde_json::from_str(POLYGON_STATE).unwrap();
@@ -481,6 +590,7 @@ pub mod tests {
         let source = Aqua0BookSource::new(
             client(&server.url(), 137),
             BookFeedConfig { chain: Chain::Polygon, tokens: Arc::new(tokens), min_tvl_usd: 0.0 },
+            Arc::new(HashSet::new()),
             Arc::new(HashMap::new()),
             Duration::from_secs(60),
         );
@@ -532,6 +642,7 @@ pub mod tests {
                 tokens: Arc::new(HashMap::new()),
                 min_tvl_usd: 0.0,
             },
+            Arc::new(HashSet::new()),
             Arc::new(HashMap::new()),
             Duration::from_secs(60),
         );
@@ -544,6 +655,135 @@ pub mod tests {
         assert_eq!(server.request_count(), 1, "only the refused quote reached the server");
     }
 
+    fn polygon_source(
+        url: &str,
+        min_tvl_usd: f64,
+        usd: HashSet<Bytes>,
+        refresh: Duration,
+    ) -> Aqua0BookSource {
+        let market = market_of(&recorded(POLYGON_STATE));
+        let tokens: HashMap<Bytes, Token> = market
+            .tokens
+            .iter()
+            .map(|address| (Bytes::from_str(address).unwrap(), token(address, Chain::Polygon)))
+            .collect();
+        Aqua0BookSource::new(
+            client(url, 137),
+            BookFeedConfig { chain: Chain::Polygon, tokens: Arc::new(tokens), min_tvl_usd },
+            Arc::new(usd),
+            Arc::new(HashMap::new()),
+            refresh,
+        )
+    }
+
+    fn polygon_markets() -> String {
+        let market = market_of(&recorded(POLYGON_STATE));
+        serde_json::json!({ "markets": [{
+            "chainId": 137, "poolId": market.pool_id, "classId": market.class_id, "tokens": market.tokens
+        }]})
+        .to_string()
+    }
+
+    /// A poll where every market answers but none passes its checks is a failed poll.
+    #[tokio::test]
+    async fn a_poll_where_every_market_fails_its_checks_fails() {
+        let markets = polygon_markets();
+        let server = spawn_http_server(move |request| {
+            if request.target.starts_with("/markets") {
+                return Some(("200 OK", markets.clone()));
+            }
+            let mut state: serde_json::Value = serde_json::from_str(POLYGON_STATE).unwrap();
+            state["hooks"] = format!("0x{}", "ab".repeat(20)).into();
+            state["expiresAt"] = u64::MAX.into();
+            Some(("200 OK", state.to_string()))
+        })
+        .await;
+        let source = polygon_source(&server.url(), 0.0, HashSet::new(), Duration::from_secs(60));
+        assert!(matches!(source.fetch().await, Err(FeedError::Connection(_))));
+    }
+
+    /// After a failed `/markets` read the last list is served without reading again until the
+    /// backoff has passed.
+    #[tokio::test]
+    async fn a_failed_market_list_is_not_read_again_on_every_poll() {
+        let markets = polygon_markets();
+        let market_reads = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::clone(&market_reads);
+        let server = spawn_http_server(move |request| {
+            if request.target.starts_with("/markets") {
+                if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Some(("200 OK", markets.clone()));
+                }
+                return Some(("500 Internal Server Error", "{}".to_string()));
+            }
+            let mut state: serde_json::Value = serde_json::from_str(POLYGON_STATE).unwrap();
+            state["expiresAt"] = u64::MAX.into();
+            Some(("200 OK", state.to_string()))
+        })
+        .await;
+        let source = polygon_source(&server.url(), 0.0, HashSet::new(), Duration::from_secs(1));
+        assert_eq!(
+            source
+                .fetch()
+                .await
+                .unwrap()
+                .books
+                .len(),
+            1
+        );
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert_eq!(
+            source
+                .fetch()
+                .await
+                .unwrap()
+                .books
+                .len(),
+            1,
+            "the last list is served"
+        );
+        assert_eq!(
+            source
+                .fetch()
+                .await
+                .unwrap()
+                .books
+                .len(),
+            1
+        );
+        assert_eq!(market_reads.load(Ordering::SeqCst), 2, "no read during the backoff");
+    }
+
+    /// Depth is the largest backed fill each way in the market's USD stablecoin; a market with
+    /// none clears only a zero floor.
+    #[test]
+    fn the_tvl_floor_values_depth_in_the_usd_stablecoin() {
+        let state = recorded(POLYGON_STATE);
+        let (token0, token1) =
+            (token(&state.tokens[0], Chain::Polygon), token(&state.tokens[1], Chain::Polygon));
+        let usd0 = HashSet::from([token0.address.clone()]);
+        let depth = depth_usd(&state, &token0, &token1, &usd0).unwrap();
+        assert!(depth > 0.0);
+        assert_eq!(depth_usd(&state, &token0, &token1, &HashSet::new()), None);
+
+        let id = &state.component_id;
+        let floor = |min: f64, usd: HashSet<Bytes>| {
+            polygon_source("http://localhost", min, usd, Duration::from_secs(60))
+                .clears_min_tvl(&state, &token0, &token1, id)
+        };
+        assert!(floor(depth, usd0.clone()));
+        assert!(!floor(depth + 1.0, usd0));
+        assert!(floor(0.0, HashSet::new()));
+        assert!(!floor(1.0, HashSet::new()));
+    }
+
+    #[test]
+    fn a_dynamic_fee_pool_is_refused() {
+        let mut state = recorded(POLYGON_STATE);
+        state.fee = 0x80_0000;
+        assert!(polygon_book(state).is_err());
+    }
+
     #[test]
     fn default_samples_follow_token_decimals() {
         let source = Aqua0BookSource::new(
@@ -553,6 +793,7 @@ pub mod tests {
                 tokens: Arc::new(HashMap::new()),
                 min_tvl_usd: 0.0,
             },
+            Arc::new(HashSet::new()),
             Arc::new(HashMap::from([(Bytes::zero(20), vec![BigUint::from(5u32)])])),
             Duration::from_secs(60),
         );

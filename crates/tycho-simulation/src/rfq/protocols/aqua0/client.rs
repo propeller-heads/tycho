@@ -30,6 +30,9 @@ pub const AQUA0_API_URL: &str = "https://api.aqua0.xyz/api/tycho/rfq";
 /// How long approvals stay paused after a 429 that names no wait of its own.
 const DEFAULT_PAUSE: Duration = Duration::from_secs(60);
 
+/// The longest pause a 429 can ask for; a larger `Retry-After` is cut to this.
+const MAX_PAUSE: Duration = Duration::from_secs(300);
+
 /// Whether Aqua0 refused the request because it does not execute on the chain.
 fn refuses_the_chain(body: &str) -> bool {
     body.contains("CHAIN_NOT_SUPPORTED")
@@ -136,7 +139,18 @@ impl Aqua0Client {
             .query(&[("chainId", self.chain_id.to_string())]);
         let response: Aqua0MarketsResponse =
             fetch_json(request, "Aqua0 markets", refuses_the_chain).await?;
-        Ok(response.markets)
+        // One malformed entry is skipped, not the whole list.
+        Ok(response
+            .markets
+            .into_iter()
+            .filter_map(|entry| match serde_json::from_value::<Aqua0Market>(entry) {
+                Ok(market) => Some(market),
+                Err(error) => {
+                    warn!(%error, "skipping a malformed Aqua0 market entry");
+                    None
+                }
+            })
+            .collect())
     }
 
     /// Indicative levels for one listed market at the given comma-separated sample sizes.
@@ -239,7 +253,8 @@ impl Aqua0Client {
                 .unwrap_or_default();
             let wait = header
                 .or(body.retry_after_seconds)
-                .map_or(DEFAULT_PAUSE, Duration::from_secs);
+                .map_or(DEFAULT_PAUSE, Duration::from_secs)
+                .min(MAX_PAUSE);
             return Err(self.paused_by(wait));
         }
         let body = response
@@ -312,6 +327,20 @@ fn check_binding_quote(
     {
         return Err(mismatch("router"));
     }
+    // The signed quote names what the backend signed, so the encoder's own comparison with the
+    // swap checks the answer and not this request.
+    let base_token = Bytes::from_str(&quote.token_in)
+        .map_err(|error| RFQError::ParsingError(format!("Invalid Aqua0 tokenIn: {error}")))?;
+    let quote_token = Bytes::from_str(&quote.token_out)
+        .map_err(|error| RFQError::ParsingError(format!("Invalid Aqua0 tokenOut: {error}")))?;
+    let amount_in = BigUint::from_str(&quote.amount_in)
+        .map_err(|error| RFQError::ParsingError(format!("Invalid Aqua0 amountIn: {error}")))?;
+    if base_token != params.token_in ||
+        quote_token != params.token_out ||
+        amount_in != params.amount_in
+    {
+        return Err(mismatch("swap"));
+    }
     let amount_out = BigUint::from_str(&quote.amount_out)
         .map_err(|error| RFQError::ParsingError(format!("Invalid Aqua0 amountOut: {error}")))?;
     if amount_out == BigUint::default() {
@@ -331,11 +360,15 @@ fn check_binding_quote(
     }
     debug!(%amount_out, deadline, "Aqua0 binding quote accepted");
     Ok(SignedQuote {
-        base_token: params.token_in.clone(),
-        quote_token: params.token_out.clone(),
-        amount_in: params.amount_in.clone(),
+        base_token,
+        quote_token,
+        amount_in,
         amount_out,
-        quote_attributes: [("hook_data".to_string(), hook_data)].into(),
+        quote_attributes: [
+            ("hook_data".to_string(), hook_data),
+            ("deadline_timestamp".to_string(), Bytes::from(deadline.to_be_bytes().to_vec())),
+        ]
+        .into(),
     })
 }
 
@@ -423,6 +456,9 @@ mod tests {
         let signed = check_binding_quote(&quote_for(&request), &request, &params(), 999).unwrap();
         assert_eq!(signed.amount_out, BigUint::from(999_000u32));
         assert_eq!(signed.quote_attributes["hook_data"].to_string(), "0xdeadbeef");
+        assert_eq!(signed.quote_attributes["deadline_timestamp"].as_ref(), 1000u64.to_be_bytes());
+        assert_eq!(signed.base_token, params().token_in);
+        assert_eq!(signed.amount_in, params().amount_in);
     }
 
     #[rstest]
@@ -488,6 +524,7 @@ mod tests {
         ));
     }
 
+    /// A 429 asking for more than five minutes pauses approvals for five minutes.
     #[tokio::test]
     async fn a_429_pauses_approvals_without_another_request() {
         let server = spawn_http_server(|_| {
@@ -505,9 +542,9 @@ mod tests {
             .request_binding_quote(&params(), &pool())
             .await
             .unwrap_err();
-        assert!(matches!(first, RFQError::QuoteNotFound(ref m) if m.contains("900s")), "{first}");
+        assert!(matches!(first, RFQError::QuoteNotFound(ref m) if m.contains("300s")), "{first}");
         let left = client.paused_for().unwrap();
-        assert!(left > Duration::from_secs(890) && left <= Duration::from_secs(900));
+        assert!(left > Duration::from_secs(290) && left <= MAX_PAUSE);
 
         let second = client
             .request_binding_quote(&params(), &pool())

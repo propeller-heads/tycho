@@ -32,10 +32,11 @@ use crate::{
     },
 };
 
-/// Gas for one Aqua0 fill when the backend sends no measured estimate: `PoolManager.swap` while
-/// the hook adds and removes each JIT range. A one-range fill through the Arbitrum Tycho Router
-/// used 802,743 (`Aqua0.t.sol`).
-const SWAP_GAS_BASE: u64 = 600_000;
+/// Gas for one Aqua0 fill when the backend sends no measured estimate: the V4 executor's swap,
+/// with the hook adding and removing each JIT range. In `Aqua0.t.sol` the executor's part of a
+/// one-range fill used 717,716 of the router call's 799,690; the router's own transfers are
+/// charged by the gas estimator.
+const SWAP_GAS_BASE: u64 = 520_000;
 const SWAP_GAS_PER_RANGE: u64 = 200_000;
 
 fn swap_gas(ranges: usize) -> BigUint {
@@ -96,6 +97,9 @@ pub struct Aqua0State {
     zero_for_one: Vec<Aqua0Level>,
     #[debug(skip)]
     one_for_zero: Vec<Aqua0Level>,
+    /// Set on the state a fill returns: a route may fill each Aqua0 market once.
+    #[serde(default)]
+    filled: bool,
     #[serde(skip)]
     #[debug(skip)]
     client: Option<Arc<Aqua0Client>>,
@@ -126,6 +130,7 @@ impl Aqua0State {
             expires_at,
             zero_for_one,
             one_for_zero,
+            filled: false,
             client: Some(client),
         })
     }
@@ -144,7 +149,19 @@ impl Aqua0State {
         )
     }
 
+    /// The state after a fill on this market. It quotes nothing, since a route can use an Aqua0
+    /// market only once.
+    fn after_fill(&self) -> Box<dyn ProtocolSim> {
+        Box::new(Self { filled: true, ..self.clone() })
+    }
+
     fn ensure_fresh(&self) -> Result<(), SimulationError> {
+        if self.filled {
+            return Err(SimulationError::InvalidInput(
+                "this Aqua0 market is already filled in the route".into(),
+                None,
+            ));
+        }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|error| SimulationError::FatalError(error.to_string()))?
@@ -182,19 +199,25 @@ impl Aqua0State {
         Ok(points)
     }
 
-    /// Linear between backed samples, and the gas of the sample at or above `amount_in`.
+    /// Linear between backed samples, and the gas of the sample at or above `amount_in`. An
+    /// amount below the smallest backed sample is refused: Aqua0 does not quote below its minimum
+    /// trade size, and the backend leaves smaller sizes out of `/state`.
     fn interpolate(
         &self,
         amount_in: &BigUint,
         levels: &[Aqua0Level],
     ) -> Result<(BigUint, BigUint), SimulationError> {
+        sim::require_positive_amount(amount_in)?;
         let points = Self::backed_points(levels)?;
-        if amount_in == &BigUint::default() {
-            return Ok((BigUint::default(), points[0].gas.clone()));
+        let minimum = &points[0].amount_in;
+        if amount_in < minimum {
+            return Err(SimulationError::RecoverableError(format!(
+                "Aqua0 amount {amount_in} is below the smallest backed size {minimum}"
+            )));
         }
         let mut previous_in = BigUint::default();
         let mut previous_out = BigUint::default();
-        let mut previous_gas = swap_gas(1);
+        let mut previous_gas = points[0].gas.clone();
         for point in &points {
             if amount_in <= &point.amount_in {
                 let input_span = &point.amount_in - &previous_in;
@@ -209,7 +232,7 @@ impl Aqua0State {
         let partial = GetAmountOutResult {
             amount: previous_out,
             gas: previous_gas,
-            new_state: self.clone_box(),
+            new_state: self.after_fill(),
         };
         Err(SimulationError::InvalidInput(
             format!(
@@ -222,6 +245,8 @@ impl Aqua0State {
 
 #[typetag::serde]
 impl ProtocolSim for Aqua0State {
+    /// The pool's LP fee. Pools with V4's dynamic-fee flag are refused when the feed reads them,
+    /// so this is always a static fee.
     fn fee(&self) -> f64 {
         self.fee_units as f64 / 1_000_000.0
     }
@@ -250,7 +275,7 @@ impl ProtocolSim for Aqua0State {
         self.ensure_fresh()?;
         let (levels, _, _) = self.direction(&token_in.address, &token_out.address)?;
         let (amount, gas) = self.interpolate(&amount_in, levels)?;
-        Ok(GetAmountOutResult { amount, gas, new_state: self.clone_box() })
+        Ok(GetAmountOutResult { amount, gas, new_state: self.after_fill() })
     }
 
     fn get_limits(
@@ -279,12 +304,18 @@ impl ProtocolSim for Aqua0State {
         };
         let (capacity, _) =
             self.get_limits(params.token_in().address.clone(), params.token_out().address.clone())?;
+        let (levels, _, _) =
+            self.direction(&params.token_in().address, &params.token_out().address)?;
+        let smallest = Self::backed_points(levels)?[0]
+            .amount_in
+            .clone();
         let maximum = max_amount_in
             .as_ref()
             .map_or_else(|| capacity.clone(), |bound| capacity.clone().min(bound.clone()));
         let minimum = min_amount_in
             .clone()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .max(smallest);
         if minimum > maximum || limit.denominator == BigUint::default() {
             return Err(SimulationError::InvalidInput("Invalid Aqua0 trade bounds".into(), None));
         }
@@ -298,20 +329,26 @@ impl ProtocolSim for Aqua0State {
         if clears(&maximum, &result.amount) {
             return Ok(PoolSwap::new(maximum, result.amount, result.new_state, None));
         }
-        let candidate = crate::evm::query_pool_swap::query_pool_swap(self, params)?;
-        let amount = candidate
-            .amount_in()
-            .clone()
-            .min(maximum);
-        let result = quote(amount.clone())?;
-        // The floating-point search has a tolerance; never return a quote below the exact
-        // integer price limit or outside the caller's bounds.
-        if amount < minimum || !clears(&amount, &result.amount) {
+        // The samples are linear between levels, so search the integer inputs directly: the
+        // smallest size must clear the limit and the largest does not.
+        let mut low = minimum;
+        if !clears(&low, &quote(low.clone())?.amount) {
             return Err(SimulationError::InvalidInput(
                 "No Aqua0 trade satisfies the requested bounds".into(),
                 None,
             ));
         }
+        let mut high = maximum;
+        while &high - &low > BigUint::from(1u32) {
+            let middle = (&low + &high) / 2u32;
+            if clears(&middle, &quote(middle.clone())?.amount) {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        let amount = low;
+        let result = quote(amount.clone())?;
         Ok(PoolSwap::new(amount, result.amount, result.new_state, None))
     }
 
@@ -346,7 +383,8 @@ impl ProtocolSim for Aqua0State {
                 self.token0 == other.token0 &&
                     self.token1 == other.token1 &&
                     self.pool == other.pool &&
-                    self.state_version == other.state_version
+                    self.state_version == other.state_version &&
+                    self.filled == other.filled
             })
     }
 
@@ -440,8 +478,8 @@ mod tests {
                 .unwrap()
                 .gas
         };
-        assert_eq!(gas(100), BigUint::from(800_000u32));
-        assert_eq!(gas(150), BigUint::from(1_000_000u32));
+        assert_eq!(gas(100), BigUint::from(720_000u32));
+        assert_eq!(gas(150), BigUint::from(920_000u32));
     }
 
     #[test]
@@ -462,6 +500,42 @@ mod tests {
             state.get_amount_out(BigUint::from(201u32), &state.token0, &state.token1),
             Err(SimulationError::InvalidInput(_, Some(_)))
         ));
+    }
+
+    #[test]
+    fn refuses_nothing_and_amounts_below_the_smallest_backed_size() {
+        let state = state();
+        assert!(matches!(
+            state.get_amount_out(BigUint::default(), &state.token0, &state.token1),
+            Err(SimulationError::InvalidInput(_, None))
+        ));
+        assert!(matches!(
+            state.get_amount_out(BigUint::from(99u32), &state.token0, &state.token1),
+            Err(SimulationError::RecoverableError(_))
+        ));
+        assert!(state
+            .get_amount_out(BigUint::from(100u32), &state.token0, &state.token1)
+            .is_ok());
+    }
+
+    /// A route fills an Aqua0 market once, so the state after a fill quotes nothing more.
+    #[test]
+    fn the_state_after_a_fill_refuses_a_second_fill() {
+        let state = state();
+        let filled = state
+            .get_amount_out(BigUint::from(150u32), &state.token0, &state.token1)
+            .unwrap()
+            .new_state;
+        assert!(!state.eq(filled.as_ref()));
+        assert!(filled
+            .get_amount_out(BigUint::from(150u32), &state.token0, &state.token1)
+            .is_err());
+        assert!(filled
+            .get_amount_out(BigUint::from(100u32), &state.token1, &state.token0)
+            .is_err());
+        assert!(filled
+            .get_limits(state.token0.address.clone(), state.token1.address)
+            .is_err());
     }
 
     #[test]
@@ -489,16 +563,20 @@ mod tests {
     #[test]
     fn trade_depth_is_capped_by_backed_liquidity_and_caller_bounds() {
         let state = state();
-        for (minimum, maximum, expected) in [
-            (None, None, Some(200u32)),
-            (None, Some(150u32), Some(150)),
-            (Some(151u32), Some(150), None),
+        // 100 -> 300 and 200 -> 500: a price of 8/3 is met up to 150, and 3 only at 100.
+        for (price, minimum, maximum, expected) in [
+            ((2u32, 1u32), None, None, Some(200u32)),
+            ((2, 1), None, Some(150u32), Some(150)),
+            ((2, 1), Some(151u32), Some(150), None),
+            ((8, 3), None, None, Some(150)),
+            ((3, 1), None, None, Some(100)),
+            ((7, 2), None, None, None),
         ] {
             let params = QueryPoolSwapParams::new(
                 state.token0.clone(),
                 state.token1.clone(),
                 SwapConstraint::TradeLimitPrice {
-                    limit: Price::new(2u32.into(), 1u32.into()),
+                    limit: Price::new(price.0.into(), price.1.into()),
                     tolerance: 0.001,
                     min_amount_in: minimum.map(BigUint::from),
                     max_amount_in: maximum.map(BigUint::from),
@@ -508,7 +586,7 @@ mod tests {
             if let Some(expected) = expected {
                 let result = result.unwrap();
                 assert_eq!(result.amount_in(), &BigUint::from(expected));
-                assert!(result.amount_out() >= &(result.amount_in() * 2u32));
+                assert!(result.amount_out() * price.1 >= result.amount_in() * price.0);
             } else {
                 assert!(result.is_err());
             }

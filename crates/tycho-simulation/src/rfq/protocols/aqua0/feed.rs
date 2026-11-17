@@ -1,4 +1,9 @@
-use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    sync::Arc,
+    time::Duration,
+};
 
 use num_bigint::BigUint;
 use tycho_common::Bytes;
@@ -24,10 +29,11 @@ pub struct Aqua0Feed {
     source: Aqua0BookSource,
 }
 
-/// Builds an [`Aqua0Feed`] from the shared [`BookFeedConfig`]. Aqua0's RFQ API takes no
-/// credentials.
+/// Builds an [`Aqua0Feed`] from the shared [`BookFeedConfig`] and the USD stablecoins a market's
+/// depth is valued in against `min_tvl_usd`. Aqua0's RFQ API takes no credentials.
 pub struct Aqua0FeedBuilder {
     book_config: BookFeedConfig,
+    usd_quote_tokens: Arc<HashSet<Bytes>>,
     base_url: String,
     feed_config: HttpFeedConfig,
     quote_timeout: Duration,
@@ -36,9 +42,14 @@ pub struct Aqua0FeedBuilder {
 }
 
 impl Aqua0FeedBuilder {
-    pub fn new(book_config: BookFeedConfig) -> Self {
+    /// A market with neither token in `usd_quote_tokens` clears only a zero `min_tvl_usd`.
+    pub fn new(
+        book_config: BookFeedConfig,
+        usd_quote_tokens: impl Into<Arc<HashSet<Bytes>>>,
+    ) -> Self {
         Self {
             book_config,
+            usd_quote_tokens: usd_quote_tokens.into(),
             base_url: AQUA0_API_URL.to_string(),
             feed_config: Self::default_feed_config(),
             quote_timeout: DEFAULT_QUOTE_TIMEOUT,
@@ -115,6 +126,7 @@ impl Aqua0FeedBuilder {
             source: Aqua0BookSource::new(
                 Arc::new(client),
                 self.book_config,
+                self.usd_quote_tokens,
                 Arc::new(self.sample_sizes),
                 self.markets_refresh,
             ),
