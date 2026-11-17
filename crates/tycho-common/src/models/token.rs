@@ -29,8 +29,10 @@ pub struct Token {
     ///  - 100: Normal token
     ///  - 75: Rebase token
     ///  - 50: Fee token
-    ///  - 10: Token analysis failed at creation
-    ///  - 9-5: Token analysis failed on cronjob (after creation).
+    ///  - 30: Fee token whose fee changes with the trade size, the block or the time
+    ///  - 10: Blocked, temporarily blocked or without liquidity, or the analysis failed
+    ///  - 9-5: Still blocked or without liquidity on later analyses
+    ///  - 1: Must never be quoted (a honeypot, or the owner can take tokens out of the pool)
     ///  - 0: Failed to extract decimals onchain
     pub quality: u32,
 }
@@ -54,6 +56,16 @@ impl Token {
             chain,
             quality,
         }
+    }
+
+    /// Sets quality, tax and gas from `analysis`.
+    pub fn apply_analysis(&mut self, analysis: &TokenAnalysis) {
+        self.quality = analysis.verdict.quality();
+        self.tax = analysis.fees.max_tax();
+        self.gas = analysis
+            .gas
+            .map(|g| vec![Some(g)])
+            .unwrap_or_default();
     }
 
     /// One
@@ -145,6 +157,194 @@ impl TokenQuality {
     pub fn bad(reason: impl ToString) -> Self {
         Self::Bad { reason: reason.to_string() }
     }
+}
+
+/// Whether a token can be quoted, for a router that buys, forwards the output to the receiver and
+/// lets the receiver sell, all within one transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, DeepSizeOf)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenVerdict {
+    /// Every leg succeeds without a fee.
+    Ok,
+    /// Every leg succeeds, with a fee on at least one leg, or calls another contract that can
+    /// change how the token transfers.
+    Fee,
+    /// Every leg succeeds, but a leg's fee changes with the trade size, the block or the time,
+    /// so one constant fee per leg does not describe it.
+    VariableFee,
+    /// A leg fails, and a simulated owner action or the passage of time makes all legs succeed.
+    TemporarilyBlocked,
+    /// A leg fails and nothing tried lifts it.
+    Blocked,
+    /// Must never be quoted: buys and transfers work but sells fail or deliver nothing to the
+    /// pool (a honeypot), or a privileged caller can take tokens out of the pool.
+    NoQuote,
+    /// The pool holds too little of the token to simulate a trade; analyse again later.
+    NoLiquidity,
+}
+
+impl TokenVerdict {
+    /// The `Token::quality` this verdict maps to.
+    pub fn quality(self) -> u32 {
+        match self {
+            TokenVerdict::Ok => 100,
+            TokenVerdict::Fee => 50,
+            TokenVerdict::VariableFee => 30,
+            TokenVerdict::TemporarilyBlocked |
+            TokenVerdict::Blocked |
+            TokenVerdict::NoLiquidity => 10,
+            TokenVerdict::NoQuote => 1,
+        }
+    }
+}
+
+/// Fee per leg in basis points of the amount sent; `None` when the leg did not run or reverted.
+/// Negative when more arrived than was sent (rebasing or reflection).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, DeepSizeOf)]
+pub struct LegFees {
+    /// Pool to trader.
+    pub buy: Option<i64>,
+    /// Trader to an unrelated wallet.
+    pub transfer: Option<i64>,
+    /// Trader to pool.
+    pub sell: Option<i64>,
+}
+
+impl LegFees {
+    /// The highest fee of any leg, clamped at zero, as stored in `Token::tax`.
+    pub fn max_tax(&self) -> TransferTax {
+        let mut max = 0;
+        for fee in [self.buy, self.transfer, self.sell]
+            .into_iter()
+            .flatten()
+        {
+            max = max.max(fee);
+        }
+        TransferTax::try_from(max).unwrap_or(0)
+    }
+}
+
+/// Behaviour observed during the analysis that does not decide the verdict on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, DeepSizeOf)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenFlag {
+    /// A leg called a contract other than the token, its implementation, the pool or a
+    /// precompile.
+    CallsExternalContract,
+    /// A privileged caller can lower the pool's balance of the token, by a forced transfer or
+    /// burn, which leaves the pool's reserves above its balance.
+    OwnerCanReducePoolBalance,
+    /// A leg's fee differs with the trade size, or a month later without any owner action: one
+    /// constant fee per leg does not describe the token.
+    FeeOutsideModel,
+    /// The token charges no fee now, but a new value in a field its transfer reads, which a
+    /// privileged function writes, starts one: a leg delivers less, or a contract outside the
+    /// trade starts to emit events.
+    FeeCanStart,
+    /// Buy, transfer and sell fees differ.
+    DirectionDependentFee,
+    /// A transfer made the token sell accumulated fees.
+    SwapsOnTransfer,
+    /// The large trade fails while the small one succeeds: a max transaction or wallet limit.
+    SizeLimited,
+    /// The token is an EIP-1967 proxy, beacon proxies included, or an EIP-1167 minimal proxy.
+    Proxy,
+    /// `owner()` returns the zero address.
+    OwnershipRenounced,
+    /// The pool is not a Uniswap V2 style pair against WETH, so the legs were not real swaps:
+    /// the pool paid out the buy itself, which a token can tell apart from a swap.
+    DirectLegs,
+    /// The pool held too little of the token, or a pair too little of the wrapped native token,
+    /// so the analysis wrote the pool a balance of a quarter of the supply: the legs did not
+    /// trade against real liquidity.
+    FundedPool,
+}
+
+/// A call the token made during a simulated leg.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DeepSizeOf)]
+pub struct ExternalCall {
+    /// `buy`, `transfer` or `sell`.
+    pub leg: String,
+    pub target: Bytes,
+    /// First four bytes of the calldata; `None` for a plain ETH send.
+    pub selector: Option<Bytes>,
+    pub reverted: bool,
+}
+
+/// What a control slot governs, as proven by a simulated owner call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, DeepSizeOf)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotRole {
+    /// Calling a writer opened trading.
+    Gate,
+    /// Calling a writer with a large value lifted a size limit.
+    Limit,
+    /// Calling a writer with zero changed the measured fee, or a new value in the field started
+    /// a fee in a token that charged none.
+    Fee,
+}
+
+/// A token storage field the transfer path reads and an owner-callable function writes, with the
+/// role a simulated call proved for it. A write to it can change the token's verdict or fees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DeepSizeOf)]
+pub struct ControlSlot {
+    pub slot: Bytes,
+    /// Byte offset of the field within the slot, for packed variables.
+    pub offset: u8,
+    /// Selectors of the functions that write the field.
+    pub writers: Vec<Bytes>,
+    pub role: SlotRole,
+}
+
+/// The outcome of analysing a token at one block against one pool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DeepSizeOf)]
+pub struct TokenAnalysis {
+    pub verdict: TokenVerdict,
+    /// Why the verdict is not `Ok`, e.g. the token's revert reason.
+    pub reason: Option<String>,
+    pub fees: LegFees,
+    /// Average gas of a transfer.
+    pub gas: Option<TransferCost>,
+    /// The block analysed; `None` when the analyzer ran at `latest` without resolving it.
+    pub block: Option<u64>,
+    /// The address the buy came from and the sell went to; `None` when no holder was found.
+    pub pool: Option<Bytes>,
+    /// Identifies the analyzer and its version, e.g. `simulation/1`.
+    pub analyzer: String,
+    pub flags: Vec<TokenFlag>,
+    pub external_calls: Vec<ExternalCall>,
+    pub control_slots: Vec<ControlSlot>,
+}
+
+impl TokenAnalysis {
+    /// An analysis with only a verdict and reason, for analyzers that observe nothing else.
+    pub fn verdict_only(
+        verdict: TokenVerdict,
+        reason: Option<String>,
+        block: Option<u64>,
+        analyzer: &str,
+    ) -> Self {
+        Self {
+            verdict,
+            reason,
+            fees: LegFees::default(),
+            gas: None,
+            block,
+            pool: None,
+            analyzer: analyzer.to_string(),
+            flags: Vec::new(),
+            external_calls: Vec::new(),
+            control_slots: Vec::new(),
+        }
+    }
+}
+
+/// A token with the analysis its quality, tax and gas were derived from; `None` when the token
+/// was not analysed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalyzedToken {
+    pub token: Token,
+    pub analysis: Option<TokenAnalysis>,
 }
 
 /// A store for tracking token owners and their balances.

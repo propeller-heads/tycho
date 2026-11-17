@@ -10,7 +10,7 @@ use crate::{
             TracedEntryPoint,
         },
         contract::AccountDelta,
-        token::{Token, TokenQuality, TransferCost, TransferTax},
+        token::{AnalyzedToken, TokenAnalysis},
         Address, Balance, BlockHash, StoreKey,
     },
     Bytes,
@@ -126,29 +126,17 @@ pub trait AccountExtractor {
     ) -> Result<HashMap<Bytes, AccountDelta>, Self::Error>; //TODO: do not return `AccountUpdate` but `Account`
 }
 
-/// Trait for analyzing a token, including its quality, transfer cost, and transfer tax.
+/// Trait for analyzing how a token behaves when bought, transferred and sold.
 #[async_trait]
 pub trait TokenAnalyzer: Send + Sync {
     type Error;
 
-    /// Analyzes the quality of a token given its address and a block tag.
+    /// Analyzes the token at `token` as of `block`.
     ///
-    /// # Parameters
-    /// * `token` - The address of the token to analyze.
-    /// * `block` - The block tag at which the analysis should be performed.
-    ///
-    /// # Returns
-    /// A result containing:
-    /// * `TokenQuality` - The quality assessment of the token (either `Good` or `Bad`).
-    /// * `Option<TransferCost>` - The average cost per transfer, if available.
-    /// * `Option<TransferTax>` - The transfer tax, if applicable.
-    ///
-    /// On failure, returns `Self::Error`.
-    async fn analyze(
-        &self,
-        token: Bytes,
-        block: BlockTag,
-    ) -> Result<(TokenQuality, Option<TransferCost>, Option<TransferTax>), Self::Error>;
+    /// Returns the verdict with the fees, gas and observations that led to it. An analysis that
+    /// ran but found the token unusable is an `Ok` with a non-`Ok` verdict; `Err` means the
+    /// analysis itself could not run, e.g. the RPC failed.
+    async fn analyze(&self, token: Bytes, block: BlockTag) -> Result<TokenAnalysis, Self::Error>;
 }
 
 /// Trait for finding an address that owns a specific token. This is useful for detecting
@@ -186,14 +174,13 @@ pub trait TokenPreProcessor: Send + Sync {
     /// * `block` - The block tag at which the information should be retrieved.
     ///
     /// # Returns
-    /// A vector of `CurrencyToken` objects, each containing the processed information for the
-    /// token.
+    /// Each token with its metadata, and the analysis its quality, tax and gas came from.
     async fn get_tokens(
         &self,
         addresses: Vec<Bytes>,
         token_finder: Arc<dyn TokenOwnerFinding>,
         block: BlockTag,
-    ) -> Vec<Token>;
+    ) -> Vec<AnalyzedToken>;
 }
 
 /// Trait for tracing blockchain transaction execution.

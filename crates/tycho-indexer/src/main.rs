@@ -53,7 +53,8 @@ use tycho_common::{
 use tycho_ethereum::{
     rpc::EthereumRpcClient,
     services::{
-        account_extractor::EVMAccountExtractor, token_pre_processor::EthereumTokenPreProcessor,
+        account_extractor::EVMAccountExtractor, token_analyzer::ensure_rpc_supports_simulation,
+        token_pre_processor::EthereumTokenPreProcessor,
     },
 };
 use tycho_indexer::{
@@ -415,7 +416,6 @@ fn run_indexer(global_args: &GlobalArgs, index_args: &IndexArgs) -> Result<(), E
             retention_horizon,
             extractors_config,
             Some(extraction_runtime.handle()),
-            index_args.settlement_contract,
         )
         .await?;
 
@@ -536,7 +536,6 @@ async fn run_spkg(global_args: &GlobalArgs, run_args: RunSpkgArgs) -> Result<(),
         Utc::now().naive_utc(),
         config,
         None,
-        run_args.settlement_contract,
     )
     .await?;
 
@@ -604,9 +603,13 @@ async fn create_indexing_tasks(
     retention_horizon: NaiveDateTime,
     extractors_config: ExtractorConfigs,
     extraction_runtime: Option<&Handle>,
-    settlement_contract: alloy::primitives::Address,
 ) -> Result<(ExtractionTasks, ServerTasks), ExtractionError> {
     let rpc_client = global_args.rpc.build_client()?;
+    ensure_rpc_supports_simulation(&rpc_client)
+        .await
+        .map_err(|e| {
+            ExtractionError::Setup(format!("the RPC cannot analyse tokens by simulation: {e}"))
+        })?;
 
     let protocol_systems: Vec<String> = extractors_config
         .extractors
@@ -632,7 +635,7 @@ async fn create_indexing_tasks(
     let chain = *chains
         .first()
         .expect("No chain provided"); //TODO: handle multichain?
-    let token_processor = EthereumTokenPreProcessor::new(&rpc_client, chain, settlement_contract);
+    let token_processor = EthereumTokenPreProcessor::new(&rpc_client, chain);
 
     let (supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
         &extractors_config,
@@ -967,6 +970,9 @@ async fn run_analyze_tokens(
         .build()
         .await?;
     let cached_gw = Arc::new(cached_gw);
+    ensure_rpc_supports_simulation(&rpc_client)
+        .await
+        .map_err(|e| anyhow::anyhow!("the RPC cannot analyse tokens by simulation: {e}"))?;
     let analyze_thread = analyze_tokens(analyzer_args, &rpc_client, cached_gw.clone());
     select! {
          res = analyze_thread => {

@@ -274,11 +274,6 @@ pub struct IndexArgs {
     /// Any data before this date is not kept in storage.
     #[clap(long, env, default_value = "2024-01-01T00:00:00")]
     pub retention_horizon: String,
-
-    /// Settlement contract address used for token transfer simulation.
-    /// Defaults to the CoW Swap settlement contract on Ethereum mainnet.
-    #[clap(long, default_value = "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58")]
-    pub settlement_contract: alloy::primitives::Address,
 }
 
 #[derive(Args, Debug, Clone, PartialEq)]
@@ -340,11 +335,6 @@ pub struct RunSpkgArgs {
     /// - `rpc` - RPC is used to trace and retrieve detected accounts.
     #[clap(long)]
     pub dci_plugin: Option<String>,
-
-    /// Settlement contract address used for token transfer simulation.
-    /// Defaults to the CoW Swap settlement contract on Ethereum mainnet.
-    #[clap(long, default_value = "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58")]
-    pub settlement_contract: alloy::primitives::Address,
 }
 
 impl RunSpkgArgs {
@@ -381,10 +371,6 @@ pub struct AnalyzeTokenArgs {
     /// Blockchain to execute analysis for.
     #[clap(long)]
     pub chain: Chain,
-    /// Settlement contract address used for transfer simulation.
-    /// Defaults to the CoW Swap settlement contract on Ethereum mainnet.
-    #[clap(long, default_value = "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58")]
-    pub settlement_contract: alloy::primitives::Address,
     /// How many concurrent threads to use for token analysis.
     #[clap(long)]
     pub concurrency: usize,
@@ -395,11 +381,11 @@ pub struct AnalyzeTokenArgs {
     /// should be at least `concurrency * update_batch_size`.
     #[clap(long)]
     pub fetch_batch_size: usize,
-    /// Also re-analyze quality-5 tokens that traded within this many days. Quality 5 is
-    /// the analysis floor and is otherwise never revisited; a recently traded token gets
-    /// a recovery pass because its behavior may have changed after listing (e.g. launch
-    /// transfer restrictions lifted). Set to 0 to disable; a large value re-checks every
-    /// quality-5 token with active liquidity (backfill).
+    /// Also re-analyze quality 1–5 tokens that traded within this many days. Quality 5 is
+    /// the analysis floor and 1 marks tokens never to quote; neither is otherwise revisited.
+    /// A recently traded token gets a recovery pass because its behavior may have changed
+    /// after listing (e.g. launch transfer restrictions lifted). Set to 0 to disable; a large
+    /// value re-checks every quality 1–5 token with active liquidity (backfill).
     #[clap(long, default_value_t = 1)]
     pub recovery_lookback_days: u32,
 }
@@ -478,9 +464,6 @@ mod cli_tests {
                 initialized_accounts: vec![],
                 initialization_block: 0,
                 dci_plugin: None,
-                settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
-                    .parse()
-                    .unwrap(),
             }),
         };
 
@@ -691,9 +674,6 @@ mod cli_tests {
                 extractors_config: "/opt/extractors.yaml".to_string(),
                 chain_config: "./chains.yaml".to_string(),
                 retention_horizon: "2024-01-01T00:00:00".to_string(),
-                settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
-                    .parse()
-                    .unwrap(),
             }),
         };
 
