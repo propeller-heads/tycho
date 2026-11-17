@@ -878,6 +878,9 @@ impl ProtocolSim for UniswapV4State {
                     swap_params,
                     delta: swap_delta,
                     hook_data: Bytes::new(),
+                    sqrt_price_after_swap: result.sqrt_price,
+                    tick_after_swap: result.tick.value(),
+                    liquidity_after_swap: result.liquidity,
                 };
 
                 let after_swap_result = hook
@@ -2173,6 +2176,70 @@ mod tests {
             .unwrap();
 
         assert_eq!(out.amount, BigUint::from_str("2681115183499232721").unwrap())
+    }
+
+    #[test]
+    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
+    fn test_generic_hook_after_swap_reads_the_post_swap_price() {
+        // ETH/cbBTC pool 0x8514479827d1884c2957e8015b2aed79c4422e89e44476a170a70101b5422203. Its
+        // AdaptivePoolPolicyHookV1 reads the pool price in afterSwap and reverts with
+        // PriceOutOfBounds (0xccb2e471) when an ETH sell ends below its minSqrtPriceX96,
+        // 131666046885297595736429 at this block. The V4 quoter at this block returns 137914 for
+        // 0.05 ETH and reverts for 0.13 ETH.
+        let block = BlockHeader {
+            number: 26399230,
+            hash: Bytes::from_str(
+                "0xe8a25e8fbdcbeb045aa5da26c1753daae2b8b598115549dbcd11c60b1eee32c0",
+            )
+            .unwrap(),
+            timestamp: 1794490943,
+            ..Default::default()
+        };
+        let mut state = UniswapV4State::new(
+            232181134220589,
+            U256::from_str("131779315593091412683457").unwrap(),
+            UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 0x800000 },
+            -266148,
+            10,
+            vec![
+                TickInfo::new(-266720, 3357011528574).unwrap(),
+                TickInfo::new(-266570, 228824122692015).unwrap(),
+                TickInfo::new(-266140, 55570436206656).unwrap(),
+                TickInfo::new(-266000, -55570436206656).unwrap(),
+            ],
+        )
+        .unwrap();
+        let db = SimulationDB::new(get_client(None).unwrap(), get_runtime().unwrap(), Some(block));
+        let hook_handler = GenericVMHookHandler::new(
+            Address::from_str("0x0ce2adeedcc62493cb3853a6f551426fd8b048c4").unwrap(),
+            create_engine(db, true).unwrap(),
+            Address::from_str("0x000000000004444c5dc75cb358380d2e3de08a90").unwrap(),
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            false,
+        )
+        .unwrap();
+        state.set_hook_handler(Box::new(hook_handler));
+        let cbbtc = Token::new(
+            &Bytes::from_str("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf").unwrap(),
+            "cbBTC",
+            8,
+            0,
+            &[Some(10_000)],
+            Default::default(),
+            100,
+        );
+
+        let within_bound = state
+            .get_amount_out(BigUint::from(50_000_000_000_000_000u64), &eth(), &cbbtc)
+            .unwrap();
+        assert_eq!(within_bound.amount, BigUint::from(137914u64));
+
+        let past_bound = state
+            .get_amount_out(BigUint::from(130_000_000_000_000_000u64), &eth(), &cbbtc)
+            .expect_err("the hook rejects a sell that ends below its lower price bound");
+        assert!(format!("{past_bound:?}").contains("ccb2e471"), "{past_bound:?}");
     }
 
     #[test]

@@ -161,6 +161,11 @@ pub struct AfterSwapParameters {
     pub swap_params: SwapParams,
     pub delta: BalanceDelta,
     pub hook_data: Bytes,
+    /// The pool's price, tick and active liquidity once the swap has run. The PoolManager stores
+    /// them before it calls `afterSwap`, so a hook that reads the pool there sees these values.
+    pub sqrt_price_after_swap: U256,
+    pub tick_after_swap: i32,
+    pub liquidity_after_swap: u128,
 }
 
 #[derive(Debug, Clone)]

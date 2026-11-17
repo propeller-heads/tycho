@@ -294,6 +294,9 @@ mod tests {
                 I128::try_from(amount1).expect("i128 fits I128"),
             ),
             hook_data: Bytes::new(),
+            sqrt_price_after_swap: U256::ZERO,
+            tick_after_swap: 0,
+            liquidity_after_swap: 0,
         }
     }
 

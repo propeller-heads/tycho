@@ -314,6 +314,9 @@ mod tests {
                 I128::try_from(128499868287523768i128).unwrap(),
             ),
             hook_data: Bytes::new(),
+            sqrt_price_after_swap: U256::ZERO,
+            tick_after_swap: 0,
+            liquidity_after_swap: 0,
         };
 
         let result = handler
