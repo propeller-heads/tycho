@@ -266,4 +266,49 @@ mod tests {
         assert_eq!(inactive, None);
         assert_eq!(unknown, None);
     }
+
+    #[tokio::test]
+    async fn test_active_instance_head_has_the_base_block() {
+        let mut conn = instance_test_connection().await;
+        let setup = setup_protocols(&mut conn).await;
+        diesel::update(protocol_instance::table.filter(protocol_instance::id.eq(setup.curve)))
+            .set(protocol_instance::base_block_ts.eq(day(1)))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+
+        let curve = active_instance_head("vm:curve", &mut conn)
+            .await
+            .unwrap()
+            .unwrap();
+        let uniswap_v4 = active_instance_head("uniswap_v4", &mut conn)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(curve.base, Some(day(1)));
+        assert_eq!(uniswap_v4.base, None);
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_head_has_the_retention_horizon() {
+        let mut conn = instance_test_connection().await;
+        let setup = setup_protocols(&mut conn).await;
+        diesel::sql_query("UPDATE partition_retention_config SET retention = '7 days'")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        let expected = diesel::select(diesel::dsl::sql::<Timestamptz>("now() - interval '7 days'"))
+            .get_result::<NaiveDateTime>(&mut conn)
+            .await
+            .unwrap();
+
+        let found = active_instance_head("vm:curve", &mut conn)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(found.id, setup.curve);
+        assert_eq!(found.retention_horizon, expected);
+    }
 }
