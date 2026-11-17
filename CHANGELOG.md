@@ -1,3 +1,30 @@
+## [0.527.1](https://github.com/propeller-heads/tycho/compare/0.527.0...0.527.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **ci:** skip required jobs only when change detection reports false ([75c10ff](https://github.com/propeller-heads/tycho/commit/75c10ffacfe12ce4fdd2b81b6ce0585f8829fbe7))
+
+## [0.527.0](https://github.com/propeller-heads/tycho/compare/0.526.1...0.527.0) (2026-11-17)
+
+
+### Features
+
+* **integration-test:** probe the limits of strict protocols in the cluster ([1250988](https://github.com/propeller-heads/tycho/commit/125098862d2c36f6a16e5744a2e01ef0dc56c633)), closes [#1773](https://github.com/propeller-heads/tycho/issues/1773)
+* **integration-test:** probe the limits of strict protocols in the cluster ([#1773](https://github.com/propeller-heads/tycho/issues/1773)) ([560b4cc](https://github.com/propeller-heads/tycho/commit/560b4cce86ea73866083e555fdcb68bfc2cdfcaf))
+* **test runner:** check balances per component against a declared source ([c003cec](https://github.com/propeller-heads/tycho/commit/c003cecac57d654eb9071d8e443d4b5edfb9dd7b)), closes [#1737](https://github.com/propeller-heads/tycho/issues/1737)
+* **test runner:** read balances from view calls, and verify tvl_only ([7ceb601](https://github.com/propeller-heads/tycho/commit/7ceb601a440e281fc7907997cd84a8d1f00f90bb)), closes [#1740](https://github.com/propeller-heads/tycho/issues/1740)
+* **test runner:** require a reason for every skip in strict mode ([0b881dc](https://github.com/propeller-heads/tycho/commit/0b881dcb5507ff00023b9cfeaeeeff8e9adab524))
+* **test runner:** require exact execution in strict mode ([e703a28](https://github.com/propeller-heads/tycho/commit/e703a283ad877350cf1aa0c63420e6c86d3faf84)), closes [#1735](https://github.com/propeller-heads/tycho/issues/1735)
+* **test runner:** run the strict checks in full mode ([ed2dde3](https://github.com/propeller-heads/tycho/commit/ed2dde341aefc4fe11935d5174923769d2304850)), closes [#1772](https://github.com/propeller-heads/tycho/issues/1772)
+* **test runner:** test each direction's limit in strict mode ([20f8c1f](https://github.com/propeller-heads/tycho/commit/20f8c1ff45fefdc5b4e74b4e31b330f37d5d73b8)), closes [#1734](https://github.com/propeller-heads/tycho/issues/1734)
+* **tycho-test:** name the probe sizes and load package yamls from memory ([50424ec](https://github.com/propeller-heads/tycho/commit/50424ec4817e4ad7d89202f08ffe763f1adb7b94)), closes [#1771](https://github.com/propeller-heads/tycho/issues/1771)
+
+
+### Bug Fixes
+
+* **test runner:** reject yes/no skips, log each skip once, and test the ladder skips ([4f84f5b](https://github.com/propeller-heads/tycho/commit/4f84f5b2c172a0f5de3bebb29d979a1f3958ea57))
+
 ## [0.526.1](https://github.com/propeller-heads/tycho/compare/0.526.0...0.526.1) (2026-11-17)
 
 
