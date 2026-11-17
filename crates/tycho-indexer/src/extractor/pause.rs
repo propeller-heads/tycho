@@ -206,3 +206,288 @@ impl<G: ComponentPauseGateway> PauseRefresher<G> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::NaiveDateTime;
+    use tycho_common::models::protocol::PauseRecord;
+
+    use super::*;
+
+    #[expect(
+        clippy::allow_attributes,
+        reason = "mockall copies these attributes onto several generated items, so an #[expect] would go unfulfilled on some of them"
+    )]
+    mod gateway_mock {
+        use async_trait::async_trait;
+        use mockall::mock;
+        use tycho_common::models::protocol::{PauseRecord, UnpauseRecord};
+
+        use super::*;
+
+        mock! {
+            pub ComponentPauseGateway {}
+
+            #[async_trait]
+            impl ComponentPauseGateway for ComponentPauseGateway {
+                async fn pause_components(
+                    &self,
+                    chain: &Chain,
+                    system: &str,
+                    pauses: &[PauseRecord],
+                ) -> Result<Vec<ComponentId>, StorageError>;
+                #[allow(
+                    clippy::type_complexity,
+                    clippy::type_repetition_in_bounds,
+                    reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`"
+                )]
+                fn unpause_components<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
+                    &'life0 self,
+                    chain: &'life1 Chain,
+                    component_ids: &'life2 [&'life3 str],
+                    unpause: &'life4 UnpauseRecord,
+                ) -> ::core::pin::Pin<
+                    Box<
+                        dyn ::core::future::Future<Output = Result<Vec<ComponentId>, StorageError>>
+                            + ::core::marker::Send
+                            + 'async_trait,
+                    >,
+                >
+                where
+                    'life0: 'async_trait,
+                    'life1: 'async_trait,
+                    'life2: 'async_trait,
+                    'life3: 'async_trait,
+                    'life4: 'async_trait,
+                    Self: 'async_trait;
+                async fn get_component_pauses(
+                    &self,
+                    chain: &Chain,
+                ) -> Result<Vec<ComponentPause>, StorageError>;
+            }
+        }
+    }
+
+    use gateway_mock::MockComponentPauseGateway;
+
+    const EXTRACTED: &str = "uniswap_v2";
+
+    fn pause(system: &str, id: &str) -> ComponentPause {
+        ComponentPause {
+            protocol_system: system.to_string(),
+            record: PauseRecord {
+                component_id: id.to_string(),
+                reason: None,
+                actor: None,
+                evidence_url: None,
+            },
+            paused_at: NaiveDateTime::default(),
+        }
+    }
+
+    /// A gateway whose reads return `reads` in order.
+    fn gateway(reads: Vec<Result<Vec<ComponentPause>, StorageError>>) -> MockComponentPauseGateway {
+        let mut gateway = MockComponentPauseGateway::new();
+        let mut reads = reads.into_iter();
+        gateway
+            .expect_get_component_pauses()
+            .times(reads.len())
+            .returning(move |_| {
+                reads
+                    .next()
+                    .expect("more reads than expected")
+            });
+        gateway
+    }
+
+    /// A refresher whose registry extracts [`EXTRACTED`], was loaded from `first`, and whose
+    /// refreshes read `rest`.
+    async fn refresher(
+        first: Vec<ComponentPause>,
+        rest: Vec<Result<Vec<ComponentPause>, StorageError>>,
+    ) -> PauseRefresher<MockComponentPauseGateway> {
+        let registry = PauseRegistry::load(
+            &gateway(vec![Ok(first)]),
+            &Chain::Ethereum,
+            HashSet::from([EXTRACTED.to_string()]),
+        )
+        .await
+        .expect("load");
+        PauseRefresher::new(gateway(rest), Chain::Ethereum, Arc::new(RwLock::new(registry)))
+    }
+
+    fn is_paused(
+        refresher: &PauseRefresher<MockComponentPauseGateway>,
+        system: &str,
+        id: &str,
+    ) -> bool {
+        refresher
+            .registry
+            .read()
+            .expect("lock")
+            .is_paused(system, id)
+    }
+
+    fn drain_events(
+        refresher: &PauseRefresher<MockComponentPauseGateway>,
+        system: &str,
+    ) -> Vec<PauseEvent> {
+        refresher
+            .registry
+            .write()
+            .expect("lock")
+            .drain_events(system)
+    }
+
+    #[tokio::test]
+    async fn test_load() {
+        let gateway = gateway(vec![Ok(vec![pause("uniswap_v2", "a"), pause("uniswap_v3", "b")])]);
+
+        let mut registry =
+            PauseRegistry::load(&gateway, &Chain::Ethereum, HashSet::from(["uniswap_v2".into()]))
+                .await
+                .expect("load");
+
+        assert!(registry.is_paused("uniswap_v2", "a"));
+        assert!(registry.is_paused("uniswap_v3", "b"));
+        assert!(!registry.is_paused("uniswap_v2", "b"));
+        assert!(!registry.is_paused("unknown", "a"));
+        assert!(registry
+            .drain_events("uniswap_v2")
+            .is_empty());
+        assert!(registry
+            .drain_events("uniswap_v3")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_error() {
+        let gateway = gateway(vec![Err(StorageError::Unexpected("db down".to_string()))]);
+
+        let result = PauseRegistry::load(&gateway, &Chain::Ethereum, HashSet::new()).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_pause_and_unpause() {
+        let refresher =
+            refresher(vec![pause(EXTRACTED, "a")], vec![Ok(vec![pause(EXTRACTED, "b")])]).await;
+        let changes = refresher.subscribe();
+
+        refresher.refresh().await;
+
+        assert!(changes
+            .has_changed()
+            .expect("sender alive"));
+        assert!(!is_paused(&refresher, EXTRACTED, "a"));
+        assert!(is_paused(&refresher, EXTRACTED, "b"));
+        let events = drain_events(&refresher, EXTRACTED);
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            HashSet::from([
+                PauseEvent::Unpause("a".to_string()),
+                PauseEvent::Pause("b".to_string())
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_new_system() {
+        let refresher = refresher(vec![], vec![Ok(vec![pause(EXTRACTED, "a")])]).await;
+
+        refresher.refresh().await;
+
+        assert!(is_paused(&refresher, EXTRACTED, "a"));
+        assert_eq!(drain_events(&refresher, EXTRACTED), vec![PauseEvent::Pause("a".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_last_pause_of_system_ends() {
+        let refresher = refresher(vec![pause(EXTRACTED, "a")], vec![Ok(vec![])]).await;
+
+        refresher.refresh().await;
+
+        assert!(!is_paused(&refresher, EXTRACTED, "a"));
+        assert_eq!(drain_events(&refresher, EXTRACTED), vec![PauseEvent::Unpause("a".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_system_not_extracted() {
+        let refresher = refresher(vec![], vec![Ok(vec![pause("uniswap_v3", "a")])]).await;
+        let changes = refresher.subscribe();
+
+        refresher.refresh().await;
+
+        assert!(changes
+            .has_changed()
+            .expect("sender alive"));
+        assert!(is_paused(&refresher, "uniswap_v3", "a"));
+        assert!(drain_events(&refresher, "uniswap_v3").is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_no_change() {
+        let refresher =
+            refresher(vec![pause(EXTRACTED, "a")], vec![Ok(vec![pause(EXTRACTED, "a")])]).await;
+        let changes = refresher.subscribe();
+
+        refresher.refresh().await;
+
+        assert!(!changes
+            .has_changed()
+            .expect("sender alive"));
+        assert!(is_paused(&refresher, EXTRACTED, "a"));
+        assert!(drain_events(&refresher, EXTRACTED).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_twice_before_drain() {
+        let refresher = refresher(vec![], vec![Ok(vec![pause(EXTRACTED, "a")]), Ok(vec![])]).await;
+
+        refresher.refresh().await;
+        refresher.refresh().await;
+
+        assert_eq!(
+            drain_events(&refresher, EXTRACTED),
+            vec![PauseEvent::Pause("a".to_string()), PauseEvent::Unpause("a".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_read_error() {
+        let refresher = refresher(
+            vec![pause(EXTRACTED, "a")],
+            vec![Err(StorageError::Unexpected("db down".to_string()))],
+        )
+        .await;
+        let changes = refresher.subscribe();
+
+        refresher.refresh().await;
+
+        assert!(!changes
+            .has_changed()
+            .expect("sender alive"));
+        assert!(is_paused(&refresher, EXTRACTED, "a"));
+        assert!(drain_events(&refresher, EXTRACTED).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_drain_events_twice() {
+        let refresher = refresher(vec![], vec![Ok(vec![pause(EXTRACTED, "a")])]).await;
+        refresher.refresh().await;
+        let mut registry = refresher
+            .registry
+            .write()
+            .expect("lock");
+
+        let first = registry.drain_events(EXTRACTED);
+        let second = registry.drain_events(EXTRACTED);
+
+        assert_eq!(first, vec![PauseEvent::Pause("a".to_string())]);
+        assert!(second.is_empty());
+    }
+}
