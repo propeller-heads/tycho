@@ -1,7 +1,8 @@
 -- Views derived from `trades`.
 --
--- Every sink and the pricer apply this file on start, so it has to be idempotent and it has to
--- tolerate a database whose sinks have not created `trades` yet.
+-- Every sink and the pricer apply this file on start, after migrate_schema.sql, so it has to be
+-- idempotent and it has to tolerate a database whose sinks have not created `trades` yet. Columns
+-- and indexes belong in schema.sql and migrate_schema.sql, not here.
 --
 --   psql "$DSN" -f views.sql
 BEGIN;
@@ -16,21 +17,6 @@ BEGIN
         RAISE NOTICE 'trades table does not exist yet, skipping the views';
         RETURN;
     END IF;
-
-    -- Set by the package since the release that reads `state_reverted` on the call. An existing
-    -- database was created before it, and `schema.sql` only creates a table it does not find,
-    -- so the column is added here.
-    ALTER TABLE trades ADD COLUMN IF NOT EXISTS state_committed BOOLEAN;
-    ALTER TABLE trades ADD COLUMN IF NOT EXISTS router_positive_slippage_bps BIGINT;
-    ALTER TABLE trades ADD COLUMN IF NOT EXISTS client_positive_slippage_share_bps BIGINT;
-    ALTER TABLE trades ADD COLUMN IF NOT EXISTS positive_slippage_cap_bps BIGINT;
-    ALTER TABLE trades ADD COLUMN IF NOT EXISTS token_pair_fee BOOLEAN;
-    ALTER TABLE IF EXISTS fee_config_events ADD COLUMN IF NOT EXISTS token0 TEXT;
-    ALTER TABLE IF EXISTS fee_config_events ADD COLUMN IF NOT EXISTS token1 TEXT;
-    ALTER TABLE router_call_errors ADD COLUMN IF NOT EXISTS state_committed BOOLEAN;
-
-    -- Looking up the trades of one transaction by hash, which no other index serves.
-    CREATE INDEX IF NOT EXISTS trades_tx_idx ON trades (chain, tx_hash);
 
     -- The trades to sum volume over: one row per swap the chain actually kept.
     --
