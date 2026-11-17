@@ -5,6 +5,7 @@
 //! results go is each runner's own; protocol-testing, for one, writes a JSON report.
 
 pub mod execution;
+pub mod ladder;
 pub mod limits;
 pub mod outcome;
 pub mod sheet;
