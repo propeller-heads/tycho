@@ -58,6 +58,7 @@ sol! {
 
     interface IBasePool {
         function get_virtual_price() external view returns (uint256);
+        function totalSupply() external view returns (uint256);
     }
 }
 
@@ -394,6 +395,19 @@ where
     {
         self.call(to, sol_call).ok()
     }
+}
+
+/// Read the total supply of the LP token at `lp_token`.
+pub fn read_total_supply<D: EngineDatabaseInterface + Clone + Debug>(
+    engine: &SimulationEngine<D>,
+    lp_token: &AlloyAddress,
+) -> Result<U256, SimulationError>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    PoolReader::new(engine, &PendingOverrides::default())
+        .call(lp_token, &IBasePool::totalSupplyCall {})
 }
 
 /// Read the pool's `MATH()` contract address, if it exposes one (TwoCrypto-NG era pools).

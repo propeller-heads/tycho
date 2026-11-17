@@ -2,6 +2,7 @@ pragma solidity ^0.8.26;
 
 import "../TychoRouterTestSetup.sol";
 import "@src/executors/CurveExecutor.sol";
+import {CURVE_STABLE_UNDERLYING_POOL_TYPE} from "@interfaces/ICurvePool.sol";
 import {Constants} from "../Constants.sol";
 import {Test} from "../../lib/forge-std/src/Test.sol";
 
@@ -364,6 +365,69 @@ contract CurveExecutorTest is Test, TestUtils, Constants {
     }
 }
 
+/// Underlying swaps on the USD1 metapool. Index 0 is USD1, 1 is USDC, 2 is USDT.
+contract CurveExecutorUnderlyingTest is Test, TestUtils, Constants {
+    using SafeERC20 for IERC20;
+
+    CurveExecutor curveExecutor;
+
+    function setUp() public {
+        uint256 forkBlock = 26434212;
+        vm.createSelectFork(vm.rpcUrl("mainnet"), forkBlock);
+        curveExecutor = new CurveExecutor(ETH_ADDR, STETH_ADDR);
+    }
+
+    function testUnderlyingPoolTypeByte() public pure {
+        // The Rust encoder emits this byte.
+        assertEq(CURVE_STABLE_UNDERLYING_POOL_TYPE, 11);
+    }
+
+    function testMetaPoolToBaseCoin() public {
+        uint256 amountIn = 1000 ether;
+        deal(USD1_ADDR, address(curveExecutor), amountIn);
+        bytes memory data = abi.encodePacked(
+            USD1_ADDR,
+            USDC_ADDR,
+            USD1_CRV2POOL_POOL,
+            CURVE_STABLE_UNDERLYING_POOL_TYPE,
+            uint8(0),
+            uint8(1)
+        );
+
+        vm.prank(address(curveExecutor));
+        IERC20(USD1_ADDR).forceApprove(USD1_CRV2POOL_POOL, amountIn);
+        curveExecutor.swap(amountIn, data, ALICE);
+
+        // get_dy_underlying(0, 1, 1000e18) at this block.
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(curveExecutor)), 998431508);
+        assertEq(IERC20(USD1_ADDR).balanceOf(address(curveExecutor)), 0);
+    }
+
+    function testMetaPoolFromBaseCoin() public {
+        uint256 amountIn = 100_000 * 10 ** 6;
+        deal(USDT_ADDR, address(curveExecutor), amountIn);
+        bytes memory data = abi.encodePacked(
+            USDT_ADDR,
+            USD1_ADDR,
+            USD1_CRV2POOL_POOL,
+            CURVE_STABLE_UNDERLYING_POOL_TYPE,
+            uint8(2),
+            uint8(0)
+        );
+
+        vm.prank(address(curveExecutor));
+        IERC20(USDT_ADDR).forceApprove(USD1_CRV2POOL_POOL, amountIn);
+        curveExecutor.swap(amountIn, data, ALICE);
+
+        // get_dy_underlying(2, 0, 100_000e6) at this block.
+        assertEq(
+            IERC20(USD1_ADDR).balanceOf(address(curveExecutor)),
+            100042232123237499257451
+        );
+        assertEq(IERC20(USDT_ADDR).balanceOf(address(curveExecutor)), 0);
+    }
+}
+
 contract TychoRouterForCurveTest is TychoRouterTestSetup {
     function testSingleCurveIntegration() public {
         deal(UWU_ADDR, ALICE, 1 ether);
@@ -419,5 +483,31 @@ contract TychoRouterForCurveTest is TychoRouterTestSetup {
         assertEq(ALICE.balance, 0);
 
         vm.stopPrank();
+    }
+}
+
+contract TychoRouterForCurveUnderlyingTest is TychoRouterTestSetup {
+    function getForkBlock() public pure override returns (uint256) {
+        return 26434212;
+    }
+
+    function testSingleCurveUnderlyingIntegration() public {
+        // USD1 -> USDC through the USD1 metapool and its base pool
+        uint256 amountIn = 1000 ether;
+        deal(USD1_ADDR, ALICE, amountIn);
+
+        vm.startPrank(ALICE);
+        IERC20(USD1_ADDR).approve(tychoRouterAddr, type(uint256).max);
+        bytes memory callData = loadCallDataFromFile(
+            "test_single_encoding_strategy_curve_underlying"
+        );
+        (bool success,) = tychoRouterAddr.call(callData);
+        vm.stopPrank();
+
+        assertTrue(success, "Call Failed");
+        assertEq(IERC20(USD1_ADDR).balanceOf(ALICE), 0);
+        assertEq(IERC20(USDC_ADDR).balanceOf(ALICE), 998431508);
+        assertEq(IERC20(USD1_ADDR).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
     }
 }

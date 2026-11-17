@@ -764,6 +764,100 @@ fn test_single_encoding_strategy_curve() {
 }
 
 #[test]
+fn test_single_encoding_strategy_curve_underlying() {
+    //   USD1 ──(curve USD1 metapool, through its base pool)──> USDC
+
+    let token_in = Bytes::from("0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d"); // USD1
+    let token_out = usdc();
+
+    let address_list = |addresses: &[&str]| {
+        let quoted: Vec<String> = addresses
+            .iter()
+            .map(|address| format!("\"{address}\""))
+            .collect();
+        Bytes::from(
+            format!("[{}]", quoted.join(","))
+                .as_bytes()
+                .to_vec(),
+        )
+    };
+    let static_attributes = HashMap::from([
+        (
+            "factory".to_string(),
+            Bytes::from(
+                "0x6a8cbed756804b16e05e741edabd5cb544ae21bf"
+                    .as_bytes()
+                    .to_vec(),
+            ),
+        ),
+        (
+            "coins".to_string(),
+            address_list(&[
+                "0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d", // USD1
+                "0x4f493b7de8aac7d55f71853688b1f7c8f0243c85", // crv2pool
+            ]),
+        ),
+        (
+            "underlying_coins".to_string(),
+            address_list(&[
+                "0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d", // USD1
+                "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // USDC
+                "0xdac17f958d2ee523a2206206994597c13d831ec7", // USDT
+            ]),
+        ),
+    ]);
+
+    let component = ProtocolComponent {
+        id: String::from("0xC09e82f81Cb811DB0922dD48206fc2e212322caf"),
+        protocol_system: String::from("vm:curve"),
+        static_attributes,
+        ..Default::default()
+    };
+
+    let swap = Swap::new(
+        component,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        token_in,
+        token_out,
+        BigUint::from_str("1000_000000000000000000").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        // Dummy 1-wei quote with a matching minAmountOut, so any output is accepted
+        BigUint::from_str("1").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        &encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_curve_underlying", hex_calldata.as_str());
+}
+
+#[test]
 fn test_single_encoding_strategy_curve_st_eth() {
     //   ETH ──(curve stETH pool)──> STETH
 

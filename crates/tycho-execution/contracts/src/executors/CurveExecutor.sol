@@ -10,8 +10,10 @@ import {TransferManager} from "../TransferManager.sol";
 import {
     ICurveCryptoPool,
     ICurveCryptoPoolETH,
+    ICurveStableMetaPool,
     ICurveStablePool,
-    isCurveStablePool
+    isCurveStablePool,
+    isCurveStableUnderlying
 } from "@interfaces/ICurvePool.sol";
 
 error CurveExecutor__AddressZero();
@@ -71,7 +73,14 @@ contract CurveExecutor is IExecutor {
             ethAmount = amountIn;
         }
 
-        if (isCurveStablePool(poolType)) {
+        if (isCurveStableUnderlying(poolType)) {
+            // The metapool pulls the input itself and deposits it in, or redeems the
+            // output from, its base pool. No base pool coin is the native token.
+            ICurveStableMetaPool(pool)
+                .exchange_underlying(
+                    int128(uint128(i)), int128(uint128(j)), amountIn, 0
+                );
+        } else if (isCurveStablePool(poolType)) {
             // forge-lint: disable-next-item(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
             ICurveStablePool(pool).exchange{value: ethAmount}(
                 int128(uint128(i)), int128(uint128(j)), amountIn, 0

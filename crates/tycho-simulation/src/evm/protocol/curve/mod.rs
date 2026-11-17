@@ -9,6 +9,7 @@ mod decoder;
 mod math;
 mod state;
 mod swap_to_price;
+mod underlying;
 mod variant;
 mod vm;
 

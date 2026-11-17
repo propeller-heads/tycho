@@ -27,6 +27,7 @@ use crate::{
                 adapter::{build_pool, CurveVariant},
                 math::Pool,
                 swap_to_price::{exchange, swap_to_price, SwapToPriceError},
+                underlying::BasePool,
                 vm,
             },
             u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
@@ -41,6 +42,32 @@ const FEE_DENOMINATOR: f64 = 1e10;
 const STABLESWAP_GAS: u64 = 150_000;
 /// Representative gas cost of a CryptoSwap exchange (heavier math + price oracle update).
 const CRYPTOSWAP_GAS: u64 = 350_000;
+/// Gas cost of a metapool `exchange_underlying`: the metapool's exchange plus a single-coin
+/// deposit into or withdrawal from the base pool. `CurveExecutor.swap` on the USD1 metapool used
+/// 341,457 gas to a base coin and 336,193 from one, on a mainnet fork at block 26434212.
+const UNDERLYING_GAS: u64 = 340_000;
+/// The share of the sell-side reserve the underlying spot price is probed at.
+const SPOT_PROBE_DIVISOR: u64 = 1_000_000;
+/// How often an underlying limit halves its input while the swap does not fit the reserves.
+const LIMIT_HALVINGS: usize = 32;
+
+/// How a pair of tokens trades through a pool.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Route {
+    /// Between two of the pool's own coins, by coin index.
+    Coins { i: usize, j: usize },
+    /// From the metapool's coin to a coin of its base pool, by base pool coin index.
+    ToBase { coin: usize },
+    /// From a coin of the base pool to the metapool's coin, by base pool coin index.
+    FromBase { coin: usize },
+}
+
+/// The result of an underlying swap: what it pays, and both pools afterwards.
+struct UnderlyingSwap {
+    amount: U256,
+    pool: Pool,
+    base_pool: BasePool,
+}
 
 /// A single Curve pool quoted via `curve_math`.
 ///
@@ -66,6 +93,9 @@ pub struct CurveState {
     /// Admin share scaled by 1e10. Absent in old snapshots; legacy StableSwap must refresh.
     #[serde(default)]
     admin_fee: Option<U256>,
+    /// The base pool of a metapool whose underlying swaps this state quotes.
+    #[serde(default)]
+    base_pool: Option<BasePool>,
 }
 
 impl CurveState {
@@ -79,7 +109,118 @@ impl CurveState {
         pool: Pool,
         admin_fee: Option<U256>,
     ) -> Self {
-        Self { pool_address, tokens, decimals, variant, pool, admin_fee }
+        Self { pool_address, tokens, decimals, variant, pool, admin_fee, base_pool: None }
+    }
+
+    /// Makes this metapool quote swaps between its coin and the coins of `base_pool`.
+    pub(super) fn with_base_pool(mut self, base_pool: BasePool) -> Self {
+        self.base_pool = Some(base_pool);
+        self
+    }
+
+    /// Resolves how `token_in` trades for `token_out`.
+    ///
+    /// A pair of the pool's own coins trades directly. A metapool with a base pool also trades its
+    /// coin against the base pool's coins. The base pool's LP token against a base coin, and two
+    /// base coins against each other, are refused: the base pool component serves them.
+    fn route(&self, token_in: &Bytes, token_out: &Bytes) -> Result<Route, SimulationError> {
+        let position = |token: &Bytes| {
+            self.tokens
+                .iter()
+                .position(|coin| coin == token)
+        };
+        let (coin_in, coin_out) = (position(token_in), position(token_out));
+        if let (Some(i), Some(j)) = (coin_in, coin_out) {
+            return Ok(Route::Coins { i, j });
+        }
+        if let Some(base) = &self.base_pool {
+            if coin_in == Some(base.meta_coin) {
+                if let Some(coin) = base.coin_index(token_out) {
+                    return Ok(Route::ToBase { coin });
+                }
+            }
+            if coin_out == Some(base.meta_coin) {
+                if let Some(coin) = base.coin_index(token_in) {
+                    return Ok(Route::FromBase { coin });
+                }
+            }
+        }
+        Err(SimulationError::InvalidInput(
+            format!("curve pool {} does not swap {token_in} for {token_out}", self.pool_address),
+            None,
+        ))
+    }
+
+    /// Whether `token` is one of the pool's coins or of its base pool's coins.
+    fn holds_token(&self, token: &Bytes) -> bool {
+        self.tokens.contains(token) ||
+            self.base_pool
+                .as_ref()
+                .is_some_and(|base| base.coin_index(token).is_some())
+    }
+
+    /// Quotes an underlying swap of `dx`. `None` when the swap does not fit the reserves.
+    fn swap_underlying(
+        &self,
+        route: Route,
+        dx: U256,
+    ) -> Result<Option<UnderlyingSwap>, SimulationError> {
+        let Some(base) = &self.base_pool else {
+            return Ok(None);
+        };
+        let admin_fee = self.admin_fee()?;
+        let swap = match route {
+            Route::Coins { .. } => None,
+            Route::ToBase { coin } => {
+                exchange(&self.pool, base.meta_coin, base.lp_coin, dx, admin_fee).and_then(|meta| {
+                    let (amount, base_pool) = base.withdraw(meta.amount, coin)?;
+                    Some((amount, meta.balances, base_pool))
+                })
+            }
+            Route::FromBase { coin } => base
+                .deposit(dx, coin)
+                .and_then(|(minted, base_pool)| {
+                    let meta =
+                        exchange(&self.pool, base.lp_coin, base.meta_coin, minted, admin_fee)?;
+                    Some((meta.amount, meta.balances, base_pool))
+                }),
+        };
+        let Some((amount, balances, base_pool)) = swap else {
+            return Ok(None);
+        };
+        let mut pool = self.pool.clone();
+        for (index, balance) in balances.into_iter().enumerate() {
+            pool.set_balance(index, balance)
+                .map_err(|e| SimulationError::FatalError(e.to_string()))?;
+        }
+        Ok(Some(UnderlyingSwap { amount, pool, base_pool }))
+    }
+
+    /// The reserve an underlying swap sells into, in the sell token's units.
+    ///
+    /// A swap from a base coin sells LP tokens into the metapool, so its reserve is the
+    /// metapool's LP balance, expressed as the base coin amount that balance redeems for. The base
+    /// pool's own balance of that coin caps it.
+    fn underlying_sell_reserve(&self, route: Route) -> U256 {
+        match (&self.base_pool, route) {
+            (Some(base), Route::ToBase { .. }) => self.pool.balances()[base.meta_coin],
+            (Some(base), Route::FromBase { coin }) => {
+                let lp_reserve = self.pool.balances()[base.lp_coin];
+                let coin_reserve = base.balance(coin);
+                base.withdraw(lp_reserve, coin)
+                    .map_or(coin_reserve, |(amount, _)| amount.min(coin_reserve))
+            }
+            (_, Route::Coins { .. }) | (None, _) => U256::ZERO,
+        }
+    }
+
+    /// The reserve an underlying swap pays out of, in the buy token's units.
+    fn underlying_buy_reserve(&self, route: Route) -> U256 {
+        match (&self.base_pool, route) {
+            (Some(base), Route::ToBase { coin }) => base.balance(coin),
+            (Some(base), Route::FromBase { .. }) => self.pool.balances()[base.meta_coin],
+            (_, Route::Coins { .. }) | (None, _) => U256::ZERO,
+        }
     }
 
     fn admin_fee(&self) -> Result<U256, SimulationError> {
@@ -92,18 +233,6 @@ impl CurveState {
                 self.pool_address
             ))
         })
-    }
-
-    fn coin_index(&self, token: &Bytes) -> Result<usize, SimulationError> {
-        self.tokens
-            .iter()
-            .position(|t| t == token)
-            .ok_or_else(|| {
-                SimulationError::InvalidInput(
-                    format!("token {token} is not a coin of curve pool {}", self.pool_address),
-                    None,
-                )
-            })
     }
 
     fn is_crypto(&self) -> bool {
@@ -135,8 +264,9 @@ impl CurveState {
         target: &Price,
         tolerance: f64,
     ) -> Result<Option<PoolSwap>, SimulationError> {
-        let i = self.coin_index(&token_in.address)?;
-        let j = self.coin_index(&token_out.address)?;
+        let Route::Coins { i, j } = self.route(&token_in.address, &token_out.address)? else {
+            return Ok(None);
+        };
         if target.numerator.bits() > 256 || target.denominator.bits() > 256 {
             return Ok(None);
         }
@@ -209,8 +339,23 @@ impl ProtocolSim for CurveState {
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        let i = self.coin_index(&base.address)?;
-        let j = self.coin_index(&quote.address)?;
+        let route = self.route(&base.address, &quote.address)?;
+        let Route::Coins { i, j } = route else {
+            // Underlying swaps have no closed-form marginal price here: quote a small trade.
+            let probe = (self.underlying_sell_reserve(route) / U256::from(SPOT_PROBE_DIVISOR))
+                .max(U256::from(1));
+            let swap = self
+                .swap_underlying(route, probe)?
+                .ok_or_else(|| {
+                    SimulationError::RecoverableError(format!(
+                        "curve underlying spot price unavailable for {}",
+                        self.pool_address
+                    ))
+                })?;
+            let ratio = u256_to_f64(swap.amount)? / u256_to_f64(probe)?;
+            let decimal_adjustment = 10f64.powi(decimals_exponent(base.decimals, quote.decimals)?);
+            return Ok(ratio * decimal_adjustment);
+        };
         let (numerator, denominator) = self
             .pool
             .spot_price(i, j)
@@ -233,9 +378,27 @@ impl ProtocolSim for CurveState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let i = self.coin_index(&token_in.address)?;
-        let j = self.coin_index(&token_out.address)?;
+        let route = self.route(&token_in.address, &token_out.address)?;
         let dx = biguint_to_u256(&amount_in);
+        let Route::Coins { i, j } = route else {
+            let swap = self
+                .swap_underlying(route, dx)?
+                .ok_or_else(|| {
+                    SimulationError::RecoverableError(format!(
+                        "curve underlying exchange failed for {}",
+                        self.pool_address
+                    ))
+                })?;
+            let new_state =
+                Self { pool: swap.pool, base_pool: Some(swap.base_pool), ..self.clone() };
+            return Ok(GetAmountOutResult::new(
+                u256_to_biguint(swap.amount),
+                UNDERLYING_GAS
+                    .to_biguint()
+                    .expect("u64 fits in BigUint"),
+                Box::new(new_state),
+            ));
+        };
 
         let mut new_pool = self.pool.clone();
         let dy = if self.is_crypto() {
@@ -287,8 +450,36 @@ impl ProtocolSim for CurveState {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        let i = self.coin_index(&sell_token)?;
-        let j = self.coin_index(&buy_token)?;
+        let route = match self.route(&sell_token, &buy_token) {
+            Ok(route) => route,
+            // A pair of this component's tokens with no route is one the base pool serves.
+            Err(_)
+                if sell_token != buy_token &&
+                    self.holds_token(&sell_token) &&
+                    self.holds_token(&buy_token) =>
+            {
+                return Ok((BigUint::ZERO, BigUint::ZERO));
+            }
+            Err(error) => return Err(error),
+        };
+        let Route::Coins { i, j } = route else {
+            // Soft limit, as for the pool's own coins: the sell-side reserve. An underlying swap
+            // of that size can exceed what the other pool holds, so halve it until it fits.
+            let mut max_in = self.underlying_sell_reserve(route);
+            for _ in 0..LIMIT_HALVINGS {
+                if max_in.is_zero() {
+                    break;
+                }
+                if let Some(swap) = self.swap_underlying(route, max_in)? {
+                    let reserve = self
+                        .underlying_buy_reserve(route)
+                        .saturating_sub(U256::from(1));
+                    return Ok((u256_to_biguint(max_in), u256_to_biguint(swap.amount.min(reserve))));
+                }
+                max_in /= U256::from(2);
+            }
+            return Ok((BigUint::ZERO, BigUint::ZERO));
+        };
         let (balance_in, balance_out) = {
             let balances = self.pool.balances();
             (balances[i], balances[j])
@@ -349,13 +540,19 @@ impl ProtocolSim for CurveState {
             None => {
                 let engine = create_engine(SHARED_TYCHO_DB.clone(), false)?;
                 let pool_address = AlloyAddress::from_slice(self.pool_address.as_ref());
-                vm::read_raw_pool_state(
+                let state = vm::read_raw_pool_state(
                     &engine,
                     &pool_address,
                     self.variant,
                     &self.decimals,
                     &Default::default(),
-                )?
+                )?;
+                // A pending block's readings carry the metapool only, so the base pool is
+                // re-read on this path alone.
+                if let Some(base_pool) = &mut self.base_pool {
+                    base_pool.refresh(&engine)?;
+                }
+                state
             }
         };
         let pool = build_pool(&state)
@@ -624,6 +821,182 @@ mod tests {
         (curve_state(pool, CurveVariant::StableSwapMeta, vec![18, 18]), token(0, 18), token(1, 18))
     }
 
+    /// The USD1 metapool (`0xC09e82f81Cb811DB0922dD48206fc2e212322caf`) and its base pool
+    /// crv2pool (USDC/USDT) at block 26434212. Tokens: 0 = USD1, 1 = crv2pool, 2 = USDC, 3 = USDT.
+    fn usd1_metapool() -> CurveState {
+        let pool = Pool::StableSwapNG {
+            balances: vec![
+                U256::from(7_369_267_681_006_782_861_926_247u128),
+                U256::from(2_648_075_667_563_217_394_185_872u128),
+            ],
+            rates: vec![U256::from(WAD), U256::from(1_019_626_599_605_111_854u128)],
+            amp: U256::from(200_000u64),
+            fee: U256::from(1_000_000u64),
+            offpeg_fee_multiplier: U256::from(100_000_000_000u64),
+        };
+        let base_rate = U256::from(10u8).pow(U256::from(30u8));
+        let base = Pool::StableSwapNG {
+            balances: vec![U256::from(612_669_739_206u64), U256::from(4_493_527_459_173u64)],
+            rates: vec![base_rate, base_rate],
+            amp: U256::from(1_000_000u64),
+            fee: U256::from(100_000u64),
+            offpeg_fee_multiplier: U256::from(200_000_000_000u64),
+        };
+        let base_pool = BasePool::new(
+            vec![token(2, 6).address, token(3, 6).address],
+            base,
+            U256::from(5_007_566_619_967_511_977_472_971u128),
+            (0, 1),
+        );
+        curve_state(pool, CurveVariant::StableSwapNG, vec![18, 18]).with_base_pool(base_pool)
+    }
+
+    /// Expected values are `get_dy_underlying` on chain at block 26434212.
+    #[rstest::rstest]
+    #[case::usd1_to_usdc_small(0, 2, 1_000 * WAD, 998_431_508)]
+    #[case::usd1_to_usdc(0, 2, 100_000 * WAD, 99_826_575_332)]
+    #[case::usd1_to_usdt(0, 3, 100_000 * WAD, 99_925_522_977)]
+    #[case::usd1_to_usdt_large(0, 3, 1_000_000 * WAD, 998_734_524_892)]
+    #[case::usdc_to_usd1(2, 0, 100_000_000_000, 100_117_218_861_552_368_320_042)]
+    #[case::usdt_to_usd1(3, 0, 100_000_000_000, 100_042_232_123_237_499_257_451)]
+    #[case::usdt_to_usd1_large(3, 0, 1_000_000_000_000, 1_000_192_703_343_654_570_648_144)]
+    fn underlying_quote_matches_chain(
+        #[case] token_in: u8,
+        #[case] token_out: u8,
+        #[case] amount_in: u128,
+        #[case] expected: u128,
+    ) {
+        let state = usd1_metapool();
+        let decimals = |index: u8| if index < 2 { 18 } else { 6 };
+
+        let result = state
+            .get_amount_out(
+                BigUint::from(amount_in),
+                &token(token_in, decimals(token_in)),
+                &token(token_out, decimals(token_out)),
+            )
+            .expect("underlying quote");
+
+        assert_eq!(result.amount, BigUint::from(expected));
+    }
+
+    #[rstest::rstest]
+    #[case::lp_to_base_coin(1, 2)]
+    #[case::base_coin_to_lp(3, 1)]
+    #[case::between_base_coins(2, 3)]
+    fn underlying_refuses_pairs_the_base_pool_serves(#[case] token_in: u8, #[case] token_out: u8) {
+        let state = usd1_metapool();
+
+        let result = state.get_amount_out(
+            BigUint::from(1_000_000u64),
+            &token(token_in, 18),
+            &token(token_out, 6),
+        );
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(_, _))), "{result:?}");
+    }
+
+    #[rstest::rstest]
+    #[case::lp_to_base_coin(1, 2)]
+    #[case::base_coin_to_lp(3, 1)]
+    #[case::between_base_coins(2, 3)]
+    fn underlying_limits_are_zero_for_pairs_the_base_pool_serves(
+        #[case] token_in: u8,
+        #[case] token_out: u8,
+    ) {
+        let state = usd1_metapool();
+
+        let limits = state
+            .get_limits(token(token_in, 18).address, token(token_out, 6).address)
+            .expect("limits");
+
+        assert_eq!(limits, (BigUint::ZERO, BigUint::ZERO));
+    }
+
+    #[test]
+    fn limits_fail_for_a_token_the_pool_does_not_hold() {
+        let state = usd1_metapool();
+
+        let limits = state.get_limits(token(0, 18).address, token(9, 18).address);
+
+        assert!(matches!(limits, Err(SimulationError::InvalidInput(_, _))), "{limits:?}");
+    }
+
+    #[test]
+    fn underlying_swap_moves_both_pools() {
+        let state = usd1_metapool();
+        let amount = BigUint::from(100_000 * WAD);
+
+        let first = state
+            .get_amount_out(amount.clone(), &token(0, 18), &token(2, 6))
+            .expect("first quote");
+        let second = first
+            .new_state
+            .get_amount_out(amount, &token(0, 18), &token(2, 6))
+            .expect("second quote");
+
+        assert!(second.amount < first.amount, "the second swap gets a worse price");
+    }
+
+    #[rstest::rstest]
+    #[case::sell_usd1_for_usdc(0, 2)]
+    #[case::sell_usdt_for_usd1(3, 0)]
+    fn underlying_limit_is_quotable(#[case] token_in: u8, #[case] token_out: u8) {
+        let state = usd1_metapool();
+        let decimals = |index: u8| if index < 2 { 18 } else { 6 };
+        let (sell, buy) =
+            (token(token_in, decimals(token_in)), token(token_out, decimals(token_out)));
+
+        let (max_in, max_out) = state
+            .get_limits(sell.address.clone(), buy.address.clone())
+            .expect("limits");
+        let quote = state
+            .get_amount_out(max_in.clone(), &sell, &buy)
+            .expect("quote at the limit");
+
+        assert!(max_in > BigUint::ZERO);
+        assert_eq!(quote.amount, max_out);
+    }
+
+    #[test]
+    fn underlying_limit_pays_less_than_the_base_pool_reserve() {
+        let state = usd1_metapool();
+
+        let (_, max_out) = state
+            .get_limits(token(0, 18).address, token(2, 6).address)
+            .expect("limits");
+
+        // The metapool holds 7.37M USD1 but the base pool only 612,669 USDC.
+        assert!(max_out < BigUint::from(612_669_739_206u64));
+    }
+
+    #[test]
+    fn underlying_limit_from_a_base_coin_follows_the_metapool() {
+        let state = usd1_metapool();
+
+        let (max_in, _) = state
+            .get_limits(token(3, 6).address, token(0, 18).address)
+            .expect("limits");
+
+        // The base pool holds 4.49M USDT; the metapool's 2.65M crv2pool redeem for about 2.7M.
+        assert!(max_in > BigUint::from(2_600_000_000_000u64), "{max_in}");
+        assert!(max_in < BigUint::from(2_800_000_000_000u64), "{max_in}");
+    }
+
+    #[rstest::rstest]
+    #[case::usd1_in_usdc(0, 2)]
+    #[case::usdt_in_usd1(3, 0)]
+    fn underlying_spot_price_is_near_parity(#[case] base: u8, #[case] quote: u8) {
+        let state = usd1_metapool();
+        let decimals = |index: u8| if index < 2 { 18 } else { 6 };
+
+        let price = state
+            .spot_price(&token(base, decimals(base)), &token(quote, decimals(quote)))
+            .expect("spot price");
+
+        assert!((0.99..1.01).contains(&price), "{price}");
+    }
+
     #[test]
     fn pending_state_preserves_admin_fee_for_exchange() {
         let (mut state, token_in, token_out) = v1_two_coin_state();
@@ -878,12 +1251,11 @@ mod tests {
     #[test]
     fn test_query_pool_swap_target_equal_to_spot() {
         let (state, token_in, token_out) = v1_two_coin_state();
-        let i = state
-            .coin_index(&token_in.address)
-            .expect("token_in index");
-        let j = state
-            .coin_index(&token_out.address)
-            .expect("token_out index");
+        let route = state
+            .route(&token_in.address, &token_out.address)
+            .expect("the pool's own coins trade directly");
+        assert_eq!(route, Route::Coins { i: 0, j: 1 });
+        let (i, j) = (0, 1);
         let (num, den) = state
             .pool
             .spot_price(i, j)

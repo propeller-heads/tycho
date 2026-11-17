@@ -209,6 +209,9 @@ contract Constants is
 
     // Curve meta registry
     address CURVE_META_REGISTRY = 0xF98B45FA17DE75FB1aD0e7aFD971b0ca00e379fC;
+    // StableSwap NG metapool: USD1 paired with crv2pool, the LP token of a USDC/USDT pool
+    address USD1_ADDR = 0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d;
+    address USD1_CRV2POOL_POOL = 0xC09e82f81Cb811DB0922dD48206fc2e212322caf;
 
     // Uniswap v4 pool manager
     address POOL_MANAGER = 0x000000000004444c5dc75cB358380D2e3dE08A90;

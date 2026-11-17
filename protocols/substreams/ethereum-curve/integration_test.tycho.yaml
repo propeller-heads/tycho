@@ -7,6 +7,35 @@ adapter_contract: "CurveAdapter"
 skip_balance_check: true
 
 tests:
+  # NG metapool on an NG base pool: bcrvUSD paired with crv2pool (USDC/USDT). The component also
+  # lists the base pool's coins, which it trades through `exchange_underlying`. The range starts
+  # after Fusaka, which the router and executor bytecode need to execute.
+  - name: test_ng_metapool_underlying
+    start_block: 24631446
+    stop_block: 24631746
+    initialized_accounts:
+      - "0x6A8cbed756804B16E05E741eDaBd5cB544AE21bf" # CurveStableSwapNG factory
+      - "0x4f493B7dE8aAC7d55F71853688b1F7C8F0243C85" # base pool crv2pool, also its LP token
+      - "0x98ee851a00abee0d95d08cf4ca2bdce32aeaaf7f" # TwoCrypto factory
+    expected_components:
+      - id: "0x11f61a8fc633ce53a02d0b8f8f22a96d952422c6"
+        tokens:
+          - "0x35f12276ef6e4d50c551785f3b46faed4a057d1d" # bcrvUSD
+          - "0x4f493b7de8aac7d55f71853688b1f7c8f0243c85" # crv2pool
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" # USDC
+          - "0xdac17f958d2ee523a2206206994597c13d831ec7" # USDT
+        static_attributes:
+          factory_name: "0x63727970746f5f737761705f6e675f666163746f7279" # crypto_swap_ng_factory
+          pool_type: "0x6d657461706f6f6c" # metapool
+          base_pool: "0x307834663439336237646538616163376435356637313835333638386231663763386630323433633835" # 0x4f493b7de8aac7d55f71853688b1f7c8f0243c85
+          coins: "0x5b22307833356631323237366566366534643530633535313738356633623436666165643461303537643164222c22307834663439336237646538616163376435356637313835333638386231663763386630323433633835225d" # [bcrvUSD, crv2pool]
+          underlying_coins: "0x5b22307833356631323237366566366534643530633535313738356633623436666165643461303537643164222c22307861306238363939316336323138623336633164313964346132653965623063653336303665623438222c22307864616331376639353864326565353233613232303632303639393435393763313364383331656337225d" # [bcrvUSD, USDC, USDT]
+        creation_tx: "0x5fe3a7a8435812d3516f6576d6dc441fc26c12e5b383aba64e0eb341e0bbe1ce"
+        skip_simulation: false
+        # In a local run every execution of this range reverted, swaps between the pool's own
+        # coins included and with the executor fixture from main as well. Not investigated yet.
+        skip_execution: true
+
   # case-1: oracle
   - name: test_oracle_pool
     start_block: 21616576

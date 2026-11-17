@@ -17,6 +17,13 @@ use crate::encoding::{
     swap_encoder::SwapEncoder,
 };
 
+/// The pool type byte of a stable pool.
+const STABLE_POOL_TYPE: u8 = 1;
+/// The pool type byte of a stable metapool's swap between its coin and a coin of its base pool,
+/// which the executor runs through `exchange_underlying`. Mirrors
+/// `CURVE_STABLE_UNDERLYING_POOL_TYPE` in `ICurvePool.sol`.
+const STABLE_UNDERLYING_POOL_TYPE: u8 = 11;
+
 /// Encodes a swap on a Curve pool through the given executor address.
 ///
 /// # Fields
@@ -112,6 +119,40 @@ impl CurveSwapEncoder {
             })?;
         Ok((U8::from(i), U8::from(j)))
     }
+
+    /// The `exchange_underlying` indexes of a swap that a metapool runs through its base pool.
+    ///
+    /// A metapool component lists `underlying_coins`: its own coin first, then the coins of its
+    /// base pool. Returns `None` for a swap between the pool's own coins, and for a component
+    /// that lists no underlying coins.
+    fn get_underlying_coin_indexes(
+        swap: &Swap,
+        token_in: Address,
+        token_out: Address,
+    ) -> Result<Option<(U8, U8)>, EncodingError> {
+        let attributes = &swap.component().static_attributes;
+        let Some(underlying_bytes) = attributes.get("underlying_coins") else {
+            return Ok(None);
+        };
+        let coins_bytes = get_static_attribute(swap, "coins")?;
+        let coins: Vec<Address> = from_str(std::str::from_utf8(&coins_bytes)?)?;
+        if coins.contains(&token_in) && coins.contains(&token_out) {
+            return Ok(None);
+        }
+
+        let underlying: Vec<Address> = from_str(std::str::from_utf8(underlying_bytes)?)?;
+        let index_of = |token: Address| {
+            underlying
+                .iter()
+                .position(|&coin| coin == token)
+                .ok_or_else(|| {
+                    EncodingError::InvalidInput(format!(
+                        "Token {token} is neither a coin nor an underlying coin of the curve pool"
+                    ))
+                })
+        };
+        Ok(Some((U8::from(index_of(token_in)?), U8::from(index_of(token_out)?))))
+    }
 }
 
 impl SwapEncoder for CurveSwapEncoder {
@@ -173,7 +214,24 @@ impl SwapEncoder for CurveSwapEncoder {
         let pool_type =
             Self::get_pool_type(&pool_address.to_string(), &factory_address.to_string())?;
 
-        let (i, j) = self.get_coin_indexes(swap, token_in, token_out)?;
+        let (pool_type, i, j) = match Self::get_underlying_coin_indexes(swap, token_in, token_out)?
+        {
+            Some((i, j)) => {
+                // The executor calls `exchange_underlying` with `int128` indexes, which only
+                // stable metapools take.
+                if pool_type != U8::from(STABLE_POOL_TYPE) {
+                    return Err(EncodingError::InvalidInput(format!(
+                        "Curve pool {pool_address} is not a stable pool; it has no underlying \
+                             swaps"
+                    )));
+                }
+                (U8::from(STABLE_UNDERLYING_POOL_TYPE), i, j)
+            }
+            None => {
+                let (i, j) = self.get_coin_indexes(swap, token_in, token_out)?;
+                (pool_type, i, j)
+            }
+        };
 
         let args = (
             token_in,
@@ -422,6 +480,159 @@ mod tests {
             ))
         );
     }
+    /// The USD1 metapool: USD1 paired with crv2pool, whose base pool holds USDC and USDT.
+    fn usd1_metapool() -> ProtocolComponent {
+        let list = |addresses: &[&str]| {
+            let quoted: Vec<String> = addresses
+                .iter()
+                .map(|address| format!("\"{address}\""))
+                .collect();
+            Bytes::from(
+                format!("[{}]", quoted.join(","))
+                    .as_bytes()
+                    .to_vec(),
+            )
+        };
+        let static_attributes = HashMap::from([
+            (
+                "factory".to_string(),
+                Bytes::from(
+                    "0x6a8cbed756804b16e05e741edabd5cb544ae21bf"
+                        .as_bytes()
+                        .to_vec(),
+                ),
+            ),
+            (
+                "coins".to_string(),
+                list(&[
+                    "0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d",
+                    "0x4f493b7de8aac7d55f71853688b1f7c8f0243c85",
+                ]),
+            ),
+            (
+                "underlying_coins".to_string(),
+                list(&[
+                    "0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d",
+                    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                    "0xdac17f958d2ee523a2206206994597c13d831ec7",
+                ]),
+            ),
+        ]);
+        ProtocolComponent {
+            id: String::from("0xC09e82f81Cb811DB0922dD48206fc2e212322caf"),
+            protocol_system: String::from("vm:curve"),
+            static_attributes,
+            ..Default::default()
+        }
+    }
+
+    fn encode_on_usd1_metapool(token_in: &str, token_out: &str) -> Result<String, EncodingError> {
+        let (token_in, token_out) = (Bytes::from(token_in), Bytes::from(token_out));
+        let swap = Swap::new(
+            usd1_metapool(),
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
+        let encoding_context = EncodingContext {
+            router_address: None,
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
+        };
+        let encoder = CurveSwapEncoder::new(
+            Bytes::from("0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f"),
+            Chain::Ethereum,
+            None,
+        )?;
+        encoder
+            .encode_swap(&swap, &encoding_context)
+            .map(|encoded| encode(&encoded))
+    }
+
+    const USD1: &str = "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d";
+    const CRV2POOL: &str = "0x4f493B7dE8aAC7d55F71853688b1F7C8F0243C85";
+    const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+    const USDT: &str = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
+
+    #[test]
+    fn test_curve_encode_underlying_to_base_coin() {
+        let hex_swap = encode_on_usd1_metapool(USD1, USDC).unwrap();
+
+        assert_eq!(
+            hex_swap,
+            String::from(concat!(
+                // token in
+                "8d0d000ee44948fc98c9b98a4fa4921476f08b0d",
+                // token out
+                "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                // pool address
+                "c09e82f81cb811db0922dd48206fc2e212322caf",
+                // pool type 11: stable metapool, underlying coins
+                "0b",
+                // i index: the metapool's coin
+                "00",
+                // j index: the base pool's first coin
+                "01",
+            ))
+        );
+    }
+
+    #[test]
+    fn test_curve_encode_underlying_from_base_coin() {
+        let hex_swap = encode_on_usd1_metapool(USDT, USD1).unwrap();
+
+        assert_eq!(
+            hex_swap,
+            String::from(concat!(
+                // token in
+                "dac17f958d2ee523a2206206994597c13d831ec7",
+                // token out
+                "8d0d000ee44948fc98c9b98a4fa4921476f08b0d",
+                // pool address
+                "c09e82f81cb811db0922dd48206fc2e212322caf",
+                // pool type 11: stable metapool, underlying coins
+                "0b",
+                // i index: the base pool's second coin
+                "02",
+                // j index: the metapool's coin
+                "00",
+            ))
+        );
+    }
+
+    #[test]
+    fn test_curve_encode_metapool_own_coins_stay_a_plain_exchange() {
+        let hex_swap = encode_on_usd1_metapool(USD1, CRV2POOL).unwrap();
+
+        assert_eq!(
+            hex_swap,
+            String::from(concat!(
+                // token in
+                "8d0d000ee44948fc98c9b98a4fa4921476f08b0d",
+                // token out
+                "4f493b7de8aac7d55f71853688b1f7c8f0243c85",
+                // pool address
+                "c09e82f81cb811db0922dd48206fc2e212322caf",
+                // pool type 1
+                "01",
+                // i index
+                "00",
+                // j index
+                "01",
+            ))
+        );
+    }
+
+    #[test]
+    fn test_curve_encode_underlying_rejects_a_token_the_pool_does_not_trade() {
+        let weth = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+
+        let result = encode_on_usd1_metapool(USD1, weth);
+
+        assert!(matches!(result, Err(EncodingError::InvalidInput(_))), "{result:?}");
+    }
+
     #[test]
     fn test_curve_encode_st_eth() {
         // This test is for the stETH pool, which is a special case in Curve

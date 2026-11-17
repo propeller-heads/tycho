@@ -149,7 +149,7 @@ where
 
 /// Read an address-typed static attribute. The substreams stores addresses as the ASCII bytes of
 /// their `"0x…"` string representation.
-fn attr_address(attrs: &HashMap<String, Bytes>, key: &str) -> Option<AlloyAddress> {
+pub(super) fn attr_address(attrs: &HashMap<String, Bytes>, key: &str) -> Option<AlloyAddress> {
     let raw = attrs.get(key)?;
     let text = String::from_utf8(raw.to_vec()).ok()?;
     text.trim().parse::<AlloyAddress>().ok()
