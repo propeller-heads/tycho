@@ -13,7 +13,7 @@ contract Aqua0RecordedQuoteTest is TestUtils {
     // the amount it quoted.
     uint256 constant FORK_BLOCK = 523_932_429;
     uint256 constant QUOTE_DEADLINE = 1_794_591_921;
-    address constant TYCHO_ROUTER = 0x924F147c50eA59f5180a26031A8b65B2aA1e81Cd;
+    address constant TYCHO_ROUTER = 0x1B82e8C16Ce8E17535C9B6b8AD107f61b0b192B5;
     uint256 constant QUOTED_OUT = 9_971_227;
 
     address constant USDG = 0x004B506865409877C9fA29bfb1ebA929984B9bbC;

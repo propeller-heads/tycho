@@ -1232,7 +1232,7 @@ fn test_single_encoding_strategy_aqua0() {
 
     let usdg = Bytes::from_str("0x004B506865409877C9fA29bfb1ebA929984B9bbC").unwrap();
     let usdc = Bytes::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831").unwrap();
-    let router = Bytes::from_str("0x924F147c50eA59f5180a26031A8b65B2aA1e81Cd").unwrap();
+    let router = Bytes::from_str("0x1B82e8C16Ce8E17535C9B6b8AD107f61b0b192B5").unwrap();
     let amount_in = BigUint::from(10_000_000u64);
     let amount_out = BigUint::from(9_971_227u64);
     let hook_data = Bytes::from_str(

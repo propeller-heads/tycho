@@ -379,7 +379,7 @@ mod tests {
     use super::*;
     use crate::snapshot_feed::http::test_support::spawn_http_server;
 
-    const ROUTER: &str = "0x924f147c50ea59f5180a26031a8b65b2aa1e81cd";
+    const ROUTER: &str = "0x1b82e8c16ce8e17535c9b6b8ad107f61b0b192b5";
 
     fn params() -> GetAmountOutParams {
         GetAmountOutParams {
