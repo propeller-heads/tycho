@@ -1,3 +1,18 @@
+## [0.526.0](https://github.com/propeller-heads/tycho/compare/0.525.0...0.526.0) (2026-11-17)
+
+
+### Features
+
+* add pause fields to the block message and protocol_components ([#1805](https://github.com/propeller-heads/tycho/issues/1805)) ([469d6ee](https://github.com/propeller-heads/tycho/commit/469d6ee64dbf3b4ce6c6f3188598dd6beb198b06))
+* **client-py:** mirror the pause fields ([f728076](https://github.com/propeller-heads/tycho/commit/f728076cedb60468f31bca9006bd512ce3d112ad))
+* **common:** add pause and unpause events to the block message ([ab80d2a](https://github.com/propeller-heads/tycho/commit/ab80d2a5492136ba9a0c3bdd85b0871b84231cd4))
+* **common:** flag paused components in protocol_components replies ([44f5e59](https://github.com/propeller-heads/tycho/commit/44f5e598afa910532a394a87a90e7d6cc2ef1247))
+
+
+### Bug Fixes
+
+* **common:** document paused_component_ids as a list of strings ([eae1470](https://github.com/propeller-heads/tycho/commit/eae1470d9dfec09792cef61d8a8eb2fd8d565f7f))
+
 ## [0.525.0](https://github.com/propeller-heads/tycho/compare/0.524.0...0.525.0) (2026-11-16)
 
 
