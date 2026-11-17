@@ -34,9 +34,9 @@ use crate::{
 
 /// Gas for one Aqua0 fill when the backend sends no measured estimate: the V4 executor's swap,
 /// with the hook adding and removing each JIT range. In `Aqua0.t.sol` the executor's part of a
-/// one-range fill used 717,716 of the router call's 799,690; the router's own transfers are
+/// one-range fill used 759,825 of the router call's 842,899; the router's own transfers are
 /// charged by the gas estimator.
-const SWAP_GAS_BASE: u64 = 520_000;
+const SWAP_GAS_BASE: u64 = 560_000;
 const SWAP_GAS_PER_RANGE: u64 = 200_000;
 
 fn swap_gas(ranges: usize) -> BigUint {
@@ -478,8 +478,8 @@ mod tests {
                 .unwrap()
                 .gas
         };
-        assert_eq!(gas(100), BigUint::from(720_000u32));
-        assert_eq!(gas(150), BigUint::from(920_000u32));
+        assert_eq!(gas(100), BigUint::from(760_000u32));
+        assert_eq!(gas(150), BigUint::from(960_000u32));
     }
 
     #[test]
