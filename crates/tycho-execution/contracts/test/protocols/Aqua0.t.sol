@@ -11,10 +11,10 @@ import {TychoRouterV3} from "../../src/TychoRouterV3.sol";
 contract Aqua0RecordedQuoteTest is TestUtils {
     // The recording: the block the quote was signed at, its deadline, the router it names and
     // the amount it quoted.
-    uint256 constant FORK_BLOCK = 523_932_429;
-    uint256 constant QUOTE_DEADLINE = 1_794_591_921;
+    uint256 constant FORK_BLOCK = 524_997_010;
+    uint256 constant QUOTE_DEADLINE = 1_794_908_038;
     address constant TYCHO_ROUTER = 0x1B82e8C16Ce8E17535C9B6b8AD107f61b0b192B5;
-    uint256 constant QUOTED_OUT = 9_971_227;
+    uint256 constant QUOTED_OUT = 9_863_840;
 
     address constant USDG = 0x004B506865409877C9fA29bfb1ebA929984B9bbC;
     address constant USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
