@@ -50,7 +50,10 @@ impl PostgresGatewayNew {
         let (rows, total) = match (system, ids) {
             (Some(system), ids) => {
                 self.get_protocol_system_id(&system)?;
-                load_components_of(&system, ids, min_tvl, pagination_params, conn).await?
+                let Some(instance) = active_instance(&system, conn).await? else {
+                    return Ok(WithTotal { entity: Vec::new(), total: Some(0) });
+                };
+                load_components_of(instance, &system, ids, min_tvl, pagination_params, conn).await?
             }
             (None, Some(_)) => {
                 return Err(StorageError::Unsupported(
@@ -248,18 +251,16 @@ impl PostgresGatewayNew {
     }
 }
 
-/// Loads the matching component rows of the active instance of `system`, each with `system` as
-/// its protocol system name, and counts the matches on all pages.
+/// Loads the matching component rows of `instance`, each with `system` as its protocol system
+/// name, and counts the matches on all pages.
 async fn load_components_of(
+    instance: InstanceId,
     system: &str,
     ids: Option<&[&str]>,
     min_tvl: Option<f64>,
     pagination_params: Option<&PaginationParams>,
     conn: &mut AsyncPgConnection,
 ) -> Result<(Vec<(iorm::ProtocolComponent, String)>, i64), StorageError> {
-    let Some(instance) = active_instance(system, conn).await? else {
-        return Ok((Vec::new(), 0));
-    };
     let filtered = || {
         let mut query = protocol_component::table
             .left_join(
