@@ -17,6 +17,7 @@ use crate::postgres::{
     compare_balances, count_to_i64,
     instance::{
         active::active_instance_ids,
+        cache::token_store::TokenQuery,
         gateway::PostgresGatewayNew,
         schema::tycho::{component_balance, protocol_component, protocol_instance},
     },
@@ -46,6 +47,20 @@ impl PostgresGatewayNew {
         conn: &mut AsyncPgConnection,
     ) -> Result<WithTotal<Vec<Token>>, StorageError> {
         self.get_chain_id(&chain)?;
+        if let Some(cache) = &self.token_cache {
+            return cache.query_tokens(&TokenQuery {
+                chain,
+                addresses: address.map(|addresses| {
+                    addresses
+                        .iter()
+                        .map(|address| (*address).clone())
+                        .collect()
+                }),
+                quality_range: quality,
+                last_traded_ts_threshold: traded_n_days_ago,
+                pagination: pagination_params.cloned(),
+            });
+        }
         let instances = match traded_n_days_ago {
             Some(_) => active_instance_ids(conn).await?,
             None => Vec::new(),

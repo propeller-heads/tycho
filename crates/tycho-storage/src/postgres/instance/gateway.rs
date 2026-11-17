@@ -3,7 +3,9 @@ use std::sync::Arc;
 use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
 use tycho_common::{models::Chain, storage::StorageError};
 
-use crate::postgres::{ChainEnumCache, FromConnection, ProtocolSystemEnumCache};
+use crate::postgres::{
+    instance::cache::token::TokenCache, ChainEnumCache, FromConnection, ProtocolSystemEnumCache,
+};
 
 /// Inner gateway on the `tycho` instance tables. It runs the SQL for the public gateways and reads
 /// each protocol's active instance.
@@ -17,6 +19,7 @@ use crate::postgres::{ChainEnumCache, FromConnection, ProtocolSystemEnumCache};
 pub struct PostgresGatewayNew {
     pub(super) chain_id_cache: Arc<ChainEnumCache>,
     pub(super) protocol_system_id_cache: Arc<ProtocolSystemEnumCache>,
+    pub(super) token_cache: Option<Arc<TokenCache>>,
 }
 
 impl PostgresGatewayNew {
@@ -29,6 +32,7 @@ impl PostgresGatewayNew {
         Ok(Self {
             chain_id_cache: Arc::new(chain_id_cache),
             protocol_system_id_cache: Arc::new(protocol_system_id_cache),
+            token_cache: None,
         })
     }
 
@@ -37,7 +41,7 @@ impl PostgresGatewayNew {
         chain_id_cache: Arc<ChainEnumCache>,
         protocol_system_id_cache: Arc<ProtocolSystemEnumCache>,
     ) -> Self {
-        Self { chain_id_cache, protocol_system_id_cache }
+        Self { chain_id_cache, protocol_system_id_cache, token_cache: None }
     }
 
     #[cfg(test)]
@@ -51,7 +55,15 @@ impl PostgresGatewayNew {
         Self {
             chain_id_cache: Arc::new(chain_id_cache),
             protocol_system_id_cache: Arc::new(protocol_system_id_cache),
+            token_cache: None,
         }
+    }
+
+    /// Answers `get_tokens` from `cache` instead of SQL.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no builder wires it until cut-over"))]
+    pub fn with_token_cache(mut self, cache: Arc<TokenCache>) -> Self {
+        self.token_cache = Some(cache);
+        self
     }
 
     /// The database id of `chain`, or `NotFound` for a chain the database does not know.
