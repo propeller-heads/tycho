@@ -13,6 +13,7 @@ use tycho_common::{
     storage::{ProtocolGateway, StorageError},
     Bytes,
 };
+use tycho_storage::postgres::InstanceId;
 
 #[async_trait]
 pub trait ProtocolDataCache: Send + Sync {
@@ -43,6 +44,14 @@ pub trait ProtocolDataCache: Send + Sync {
         &self,
         components: T,
     ) -> Result<(), StorageError>;
+
+    /// Adds the components whose protocol has `instance` as its unit. Other components are
+    /// skipped.
+    async fn add_instance_components<T: IntoIterator<Item = ProtocolComponent> + Send + Sync>(
+        &self,
+        instance: InstanceId,
+        components: T,
+    ) -> Result<(), StorageError>;
 }
 
 /// Longest time a background price refresh may take before it is abandoned.
@@ -56,6 +65,7 @@ pub struct ProtocolMemoryCache {
     tokens: Arc<RwLock<HashMap<Bytes, Token>>>,
     token_prices: Arc<RwLock<TokenPrices>>,
     components: Arc<RwLock<ProtocolComponentStore>>,
+    instances: HashMap<String, InstanceId>,
     max_price_age: chrono::Duration,
     gateway: Arc<dyn ProtocolGateway + Send + Sync>,
     /// Held while a price refresh runs, so that at most one runs at a time.
@@ -81,9 +91,16 @@ impl ProtocolMemoryCache {
             gateway,
             tokens: Arc::new(RwLock::new(HashMap::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
+            instances: HashMap::new(),
             token_prices: Arc::new(RwLock::new(TokenPrices::default())),
             price_refresh: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// Sets the instance of each protocol's components: its active instance at startup.
+    pub fn with_instances(mut self, instances: HashMap<String, InstanceId>) -> Self {
+        self.instances = instances;
+        self
     }
 
     #[instrument(skip_all)]
@@ -353,6 +370,29 @@ impl ProtocolDataCache for ProtocolMemoryCache {
                 .or_default();
             components.insert(pc.id.clone(), pc);
         });
+        Ok(())
+    }
+
+    async fn add_instance_components<T: IntoIterator<Item = ProtocolComponent> + Send + Sync>(
+        &self,
+        instance: InstanceId,
+        components: T,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.components.write().await;
+        let mut n_skipped = 0;
+        components.into_iter().for_each(|pc| {
+            if self.instances.get(&pc.protocol_system) == Some(&instance) {
+                guard
+                    .entry(pc.protocol_system.clone())
+                    .or_default()
+                    .insert(pc.id.clone(), pc);
+            } else {
+                n_skipped += 1;
+            }
+        });
+        if n_skipped > 0 {
+            debug!(n_skipped, ?instance, "SkippedComponentsOfOtherInstances");
+        }
         Ok(())
     }
 }
