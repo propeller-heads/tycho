@@ -85,7 +85,21 @@ INSERT INTO trades (
      true, true, '0x01', 'v3_1', 'single', 'transfer_from',
      '0x01', '0x01', '0x01', '0xfff1111111111111111111111111111111111111',
      '0x1818181818181818181818181818181818181818', 1000000000, 0,
-     0, 1, 0, 1, '{}', true, false, false, 500000000);
+     0, 1, 0, 1, '{}', true, false, false, 500000000),
+    -- a stable prices a trade into a token Tycho knows but holds no price row for: the out side
+    -- still gets its decimals and the price this trade implies
+    ('no-price-row', 'base', 1, now() - interval '30 days', '0x10', 0, 0,
+     true, true, '0x01', 'v3_1', 'single', 'transfer_from',
+     '0x01', '0x01', '0x01', '0xfff1111111111111111111111111111111111111',
+     '0x7777777777777777777777777777777777777777', 1000000000, 0,
+     0, 1, 0, 1, '{}', true, false, false, 250000000),
+    -- a token that failed Tycho's analysis with an 18 but has a fresh price values the trade
+    -- itself, so it keeps its decimals and its own unit price
+    ('priced-quality-10', 'base', 1, now(), '0x11', 0, 0,
+     true, true, '0x01', 'v3_1', 'single', 'transfer_from',
+     '0x01', '0x01', '0x01', '0x1919191919191919191919191919191919191919',
+     '0xdddddddddddddddddddddddddddddddddddddddd', 1000000000000000000, 0,
+     0, 1, 0, 1, '{}', true, false, false, 4000000);
 
 -- A token Tycho does not know keeps the decimals its trade already has: 1000 USD for 4 units
 -- of a 9-decimal token is 250 USD each.

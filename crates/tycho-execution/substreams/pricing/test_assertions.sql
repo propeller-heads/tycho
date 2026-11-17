@@ -89,6 +89,24 @@ BEGIN
             v.volume_usd, v.price_source, v.decimals_out, v.price_out_usd;
     END IF;
 
+    -- A token Tycho knows with no token_price row at all still lends its decimals: 1000 USD for
+    -- 250 units of a 6-decimal token is 4 USD each.
+    SELECT * INTO v FROM trades WHERE id = 'no-price-row';
+    IF v.volume_usd IS DISTINCT FROM 1000.0 OR v.price_source IS DISTINCT FROM 'in_stable'
+       OR v.decimals_out IS DISTINCT FROM 6 OR v.price_out_usd IS DISTINCT FROM 4.0 THEN
+        RAISE EXCEPTION 'a token without a price row lost its decimals: % % % %',
+            v.volume_usd, v.price_source, v.decimals_out, v.price_out_usd;
+    END IF;
+
+    -- The untrusted-18 guard applies only to a token without a fresh price: one Tycho prices keeps
+    -- its decimals and its own unit price (1 unit at 2 USD).
+    SELECT * INTO v FROM trades WHERE id = 'priced-quality-10';
+    IF v.volume_usd IS DISTINCT FROM 2.0 OR v.price_source IS DISTINCT FROM 'in_tycho'
+       OR v.decimals_in IS DISTINCT FROM 18 OR v.price_in_usd IS DISTINCT FROM 2.0 THEN
+        RAISE EXCEPTION 'a priced quality-10 token lost its decimals or price: % % % %',
+            v.volume_usd, v.price_source, v.decimals_in, v.price_in_usd;
+    END IF;
+
     -- A token Tycho does not know keeps the decimals the trade already had.
     SELECT * INTO v FROM trades WHERE id = 'kept-decimals';
     IF v.volume_usd IS DISTINCT FROM 1000.0 OR v.decimals_out IS DISTINCT FROM 9

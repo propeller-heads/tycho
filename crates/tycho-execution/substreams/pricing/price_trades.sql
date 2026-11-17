@@ -37,15 +37,18 @@
 \set price_max_age '3 hours'
 \endif
 
+-- The token gather and the update read the trades table separately, so both run on one
+-- snapshot: a trade the sink inserts between them would otherwise be priced without its tokens
+-- looked up. The sink only inserts, so the update cannot hit a serialization failure.
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+
 -- The tokens this pass needs from Tycho: both sides of every unpriced trade, and the chain's
 -- pinned tokens (the anchor). Passed as a literal so the lookup below runs on the Tycho database
--- instead of copying its whole token table across the link on every pass.
+-- instead of copying its whole token table across the link on every pass. The trade filter
+-- must match `sided` below.
 SELECT COALESCE(array_agg(DISTINCT decode(substr(token, 3), 'hex')), '{}')::text AS needed_tokens
 FROM (
-    SELECT token_in AS token FROM trades
-    WHERE priced_at IS NULL AND chain = :'chain' AND tx_success AND call_success
-    UNION ALL
-    SELECT token_out FROM trades
+    SELECT unnest(ARRAY[token_in, token_out]) AS token FROM trades
     WHERE priced_at IS NULL AND chain = :'chain' AND tx_success AND call_success
     UNION ALL
     SELECT address FROM preferred_tokens WHERE chain = :'chain'
@@ -62,9 +65,13 @@ WITH tycho_tokens AS (
                      AND tp.modified_ts > now() - :'price_max_age'::interval
                 THEN tp.price::numeric END                          AS price_raw,
            -- Tycho reads decimals() when it first sees a token and stores 18 if that call fails.
-           -- A failed call usually fails the token's analysis too (quality 10 or below), so an
-           -- 18 on such a token is not trusted.
-           CASE WHEN t.decimals = 18 AND t.quality <= 10 THEN NULL
+           -- It then sets quality 10, as it does for any failed first analysis, so an 18 at
+           -- quality 10 may be that default. It is not trusted for a token without a fresh price,
+           -- whose only price would be implied through those decimals. A token Tycho prices
+           -- keeps them: its price and the trade's volume do not depend on them.
+           CASE WHEN t.decimals = 18 AND t.quality = 10
+                     AND NOT (tp.price > 0 AND tp.modified_ts > now() - :'price_max_age'::interval)
+                THEN NULL
                 ELSE t.decimals END                                 AS tycho_decimals
     FROM :schema.token t
     JOIN :schema.account a ON a.id = t.account_id
@@ -89,19 +96,18 @@ anchor AS (
       AND pt.is_stable
       AND k.price_raw IS NOT NULL
 ),
--- One row per known token. A pinned token's decimals win over Tycho's. `price_raw` is kept only
--- when the token can value a trade: fresh, and for a pinned token inside its band (outside it,
--- it is a copied symbol or a stale row, not a price). Its decimals stay usable either way.
+-- One row per known token, with its unit price in USD. A pinned token's decimals win over
+-- Tycho's.
 valued AS (
     SELECT k.token,
-           CASE WHEN pt.address IS NULL
-                     OR (power(10::numeric, pt.decimals) / k.price_raw * a.native_usd)
-                        BETWEEN pt.min_usd AND pt.max_usd
-                THEN k.price_raw END                    AS price_raw,
+           k.price_raw,
            COALESCE(pt.decimals, k.tycho_decimals)      AS decimals,
+           power(10::numeric, COALESCE(pt.decimals, k.tycho_decimals)) / k.price_raw * a.native_usd
+                                                        AS unit_usd,
            (pt.address IS NOT NULL)                     AS preferred,
            COALESCE(pt.is_stable, false)                AS is_stable,
            COALESCE(pt.priority, 99)                    AS priority,
+           pt.min_usd, pt.max_usd,
            a.native_usd
     FROM tokens k
     CROSS JOIN anchor a
@@ -109,11 +115,18 @@ valued AS (
            ON pt.chain = :'chain' AND pt.address = k.token
     WHERE a.native_usd IS NOT NULL
 ),
+-- The price is kept only when the token can value a trade: fresh, and for a pinned token inside
+-- its band (outside it, it is a copied symbol or a stale row, not a price). Its decimals stay
+-- usable either way.
 priced AS (
-    SELECT v.*,
-           power(10::numeric, v.decimals) / v.price_raw * v.native_usd AS unit_usd,
-           (v.preferred AND v.price_raw IS NOT NULL)                    AS can_anchor
+    SELECT v.token, v.decimals, v.preferred, v.is_stable, v.priority, v.native_usd,
+           CASE WHEN in_band THEN v.price_raw END                AS price_raw,
+           CASE WHEN in_band THEN v.unit_usd END                 AS unit_usd,
+           (v.preferred AND in_band AND v.price_raw IS NOT NULL) AS can_anchor
     FROM valued v
+    CROSS JOIN LATERAL (
+        SELECT NOT v.preferred OR v.unit_usd BETWEEN v.min_usd AND v.max_usd AS in_band
+    ) b
 ),
 sided AS (
     SELECT t.id,
@@ -133,6 +146,7 @@ sided AS (
     FROM trades t
     LEFT JOIN priced i ON i.token = t.token_in
     LEFT JOIN priced o ON o.token = t.token_out
+    -- The same trades as the token gather at the top, which must match this filter.
     WHERE t.priced_at IS NULL
       AND t.chain = :'chain'
       AND t.tx_success
@@ -205,3 +219,5 @@ SET price_in_usd  = final.price_in_usd,
     priced_at     = now()
 FROM final
 WHERE t.id = final.id;
+
+COMMIT;

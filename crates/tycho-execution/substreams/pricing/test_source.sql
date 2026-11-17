@@ -18,5 +18,8 @@ INSERT INTO account (id, address)
 VALUES (:id, decode(:'token_hex', 'hex'));
 INSERT INTO token (id, account_id, decimals, quality)
 VALUES (:id, :id, :decimals, :quality);
+-- Without a price, the token has no token_price row at all.
+\if :{?price}
 INSERT INTO token_price (token_id, price, modified_ts)
 VALUES (:id, :price, now() - :'age'::interval);
+\endif
