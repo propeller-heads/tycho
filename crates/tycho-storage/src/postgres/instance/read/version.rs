@@ -39,6 +39,61 @@ pub(super) async fn check_current(
     }
 }
 
+/// Which rows answer a read at a version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadAt {
+    /// The current tables answer: every current row is valid at this version. `None` for the
+    /// latest version, else the timestamp of the version.
+    Current(Option<NaiveDateTime>),
+    /// A version before the head: current rows with `valid_from <= ts`, and history rows with
+    /// `valid_from <= ts < valid_to` and `valid_to <= head`.
+    Past { ts: NaiveDateTime, head: NaiveDateTime },
+}
+
+/// Resolves the version `at` of `instance` to the rows that answer it. The head, the base and the
+/// retention horizon are the ones the read looked up with the instance.
+///
+/// In this order:
+/// - `None` or the `Latest` block with kind `Last`: `Current(None)`. Reads nothing.
+/// - a timestamp at or after the head, or any timestamp when the instance has no head:
+///   `Current(Some(ts))`.
+/// - a timestamp before the retention horizon: `Unsupported`, because older history is dropped.
+/// - a timestamp before the base block of the instance: `Unsupported`, because the instance has no
+///   history before it.
+/// - any other timestamp before the head: `Past { ts, head }`.
+///
+/// A version kind other than `Last` is `Unsupported`.
+pub(super) async fn resolve_version(
+    instance: &ActiveInstance,
+    at: Option<&Version>,
+    conn: &mut AsyncPgConnection,
+) -> Result<ReadAt, StorageError> {
+    let Some(at) = at else {
+        return Ok(ReadAt::Current(None));
+    };
+    if let Version(BlockOrTimestamp::Block(BlockIdentifier::Latest(_)), VersionKind::Last) = at {
+        return Ok(ReadAt::Current(None));
+    }
+    let ts = maybe_lookup_version_ts(at, conn).await?;
+    let Some(head) = instance.head.filter(|head| ts < *head) else {
+        return Ok(ReadAt::Current(Some(ts)));
+    };
+    if ts < instance.retention_horizon {
+        return Err(StorageError::Unsupported(format!(
+            "version {ts} is before the history retention horizon {}: older history is dropped",
+            instance.retention_horizon
+        )));
+    }
+    if let Some(base) = instance.base.filter(|base| ts < *base) {
+        return Err(StorageError::Unsupported(format!(
+            "version {ts} is before the base block of instance {} at {base}: the instance has no \
+             history before it",
+            instance.id
+        )));
+    }
+    Ok(ReadAt::Past { ts, head })
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, NaiveDate, NaiveDateTime};
