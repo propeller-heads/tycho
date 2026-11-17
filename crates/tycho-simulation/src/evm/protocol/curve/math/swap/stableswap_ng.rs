@@ -5,8 +5,108 @@
 use alloy_primitives::U256;
 
 use crate::evm::protocol::curve::math::core::stableswap_ng::{
-    dynamic_fee, get_d, get_y, A_PRECISION, FEE_DENOMINATOR, PRECISION,
+    dynamic_fee, get_d, get_y, get_y_d, A_PRECISION, FEE_DENOMINATOR, PRECISION,
 };
+
+/// The reserves and parameters of a StableSwapNG pool that liquidity math reads.
+#[derive(Clone, Copy, Debug)]
+pub struct LiquidityPool<'a> {
+    pub balances: &'a [U256],
+    pub rates: &'a [U256],
+    pub amp: U256,
+    pub fee: U256,
+    pub offpeg_fee_multiplier: U256,
+    /// Total supply of the pool's LP token.
+    pub total_supply: U256,
+}
+
+impl LiquidityPool<'_> {
+    fn xp(&self, balances: &[U256]) -> Option<Vec<U256>> {
+        balances
+            .iter()
+            .zip(self.rates)
+            .map(|(balance, rate)| Some(balance.checked_mul(*rate)? / PRECISION))
+            .collect()
+    }
+
+    /// The fee rate liquidity changes pay on the imbalance they cause.
+    fn imbalance_fee(&self) -> Option<U256> {
+        let n = U256::from(self.balances.len());
+        let denominator = U256::from(4).checked_mul(n.checked_sub(U256::from(1))?)?;
+        self.fee
+            .checked_mul(n)?
+            .checked_div(denominator)
+    }
+}
+
+/// The amount of coin `i` paid for burning `burn_amount` LP tokens.
+///
+/// Vyper: `_calc_withdraw_one_coin(_burn_amount, i)[0]` in `CurveStableSwapNG.vy`.
+pub fn calc_withdraw_one_coin(pool: &LiquidityPool, burn_amount: U256, i: usize) -> Option<U256> {
+    let n = U256::from(pool.balances.len());
+    let xp = pool.xp(pool.balances)?;
+    let d0 = get_d(&xp, pool.amp)?;
+    let d1 = d0.checked_sub(
+        burn_amount
+            .checked_mul(d0)?
+            .checked_div(pool.total_supply)?,
+    )?;
+    let new_y = get_y_d(i, &xp, d1, pool.amp)?;
+
+    let base_fee = pool.imbalance_fee()?;
+    let ys = d0.checked_add(d1)? / (U256::from(2) * n);
+    let mut xp_reduced = xp.clone();
+    for (j, xp_j) in xp.iter().enumerate() {
+        let scaled = xp_j.checked_mul(d1)? / d0;
+        let (dx_expected, xavg) = if j == i {
+            (scaled.checked_sub(new_y)?, (*xp_j + new_y) / U256::from(2))
+        } else {
+            (xp_j.checked_sub(scaled)?, *xp_j)
+        };
+        let fee = dynamic_fee(xavg, ys, base_fee, pool.offpeg_fee_multiplier);
+        xp_reduced[j] = xp_j.checked_sub(fee.checked_mul(dx_expected)? / FEE_DENOMINATOR)?;
+    }
+
+    let dy = xp_reduced[i].checked_sub(get_y_d(i, &xp_reduced, d1, pool.amp)?)?;
+    // Vyper withdraws one unit less to account for rounding errors.
+    dy.checked_sub(U256::from(1))?
+        .checked_mul(PRECISION)?
+        .checked_div(pool.rates[i])
+}
+
+/// The LP tokens minted for depositing `amounts`, one entry per coin.
+///
+/// Vyper: `_calc_token_amount(_amounts, True, …)` in `CurveStableSwapNGViews.vy`, on its NG
+/// branch. `None` for a pool with no supply, where the first deposit takes the whole invariant.
+pub fn calc_deposit(pool: &LiquidityPool, amounts: &[U256]) -> Option<U256> {
+    if pool.total_supply.is_zero() || amounts.len() != pool.balances.len() {
+        return None;
+    }
+    let n = U256::from(pool.balances.len());
+    let d0 = get_d(&pool.xp(pool.balances)?, pool.amp)?;
+
+    let mut new_balances = Vec::with_capacity(amounts.len());
+    for (balance, amount) in pool.balances.iter().zip(amounts) {
+        new_balances.push(balance.checked_add(*amount)?);
+    }
+    let d1 = get_d(&pool.xp(&new_balances)?, pool.amp)?;
+
+    let base_fee = pool.imbalance_fee()?;
+    let ys = d0.checked_add(d1)? / n;
+    for (i, old_balance) in pool.balances.iter().enumerate() {
+        let ideal_balance = d1.checked_mul(*old_balance)? / d0;
+        let difference = ideal_balance.abs_diff(new_balances[i]);
+        let xs = pool.rates[i].checked_mul(old_balance.checked_add(new_balances[i])?)? / PRECISION;
+        let fee = dynamic_fee(xs, ys, base_fee, pool.offpeg_fee_multiplier);
+        new_balances[i] =
+            new_balances[i].checked_sub(fee.checked_mul(difference)? / FEE_DENOMINATOR)?;
+    }
+    let d2 = get_d(&pool.xp(&new_balances)?, pool.amp)?;
+
+    d2.checked_sub(d0)?
+        .checked_mul(pool.total_supply)?
+        .checked_div(d0)
+}
 
 pub fn get_amount_out(
     balances: &[U256],
@@ -260,5 +360,80 @@ mod tests {
         let rhs = dx * num;
         let diff = if lhs > rhs { lhs - rhs } else { rhs - lhs };
         assert!(diff * U256::from(100) < rhs, "spot price inconsistent with swap");
+    }
+}
+
+#[cfg(test)]
+mod liquidity_tests {
+    use super::*;
+
+    /// crv2pool (USDC/USDT, `0x4f493B7dE8aAC7d55F71853688b1F7C8F0243C85`) at block 26434212.
+    fn base_pool_state() -> ([U256; 2], [U256; 2]) {
+        let rate = U256::from(10u8).pow(U256::from(30u8));
+        ([U256::from(612_669_739_206u64), U256::from(4_493_527_459_173u64)], [rate, rate])
+    }
+
+    fn base_pool<'a>(balances: &'a [U256], rates: &'a [U256]) -> LiquidityPool<'a> {
+        LiquidityPool {
+            balances,
+            rates,
+            amp: U256::from(1_000_000u64),
+            fee: U256::from(100_000u64),
+            offpeg_fee_multiplier: U256::from(200_000_000_000u64),
+            total_supply: U256::from(5_007_566_619_967_511_977_472_971u128),
+        }
+    }
+
+    fn wad(units: u64) -> U256 {
+        U256::from(units) * PRECISION
+    }
+
+    #[rstest::rstest]
+    #[case::small_to_usdc(wad(1_000), 0, 1_018_919_620u64)]
+    #[case::small_to_usdt(wad(1_000), 1, 1_019_798_896u64)]
+    #[case::large_to_usdc(wad(500_000), 0, 507_809_421_904u64)]
+    #[case::large_to_usdt(wad(500_000), 1, 509_894_156_657u64)]
+    fn calc_withdraw_one_coin_matches_chain(
+        #[case] burn_amount: U256,
+        #[case] coin: usize,
+        #[case] expected: u64,
+    ) {
+        let (balances, rates) = base_pool_state();
+        let pool = base_pool(&balances, &rates);
+
+        assert_eq!(calc_withdraw_one_coin(&pool, burn_amount, coin), Some(U256::from(expected)));
+    }
+
+    #[test]
+    fn calc_withdraw_one_coin_fails_past_the_reserve() {
+        let (balances, rates) = base_pool_state();
+        let pool = base_pool(&balances, &rates);
+
+        assert_eq!(calc_withdraw_one_coin(&pool, pool.total_supply + U256::from(1), 0), None);
+    }
+
+    #[rstest::rstest]
+    #[case::usdc(0, 100_000_000_000u64, 98_131_537_660_695_008_079_923u128)]
+    #[case::usdt(1, 100_000_000_000u64, 98_058_035_948_754_796_043_853u128)]
+    #[case::large_usdt(1, 1_000_000_000_000u64, 980_562_282_214_787_073_944_878u128)]
+    fn calc_deposit_matches_chain(
+        #[case] coin: usize,
+        #[case] amount: u64,
+        #[case] expected: u128,
+    ) {
+        let (balances, rates) = base_pool_state();
+        let pool = base_pool(&balances, &rates);
+        let mut amounts = [U256::ZERO; 2];
+        amounts[coin] = U256::from(amount);
+
+        assert_eq!(calc_deposit(&pool, &amounts), Some(U256::from(expected)));
+    }
+
+    #[test]
+    fn calc_deposit_refuses_an_empty_pool() {
+        let (balances, rates) = base_pool_state();
+        let pool = LiquidityPool { total_supply: U256::ZERO, ..base_pool(&balances, &rates) };
+
+        assert_eq!(calc_deposit(&pool, &[U256::from(1), U256::ZERO]), None);
     }
 }

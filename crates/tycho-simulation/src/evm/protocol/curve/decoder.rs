@@ -1,16 +1,23 @@
 use std::{collections::HashMap, str::FromStr};
 
 use alloy::primitives::Address as AlloyAddress;
+use tracing::debug;
 use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
 use tycho_common::{models::token::Token, Bytes};
 
 use crate::{
     evm::{
-        engine_db::{create_engine, SHARED_TYCHO_DB},
+        engine_db::{create_engine, tycho_db::PreCachedDB, SHARED_TYCHO_DB},
         protocol::{
-            curve::{adapter::build_pool, state::CurveState, variant, vm},
+            curve::{
+                adapter::{build_pool, CurveVariant},
+                state::CurveState,
+                underlying::BasePool,
+                variant, vm,
+            },
             vm::utils::load_stateless_contracts,
         },
+        simulation::SimulationEngine,
     },
     protocol::{
         errors::InvalidSnapshotError,
@@ -45,7 +52,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for CurveState {
             ))
         })?;
 
-        let coins = parse_coins(&snapshot.component.static_attributes)?;
+        let coins = parse_address_list(&snapshot.component.static_attributes, "coins")?;
         if coins.len() < 2 {
             return Err(InvalidSnapshotError::ValueError(format!(
                 "Curve pool {pool_address} has fewer than 2 coins"
@@ -90,25 +97,85 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for CurveState {
         let pool = build_pool(&raw).map_err(|e| {
             InvalidSnapshotError::ValueError(format!("curve build_pool failed: {e}"))
         })?;
-        Ok(CurveState::new(pool_address, coins, decimals, resolved, pool, raw.admin_fee))
+        let base_pool = read_base_pool(
+            &snapshot.component.static_attributes,
+            &coins,
+            resolved,
+            all_tokens,
+            &engine,
+        );
+        let state = CurveState::new(pool_address, coins, decimals, resolved, pool, raw.admin_fee);
+        Ok(match base_pool {
+            Some(base_pool) => state.with_base_pool(base_pool),
+            None => state,
+        })
+    }
+}
+
+/// Reads the base pool of a StableSwap NG metapool that lists its `underlying_coins`.
+///
+/// `underlying_coins` holds the metapool's coin first, then the base pool's coins in its own
+/// order. Returns `None`, leaving the pool to quote its own coins only, when the component lists
+/// none, is not a two-coin StableSwap NG pool, or its base pool cannot be read as one.
+fn read_base_pool(
+    static_attributes: &HashMap<String, Bytes>,
+    coins: &[Bytes],
+    variant: CurveVariant,
+    all_tokens: &HashMap<Bytes, Token>,
+    engine: &SimulationEngine<PreCachedDB>,
+) -> Option<BasePool> {
+    if variant != CurveVariant::StableSwapNG || coins.len() != 2 {
+        return None;
+    }
+    let underlying = parse_address_list(static_attributes, "underlying_coins").ok()?;
+    let (meta_token, base_tokens) = underlying.split_first()?;
+    let meta_coin = coins
+        .iter()
+        .position(|coin| coin == meta_token)?;
+    let address = variant::attr_address(static_attributes, "base_pool")?;
+    let address = Bytes::from(address.as_slice().to_vec());
+
+    let decimals = base_tokens
+        .iter()
+        .map(|token| coin_decimals(token, all_tokens, &address))
+        .collect::<Result<Vec<u8>, _>>();
+    let read = decimals
+        .map_err(|e| e.to_string())
+        .and_then(|decimals| {
+            BasePool::read(
+                engine,
+                address.clone(),
+                base_tokens.to_vec(),
+                decimals,
+                (meta_coin, 1 - meta_coin),
+            )
+            .map_err(|e| e.to_string())
+        });
+    match read {
+        Ok(base_pool) => Some(base_pool),
+        Err(error) => {
+            debug!(base_pool = %address, error, "Curve base pool unreadable; no underlying swaps");
+            None
+        }
     }
 }
 
 /// Parse the `coins` static attribute (a JSON array of `"0x…"` addresses in on-chain order) into
 /// normalized coin addresses. The ETH sentinel is rewritten to the zero address.
-fn parse_coins(
+fn parse_address_list(
     static_attributes: &HashMap<String, Bytes>,
+    key: &str,
 ) -> Result<Vec<Bytes>, InvalidSnapshotError> {
     let raw = static_attributes
-        .get("coins")
+        .get(key)
         .ok_or_else(|| {
-            InvalidSnapshotError::ValueError("Missing `coins` static attribute".to_string())
+            InvalidSnapshotError::ValueError(format!("Missing `{key}` static attribute"))
         })?;
     let text = std::str::from_utf8(raw.as_ref()).map_err(|e| {
-        InvalidSnapshotError::ValueError(format!("`coins` attribute is not valid UTF-8: {e}"))
+        InvalidSnapshotError::ValueError(format!("`{key}` attribute is not valid UTF-8: {e}"))
     })?;
     let addresses: Vec<String> = serde_json::from_str(text).map_err(|e| {
-        InvalidSnapshotError::ValueError(format!("Failed to parse `coins` attribute: {e}"))
+        InvalidSnapshotError::ValueError(format!("Failed to parse `{key}` attribute: {e}"))
     })?;
     addresses
         .iter()
@@ -165,7 +232,7 @@ mod tests {
     fn parse_coins_preserves_on_chain_order_and_normalizes_eth() {
         // On-chain order [USDC, WBTC, ETH-sentinel]; ETH sentinel must map to the zero address.
         let json = r#"["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","0x2260fac5e5542a773aa44fbcfedf7c193bc2c599","0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]"#;
-        let coins = parse_coins(&attrs_with_coins(json)).unwrap();
+        let coins = parse_address_list(&attrs_with_coins(json), "coins").unwrap();
         assert_eq!(coins.len(), 3);
         assert_eq!(
             coins[0],
@@ -180,7 +247,7 @@ mod tests {
 
     #[test]
     fn parse_coins_missing_attribute_errors() {
-        let err = parse_coins(&HashMap::new()).unwrap_err();
+        let err = parse_address_list(&HashMap::new(), "coins").unwrap_err();
         assert!(matches!(err, InvalidSnapshotError::ValueError(_)));
     }
 }

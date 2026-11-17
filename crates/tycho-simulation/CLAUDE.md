@@ -44,7 +44,11 @@ for any protocol indexed by Tycho.
     that changes a state's price, tick, liquidity, fee or ticks must start an empty step cache,
     and changes ticks only through `Arc::make_mut`
   - **Hybrid** (`fluid/`, `balancer_v3/`, `curve/`): native Rust quote math over VM-indexed pool
-    state (each has both `state.rs` and `vm.rs`)
+    state (each has both `state.rs` and `vm.rs`). A Curve StableSwap NG metapool whose component
+    lists `underlying_coins` also quotes swaps between its coin and the coins of its base pool
+    (`curve/underlying.rs`): it reads the base pool's reserves and LP supply beside its own state
+    and composes a single-coin deposit or withdrawal with its own exchange. The base pool must be
+    StableSwap NG as well; otherwise the metapool quotes its own two coins only
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
     protocols without a native implementation
 - **`snapshot_feed/`**: latest-value snapshot feeds, both ends, generic in the snapshot and the
