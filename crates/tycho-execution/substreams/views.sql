@@ -23,6 +23,10 @@ BEGIN
     ALTER TABLE trades ADD COLUMN IF NOT EXISTS state_committed BOOLEAN;
     ALTER TABLE trades ADD COLUMN IF NOT EXISTS router_positive_slippage_bps BIGINT;
     ALTER TABLE trades ADD COLUMN IF NOT EXISTS client_positive_slippage_share_bps BIGINT;
+    ALTER TABLE trades ADD COLUMN IF NOT EXISTS positive_slippage_cap_bps BIGINT;
+    ALTER TABLE trades ADD COLUMN IF NOT EXISTS token_pair_fee BOOLEAN;
+    ALTER TABLE IF EXISTS fee_config_events ADD COLUMN IF NOT EXISTS token0 TEXT;
+    ALTER TABLE IF EXISTS fee_config_events ADD COLUMN IF NOT EXISTS token1 TEXT;
     ALTER TABLE router_call_errors ADD COLUMN IF NOT EXISTS state_committed BOOLEAN;
 
     -- Looking up the trades of one transaction by hash, which no other index serves.

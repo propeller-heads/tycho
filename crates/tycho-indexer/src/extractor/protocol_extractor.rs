@@ -354,45 +354,74 @@ where
             drop(state); // Release the lock before doing potentially slow operations
 
             // Report the memory usage for all buffers and caches
+            let reorg_buffer_size = async {
+                self.reorg_buffer
+                    .lock()
+                    .await
+                    .deep_size_of()
+            }
+            .instrument(info_span!("reorg_buffer_size"))
+            .await;
             gauge!(
                 "extractor_reorg_buffer_size",
                 "chain" => self.chain.to_string(),
                 "extractor" => self.name.clone(),
             )
-            .set(
-                self.reorg_buffer
+            .set(reorg_buffer_size as f64);
+
+            let partial_block_buffer_size = async {
+                self.partial_block_buffer
                     .lock()
                     .await
-                    .deep_size_of() as f64,
-            );
+                    .deep_size_of()
+            }
+            .instrument(info_span!("partial_block_buffer_size"))
+            .await;
             gauge!(
                 "extractor_partial_block_buffer_size",
                 "chain" => self.chain.to_string(),
                 "extractor" => self.name.clone(),
             )
-            .set(
-                self.partial_block_buffer
-                    .lock()
-                    .await
-                    .deep_size_of() as f64,
-            );
+            .set(partial_block_buffer_size as f64);
 
-            // As the protocol cache is shared with other extractors, we only index it by chain
+            // As the protocol cache is shared with other extractors, we only index it by chain.
+            // Counts, not a deep size: a size walk visits every entry and takes about 1 s on a
+            // large cache, during which it blocks an extraction runtime thread.
             gauge!(
-                "protocol_cache_size",
+                "protocol_cache_tokens",
                 "chain" => self.chain.to_string(),
             )
-            .set(self.protocol_cache.size_of().await as f64);
+            .set(self.protocol_cache.token_count().await as f64);
+            gauge!(
+                "protocol_cache_components",
+                "chain" => self.chain.to_string(),
+            )
+            .set(
+                self.protocol_cache
+                    .component_count()
+                    .await as f64,
+            );
+            if let Some(price_age) = self.protocol_cache.price_age().await {
+                gauge!(
+                    "protocol_cache_price_age_seconds",
+                    "chain" => self.chain.to_string(),
+                )
+                .set(price_age.num_seconds() as f64);
+            }
 
             if let Some(dci_plugin) = &self.dci_plugin {
-                let dci = dci_plugin.lock().await;
-                gauge!(
-                    "dci_cache_size",
-                    "chain" => self.chain.to_string(),
-                    "extractor" => self.name.clone(),
-                )
-                .set(dci.cache_size() as f64);
-                dci.emit_cache_metrics(&self.chain.to_string(), &self.name);
+                async {
+                    let dci = dci_plugin.lock().await;
+                    gauge!(
+                        "dci_cache_size",
+                        "chain" => self.chain.to_string(),
+                        "extractor" => self.name.clone(),
+                    )
+                    .set(dci.cache_size() as f64);
+                    dci.emit_cache_metrics(&self.chain.to_string(), &self.name);
+                }
+                .instrument(info_span!("dci_cache_metrics"))
+                .await;
             }
         }
     }
@@ -1775,6 +1804,8 @@ where
             component_tvl: HashMap::new(),
             dci_update: DCIUpdate::default(), // TODO: get reverted entrypoint info?
             partial_block_index: revert_partial_block_index,
+            paused_components: HashSet::new(),
+            unpaused_components: HashSet::new(),
         };
 
         debug!("Successfully retrieved all previous states during revert!");
