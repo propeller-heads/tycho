@@ -5,6 +5,8 @@ pub mod models;
 pub mod serde_primitives;
 pub mod simulation;
 pub mod storage;
+#[cfg(feature = "test-utils")]
+pub mod testing;
 pub mod traits;
 
 #[cfg(test)]
