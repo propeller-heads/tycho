@@ -12,13 +12,14 @@ use tycho_common::{
     Bytes,
 };
 
-use super::version::{check_current, resolve_version, unique_by_key, ReadAt};
+use super::version::{resolve_version, unique_by_key, ReadAt};
 use crate::postgres::{
     instance::{
         active::active_instance_head,
         gateway::PostgresGatewayNew,
         schema::tycho::{
             component_balance, component_balance_history, protocol_component, protocol_state,
+            protocol_state_history,
         },
         InstanceId,
     },
@@ -81,7 +82,9 @@ impl PostgresGatewayNew {
     /// Returns the state of the components of `system`'s active instance. The total is always
     /// `None`.
     ///
-    /// - `at`: the version. `Unsupported` for a version before the head of the instance.
+    /// - `at`: the version. Before the head of the instance, the history tables answer too.
+    ///   `Unsupported` for a version before the history retention horizon or before the base block
+    ///   of the instance.
     /// - `system`: the protocol system. Required, because a pool id can repeat across protocol
     ///   systems: `None` is `Unsupported`. `NotFound` for an unknown name. A protocol system
     ///   without an active instance has no states.
@@ -130,41 +133,33 @@ async fn states_of(
     let Some(active) = active_instance_head(system, conn).await? else {
         return Ok(WithTotal { entity: Vec::new(), total: None });
     };
-    check_current(&active, at, conn).await?;
+    let read = resolve_version(&active, at, conn).await?;
     let instance = active.id;
 
-    let mut query = protocol_state::table
-        .inner_join(
-            protocol_component::table.on(protocol_component::instance_id
-                .eq(protocol_state::instance_id)
-                .and(protocol_component::id.eq(protocol_state::protocol_component_id))),
-        )
-        .filter(protocol_state::instance_id.eq(instance))
-        .filter(protocol_component::instance_id.eq(instance))
-        .select((
-            protocol_component::external_id,
-            protocol_state::attribute_name,
-            protocol_state::attribute_value,
-        ))
-        .into_boxed::<Pg>();
-    if let Some(ids) = ids {
-        query = query.filter(protocol_component::external_id.eq_any(ids));
-    }
-    let rows: Vec<(ComponentId, String, Bytes)> = query
-        .load(conn)
-        .await
-        .map_err(PostgresError::from)?;
-
-    let mut attributes: HashMap<ComponentId, HashMap<String, Bytes>> = HashMap::new();
-    for (external_id, name, value) in rows {
+    let rows = match read {
+        ReadAt::Current(_) => current_state_rows(instance, ids, None, conn).await?,
+        ReadAt::Past { ts, head } => {
+            let mut rows = current_state_rows(instance, ids, Some(ts), conn).await?;
+            rows.extend(history_state_rows(instance, ids, ts, head, conn).await?);
+            rows
+        }
+    };
+    let attributes: HashMap<ComponentId, HashMap<String, Bytes>> = unique_by_key(
+        "protocol_state",
+        rows.into_iter()
+            .map(|(external_id, name, value)| ((external_id, name), value)),
+    )?
+    .into_iter()
+    .fold(HashMap::new(), |mut attributes, ((external_id, name), value)| {
         attributes
             .entry(external_id)
             .or_default()
             .insert(name, value);
-    }
+        attributes
+    });
 
     let mut balances = if retrieve_balances {
-        component_balances_at(instance, ids, ReadAt::Current(None), conn)
+        component_balances_at(instance, ids, read, conn)
             .await?
             .into_iter()
             .filter(|((external_id, _), _)| attributes.contains_key(external_id))
@@ -193,6 +188,79 @@ async fn states_of(
         })
         .collect();
     Ok(WithTotal { entity: states, total: None })
+}
+
+/// A state row: external id of the component, attribute name and value.
+type StateRow = (ComponentId, String, Bytes);
+
+/// Loads the current state rows of the components of `instance`.
+/// `ids`: only components with these external ids. `ts`: only rows with `valid_from <= ts`.
+async fn current_state_rows(
+    instance: InstanceId,
+    ids: Option<&[&str]>,
+    ts: Option<NaiveDateTime>,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<StateRow>, StorageError> {
+    let mut query = protocol_state::table
+        .inner_join(
+            protocol_component::table.on(protocol_component::instance_id
+                .eq(protocol_state::instance_id)
+                .and(protocol_component::id.eq(protocol_state::protocol_component_id))),
+        )
+        .filter(protocol_state::instance_id.eq(instance))
+        .filter(protocol_component::instance_id.eq(instance))
+        .select((
+            protocol_component::external_id,
+            protocol_state::attribute_name,
+            protocol_state::attribute_value,
+        ))
+        .into_boxed::<Pg>();
+    if let Some(ts) = ts {
+        query = query.filter(protocol_state::valid_from.le(ts));
+    }
+    if let Some(ids) = ids {
+        query = query.filter(protocol_component::external_id.eq_any(ids));
+    }
+    Ok(query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
+}
+
+/// Loads the history state rows of the components of `instance` that are valid at `ts`:
+/// `valid_from <= ts < valid_to`, with `valid_to <= head`.
+/// `ids`: only components with these external ids.
+async fn history_state_rows(
+    instance: InstanceId,
+    ids: Option<&[&str]>,
+    ts: NaiveDateTime,
+    head: NaiveDateTime,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<StateRow>, StorageError> {
+    let mut query = protocol_state_history::table
+        .inner_join(
+            protocol_component::table.on(protocol_component::instance_id
+                .eq(protocol_state_history::instance_id)
+                .and(protocol_component::id.eq(protocol_state_history::protocol_component_id))),
+        )
+        .filter(protocol_state_history::instance_id.eq(instance))
+        .filter(protocol_component::instance_id.eq(instance))
+        .filter(protocol_state_history::valid_from.le(ts))
+        .filter(protocol_state_history::valid_to.gt(ts))
+        .filter(protocol_state_history::valid_to.le(head))
+        .select((
+            protocol_component::external_id,
+            protocol_state_history::attribute_name,
+            protocol_state_history::attribute_value,
+        ))
+        .into_boxed::<Pg>();
+    if let Some(ids) = ids {
+        query = query.filter(protocol_component::external_id.eq_any(ids));
+    }
+    Ok(query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
 }
 
 /// A balance row: external id of the component, token, balance and its float value.
