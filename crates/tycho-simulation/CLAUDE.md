@@ -43,6 +43,13 @@ for any protocol indexed by Tycho.
     steps they already took (`utils/uniswap/swap_step_cache.rs`), shared by their clones: code
     that changes a state's price, tick, liquidity, fee or ticks must start an empty step cache,
     and changes ticks only through `Arc::make_mut`
+  - **Algebra Integral plugins** (`algebra_integral/plugin/`): no protocol state yet, only what
+    every DEX built on Algebra Integral shares for its pools' plugins. `PluginHandler` answers for
+    one pool's plugin (fees, whether swaps are enabled, hook gas); handlers register per
+    `(Chain, plugin implementation)` in `registry.rs`, with a generic VM fallback on Ethereum
+    only that the first DEX registers. A native handler is a `ComposedPlugin` of fee, gate and
+    gas modules. `modules/<vendor>/<module>.rs` decodes the `<module>/<field>` attributes that
+    the file of the same path in `protocols/substreams/ethereum-algebra-integral` emits
   - **Hybrid** (`fluid/`, `balancer_v3/`, `curve/`): native Rust quote math over VM-indexed pool
     state (each has both `state.rs` and `vm.rs`)
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
