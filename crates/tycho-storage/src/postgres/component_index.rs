@@ -182,6 +182,23 @@ impl SystemIndex {
         }
     }
 
+    /// Writes the TVL of the rows whose component is in this system. `rows` must be sorted by
+    /// component id; other rows are ignored.
+    fn apply_tvl(&mut self, rows: &[TvlRow]) {
+        let mut position = 0;
+        for row in rows {
+            while position < self.ids.len() && self.ids[position] < row.component_id {
+                position += 1;
+            }
+            if position == self.ids.len() {
+                break;
+            }
+            if self.ids[position] == row.component_id {
+                self.tvl[position] = row.tvl;
+            }
+        }
+    }
+
     /// Ids on the page `[offset, offset + limit)` of the components with a TVL above `min_tvl`,
     /// and the number of such components on all pages.
     fn query(&self, min_tvl: Option<f64>, offset: usize, limit: usize) -> ComponentPage {
@@ -241,24 +258,11 @@ impl ChainIndex {
     /// does not hold yet.
     ///
     /// Every system's ids are sorted too, so one cursor per system walks forward with the rows:
-    /// one pass over the index in total, and no id-to-system map in memory.
+    /// one pass over the rows per system, and no id-to-system map in memory.
     fn apply_tvl(&mut self, rows: &[TvlRow]) {
-        let mut cursors: Vec<(&mut SystemIndex, usize)> = self
-            .systems
+        self.systems
             .values_mut()
-            .map(|system| (system, 0))
-            .collect();
-        for row in rows {
-            for (system, position) in cursors.iter_mut() {
-                while *position < system.ids.len() && system.ids[*position] < row.component_id {
-                    *position += 1;
-                }
-                if *position < system.ids.len() && system.ids[*position] == row.component_id {
-                    system.tvl[*position] = row.tvl;
-                    break;
-                }
-            }
-        }
+            .for_each(|system| system.apply_tvl(rows));
     }
 
     fn n_components(&self) -> usize {
