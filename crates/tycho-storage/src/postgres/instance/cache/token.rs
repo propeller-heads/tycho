@@ -376,6 +376,7 @@ mod tests {
             schema::tycho::{component_balance, protocol_component},
             InstanceId,
         },
+        schema::token as token_table,
         testing::instance_test_connection,
     };
 
@@ -383,6 +384,7 @@ mod tests {
     const UNKNOWN: &str = "0x00000000000000000000000000000000000000dd";
     const NO_ROW: &str = "0x00000000000000000000000000000000000000ee";
     const E: &str = "0x00000000000000000000000000000000000000e1";
+    const F: &str = "0x00000000000000000000000000000000000000f1";
 
     fn day(d: u32) -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2020, 1, d)
@@ -680,5 +682,35 @@ mod tests {
             })
             .unwrap();
         assert_eq!(addresses(&replaced.entity), vec![b(A)]);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_reads_token_changes() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a_id = token(&mut conn, s.chain_id, A, "A", 100).await;
+        let cache = load(&mut conn).await;
+        diesel::update(token_table::table.filter(token_table::id.eq(a_id)))
+            .set(token_table::quality.eq(0))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        token(&mut conn, s.chain_id, F, "F", 100).await;
+
+        let n_refreshed = cache.refresh(&mut conn).await.unwrap();
+
+        assert!(n_refreshed >= 2, "the poll should read the changed and the new token");
+        let all = TokenQuery { last_traded_ts_threshold: None, ..traded_after(day(1)) };
+        let low_quality = cache
+            .query_tokens(&TokenQuery {
+                quality_range: QualityRange { min: None, max: Some(0) },
+                ..all.clone()
+            })
+            .unwrap();
+        assert_eq!(addresses(&low_quality.entity), vec![b(A)]);
+        let new_token = cache
+            .query_tokens(&TokenQuery { addresses: Some(vec![b(F)]), ..all })
+            .unwrap();
+        assert_eq!(addresses(&new_token.entity), vec![b(F)]);
     }
 }
