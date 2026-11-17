@@ -102,7 +102,7 @@ mod tests {
         storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
     };
 
-    use super::check_current;
+    use super::{check_current, resolve_version, ReadAt};
     use crate::postgres::{
         instance::{active::ActiveInstance, InstanceId},
         testing::instance_test_connection,
@@ -118,19 +118,18 @@ mod tests {
         Version(BlockOrTimestamp::Timestamp(ts), VersionKind::Last)
     }
 
-    fn instance(head: Option<NaiveDateTime>) -> ActiveInstance {
-        ActiveInstance {
-            id: InstanceId(1),
-            head,
-            base: None,
-            retention_horizon: day(1) - Duration::days(1),
-        }
+    fn instance(
+        head: Option<NaiveDateTime>,
+        base: Option<NaiveDateTime>,
+        retention_horizon: NaiveDateTime,
+    ) -> ActiveInstance {
+        ActiveInstance { id: InstanceId(1), head, base, retention_horizon }
     }
 
     #[tokio::test]
     async fn test_no_version_is_current() {
         let mut conn = instance_test_connection().await;
-        let instance = instance(None);
+        let instance = instance(None, None, day(1) - Duration::days(1));
 
         assert_eq!(
             check_current(&instance, None, &mut conn)
@@ -143,7 +142,7 @@ mod tests {
     #[tokio::test]
     async fn test_version_at_or_after_head_is_current() {
         let mut conn = instance_test_connection().await;
-        let instance = instance(Some(day(2)));
+        let instance = instance(Some(day(2)), None, day(1) - Duration::days(1));
 
         for ts in [day(2), day(3)] {
             assert_eq!(
@@ -158,7 +157,7 @@ mod tests {
     #[tokio::test]
     async fn test_version_before_head_is_unsupported() {
         let mut conn = instance_test_connection().await;
-        let instance = instance(Some(day(2)));
+        let instance = instance(Some(day(2)), None, day(1) - Duration::days(1));
 
         let result = check_current(&instance, Some(&at(day(1))), &mut conn).await;
 
@@ -168,7 +167,7 @@ mod tests {
     #[tokio::test]
     async fn test_check_current_answers_latest_without_a_block() {
         let mut conn = instance_test_connection().await;
-        let instance = instance(Some(day(2)));
+        let instance = instance(Some(day(2)), None, day(1) - Duration::days(1));
         let latest = Version(
             BlockOrTimestamp::Block(BlockIdentifier::Latest(Chain::Ethereum)),
             VersionKind::Last,
@@ -185,7 +184,7 @@ mod tests {
     #[tokio::test]
     async fn test_instance_without_head_is_current() {
         let mut conn = instance_test_connection().await;
-        let instance = instance(None);
+        let instance = instance(None, None, day(1) - Duration::days(1));
 
         assert_eq!(
             check_current(&instance, Some(&at(day(1))), &mut conn)
@@ -193,5 +192,116 @@ mod tests {
                 .unwrap(),
             Some(day(1))
         );
+    }
+
+    fn resolver(head: Option<NaiveDateTime>, base: Option<NaiveDateTime>) -> ActiveInstance {
+        instance(head, base, day(2))
+    }
+
+    #[tokio::test]
+    async fn test_resolve_latest_is_current() {
+        let mut conn = instance_test_connection().await;
+        let instance = resolver(Some(day(5)), None);
+        let latest = Version(
+            BlockOrTimestamp::Block(BlockIdentifier::Latest(Chain::Ethereum)),
+            VersionKind::Last,
+        );
+
+        for at in [None, Some(&latest)] {
+            assert_eq!(
+                resolve_version(&instance, at, &mut conn)
+                    .await
+                    .unwrap(),
+                ReadAt::Current(None)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_at_or_after_head_is_current() {
+        let mut conn = instance_test_connection().await;
+        let instance = resolver(Some(day(5)), None);
+
+        for ts in [day(5), day(6)] {
+            assert_eq!(
+                resolve_version(&instance, Some(&at(ts)), &mut conn)
+                    .await
+                    .unwrap(),
+                ReadAt::Current(Some(ts))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_without_head_is_current() {
+        let mut conn = instance_test_connection().await;
+        let instance = resolver(None, None);
+
+        assert_eq!(
+            resolve_version(&instance, Some(&at(day(1))), &mut conn)
+                .await
+                .unwrap(),
+            ReadAt::Current(Some(day(1)))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_before_head_is_past() {
+        let mut conn = instance_test_connection().await;
+        let instance = resolver(Some(day(5)), None);
+
+        assert_eq!(
+            resolve_version(&instance, Some(&at(day(3))), &mut conn)
+                .await
+                .unwrap(),
+            ReadAt::Past { ts: day(3), head: day(5) }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_at_the_limits_is_past() {
+        let mut conn = instance_test_connection().await;
+
+        let at_horizon = resolver(Some(day(5)), None);
+        assert_eq!(
+            resolve_version(&at_horizon, Some(&at(day(2))), &mut conn)
+                .await
+                .unwrap(),
+            ReadAt::Past { ts: day(2), head: day(5) }
+        );
+
+        let at_base = resolver(Some(day(5)), Some(day(3)));
+        assert_eq!(
+            resolve_version(&at_base, Some(&at(day(3))), &mut conn)
+                .await
+                .unwrap(),
+            ReadAt::Past { ts: day(3), head: day(5) }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_before_retention_is_unsupported() {
+        let mut conn = instance_test_connection().await;
+        let instance = resolver(Some(day(5)), None);
+
+        let result = resolve_version(&instance, Some(&at(day(1))), &mut conn).await;
+
+        let Err(StorageError::Unsupported(msg)) = result else {
+            panic!("expected Unsupported, got {result:?}");
+        };
+        assert!(msg.contains("retention horizon"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_before_base_is_unsupported() {
+        let mut conn = instance_test_connection().await;
+        let instance = resolver(Some(day(5)), Some(day(4)));
+
+        let result = resolve_version(&instance, Some(&at(day(3))), &mut conn).await;
+
+        let Err(StorageError::Unsupported(msg)) = result else {
+            panic!("expected Unsupported, got {result:?}");
+        };
+        assert!(msg.contains("base block"), "{msg}");
     }
 }
