@@ -1,3 +1,4 @@
+pub mod checks;
 pub mod execution;
 pub mod rpc_tools;
 pub mod token_prices;

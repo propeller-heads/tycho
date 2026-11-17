@@ -7,7 +7,6 @@ mod report;
 mod rpc;
 mod state_registry;
 mod test_runner;
-mod tvl_only;
 mod tycho_rpc;
 mod tycho_runner;
 mod utils;

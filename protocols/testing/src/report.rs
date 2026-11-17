@@ -5,7 +5,7 @@
 //! at the end, listing every failure. The results of every test go into a [`Report`], which the
 //! runner can write as JSON.
 
-use std::{fmt, path::Path};
+use std::path::Path;
 
 use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, WrapErr};
@@ -14,147 +14,29 @@ use num_rational::BigRational;
 use num_traits::{Signed, ToPrimitive, Zero};
 use serde::Serialize;
 use tracing::error;
+pub use tycho_test::checks::outcome::{CheckId, CheckResult, LimitReport, Outcome};
 
 use crate::config::{DeclaredBy, Harness, Limits};
 
-/// The checks a test runs, named the way the report and the yaml refer to them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckId {
-    /// Indexing the range and finding the block to read the snapshot at.
-    Index,
-    /// Every expected component is indexed, with its tokens and static attributes.
-    StateComponents,
-    /// No excluded component is indexed.
-    StateExcluded,
-    /// Indexed component balances match the chain.
-    Balances,
-    /// Strict: a component declared `tvl_only` quotes the same with its balances scaled down.
-    BalancesTvlOnly,
-    /// The snapshot decodes, and every expected component decodes from it.
-    Decode,
-    /// Limits, spot prices and quotes along the ladder, in every direction.
-    SimLadder,
-    /// Executing the ladder's quotes on chain matches the simulation.
-    ExecLadder,
-    /// Strict: every direction quotes and executes at its limit.
-    LimitsAtLimit,
-    /// Strict: past the limit, the venue behaves as the declared kind claims.
-    LimitsPastLimit,
-    /// Strict: the quote at the limit pays no more than the limit's max output.
-    LimitsMaxOutput,
-}
-
-impl CheckId {
-    /// Strict mode's three checks of each direction's limit.
-    pub const LIMITS: [CheckId; 3] =
-        [CheckId::LimitsAtLimit, CheckId::LimitsPastLimit, CheckId::LimitsMaxOutput];
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            CheckId::Index => "index",
-            CheckId::StateComponents => "state.components",
-            CheckId::StateExcluded => "state.excluded",
-            CheckId::Balances => "balances",
-            CheckId::BalancesTvlOnly => "balances.tvl_only",
-            CheckId::Decode => "decode",
-            CheckId::SimLadder => "sim.ladder",
-            CheckId::ExecLadder => "exec.ladder",
-            CheckId::LimitsAtLimit => "limits.at_limit",
-            CheckId::LimitsPastLimit => "limits.past_limit",
-            CheckId::LimitsMaxOutput => "limits.max_output",
-        }
-    }
-}
-
-impl fmt::Display for CheckId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl Serialize for CheckId {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-/// How a check ended.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum Outcome {
-    Pass,
-    Fail {
-        detail: String,
-    },
-    /// The package's configuration turned the check off.
-    Skipped {
-        reason: String,
-    },
-    /// An earlier check failed and this one needs its result.
-    NotRun {
-        reason: String,
-    },
-}
-
-/// One check of one test.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CheckResult {
-    pub test: String,
-    pub check: CheckId,
-    /// The component the result is about, when it is about one only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub component: Option<String>,
-    /// The swap direction the result is about, `0x<token in>->0x<token out>`, when it is about one
-    /// only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub direction: Option<String>,
-    #[serde(flatten)]
-    pub outcome: Outcome,
-    /// Strict: for a `limits.*` result, the declaration it is checked against and the limit.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit: Option<LimitReport>,
-}
-
-/// The declaration a `limits.*` result is checked against, and the limit it tested, whatever the
-/// outcome, so a reader sees which directions pass on a `soft` or `under_cap` claim and how large
-/// a non-hard limit is.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LimitReport {
-    pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rounding: Option<u64>,
-    pub declared_by: DeclaredBy,
-    /// `get_limits`' max input, after the `int128` cap, when the direction was quoted.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_input: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_output: Option<String>,
-    /// Whether the `int128` cap replaced a larger limit.
-    pub capped: bool,
-}
-
-impl LimitReport {
-    /// `sizes` is `get_limits`' max input and max output, when the direction was quoted.
-    pub fn new(
-        limits: &Limits,
-        declared_by: DeclaredBy,
-        sizes: Option<(&BigUint, &BigUint)>,
-        capped: bool,
-    ) -> Self {
-        Self {
-            kind: limits.kind().to_string(),
-            reason: limits.reason().map(str::to_string),
-            rounding: match limits {
-                Limits::Hard { rounding } => Some(*rounding),
-                Limits::Soft { .. } | Limits::UnderCap { .. } => None,
-            },
-            declared_by,
-            max_input: sizes.map(|(max_input, _)| max_input.to_string()),
-            max_output: sizes.map(|(_, max_output)| max_output.to_string()),
-            capped,
-        }
+/// The [`LimitReport`] of a direction checked against `limits`, declared by `declared_by`.
+/// `sizes` is `get_limits`' max input and max output, when the direction was quoted.
+pub fn limit_report(
+    limits: &Limits,
+    declared_by: DeclaredBy,
+    sizes: Option<(&BigUint, &BigUint)>,
+    capped: bool,
+) -> LimitReport {
+    LimitReport {
+        kind: limits.kind().to_string(),
+        reason: limits.reason().map(str::to_string),
+        rounding: match limits {
+            Limits::Hard { rounding } => Some(*rounding),
+            Limits::Soft { .. } | Limits::UnderCap { .. } => None,
+        },
+        declared_by: declared_by.as_str().to_string(),
+        max_input: sizes.map(|(max_input, _)| max_input.to_string()),
+        max_output: sizes.map(|(_, max_output)| max_output.to_string()),
+        capped,
     }
 }
 
@@ -456,7 +338,7 @@ mod tests {
     use super::*;
 
     fn limit() -> LimitReport {
-        LimitReport::new(&Limits::Hard { rounding: 0 }, DeclaredBy::Component, None, false)
+        limit_report(&Limits::Hard { rounding: 0 }, DeclaredBy::Component, None, false)
     }
 
     fn failing() -> miette::Result<()> {
@@ -565,7 +447,7 @@ mod tests {
                     component: Some("0x01".to_string()),
                     direction: Some("0x02->0x03".to_string()),
                     outcome: Outcome::Skipped { reason: "off".to_string() },
-                    limit: Some(LimitReport::new(
+                    limit: Some(limit_report(
                         &Limits::Soft { reason: "constant product".to_string() },
                         DeclaredBy::PackageDefault,
                         Some((&BigUint::from(1000u32), &BigUint::from(2000u32))),
