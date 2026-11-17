@@ -104,6 +104,50 @@ pub fn encode_swap(
         gas_usage,
         expected_amount_out,
     )?;
+    encode_solution(solution, chain, executors_json)
+}
+
+/// [`encode_swap`] with the router's `expectedAmountOut` at its maximum, for a check that the
+/// execution pays exactly `quote`.
+///
+/// The deployed router's fee calculator takes any output above `expectedAmountOut` as positive
+/// slippage, so a swap encoded with its quote never pays the receiver more than the quote, and a
+/// simulation that underquotes would pass. Above the maximum nothing is taken, and the receiver
+/// gets all the venue pays, less the router fee. The minimum output stays 80% of `quote`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is an independent input of one swap encoding"
+)]
+pub fn encode_swap_without_surplus_capture(
+    component: &ProtocolComponent,
+    state: Option<Arc<dyn ProtocolSim>>,
+    sell_token: &Token,
+    buy_token: &Token,
+    amount_in: BigUint,
+    chain: Chain,
+    executors_json: Option<String>,
+    gas_usage: BigUint,
+    quote: BigUint,
+) -> miette::Result<(Solution, Transaction)> {
+    let solution = solution(
+        component.clone(),
+        state,
+        sell_token.clone(),
+        buy_token.clone(),
+        amount_in,
+        gas_usage,
+        quote,
+        Some(BigUint::from_bytes_be(&U256::MAX.to_be_bytes::<32>())),
+    )?;
+    encode_solution(solution, chain, executors_json)
+}
+
+/// Encodes `solution` for the router, as one transaction.
+fn encode_solution(
+    solution: Solution,
+    chain: Chain,
+    executors_json: Option<String>,
+) -> miette::Result<(Solution, Transaction)> {
     let swap_encoder_registry = SwapEncoderRegistry::new(chain)
         .add_default_encoders(executors_json)
         .into_diagnostic()?;
@@ -137,6 +181,34 @@ pub fn create_solution(
     gas_usage: BigUint,
     expected_amount_out: BigUint,
 ) -> miette::Result<Solution> {
+    solution(
+        component,
+        state,
+        sell_token,
+        buy_token,
+        amount_in,
+        gas_usage,
+        expected_amount_out,
+        None,
+    )
+}
+
+/// A one-swap solution whose minimum output is 80% of `quote`, with `router_expected` as the
+/// router's `expectedAmountOut`, or `quote` without it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is an independent input of one swap encoding"
+)]
+fn solution(
+    component: ProtocolComponent,
+    state: Option<Arc<dyn ProtocolSim>>,
+    sell_token: Token,
+    buy_token: Token,
+    amount_in: BigUint,
+    gas_usage: BigUint,
+    quote: BigUint,
+    router_expected: Option<BigUint>,
+) -> miette::Result<Solution> {
     let user_address = Bytes::from_str(USER_ADDR).into_diagnostic()?;
 
     // Prepare data to encode. First we need to create a swap object
@@ -152,7 +224,7 @@ pub fn create_solution(
 
     // The widest tolerance the router accepts (20% below the quote) — these tests care about
     // whether the swap executes, not about a tight slippage bound.
-    let min_amount_out = &expected_amount_out * BigUint::from(8000u64) / BigUint::from(10_000u64);
+    let min_amount_out = &quote * BigUint::from(8000u64) / BigUint::from(10_000u64);
 
     Ok(Solution::new(
         user_address.clone(),
@@ -160,7 +232,7 @@ pub fn create_solution(
         sell_token.address,
         buy_token.address,
         amount_in,
-        expected_amount_out,
+        router_expected.unwrap_or(quote),
         min_amount_out,
         vec![simple_swap],
     ))
@@ -482,7 +554,7 @@ pub fn calculate_executor_storage_slot(key: Address) -> FixedBytes<32> {
 ///
 /// # Arguments
 /// * `angstrom_address` - The address of the Angstrom hook contract
-///   (0x0000000AA8c2Fb9b232F78D2B286dC2aE53BfAD4)
+///   (0x0000000aa232009084Bd71A5797d089AA4Edfad4)
 /// * `current_block_number` - The current block number to set as _lastBlockUpdated
 ///
 /// # Returns

@@ -5,84 +5,67 @@
 //! at the end, listing every failure. The results of every test go into a [`Report`], which the
 //! runner can write as JSON.
 
-use std::{fmt, path::Path};
+use std::path::Path;
 
+use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, WrapErr};
+use num_bigint::{BigInt, BigUint};
+use num_traits::Signed;
 use serde::Serialize;
 use tracing::error;
+pub use tycho_test::checks::{
+    execution::drift,
+    outcome::{CheckId, CheckResult, LimitReport, Outcome},
+};
 
-use crate::config::Harness;
+use crate::config::{DeclaredTolerance, Harness};
 
-/// The checks a test runs, named the way the report and the yaml refer to them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckId {
-    /// Indexing the range and finding the block to read the snapshot at.
-    Index,
-    /// Every expected component is indexed, with its tokens and static attributes.
-    StateComponents,
-    /// No excluded component is indexed.
-    StateExcluded,
-    /// Indexed component balances match the chain.
-    Balances,
-    /// The snapshot decodes, and every expected component decodes from it.
-    Decode,
-    /// Limits, spot prices and quotes along the ladder, in every direction.
-    SimLadder,
-    /// Executing the ladder's quotes on chain matches the simulation.
-    ExecLadder,
-}
-
-impl CheckId {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            CheckId::Index => "index",
-            CheckId::StateComponents => "state.components",
-            CheckId::StateExcluded => "state.excluded",
-            CheckId::Balances => "balances",
-            CheckId::Decode => "decode",
-            CheckId::SimLadder => "sim.ladder",
-            CheckId::ExecLadder => "exec.ladder",
-        }
-    }
-}
-
-impl fmt::Display for CheckId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl Serialize for CheckId {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-/// How a check ended.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum Outcome {
-    Pass,
-    Fail {
-        detail: String,
-    },
-    /// The package's configuration turned the check off.
-    Skipped {
-        reason: String,
-    },
-    /// An earlier check failed and this one needs its result.
-    NotRun {
-        reason: String,
-    },
-}
-
-/// One check of one test.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CheckResult {
+/// The largest difference between a simulated and an executed amount out in one test, whether or
+/// not it was within tolerance. A declared `execution_tolerance`'s reason, which names what a run
+/// measured, can be checked against it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Drift {
     pub test: String,
-    pub check: CheckId,
-    #[serde(flatten)]
-    pub outcome: Outcome,
+    pub simulation: String,
+    pub component: String,
+    pub simulated: String,
+    pub executed: String,
+    /// `(executed - simulated) / executed`, in basis points: negative when the simulation
+    /// overquotes, positive when it underquotes.
+    pub bps: f64,
+    /// `executed - simulated` of the execution furthest off in absolute terms, in base units of
+    /// its token out, which may not be the one above. A `wei` tolerance can be checked against it.
+    pub largest_difference: String,
+    /// The token out `largest_difference` is in.
+    pub largest_difference_token: String,
+}
+
+/// The execution furthest off in relative terms so far, before it becomes a [`Drift`].
+struct Observed {
+    simulation: String,
+    component: String,
+    simulated: String,
+    executed: String,
+    bps: f64,
+}
+
+/// How a test ended, from [`Checks::finish`].
+pub struct Finished {
+    /// An error naming every failed check if any failed.
+    pub outcome: miette::Result<()>,
+    pub results: Vec<CheckResult>,
+    /// The largest drift, if any execution was noted.
+    pub drift: Option<Drift>,
+}
+
+/// The declaration a result carries, so the report shows what it was checked against.
+#[derive(Clone, Copy)]
+enum Declared<'a> {
+    Nothing,
+    /// A limit check's limit and its declaration.
+    Limit(&'a LimitReport),
+    /// A balance check's `tvl_only` tolerance.
+    TvlOnly(&'a DeclaredTolerance),
 }
 
 /// Runs the checks of one test and records how each ended.
@@ -90,11 +73,65 @@ pub struct Checks {
     harness: Harness,
     test: String,
     results: Vec<CheckResult>,
+    drift: Option<Observed>,
+    /// The largest `executed - simulated` in magnitude, with its token out.
+    largest_difference: Option<(BigInt, String)>,
+    /// The block of `full` these checks run at; `None` for a test's checks.
+    block: Option<u64>,
 }
 
 impl Checks {
     pub fn new(harness: Harness, test: &str) -> Self {
-        Self { harness, test: test.to_string(), results: Vec::new() }
+        Self {
+            harness,
+            test: test.to_string(),
+            results: Vec::new(),
+            drift: None,
+            largest_difference: None,
+            block: None,
+        }
+    }
+
+    /// The checks of one block of `full`: every check recorded carries `block`.
+    pub fn with_block(mut self, block: u64) -> Self {
+        self.block = Some(block);
+        self
+    }
+
+    /// Notes an execution's output against its simulation, keeping the largest difference.
+    /// A zero output has no relative difference and is not noted; it fails its check anyway.
+    pub fn observe_execution(
+        &mut self,
+        simulation: &str,
+        component: &str,
+        token_out: &str,
+        simulated: &BigUint,
+        executed: &BigUint,
+    ) {
+        let Some((difference, bps)) = drift(simulated, executed) else {
+            return;
+        };
+        if self
+            .largest_difference
+            .as_ref()
+            .is_none_or(|(largest, _)| difference.abs() > largest.abs())
+        {
+            self.largest_difference = Some((difference, token_out.to_string()));
+        }
+        if self
+            .drift
+            .as_ref()
+            .is_some_and(|largest| largest.bps.abs() >= bps.abs())
+        {
+            return;
+        }
+        self.drift = Some(Observed {
+            simulation: simulation.to_string(),
+            component: component.to_string(),
+            simulated: simulated.to_string(),
+            executed: executed.to_string(),
+            bps,
+        });
     }
 
     /// Runs `check` and records its outcome.
@@ -109,11 +146,17 @@ impl Checks {
     ) -> miette::Result<Option<T>> {
         match check() {
             Ok(value) => {
-                self.record(id, Outcome::Pass);
+                self.record(id, None, None, Outcome::Pass, Declared::Nothing);
                 Ok(Some(value))
             }
             Err(e) => {
-                self.record(id, Outcome::Fail { detail: format!("{e:#}") });
+                self.record(
+                    id,
+                    None,
+                    None,
+                    Outcome::Fail { detail: format!("{e:#}") },
+                    Declared::Nothing,
+                );
                 match self.harness {
                     Harness::Legacy => Err(e),
                     Harness::Strict => {
@@ -127,39 +170,196 @@ impl Checks {
 
     /// Records a check the package's configuration turned off.
     pub fn skip(&mut self, id: CheckId, reason: &str) {
-        self.record(id, Outcome::Skipped { reason: reason.to_string() });
+        self.record(
+            id,
+            None,
+            None,
+            Outcome::Skipped { reason: reason.to_string() },
+            Declared::Nothing,
+        );
+    }
+
+    /// Records a check the package's configuration turned off for one component, by its lowercase
+    /// id, as the runner matches components.
+    pub fn skip_component(&mut self, id: CheckId, component: &str, reason: &str) {
+        self.record(
+            id,
+            Some(component),
+            None,
+            Outcome::Skipped { reason: reason.to_string() },
+            Declared::Nothing,
+        );
     }
 
     /// Records a check that could not run because `prerequisite` failed.
     pub fn not_run(&mut self, id: CheckId, prerequisite: CheckId) {
-        self.record(id, Outcome::NotRun { reason: format!("{prerequisite} failed") });
+        self.record(
+            id,
+            None,
+            None,
+            Outcome::NotRun { reason: format!("{prerequisite} failed") },
+            Declared::Nothing,
+        );
+    }
+
+    /// Records a check that could not run, for `reason`, when no earlier check's failure is the
+    /// cause.
+    pub fn not_run_for(&mut self, id: CheckId, reason: &str) {
+        self.record(
+            id,
+            None,
+            None,
+            Outcome::NotRun { reason: reason.to_string() },
+            Declared::Nothing,
+        );
+    }
+
+    /// Strict: records the three limit checks as not run, because `prerequisite` failed. Legacy
+    /// mode runs no limit checks, so this records nothing there.
+    pub fn limits_not_run(&mut self, prerequisite: CheckId) {
+        if self.harness == Harness::Strict {
+            for id in CheckId::LIMITS {
+                self.not_run(id, prerequisite);
+            }
+        }
+    }
+
+    /// Strict: records the three limit checks as skipped, for `reason`. Legacy mode runs no limit
+    /// checks, so this records nothing there.
+    pub fn limits_skipped(&mut self, reason: &str) {
+        if self.harness == Harness::Strict {
+            for id in CheckId::LIMITS {
+                self.skip(id, reason);
+            }
+        }
     }
 
     /// Records a failure that happened outside [`Checks::run`], such as an indexing error.
     pub fn fail(&mut self, id: CheckId, error: &miette::Report) {
-        self.record(id, Outcome::Fail { detail: format!("{error:#}") });
+        self.record(
+            id,
+            None,
+            None,
+            Outcome::Fail { detail: format!("{error:#}") },
+            Declared::Nothing,
+        );
     }
 
-    /// Ends the test: an error naming every failed check if any failed, `Ok` otherwise, and the
-    /// results either way.
-    pub fn finish(self) -> (miette::Result<()>, Vec<CheckResult>) {
-        let failed: Vec<String> = self
+    /// Ends the test: an error naming every failed check if any failed, `Ok` otherwise, with the
+    /// results and the largest drift either way.
+    pub fn finish(self) -> Finished {
+        // A check recorded per direction can fail several times; name it once.
+        let failed: Vec<&str> = self
             .results
             .iter()
             .filter(|result| matches!(result.outcome, Outcome::Fail { .. }))
-            .map(|result| result.check.to_string())
+            .map(|result| result.check.as_str())
+            .unique()
             .collect();
         let outcome = if failed.is_empty() {
             Ok(())
         } else {
             Err(miette!("Failed checks: {}", failed.join(", ")))
         };
-        (outcome, self.results)
+        let drift = self
+            .drift
+            .zip(self.largest_difference)
+            .map(|(observed, (largest_difference, token))| {
+                let Observed { simulation, component, simulated, executed, bps } = observed;
+                Drift {
+                    test: self.test,
+                    simulation,
+                    component,
+                    simulated,
+                    executed,
+                    bps,
+                    largest_difference: largest_difference.to_string(),
+                    largest_difference_token: token,
+                }
+            });
+        Finished { outcome, results: self.results, drift }
     }
 
-    fn record(&mut self, check: CheckId, outcome: Outcome) {
-        self.results
-            .push(CheckResult { test: self.test.clone(), check, outcome });
+    /// Records the outcome of a limit check on one direction of one component, with the limit and
+    /// its declaration: a failure listing `failures` if there are any, else `unfailed`, which says
+    /// whether the check passed or why it did not run.
+    pub fn record_direction(
+        &mut self,
+        id: CheckId,
+        component: &str,
+        direction: &str,
+        limit: &LimitReport,
+        unfailed: Outcome,
+        failures: &[String],
+    ) {
+        self.record_scoped(
+            id,
+            component,
+            Some(direction),
+            Declared::Limit(limit),
+            unfailed,
+            failures,
+        );
+    }
+
+    /// Records the outcome of a balance check on one component: a failure listing `failures` if
+    /// there are any, else a pass, with the component's `tvl_only` declaration when it has one, so
+    /// the report shows the tolerance a pass was within.
+    pub fn record_balances(
+        &mut self,
+        id: CheckId,
+        component: &str,
+        tvl_only: Option<&DeclaredTolerance>,
+        failures: &[String],
+    ) {
+        let declared = tvl_only.map_or(Declared::Nothing, Declared::TvlOnly);
+        self.record_scoped(id, component, None, declared, Outcome::Pass, failures);
+    }
+
+    fn record_scoped(
+        &mut self,
+        id: CheckId,
+        component: &str,
+        direction: Option<&str>,
+        declared: Declared<'_>,
+        unfailed: Outcome,
+        failures: &[String],
+    ) {
+        let outcome = if failures.is_empty() {
+            unfailed
+        } else {
+            let detail = failures.join("; ");
+            let scope =
+                direction.map_or_else(|| component.to_string(), |d| format!("{component} {d}"));
+            error!("[{}] {id} failed for {scope}: {detail}", self.test);
+            Outcome::Fail { detail }
+        };
+        self.record(id, Some(component), direction, outcome, declared);
+    }
+
+    fn record(
+        &mut self,
+        check: CheckId,
+        component: Option<&str>,
+        direction: Option<&str>,
+        outcome: Outcome,
+        declared: Declared<'_>,
+    ) {
+        let (limit, tvl_only) = match declared {
+            Declared::Nothing => (None, None),
+            Declared::Limit(limit) => (Some(limit.clone()), None),
+            Declared::TvlOnly(tvl_only) => (None, Some(tvl_only.clone())),
+        };
+        self.results.push(CheckResult {
+            test: self.test.clone(),
+            check,
+            component: component.map(str::to_lowercase),
+            direction: direction.map(str::to_string),
+            block: self.block,
+            outcome,
+            limit,
+            tvl_only,
+        });
     }
 }
 
@@ -170,6 +370,18 @@ pub struct Report {
     pub chain: String,
     pub harness: Harness,
     pub results: Vec<CheckResult>,
+    /// The largest drift of each test that executed anything.
+    pub drift: Vec<Drift>,
+}
+
+impl Report {
+    /// Adds a finished test's results and drift. Returns `run`, the test's own result, if it
+    /// failed, and else the checks' outcome.
+    pub fn add_test(&mut self, finished: Finished, run: miette::Result<()>) -> miette::Result<()> {
+        self.results.extend(finished.results);
+        self.drift.extend(finished.drift);
+        run.and(finished.outcome)
+    }
 }
 
 impl Report {
@@ -179,11 +391,30 @@ impl Report {
             .into_diagnostic()
             .wrap_err_with(|| format!("Failed to write the test report to {}", path.display()))
     }
+
+    /// Appends the report to `path` as one line of JSON, for a run that reports as it goes.
+    pub fn append_line(&self, path: &Path) -> miette::Result<()> {
+        use std::io::Write;
+        let mut line = serde_json::to_string(self).into_diagnostic()?;
+        line.push('\n');
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut file| file.write_all(line.as_bytes()))
+            .into_diagnostic()
+            .wrap_err_with(|| format!("Failed to append to the test report {}", path.display()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{DeclaredBy, Limits};
+
+    fn limit() -> LimitReport {
+        LimitReport::new(&Limits::Hard {}, DeclaredBy::Component, None)
+    }
 
     fn failing() -> miette::Result<()> {
         Err(miette!("boom"))
@@ -195,7 +426,7 @@ mod tests {
         assert!(checks
             .run(CheckId::StateComponents, failing)
             .is_err());
-        let (outcome, results) = checks.finish();
+        let Finished { outcome, results, .. } = checks.finish();
         assert!(outcome.is_err());
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].check, CheckId::StateComponents);
@@ -224,7 +455,7 @@ mod tests {
         );
         checks.not_run(CheckId::SimLadder, CheckId::Decode);
 
-        let (outcome, results) = checks.finish();
+        let Finished { outcome, results, .. } = checks.finish();
         let message = outcome.unwrap_err().to_string();
         assert!(message.contains("state.components") && message.contains("decode"), "{message}");
         assert!(!message.contains("balances"), "{message}");
@@ -241,13 +472,99 @@ mod tests {
     }
 
     #[test]
+    fn a_skipped_component_is_reported_by_its_lowercase_id() {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.skip_component(CheckId::ExecLadder, "0xAbC", "no fork state");
+        let Finished { outcome, results, .. } = checks.finish();
+        assert!(outcome.is_ok());
+        assert_eq!(
+            results,
+            vec![CheckResult {
+                test: "t".to_string(),
+                check: CheckId::ExecLadder,
+                component: Some("0xabc".to_string()),
+                direction: None,
+                block: None,
+                outcome: Outcome::Skipped { reason: "no fork state".to_string() },
+                limit: None,
+                tvl_only: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_balance_result_carries_the_tvl_only_declaration() {
+        let declared: DeclaredTolerance =
+            serde_yaml::from_str("{bps: 10, reason: \"a fee bucket the contract also holds\"}")
+                .unwrap();
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.record_balances(CheckId::Balances, "0xAbC", Some(&declared), &[]);
+        checks.record_balances(
+            CheckId::BalancesTvlOnly,
+            "0xAbC",
+            Some(&declared),
+            &["moved".to_string()],
+        );
+        checks.record_balances(CheckId::Balances, "0xDef", None, &[]);
+        let results = checks.finish().results;
+        assert_eq!(results[0].tvl_only.as_ref(), Some(&declared));
+        assert_eq!(results[1].outcome, Outcome::Fail { detail: "moved".to_string() });
+        assert_eq!(results[1].tvl_only.as_ref(), Some(&declared));
+        assert_eq!(results[2].tvl_only, None);
+        let json = serde_json::to_value(&results).unwrap();
+        assert_eq!(json[0]["tvl_only"]["bps"], "10");
+        assert_eq!(json[0]["tvl_only"]["reason"], "a fee bucket the contract also holds");
+        assert!(json[2].get("tvl_only").is_none());
+    }
+
+    #[test]
+    fn a_report_appends_one_line_per_call() {
+        let path = std::env::temp_dir().join(format!("report-lines-{}.jsonl", std::process::id()));
+        std::fs::write(&path, "").unwrap();
+        let report = |block: u64| {
+            let mut checks = Checks::new(Harness::Strict, "full").with_block(block);
+            checks.skip(CheckId::ExecLadder, "off");
+            Report {
+                package: "ethereum-foo".to_string(),
+                chain: "ethereum".to_string(),
+                harness: Harness::Strict,
+                results: checks.finish().results,
+                drift: vec![],
+            }
+        };
+        report(7).append_line(&path).unwrap();
+        report(8).append_line(&path).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let blocks: Vec<u64> = written
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["results"][0]["block"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(blocks, vec![7, 8]);
+    }
+
+    #[test]
+    fn checks_carry_the_block_they_ran_at() {
+        let mut checks = Checks::new(Harness::Strict, "t").with_block(21_000_005);
+        checks.skip(CheckId::ExecLadder, "off");
+        assert_eq!(checks.finish().results[0].block, Some(21_000_005));
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.skip(CheckId::ExecLadder, "off");
+        assert_eq!(checks.finish().results[0].block, None);
+    }
+
+    #[test]
     fn a_test_whose_checks_all_pass_passes() {
         let mut checks = Checks::new(Harness::Strict, "t");
         checks
             .run(CheckId::StateComponents, || Ok(()))
             .unwrap();
-        checks.skip(CheckId::Balances, "skip_balance_check: true");
-        assert!(checks.finish().0.is_ok());
+        checks.skip(CheckId::Balances, "no address holds the pooled ether");
+        assert!(checks.finish().outcome.is_ok());
     }
 
     #[test]
@@ -256,16 +573,35 @@ mod tests {
             package: "ethereum-foo".to_string(),
             chain: "ethereum".to_string(),
             harness: Harness::Strict,
+            drift: vec![],
             results: vec![
                 CheckResult {
                     test: "t".to_string(),
                     check: CheckId::SimLadder,
+                    component: None,
+                    direction: None,
+                    block: None,
                     outcome: Outcome::Fail { detail: "boom".to_string() },
+                    limit: None,
+                    tvl_only: None,
                 },
                 CheckResult {
                     test: "t".to_string(),
-                    check: CheckId::Balances,
+                    check: CheckId::LimitsPastLimit,
+                    component: Some("0x01".to_string()),
+                    direction: Some("0x02->0x03".to_string()),
+                    block: Some(7),
                     outcome: Outcome::Skipped { reason: "off".to_string() },
+                    limit: Some(LimitReport::new(
+                        &Limits::Soft { reason: "constant product".to_string() },
+                        DeclaredBy::PackageDefault,
+                        Some(&tycho_test::checks::limits::LimitSizes {
+                            max_input: &BigUint::from(1000u32),
+                            max_output: &BigUint::from(2000u32),
+                            capped: false,
+                        }),
+                    )),
+                    tvl_only: None,
                 },
             ],
         };
@@ -274,7 +610,142 @@ mod tests {
         assert_eq!(json["results"][0]["check"], "sim.ladder");
         assert_eq!(json["results"][0]["outcome"], "fail");
         assert_eq!(json["results"][0]["detail"], "boom");
+        assert!(json["results"][0]
+            .get("component")
+            .is_none());
+        assert!(json["results"][0]
+            .get("direction")
+            .is_none());
+        assert_eq!(json["results"][1]["check"], "limits.past_limit");
+        assert_eq!(json["results"][1]["component"], "0x01");
+        assert_eq!(json["results"][1]["direction"], "0x02->0x03");
         assert_eq!(json["results"][1]["outcome"], "skipped");
         assert_eq!(json["results"][1]["reason"], "off");
+        assert_eq!(json["results"][1]["block"], 7);
+        assert!(json["results"][0]
+            .get("block")
+            .is_none());
+        assert!(json["results"][0]
+            .get("limit")
+            .is_none());
+        assert_eq!(
+            json["results"][1]["limit"],
+            serde_json::json!({
+                "kind": "soft",
+                "reason": "constant product",
+                "declared_by": "package_default",
+                "max_input": "1000",
+                "max_output": "2000",
+                "capped": false,
+            })
+        );
+    }
+
+    /// Records `unfailed` for `limits.past_limit` on `component` and `direction`, failing with
+    /// `failures` if any, and returns the outcome it recorded.
+    fn record_one(unfailed: Outcome, failures: &[String]) -> Outcome {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.record_direction(
+            CheckId::LimitsPastLimit,
+            "0x01",
+            "0xa->0xb",
+            &limit(),
+            unfailed,
+            failures,
+        );
+        let results = checks.finish().results;
+        results[0].outcome.clone()
+    }
+
+    #[test]
+    fn a_failure_outranks_what_a_direction_would_otherwise_record() {
+        let failure = ["quotes past the limit".to_string()];
+        let skipped = Outcome::Skipped { reason: "capped".to_string() };
+        for unfailed in [Outcome::Pass, skipped.clone()] {
+            assert_eq!(
+                record_one(unfailed, &failure),
+                Outcome::Fail { detail: "quotes past the limit".to_string() }
+            );
+        }
+        assert_eq!(record_one(Outcome::Pass, &[]), Outcome::Pass);
+        assert_eq!(record_one(skipped.clone(), &[]), skipped);
+    }
+
+    #[test]
+    fn a_check_failing_in_several_directions_is_named_once() {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        let failure = ["quotes past the limit".to_string()];
+        for direction in ["0xa->0xb", "0xb->0xa"] {
+            checks.record_direction(
+                CheckId::LimitsPastLimit,
+                "0x01",
+                direction,
+                &limit(),
+                Outcome::Pass,
+                &failure,
+            );
+        }
+        let Finished { outcome, results, .. } = checks.finish();
+        assert_eq!(outcome.unwrap_err().to_string(), "Failed checks: limits.past_limit");
+        let directions: Vec<_> = results
+            .iter()
+            .map(|r| (r.component.as_deref(), r.direction.as_deref()))
+            .collect();
+        assert_eq!(
+            directions,
+            vec![(Some("0x01"), Some("0xa->0xb")), (Some("0x01"), Some("0xb->0xa"))]
+        );
+    }
+
+    #[test]
+    fn a_check_recorded_per_component_has_no_direction() {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.record_balances(CheckId::Balances, "0x01", None, &[]);
+        checks.record_balances(CheckId::Balances, "0x02", None, &["A: indexed 1".to_string()]);
+
+        let Finished { outcome, results, .. } = checks.finish();
+        assert_eq!(outcome.unwrap_err().to_string(), "Failed checks: balances");
+        assert_eq!(
+            (results[0].component.as_deref(), results[0].direction.as_deref(), &results[0].outcome),
+            (Some("0x01"), None, &Outcome::Pass)
+        );
+        assert_eq!(results[1].outcome, Outcome::Fail { detail: "A: indexed 1".to_string() });
+    }
+
+    #[test]
+    fn the_largest_drift_of_a_test_is_kept_with_its_sign() {
+        assert!(Checks::new(Harness::Strict, "t")
+            .finish()
+            .drift
+            .is_none());
+
+        let amount = |n: u32| BigUint::from(n);
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.observe_execution("a", "0x01", "USDC", &amount(1000), &amount(1000));
+        // An overquote of 30 bps.
+        checks.observe_execution("b", "0x01", "USDC", &amount(1003), &amount(1000));
+        // An underquote of 10 bps.
+        checks.observe_execution("c", "0x02", "WETH", &amount(999), &amount(1000));
+        // No output: not noted.
+        checks.observe_execution("d", "0x02", "WETH", &amount(1000), &amount(0));
+        // Overquotes by 20 wei, more than "b" in wei but only 2 bps.
+        checks.observe_execution("e", "0x02", "WETH", &amount(100_020), &amount(100_000));
+
+        let drift = checks.finish().drift.unwrap();
+        assert_eq!(drift.test, "t");
+        assert_eq!(drift.simulation, "b");
+        assert_eq!(drift.component, "0x01");
+        assert_eq!((drift.simulated.as_str(), drift.executed.as_str()), ("1003", "1000"));
+        assert!((drift.bps + 30.0).abs() < 1e-9, "{}", drift.bps);
+        assert_eq!(
+            (drift.largest_difference.as_str(), drift.largest_difference_token.as_str()),
+            ("-20", "WETH")
+        );
+
+        let mut checks = Checks::new(Harness::Strict, "t");
+        checks.observe_execution("f", "0x01", "USDC", &amount(1000), &amount(1001));
+        let drift = checks.finish().drift.unwrap();
+        assert!((drift.bps - 10_000.0 / 1001.0).abs() < 1e-9, "{}", drift.bps);
+        assert_eq!(drift.largest_difference, "1");
     }
 }
