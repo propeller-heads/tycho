@@ -17,6 +17,8 @@ pub struct ProtocolComponentExpectation {
     #[serde(default)]
     pub static_attributes: HashMap<String, Bytes>,
     pub creation_tx: Bytes,
+    #[serde(default)]
+    pub protocol_type_name: Option<String>,
 }
 
 /// Represents a ProtocolComponent with test configuration
@@ -40,6 +42,8 @@ struct ExpectedComponentEntry {
     #[serde(default)]
     static_attributes: HashMap<String, Bytes>,
     creation_tx: Bytes,
+    #[serde(default)]
+    protocol_type_name: Option<String>,
     #[serde(default = "default_false")]
     skip_simulation: bool,
     #[serde(default = "default_false")]
@@ -53,11 +57,18 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
             tokens,
             static_attributes,
             creation_tx,
+            protocol_type_name,
             skip_simulation,
             skip_execution,
         } = entry;
         Self {
-            base: ProtocolComponentExpectation { id, tokens, static_attributes, creation_tx },
+            base: ProtocolComponentExpectation {
+                id,
+                tokens,
+                static_attributes,
+                creation_tx,
+                protocol_type_name,
+            },
             skip_simulation,
             skip_execution,
         }
@@ -112,6 +123,22 @@ impl ProtocolComponentExpectation {
                 }
             }
         }
+        // Compare protocol_type_name, when the test declares one
+        if let Some(expected_type) = &self.protocol_type_name {
+            if expected_type != &other.protocol_type_name {
+                let diff = Self::format_diff(
+                    "protocol_type_name",
+                    expected_type,
+                    &other.protocol_type_name,
+                    colorize_output,
+                );
+                diffs.push(format!(
+                    "Field 'protocol_type_name' mismatch for {}:\n{}",
+                    self.id, diff
+                ));
+            }
+        }
+
         // Compare creation_tx
         if self.creation_tx != other.creation_tx {
             let self_tx = format!("{}", self.creation_tx.clone());
