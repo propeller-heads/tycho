@@ -214,9 +214,41 @@ mod test {
     use deepsize::DeepSizeOf;
     use futures03::future::try_join_all;
     use mini_moka::sync::ConcurrentCacheExt;
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, Notify};
 
     use crate::services::{cache::RpcCache, rpc::RpcError};
+
+    #[test_log::test(tokio::test)]
+    async fn test_clear_during_fallback() {
+        let cache = Arc::new(RpcCache::<String, i32>::new("test", 100, 3600));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let in_flight = tokio::spawn({
+            let (cache, started, release) = (cache.clone(), started.clone(), release.clone());
+            async move {
+                cache
+                    .get("k0".to_string(), |_| {
+                        let (started, release) = (started.clone(), release.clone());
+                        async move {
+                            started.notify_one();
+                            release.notified().await;
+                            Ok::<_, RpcError>((1, true))
+                        }
+                    })
+                    .await
+            }
+        });
+        started.notified().await;
+
+        cache.clear();
+        release.notify_one();
+        in_flight
+            .await
+            .expect("task panicked")
+            .expect("fallback failed");
+
+        assert!(!cache.contains(&"k0".to_string()));
+    }
 
     #[test_log::test(tokio::test)]
     async fn test_sequential_access() {
