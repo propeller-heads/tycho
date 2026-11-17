@@ -69,6 +69,17 @@ pub async fn bound_snapshot_reads(conn: &mut AsyncPgConnection) -> Result<(), Po
     Ok(())
 }
 
+/// Plans every later statement of the current transaction with its bound values, so Postgres plans
+/// and locks only the instance leaves the values name. The setting ends with the transaction.
+#[cfg_attr(not(test), expect(dead_code, reason = "no read cache calls it until cut-over"))]
+pub async fn force_custom_plans(conn: &mut AsyncPgConnection) -> Result<(), PostgresError> {
+    diesel::sql_query("SELECT set_config('plan_cache_mode', 'force_custom_plan', true)")
+        .execute(conn)
+        .await
+        .map_err(PostgresError::from)?;
+    Ok(())
+}
+
 /// Subquery for the ids of the live accounts of a chain: not deleted, with a live code row.
 fn account_ids(chain_id: i64) -> schema::account::BoxedQuery<'static, Pg, BigInt> {
     schema::account::table
