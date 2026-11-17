@@ -1,3 +1,15 @@
+## [0.527.3](https://github.com/propeller-heads/tycho/compare/0.527.2...0.527.3) (2026-11-17)
+
+
+### Bug Fixes
+
+* **tycho-simulation:** charge Ekubo v2 gas per bitmap word ([0dd66db](https://github.com/propeller-heads/tycho/commit/0dd66db3fefff37bd5e1019eeae0c77d2ad642d5))
+* **tycho-simulation:** gas estimates ([#1840](https://github.com/propeller-heads/tycho/issues/1840)) ([c0b0b26](https://github.com/propeller-heads/tycho/commit/c0b0b26363b13ef22eeaa8667c0af5a7590b89d9))
+* **tycho-simulation:** lower the Uniswap V4 base gas to 150k ([6b0fd75](https://github.com/propeller-heads/tycho/commit/6b0fd75b15502f49d2bf58cfbdf7e622892a2240))
+* **tycho-simulation:** raise the Bebop gas estimate to 285k ([63c56d2](https://github.com/propeller-heads/tycho/commit/63c56d2374960209ad445a65285e96be5b6838f1))
+* **tycho-simulation:** set gas for two unnamed price level venues ([69fdac2](https://github.com/propeller-heads/tycho/commit/69fdac2cd162bc1172f0be88a9cc672277fbe070))
+* **tycho-simulation:** stop double-counting the Pons V2 hook dispatch ([d1fb95d](https://github.com/propeller-heads/tycho/commit/d1fb95d722827dfdf4e72c09187e5c55810ee526))
+
 ## [0.527.2](https://github.com/propeller-heads/tycho/compare/0.527.1...0.527.2) (2026-11-17)
 
 
