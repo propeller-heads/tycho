@@ -206,15 +206,16 @@ fn build_trade(
             deadline: c.deadline.to_string(),
             has_signature: !c.signature.is_empty(),
         });
-    let router_fee_config = resolve_fee_config(
-        fee_store,
-        router,
-        call.begin_ordinal,
-        &tx.from,
-        swap.client_fee
+    let lookup = FeeLookup {
+        tx_origin: &tx.from,
+        client: swap
+            .client_fee
             .as_ref()
             .map(|c| c.receiver.as_slice()),
-    );
+        token_in: &swap.token_in,
+        token_out: &swap.token_out,
+    };
+    let router_fee_config = resolve_fee_config(fee_store, router, call.begin_ordinal, &lookup);
 
     Ok(Trade {
         chain: chain.to_string(),
@@ -261,6 +262,10 @@ fn build_trade(
     })
 }
 
+/// A router positive slippage of 100% in fee units. Router positive slippage bps exist only on the
+/// `uint32` calculator generation, so they are always on its denominator.
+const FULL_ROUTER_POSITIVE_SLIPPAGE_BPS: u64 = 100_000_000;
+
 /// The denominator the fee bps of a calculator are on.
 ///
 /// The scale belongs to the calculator, not to the router that resolves to it: a router rotated
@@ -271,14 +276,36 @@ fn bps_scale(observed: Option<u64>, router: RouterVersion) -> Option<u64> {
     observed.or_else(|| router.default_bps_scale())
 }
 
+/// A client cap of 100% in fee units, which captures as much as no cap does. The FeeCalculator
+/// reports it for a client without a cap.
+const UNCAPPED_POSITIVE_SLIPPAGE_BPS: u64 = 100_000_000;
+
+/// What a trade's fee configuration depends on besides the calculator.
+struct FeeLookup<'a> {
+    tx_origin: &'a [u8],
+    /// The signed client fee receiver, if the trade carries one.
+    client: Option<&'a [u8]>,
+    token_in: &'a [u8],
+    token_out: &'a [u8],
+}
+
+/// The router fee on output for a trade, as `FeeCalculator._applyTokenPairFee` resolves it: a
+/// pair fee replaces the default fee, and against a client's custom fee the lower one applies.
+fn fee_on_output_with_pair_fee(fee_on_output: u64, custom: Option<u64>, pair: Option<u64>) -> u64 {
+    match (pair, custom) {
+        (None, _) => fee_on_output,
+        (Some(pair), None) => pair,
+        (Some(pair), Some(custom)) => pair.min(custom),
+    }
+}
+
 /// Resolves the router fee configuration in effect at `ordinal`, applying per-client overrides
 /// the same way `FeeCalculator._resolveClient` does (zero client falls back to `tx.origin`).
 fn resolve_fee_config(
     store: &StoreGetString,
     router: &RouterConfig,
     ordinal: u64,
-    tx_origin: &[u8],
-    client: Option<&[u8]>,
+    lookup: &FeeLookup,
 ) -> Option<RouterFeeConfig> {
     if router.version == RouterVersion::V2 {
         return None;
@@ -291,9 +318,9 @@ fn resolve_fee_config(
         .get_at(ordinal, keys::fee_bps_scale(&fee_calculator))
         .and_then(|v| v.parse::<u64>().ok());
     let bps_scale = bps_scale(observed_scale, router.version)?;
-    let client = match client {
+    let client = match lookup.client {
         Some(c) if c != ZERO_ADDRESS => c,
-        _ => tx_origin,
+        _ => lookup.tx_origin,
     };
     let get_u64 = |key: String| {
         store
@@ -302,23 +329,40 @@ fn resolve_fee_config(
     };
     let custom_output = get_u64(keys::custom_fee_on_output(&fee_calculator, client));
     let custom_client = get_u64(keys::custom_fee_on_client_fee(&fee_calculator, client));
-    let fee_on_output_bps = custom_output
-        .or_else(|| get_u64(keys::fee_on_output(&fee_calculator)))
-        .unwrap_or_default();
+    let (token0, token1) = if lookup.token_in <= lookup.token_out {
+        (lookup.token_in, lookup.token_out)
+    } else {
+        (lookup.token_out, lookup.token_in)
+    };
+    let pair_fee = get_u64(keys::token_pair_fee(&fee_calculator, token0, token1));
+    let fee_on_output_bps = fee_on_output_with_pair_fee(
+        custom_output
+            .or_else(|| get_u64(keys::fee_on_output(&fee_calculator)))
+            .unwrap_or_default(),
+        custom_output,
+        pair_fee,
+    );
     let fee_on_client_fee_bps = custom_client
         .or_else(|| get_u64(keys::fee_on_client_fee(&fee_calculator)))
         .unwrap_or_default();
+    let global_router_bps = get_u64(keys::router_positive_slippage(&fee_calculator));
+    // Older calculators turn capture on and off with `PositiveSlippageToggled`. A calculator with
+    // a router positive slippage bps has no switch, so its router positive slippage bps alone
+    // decides what the router captures.
     let positive_slippage_enabled = router.version == RouterVersion::V3_1 &&
-        store
-            .get_at(ordinal, keys::positive_slippage(&fee_calculator))
-            .map(|v| v == "1")
-            .unwrap_or(false);
-    // Only the calculator generation that has the exemption emits the event that sets this, so a
-    // trade on an older calculator resolves to false.
-    let positive_slippage_exempt = store
-        .get_at(ordinal, keys::positive_slippage_exempt(&fee_calculator, client))
-        .map(|v| v == "1")
-        .unwrap_or(false);
+        (global_router_bps.is_some() ||
+            store
+                .get_at(ordinal, keys::positive_slippage(&fee_calculator))
+                .is_some_and(|v| v == "1"));
+    // A calculator that never emitted a router positive slippage event captures the full surplus.
+    let router_positive_slippage_bps =
+        get_u64(keys::custom_router_positive_slippage(&fee_calculator, client))
+            .or(global_router_bps)
+            .unwrap_or(FULL_ROUTER_POSITIVE_SLIPPAGE_BPS);
+    let client_positive_slippage_share_bps =
+        get_u64(keys::client_positive_slippage_share(&fee_calculator, client)).unwrap_or_default();
+    let positive_slippage_cap_bps = get_u64(keys::positive_slippage_cap(&fee_calculator, client))
+        .unwrap_or(UNCAPPED_POSITIVE_SLIPPAGE_BPS);
     Some(RouterFeeConfig {
         fee_calculator,
         fee_on_output_bps,
@@ -326,14 +370,35 @@ fn resolve_fee_config(
         custom_fee_on_output: custom_output.is_some(),
         custom_fee_on_client_fee: custom_client.is_some(),
         positive_slippage_enabled,
-        positive_slippage_exempt,
+        router_positive_slippage_bps,
+        client_positive_slippage_share_bps,
         bps_scale,
+        positive_slippage_cap_bps,
+        token_pair_fee: pair_fee.is_some(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn without_a_pair_fee_the_fee_on_output_stands() {
+        assert_eq!(fee_on_output_with_pair_fee(100, None, None), 100);
+        assert_eq!(fee_on_output_with_pair_fee(40, Some(40), None), 40);
+    }
+
+    #[test]
+    fn a_pair_fee_replaces_the_default_fee_in_both_directions() {
+        assert_eq!(fee_on_output_with_pair_fee(100, None, Some(300)), 300);
+        assert_eq!(fee_on_output_with_pair_fee(100, None, Some(0)), 0);
+    }
+
+    #[test]
+    fn against_a_custom_fee_the_lower_one_applies() {
+        assert_eq!(fee_on_output_with_pair_fee(40, Some(40), Some(300)), 40);
+        assert_eq!(fee_on_output_with_pair_fee(400, Some(400), Some(300)), 300);
+    }
 
     /// The rotation this fixes: a v3_0 router pointed at a calculator of the next generation
     /// reports its bps on 100000000, and reading 10000 off the router makes the rate 10000 times

@@ -297,6 +297,16 @@ Market conditions can change rapidly. Delays in your decision-making can lead to
 Because the RFQ will only let you swap up to the amount of tokens specified in the quote, when the RFQ swap happens after another protocol in a sequential swap, if positive slippage occurs during the preceding swap, any additional input tokens beyond the permitted quote amount will remain in the Tycho Router and not be sent to the RFQ protocol.
 {% endhint %}
 
+{% hint style="warning" %}
+**BaiBai: priority-fee surcharge**
+
+BaiBai's entrypoint withholds part of a swap's output when the transaction's priority fee (gas price minus basefee) is above 0.002 gwei (2e6 wei): 0.01 bps per 1e4 wei above that, up to 50 bps, which is reached at 0.052 gwei. Below the threshold nothing is withheld.
+
+BaiBai books do not include it, because the priority fee is set when the transaction is sent, not when it is quoted. A route through BaiBai sent with a higher tip receives up to 50 bps less than simulated, and reverts if its minimum amount out is tighter than that. Send BaiBai routes with a priority fee of at most 0.002 gwei, or widen the slippage tolerance by the surcharge the tip implies.
+
+These values were measured on Base at block 53,545,000. The venue owner can change the threshold and the cap without a contract upgrade, and Tycho does not read them.
+{% endhint %}
+
 ## pAMM Price Level Stream
 
 Besides the book feeds above, Tycho Simulation consumes <a href="https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level" target="_blank" rel="noopener noreferrer">Titan Builder's pAMM price level stream</a>: a WebSocket of per-pair quote ladders for the pAMMs Titan builds blocks with, on Ethereum Mainnet. `PriceLevelStreamBuilder` turns those frames into the same `Update` messages the protocol stream emits, so you consume it like any other stream, and it quotes venues no book feed above covers. The [pAMM Price Level Stream](price-level-stream.md) page covers its configuration, freshness contract, message format and metrics.

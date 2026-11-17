@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
     SafeERC20
@@ -23,6 +24,7 @@ error Vault__UnexpectedNonZeroCount(uint256 nonZeroCount);
 error Vault__UnexpectedInputDelta(int256 inputDelta);
 error Vault__ValueMismatch(uint256 msgValue, uint256 amount);
 error Vault__EthNotAccepted(uint256 msgValue);
+error Vault__Paused();
 
 /**
  * @title Vault - ERC6909-compliant multi-token vault
@@ -37,6 +39,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
     using TransientSlot for TransientSlot.Int256Slot;
     using TransientSlot for TransientSlot.Uint256Slot;
     using SafeERC20 for IERC20;
+    using SafeCast for uint256;
 
     // Vault balances - using our own mapping to avoid expensive Transfer events from ERC6909
     mapping(address => mapping(uint256 => uint256)) private _vaultBalances;
@@ -47,6 +50,37 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
             .wrap(keccak256("TychoVault#NON_ZERO_DELTA_COUNT_SLOT"));
     TransientSlot.BooleanSlot internal constant _USE_VAULT_SLOT =
         TransientSlot.BooleanSlot.wrap(keccak256("Vault#USE_VAULT_SLOT"));
+
+    bool private _vaultPaused;
+
+    event VaultPaused(address indexed account);
+    event VaultUnpaused(address indexed account);
+
+    /**
+     * @dev Rejects deposits and swaps funded from vault balances while the
+     * vault is paused. Withdrawals are never paused.
+     */
+    modifier whenVaultNotPaused() {
+        require(!_vaultPaused, Vault__Paused());
+        _;
+    }
+
+    /**
+     * @notice Whether deposits and swaps funded from vault balances are paused.
+     */
+    function vaultPaused() external view returns (bool) {
+        return _vaultPaused;
+    }
+
+    function _pauseVault() internal {
+        _vaultPaused = true;
+        emit VaultPaused(msg.sender);
+    }
+
+    function _unpauseVault() internal {
+        _vaultPaused = false;
+        emit VaultUnpaused(msg.sender);
+    }
 
     // ============ ERC6909 Overrides and Extensions ============
 
@@ -131,6 +165,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         payable
         nonReentrant
         whenNotPaused
+        whenVaultNotPaused
     {
         if (token == address(0)) {
             revert Vault__AddressZero();
@@ -339,8 +374,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
                 revert Vault__UnexpectedNonZeroCount(nonZeroCount);
             } else if (nonZeroCount == 1) {
                 int256 inputDelta = _getDelta(inputToken);
-                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                if (inputDelta == 0 || inputDelta != -int256(inputAmount)) {
+                if (inputDelta == 0 || inputDelta != -inputAmount.toInt256()) {
                     revert Vault__UnexpectedInputDelta(inputDelta);
                 }
                 uint256 id = _toId(inputToken);

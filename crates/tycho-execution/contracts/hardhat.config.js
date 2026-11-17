@@ -85,6 +85,11 @@ module.exports = {
             url: process.env.RPC_URL,
             accounts: [process.env.PRIVATE_KEY],
             chainId: 5042
+        },
+        elysium: {
+            url: process.env.RPC_URL,
+            accounts: [process.env.PRIVATE_KEY],
+            chainId: 99901
         }
     },
 
@@ -105,6 +110,14 @@ module.exports = {
                 urls: {
                     apiURL: "https://api.uniscan.xyz/api",
                     browserURL: "https://www.uniscan.xyz/"
+                }
+            },
+            {
+                network: "arc",
+                chainId: 5042,
+                urls: {
+                    apiURL: "https://api.etherscan.io/v2/api",
+                    browserURL: "https://arc.etherscan.io/"
                 }
             },
             {

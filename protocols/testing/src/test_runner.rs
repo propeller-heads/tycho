@@ -80,6 +80,7 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("robinhood-sushiswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-robinswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-gigadex-v3", "ethereum-pancakeswap-v3"),
+        ("robinhood-swaphood-v3", "ethereum-pancakeswap-v3"),
         ("elysium-kleos-v3", "ethereum-uniswap-v3-logs-only"),
         ("elysium-elyspump-v3", "ethereum-uniswap-v3-logs-only"),
         ("elysium-stockiumswap-v3", "ethereum-uniswap-v3-logs-only"),
@@ -92,6 +93,7 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("robinhood-up-v3", "base-aerodrome-slipstreams"),
         ("elysium-aero-cl", "evm-aero-cl"),
         ("robinhood-pancakeswap-infinity-cl", "base-pancakeswap-infinity-cl"),
+        ("bsc-pancakeswap-infinity-bin", "base-pancakeswap-infinity-bin"),
         ("robinhood-uniswap-v4-with-hooks", "ethereum-uniswap-v4/with-hooks"),
         ("bsc-ring-swap-v2", "ethereum-ring-swap-v2"),
     ])

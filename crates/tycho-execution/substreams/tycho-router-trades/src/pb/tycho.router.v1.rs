@@ -181,16 +181,30 @@ pub struct RouterFeeConfig {
     pub custom_fee_on_output: bool,
     #[prost(bool, tag="5")]
     pub custom_fee_on_client_fee: bool,
+    /// False only when an older calculator turned capture off with PositiveSlippageToggled. A
+    /// calculator with a router positive slippage bps has no switch and reports true.
     #[prost(bool, tag="6")]
     pub positive_slippage_enabled: bool,
     /// Denominator of the bps values: 10000 for v3_0, 100000000 for v3_1.
     #[prost(uint64, tag="7")]
     pub bps_scale: u64,
-    /// Whether this trade's client is exempt from positive slippage capture. The client is the
-    /// signed clientFeeReceiver, or tx.origin when that is zero, the same resolution the
-    /// FeeCalculator does. Only the calculator generation that has exemptions can set it.
-    #[prost(bool, tag="8")]
-    pub positive_slippage_exempt: bool,
+    /// Part of the surplus the router captures for this trade's client, in fee units (100000000 =
+    /// the full surplus): the client's custom value if set, otherwise the calculator's global one.
+    /// The client is the signed clientFeeReceiver, or tx.origin when that is zero, the same
+    /// resolution the FeeCalculator does. An exemption on an older calculator reads as zero.
+    #[prost(uint64, tag="9")]
+    pub router_positive_slippage_bps: u64,
+    /// The client's share of the captured surplus, in fee units. The router keeps the rest.
+    #[prost(uint64, tag="10")]
+    pub client_positive_slippage_share_bps: u64,
+    /// Most surplus the router captures from this trade, as a part of the swaps' output before fees,
+    /// in fee units. 100000000 when the client has no cap, the same value the FeeCalculator reports.
+    #[prost(uint64, tag="11")]
+    pub positive_slippage_cap_bps: u64,
+    /// Whether the calculator has a pair fee for this trade's token pair. fee_on_output_bps already
+    /// applies it: it replaces the default fee, and against a custom fee the lower of the two applies.
+    #[prost(bool, tag="12")]
+    pub token_pair_fee: bool,
 }
 /// One recipient of the FeesTaken event.
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -249,6 +263,11 @@ pub struct FeeConfigEvent {
     /// uint32, so an event that carries one has a different topic in each.
     #[prost(uint64, tag="12")]
     pub bps_scale: u64,
+    /// The token pair of TokenPair* events, lower address first; empty otherwise.
+    #[prost(bytes="vec", tag="13")]
+    pub token0: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes="vec", tag="14")]
+    pub token1: ::prost::alloc::vec::Vec<u8>,
 }
 /// Every ERC-6909 Transfer a router emitted in one block.
 ///
