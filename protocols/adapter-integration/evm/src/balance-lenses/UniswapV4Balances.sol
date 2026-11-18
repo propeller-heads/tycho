@@ -35,24 +35,22 @@ contract UniswapV4Balances is BalanceLens {
     using StateLibrary for IPoolManager;
 
     /// @notice The id is not a 32-byte pool id.
-    error UniswapV4Balances__NotAPoolId(bytes id);
+    error NotAPoolId(bytes id);
     /// @notice The component does not have exactly two tokens.
-    error UniswapV4Balances__NotTwoTokens(uint256 count);
+    error NotTwoTokens(uint256 count);
     /// @notice `tick_spacing` is outside the bounds `PoolManager.initialize`
     /// accepts (`TickMath.MIN_TICK_SPACING` to `MAX_TICK_SPACING`).
-    error UniswapV4Balances__InvalidTickSpacing(uint256 tickSpacing);
+    error InvalidTickSpacing(uint256 tickSpacing);
     /// @notice The pool's sqrt price is zero: the `PoolManager` holds no
     /// initialized pool under this id.
-    error UniswapV4Balances__PoolNotInitialized(bytes32 id);
+    error PoolNotInitialized(bytes32 id);
     /// @notice A tick's net liquidity took the running liquidity below
     /// zero, so the walk did not visit the ticks the pool holds.
-    error UniswapV4Balances__NegativeLiquidity(int24 tick);
+    error NegativeLiquidity(int24 tick);
     /// @notice The walk's liquidity at the current tick differs from the
     /// pool's `liquidity`, so the walk did not visit the ticks the pool
     /// holds.
-    error UniswapV4Balances__LiquidityMismatch(uint256 walked, uint256 pool);
-    /// @notice The `tick_spacing` attribute is longer than 32 bytes.
-    error UniswapV4Balances__NotAUint(bytes value);
+    error LiquidityMismatch(uint256 walked, uint256 pool);
 
     /// @notice The pool the walk reads, with its `slot0` price and tick.
     struct PoolView {
@@ -79,17 +77,17 @@ contract UniswapV4Balances is BalanceLens {
         Attribute[] calldata attributes
     ) external view returns (uint256[] memory amounts) {
         if (id.length != 32) {
-            revert UniswapV4Balances__NotAPoolId(id);
+            revert NotAPoolId(id);
         }
         if (tokens.length != 2) {
-            revert UniswapV4Balances__NotTwoTokens(tokens.length);
+            revert NotTwoTokens(tokens.length);
         }
         uint256 tickSpacing = toUint(attribute(attributes, "tick_spacing"));
         if (
             tickSpacing < uint24(TickMath.MIN_TICK_SPACING)
                 || tickSpacing > uint24(TickMath.MAX_TICK_SPACING)
         ) {
-            revert UniswapV4Balances__InvalidTickSpacing(tickSpacing);
+            revert InvalidTickSpacing(tickSpacing);
         }
 
         PoolView memory pool;
@@ -99,14 +97,14 @@ contract UniswapV4Balances is BalanceLens {
         pool.tickSpacing = int24(int256(tickSpacing));
         (pool.sqrtPriceX96, pool.tick,,) = pool.manager.getSlot0(pool.id);
         if (pool.sqrtPriceX96 == 0) {
-            revert UniswapV4Balances__PoolNotInitialized(bytes32(id));
+            revert PoolNotInitialized(bytes32(id));
         }
 
         Totals memory totals = walk(pool);
 
         uint256 poolLiquidity = pool.manager.getLiquidity(pool.id);
         if (uint256(totals.liquidityAtTick) != poolLiquidity) {
-            revert UniswapV4Balances__LiquidityMismatch(
+            revert LiquidityMismatch(
                 uint256(totals.liquidityAtTick), poolLiquidity
             );
         }
@@ -148,7 +146,7 @@ contract UniswapV4Balances is BalanceLens {
                 (, int128 net) = pool.manager.getTickLiquidity(pool.id, tick);
                 totals.liquidity += net;
                 if (totals.liquidity < 0) {
-                    revert UniswapV4Balances__NegativeLiquidity(tick);
+                    revert NegativeLiquidity(tick);
                 }
                 started = true;
                 previousTick = tick;
@@ -190,16 +188,6 @@ contract UniswapV4Balances is BalanceLens {
             totals.amount1 += SqrtPriceMath.getAmount1Delta(
                 sqrtLower, price, liquidity, false
             );
-        }
-    }
-
-    /// @notice `value` as a big-endian uint256 of at most 32 bytes.
-    function toUint(bytes calldata value) internal pure returns (uint256 n) {
-        if (value.length > 32) {
-            revert UniswapV4Balances__NotAUint(value);
-        }
-        for (uint256 i = 0; i < value.length; i++) {
-            n = (n << 8) | uint8(value[i]);
         }
     }
 }
