@@ -8,7 +8,7 @@ use crate::{
     evm::{
         engine_db::{create_engine, SHARED_TYCHO_DB},
         protocol::{
-            curve::{adapter::build_pool, state::CurveState, variant, vm},
+            curve::{adapter::build_pool, policy::CurvePolicy, state::CurveState, variant, vm},
             vm::utils::load_stateless_contracts,
         },
     },
@@ -90,7 +90,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for CurveState {
         let pool = build_pool(&raw).map_err(|e| {
             InvalidSnapshotError::ValueError(format!("curve build_pool failed: {e}"))
         })?;
-        Ok(CurveState::new(pool_address, coins, decimals, resolved, pool, raw.admin_fee))
+        let policy = CurvePolicy::from_attributes(&snapshot.state.attributes)
+            .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
+        Ok(CurveState::new(pool_address, coins, decimals, resolved, pool, raw.admin_fee)
+            .with_policy(policy))
     }
 }
 

@@ -7,11 +7,16 @@
 pub mod adapter;
 mod decoder;
 mod math;
+mod policy;
 mod state;
 mod swap_to_price;
 mod variant;
 mod vm;
 
+pub use policy::{
+    CurvePolicy, POLICY_ATTRIBUTE, POLICY_CONTROLLER_ATTRIBUTE, POLICY_KILLED_ATTRIBUTE,
+    POLICY_MIN_FEE_ATTRIBUTE, POLICY_ROUTER_ATTRIBUTE, POLICY_VERSION_ATTRIBUTE,
+};
 pub use state::CurveState;
 pub use variant::resolve_variant;
 pub use vm::{decode_raw_state, encode_raw_state, read_raw_pool_state, POOL_STATE_ADJUSTED};

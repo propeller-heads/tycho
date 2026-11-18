@@ -6,8 +6,8 @@ use substreams::{
     pb::substreams::StoreDeltas,
     scalar::BigInt,
     store::{
-        StoreAddBigInt, StoreGet, StoreGetInt64, StoreGetString, StoreNew, StoreSet, StoreSetInt64,
-        StoreSetString,
+        StoreAddBigInt, StoreGet, StoreGetInt64, StoreGetRaw, StoreGetString, StoreNew, StoreSet,
+        StoreSetInt64, StoreSetRaw, StoreSetString,
     },
 };
 use substreams_ethereum::{pb::eth, Function};
@@ -17,6 +17,7 @@ use crate::{
     abi::set_oracle_implementation::functions::SetOracle,
     consts::ZERO_ADDRESS,
     params::{emit_specific_pools, parse_curve_params},
+    policy::{created_policies, policy_entity_changes, policy_state_writes},
     pool_changes::emit_eth_deltas,
     pool_factories,
 };
@@ -119,6 +120,46 @@ pub fn store_component_tokens(map: BlockChanges, store: StoreSetString) {
                     .join(":"),
             );
         });
+}
+
+/// Stores the pool and version of each grant policy, keyed by the policy address.
+#[substreams::handlers::store]
+pub fn store_created_policies(block: eth::v2::Block, store: StoreSetRaw) {
+    for trx in block.transactions() {
+        for created in created_policies(trx) {
+            store.set(created.ordinal, hex::encode(&created.policy), &created.store_value);
+        }
+    }
+}
+
+/// Stores the policy of each pool and the grant terms of each grant policy.
+#[substreams::handlers::store]
+pub fn store_policy_states(
+    block: eth::v2::Block,
+    components_store: StoreGetString,
+    created_policies_store: StoreGetRaw,
+    store: StoreSetRaw,
+) {
+    for trx in block.transactions() {
+        let writes = policy_state_writes(
+            trx,
+            |pool| is_tracked_pool(&components_store, pool),
+            |policy| {
+                created_policies_store
+                    .get_last(hex::encode(policy))
+                    .is_some()
+            },
+        );
+        for write in writes {
+            store.set(write.ordinal, write.key, &write.value);
+        }
+    }
+}
+
+fn is_tracked_pool(components_store: &StoreGetString, pool: &[u8]) -> bool {
+    components_store
+        .get_last(format!("pool:0x{0}", hex::encode(pool)))
+        .is_some()
 }
 
 /// Stores contracts required by components, for example LP tokens if they are different from the
@@ -244,6 +285,8 @@ pub fn map_protocol_changes(
     non_component_accounts_store: StoreGetInt64,
     set_oracle_components_store: StoreGetInt64,
     balance_store: StoreDeltas, // Note, this map module is using the `deltas` mode for the store.
+    created_policies_store: StoreGetRaw,
+    policy_states_store: StoreGetRaw,
 ) -> Result<BlockChanges> {
     let curve_param = parse_curve_params(&params)?;
     // We merge contract changes by transaction (identified by transaction index) making it easy to
@@ -576,6 +619,58 @@ pub fn map_protocol_changes(
                 .extend(entrypoint_params);
         });
 
+    // After the component changes, so a policy set in a pool's creation transaction replaces the
+    //  pool's initial `policy`.
+    for trx in block.transactions() {
+        let changes = policy_entity_changes(
+            trx,
+            |pool| is_tracked_pool(&components_store, pool),
+            |policy| created_policies_store.get_last(hex::encode(policy)),
+            |ordinal, key| policy_states_store.get_at(ordinal, key),
+        );
+        if changes.is_empty() {
+            continue;
+        }
+        let tx = Transaction {
+            to: trx.to.clone(),
+            from: trx.from.clone(),
+            hash: trx.hash.clone(),
+            index: trx.index.into(),
+        };
+        let entity_changes = &mut transaction_changes
+            .entry(tx.index)
+            .or_insert_with(|| TransactionChanges {
+                tx: Some(tx.clone()),
+                contract_changes: vec![],
+                component_changes: vec![],
+                balance_changes: vec![],
+                entrypoints: vec![],
+                entity_changes: vec![],
+                entrypoint_params: vec![],
+            })
+            .entity_changes;
+        for change in changes {
+            match entity_changes
+                .iter_mut()
+                .find(|known| known.component_id == change.component_id)
+            {
+                Some(known) => {
+                    for attribute in change.attributes {
+                        match known
+                            .attributes
+                            .iter_mut()
+                            .find(|existing| existing.name == attribute.name)
+                        {
+                            Some(existing) => existing.value = attribute.value,
+                            None => known.attributes.push(attribute),
+                        }
+                    }
+                }
+                None => entity_changes.push(change),
+            }
+        }
+    }
+
     // Balance changes are gathered by the `StoreDelta` based on `TokenExchange`, etc. creating
     //  `BalanceDeltas`. We essentially just process the changes that occurred to the `store` this
     //  block. Then, these balance changes are merged onto the existing map of tx contract changes,
@@ -675,7 +770,8 @@ pub fn map_protocol_changes(
             .filter_map(|(_, change)| {
                 if change.contract_changes.is_empty() &&
                     change.component_changes.is_empty() &&
-                    change.balance_changes.is_empty()
+                    change.balance_changes.is_empty() &&
+                    change.entity_changes.is_empty()
                 {
                     None
                 } else {
