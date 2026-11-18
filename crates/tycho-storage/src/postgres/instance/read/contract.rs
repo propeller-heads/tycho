@@ -309,8 +309,11 @@ mod tests {
     use chrono::{NaiveDate, NaiveDateTime};
     use diesel_async::AsyncPgConnection;
     use tycho_common::{
-        models::{contract::AccountBalance, Address, Chain},
-        storage::{BlockOrTimestamp, StorageError, Version, VersionKind},
+        models::{
+            contract::{Account, AccountBalance},
+            Address, Chain, ContractId, PaginationParams,
+        },
+        storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
         Bytes,
     };
 
@@ -517,5 +520,361 @@ mod tests {
         let result = balances(&s.gateway, &mut conn, "vm:curve", true, Some(&at(day(1)))).await;
 
         assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+    }
+
+    /// Inserts an account at `address` with the code `code`, code hash `0xc1`, code tx `0xc2`, the
+    /// given slots, a native balance of `0x01` and a balance of `0x05` in the token `0x02`.
+    /// Returns the account id.
+    async fn contract(
+        conn: &mut AsyncPgConnection,
+        instance: InstanceId,
+        address: &str,
+        code: &str,
+        slots: &[(&str, &str)],
+    ) -> i64 {
+        let id = account_with_balances(conn, instance, address, "0x01", "0x05").await;
+        db_fixtures::insert_instance_code(conn, instance, id, b(code), b("0xc1"), b("0xc2")).await;
+        let slots: Vec<(Bytes, Bytes)> = slots
+            .iter()
+            .map(|(slot, value)| (b(slot), b(value)))
+            .collect();
+        db_fixtures::insert_instance_slots(conn, instance, id, &slots).await;
+        id
+    }
+
+    async fn contracts(
+        gateway: &PostgresGatewayNew,
+        conn: &mut AsyncPgConnection,
+        system: &str,
+        addresses: Option<&[Address]>,
+        pagination: Option<&PaginationParams>,
+        at: Option<&Version>,
+    ) -> Result<(Vec<Account>, Option<i64>), StorageError> {
+        let page = gateway
+            .get_contracts(&Chain::Ethereum, system, addresses, at, true, pagination, conn)
+            .await?;
+        let mut entity = page.entity;
+        if pagination.is_none() {
+            entity.sort_by(|a, b| a.address.cmp(&b.address));
+        }
+        Ok((entity, page.total))
+    }
+
+    fn addresses(accounts: &[Account]) -> Vec<Address> {
+        accounts
+            .iter()
+            .map(|account| account.address.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_contract_of_a_protocol() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        contract(&mut conn, s.curve, "0xaa", "0xc0de", &[("0x01", "0x0a"), ("0x02", "0x0b")]).await;
+        let id = ContractId::new(Chain::Ethereum, b("0xaa"));
+
+        let result = s
+            .gateway
+            .get_contract(&id, "vm:curve", None, true, &mut conn)
+            .await
+            .unwrap();
+
+        let expected = Account::new(
+            Chain::Ethereum,
+            b("0xaa"),
+            String::new(),
+            [(b("0x01"), b("0x0a")), (b("0x02"), b("0x0b"))].into(),
+            b("0x01"),
+            [balance("0xaa", b("0x02"), "0x05")].into(),
+            b("0xc0de"),
+            b("0xc1"),
+            Bytes::zero(32),
+            b("0xc2"),
+            None,
+        );
+        assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    async fn test_contract_without_slots() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        contract(&mut conn, s.curve, "0xaa", "0xc0de", &[("0x01", "0x0a")]).await;
+        let id = ContractId::new(Chain::Ethereum, b("0xaa"));
+
+        let result = s
+            .gateway
+            .get_contract(&id, "vm:curve", None, false, &mut conn)
+            .await
+            .unwrap();
+
+        assert!(result.slots.is_empty());
+        assert_eq!(result.code, b("0xc0de"));
+    }
+
+    #[tokio::test]
+    async fn test_shared_contract_comes_from_the_protocol_copy() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        contract(&mut conn, s.curve, "0xaa", "0xc0de01", &[("0x01", "0x0a")]).await;
+        contract(&mut conn, s.uniswap_v4, "0xaa", "0xc0de02", &[("0x01", "0x0b")]).await;
+
+        for (system, code, value) in
+            [("vm:curve", "0xc0de01", "0x0a"), ("uniswap_v4", "0xc0de02", "0x0b")]
+        {
+            let (result, _) = contracts(&s.gateway, &mut conn, system, None, None, None)
+                .await
+                .unwrap();
+
+            assert_eq!(result.len(), 1, "{system}");
+            assert_eq!(result[0].code, b(code), "{system}");
+            assert_eq!(result[0].slots, [(b("0x01"), b(value))].into(), "{system}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_contracts_without_addresses_list_accounts_with_code() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        contract(&mut conn, s.curve, "0xaa", "0xc0de", &[]).await;
+        contract(&mut conn, s.curve, "0xbb", "0xc0de", &[]).await;
+        account_with_balances(&mut conn, s.curve, "0xcc", "0x01", "0x05").await;
+
+        let (result, total) = contracts(&s.gateway, &mut conn, "vm:curve", None, None, None)
+            .await
+            .unwrap();
+        let (_, paged_total) = contracts(
+            &s.gateway,
+            &mut conn,
+            "vm:curve",
+            None,
+            Some(&PaginationParams::new(0, 10)),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(addresses(&result), vec![b("0xaa"), b("0xbb")]);
+        assert_eq!(total, Some(2));
+        assert_eq!(paged_total, Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_contracts_with_addresses_skip_accounts_without_code() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        contract(&mut conn, s.curve, "0xaa", "0xc0de", &[]).await;
+        account_with_balances(&mut conn, s.curve, "0xcc", "0x01", "0x05").await;
+
+        let (result, total) =
+            contracts(&s.gateway, &mut conn, "vm:curve", Some(&[b("0xaa"), b("0xcc")]), None, None)
+                .await
+                .unwrap();
+
+        assert_eq!(addresses(&result), vec![b("0xaa")]);
+        assert_eq!(total, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_contract_without_native_balance_fails() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id = db_fixtures::insert_instance_account(&mut conn, s.curve, b("0xaa")).await;
+        db_fixtures::insert_instance_account_balance(&mut conn, s.curve, id, b("0x02"), b("0x05"))
+            .await;
+        db_fixtures::insert_instance_code(
+            &mut conn,
+            s.curve,
+            id,
+            b("0xc0de"),
+            b("0xc1"),
+            b("0xc2"),
+        )
+        .await;
+
+        let result = contracts(&s.gateway, &mut conn, "vm:curve", None, None, None).await;
+
+        assert!(
+            matches!(&result, Err(StorageError::NotFound(entity, _)) if entity == "native_balance"),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_contract_without_balances_fails() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id = db_fixtures::insert_instance_account(&mut conn, s.curve, b("0xaa")).await;
+        db_fixtures::insert_instance_code(
+            &mut conn,
+            s.curve,
+            id,
+            b("0xc0de"),
+            b("0xc1"),
+            b("0xc2"),
+        )
+        .await;
+
+        let result = contracts(&s.gateway, &mut conn, "vm:curve", None, None, None).await;
+
+        assert!(
+            matches!(&result, Err(StorageError::NotFound(entity, _)) if entity == "account_balances"),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_contracts_paging() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        // Ids rise in insertion order, so the addresses are inserted out of address order.
+        contract(&mut conn, s.curve, "0xcc", "0xc0de", &[]).await;
+        contract(&mut conn, s.curve, "0xaa", "0xc0de", &[]).await;
+        contract(&mut conn, s.curve, "0xbb", "0xc0de", &[]).await;
+
+        let (first, first_total) = contracts(
+            &s.gateway,
+            &mut conn,
+            "vm:curve",
+            None,
+            Some(&PaginationParams::new(0, 2)),
+            None,
+        )
+        .await
+        .unwrap();
+        let (second, second_total) = contracts(
+            &s.gateway,
+            &mut conn,
+            "vm:curve",
+            None,
+            Some(&PaginationParams::new(1, 2)),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(addresses(&first), vec![b("0xcc"), b("0xaa")]);
+        assert_eq!(addresses(&second), vec![b("0xbb")]);
+        assert_eq!(first_total, Some(3));
+        assert_eq!(second_total, Some(3));
+    }
+
+    #[tokio::test]
+    async fn test_contracts_skip_deleted_and_inactive() {
+        use diesel::prelude::*;
+        use diesel_async::RunQueryDsl;
+
+        use crate::postgres::instance::schema::tycho::account;
+
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let next = db_fixtures::insert_instance(&mut conn, s.curve_system_id, "0.0.2").await;
+        let deleted = contract(&mut conn, s.curve, "0xaa", "0xc0de", &[]).await;
+        diesel::update(account::table.find((s.curve, deleted)))
+            .set(account::deleted_at.eq(Some(day(1))))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        contract(&mut conn, s.curve, "0xbb", "0xc0de", &[]).await;
+        contract(&mut conn, next, "0xaa", "0xc0de", &[]).await;
+        contract(&mut conn, next, "0xcc", "0xc0de", &[]).await;
+
+        let (all, _) = contracts(&s.gateway, &mut conn, "vm:curve", None, None, None)
+            .await
+            .unwrap();
+        let (by_address, _) =
+            contracts(&s.gateway, &mut conn, "vm:curve", Some(&[b("0xaa")]), None, None)
+                .await
+                .unwrap();
+
+        assert_eq!(addresses(&all), vec![b("0xbb")]);
+        assert!(by_address.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_contract_of_unknown_protocol_fails() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        contract(&mut conn, s.curve, "0xaa", "0xc0de", &[]).await;
+        let id = ContractId::new(Chain::Ethereum, b("0xaa"));
+
+        for system in ["not-a-protocol", ""] {
+            let many = contracts(&s.gateway, &mut conn, system, None, None, None).await;
+            let one = s
+                .gateway
+                .get_contract(&id, system, None, true, &mut conn)
+                .await;
+
+            assert!(matches!(many, Err(StorageError::NotFound(..))), "{system:?}: {many:?}");
+            assert!(matches!(one, Err(StorageError::NotFound(..))), "{system:?}: {one:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_contracts_of_protocol_without_active_instance_are_empty() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        contract(&mut conn, s.curve, "0xaa", "0xc0de", &[]).await;
+        db_fixtures::set_active_instance(&mut conn, s.curve_system_id, None).await;
+        let id = ContractId::new(Chain::Ethereum, b("0xaa"));
+
+        let (result, total) = contracts(&s.gateway, &mut conn, "vm:curve", None, None, None)
+            .await
+            .unwrap();
+        let one = s
+            .gateway
+            .get_contract(&id, "vm:curve", None, true, &mut conn)
+            .await;
+
+        assert!(result.is_empty());
+        assert_eq!(total, Some(0));
+        assert!(
+            matches!(&one, Err(StorageError::NotFound(entity, _)) if entity == "Account"),
+            "{one:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_contracts_before_head_are_unsupported() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        contract(&mut conn, s.curve, "0xaa", "0xc0de", &[]).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, day(2)).await;
+
+        let result =
+            contracts(&s.gateway, &mut conn, "vm:curve", None, None, Some(&at(day(1)))).await;
+
+        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_contracts_at_latest_read_up_to_the_head() {
+        use diesel::prelude::*;
+        use diesel_async::RunQueryDsl;
+
+        use crate::postgres::instance::schema::tycho::account;
+
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        // A head ahead of this machine's clock, as with a block timestamp past the local time.
+        let head = chrono::Utc::now().naive_utc() + chrono::Duration::hours(1);
+        let created = contract(&mut conn, s.curve, "0xaa", "0xc0de", &[]).await;
+        diesel::update(account::table.find((s.curve, created)))
+            .set(account::created_at.eq(Some(head)))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        db_fixtures::set_instance_head(&mut conn, s.curve, head).await;
+        let latest = Version(
+            BlockOrTimestamp::Block(BlockIdentifier::Latest(Chain::Ethereum)),
+            VersionKind::Last,
+        );
+
+        let (result, _) = contracts(&s.gateway, &mut conn, "vm:curve", None, None, Some(&latest))
+            .await
+            .unwrap();
+
+        assert_eq!(addresses(&result), vec![b("0xaa")]);
     }
 }
