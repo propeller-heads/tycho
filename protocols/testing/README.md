@@ -528,3 +528,10 @@ The FeeCalculator fixture is a fresh deployment with zero fees, so it is a no-op
 
 `UniswapV4Robinhood.runtime.json` builds like the others, from `(robinhood, uniswap_v4)` on a
 Robinhood fork, so `forge test` catches drift if the Robinhood executor changes.
+`UniswapV4Elysium.runtime.json` builds the same way from `(elysium, uniswap_v4)` on an Elysium fork
+(`ELYSIUM_RPC_URL`). Execution validation plants it for both `(Elysium, uniswap_v4)` and
+`(Elysium, uniswap_v4_hooks)` (`CHAIN_SPECIFIC_EXECUTORS` in `src/execution.rs`). Like every
+fixture it is built with the Foundry profile's compiler settings, so its bytecode differs from a
+deployment built with other settings (the Elysium executor at
+`0x74145BbB8F3E51f7138eD3F7C96dFb3d56F784b5` was built by Hardhat with 1000 optimizer runs) while
+the source is the same.
