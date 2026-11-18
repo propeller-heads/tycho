@@ -513,7 +513,8 @@ pub trait ComponentPauseGateway {
     /// Records admin pauses of components.
     ///
     /// A component that is already paused keeps its existing pause and audit details. A
-    /// component can be paused before it is indexed.
+    /// component can be paused before it is indexed. The call records every pause or none, so a
+    /// failed call can be retried as a whole.
     ///
     /// # Parameters
     /// - `chain` The chain of the components.

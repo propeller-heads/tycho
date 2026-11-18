@@ -1,5 +1,7 @@
 use diesel::prelude::*;
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::{
+    scoped_futures::ScopedFutureExt, AsyncConnection, AsyncPgConnection, RunQueryDsl,
+};
 use tycho_common::{
     models::{
         protocol::{ComponentPause, PauseRecord, UnpauseRecord},
@@ -8,7 +10,7 @@ use tycho_common::{
     storage::StorageError,
 };
 
-use super::{orm, schema, storage_error_from_diesel, PostgresGateway};
+use super::{orm, schema, storage_error_from_diesel, PostgresError, PostgresGateway};
 
 impl PostgresGateway {
     /// Resolves a protocol system id from the cache, or from the table if another process added
@@ -31,7 +33,8 @@ impl PostgresGateway {
             .map_err(|err| storage_error_from_diesel(err, "ProtocolSystem", system, None).into())
     }
 
-    /// Inserts one open pause row per record, skipping components that already have one.
+    /// Inserts one open pause row per record, skipping components that already have one. Inserts
+    /// every row or none.
     ///
     /// Returns the component ids of the inserted rows.
     pub async fn pause_components(
@@ -62,20 +65,31 @@ impl PostgresGateway {
             })
             .collect();
 
-        let mut paused = Vec::with_capacity(rows.len());
-        for chunk in rows.chunks(orm::NewComponentPause::MAX_BATCH_SIZE) {
-            let mut chunk_paused: Vec<ComponentId> = diesel::insert_into(cp::component_pause)
-                .values(chunk)
-                .on_conflict((cp::chain_id, cp::component_id))
-                .filter_target(cp::unpaused_at.is_null())
-                .do_nothing()
-                .returning(cp::component_id)
-                .get_results(conn)
-                .await
-                .map_err(|err| storage_error_from_diesel(err, "ComponentPause", system, None))?;
-            paused.append(&mut chunk_paused);
-        }
-        Ok(paused)
+        // One transaction across all batches, so a failed batch leaves no component paused.
+        conn.transaction(|conn| {
+            async move {
+                let mut paused = Vec::with_capacity(rows.len());
+                for chunk in rows.chunks(orm::NewComponentPause::MAX_BATCH_SIZE) {
+                    let mut chunk_paused: Vec<ComponentId> =
+                        diesel::insert_into(cp::component_pause)
+                            .values(chunk)
+                            .on_conflict((cp::chain_id, cp::component_id))
+                            .filter_target(cp::unpaused_at.is_null())
+                            .do_nothing()
+                            .returning(cp::component_id)
+                            .get_results(conn)
+                            .await
+                            .map_err(|err| {
+                                storage_error_from_diesel(err, "ComponentPause", system, None)
+                            })?;
+                    paused.append(&mut chunk_paused);
+                }
+                Ok::<_, PostgresError>(paused)
+            }
+            .scope_boxed()
+        })
+        .await
+        .map_err(StorageError::from)
     }
 
     /// Closes the open pause rows of the given components.
