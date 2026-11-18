@@ -1,3 +1,20 @@
+## [0.528.0](https://github.com/propeller-heads/tycho/compare/0.527.5...0.528.0) (2026-11-18)
+
+
+### Features
+
+* **rfq:** add Euclid Protocol RFQ provider ([1e0b24a](https://github.com/propeller-heads/tycho/commit/1e0b24a0e003be6cc8b0219276352acf1e4fe909))
+
+
+### Bug Fixes
+
+* **euclid:** address round-2 review ([6e78a2b](https://github.com/propeller-heads/tycho/commit/6e78a2befa86fc6f0f032728639a9ca185a3e5fc))
+* **euclid:** follow the router on unexpiring and zero-pay orders ([879ef3d](https://github.com/propeller-heads/tycho/commit/879ef3d61282b26d24d1b1ac98bc2cebab364d5f))
+* **execution:** annotate EuclidExecutor for forge lint ([b550c91](https://github.com/propeller-heads/tycho/commit/b550c91684712ad511c9d1346ad70ef91d2b9d00))
+* **execution:** count Euclid's output transfer in the gas estimate ([34e29b0](https://github.com/propeller-heads/tycho/commit/34e29b0ac3628d43b1931131055d3912b84749dd))
+* **execution:** reject Euclid calldata the executor reverts on ([84bfeaf](https://github.com/propeller-heads/tycho/commit/84bfeafe968f12b3a33fbabca398086104b653f8))
+* **simulation:** name the clock failure in Euclid's expiry check ([eeba70b](https://github.com/propeller-heads/tycho/commit/eeba70b464dacd35ea1eaafcd153858c34e941a9))
+
 ## [0.527.5](https://github.com/propeller-heads/tycho/compare/0.527.4...0.527.5) (2026-11-18)
 
 
