@@ -107,6 +107,7 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         _executor("UniswapV2", "ethereum", "uniswap_v2");
         _executor("UniswapV3", "ethereum", "uniswap_v3");
         _executor("UniswapV4", "ethereum", "uniswap_v4");
+        _executor("UniswapV4Elysium", "elysium", "uniswap_v4");
         // Stands in for whichever hook executor uniswap_v4_hooks is tested against.
         _executor("UniswapV4Angstrom", "ethereum", "uniswap_v4");
         _executor("UniswapV4Robinhood", "robinhood", "uniswap_v4");
@@ -137,6 +138,11 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         if (chain.eq("base")) return 46_500_000;
         if (chain.eq("bsc")) return 46_793_446;
         if (chain.eq("robinhood")) return 80_000_000;
+        // No Elysium constructor reads chain state yet. The block is past the PoolManager, the
+        // wrapped native token and the Metric fallback router that the elysium section of
+        // config/executor_deployments.json names. That section's Angstrom argument has no code
+        // on Elysium.
+        if (chain.eq("elysium")) return 6_024_400;
         revert(
             string.concat(chain, " has no fork block; add one to _forkBlock")
         );

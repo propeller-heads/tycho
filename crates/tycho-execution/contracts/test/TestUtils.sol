@@ -25,5 +25,18 @@ contract TestUtils is Test {
 
         revert("Test calldata not found");
     }
+
+    /// The constructor arguments config/executor_deployments.json deploys the executor of
+    /// `protocol` with on `chain`.
+    function executorDeploymentArgs(string memory chain, string memory protocol)
+        internal
+        view
+        returns (address[] memory)
+    {
+        return vm.parseJsonAddressArray(
+            vm.readFile("../config/executor_deployments.json"),
+            string.concat(".", chain, ".", protocol, ".args")
+        );
+    }
 }
 

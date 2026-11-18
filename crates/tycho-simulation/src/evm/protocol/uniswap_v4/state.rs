@@ -112,6 +112,26 @@ const MAX_SWAP_GAS: u64 = 16_700_000;
 // 1e30 makes the rounding smaller than an f64 can hold and still leaves room under U256::MAX for
 // the hook's own intermediate products.
 const HOOK_FEE_PROBE_EXP: u64 = 30;
+/// The exact input `amount_in_to_price` offers its walk: 2^200. Net of the swap fee, either
+/// token's amount over the whole tick range is at most a uint128 liquidity times 2^96 divided by
+/// the smallest sqrt price (about 2^32), below 2^192. The gross input is that net times
+/// `1e6 / (1e6 - fee)`, so the budget covers any walk at a swap fee below 996_094 pips (where
+/// that factor reaches 2^8); above it a walk can run out of budget and fails. It is small
+/// enough that v4's `amountRemaining * (1e6 - fee)` stays below 2^256.
+const PRICE_WALK_BUDGET: I256 = I256::from_raw(U256::from_limbs([0, 0, 0, 1 << 8]));
+
+/// Where a walk of the pool's price to a target ends: the input it took, the output that input
+/// returns and the active liquidity at the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PriceWalk {
+    /// The exact input, LP fee included, that brings the price to the target.
+    pub(crate) amount_in: U256,
+    /// The active liquidity a swap from the target continues with, after crossing an initialized
+    /// tick at the target.
+    pub(crate) liquidity: u128,
+    /// The output of the walk's input, before any hook takes a fee from it.
+    pub(crate) amount_out: U256,
+}
 
 /// Only hookless pools serialize. Deserializing sets `hook: None` and checks the tick list.
 #[derive(Clone, Deserialize)]
@@ -604,6 +624,101 @@ impl UniswapV4State {
         }
 
         (last_successful_amount_in, last_successful_amount_out)
+    }
+
+    /// The total swap fee in pips an exact-input swap in the direction given by `zero_for_one`
+    /// pays the pool when its hook returns `lp_fee_override` (`None`: the pool's own LP fee).
+    ///
+    /// Fails if the protocol and LP fee combine to more than a `u32`.
+    pub(crate) fn swap_fee_pips(
+        &self,
+        zero_for_one: bool,
+        lp_fee_override: Option<u32>,
+    ) -> Result<u32, SimulationError> {
+        self.fees
+            .calculate_swap_fees_pips(zero_for_one, lp_fee_override)
+    }
+
+    /// The exact input that moves the pool's price from where it is to `sqrt_price_target` in
+    /// the direction given by `zero_for_one`, at the LP fee `lp_fee_override` (`None`: the pool's
+    /// own), the output of that input before any hook fee, and the active liquidity once the
+    /// price is there.
+    ///
+    /// The walk takes v4's own swap steps (each ends at the next initialized tick or at the edge
+    /// of the current tick-bitmap word) and sums each step's input rounded up with its fee
+    /// rounded up, so the result is the input that brings the price exactly to the target; a
+    /// swap at the target can absorb a little more without moving the price. A target the price
+    /// is already at, or already past, needs no input and returns no output. The liquidity is the
+    /// one a swap from the target continues with: where an initialized tick sits at the target,
+    /// after crossing it, as v4's first step from that price does.
+    ///
+    /// Fails if a step's arithmetic fails, the walk leaves the tick range, or the input budget
+    /// ([`PRICE_WALK_BUDGET`]) runs out before the target.
+    pub(crate) fn amount_in_to_price(
+        &self,
+        zero_for_one: bool,
+        sqrt_price_target: U256,
+        lp_fee_override: Option<u32>,
+    ) -> Result<PriceWalk, SimulationError> {
+        let target_ahead = if zero_for_one {
+            sqrt_price_target < self.sqrt_price
+        } else {
+            sqrt_price_target > self.sqrt_price
+        };
+        if !target_ahead {
+            let liquidity = if self.sqrt_price == sqrt_price_target {
+                self.liquidity_leaving_price(zero_for_one)?
+            } else {
+                self.liquidity
+            };
+            return Ok(PriceWalk { amount_in: U256::ZERO, liquidity, amount_out: U256::ZERO });
+        }
+        let result =
+            self.swap(zero_for_one, -PRICE_WALK_BUDGET, Some(sqrt_price_target), lp_fee_override)?;
+        if result.sqrt_price != sqrt_price_target {
+            return Err(SimulationError::FatalError(format!(
+                "walking the price to {sqrt_price_target} used up the input budget at {}",
+                result.sqrt_price
+            )));
+        }
+        let consumed = PRICE_WALK_BUDGET + result.amount_remaining;
+        Ok(PriceWalk {
+            amount_in: consumed.into_raw(),
+            liquidity: result.liquidity,
+            // An exact-input swap reports its output as a negative amount calculated.
+            amount_out: result.amount_calculated.unsigned_abs(),
+        })
+    }
+
+    /// The active liquidity a swap in the direction given by `zero_for_one` continues with once
+    /// it leaves the current price: v4's first step crosses an initialized tick that sits exactly
+    /// at the current price (`zero_for_one` from that tick, or `!zero_for_one` from just below it
+    /// after a downward cross) before the price moves. With no initialized tick there is nothing
+    /// to cross, and the active liquidity stays.
+    fn liquidity_leaving_price(&self, zero_for_one: bool) -> Result<u128, SimulationError> {
+        // The tick list's search indexes its first and last tick, so it cannot run on an empty
+        // list.
+        if self.has_no_initialized_ticks() {
+            return Ok(self.liquidity);
+        }
+        match self
+            .ticks
+            .next_initialized_tick_within_one_word(self.tick.value(), zero_for_one)
+        {
+            Ok((_, Some(info))) if info.sqrt_price == self.sqrt_price => {
+                info.liquidity_after_crossing(self.liquidity, zero_for_one)
+            }
+            Ok(_) => Ok(self.liquidity),
+            Err(tick_err) => match tick_err.kind {
+                TickListErrorKind::TicksExeeded => Ok(self.liquidity),
+                TickListErrorKind::BelowSmallest | TickListErrorKind::AtOrAboveLargest => {
+                    Err(SimulationError::FatalError(format!(
+                        "no tick to search from {} in the tick list",
+                        self.tick.value()
+                    )))
+                }
+            },
+        }
     }
 
     /// Helper method to check if there are no initialized ticks in either direction
@@ -1478,6 +1593,112 @@ mod tests {
         };
         assert!(message.contains(&address_sized.to_string()), "{message}");
         assert_eq!(pool.liquidity, 1000);
+    }
+
+    /// A walk to the price the pool already sits at needs no input and reports the liquidity a
+    /// swap from there continues with. Ticks -60 (+5000), 60 (+2000) and 120 (-7000) give 5000
+    /// below tick 60 and 7000 above it. At the price of tick 60, a downward swap from tick 60
+    /// crosses 60 first, and so does an upward swap from tick 59 (where a downward cross onto
+    /// that price leaves the pool); the other two start with the liquidity they have. With no
+    /// initialized tick nothing is crossed.
+    #[rstest]
+    #[case::down_from_the_tick(60, 7_000, true, 5_000)]
+    #[case::up_from_the_tick(60, 7_000, false, 7_000)]
+    #[case::up_from_just_below(59, 5_000, false, 7_000)]
+    #[case::down_from_just_below(59, 5_000, true, 5_000)]
+    fn test_amount_in_to_the_current_price_reports_the_liquidity_leaving_it(
+        #[case] tick: i32,
+        #[case] liquidity: u128,
+        #[case] zero_for_one: bool,
+        #[case] expected_liquidity: u128,
+    ) {
+        let sqrt_price = get_sqrt_ratio_at_tick(60).unwrap();
+        let ticks = vec![
+            TickInfo::new(-60, 5_000).unwrap(),
+            TickInfo::new(60, 2_000).unwrap(),
+            TickInfo::new(120, -7_000).unwrap(),
+        ];
+        let pool = UniswapV4State::new(
+            liquidity,
+            sqrt_price,
+            UniswapV4Fees::new(0, 0, 0),
+            tick,
+            60,
+            ticks,
+        )
+        .unwrap();
+
+        let walk = pool
+            .amount_in_to_price(zero_for_one, sqrt_price, None)
+            .unwrap();
+
+        assert_eq!((walk.amount_in, walk.liquidity), (U256::ZERO, expected_liquidity));
+    }
+
+    #[rstest]
+    #[case::down(true)]
+    #[case::up(false)]
+    fn test_amount_in_to_the_current_price_without_ticks_keeps_the_liquidity(
+        #[case] zero_for_one: bool,
+    ) {
+        let sqrt_price = get_sqrt_ratio_at_tick(60).unwrap();
+        let pool =
+            UniswapV4State::new(5_000, sqrt_price, UniswapV4Fees::new(0, 0, 0), 60, 60, vec![])
+                .unwrap();
+
+        let walk = pool
+            .amount_in_to_price(zero_for_one, sqrt_price, None)
+            .unwrap();
+
+        assert_eq!((walk.amount_in, walk.liquidity), (U256::ZERO, 5_000));
+    }
+
+    /// A full-range position of 2^126 liquidity walked up from tick 0 to tick 880000 needs about
+    /// 2^126 * 1.0001^440000 ≈ 1.09e57 of token1 net of fees. At no LP fee that fits the 2^200
+    /// (≈ 1.61e60) budget; at 999900 pips the gross input is 10^4 times the net, about 1.09e61,
+    /// so the walk stops short and says so. The no-fee walk's input and output are v4's
+    /// `getAmount1Delta` rounded up and `getAmount0Delta` rounded down, summed over its 58 steps
+    /// to each tick-bitmap word edge at spacing 60, worked out with an independent Python port
+    /// of `TickMath.getSqrtPriceAtTick`.
+    #[rstest]
+    #[case::no_fee_within_the_budget(None, true)]
+    #[case::fee_above_the_budget_bound(Some(999_900), false)]
+    fn test_amount_in_to_price_against_the_input_budget(
+        #[case] lp_fee_override: Option<u32>,
+        #[case] reaches_target: bool,
+    ) {
+        let liquidity: u128 = 1 << 126;
+        let net = i128::try_from(liquidity).unwrap();
+        let ticks =
+            vec![TickInfo::new(-887_220, net).unwrap(), TickInfo::new(887_220, -net).unwrap()];
+        let pool = UniswapV4State::new(
+            liquidity,
+            get_sqrt_ratio_at_tick(0).unwrap(),
+            UniswapV4Fees::new(0, 0, 0),
+            0,
+            60,
+            ticks,
+        )
+        .unwrap();
+        let target = get_sqrt_ratio_at_tick(880_000).unwrap();
+
+        let walk = pool.amount_in_to_price(false, target, lp_fee_override);
+
+        match (walk, reaches_target) {
+            (Ok(walk), true) => assert_eq!(
+                (walk.amount_in, walk.amount_out, walk.liquidity),
+                (
+                    U256::from_str("1090890785126545743432254324356798306370102991638442803200")
+                        .unwrap(),
+                    U256::from_str("85070591730234615859209618757650758722").unwrap(),
+                    liquidity
+                )
+            ),
+            (Err(SimulationError::FatalError(message)), false) => {
+                assert!(message.contains("used up the input budget"), "{message}")
+            }
+            (walk, _) => panic!("expected reaches_target = {reaches_target}, got {walk:?}"),
+        }
     }
 
     #[test]

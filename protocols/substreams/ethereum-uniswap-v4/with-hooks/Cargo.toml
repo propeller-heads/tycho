@@ -1,6 +1,6 @@
 [package]
 name = "ethereum-uniswap-v4-with-hooks"
-version = "0.8.1"
+version = "0.9.0"
 edition = "2021"
 
 [lib]
@@ -16,6 +16,11 @@ anyhow = "1.0.75"
 hex-literal = "0.4.1"
 substreams-helper = { git = "https://github.com/propeller-heads/tycho-protocol-sdk.git", tag = "0.5.0" }
 tycho-substreams = "0.6.0"
+# A later release, for `TransactionChangesBuilder::change_component_pause_state`, which 0.6.0 does
+# not have; the Montra terminal module pauses pools with it. Both releases generate their messages
+# from the same tycho.evm.v1 protos with prost 0.11, so a message converts between them through its
+# wire encoding (`map_montra_enriched_block_changes::convert`).
+tycho-substreams-v0-8 = { package = "tycho-substreams", version = "0.8.2" }
 hex = "0.4.3"
 tiny-keccak = { version = "2.0", features = ["keccak"] }
 

@@ -4,8 +4,6 @@
 //!
 //! Robinhood runs no dynamic contract indexing, so the block changes carry no storage payload.
 
-use std::collections::HashSet;
-
 use anyhow::{anyhow, Result};
 use ethereum_uniswap_v4_shared::{
     pb::uniswap::v4::{Events, LiquidityChanges, TickDeltas},
@@ -17,13 +15,13 @@ use substreams_ethereum::pb::eth::v2::{self as eth};
 use tycho_substreams::prelude::*;
 
 use crate::{
+    address_list::parse_address_list,
     pons::{pons_static_attributes, PONS_HOOK_IDENTIFIER},
     storage::{pad32, tx_storage_writes, Word},
 };
 
 /// Query-string parameters of [`map_pons_enriched_block_changes`]. `pons_hooks` is the only
-/// parameter: a non-empty, comma-separated list of 20-byte hexadecimal addresses, with the `0x`
-/// prefix optional and the digits read case-insensitively, e.g.
+/// parameter: an address list in the form the crate's `address_list` module reads, e.g.
 /// `pons_hooks=0xe5e702641ea86f4ae6cc3cdaed2b886f976be044,0x...`. A single hook is a one-element
 /// list.
 #[derive(Debug, Deserialize)]
@@ -39,8 +37,8 @@ impl Params {
             .map_err(|e| anyhow!("failed to parse query params `{input}`: {e}"))
     }
 
-    /// Returns the configured Pons hooks as raw addresses. Each comma-separated entry must be
-    /// exactly 20 hexadecimal bytes, and duplicate addresses are rejected case-insensitively.
+    /// Returns the configured Pons hooks as raw addresses, in the order `pons_hooks` lists them.
+    /// Fails when `pons_hooks` is unset, and when it fails [`parse_address_list`].
     pub fn pons_hook_addresses(&self) -> Result<Vec<[u8; 20]>> {
         let Some(value) = &self.pons_hooks else {
             return Err(anyhow!(
@@ -48,37 +46,7 @@ impl Params {
                  comma-separated addresses"
             ))
         };
-
-        if value.is_empty() {
-            return Err(anyhow!("`pons_hooks` must contain at least one address"))
-        }
-
-        let mut addresses = Vec::new();
-        let mut seen = HashSet::new();
-        for (index, value) in value.split(',').enumerate() {
-            if value.is_empty() {
-                return Err(anyhow!("`pons_hooks` entry {} is empty", index + 1))
-            }
-
-            let digits = value
-                .strip_prefix("0x")
-                .unwrap_or(value);
-            let bytes = hex::decode(digits).map_err(|e| {
-                anyhow!("`pons_hooks` entry {} `{value}` is not hex: {e}", index + 1)
-            })?;
-            let address = <[u8; 20]>::try_from(bytes.as_slice()).map_err(|_| {
-                anyhow!("`pons_hooks` entry {} `{value}` is not exactly 20 bytes", index + 1)
-            })?;
-            if !seen.insert(address) {
-                return Err(anyhow!(
-                    "`pons_hooks` entry {} `{value}` duplicates an earlier address",
-                    index + 1
-                ))
-            }
-            addresses.push(address);
-        }
-
-        Ok(addresses)
+        parse_address_list("pons_hooks", value)
     }
 }
 

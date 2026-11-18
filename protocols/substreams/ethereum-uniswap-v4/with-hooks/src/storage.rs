@@ -57,20 +57,22 @@ pub fn word_at_offset(slot: &Word, offset: u64) -> Word {
     slot
 }
 
+/// Whether [`read_uint`] reads the window `width` bytes wide starting `low_byte_offset` bytes from
+/// the low end of a word: `width` is 1 to 8, so the value fits a `u64`, and the window ends within
+/// the word.
+pub const fn is_uint_window(low_byte_offset: usize, width: usize) -> bool {
+    width >= 1 && width <= 8 && low_byte_offset <= 32 - width
+}
+
 /// Reads an unsigned big-endian integer packed into `word`, `width` bytes wide and starting
 /// `low_byte_offset` bytes from the low end of the word — the order Solidity packs struct members
-/// into a slot. Returns `None` when `width` is 0, when `width` exceeds 8, or when
-/// `low_byte_offset + width` reaches past the word.
+/// into a slot. Returns `None` unless [`is_uint_window`] holds for the window.
 pub fn read_uint(word: &Word, low_byte_offset: usize, width: usize) -> Option<u64> {
-    if width == 0 || width > 8 {
-        return None;
-    }
-    let high_byte_offset = low_byte_offset.checked_add(width)?;
-    if high_byte_offset > 32 {
+    if !is_uint_window(low_byte_offset, width) {
         return None;
     }
 
-    let start = 32 - high_byte_offset;
+    let start = 32 - low_byte_offset - width;
     let mut value = 0u64;
     for byte in &word[start..start + width] {
         value = (value << 8) | u64::from(*byte);
