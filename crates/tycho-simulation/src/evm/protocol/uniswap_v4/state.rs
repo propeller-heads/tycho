@@ -652,9 +652,9 @@ impl UniswapV4State {
     }
 }
 
-/// The error `get_amount_out` reports for a hook call `stage` (`BeforeSwap`, `AfterSwap`) that
-/// failed with `error`: a hook's `InvalidInput` refuses this one swap and passes through, and any
-/// other error means the hook cannot be simulated, which is fatal.
+/// The error `get_amount_out` reports for a hook call `stage` (`BeforeSwap`, `CheckSwapOutcome`,
+/// `AfterSwap`) that failed with `error`: a hook's `InvalidInput` refuses this one swap and passes
+/// through, and any other error means the hook cannot be simulated, which is fatal.
 ///
 /// The pass-through holds for every hook. A native hook returns `InvalidInput` for an input its
 /// contract reverts on. The generic VM hook returns it only from `coerce_error`
@@ -910,7 +910,8 @@ impl ProtocolSim for UniswapV4State {
                     sqrt_price_x96: result.sqrt_price,
                     amount_unfilled: result.amount_remaining.unsigned_abs(),
                 },
-            )?;
+            )
+            .map_err(|e| hook_call_error("CheckSwapOutcome", e))?;
         }
 
         // Create BalanceDelta from swap result using the proper constructor
@@ -3154,6 +3155,28 @@ mod tests {
             Ok(_) if !refused => {}
             other => panic!("expected refused = {refused}, got {other:?}"),
         }
+    }
+
+    /// A `check_swap_outcome` error other than `InvalidInput` means the hook cannot be simulated,
+    /// so `get_amount_out` reports it as `FatalError`, as it does for `before_swap` and
+    /// `after_swap`.
+    #[test]
+    fn test_get_amount_out_reports_a_failing_outcome_check_as_fatal() {
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            fail_outcome_check: true,
+            ..Default::default()
+        }));
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+
+        let result =
+            pool.get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_in, &token_out);
+
+        assert!(
+            matches!(&result, Err(SimulationError::FatalError(msg))
+                if msg.starts_with("CheckSwapOutcome hook simulation failed")),
+            "{result:?}"
+        );
     }
 
     fn pool_target_price_params() -> QueryPoolSwapParams {
