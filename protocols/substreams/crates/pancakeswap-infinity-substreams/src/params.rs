@@ -21,14 +21,14 @@ pub struct Deployment {
 }
 
 impl Deployment {
-    /// Parses `pool_manager=<hex>&vault=<hex>`. Errors name `module`, the handler the string was
-    /// passed to, on a missing or unknown key or an address that is not 20 bytes of hex.
+    /// Parses `pool_manager=<hex>&vault=<hex>`. Every error names `module`, the handler the
+    /// string was passed to: a missing or unknown key, or an address that is not 20 bytes of hex.
     pub fn parse(module: &str, params: &str) -> Result<Self, anyhow::Error> {
-        let raw: RawDeployment = serde_qs::from_str(params)
-            .map_err(|err| anyhow!("Invalid {module} params {params:?}: {err}"))?;
+        let invalid = |err: anyhow::Error| anyhow!("Invalid {module} params {params:?}: {err}");
+        let raw: RawDeployment = serde_qs::from_str(params).map_err(|err| invalid(anyhow!(err)))?;
         Ok(Self {
-            pool_manager: decode_address("pool_manager", &raw.pool_manager)?,
-            vault: decode_address("vault", &raw.vault)?,
+            pool_manager: decode_address("pool_manager", &raw.pool_manager).map_err(invalid)?,
+            vault: decode_address("vault", &raw.vault).map_err(invalid)?,
         })
     }
 }
@@ -57,20 +57,38 @@ mod tests {
         assert_eq!(
             deployment,
             Deployment {
-                pool_manager: hex::decode(POOL_MANAGER).unwrap().try_into().unwrap(),
-                vault: hex::decode(VAULT).unwrap().try_into().unwrap(),
+                pool_manager: hex::decode(POOL_MANAGER)
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                vault: hex::decode(VAULT)
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
             }
         );
     }
 
     #[rstest::rstest]
-    #[case::bare_address(POOL_MANAGER)]
-    #[case::missing_vault(&format!("pool_manager={POOL_MANAGER}"))]
-    #[case::unknown_key(&format!("pool_manager={POOL_MANAGER}&vault={VAULT}&hooks=00"))]
-    #[case::short_address(&format!("pool_manager=1234&vault={VAULT}"))]
-    #[case::prefixed_address(&format!("pool_manager=0x{POOL_MANAGER}&vault={VAULT}"))]
-    fn rejects_malformed_params(#[case] params: &str) {
-        let err = Deployment::parse("map_pools_created", params).unwrap_err();
-        assert!(err.to_string().starts_with("Invalid "), "{err}");
+    #[case::bare_address(POOL_MANAGER, "unknown field `a0Ff")]
+    #[case::missing_vault(&format!("pool_manager={POOL_MANAGER}"), "missing field `vault`")]
+    #[case::unknown_key(
+        &format!("pool_manager={POOL_MANAGER}&vault={VAULT}&hooks=00"),
+        "unknown field `hooks`"
+    )]
+    #[case::short_address(
+        &format!("pool_manager=1234&vault={VAULT}"),
+        "Invalid pool_manager \"1234\": expected 20 bytes, got 2"
+    )]
+    #[case::prefixed_address(
+        &format!("pool_manager={POOL_MANAGER}&vault=0x{VAULT}"),
+        "Invalid vault \"0x"
+    )]
+    fn rejects_malformed_params(#[case] params: &str, #[case] reason: &str) {
+        let err = Deployment::parse("map_pools_created", params)
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("Invalid map_pools_created params "), "{err}");
+        assert!(err.contains(reason), "{err}");
     }
 }
