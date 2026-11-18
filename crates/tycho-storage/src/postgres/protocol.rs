@@ -17,7 +17,7 @@ use tycho_common::{
             ComponentBalance, ProtocolComponent, ProtocolComponentState,
             ProtocolComponentStateDelta, QualityRange,
         },
-        token::Token,
+        token::{Token, TokenOwner},
         Address, Balance, Chain, ChangeType, ComponentId, FinancialType, ImplementationType,
         PaginationParams, ProtocolType, StoreVal, TxHash,
     },
@@ -439,7 +439,7 @@ impl PostgresGateway {
         tokens: &[Address],
         min_balance: Option<f64>,
         conn: &mut AsyncPgConnection,
-    ) -> Result<HashMap<Address, (ComponentId, Bytes)>, StorageError> {
+    ) -> Result<HashMap<Address, TokenOwner>, StorageError> {
         let chain_id = self.get_chain_id(chain)?;
         let token_ids: HashMap<i64, Address> = schema::token::table
             .inner_join(schema::account::table)
@@ -454,8 +454,10 @@ impl PostgresGateway {
         let rows = schema::protocol_component::table
             .inner_join(schema::protocol_component_holds_token::table)
             .inner_join(schema::component_balance::table)
+            .inner_join(schema::protocol_system::table)
             .select((
                 schema::component_balance::token_id,
+                schema::protocol_system::name,
                 schema::protocol_component::external_id,
                 schema::component_balance::new_balance,
             ))
@@ -463,11 +465,17 @@ impl PostgresGateway {
             .filter(schema::component_balance::balance_float.ge(min_balance.unwrap_or(0f64)))
             .filter(schema::component_balance::valid_to.eq(MAX_TS))
             .filter(schema::component_balance::token_id.eq_any(token_ids.keys()))
-            .get_results::<(i64, String, Bytes)>(conn)
+            .order_by(schema::protocol_component::id)
+            .get_results::<(i64, String, String, Bytes)>(conn)
             .await
             .map_err(PostgresError::from)?;
 
-        Ok(largest_balance_per_token(rows, &token_ids))
+        let owners = rows
+            .into_iter()
+            .map(|(token_id, protocol_system, component_id, balance)| {
+                (token_id, TokenOwner { protocol_system, component_id, balance })
+            });
+        Ok(largest_balance_per_token(owners, &token_ids))
     }
 
     pub async fn add_protocol_components(
@@ -2035,23 +2043,25 @@ impl PostgresGateway {
     }
 }
 
-/// Keeps, per token, the component with the largest balance. Rows are `(token_id, component_id,
-/// balance)`. On a tie the first row stays. Rows whose token id is not in `token_ids` are ignored.
+/// Keeps, per token, the owner with the largest balance. Rows are `(token_id, owner)`. On a tie
+/// the first row stays. Rows whose token id is not in `token_ids` are ignored.
 fn largest_balance_per_token(
-    rows: impl IntoIterator<Item = (i64, ComponentId, Bytes)>,
+    rows: impl IntoIterator<Item = (i64, TokenOwner)>,
     token_ids: &HashMap<i64, Address>,
-) -> HashMap<Address, (ComponentId, Bytes)> {
-    let mut largest: HashMap<Address, (ComponentId, Bytes)> = HashMap::new();
-    for (token_id, component_id, balance) in rows {
+) -> HashMap<Address, TokenOwner> {
+    let mut largest: HashMap<Address, TokenOwner> = HashMap::new();
+    for (token_id, owner) in rows {
         let Some(token) = token_ids.get(&token_id) else {
             continue;
         };
         let replace = match largest.get(token) {
-            Some((_, current)) => compare_balances(&balance, current) == Ordering::Greater,
+            Some(current) => {
+                compare_balances(&owner.balance, &current.balance) == Ordering::Greater
+            }
             None => true,
         };
         if replace {
-            largest.insert(token.clone(), (component_id, balance));
+            largest.insert(token.clone(), owner);
         }
     }
     largest
