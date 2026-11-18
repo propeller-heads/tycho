@@ -30,7 +30,8 @@ use uuid::Uuid;
 use crate::{
     extractor::{
         dynamic_contract_indexer::{
-            dci::DynamicContractIndexer, hooks::hook_dci::UniswapV4HookDCI,
+            dci::DynamicContractIndexer,
+            hooks::{hook_dci::UniswapV4HookDCI, router_code_tracer::RouterCodeTracer},
         },
         DeltaCommand, ExtractionError, Extractor, ExtractorExtension, ExtractorMsg,
     },
@@ -45,7 +46,9 @@ use crate::{
 )]
 pub(crate) enum DCIPlugin<AE: AccountExtractor + Send + Sync> {
     Standard(DynamicContractIndexer<AE, EVMEntrypointService, CachedGateway>),
-    UniswapV4Hooks(Box<UniswapV4HookDCI<AE, EVMEntrypointService, CachedGateway>>),
+    UniswapV4Hooks(
+        Box<UniswapV4HookDCI<AE, RouterCodeTracer<EVMEntrypointService>, CachedGateway>>,
+    ),
 }
 
 #[async_trait]
