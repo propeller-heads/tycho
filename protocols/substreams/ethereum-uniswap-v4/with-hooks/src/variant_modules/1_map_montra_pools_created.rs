@@ -22,7 +22,7 @@ pub fn map_montra_pools_created(
 /// is the only filter: no pool of another hook is created, Montra's own later hooks included, and
 /// every pool of a listed hook is, whatever its tokens, fee or tick spacing. Every Montra pool's
 /// `key_lp_fee` is 0x800000, the dynamic-fee flag; the `montra_*` attributes carry its fees.
-fn pools_created(params: &Params, block: &eth::Block) -> Vec<TransactionEntityChanges> {
+pub(crate) fn pools_created(params: &Params, block: &eth::Block) -> Vec<TransactionEntityChanges> {
     block
         .logs()
         // This filter runs first because any contract can emit an `Initialize` with a real pool
@@ -32,7 +32,7 @@ fn pools_created(params: &Params, block: &eth::Block) -> Vec<TransactionEntityCh
             Initialize::match_and_decode(view.log).map(|event| (view.receipt.transaction, event))
         })
         .filter(|(_, event)| params.is_montra_hook(&event.hooks))
-        .map(|(tx, event)| pool_creation(tx, &event, &params.pool_manager))
+        .map(|(tx, event)| pool_creation(tx, event, &params.pool_manager))
         .collect()
 }
 
@@ -41,6 +41,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use hex_literal::hex;
+
+    use rstest::rstest;
 
     use super::*;
     use crate::{
@@ -79,7 +81,7 @@ mod tests {
     }
 
     /// An `Initialize` creates no pool unless the `PoolManager` emitted it for a listed hook.
-    #[rstest::rstest]
+    #[rstest]
     #[case::pool_of_another_hook(POOL_MANAGER, hex!("0000000000000000000000000000000000000080"))]
     #[case::initialize_from_another_contract(hex!("00000000000000000000000000000000000000aa"), HOOK)]
     fn test_initialize_creates_no_pool(#[case] emitter: Address, #[case] hook: Address) {
