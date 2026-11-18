@@ -2547,6 +2547,21 @@ mod tests {
         assert_eq!(executes_in_next_block(chain, protocol_system), expected);
     }
 
+    /// The `uniswap_v4_hooks` entries of `NEXT_BLOCK_CHAIN_PROTOCOLS` hold only while their chain
+    /// prices hook pools with native handlers alone: a chain the generic VM hook handler serves
+    /// prices its VM hook pools on the update's block.
+    #[test]
+    fn next_block_hook_chains_have_no_generic_vm_hooks() {
+        use tycho_simulation::evm::protocol::uniswap_v4::hooks::hook_handler_creator::GENERIC_VM_HOOK_CHAINS;
+        for (chain, protocol_system) in super::NEXT_BLOCK_CHAIN_PROTOCOLS {
+            assert!(
+                protocol_system != "uniswap_v4_hooks" || !GENERIC_VM_HOOK_CHAINS.contains(&chain),
+                "{chain} serves generic VM hooks, so its uniswap_v4_hooks pools are not all \
+                 priced for the next block"
+            );
+        }
+    }
+
     #[rstest]
     #[case::stale_update_name("fermiswap", "execution reverted: StaleUpdate()")]
     #[case::stale_update_bare_selector("kipseli", "execution reverted: 0x666a2814")]
