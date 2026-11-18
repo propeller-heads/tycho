@@ -789,7 +789,7 @@ impl PostgresGateway {
         };
 
         let balances = if retrieve_balances {
-            self.get_component_balances(chain, ids, at.as_ref(), conn)
+            self.get_component_balances(chain, system.as_deref(), ids, at.as_ref(), conn)
                 .await?
         } else {
             HashMap::new()
@@ -1575,6 +1575,7 @@ impl PostgresGateway {
     pub async fn get_component_balances(
         &self,
         chain: &Chain,
+        system: Option<&str>,
         ids: Option<&[&str]>,
         at: Option<&Version>,
         conn: &mut AsyncPgConnection,
@@ -1600,6 +1601,15 @@ impl PostgresGateway {
         if let Some(external_ids) = ids {
             component_query =
                 component_query.filter(schema::protocol_component::external_id.eq_any(external_ids))
+        }
+        if let Some(system) = system {
+            component_query = component_query.filter(
+                schema::protocol_component::protocol_system_id.eq_any(
+                    schema::protocol_system::table
+                        .filter(schema::protocol_system::name.eq(system))
+                        .select(schema::protocol_system::id),
+                ),
+            );
         }
         let protocol_components: HashMap<i64, String> = component_query
             .get_results::<(i64, String)>(conn)
