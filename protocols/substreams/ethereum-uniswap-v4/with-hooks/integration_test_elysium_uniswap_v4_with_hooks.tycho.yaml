@@ -11,8 +11,8 @@ module_name: "map_montra_enriched_block_changes"
 # simulation refuses a quote whose output is 0. The bound is exact in both directions on a pool with
 # no initialized tick whose net liquidity is 0 (two positions cancelling at one boundary). The
 # simulation drops such a tick, so on a pool that has one the limit falls short by up to 2 raw
-# input units per such tick crossed. Only outside liquidity can create one, and the pools of these
-# ranges have none, so no rounding is declared.
+# input units per such tick crossed. Only outside liquidity can create one. The third test's pools
+# hold outside liquidity, none with such a tick, so no rounding is declared.
 limits:
   kind: hard
 # The PoolManager holds every pool's tokens in one balance and accounts no per-pool amount; the
@@ -43,7 +43,7 @@ tests:
         tvl_only: &montra_tvl_only
           bps: 0.01
           wei: 1000
-          reason: "the shared Uniswap v4 balance pipeline (5_map_store_balance_changes.rs) rounds each swap's estimated LP fee share to nearest and prices liquidity changes at the block's sqrt price, so indexed balances sit slightly above the UniswapV4Balances lens. Measured with range --report at 20b95df9b over the 31 components both test ranges then listed: at most 0.0028 bps (8-decimal EQSPCX, pool 0x0ee0fec1), and 1-4 wei on tokens the lens reads as 0. The three range-2 pools added later (0x021a9289, 0x026a476d, 0x33d35fd8) pass balances.tvl_only but were not measured on their own. bps 0.01 is the smallest step; wei 1000 is headroom chosen over the 4 wei measured."
+          reason: "the shared Uniswap v4 balance pipeline (5_map_store_balance_changes.rs) rounds each swap's estimated LP fee share to nearest and prices liquidity changes at the block's sqrt price, so indexed balances sit slightly above the UniswapV4Balances lens, never below it. Measured by a range --report run of all three tests with tvl_only removed, over the 37 components they list: at most 0.0028 bps (7 units of the 8-decimal EQSPCX, pool 0x0ee0fec1), and 1-4 wei on tokens the lens reads as 0. bps 0.01 is the smallest step. The drift grows with a pool's swaps and has no fixed bound, so wei 1000 is headroom over the 4 wei measured."
       # native quote; launched at block 1032795
       - id: "0x06602fee3eef46c193ab60f7b658a1254aa382dd0545d18a66c94f4f8a6337af"
         tokens:
@@ -446,4 +446,49 @@ tests:
           hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
           key_lp_fee: "0x00800000"
         creation_tx: "0x5d6394e97605ec3c1d2e5d90305b1d1e06f9c80d0e115f58d444f3a5d88d01dc"
+        tvl_only: *montra_tvl_only
+  # Outside liquidity: positions added by other accounts than the hook, which the limits of the
+  # first two tests never meet. One pool takes full-range positions, which reach past the opening
+  # (the hook's PastOpening refusal); two take a 24-position ladder each, so a limit walks across
+  # 25 more initialized ticks. Counted from the PoolManager's ModifyLiquidity logs whose sender is
+  # not the hook (spec, refs/logs/pm_modifyliquidity_nonhook_588510_6001999.jsonl).
+  - name: test_outside_liquidity
+    start_block: 4959600
+    stop_block: 5003000
+    expected_components:
+      # native quote; 23 full-range outside adds from 4995418 to 5002919; launched at block 4988300
+      - id: "0x6ea9f206ae9094a0b56cd85b1035611791b130cc8f4abb13aecdcf500fb6b958"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0xeefeeb3ae68240834154360be335d0ff8950c6a6"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x6ea9f206ae9094a0b56cd85b1035611791b130cc8f4abb13aecdcf500fb6b958"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x6483abe7b89d3b7615241a4700089b6db7b066825dde50496d87443dc077661b"
+        tvl_only: *montra_tvl_only
+      # native quote; graduates and switches its LP fee on (second test), then a 24-position outside ladder at 5000076; launched at block 4970022
+      - id: "0x4937bb23c0503b32cf26d119cdfa5772d40a3900f5a1783437546e2e52025764"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0xe9c952cd198ff412113a465d34ff2c233f6f4ca1"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x4937bb23c0503b32cf26d119cdfa5772d40a3900f5a1783437546e2e52025764"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xc17ba1154b14f8befdfb761078fc7e0b0c0491b12d3fa3eeedfcab8af751e6a5"
+        tvl_only: *montra_tvl_only
+      # native quote; a 24-position outside ladder at 5002287; launched at block 4959653
+      - id: "0xa5499b0299a10dd35388d4c9517322aedd7f6682c226900062f8be2270733201"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x3780176bd3c7d89a123195a88ca5dd88d70c1bf0"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xa5499b0299a10dd35388d4c9517322aedd7f6682c226900062f8be2270733201"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xc994ae487ce2ec3a4901c477777cab1629bef76f89b0d23c014c49ee70443c44"
         tvl_only: *montra_tvl_only
