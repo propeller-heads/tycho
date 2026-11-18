@@ -65,7 +65,11 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
         PM_PER_HOOK_CALL_OVERHEAD
     }
 
-    /// Simulates the beforeSwap Solidity behaviour
+    /// Simulates the beforeSwap Solidity behaviour.
+    ///
+    /// An `InvalidInput` refuses this one swap, as a revert of the hook on this input would, and
+    /// `get_amount_out` returns it to the caller unchanged; any other error means the hook
+    /// cannot be simulated, and `get_amount_out` reports it as `FatalError`.
     fn before_swap(
         &self,
         params: BeforeSwapParameters,
@@ -73,7 +77,10 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
         transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
     ) -> Result<WithGasEstimate<BeforeSwapOutput>, SimulationError>;
 
-    /// Simulates the afterSwap Solidity behaviour
+    /// Simulates the afterSwap Solidity behaviour.
+    ///
+    /// Errors are classified as for [`HookHandler::before_swap`]: an `InvalidInput` refuses this
+    /// one swap and reaches the caller unchanged, and any other error becomes `FatalError`.
     fn after_swap(
         &self,
         params: AfterSwapParameters,

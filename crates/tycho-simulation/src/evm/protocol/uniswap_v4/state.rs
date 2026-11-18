@@ -647,6 +647,23 @@ impl UniswapV4State {
     }
 }
 
+/// The error `get_amount_out` reports for a hook call `stage` (`BeforeSwap`, `AfterSwap`) that
+/// failed with `error`: a hook's `InvalidInput` refuses this one swap and passes through, and any
+/// other error means the hook cannot be simulated, which is fatal.
+///
+/// The pass-through holds for every hook. A native hook returns `InvalidInput` for an input its
+/// contract reverts on. The generic VM hook returns it only from `coerce_error`
+/// (`vm/utils.rs`) for a call that ran out of gas, which a smaller input can avoid, so a refused
+/// amount does not stop consumers from simulating the pool.
+fn hook_call_error(stage: &str, error: SimulationError) -> SimulationError {
+    match error {
+        SimulationError::InvalidInput(..) => error,
+        e @ (SimulationError::FatalError(_) | SimulationError::RecoverableError(_)) => {
+            SimulationError::FatalError(format!("{stage} hook simulation failed: {e:?}"))
+        }
+    }
+}
+
 #[typetag::serde]
 impl ProtocolSim for UniswapV4State {
     /// Runs the hook of every quote and limit from this state under `overrides`, which must be
@@ -807,17 +824,9 @@ impl ProtocolSim for UniswapV4State {
                     hook_data: Bytes::new(),
                 };
 
-                // A hook that refuses this swap, such as one gating trading on a start time,
-                // reports `InvalidInput`; only a failure to simulate the hook is fatal.
                 let before_swap_result = hook
                     .before_swap(before_swap_params, None, None)
-                    .map_err(|e| match e {
-                        SimulationError::InvalidInput(..) => e,
-                        e @ (SimulationError::FatalError(_) |
-                        SimulationError::RecoverableError(_)) => SimulationError::FatalError(
-                            format!("BeforeSwap hook simulation failed: {e:?}"),
-                        ),
-                    })?;
+                    .map_err(|e| hook_call_error("BeforeSwap", e))?;
 
                 before_swap_gas = before_swap_result.gas_estimate;
                 before_swap_delta = before_swap_result.result.amount_delta;
@@ -883,11 +892,7 @@ impl ProtocolSim for UniswapV4State {
 
                 let after_swap_result = hook
                     .after_swap(after_swap_params, storage_overwrites, None)
-                    .map_err(|e| {
-                        SimulationError::FatalError(format!(
-                            "AfterSwap hook simulation failed: {e:?}"
-                        ))
-                    })?;
+                    .map_err(|e| hook_call_error("AfterSwap", e))?;
                 after_swap_gas = after_swap_result.gas_estimate;
                 // Hooks.sol calls afterSwap whenever AFTER_SWAP_FLAG is set, but only parses the
                 // returned delta when AFTER_SWAP_RETURNS_DELTA_FLAG is set too. Without that
@@ -2250,6 +2255,17 @@ mod tests {
         /// Price the hook answers `spot_price` with. `None` models a hook that leaves the price
         /// to the pool by failing recoverably.
         spot_price_override: Option<u64>,
+        /// How `after_swap` fails, if it does.
+        after_swap_failure: Option<AfterSwapFailure>,
+    }
+
+    /// The two ways a hook's `after_swap` can fail.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AfterSwapFailure {
+        /// The hook refuses the swap's outcome, as a revert would.
+        Refuses,
+        /// The hook cannot be simulated.
+        CannotSimulate,
     }
 
     impl HookHandler for AfterSwapTestHook {
@@ -2272,7 +2288,18 @@ mod tests {
             _: Option<HashMap<Address, HashMap<U256, U256>>>,
             _: Option<HashMap<Address, HashMap<U256, U256>>>,
         ) -> Result<WithGasEstimate<AfterSwapDelta>, SimulationError> {
-            Ok(WithGasEstimate { gas_estimate: AFTER_SWAP_TEST_HOOK_GAS, result: self.delta })
+            match self.after_swap_failure {
+                Some(AfterSwapFailure::Refuses) => {
+                    Err(SimulationError::InvalidInput("refused by the hook".into(), None))
+                }
+                Some(AfterSwapFailure::CannotSimulate) => {
+                    Err(SimulationError::RecoverableError("the hook did not run".into()))
+                }
+                None => Ok(WithGasEstimate {
+                    gas_estimate: AFTER_SWAP_TEST_HOOK_GAS,
+                    result: self.delta,
+                }),
+            }
         }
 
         fn fee(&self, _: &UniswapV4State, _: SwapParams) -> Result<f64, SimulationError> {
@@ -2341,6 +2368,7 @@ mod tests {
             delta: I128::unchecked_from(AFTER_SWAP_TEST_HOOK_DELTA),
             analytic_fee_bps: None,
             spot_price_override: None,
+            after_swap_failure: None,
         })
     }
 
@@ -2354,6 +2382,7 @@ mod tests {
             delta: I128::ZERO,
             analytic_fee_bps: Some(analytic_fee_bps),
             spot_price_override: None,
+            after_swap_failure: None,
         })
     }
 
@@ -2372,6 +2401,7 @@ mod tests {
             delta: I128::ZERO,
             analytic_fee_bps,
             spot_price_override: Some(TEST_HOOK_SPOT_PRICE),
+            after_swap_failure: None,
         })
     }
 
@@ -2436,6 +2466,39 @@ mod tests {
             with_delta.gas,
             hookless.gas + BigUint::from(AFTER_SWAP_TEST_HOOK_GAS + PM_PER_HOOK_CALL_OVERHEAD)
         );
+    }
+
+    /// A hook's `after_swap` refusal reaches the caller as `InvalidInput`, as a `before_swap` one
+    /// does; any other `after_swap` failure is fatal.
+    #[rstest]
+    #[case::refusal_passes_through(AfterSwapFailure::Refuses, true)]
+    #[case::other_failure_is_fatal(AfterSwapFailure::CannotSimulate, false)]
+    fn test_after_swap_failure_reaches_the_caller_by_kind(
+        #[case] failure: AfterSwapFailure,
+        #[case] expect_invalid_input: bool,
+    ) {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let mut pool = create_basic_v4_test_pool();
+        pool.set_hook_handler(Box::new(AfterSwapTestHook {
+            address: construct_hook_address(&[HookOptions::AfterSwap]),
+            delta: I128::ZERO,
+            analytic_fee_bps: None,
+            spot_price_override: None,
+            after_swap_failure: Some(failure),
+        }));
+
+        let result =
+            pool.get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_in, &token_out);
+
+        match result {
+            Err(SimulationError::InvalidInput(msg, None)) if expect_invalid_input => {
+                assert_eq!(msg, "refused by the hook");
+            }
+            Err(SimulationError::FatalError(msg)) if !expect_invalid_input => {
+                assert!(msg.starts_with("AfterSwap hook simulation failed"), "{msg}");
+            }
+            other => panic!("expected the {failure:?} failure, got {other:?}"),
+        }
     }
 
     /// Hook that fills part of an exact-in swap from its own inventory, the way a limit order
