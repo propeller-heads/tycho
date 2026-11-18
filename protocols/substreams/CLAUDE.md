@@ -25,10 +25,9 @@ Each package contains:
 
 Shared code lives in `crates/`: `tycho-substreams` (the Tycho protobuf models and helpers every
 package builds on), `substreams-helper`, and `pancakeswap-infinity-substreams` (what the PancakeSwap
-Infinity CL and Bin packages share: hook bitmap, fee flag, pool slot, deployment params, the
-`Transaction` conversions). A shared crate exports no handler: handlers are `#[no_mangle]` symbols
-and a wasm keeps every one from every crate it links, so two packages cannot both depend on a crate
-that defines any.
+Infinity CL and Bin packages share; its `lib.rs` lists it). Handlers are `#[no_mangle]` symbols and
+a wasm keeps every one from every crate it links, so a package can depend on a crate that defines
+handlers only when no handler name repeats in the resulting wasm.
 
 ## Adding a new protocol
 

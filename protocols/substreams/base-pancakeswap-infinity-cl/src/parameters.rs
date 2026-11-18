@@ -1,8 +1,8 @@
 //! Decoding of `PoolKey.parameters` and storage-slot arithmetic for PancakeSwap Infinity CL.
 //!
-//! The hook bitmap, the dynamic fee flag, the pool slot hash and the protocol fee split are
-//! `pancakeswap_infinity_substreams::parameters`, re-exported here. CL's own are the `int24` tick
-//! spacing, the `pools` mapping slot and the slot0 layout.
+//! What CL shares with Bin is `pancakeswap_infinity_substreams::parameters`, re-exported here
+//! within the crate. CL's own are the `int24` tick spacing, the `pools` mapping slot and the
+//! slot0 layout.
 //!
 //! Layout, bit offsets from the least significant bit of the bytes32:
 //! [ParametersHelper](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/libraries/math/ParametersHelper.sol#L12-L29),
