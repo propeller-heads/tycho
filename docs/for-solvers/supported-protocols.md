@@ -5,9 +5,9 @@ Currently, Tycho supports the following protocols:
 <table data-full-width="true">
 <thead><tr><th width="204.7578125">Protocol</th><th width="251.88671875">Integration Type</th><th width="156.2734375">Simulation Time</th><th width="148.26953125">Chains</th><th width="261.26953125">Partial Support Notes</th></tr></thead>
 <tbody>
-<tr><td><code>uniswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>1 μs (0.001 ms)</td><td>Ethereum, Base, Unichain, Arbitrum, Polygon, BSC, Robinhood</td><td></td></tr>
-<tr><td><code>uniswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Ethereum, Base, Unichain, Arbitrum, Polygon, BSC, Robinhood</td><td></td></tr>
-<tr><td><code>uniswap_v4</code></td><td>Native (<code>UniswapV4State</code>)</td><td>3 μs (0.003 ms)</td><td>Ethereum, Base, Unichain, Arbitrum, Polygon, BSC, Robinhood</td><td>Only core uniswap V4 pools are supported on this native implementation.</td></tr>
+<tr><td><code>uniswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>1 μs (0.001 ms)</td><td>Ethereum, Base, Unichain, Arbitrum, Polygon, BSC, Robinhood, Elysium</td><td></td></tr>
+<tr><td><code>uniswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Ethereum, Base, Unichain, Arbitrum, Polygon, BSC, Robinhood, Elysium</td><td></td></tr>
+<tr><td><code>uniswap_v4</code></td><td>Native (<code>UniswapV4State</code>)</td><td>3 μs (0.003 ms)</td><td>Ethereum, Base, Unichain, Arbitrum, Polygon, BSC, Robinhood, Elysium</td><td>Only core uniswap V4 pools are supported on this native implementation.</td></tr>
 <tr><td><code>uniswap_v4_hooks</code></td><td>Hybrid (<code>UniswapV4State</code>)<br>[DCI indexed]</td><td>1 ms</td><td>Ethereum, Robinhood</td><td>Ethereum: all composable hooks are supported.<br>Robinhood: only Pons V2 MemeHook pools are supported. Pools with other hooks fail to decode and stop the stream. Set <code>.skip_state_decode_failures(true)</code> on the stream builder to skip them.<br><strong>Angstrom</strong>: see more details <a href="supported-protocols.md#angstrom-uniswap-v4-hook">below</a>.<br><em>recommended</em>: set a high startup timeout on the stream builder: <code>.startup_timeout(Duration::from_secs(120))</code></td></tr>
 <tr><td><code>vm:balancer_v2</code></td><td>VM (<code>EVMPoolState</code>)<br>[DCI indexed]</td><td>0.5 ms</td><td>Ethereum</td><td>A few pools are currently unsupported. Use <code>balancer_v2_pool_filter</code></td></tr>
 <tr><td><code>vm:curve</code></td><td>Hybrid (<code>CurveState</code>)<br>[DCI indexed]</td><td>30 μs (0.03 ms)</td><td>Ethereum, Unichain</td><td>Use <code>curve_filter</code>. It excludes pools with rate-bearing or rebasing coins, unless an allowlist trusts the rate source of each such coin: its oracle rate provider, its ERC4626 vault, or, for rebasing coins, the pool itself. An allowlist entry must give the same rate to a quote as to a swap, and DCI must index every storage slot that the rate read touches.<br>NOTE: curve requires a node RPC to fetch some code at startup. Please set the <code>RPC_URL</code> env var.</td></tr>
@@ -19,6 +19,9 @@ Currently, Tycho supports the following protocols:
 <tr><td><code>sushiswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Robinhood</td><td></td></tr>
 <tr><td><code>robinswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Robinhood</td><td></td></tr>
 <tr><td><code>gigadex_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Robinhood</td><td></td></tr>
+<tr><td><code>kleos_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Elysium</td><td></td></tr>
+<tr><td><code>elyspump_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Elysium</td><td></td></tr>
+<tr><td><code>stockiumswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Elysium</td><td></td></tr>
 <tr><td><code>ramses_v3</code></td><td>Native (<code>RamsesV3State</code>)</td><td>-</td><td>Polygon, Robinhood</td><td></td></tr>
 <tr><td><code>quickswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>3 μs (0.003 ms)</td><td>Polygon</td><td></td></tr>
 <tr><td><code>ekubo_v2</code></td><td>Native (<code>EkuboState</code>)</td><td>1.5 μs (0.0015 ms)</td><td>Ethereum</td><td></td></tr>
@@ -27,8 +30,8 @@ Currently, Tycho supports the following protocols:
 <tr><td><code>aerodrome_v1</code></td><td>Native (<code>AerodromeV1State</code>)</td><td>3 μs (0.003 ms)</td><td>Base</td><td></td></tr>
 <tr><td><code>aerodrome_slipstreams</code></td><td><p>Native</p><p>(<code>AerodromeSlipstreamsState</code>)</p></td><td>-</td><td>Base</td><td>Dynamic-fee pools untouched so far in the execution block quote the worse of the initial and dynamic fee, so the output is never over-quoted. If your submission path lands the swap first in the block, opt in per registration: <code>exchange_with_decoder_context</code> with <code>DecoderContext::new().assume_first_in_block(true)</code>.</td></tr>
 <tr><td><code>velodrome_slipstreams</code></td><td><p>Native</p><p>(<code>VelodromeSlipstreamsState</code>)</p></td><td>-</td><td>Unichain</td><td></td></tr>
-<tr><td><code>aero_basic</code></td><td>Native (<code>AeroBasicState</code>)</td><td>-</td><td>Ethereum, Base, Arbitrum, Robinhood</td><td>Quotes assume that the swap pays no MEV tax. The MEV tax applies only to transactions with a priority fee above a threshold.</td></tr>
-<tr><td><code>aero_cl</code></td><td>Native (<code>AerodromeSlipstreamsState</code>)</td><td>-</td><td>Ethereum, Base, Arbitrum, Robinhood</td><td>Quotes assume that the swap gets no caller discount and pays no MEV tax. A discount only makes the fee lower. The MEV tax applies only to transactions with a priority fee above a threshold.</td></tr>
+<tr><td><code>aero_basic</code></td><td>Native (<code>AeroBasicState</code>)</td><td>-</td><td>Ethereum, Base, Arbitrum, Robinhood, Elysium</td><td>Quotes assume that the swap pays no MEV tax. The MEV tax applies only to transactions with a priority fee above a threshold.</td></tr>
+<tr><td><code>aero_cl</code></td><td>Native (<code>AerodromeSlipstreamsState</code>)</td><td>-</td><td>Ethereum, Base, Arbitrum, Robinhood, Elysium</td><td>Quotes assume that the swap gets no caller discount and pays no MEV tax. A discount only makes the fee lower. The MEV tax applies only to transactions with a priority fee above a threshold.</td></tr>
 <tr><td><code>up_v3</code></td><td>Native (<code>AerodromeSlipstreamsState</code>)</td><td>-</td><td>Robinhood</td><td></td></tr>
 <tr><td><code>rocketpool</code></td><td>Native (<code>RocketpoolState</code>)</td><td>-</td><td>Ethereum</td><td>Note: the DepositPool was recently updated to v1.4. This new version is supported by tycho_simulation <a href="https://github.com/propeller-heads/tycho-simulation/releases/tag/0.248.0" target="_blank" rel="noopener noreferrer">> v0.248.0</a> and above.</td></tr>
 <tr><td><code>fluid_v1</code></td><td>Native (<code>FluidV1</code>)<br>[DCI indexed]</td><td>-</td><td>Ethereum</td><td>Note: paused pools are still indexed. To filter them out use <code>fluid_v1_paused_pools_filter</code>.</td></tr>
@@ -155,6 +158,17 @@ fn register_exchanges(
                 .exchange::<AeroBasicState>("aero_basic", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("aero_cl", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)
+        }
+        Chain::Elysium => {
+            builder = builder
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("kleos_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("elyspump_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("stockiumswap_v3", tvl_filter.clone(), None)
+                .exchange::<AeroBasicState>("aero_basic", tvl_filter.clone(), None)
+                .exchange::<AerodromeSlipstreamsState>("aero_cl", tvl_filter.clone(), None)
         }
         _ => {}
     }

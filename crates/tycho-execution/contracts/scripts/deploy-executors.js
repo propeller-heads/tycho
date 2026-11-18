@@ -36,6 +36,7 @@ const deploy_protocols = {
         "rfq:metric",
         "pricelevelstream",
         "rfq:native",
+        "rfq:euclid",
         "sky",
         "lido_v4",
         "etherfi",
@@ -58,6 +59,7 @@ const deploy_protocols = {
         "native_wrapper",
         "lunarbase",
         "biconomy",
+        "baibai",
         "rfq:metric",
         "rfq:native",
         "fallback",
@@ -132,6 +134,15 @@ const deploy_protocols = {
         "uniswap_v2",
         "uniswap_v3",
         "uniswap_v4",
+    ],
+    "elysium": [
+        "aero_basic",
+        "uniswap_v2",
+        "uniswap_v3",
+        "uniswap_v4",
+        "native_wrapper",
+        "rfq:metric",
+        "fallback:rfq:metric",
     ],
 };
 

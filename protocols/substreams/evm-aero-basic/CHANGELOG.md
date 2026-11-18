@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.1
+
+- Add the Elysium manifest (`elysium-aero-basic.yaml`), with the same factories and fee modules as
+  the other chains, from the volatile factory's deployment block 1945551. The wasm is unchanged.
+
 ## v0.1.0
 
 - Index AERO v1.1.0 basic pools (protocol system `aero_basic`, type `aero_basic_pool`) on Base,

@@ -14,6 +14,7 @@ postgres/
 ├── chain.rs            — block & transaction persistence
 ├── contract.rs         — account, code, storage slot, and native-balance persistence
 ├── protocol.rs         — protocol component, attribute, and token-balance persistence
+├── component_pause.rs  — admin pause persistence (ComponentPauseGateway)
 ├── token_cache.rs      — in-memory token store answering get_tokens without SQL (opt-in)
 ├── component_index.rs  — in-memory id/TVL index counting and paging get_protocol_components
 ├── entry_point.rs      — entry point + tracing param/result persistence
@@ -61,15 +62,17 @@ All public DB operations go through one of two gateway structs:
   `token_cache` when enabled), `get_protocol_components` (counted and paged by `component_index`
   when enabled) and `get_delta` (small LRU). The executor runs a batch up to
   three times when Postgres reports a transaction conflict (deadlock or serialization
-  failure); each attempt re-runs from scratch with a fresh snapshot.
+  failure); each attempt re-runs from scratch with a fresh snapshot. Admin pause writes
+  (`pause_components`, `unpause_components`) skip the executor and run on their own connection,
+  because they are not block data.
 - **`DirectGateway`** (testing / low-throughput): same trait surface, no buffering.
 
 `GatewayBuilder::build` requires **exactly one** chain (`ensure_chain`) — an instance is
 single-chain; it hard-fails otherwise.
 
 Both delegate every actual SQL call to `PostgresGateway` (unexported). Domain logic lives in
-`chain`, `contract`, `protocol`, `entry_point`, `extraction_state`, and `snapshot`—each adding
-methods to `PostgresGateway` via `impl` blocks in their own file.
+`chain`, `contract`, `protocol`, `component_pause`, `entry_point`, `extraction_state`, and
+`snapshot`—each adding methods to `PostgresGateway` via `impl` blocks in their own file.
 
 `versioning` is the only module without a DB table of its own; it provides the shared traits
 and utilities consumed by `contract` and `protocol`. Two paths: `apply_versioning()` for plain

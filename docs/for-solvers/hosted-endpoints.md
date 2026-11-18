@@ -16,6 +16,7 @@ description: Tycho Indexer's hosted endpoints
 <tr><td>Polygon Mainnet</td><td>tycho-polygon-beta.propellerheads.xyz</td></tr>
 <tr><td>BSC Mainnet</td><td>tycho-bsc-beta.propellerheads.xyz</td></tr>
 <tr><td>Robinhood Chain Mainnet</td><td>tycho-robinhood-beta.propellerheads.xyz</td></tr>
+<tr><td>Elysium Mainnet</td><td>tycho-elysium-beta.propellerheads.xyz</td></tr>
 </tbody>
 </table>
 

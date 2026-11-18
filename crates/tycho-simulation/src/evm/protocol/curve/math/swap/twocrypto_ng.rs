@@ -330,6 +330,69 @@ mod tests {
         }
     }
 
+    /// STRCx/USDC pool 0x7d476d419bbc9f0115cd59ac35e8a71ae88192c2 after it was drained on
+    /// 2026-09-19: D, both balances and the LP supply are zero on chain.
+    #[test]
+    fn drained_pool_returns_none() {
+        let balances = [U256::ZERO, U256::ZERO];
+        let precisions = [U256::from(1_000_000_000_000u64), U256::from(1u64)];
+        let price_scale = U256::from(98_308_310_068_124_133_248u128);
+        let d = U256::ZERO;
+        let (ann, gamma) = (U256::from(20_000_000u64), U256::from(1_000_000_000_000_000u64));
+        let (mid_fee, out_fee, fee_gamma) = (
+            U256::from(100_000_000u64),
+            U256::from(300_000_000u64),
+            U256::from(5_000_000_000_000_000u64),
+        );
+        let amount = U256::from(1_000_000u64);
+        for (i, j) in [(0, 1), (1, 0)] {
+            let out = get_amount_out(
+                &balances,
+                &precisions,
+                price_scale,
+                d,
+                ann,
+                gamma,
+                mid_fee,
+                out_fee,
+                fee_gamma,
+                i,
+                j,
+                amount,
+            );
+            assert!(out.is_none());
+            let amount_in = get_amount_in(
+                &balances,
+                &precisions,
+                price_scale,
+                d,
+                ann,
+                gamma,
+                mid_fee,
+                out_fee,
+                fee_gamma,
+                i,
+                j,
+                amount,
+            );
+            assert!(amount_in.is_none());
+            let spot = spot_price(
+                &balances,
+                &precisions,
+                price_scale,
+                d,
+                ann,
+                gamma,
+                mid_fee,
+                out_fee,
+                fee_gamma,
+                i,
+                j,
+            );
+            assert!(spot.is_none());
+        }
+    }
+
     #[test]
     fn get_amount_out_accepts_normal_amounts() {
         let dy = usdc_pool_amount_out(U256::from(1_000_000_000u64)).expect("1k USDC quote");

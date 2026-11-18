@@ -84,7 +84,6 @@ jobs:
     if: ${{ inputs.application == 'tycho-indexer' }}
     uses: propeller-heads/ci-cd-templates/.github/workflows/deploy-any-branch-dev.yaml@main
     permissions:
-      id-token: write
       contents: read
     with:
       image_name: tycho-indexer
@@ -93,9 +92,6 @@ jobs:
     secrets:
       app_id: ${{ secrets.APP_ID }}
       app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
-      role_to_assume: ${{ secrets.ROLE_TO_ASSUME }}
-      aws_region: ${{ secrets.AWS_REGION }}
-      eks_cluster_name: ${{ secrets.EKS_CLUSTER_NAME }}
 
   # ── tycho-integration-test ─────────────────────────────────────────────────
   build-and-push-tycho-integration-test:
@@ -121,7 +117,6 @@ jobs:
     if: ${{ inputs.application == 'tycho-integration-test' }}
     uses: propeller-heads/ci-cd-templates/.github/workflows/deploy-any-branch-dev.yaml@main
     permissions:
-      id-token: write
       contents: read
     with:
       image_name: tycho-integration-test
@@ -130,6 +125,3 @@ jobs:
     secrets:
       app_id: ${{ secrets.APP_ID }}
       app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
-      role_to_assume: ${{ secrets.ROLE_TO_ASSUME }}
-      aws_region: ${{ secrets.AWS_REGION }}
-      eks_cluster_name: ${{ secrets.EKS_CLUSTER_NAME }}

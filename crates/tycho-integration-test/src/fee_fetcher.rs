@@ -13,6 +13,7 @@ use alloy::{
     sol_types::SolCall,
 };
 use miette::miette;
+use num_bigint::BigUint;
 use tycho_common::Bytes;
 
 sol! {
@@ -43,6 +44,16 @@ impl RouterFeeOnOutput {
     /// The fee denominator (the FeeCalculator's precision scale, where this value represents 100%).
     pub fn denominator(&self) -> u64 {
         self.denominator
+    }
+
+    #[cfg(test)]
+    pub fn new_for_tests(numerator: u64, denominator: u64) -> Self {
+        Self { numerator, denominator }
+    }
+
+    /// `amount_out` less the router fee, as the router pays it out of a swap's output.
+    pub fn deduct(&self, amount_out: &BigUint) -> BigUint {
+        amount_out - amount_out * BigUint::from(self.numerator) / BigUint::from(self.denominator)
     }
 }
 
@@ -134,7 +145,16 @@ mod tests {
     use super::*;
 
     const ROUTER: Address = address!("1644d2477f809cc2c71bccfd6dc9497e3f83210d");
+
     const FEE_CALCULATOR: Address = address!("2930cb02f8293a684981ef7fb63c160329c410f1");
+
+    #[test]
+    fn the_fee_is_floored_as_the_fee_calculator_floors_it() {
+        // 10/10_000 of 1_000_999 is 1000.999, which `FeeCalculator` floors to 1000.
+        let fee = RouterFeeOnOutput::new_for_tests(10, 10_000);
+        assert_eq!(fee.deduct(&BigUint::from(1_000_999u32)), BigUint::from(999_999u32));
+        assert_eq!(fee.deduct(&BigUint::from(999u32)), BigUint::from(999u32));
+    }
 
     /// Answers the three router fee calls like a node that keeps no pending state: a call at
     /// `pending` gets the error such a node returns, a call at any other block gets the result.

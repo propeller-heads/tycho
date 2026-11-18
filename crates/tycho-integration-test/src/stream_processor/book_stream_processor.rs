@@ -16,9 +16,13 @@ use tycho_simulation::{
         all_pairs::QuoteRule, quote_tokens::usd_stablecoins_for_chain, BookFeedConfig,
         BookFeedEvent, BookFeedOutcome, BookFeedStreams, BookSnapshot,
     },
-    pamm::protocols::metric::{self, feed::MetricFeedBuilder},
+    pamm::protocols::{
+        baibai::{self, BaibaiFeedBuilder},
+        metric::{self, feed::MetricFeedBuilder},
+    },
     rfq::protocols::{
         bebop::{self, feed::BebopFeedBuilder},
+        euclid::{self, feed::EuclidFeedBuilder},
         hashflow::{self, feed::HashflowFeedBuilder},
         liquorice::{self, feed::LiquoriceFeedBuilder},
         native::{self, feed::NativeFeedBuilder},
@@ -30,18 +34,25 @@ use tycho_test::execution::encoding::USER_ADDR;
 use crate::stream_processor::{StreamUpdate, StreamUpdatePayload};
 
 /// The venues that sign binding quotes. The pAMM venues are [`PammVenue`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RfqVenue {
     Bebop,
+    Euclid,
     Hashflow,
     Liquorice,
     Native,
+}
+
+impl RfqVenue {
+    /// The venues whose quotes need no credentials, so they run unless RFQ is disabled.
+    pub const KEYLESS: [RfqVenue; 1] = [RfqVenue::Euclid];
 }
 
 impl Display for RfqVenue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RfqVenue::Bebop => write!(f, "{}", bebop::PROTOCOL_SYSTEM),
+            RfqVenue::Euclid => write!(f, "{}", euclid::PROTOCOL_SYSTEM),
             RfqVenue::Hashflow => write!(f, "{}", hashflow::PROTOCOL_SYSTEM),
             RfqVenue::Liquorice => write!(f, "{}", liquorice::PROTOCOL_SYSTEM),
             RfqVenue::Native => write!(f, "{}", native::PROTOCOL_SYSTEM),
@@ -53,6 +64,8 @@ impl Display for RfqVenue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
 pub enum PammVenue {
     Metric,
+    /// Base only. Reads its books from the chain over `--rpc-url`, so it needs no credentials.
+    Baibai,
 }
 
 impl PammVenue {
@@ -74,17 +87,20 @@ impl Display for PammVenue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PammVenue::Metric => write!(f, "{}", metric::PROTOCOL_SYSTEM),
+            PammVenue::Baibai => write!(f, "{}", baibai::PROTOCOL_SYSTEM),
         }
     }
 }
 
-/// Which RFQ venues the book stream runs: each venue whose credentials are set. A venue without
-/// them is skipped, since RFQ has no explicit venue list.
+/// Which RFQ venues the book stream runs: each venue whose credentials are set, and every venue
+/// that needs none ([`RfqVenue::KEYLESS`]). A venue without its credentials is skipped, since
+/// RFQ has no explicit venue list.
 #[derive(Clone, PartialEq, Eq)]
 pub enum RfqSelection {
     /// `--disable-rfq`: no RFQ venue.
     Disabled,
-    /// The venues whose credentials were found, possibly none.
+    /// The venues whose credentials were found, possibly none. The keyless venues run beside
+    /// them and are not listed.
     Credentials(HashMap<RfqVenue, (String, String)>),
 }
 
@@ -93,10 +109,13 @@ impl std::fmt::Debug for RfqSelection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RfqSelection::Disabled => write!(f, "Disabled"),
-            RfqSelection::Credentials(credentials) => f
-                .debug_tuple("Credentials")
-                .field(&credentials.keys().collect::<Vec<_>>())
-                .finish(),
+            RfqSelection::Credentials(credentials) => {
+                let mut venues: Vec<_> = credentials.keys().collect();
+                venues.sort_by_key(ToString::to_string);
+                f.debug_tuple("Credentials")
+                    .field(&venues)
+                    .finish()
+            }
         }
     }
 }
@@ -144,15 +163,35 @@ impl RfqSelection {
         RfqSelection::Credentials(credentials)
     }
 
+    /// The venues to build a feed for, each with its credentials: the keyed venues whose
+    /// credentials were found, then the keyless ones with empty credentials.
+    fn venues(&self) -> Vec<(RfqVenue, String, String)> {
+        let RfqSelection::Credentials(credentials) = self else {
+            return Vec::new();
+        };
+        credentials
+            .iter()
+            .map(|(venue, (user, key))| (*venue, user.clone(), key.clone()))
+            .chain(
+                RfqVenue::KEYLESS
+                    .into_iter()
+                    .map(|venue| (venue, String::new(), String::new())),
+            )
+            .collect()
+    }
+
     /// Why this selection added no feed, for the warning when no book feed runs.
     fn why_empty(&self) -> &'static str {
         match self {
             RfqSelection::Disabled => "RFQ is disabled by --disable-rfq",
             RfqSelection::Credentials(credentials) if credentials.is_empty() => {
                 "no RFQ credentials are set (BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, \
-                 LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY)"
+                 LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY), and no keyless RFQ \
+                 venue serves this chain"
             }
-            RfqSelection::Credentials(_) => "no RFQ venue with credentials serves this chain",
+            RfqSelection::Credentials(_) => {
+                "no RFQ venue with credentials, nor any keyless one, serves this chain"
+            }
         }
     }
 }
@@ -203,6 +242,8 @@ pub struct BookStreamProcessor {
     rfq: RfqSelection,
     sample_size: usize,
     pamm: PammSelection,
+    /// The node of `chain`, which the pAMM venues that read their books on chain query.
+    rpc_url: String,
     /// The protocol's stream will skip messages for this duration after processing a message
     skip_messages_duration: Duration,
     /// Whether each venue publishes one component for all of its pairs rather than one each.
@@ -210,6 +251,7 @@ pub struct BookStreamProcessor {
 }
 
 impl BookStreamProcessor {
+    #[expect(clippy::too_many_arguments, reason = "one argument per stream setting")]
     pub fn new(
         chain: Chain,
         tvl_threshold: f64,
@@ -217,9 +259,19 @@ impl BookStreamProcessor {
         skip_messages_duration: Duration,
         rfq: RfqSelection,
         pamm: PammSelection,
+        rpc_url: String,
         all_pairs: bool,
     ) -> Self {
-        Self { chain, tvl_threshold, rfq, sample_size, pamm, skip_messages_duration, all_pairs }
+        Self {
+            chain,
+            tvl_threshold,
+            rfq,
+            sample_size,
+            pamm,
+            rpc_url,
+            skip_messages_duration,
+            all_pairs,
+        }
     }
 
     /// Starts the book stream, or returns `None` when no book feed was added: both kinds are
@@ -245,14 +297,11 @@ impl BookStreamProcessor {
 
         let mut feeds = BookFeedStreams::new();
 
-        add_pamm_feeds(&self.pamm, &book_config, &mut feeds, |name| env::var(name).ok())?;
+        add_pamm_feeds(&self.pamm, &book_config, &self.rpc_url, &mut feeds, |name| {
+            env::var(name).ok()
+        })?;
 
-        let no_credentials = HashMap::new();
-        let credentials = match &self.rfq {
-            RfqSelection::Disabled => &no_credentials,
-            RfqSelection::Credentials(credentials) => credentials,
-        };
-        for (protocol, (user, key)) in credentials {
+        for (protocol, user, key) in self.rfq.venues() {
             let Some(usd_quote_tokens) = &usd_quote_tokens else {
                 warn!(
                     "Skipping {protocol}: it prices its books' TVL in USD stablecoins, and none \
@@ -270,7 +319,7 @@ impl BookStreamProcessor {
                     let mut bebop_builder = BebopFeedBuilder::new(
                         book_config.clone(),
                         Arc::clone(usd_quote_tokens),
-                        key.clone(),
+                        key,
                     )
                     .origin_address(
                         Bytes::from_str(USER_ADDR)
@@ -299,8 +348,8 @@ impl BookStreamProcessor {
                     let mut builder = HashflowFeedBuilder::new(
                         book_config.clone(),
                         Arc::clone(usd_quote_tokens),
-                        user.clone(),
-                        key.clone(),
+                        user,
+                        key,
                     )
                     .feed_config(HttpFeedConfig {
                         poll_interval: Duration::from_secs(30),
@@ -323,8 +372,8 @@ impl BookStreamProcessor {
                     let mut builder = LiquoriceFeedBuilder::new(
                         book_config.clone(),
                         Arc::clone(usd_quote_tokens),
-                        user.clone(),
-                        key.clone(),
+                        user,
+                        key,
                     )
                     .feed_config(HttpFeedConfig {
                         poll_interval: Duration::from_secs(30),
@@ -343,13 +392,35 @@ impl BookStreamProcessor {
                         .add(liquorice::PROTOCOL_SYSTEM, liquorice_feed)
                         .expect("each provider is added once");
                 }
+                RfqVenue::Euclid => {
+                    // Euclid serves Ethereum; on any other chain the feed is skipped rather
+                    // than failing the whole processor.
+                    let mut builder =
+                        EuclidFeedBuilder::new(book_config.clone(), Arc::clone(usd_quote_tokens));
+                    if self.all_pairs {
+                        builder = builder.all_pairs();
+                    }
+                    match builder.build() {
+                        Ok(euclid_feed) => {
+                            feeds
+                                .add(euclid::PROTOCOL_SYSTEM, euclid_feed)
+                                .expect("each provider is added once");
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Euclid RFQ not supported on chain {:?}, skipping: {e}",
+                                self.chain
+                            )
+                        }
+                    }
+                }
                 RfqVenue::Native => {
                     // Native serves a fixed set of chains; on any other chain the feed is
                     // skipped rather than failing the whole processor.
                     let mut builder = NativeFeedBuilder::new(
                         book_config.clone(),
                         Arc::clone(usd_quote_tokens),
-                        key.clone(),
+                        key,
                     )
                     .feed_config(HttpFeedConfig {
                         poll_interval: Duration::from_secs(30),
@@ -490,7 +561,8 @@ impl BookStreamProcessor {
     }
 }
 
-/// Adds the feed of each venue `selection` names. `secret` looks up an environment variable.
+/// Adds the feed of each venue `selection` names. `rpc_url` is the node of the book config's
+/// chain, and `secret` looks up an environment variable.
 ///
 /// # Errors
 /// Returns an error when a venue listed in `--pamm` lacks its credentials or its feed fails to
@@ -498,6 +570,7 @@ impl BookStreamProcessor {
 fn add_pamm_feeds(
     selection: &PammSelection,
     book_config: &BookFeedConfig,
+    rpc_url: &str,
     feeds: &mut BookFeedStreams,
     secret: impl Fn(&str) -> Option<String>,
 ) -> miette::Result<()> {
@@ -507,45 +580,32 @@ fn add_pamm_feeds(
         PammSelection::Listed(venues) => (venues.clone(), OnFailure::FailRun),
     };
     for venue in venues {
-        match venue {
-            PammVenue::Metric => {
-                let Some(api_key) = secret("METRIC_API_KEY") else {
-                    match on_failure {
-                        OnFailure::FailRun => {
-                            return Err(miette!(
-                                "--pamm lists {}, but METRIC_API_KEY is not set. Set it, or drop \
-                                 {} from --pamm.",
-                                venue.cli_name(),
-                                venue.cli_name()
-                            ));
-                        }
-                        OnFailure::Skip => {
-                            info!(
-                                "Metric credentials not found. Expected environment variable: \
-                                 METRIC_API_KEY"
-                            );
-                            continue;
-                        }
-                    }
-                };
+        let added = match venue {
+            PammVenue::Metric => match secret("METRIC_API_KEY") {
                 // Metric's own defaults already set its cadence and withdrawal age.
-                match MetricFeedBuilder::new(book_config.clone(), api_key).build() {
-                    Ok(metric_feed) => {
-                        info!("Adding {venue} feed...");
+                Some(api_key) => MetricFeedBuilder::new(book_config.clone(), api_key)
+                    .build()
+                    .map_err(|e| Unavailable::BuildFailed(e.to_string()))
+                    .map(|feed| {
                         feeds
-                            .add(venue.to_string(), metric_feed)
-                            .map_err(|_feed| miette!("The {venue} feed was added twice"))?;
-                    }
-                    Err(e) => match on_failure {
-                        OnFailure::FailRun => {
-                            return Err(miette!(
-                                "Failed to build the {venue} feed that --pamm lists: {e}"
-                            ));
-                        }
-                        OnFailure::Skip => warn!("Failed to build Metric feed, skipping: {e}"),
-                    },
-                }
-            }
+                            .add(venue.to_string(), feed)
+                            .is_ok()
+                    }),
+                None => Err(Unavailable::MissingSecret("METRIC_API_KEY")),
+            },
+            PammVenue::Baibai => BaibaiFeedBuilder::new(book_config.clone(), rpc_url.to_string())
+                .build()
+                .map_err(|e| Unavailable::BuildFailed(e.to_string()))
+                .map(|feed| {
+                    feeds
+                        .add(venue.to_string(), feed)
+                        .is_ok()
+                }),
+        };
+        match added {
+            Ok(true) => info!("Added {venue} feed"),
+            Ok(false) => return Err(miette!("The {venue} feed was added twice")),
+            Err(unavailable) => unavailable.handle(venue, &on_failure)?,
         }
     }
     Ok(())
@@ -557,6 +617,38 @@ enum OnFailure {
     Skip,
     /// A venue listed in `--pamm`: the run fails.
     FailRun,
+}
+
+/// Why a pAMM venue cannot run.
+enum Unavailable {
+    /// This environment variable, which holds the venue's credentials, is not set.
+    MissingSecret(&'static str),
+    /// The venue's feed failed to build, for this reason.
+    BuildFailed(String),
+}
+
+impl Unavailable {
+    /// Logs and skips `venue`, or fails the run, as `on_failure` says.
+    fn handle(self, venue: PammVenue, on_failure: &OnFailure) -> miette::Result<()> {
+        match (self, on_failure) {
+            (Unavailable::MissingSecret(name), OnFailure::FailRun) => Err(miette!(
+                "--pamm lists {}, but {name} is not set. Set it, or drop {} from --pamm.",
+                venue.cli_name(),
+                venue.cli_name()
+            )),
+            (Unavailable::MissingSecret(name), OnFailure::Skip) => {
+                info!("Skipping {venue}: its credentials are not set. Expected variable: {name}");
+                Ok(())
+            }
+            (Unavailable::BuildFailed(e), OnFailure::FailRun) => {
+                Err(miette!("Failed to build the {venue} feed that --pamm lists: {e}"))
+            }
+            (Unavailable::BuildFailed(e), OnFailure::Skip) => {
+                warn!("Failed to build {venue} feed, skipping: {e}");
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Hands one update to the harness. `false` once nobody is receiving, which is the processor's
@@ -576,14 +668,21 @@ async fn forward(
 mod tests {
     use super::*;
 
-    fn book_config() -> BookFeedConfig {
-        BookFeedConfig { chain: Chain::Base, tokens: Arc::new(HashMap::new()), min_tvl_usd: 0.0 }
+    /// The labels of the feeds `selection` adds on Base when `METRIC_API_KEY` holds `key`.
+    fn added(selection: &PammSelection, key: Option<&str>) -> miette::Result<Vec<String>> {
+        added_on(Chain::Base, selection, key)
     }
 
-    /// The labels of the feeds `selection` adds when `METRIC_API_KEY` holds `key`.
-    fn added(selection: &PammSelection, key: Option<&str>) -> miette::Result<Vec<String>> {
+    /// The labels of the feeds `selection` adds on `chain` when `METRIC_API_KEY` holds `key`.
+    fn added_on(
+        chain: Chain,
+        selection: &PammSelection,
+        key: Option<&str>,
+    ) -> miette::Result<Vec<String>> {
+        let book_config =
+            BookFeedConfig { chain, tokens: Arc::new(HashMap::new()), min_tvl_usd: 0.0 };
         let mut feeds = BookFeedStreams::new();
-        add_pamm_feeds(selection, &book_config(), &mut feeds, |name| {
+        add_pamm_feeds(selection, &book_config, "http://127.0.0.1:8545", &mut feeds, |name| {
             key.filter(|_| name == "METRIC_API_KEY")
                 .map(str::to_string)
         })?;
@@ -607,6 +706,8 @@ mod tests {
     fn a_venue_is_named_metric_on_the_cli_and_by_its_protocol_system_elsewhere() {
         assert_eq!(PammVenue::Metric.cli_name(), "metric");
         assert_eq!(PammVenue::Metric.to_string(), metric::PROTOCOL_SYSTEM);
+        assert_eq!(PammVenue::Baibai.cli_name(), "baibai");
+        assert_eq!(PammVenue::Baibai.to_string(), baibai::PROTOCOL_SYSTEM);
     }
 
     #[tokio::test]
@@ -645,6 +746,30 @@ mod tests {
         for selection in [PammSelection::Defaults, PammSelection::Listed(vec![PammVenue::Metric])] {
             assert_eq!(added(&selection, Some("key")).unwrap(), [metric::PROTOCOL_SYSTEM]);
         }
+    }
+
+    #[tokio::test]
+    async fn a_listed_venue_that_needs_no_credentials_is_added_without_them() {
+        let listed = PammSelection::Listed(vec![PammVenue::Baibai]);
+        assert_eq!(added(&listed, None).unwrap(), [baibai::PROTOCOL_SYSTEM]);
+    }
+
+    #[tokio::test]
+    async fn the_listed_venues_are_added_together() {
+        let listed = PammSelection::Listed(vec![PammVenue::Metric, PammVenue::Baibai]);
+        let mut labels = added(&listed, Some("key")).unwrap();
+        labels.sort();
+        assert_eq!(labels, [baibai::PROTOCOL_SYSTEM, metric::PROTOCOL_SYSTEM]);
+    }
+
+    #[tokio::test]
+    async fn a_listed_venue_off_its_chain_fails_the_run() {
+        let listed = PammSelection::Listed(vec![PammVenue::Baibai]);
+        let message = added_on(Chain::Ethereum, &listed, None)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("--pamm"), "{message}");
+        assert!(message.contains(baibai::PROTOCOL_SYSTEM), "{message}");
     }
 
     #[tokio::test]
@@ -704,14 +829,46 @@ mod tests {
         assert_eq!(venues, [bebop::PROTOCOL_SYSTEM, native::PROTOCOL_SYSTEM]);
     }
 
+    /// Euclid's gateway is public: it runs beside the keyed venues without credentials, and not
+    /// at all with RFQ disabled.
+    #[test]
+    fn the_keyless_venues_run_unless_rfq_is_disabled() {
+        let venues = |selection: RfqSelection| -> Vec<RfqVenue> {
+            selection
+                .venues()
+                .into_iter()
+                .map(|(venue, ..)| venue)
+                .collect()
+        };
+        assert_eq!(venues(RfqSelection::from_cli(false, secrets(&[]))), [RfqVenue::Euclid]);
+        assert_eq!(
+            venues(RfqSelection::from_cli(false, secrets(&[("BEBOP_KEY", "key")]))),
+            [RfqVenue::Bebop, RfqVenue::Euclid]
+        );
+        assert!(venues(RfqSelection::Disabled).is_empty());
+        // With no credentials, the warning still names the variables to set.
+        assert!(RfqSelection::from_cli(false, secrets(&[]))
+            .why_empty()
+            .contains("BEBOP_KEY"));
+    }
+
     /// Runs the processor in the current-thread test runtime, which polls none of the spawned
     /// feed tasks before the test ends, so no request leaves the machine.
     async fn run(rfq: RfqSelection, pamm: PammSelection) -> Option<JoinHandle<()>> {
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-        BookStreamProcessor::new(Chain::Base, 0.0, 1, Duration::ZERO, rfq, pamm, false)
-            .run_stream(Arc::new(HashMap::new()), sender)
-            .await
-            .unwrap()
+        BookStreamProcessor::new(
+            Chain::Base,
+            0.0,
+            1,
+            Duration::ZERO,
+            rfq,
+            pamm,
+            "http://127.0.0.1:8545".to_string(),
+            false,
+        )
+        .run_stream(Arc::new(HashMap::new()), sender)
+        .await
+        .unwrap()
     }
 
     #[tokio::test]

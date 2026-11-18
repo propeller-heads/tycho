@@ -148,6 +148,7 @@ pub mod builder;
 pub mod cache;
 mod chain;
 mod component_index;
+mod component_pause;
 mod contract;
 pub mod direct;
 mod entry_point;

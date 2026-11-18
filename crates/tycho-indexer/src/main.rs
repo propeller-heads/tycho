@@ -62,7 +62,7 @@ use tycho_indexer::{
         SubstreamsArgs,
     },
     extractor::{
-        factory::ExtractorFactory,
+        factory::{earlier_blocks_in_second, ExtractorFactory},
         protocol_cache::ProtocolMemoryCache,
         runner::ExtractorHandle,
         supervisor::{DCIType, ExtractorConfig, ExtractorSupervisor, ProtocolTypeConfig},
@@ -224,6 +224,34 @@ fn spawn_jemalloc_stats_reporter() {
             }
         }
     });
+}
+
+/// Logs a warning when the extraction runtime starts a task late.
+///
+/// The task asks to wake every 100 ms. A wake-up more than 250 ms late means that the runtime's
+/// threads were busy, for example with long synchronous work inside a task. The warning carries
+/// the delay as `stall_ms`. The task runs on one thread at a time, so it can miss a stall that
+/// blocks only another thread.
+async fn watch_extraction_runtime_stalls() {
+    const PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+    const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+    let mut tick = tokio::time::interval(PERIOD);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await;
+    let mut last = tokio::time::Instant::now();
+    loop {
+        tick.tick().await;
+        // `tick` returns the planned instant, so measure the actual wake-up time.
+        let now = tokio::time::Instant::now();
+        let delay = now
+            .duration_since(last)
+            .saturating_sub(PERIOD);
+        if delay > MAX_DELAY {
+            warn!(stall_ms = delay.as_millis(), "Extraction runtime stalled");
+        }
+        last = now;
+    }
 }
 
 /// Starts continuous profiling if `PYROSCOPE_SERVER_URL` is set and not empty, and returns no
@@ -394,6 +422,8 @@ fn run_indexer(global_args: &GlobalArgs, index_args: &IndexArgs) -> Result<(), E
         Ok::<_, ExtractionError>((extraction_tasks, other_tasks))
     })?;
 
+    extraction_runtime.spawn(watch_extraction_runtime_stalls());
+
     let extractor_ctrl_tx = control_tx.clone();
     extraction_runtime.spawn(async move {
         // Wait for the supervisors, shutting the whole process down as soon as one of them
@@ -455,10 +485,6 @@ fn run_indexer(global_args: &GlobalArgs, index_args: &IndexArgs) -> Result<(), E
 }
 
 #[tokio::main]
-#[expect(
-    clippy::unwrap_in_result,
-    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
-)]
 async fn run_spkg(global_args: &GlobalArgs, run_args: RunSpkgArgs) -> Result<(), ExtractionError> {
     create_tracing_subscriber();
     info!("Starting Tycho");
@@ -523,10 +549,6 @@ async fn run_spkg(global_args: &GlobalArgs, run_args: RunSpkgArgs) -> Result<(),
 }
 
 #[tokio::main]
-#[expect(
-    clippy::unwrap_in_result,
-    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
-)]
 async fn run_rpc(
     global_args: &GlobalArgs,
     rpc_args: &RpcServerArgs,
@@ -882,12 +904,13 @@ async fn get_accounts_data(
     rpc: &EthereumRpcClient,
     chain: Chain,
 ) -> (Block, HashMap<Bytes, AccountDelta>) {
-    let account_extractor = EVMAccountExtractor::new(rpc, chain);
-
-    let block = account_extractor
-        .get_block_data(block_id)
+    let block = earlier_blocks_in_second(rpc, chain, block_id)
         .await
-        .expect("Failed to get block data");
+        .expect("Failed to get block data")
+        .pop()
+        .expect("The blocks end with the init block");
+
+    let account_extractor = EVMAccountExtractor::new(rpc, chain);
 
     let requests = accounts
         .iter()
@@ -932,10 +955,6 @@ async fn shutdown_handler(
 }
 
 #[tokio::main]
-#[expect(
-    clippy::unwrap_in_result,
-    reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
-)]
 async fn run_analyze_tokens(
     global_args: &GlobalArgs,
     analyzer_args: AnalyzeTokenArgs,

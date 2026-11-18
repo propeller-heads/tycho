@@ -94,3 +94,6 @@ db/*.backup
 /tycho-client-py/dist/
 
 __pycache__/
+
+# tycho-review outputs and the worktrees of its runs
+.claude/reviews/

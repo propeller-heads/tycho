@@ -2,8 +2,9 @@ use num_bigint::BigUint;
 
 use super::{
     constants::{
-        FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
-        SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS,
+        BAIBAI_PROTOCOL_SYSTEM, FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM,
+        PRICE_LEVEL_STREAM_PREFIX, SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS,
+        UNISWAP_V3_FORKS,
     },
     group_swaps::group_swaps,
     subsidy::encoded_subsidy,
@@ -20,8 +21,13 @@ pub const TOKEN_APPROVAL_GAS: u64 = 25_000;
 /// Gas usage for a permit2 transfer from the user
 pub const USER_PERMIT2_TRANSFER: u64 = 80_000;
 
-/// Callback-based protocols: the input `transferFrom` happens inside the callback, which is
-/// inside `swap()`. The gas is thus already included in `get_amount_out`.
+/// Exact-name callback-based protocols: the input `transferFrom` happens inside the callback,
+/// which is inside `swap()`. The gas is thus already included in `get_amount_out`.
+///
+/// Incomplete on its own: every Uniswap V3 and Slipstream fork qualifies too. Use
+/// [`is_callback_protocol`] for the full classification. The forks listed here before that
+/// function existed stay listed, so code that reads this public list directly keeps its answer
+/// for them.
 pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "uniswap_v3",
     "pancakeswap_v3",
@@ -38,6 +44,15 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "aero_cl",
     "vm:balancer_v3",
 ];
+
+/// Whether `protocol_system` pulls its input inside a swap callback (see
+/// [`PROTOCOLS_CALLBACK`]). Uniswap V3 and Slipstream forks all swap through the Uniswap V3 pool
+/// ABI and pay in its callback, so a fork added to either list is covered without a second edit.
+pub fn is_callback_protocol(protocol_system: &str) -> bool {
+    PROTOCOLS_CALLBACK.contains(&protocol_system) ||
+        UNISWAP_V3_FORKS.contains(&protocol_system) ||
+        SLIPSTREAMS_FORKS.contains(&protocol_system)
+}
 
 /// Exact-name protocols where the router-to-pool input transfer is skipped (funds are sent
 /// directly without an intermediate router hop). The input transfer cost is therefore not
@@ -74,12 +89,14 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "vm:balancer_v2",
     "vm:curve",
     "rfq:bebop",
+    "rfq:euclid",
     "rfq:hashflow",
     "rfq:liquorice",
     "rfq:metric",
     "erc4626",
     "ring_swap_v2",
     "sky",
+    BAIBAI_PROTOCOL_SYSTEM,
 ];
 
 /// Whether the router must approve the protocol before swapping (see
@@ -107,7 +124,7 @@ pub const SUBSIDY_GAS: u64 = 65_000;
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
 pub const PROTOCOLS_OUTPUT_TO_ROUTER: &[&str] =
-    &["vm:curve", "rocketpool", "fluid_v1", "native_wrapper", "lido_v4"];
+    &["vm:curve", "rocketpool", "fluid_v1", "native_wrapper", "lido_v4", "rfq:euclid"];
 
 /// Mainnet stETH, the only Lido input token whose leg the router has to approve. Lido is
 /// configured on mainnet only, so a plain constant is enough.
@@ -169,38 +186,12 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
         total_gas += BigUint::from(SUBSIDY_GAS);
     }
 
-    // Add user transfer overhead
-    if strategy != Strategy::Split {
-        if let Some(first_group) = swap_groups.first() {
-            let protocol = first_group.protocol_system.as_str();
-            // if the solution is not a split swap, the protocol gas usage for callback protocols
-            // already includes a regular transfer gas usage:
-            // - for the permit2 case we need to deduct the transfer usage already included
-            // - for the regular transfer from and vault, do nothing, everything is already
-            //   accounted
-            if PROTOCOLS_CALLBACK.contains(&protocol) {
-                if *solution.user_transfer_type() == UserTransferType::TransferFromPermit2 {
-                    total_gas += BigUint::from(USER_PERMIT2_TRANSFER - DEFAULT_TOKEN_TRANSFER_GAS);
-                }
-            } else {
-                total_gas += BigUint::from(match *solution.user_transfer_type() {
-                    UserTransferType::TransferFromPermit2 => USER_PERMIT2_TRANSFER,
-                    UserTransferType::TransferFrom | UserTransferType::UseVaultsFunds => {
-                        DEFAULT_TOKEN_TRANSFER_GAS
-                    } /* TransferFrom and UseVaultsFunds have
-                       * similar overheads */
-                });
-            }
-        }
-    } else {
-        // for split swaps the funds always go through the router first
-        total_gas += BigUint::from(match *solution.user_transfer_type() {
-            UserTransferType::TransferFromPermit2 => USER_PERMIT2_TRANSFER,
-            UserTransferType::TransferFrom | UserTransferType::UseVaultsFunds => {
-                DEFAULT_TOKEN_TRANSFER_GAS
-            } /* TransferFrom and UseVaultsFunds have
-               * similar overheads */
-        });
+    if let Some(first_group) = swap_groups.first() {
+        total_gas += estimate_user_transfer_gas(
+            &first_group.protocol_system,
+            solution.user_transfer_type(),
+            &strategy,
+        );
     }
 
     // Add fees overhead: when fees are active and the last swap's protocol does not
@@ -216,6 +207,36 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
     }
 
     total_gas
+}
+
+/// Gas for the user's input transfer that is NOT captured by the first swap's `get_amount_out`.
+///
+/// A non-split solution's first protocol, if it is a callback protocol, already pays a regular
+/// `transferFrom` inside `swap()`, so only the Permit2 delta (`USER_PERMIT2_TRANSFER -
+/// DEFAULT_TOKEN_TRANSFER_GAS`) is added for Permit2 users. Any other first protocol adds the full
+/// user transfer. A split solution always adds the full user transfer, because its funds go
+/// through the router first.
+///
+/// Public so a solver can rank a route's first leg on the gas this estimator will charge for it.
+pub fn estimate_user_transfer_gas(
+    first_protocol_system: &str,
+    user_transfer_type: &UserTransferType,
+    strategy: &Strategy,
+) -> BigUint {
+    let full_transfer = match user_transfer_type {
+        UserTransferType::TransferFromPermit2 => USER_PERMIT2_TRANSFER,
+        // TransferFrom and UseVaultsFunds have similar overheads.
+        UserTransferType::TransferFrom | UserTransferType::UseVaultsFunds => {
+            DEFAULT_TOKEN_TRANSFER_GAS
+        }
+    };
+    let included_in_swap =
+        *strategy != Strategy::Split && is_callback_protocol(first_protocol_system);
+    if included_in_swap {
+        BigUint::from(full_transfer - DEFAULT_TOKEN_TRANSFER_GAS)
+    } else {
+        BigUint::from(full_transfer)
+    }
 }
 
 fn transfer_token_gas(token: &tycho_common::models::token::Token) -> BigUint {
@@ -253,7 +274,10 @@ fn transfer_token_gas(token: &tycho_common::models::token::Token) -> BigUint {
 ///   Curve, etc.), regardless of other exclusions.
 /// - **Output**: the extra `_transferOut(router, receiver)` for protocols with `outputToRouter =
 ///   true`, or any protocol when the strategy is Split (output always routes through the router).
-fn estimate_transfer_overhead(
+///
+/// `estimate_gas_usage` charges this once per swap group. It is public so a solver can rank each
+/// leg of a route on the gas this estimator will charge for it.
+pub fn estimate_transfer_overhead(
     protocol_system: &str,
     token_in: &tycho_common::models::token::Token,
     token_out: &tycho_common::models::token::Token,
@@ -265,7 +289,7 @@ fn estimate_transfer_overhead(
     // - Callback protocols handle it inside the callback (part of swap gas).
     // - Protocols that can have an optimizable transfer in should not be included here either
     //   because the extra transfer is skipped but only if the strategy is not Split
-    if !PROTOCOLS_CALLBACK.contains(&protocol_system) &&
+    if !is_callback_protocol(protocol_system) &&
         (!optimizable_transfer_in(protocol_system) || *strategy == Strategy::Split)
     {
         overhead += transfer_token_gas(token_in);
@@ -507,11 +531,53 @@ mod tests {
         assert_eq!(gas, BigUint::from(285_000u64));
     }
 
+    #[rstest]
+    // callback pulls a regular transfer inside swap()          0
+    #[case::callback_transfer_from(
+        "uniswap_v3",
+        UserTransferType::TransferFrom,
+        Strategy::Single,
+        0
+    )]
+    // USER_PERMIT2_TRANSFER − the transfer in pool gas    40_000
+    #[case::callback_permit2(
+        "uniswap_v3",
+        UserTransferType::TransferFromPermit2,
+        Strategy::Single,
+        40_000
+    )]
+    // DEFAULT_TOKEN_TRANSFER_GAS                          40_000
+    #[case::push_payment_transfer_from(
+        "fallback:fermiswap",
+        UserTransferType::TransferFrom,
+        Strategy::Sequential,
+        40_000
+    )]
+    // USER_PERMIT2_TRANSFER                               80_000
+    #[case::push_payment_permit2(
+        "uniswap_v2",
+        UserTransferType::TransferFromPermit2,
+        Strategy::Single,
+        80_000
+    )]
+    // split funds go through the router first: DEFAULT_TOKEN_TRANSFER_GAS 40_000
+    #[case::split_callback("uniswap_v3", UserTransferType::UseVaultsFunds, Strategy::Split, 40_000)]
+    fn test_user_transfer_gas(
+        #[case] first_protocol_system: &str,
+        #[case] user_transfer_type: UserTransferType,
+        #[case] strategy: Strategy,
+        #[case] expected: u64,
+    ) {
+        let gas = estimate_user_transfer_gas(first_protocol_system, &user_transfer_type, &strategy);
+
+        assert_eq!(gas, BigUint::from(expected));
+    }
+
     #[test]
     fn test_single_callback_protocol() {
-        // uniswap_v3 is a callback protocol: the pool pulls funds inside the callback, so that
-        // cost is already in pool gas. The only extra is the fee path's output transfer.
-        let solution = make_solution(vec![make_swap("uniswap_v3")]);
+        // The pool pulls funds inside the callback, so that cost is already in pool gas. The only
+        // extra is the fee path's output transfer.
+        let solution = make_solution(vec![make_swap("uniswap_v4")]);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
 
         // user transfer                             0  ← callback + TransferFrom, nothing extra
@@ -519,6 +585,21 @@ mod tests {
         // pool gas                            100_000
         // fee output transfer                  60_000  ← TOKEN_GAS, fee path adds _transferOut
         assert_eq!(gas, BigUint::from(160_000u64));
+    }
+
+    #[test]
+    fn test_single_callback_protocol_covers_every_v3_and_slipstream_fork() {
+        // Every fork in either list pays inside the Uniswap V3 swap callback, so each costs the
+        // same as `test_single_callback_protocol`, including a fork added to a list later.
+        for protocol_system in UNISWAP_V3_FORKS
+            .iter()
+            .chain(SLIPSTREAMS_FORKS)
+        {
+            let solution = make_solution(vec![make_swap(protocol_system)]);
+            let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+            assert_eq!(gas, BigUint::from(160_000u64), "{protocol_system}");
+        }
     }
 
     #[test]
@@ -568,6 +649,24 @@ mod tests {
         // hop1 input transfer (router → pool)   60_000  ← vm:curve is not optimizable/callback
         // hop1 approval (ProtocolWillDebit)     25_000  ← TOKEN_APPROVAL_GAS
         // hop1 output to router                 60_000  ← vm:curve in OUTPUT_TO_ROUTER
+        // hop2 pool gas                        100_000
+        // hop2 input transfer                       0  ← uniswap_v2 is optimizable
+        // fee output transfer (last hop)        60_000  ← uniswap_v2 not in OUTPUT_TO_ROUTER
+        assert_eq!(gas, BigUint::from(445_000u64));
+    }
+
+    #[test]
+    fn test_sequential_two_hops_signed_quote_output_to_router() {
+        // Sequential rfq:euclid → uniswap_v2:
+        // the 1inch router pays the TychoRouter, which sends the output on to the next pool
+        let solution = make_solution(vec![make_swap("rfq:euclid"), make_swap("uniswap_v2")]);
+        let gas = estimate_gas_usage(&solution, Strategy::Sequential);
+
+        // user transfer (first hop, TransferFrom) 40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // hop1 pool gas                        100_000
+        // hop1 input transfer (router → pool)   60_000  ← rfq:euclid is not optimizable/callback
+        // hop1 approval (ProtocolWillDebit)     25_000  ← TOKEN_APPROVAL_GAS
+        // hop1 output to router                 60_000  ← rfq:euclid in OUTPUT_TO_ROUTER
         // hop2 pool gas                        100_000
         // hop2 input transfer                       0  ← uniswap_v2 is optimizable
         // fee output transfer (last hop)        60_000  ← uniswap_v2 not in OUTPUT_TO_ROUTER

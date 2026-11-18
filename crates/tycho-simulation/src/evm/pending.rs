@@ -162,9 +162,9 @@ impl PendingBlockProcessor {
         let target_header = BlockHeader::from(target_block);
 
         let mut pending_deltas: HashMap<String, BlockAggregatedChanges> = HashMap::new();
-        for (extractor, indexer) in &self.indexers {
+        for (protocol_system, indexer) in &self.indexers {
             let changes = indexer.generate_deltas(pending);
-            pending_deltas.insert(extractor.clone(), changes);
+            pending_deltas.insert(protocol_system.clone(), changes);
         }
 
         let update = self

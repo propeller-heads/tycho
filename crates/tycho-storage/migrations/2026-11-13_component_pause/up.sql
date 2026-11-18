@@ -1,0 +1,32 @@
+-- Admin pauses of protocol components. Unpausing sets unpaused_at instead of deleting the row,
+-- so the table keeps every past pause.
+CREATE TABLE IF NOT EXISTS component_pause (
+    id                 BIGSERIAL PRIMARY KEY,
+    chain_id           BIGINT NOT NULL REFERENCES chain(id),
+    protocol_system_id BIGINT NOT NULL REFERENCES protocol_system(id),
+    -- External id of the component. No foreign key: reverting a reorg deletes the components
+    -- created after the fork, and a foreign key would delete their pauses or block the revert.
+    -- It also lets an operator pause an id the indexer has not reached yet.
+    component_id       VARCHAR(255) NOT NULL,
+    -- Operator audit fields. No logic depends on them.
+    reason             TEXT,
+    actor              TEXT,
+    evidence_url       TEXT,
+    unpause_actor      TEXT,
+    unpause_reason     TEXT,
+    paused_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    unpaused_at        TIMESTAMPTZ,
+    inserted_ts        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    modified_ts        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- At most one open pause per component. A component id is unique per chain, so the protocol
+-- system is not part of the key.
+CREATE UNIQUE INDEX IF NOT EXISTS component_pause_open_idx
+    ON component_pause (chain_id, component_id)
+    WHERE unpaused_at IS NULL;
+
+CREATE TRIGGER update_modtime_component_pause
+    BEFORE UPDATE ON component_pause
+    FOR EACH ROW
+    EXECUTE PROCEDURE update_modified_column();

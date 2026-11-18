@@ -1,5 +1,6 @@
 mod aerodrome_v1;
 mod angstrom;
+mod baibai;
 mod balancer_v2;
 mod balancer_v3;
 mod bebop;
@@ -10,6 +11,7 @@ mod ekubo;
 mod ekubo_v3;
 mod erc_4626;
 mod etherfi;
+mod euclid;
 mod fallback;
 pub use fallback::{FallbackProtocol, FallbackSwapData};
 mod fermiswap;

@@ -148,9 +148,10 @@ The `ImplementationType` enum has two variants (`Custom`, `Vm`), but three patte
   Balancer V2, Maverick V2. Often paired with DCI for dynamic contract discovery.
 - **Hybrid**: Combines explicit protocol state attributes (from Substreams) with contract storage
   tracking. Simulation uses both: decoded state for known fields, raw storage for on-chain VM
-  execution. Runtime pattern, not a separate enum variant. Fluid V1, Balancer V3, Curve. Note that
-  Balancer V3 and Curve keep VM-shaped indexing (`vm:` component keys, full contract storage) —
-  only their quote path is native Rust.
+  execution. Runtime pattern, not a separate enum variant. Fluid V1, Balancer V3, Curve. Balancer V3
+  and Curve keep VM-shaped indexing (full contract storage) and, from before the rule, their `vm:`
+  keys; only their quote path is native Rust. A new hybrid that quotes natively takes a key without
+  the `vm:` prefix, which marks protocols whose quotes run through the VM.
 
 ### ReorgBuffer + finality
 
