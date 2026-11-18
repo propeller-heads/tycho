@@ -93,7 +93,7 @@ mod tests {
         db_fixtures::set_active_instance(&mut conn, protocol_system_id, Some(id)).await;
 
         assert_eq!(
-            active_instance(&mut conn, "vm:curve")
+            active_instance("vm:curve", &mut conn)
                 .await
                 .unwrap(),
             Some(id)
@@ -108,7 +108,7 @@ mod tests {
         db_fixtures::insert_instance(&mut conn, protocol_system_id, "0.0.1").await;
 
         assert_eq!(
-            active_instance(&mut conn, "vm:curve")
+            active_instance("vm:curve", &mut conn)
                 .await
                 .unwrap(),
             None
@@ -120,7 +120,7 @@ mod tests {
         let mut conn = instance_test_connection().await;
 
         assert_eq!(
-            active_instance(&mut conn, "not-a-protocol")
+            active_instance("not-a-protocol", &mut conn)
                 .await
                 .unwrap(),
             None
