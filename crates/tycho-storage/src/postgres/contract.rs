@@ -425,8 +425,17 @@ impl PostgresGateway {
 
             // Restore full state delta at from target version for accounts that were deleted
             let version = Some(Version::from_ts(*target_version_ts));
+            // This gateway ignores the protocol system.
             let restored: HashMap<Address, AccountDelta> = self
-                .get_contracts(chain, Some(&deleted_addresses), version.as_ref(), true, None, conn)
+                .get_contracts(
+                    chain,
+                    "",
+                    Some(&deleted_addresses),
+                    version.as_ref(),
+                    true,
+                    None,
+                    conn,
+                )
                 .await
                 .map_err(PostgresError::from)?
                 .entity
@@ -705,6 +714,7 @@ impl PostgresGateway {
     pub async fn get_contract(
         &self,
         id: &ContractId,
+        protocol_system: &str,
         version: Option<&Version>,
         include_slots: bool,
         conn: &mut AsyncPgConnection,
@@ -721,7 +731,14 @@ impl PostgresGateway {
         let chain = id.chain;
 
         let mut all_balances = self
-            .get_account_balances(&chain, Some(slice::from_ref(&id.address)), version, true, conn)
+            .get_account_balances(
+                &chain,
+                protocol_system,
+                Some(slice::from_ref(&id.address)),
+                version,
+                true,
+                conn,
+            )
             .await?;
         let account_balances = all_balances
             .get_mut(&id.address)
@@ -800,10 +817,12 @@ impl PostgresGateway {
     /// The returned `total` is the number of accounts matching the filters at `version`, so the
     /// caller can tell how many pages exist. Note that on the `ids` path an account that has no
     /// code at `version` is counted but not returned.
+    #[expect(clippy::too_many_arguments, reason = "one argument per query filter")]
     #[instrument(level = Level::DEBUG, skip(self, ids, conn))]
     pub async fn get_contracts(
         &self,
         chain: &Chain,
+        protocol_system: &str,
         ids: Option<&[Address]>,
         version: Option<&Version>,
         include_slots: bool,
@@ -882,7 +901,14 @@ impl PostgresGateway {
             .collect::<Vec<_>>();
 
         let mut all_balances = self
-            .get_account_balances(chain, Some(&page_addresses), version, true, conn)
+            .get_account_balances(
+                chain,
+                protocol_system,
+                Some(&page_addresses),
+                version,
+                true,
+                conn,
+            )
             .await?;
 
         let codes = {
@@ -1566,6 +1592,7 @@ impl PostgresGateway {
     pub async fn get_account_balances(
         &self,
         chain: &Chain,
+        _protocol_system: &str,
         accounts: Option<&[Address]>,
         at: Option<&Version>,
         include_native: bool,
