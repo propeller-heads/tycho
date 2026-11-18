@@ -3,7 +3,21 @@ use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tracing::{debug_span, warn, Instrument};
 use tycho_common::{models::blockchain::Block, storage::StorageError};
 
-use crate::postgres::{convert_int, orm, storage_error_from_diesel, ChainEnumCache};
+use crate::postgres::{
+    convert_int, instance::gateway::PostgresGatewayNew, orm, storage_error_from_diesel,
+    ChainEnumCache,
+};
+
+impl PostgresGatewayNew {
+    /// Runs [`upsert_blocks`] with this gateway's chain cache.
+    pub(crate) async fn upsert_block(
+        &self,
+        blocks: &[Block],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(), StorageError> {
+        upsert_blocks(&self.chain_id_cache, blocks, conn).await
+    }
+}
 
 /// Inserts `blocks` into the shared block table, all on the chain of the first block. A block whose
 /// hash is already stored is left as it is.
