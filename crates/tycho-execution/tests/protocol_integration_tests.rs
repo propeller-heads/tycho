@@ -16,8 +16,8 @@ use tycho_execution::encoding::{
 };
 
 use crate::common::{
-    alice_address, bob_address, dai, encoding::encode_tycho_router_call, eth, eth_chain,
-    get_signer, get_tycho_router_encoder, ondo, pepe, usdc, usdt, wbtc, weth,
+    alice_address, bob_address, client_fee_receiver, dai, encoding::encode_tycho_router_call, eth,
+    eth_chain, get_signer, get_tycho_router_encoder, ondo, pepe, usdc, usdt, wbtc, weth,
 };
 
 #[test]
@@ -4880,64 +4880,103 @@ fn test_single_encoding_strategy_euclid_partial_fill() {
     );
 }
 
-/// A single Montra swap on Elysium, by pool and tokens, with the amounts the router checks.
-/// Expected outputs are V4Quoter 0x379F556c5a748BD7Cc9baF0F7A344094Ac1814f5
-/// `quoteExactInputSingle` results at Elysium block 6024400.
-struct MontraSingleSwap {
-    pool_id: &'static str,
-    token_in: Bytes,
-    token_out: Bytes,
-    amount_in: &'static str,
-    expected_amount_out: &'static str,
-    user_transfer_type: UserTransferType,
+/// Montra launch pools and tokens on Elysium the router tests swap through. Expected outputs
+/// are V4Quoter 0x379F556c5a748BD7Cc9baF0F7A344094Ac1814f5 `quoteExactInputSingle` (one hop) and
+/// `quoteExactInput` (two hops) results at Elysium block 6024400, the fork block of
+/// UniswapV4Montra.t.sol.
+mod montra {
+    /// Native HYPE (currency0) / launch token.
+    pub const BUY_POOL: &str = "0x850fd929fb9399c5d881c587a601e47b8eb20b361bb224651fcd2883852e22e9";
+    pub const BUY_POOL_TOKEN: &str = "0x95925e9c25fe28a046bcd43662b826afac06b22d";
+    /// Native HYPE (currency0) / launch token.
+    pub const NATIVE_SELL_POOL: &str =
+        "0x35bd0e6a8b82e0e18b0381757d97ba01cde11a02740f006132dd40395ffc8ce2";
+    pub const NATIVE_SELL_POOL_TOKEN: &str = "0x32193afd14c53f12c45a4c04eca9f7ba98e3ec71";
+    /// wNVDAx (currency0, 18 decimals) / launch token.
+    pub const ERC20_POOL: &str =
+        "0x33f724fd9727a72d72c2777a17577874e02fa4a6207f88177bedad3c207cc28a";
+    pub const ERC20_POOL_TOKEN: &str = "0xec8a718f0bc06c25b92082f7ba595931e0d579dc";
+    pub const WNVDAX: &str = "0x11265018bf2d5a99fb71efae73ad670203c1df44";
 }
 
-/// Writes the router calldata of `case` under `name`, for UniswapV4Montra.t.sol, which runs it
-/// and asserts the output. The minimum output is 1% below the expected one. The component is
-/// the one the `uniswap_v4_hooks` Elysium extractor emits for a Montra pool: a Uniswap V4 pool
-/// with Montra's `LaunchHook`, the dynamic-fee flag and tick spacing 200.
-fn write_montra_single_swap(name: &str, case: MontraSingleSwap) {
-    let component = ProtocolComponent {
-        id: case.pool_id.to_string(),
+/// The component the `uniswap_v4_hooks` Elysium extractor emits for the Montra pool `pool_id`:
+/// a Uniswap V4 pool with Montra's `LaunchHook`, the dynamic-fee flag and tick spacing 200.
+fn montra_component(pool_id: &str) -> ProtocolComponent {
+    ProtocolComponent {
+        id: pool_id.to_string(),
         protocol_system: "uniswap_v4_hooks".to_string(),
         static_attributes: HashMap::from([
             ("key_lp_fee".to_string(), Bytes::from("0x00800000")),
             ("tick_spacing".to_string(), Bytes::from("0x00c8")),
             ("hooks".to_string(), Bytes::from("0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec")),
-            ("pool_id".to_string(), Bytes::from(case.pool_id)),
+            ("pool_id".to_string(), Bytes::from(pool_id)),
         ]),
         ..Default::default()
-    };
-    let expected_amount_out = BigUint::from_str(case.expected_amount_out).unwrap();
-    let min_amount_out = &expected_amount_out * 99u32 / 100u32;
+    }
+}
+
+/// A Montra trade on Elysium through the router: its hops as (pool, token in, token out), the
+/// amounts the router checks and the client fee it takes.
+struct MontraTrade {
+    hops: Vec<(&'static str, Bytes, Bytes)>,
+    amount_in: &'static str,
+    expected_amount_out: &'static str,
+    /// `None`: 1% below the expected output, which a correct swap clears with room to spare.
+    min_amount_out: Option<&'static str>,
+    user_transfer_type: UserTransferType,
+    /// In the router's fee units, 100_000_000 = 100%.
+    client_fee_bps: u32,
+}
+
+/// Writes the router calldata of `trade` under `name`, for UniswapV4Montra.t.sol, which runs it
+/// and asserts the output.
+fn write_montra_trade(name: &str, trade: MontraTrade) {
+    let token_in = trade.hops[0].1.clone();
+    let token_out = trade.hops[trade.hops.len() - 1]
+        .2
+        .clone();
+    let expected_amount_out = BigUint::from_str(trade.expected_amount_out).unwrap();
+    let min_amount_out = trade.min_amount_out.map_or_else(
+        || &expected_amount_out * 99u32 / 100u32,
+        |min| BigUint::from_str(min).unwrap(),
+    );
+    let swaps = trade
+        .hops
+        .into_iter()
+        .map(|(pool, hop_in, hop_out)| {
+            Swap::new(
+                montra_component(pool),
+                default_token(hop_in),
+                default_token(hop_out),
+                BigUint::ZERO,
+            )
+        })
+        .collect();
     let solution = Solution::new(
         alice_address(),
         alice_address(),
-        case.token_in.clone(),
-        case.token_out.clone(),
-        BigUint::from_str(case.amount_in).unwrap(),
+        token_in,
+        token_out,
+        BigUint::from_str(trade.amount_in).unwrap(),
         expected_amount_out,
         min_amount_out,
-        vec![Swap::new(
-            component,
-            default_token(case.token_in),
-            default_token(case.token_out),
-            BigUint::ZERO,
-        )],
+        swaps,
     )
-    .with_user_transfer_type(case.user_transfer_type);
+    .with_user_transfer_type(trade.user_transfer_type);
     let encoded = get_tycho_router_encoder(Chain::Elysium)
         .encode_solutions(vec![solution.clone()])
         .unwrap()
         .remove(0);
+    let client_fee_receiver =
+        if trade.client_fee_bps == 0 { Bytes::zero(20) } else { client_fee_receiver() };
     let calldata = encode_tycho_router_call(
         Chain::Elysium.id(),
         &encoded,
         &solution,
         &Chain::Elysium.native_token().address,
         Some(get_signer()),
-        0,
-        &Bytes::zero(20),
+        trade.client_fee_bps,
+        &client_fee_receiver,
         &BigUint::ZERO,
     )
     .unwrap()
@@ -4945,18 +4984,22 @@ fn write_montra_single_swap(name: &str, case: MontraSingleSwap) {
     write_calldata_to_file(name, &encode(calldata));
 }
 
+fn hype() -> Bytes {
+    Chain::Elysium.native_token().address
+}
+
 #[test]
 fn test_single_encoding_strategy_montra_native_quote_buy() {
     // HYPE ───(Montra 0x850fd929)──> launch token, 1 HYPE paid as value
-    write_montra_single_swap(
+    write_montra_trade(
         "test_single_encoding_strategy_montra_native_quote_buy",
-        MontraSingleSwap {
-            pool_id: "0x850fd929fb9399c5d881c587a601e47b8eb20b361bb224651fcd2883852e22e9",
-            token_in: Chain::Elysium.native_token().address,
-            token_out: Bytes::from("0x95925e9c25fe28a046bcd43662b826afac06b22d"),
+        MontraTrade {
+            hops: vec![(montra::BUY_POOL, hype(), Bytes::from(montra::BUY_POOL_TOKEN))],
             amount_in: "1000000000000000000",
             expected_amount_out: "22658136496415342153969658",
+            min_amount_out: None,
             user_transfer_type: UserTransferType::TransferFrom,
+            client_fee_bps: 0,
         },
     );
 }
@@ -4964,15 +5007,19 @@ fn test_single_encoding_strategy_montra_native_quote_buy() {
 #[test]
 fn test_single_encoding_strategy_montra_native_quote_sell() {
     // launch token ───(Montra 0x35bd0e6a)──> HYPE, 1e24 of the token through Permit2
-    write_montra_single_swap(
+    write_montra_trade(
         "test_single_encoding_strategy_montra_native_quote_sell",
-        MontraSingleSwap {
-            pool_id: "0x35bd0e6a8b82e0e18b0381757d97ba01cde11a02740f006132dd40395ffc8ce2",
-            token_in: Bytes::from("0x32193afd14c53f12c45a4c04eca9f7ba98e3ec71"),
-            token_out: Chain::Elysium.native_token().address,
+        MontraTrade {
+            hops: vec![(
+                montra::NATIVE_SELL_POOL,
+                Bytes::from(montra::NATIVE_SELL_POOL_TOKEN),
+                hype(),
+            )],
             amount_in: "1000000000000000000000000",
             expected_amount_out: "5092761962617617745",
+            min_amount_out: None,
             user_transfer_type: UserTransferType::TransferFromPermit2,
+            client_fee_bps: 0,
         },
     );
 }
@@ -4980,15 +5027,76 @@ fn test_single_encoding_strategy_montra_native_quote_sell() {
 #[test]
 fn test_single_encoding_strategy_montra_erc20_quote_sell() {
     // launch token ───(Montra 0x33f724fd)──> wNVDAx, 1e24 of the token through Permit2
-    write_montra_single_swap(
+    write_montra_trade(
         "test_single_encoding_strategy_montra_erc20_quote_sell",
-        MontraSingleSwap {
-            pool_id: "0x33f724fd9727a72d72c2777a17577874e02fa4a6207f88177bedad3c207cc28a",
-            token_in: Bytes::from("0xec8a718f0bc06c25b92082f7ba595931e0d579dc"),
-            token_out: Bytes::from("0x11265018bf2d5a99fb71efae73ad670203c1df44"),
+        MontraTrade {
+            hops: vec![(
+                montra::ERC20_POOL,
+                Bytes::from(montra::ERC20_POOL_TOKEN),
+                Bytes::from(montra::WNVDAX),
+            )],
             amount_in: "1000000000000000000000000",
             expected_amount_out: "22834129896015656",
+            min_amount_out: None,
             user_transfer_type: UserTransferType::TransferFromPermit2,
+            client_fee_bps: 0,
+        },
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_montra_erc20_quote_buy() {
+    // wNVDAx ───(Montra 0x33f724fd)──> launch token, 0.01 wNVDAx through Permit2: the hook takes
+    // its fee from the ERC-20 input.
+    write_montra_trade(
+        "test_single_encoding_strategy_montra_erc20_quote_buy",
+        MontraTrade {
+            hops: vec![(
+                montra::ERC20_POOL,
+                Bytes::from(montra::WNVDAX),
+                Bytes::from(montra::ERC20_POOL_TOKEN),
+            )],
+            amount_in: "10000000000000000",
+            expected_amount_out: "428563952001316776957803",
+            min_amount_out: None,
+            user_transfer_type: UserTransferType::TransferFromPermit2,
+            client_fee_bps: 0,
+        },
+    );
+}
+
+/// launch token ───(Montra 0x35bd0e6a, sell)──> HYPE ───(Montra 0x850fd929, buy)──> launch token
+///
+/// Both hops are one grouped Uniswap V4 swap, so the second Montra hop is a non-first hop of the
+/// group, settled inside the same unlock. The client takes 1% (1_000_000 fee units) of the
+/// 105599768801641583489401170 output, 1055997688016415834894011, and the minimum output is
+/// exactly what Alice then receives, so the slippage check binds: `binding_min` writes it, and
+/// `one_above` asks for one unit more, which the router refuses.
+#[rstest::rstest]
+#[case::binding_min(
+    "test_single_encoding_strategy_montra_grouped_sell_then_buy_with_client_fee",
+    "104543771113625167654507159"
+)]
+#[case::one_above(
+    "test_single_encoding_strategy_montra_grouped_sell_then_buy_min_out_one_above",
+    "104543771113625167654507160"
+)]
+fn test_single_encoding_strategy_montra_grouped_sell_then_buy(
+    #[case] name: &str,
+    #[case] min_amount_out: &'static str,
+) {
+    write_montra_trade(
+        name,
+        MontraTrade {
+            hops: vec![
+                (montra::NATIVE_SELL_POOL, Bytes::from(montra::NATIVE_SELL_POOL_TOKEN), hype()),
+                (montra::BUY_POOL, hype(), Bytes::from(montra::BUY_POOL_TOKEN)),
+            ],
+            amount_in: "1000000000000000000000000",
+            expected_amount_out: "105599768801641583489401170",
+            min_amount_out: Some(min_amount_out),
+            user_transfer_type: UserTransferType::TransferFromPermit2,
+            client_fee_bps: 1_000_000,
         },
     );
 }

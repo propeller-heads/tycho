@@ -23,6 +23,9 @@ fs_permissions = [
     # with; the test checks the runtime bytecode fixtures protocol-testing plants and
     # `script/WriteRuntimeBytecodeFixtures.s.sol` writes them.
     { access = "read", path = "../config/executor_deployments.json" },
+    # `test/protocols/UniswapV4Montra.t.sol` deploys its executor where the Rust-encoded calldata
+    # names it.
+    { access = "read", path = "../config/test_executor_addresses.json" },
     { access = "read-write", path = "../../../protocols/testing/fixtures" },
     # `test/protocols/EkuboV3MevCaptureV21Gas.t.sol` checks the swaps that
     # tycho-simulation's MEVCapture v2.1 gas model is fitted to, and rewrites

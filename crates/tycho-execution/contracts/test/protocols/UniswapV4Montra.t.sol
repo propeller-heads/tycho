@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {UniswapV4Executor} from "@src/executors/UniswapV4Executor.sol";
+import {TychoRouter__NegativeSlippage} from "@src/TychoRouterV3.sol";
 import {Constants} from "../Constants.sol";
 import {TestUtils} from "../TestUtils.sol";
 import {TychoRouterTestSetup} from "../TychoRouterTestSetup.sol";
@@ -11,11 +12,10 @@ import {UniswapV4ExecutorExposed} from "./UniswapV4.t.sol";
 
 /// @dev Montra launch pools on Elysium, protocol system uniswap_v4_hooks: Uniswap V4 pools whose
 ///      hook is Montra's LaunchHook, swapped through the Elysium UniswapV4Executor with empty
-///      hook data. The hook takes its
-///      fee through the deltas beforeSwap and afterSwap return, so the amount the executor takes
-///      is already net of it. Expected outputs are V4Quoter
-///      (0x379F556c5a748BD7Cc9baF0F7A344094Ac1814f5) quoteExactInputSingle results at the fork
-///      block.
+///      hook data. The hook takes its fee through the deltas beforeSwap and afterSwap return, so
+///      the amount the executor takes is already net of it. Expected outputs are V4Quoter
+///      (0x379F556c5a748BD7Cc9baF0F7A344094Ac1814f5) quoteExactInputSingle and quoteExactInput
+///      results at the fork block.
 abstract contract MontraFixtures is TestUtils {
     uint256 internal constant ELYSIUM_FORK_BLOCK = 6024400;
     address internal constant MONTRA_HOOK =
@@ -40,6 +40,17 @@ abstract contract MontraFixtures is TestUtils {
         0xec8A718F0bC06C25B92082F7bA595931E0D579Dc;
     uint256 internal constant ERC20_SELL_AMOUNT_IN = 1_000_000 ether;
     uint256 internal constant ERC20_SELL_AMOUNT_OUT = 22834129896015656;
+    /// @dev A buy on the same pool, paid in wNVDAx.
+    uint256 internal constant ERC20_BUY_AMOUNT_IN = 0.01 ether;
+    uint256 internal constant ERC20_BUY_AMOUNT_OUT = 428563952001316776957803;
+
+    /// @dev NATIVE_SELL_AMOUNT_IN sold on pool 0x35bd0e6a…, its HYPE bought into on pool
+    ///      0x850fd929…, as one grouped swap.
+    uint256 internal constant SELL_THEN_BUY_AMOUNT_OUT =
+        105599768801641583489401170;
+    /// @dev The client's 1% (1_000_000 fee units) of SELL_THEN_BUY_AMOUNT_OUT.
+    uint256 internal constant SELL_THEN_BUY_CLIENT_FEE =
+        1055997688016415834894011;
 
     /// @dev The PoolManager and Angstrom arguments the executor is deployed with on Elysium.
     function _elysiumV4ExecutorArgs()
@@ -162,6 +173,7 @@ contract UniswapV4MontraExecutorTest is Constants, MontraFixtures {
             ERC20_SELL_AMOUNT_OUT
         );
         assertEq(IERC20(ERC20_SELL_POOL_TOKEN).balanceOf(address(_executor)), 0);
+        assertEq(IERC20(WNVDAX).balanceOf(address(_executor)), 0);
     }
 }
 
@@ -171,12 +183,6 @@ contract TychoRouterForUniswapV4MontraTest is
     TychoRouterTestSetup,
     MontraFixtures
 {
-    /// @dev Derived from its name; config/test_executor_addresses.json names it under
-    ///      elysium.uniswap_v4.
-    address internal constant ELYSIUM_V4_EXECUTOR = address(
-        uint160(uint256(keccak256("tycho.test.UniswapV4ExecutorElysium")))
-    );
-
     function getChain() public pure override returns (string memory) {
         return "elysium";
     }
@@ -193,7 +199,7 @@ contract TychoRouterForUniswapV4MontraTest is
         deployExecutorAt(
             "UniswapV4Executor.sol:UniswapV4Executor",
             abi.encode(poolManager, angstrom),
-            ELYSIUM_V4_EXECUTOR
+            testExecutorAddress("elysium", "uniswap_v4")
         );
     }
 
@@ -257,5 +263,84 @@ contract TychoRouterForUniswapV4MontraTest is
         assertEq(IERC20(ERC20_SELL_POOL_TOKEN).balanceOf(ALICE), 0);
         assertEq(IERC20(ERC20_SELL_POOL_TOKEN).balanceOf(tychoRouterAddr), 0);
         assertEq(IERC20(WNVDAX).balanceOf(tychoRouterAddr), 0);
+    }
+
+    /// @dev The hook takes its fee out of the wNVDAx input.
+    function testSingleMontraIntegrationErc20QuoteBuy() public {
+        deal(WNVDAX, ALICE, ERC20_BUY_AMOUNT_IN);
+
+        vm.startPrank(ALICE);
+        IERC20(WNVDAX).approve(PERMIT2_ADDRESS, ERC20_BUY_AMOUNT_IN);
+        (bool success,) = tychoRouterAddr.call(
+            loadCallDataFromFile(
+                "test_single_encoding_strategy_montra_erc20_quote_buy"
+            )
+        );
+        vm.stopPrank();
+
+        assertTrue(success, "Call Failed");
+        assertEq(
+            IERC20(ERC20_SELL_POOL_TOKEN).balanceOf(ALICE), ERC20_BUY_AMOUNT_OUT
+        );
+        assertEq(IERC20(WNVDAX).balanceOf(ALICE), 0);
+        assertEq(IERC20(WNVDAX).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(ERC20_SELL_POOL_TOKEN).balanceOf(tychoRouterAddr), 0);
+    }
+
+    /// @dev A Montra sell then a Montra buy as one grouped swap, so the buy is a later hop of the
+    ///      group. The client takes 1% of the output into the router's vault, and Alice's
+    ///      minimum output is exactly what is left, so the slippage check binds.
+    function testGroupedMontraIntegrationSellThenBuyWithClientFee() public {
+        deal(NATIVE_SELL_POOL_TOKEN, ALICE, NATIVE_SELL_AMOUNT_IN);
+
+        vm.startPrank(ALICE);
+        IERC20(NATIVE_SELL_POOL_TOKEN)
+            .approve(PERMIT2_ADDRESS, NATIVE_SELL_AMOUNT_IN);
+        (bool success,) = tychoRouterAddr.call(
+            loadCallDataFromFile(
+                "test_single_encoding_strategy_montra_grouped_sell_then_buy_with_client_fee"
+            )
+        );
+        vm.stopPrank();
+
+        assertTrue(success, "Call Failed");
+        assertEq(
+            IERC20(BUY_POOL_TOKEN).balanceOf(ALICE),
+            SELL_THEN_BUY_AMOUNT_OUT - SELL_THEN_BUY_CLIENT_FEE
+        );
+        assertEq(
+            tychoRouter.balanceOf(
+                clientFeeReceiver, uint256(uint160(BUY_POOL_TOKEN))
+            ),
+            SELL_THEN_BUY_CLIENT_FEE
+        );
+        assertEq(IERC20(NATIVE_SELL_POOL_TOKEN).balanceOf(ALICE), 0);
+        assertEq(IERC20(NATIVE_SELL_POOL_TOKEN).balanceOf(tychoRouterAddr), 0);
+        assertEq(tychoRouterAddr.balance, 0);
+    }
+
+    /// @dev The same trade asking for one unit more than it delivers after the client fee.
+    function testGroupedMontraIntegrationSellThenBuyRefusesOneUnitMore()
+        public
+    {
+        deal(NATIVE_SELL_POOL_TOKEN, ALICE, NATIVE_SELL_AMOUNT_IN);
+        uint256 delivered = SELL_THEN_BUY_AMOUNT_OUT - SELL_THEN_BUY_CLIENT_FEE;
+
+        vm.startPrank(ALICE);
+        IERC20(NATIVE_SELL_POOL_TOKEN)
+            .approve(PERMIT2_ADDRESS, NATIVE_SELL_AMOUNT_IN);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoRouter__NegativeSlippage.selector, delivered, delivered + 1
+            )
+        );
+        (bool success,) = tychoRouterAddr.call(
+            loadCallDataFromFile(
+                "test_single_encoding_strategy_montra_grouped_sell_then_buy_min_out_one_above"
+            )
+        );
+        vm.stopPrank();
+        // With an expected revert, the low-level call reports success once the revert matched.
+        assertTrue(success, "Call did not revert as expected");
     }
 }

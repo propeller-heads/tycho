@@ -521,7 +521,8 @@ mod tests {
 
     /// Montra launch pools on Elysium, protocol system `uniswap_v4_hooks`: Uniswap V4 pools whose
     /// hook is Montra's `LaunchHook`, swapped through the Elysium `uniswap_v4` executor with empty
-    /// hook data, since the hook reads none.
+    /// hook data. The hook ignores hook data: the swaps of `UniswapV4Montra.t.sol` settle with
+    /// empty hook data at the same amounts as the chain's V4Quoter quotes.
     mod uniswap_v4_montra {
         use rstest::rstest;
 
