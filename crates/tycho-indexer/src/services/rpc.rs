@@ -423,6 +423,7 @@ where
             .db_gateway
             .get_contracts(
                 &chain,
+                &request.protocol_system,
                 paginated_addrs.as_deref(),
                 Some(&db_version),
                 true,

@@ -2276,7 +2276,7 @@ impl ExtractorGateway for ExtractorPgGateway {
 
     async fn get_contracts(&self, addresses: &[Address]) -> Result<Vec<Account>, StorageError> {
         self.state_gateway
-            .get_contracts(&self.chain, Some(addresses), None, true, None)
+            .get_contracts(&self.chain, &self.protocol_system, Some(addresses), None, true, None)
             .await
             .map(|contract_data| contract_data.entity)
     }
@@ -2295,7 +2295,7 @@ impl ExtractorGateway for ExtractorPgGateway {
         accounts: &[Address],
     ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
         self.state_gateway
-            .get_account_balances(&self.chain, Some(accounts), None)
+            .get_account_balances(&self.chain, &self.protocol_system, Some(accounts), None)
             .await
     }
 }
