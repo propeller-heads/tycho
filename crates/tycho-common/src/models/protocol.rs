@@ -276,10 +276,10 @@ pub struct PauseRecord {
 /// The end of admin pauses, with optional audit details for operators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnpauseRecord {
-    /// Who ended the pauses: an operator, or the service that called the admin API.
-    pub actor: Option<String>,
     /// Why the pauses ended.
     pub reason: Option<String>,
+    /// Who ended the pauses: an operator, or the service that called the admin API.
+    pub actor: Option<String>,
 }
 
 /// An admin pause that is in effect.

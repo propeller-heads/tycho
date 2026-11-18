@@ -114,8 +114,8 @@ impl PostgresGateway {
             .filter(cp::unpaused_at.is_null())
             .set((
                 cp::unpaused_at.eq(diesel::dsl::now),
-                cp::unpause_actor.eq(unpause.actor.as_deref()),
                 cp::unpause_reason.eq(unpause.reason.as_deref()),
+                cp::unpause_actor.eq(unpause.actor.as_deref()),
             ))
             .returning(cp::component_id)
             .get_results(conn)
@@ -276,8 +276,8 @@ mod test_serial_db {
 
     fn unpause() -> UnpauseRecord {
         UnpauseRecord {
-            actor: Some("operator".to_owned()),
             reason: Some("pool is healthy".to_owned()),
+            actor: Some("operator".to_owned()),
         }
     }
 
@@ -479,12 +479,12 @@ mod test_serial_db {
 
         let audit: (Option<String>, Option<String>) = cp::component_pause
             .filter(cp::component_id.eq("pool_a"))
-            .select((cp::unpause_actor, cp::unpause_reason))
+            .select((cp::unpause_reason, cp::unpause_actor))
             .first(&mut conn)
             .await
             .expect("failed to read the closed pause");
         let expected = unpause();
-        assert_eq!(audit, (expected.actor, expected.reason));
+        assert_eq!(audit, (expected.reason, expected.actor));
     }
 
     #[tokio::test]
