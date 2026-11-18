@@ -1,6 +1,4 @@
-use std::str::FromStr;
-
-use ethabi::ethereum_types::Address;
+use ethabi::ethereum_types::H160;
 use substreams::scalar::BigInt;
 use substreams_ethereum::pb::eth::v2::{self as eth};
 
@@ -10,43 +8,43 @@ use ethereum_uniswap_v4_shared::{abi::pool_manager::events::Initialize, HookPerm
 
 use tycho_substreams::prelude::*;
 
+use crate::address_list::{parse_address, Address};
+
+/// Creates a component for every pool the `PoolManager` given as the module's whole parameter
+/// (an address, `0x` optional) initialises with a hook that has swap permissions. Fails, naming
+/// the parameter, when it is not a 20-byte hex address.
 #[substreams::handlers::map]
 pub fn map_pools_created(
     params: String,
     block: eth::Block,
 ) -> Result<BlockEntityChanges, substreams::errors::Error> {
+    let pool_manager = parse_address("pool_manager", &params)?;
     let mut new_pools: Vec<TransactionEntityChanges> = vec![];
-    let pool_manager = params.as_str();
 
-    get_new_pools(&block, &mut new_pools, pool_manager);
+    get_new_pools(&block, &mut new_pools, &pool_manager);
 
     Ok(BlockEntityChanges { block: None, changes: new_pools })
 }
 
-// Extract new pools initialized on the pool manager contract
-// Only includes pools WITH swap hooks
+/// Appends to `new_pools` a [`pool_creation`] per `Initialize` `pool_manager` emitted in `block`
+/// for a pool whose hook has swap permissions.
 pub(crate) fn get_new_pools(
     block: &eth::Block,
     new_pools: &mut Vec<TransactionEntityChanges>,
-    pool_manager_address: &str,
+    pool_manager: &Address,
 ) {
-    let pool_manager =
-        hex::decode(pool_manager_address).expect("the pool manager param is a hex address");
-
-    // Extract new pools from Initialize events
     let mut on_pool_created = |event: Initialize, tx: &eth::TransactionTrace, _log: &eth::Log| {
-        // Filter: only include pools WITH swap hooks
-        let hook_address = Address::from_slice(&event.hooks);
-        if !HookPermissionsDetector::has_swap_hooks(&hook_address) {
-            return; // Skip pools without swap hooks
+        // Only pools whose hook has swap permissions.
+        if !HookPermissionsDetector::has_swap_hooks(&H160::from_slice(&event.hooks)) {
+            return;
         }
 
-        new_pools.push(pool_creation(tx, &event, &pool_manager));
+        new_pools.push(pool_creation(tx, event, pool_manager));
     };
 
     let mut eh = EventHandler::new(block);
 
-    eh.filter_by_address(vec![Address::from_str(pool_manager_address).unwrap()]);
+    eh.filter_by_address(vec![H160::from(*pool_manager)]);
 
     eh.on::<Initialize, _>(&mut on_pool_created);
     eh.handle_events();
@@ -58,7 +56,7 @@ pub(crate) fn get_new_pools(
 /// `PoolManager.initialize` reverts `CurrenciesOutOfOrderOrEqual` unless currency0 < currency1.
 pub(crate) fn pool_creation(
     tx: &eth::TransactionTrace,
-    event: &Initialize,
+    event: Initialize,
     pool_manager: &[u8],
 ) -> TransactionEntityChanges {
     let id = event.id.to_hex();
@@ -67,7 +65,7 @@ pub(crate) fn pool_creation(
         .with_attributes(&[
             ("tick_spacing", event.tick_spacing.to_signed_bytes_be()),
             ("pool_id", event.id.to_vec()),
-            ("hooks", event.hooks.clone()),
+            ("hooks", event.hooks),
             // The PoolKey fee: a static LP fee in hundredths of a bip, or 0x800000, the flag of a
             // dynamic-fee pool, whose fee in force the state attributes carry. It is needed to
             // rebuild the PoolKey for contract interactions.
@@ -96,10 +94,10 @@ pub(crate) fn pool_creation(
     })
     .collect();
 
-    let balance_changes = [&event.currency0, &event.currency1]
+    let balance_changes = [event.currency0, event.currency1]
         .into_iter()
         .map(|token| BalanceChange {
-            token: token.clone(),
+            token,
             balance: BigInt::zero().to_signed_bytes_be(),
             component_id: id.as_bytes().to_vec(),
         })
@@ -138,7 +136,7 @@ mod tests {
         get_new_pools(
             &launch_block(vec![initialize_log(&POOL_MANAGER, &HOOK)]),
             &mut new_pools,
-            "E2E105D3F7209A9DA11F83CCF3E7398A753823F1",
+            &POOL_MANAGER,
         );
 
         let id = "0x35bd0e6a8b82e0e18b0381757d97ba01cde11a02740f006132dd40395ffc8ce2";
@@ -203,7 +201,7 @@ mod tests {
                 &hex!("0000000000000000000000000000000000000100"),
             )]),
             &mut new_pools,
-            "e2e105d3f7209a9da11f83ccf3e7398a753823f1",
+            &POOL_MANAGER,
         );
 
         assert_eq!(new_pools, vec![]);
