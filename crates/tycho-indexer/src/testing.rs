@@ -779,6 +779,64 @@ pub fn with_state_delta(
 }
 
 #[cfg(test)]
+/// A mocked Ethereum node that serves blocks.
+pub mod mock_node {
+    use mockito::{Matcher, ServerGuard};
+    use serde_json::json;
+    use tycho_ethereum::rpc::{config::RPCRetryConfig, EthereumRpcClient};
+
+    /// An `eth_getBlockByNumber` response for block `number` in second `second`.
+    pub fn block_response(number: u64, second: i64) -> String {
+        let zero_hash = format!("0x{:064x}", 0);
+        json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+                "number": format!("{number:#x}"),
+                "hash": format!("0x{number:064x}"),
+                "parentHash": format!("0x{:064x}", number.saturating_sub(1)),
+                "timestamp": format!("{second:#x}"),
+                "sha3Uncles": zero_hash,
+                "miner": format!("0x{:040x}", 0),
+                "stateRoot": zero_hash,
+                "transactionsRoot": zero_hash,
+                "receiptsRoot": zero_hash,
+                "logsBloom": format!("0x{}", "0".repeat(512)),
+                "difficulty": "0x0",
+                "gasLimit": "0x0",
+                "gasUsed": "0x0",
+                "extraData": "0x",
+                "mixHash": zero_hash,
+                "nonce": "0x0000000000000000",
+                "size": "0x0",
+                "transactions": [],
+            },
+        })
+        .to_string()
+    }
+
+    /// Starts a node that serves the given blocks, as (number, second) pairs, and a client for
+    /// it that does not retry.
+    pub async fn node(blocks: &[(u64, i64)]) -> (ServerGuard, EthereumRpcClient) {
+        let mut server = mockito::Server::new_async().await;
+        for &(number, second) in blocks {
+            server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(json!({
+                    "method": "eth_getBlockByNumber",
+                    "params": [format!("{number:#x}"), false],
+                })))
+                .with_body(block_response(number, second))
+                .create_async()
+                .await;
+        }
+        let rpc = EthereumRpcClient::new(&server.url())
+            .expect("valid url")
+            .with_retry(RPCRetryConfig::new(0, 1, 1));
+        (server, rpc)
+    }
+}
+
 pub mod fixtures {
     use std::{collections::HashSet, str::FromStr};
 

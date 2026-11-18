@@ -1,11 +1,13 @@
 name: Rust CI
 
 on:
+  # No path filter on pull_request and merge_group. Path filtering is handled
+  # inside the `changes` job so that the skip-* jobs below always execute on
+  # every PR and merge queue group. GitHub branch protection requires a check
+  # to appear (pass or skip) on each commit — if the workflow never runs,
+  # required checks remain pending and block the PR.
   pull_request:
-    # No path filter here. Path filtering is handled inside the `changes` job so
-    # that the skip-* jobs below always execute on every PR. GitHub branch
-    # protection requires a check to appear (pass or skip) on each commit — if
-    # the workflow never runs, required checks remain pending and block the PR.
+  merge_group:
   push:
     branches: [main]
     paths:
@@ -23,11 +25,13 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # Detects whether any Rust-relevant paths changed in the PR.
-  # Real CI jobs run only when this outputs rust == 'true', or when triggered
-  # outside a PR (push/workflow_call/workflow_dispatch). The matching skip-*
-  # jobs run otherwise, producing green checks so branch protection rules that
-  # require "Rust CI / <job-name>" are satisfied on every PR.
+  # Detects whether any Rust-relevant paths changed in the PR, or in the merge
+  # queue group (diffed against the group's base on main).
+  # On a PR or merge queue group, the matching skip-* jobs run in place of the
+  # real CI jobs only when this outputs rust == 'false', producing green checks
+  # so branch protection rules that require "Rust CI / <job-name>" are
+  # satisfied. An empty output (detection failed) runs the real jobs. Outside a
+  # PR (push/workflow_call/workflow_dispatch) the real jobs always run.
   changes:
     name: Detect Rust changes
     runs-on: ubuntu-latest
@@ -57,7 +61,7 @@ jobs:
   lint:
     name: Lint (fmt + clippy)
     needs: [changes]
-    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
+    if: needs.changes.outputs.rust != 'false' || !(github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -86,7 +90,7 @@ jobs:
   lint-skip:
     name: Lint (fmt + clippy)
     needs: [changes]
-    if: needs.changes.outputs.rust != 'true' && github.event_name == 'pull_request'
+    if: needs.changes.outputs.rust == 'false' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Rust changes detected, skipping lint"
@@ -94,7 +98,7 @@ jobs:
   test-unit:
     name: Unit tests (no external deps)
     needs: [changes]
-    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
+    if: needs.changes.outputs.rust != 'false' || !(github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -120,15 +124,16 @@ jobs:
         # - package(tycho-storage): all tests in tycho-storage require a live DB connection
         # - test(evm), test(fork): require RPC/anvil
         # - protocol-testing rpc/test_token_balance_validation: require ETH_RPC_URL
-        # LunarBase's native simulator lives under evm but has no RPC dependency.
+        # LunarBase's native simulator and the Slipstreams simulation (aerodrome_slipstreams and
+        # utils::slipstreams) live under evm but have no RPC dependency.
         run: |
           cargo nextest run --workspace --all-features --locked \
-            -E 'not (test(serial_db) | test(db_) | package(tycho-storage) | test(evm) | test(fork) | (package(protocol-testing) and (test(rpc) | test(test_token_balance_validation)))) | (package(tycho-simulation) and test(evm::protocol::lunarbase::))'
+            -E 'not (test(serial_db) | test(db_) | package(tycho-storage) | test(evm) | test(fork) | (package(protocol-testing) and (test(rpc) | test(test_token_balance_validation)))) | (package(tycho-simulation) and (test(evm::protocol::lunarbase::) | test(evm::protocol::utils::slipstreams::) | test(evm::protocol::aerodrome_slipstreams::)))'
 
   test-unit-skip:
     name: Unit tests (no external deps)
     needs: [changes]
-    if: needs.changes.outputs.rust != 'true' && github.event_name == 'pull_request'
+    if: needs.changes.outputs.rust == 'false' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Rust changes detected, skipping unit tests"
@@ -136,7 +141,7 @@ jobs:
   test-db:
     name: DB tests (postgres)
     needs: [changes]
-    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
+    if: needs.changes.outputs.rust != 'false' || !(github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -224,7 +229,7 @@ jobs:
   test-db-skip:
     name: DB tests (postgres)
     needs: [changes]
-    if: needs.changes.outputs.rust != 'true' && github.event_name == 'pull_request'
+    if: needs.changes.outputs.rust == 'false' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Rust changes detected, skipping DB tests"
@@ -232,7 +237,7 @@ jobs:
   doc:
     name: Rustdoc
     needs: [changes]
-    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
+    if: needs.changes.outputs.rust != 'false' || !(github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -255,7 +260,7 @@ jobs:
   doc-skip:
     name: Rustdoc
     needs: [changes]
-    if: needs.changes.outputs.rust != 'true' && github.event_name == 'pull_request'
+    if: needs.changes.outputs.rust == 'false' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Rust changes detected, skipping doc check"
@@ -263,7 +268,7 @@ jobs:
   check-no-default-features:
     name: Check (no default features)
     needs: [changes]
-    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
+    if: needs.changes.outputs.rust != 'false' || !(github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -286,7 +291,7 @@ jobs:
   check-no-default-features-skip:
     name: Check (no default features)
     needs: [changes]
-    if: needs.changes.outputs.rust != 'true' && github.event_name == 'pull_request'
+    if: needs.changes.outputs.rust == 'false' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Rust changes detected, skipping no-default-features check"
