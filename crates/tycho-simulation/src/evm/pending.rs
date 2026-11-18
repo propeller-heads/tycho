@@ -10,6 +10,7 @@ use tycho_common::{
     models::{
         blockchain::{Block, BlockAggregatedChanges, DCIUpdate, PendingBlock},
         protocol::{ComponentBalance, ProtocolComponent, ProtocolComponentStateDelta},
+        token::Token,
         Chain,
     },
     traits::TxDeltaIndexer,
@@ -120,8 +121,14 @@ impl PendingBlockProcessor {
     /// Only needed when using the processor standalone (without
     /// [`ProtocolStreamBuilder::build_with_pending`](crate::evm::stream::ProtocolStreamBuilder::build_with_pending)).
     /// When using `build_with_pending`, confirmed blocks are forwarded automatically.
-    pub fn advance(&mut self, msg: &FeedMessage<BlockHeader>) -> Result<(), PendingError> {
-        self.advance_inner(msg)
+    ///
+    /// The block built from a startup snapshot lists in `new_tokens` only the component tokens
+    /// the decoder has metadata for (see [`TychoStreamDecoder::set_tokens`]). An indexer must
+    /// handle a component whose tokens are missing.
+    pub async fn advance(&mut self, msg: &FeedMessage<BlockHeader>) -> Result<(), PendingError> {
+        let decoder = Arc::clone(&self.decoder);
+        let tokens = decoder.tokens().await;
+        self.advance_inner(msg, &tokens)
     }
 
     /// Simulates `pending` against the confirmed parent of `pending.block()`.
@@ -146,9 +153,14 @@ impl PendingBlockProcessor {
         pending: &PendingBlock,
         label: String,
     ) -> Result<PendingUpdate, PendingError> {
-        // Drain any confirmed blocks that have arrived since our last call.
-        while let Ok(msg) = self.block_rx.try_recv() {
-            self.advance_inner(&msg)?;
+        // Drain any confirmed blocks that have arrived since our last call. The lock is taken
+        // before the first `try_recv`, so a cancelled call never drops a received block.
+        {
+            let decoder = Arc::clone(&self.decoder);
+            let tokens = decoder.tokens().await;
+            while let Ok(msg) = self.block_rx.try_recv() {
+                self.advance_inner(&msg, &tokens)?;
+            }
         }
 
         let target_block = pending.block();
@@ -174,7 +186,11 @@ impl PendingBlockProcessor {
         Ok(PendingUpdate { label, update })
     }
 
-    fn advance_inner(&mut self, msg: &FeedMessage<BlockHeader>) -> Result<(), PendingError> {
+    fn advance_inner(
+        &mut self,
+        msg: &FeedMessage<BlockHeader>,
+        tokens: &HashMap<Bytes, Token>,
+    ) -> Result<(), PendingError> {
         let msg_block = msg
             .state_msgs
             .values()
@@ -193,6 +209,7 @@ impl PendingBlockProcessor {
                     &state_msg.snapshots,
                     &state_msg.header,
                     self.chain,
+                    tokens,
                 )?;
                 indexer
                     .apply_block(&block_changes)
@@ -228,12 +245,15 @@ impl PendingBlockProcessor {
 /// [`TxDeltaIndexer::apply_block`].
 ///
 /// Each component's traced entrypoints are folded into `dci_update`, so an indexer sees the
-/// contracts a component reads through DCI the same way it does on the delta path.
+/// contracts a component reads through DCI the same way it does on the delta path. `new_tokens`
+/// holds the components' tokens found in `tokens`, where an indexer also finds the tokens of a
+/// component that a block creates.
 fn snapshot_to_block_changes(
     extractor: &str,
     snapshot: &Snapshot,
     header: &BlockHeader,
     chain: Chain,
+    tokens: &HashMap<Bytes, Token>,
 ) -> Result<BlockAggregatedChanges, PendingError> {
     let ts = i64::try_from(header.timestamp)
         .ok()
@@ -254,12 +274,18 @@ fn snapshot_to_block_changes(
         ts,
     };
 
+    let mut new_tokens: HashMap<Bytes, Token> = HashMap::new();
     let mut new_protocol_components: HashMap<String, ProtocolComponent> = HashMap::new();
     let mut state_deltas: HashMap<String, ProtocolComponentStateDelta> = HashMap::new();
     let mut component_balances: HashMap<String, HashMap<Bytes, ComponentBalance>> = HashMap::new();
     let mut dci_update = DCIUpdate::default();
 
     for (id, comp_with_state) in &snapshot.states {
+        for address in &comp_with_state.component.tokens {
+            if let Some(token) = tokens.get(address) {
+                new_tokens.insert(address.clone(), token.clone());
+            }
+        }
         new_protocol_components.insert(id.clone(), comp_with_state.component.clone());
 
         for (entrypoint, trace) in &comp_with_state.entrypoints {
@@ -319,6 +345,7 @@ fn snapshot_to_block_changes(
         chain,
         block,
         finalized_block_height: header.number,
+        new_tokens,
         new_protocol_components,
         state_deltas,
         component_balances,
@@ -423,8 +450,14 @@ mod tests {
         };
         let header = BlockHeader { number: 7, ..Default::default() };
 
-        let changes =
-            snapshot_to_block_changes("vm:curve", &snapshot, &header, Chain::Ethereum).unwrap();
+        let changes = snapshot_to_block_changes(
+            "vm:curve",
+            &snapshot,
+            &header,
+            Chain::Ethereum,
+            &HashMap::new(),
+        )
+        .unwrap();
 
         let dci = &changes.dci_update;
         assert_eq!(dci.new_entrypoints[&component_id], HashSet::from([entry_point.clone()]));
@@ -482,6 +515,7 @@ mod tests {
         let mut pending_processor = processor(seen);
         pending_processor
             .advance(&confirmed_at(5))
+            .await
             .expect("advance failed");
 
         let update = pending_processor
@@ -523,5 +557,83 @@ mod tests {
             seen.lock().unwrap().is_empty(),
             "No indexer should run when the parent is not confirmed."
         );
+    }
+
+    /// Records the `new_tokens` of each block it applies.
+    struct TokenRecordingIndexer {
+        new_tokens: Arc<Mutex<Vec<HashMap<Bytes, Token>>>>,
+    }
+
+    impl TxDeltaIndexer for TokenRecordingIndexer {
+        fn apply_block(&mut self, block: &BlockAggregatedChanges) -> anyhow::Result<()> {
+            self.new_tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(block.new_tokens.clone());
+            Ok(())
+        }
+
+        fn generate_deltas(&self, _pending: &PendingBlock) -> BlockAggregatedChanges {
+            BlockAggregatedChanges::default()
+        }
+    }
+
+    /// An indexer that applies a startup snapshot receives, in `new_tokens`, every component
+    /// token the decoder knows, as it would from a block that creates the components.
+    #[tokio::test]
+    async fn test_snapshot_known_tokens_land_in_new_tokens() {
+        use tycho_client::feed::synchronizer::{ComponentWithState, StateSyncMessage};
+        use tycho_common::models::protocol::ProtocolComponentState;
+
+        let known = Bytes::from([0xaa; 20]);
+        let unknown = Bytes::from([0xbb; 20]);
+        let token = Token::new(&known, "KNOWN", 6, 0, &[], Chain::Ethereum, 100);
+        let decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Ethereum);
+        decoder
+            .set_tokens(HashMap::from([(known.clone(), token.clone())]))
+            .await;
+        let new_tokens = Arc::new(Mutex::new(Vec::new()));
+        let indexers: HashMap<String, Box<dyn TxDeltaIndexer>> = HashMap::from([(
+            "vm:curve".to_string(),
+            Box::new(TokenRecordingIndexer { new_tokens: new_tokens.clone() }) as _,
+        )]);
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut pending_processor =
+            PendingBlockProcessor::new(indexers, Arc::new(decoder), Chain::Ethereum, rx);
+        let id = "0xpool".to_string();
+        let snapshot = Snapshot {
+            states: HashMap::from([(
+                id.clone(),
+                ComponentWithState {
+                    state: ProtocolComponentState::new(&id, HashMap::new(), HashMap::new()),
+                    component: ProtocolComponent {
+                        id: id.clone(),
+                        tokens: vec![known.clone(), unknown],
+                        ..Default::default()
+                    },
+                    component_tvl: None,
+                    entrypoints: vec![],
+                },
+            )]),
+            vm_storage: HashMap::new(),
+        };
+        let msg = FeedMessage {
+            state_msgs: HashMap::from([(
+                "vm:curve".to_string(),
+                StateSyncMessage {
+                    header: BlockHeader { number: 7, ..Default::default() },
+                    snapshots: snapshot,
+                    ..Default::default()
+                },
+            )]),
+            sync_states: HashMap::new(),
+        };
+
+        pending_processor
+            .advance(&msg)
+            .await
+            .expect("advance failed");
+
+        assert_eq!(new_tokens.lock().unwrap().as_slice(), [HashMap::from([(known, token)])]);
     }
 }
