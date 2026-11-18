@@ -35,7 +35,7 @@ use tycho_common::{
 use super::component_metadata::ComponentTracingMetadata;
 type SlotId = U256;
 
-// V4MiniRouter compiled bytecode
+// V4MiniRouter compiled bytecode, built from assets/V4MiniRouter.sol (see assets/README.md)
 // The V4MiniRouter is a simple wrapper around V4Router that:
 // - Overrides msgSender() to return address(this)
 // - Implements _pay() to burn tokens from the payer
