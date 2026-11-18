@@ -889,11 +889,7 @@ where
 
                 state_overrides.insert(
                     router_address.clone(),
-                    AccountOverrides {
-                        slots: None,
-                        native_balance,
-                        code: Some(router_code.clone()),
-                    },
+                    AccountOverrides { slots: None, native_balance, code: Some(router_code) },
                 );
 
                 let mut pool_manager_storage_diff = BTreeMap::new();
@@ -913,7 +909,7 @@ where
                 );
 
                 state_overrides.insert(
-                    pool_manager.clone(),
+                    pool_manager,
                     AccountOverrides {
                         slots: Some(StorageOverride::Diff(pool_manager_storage_diff)),
                         native_balance: None,

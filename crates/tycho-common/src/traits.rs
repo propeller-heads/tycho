@@ -124,7 +124,7 @@ pub trait AccountExtractor {
         &self,
         block: &Block,
         requests: &[StorageSnapshotRequest],
-    ) -> Result<HashMap<Bytes, AccountDelta>, Self::Error>; //TODO: do not return `AccountUpdate` but `Account`
+    ) -> Result<HashMap<Bytes, AccountDelta>, Self::Error>;
 }
 
 /// Trait for analyzing a token, including its quality, transfer cost, and transfer tax.

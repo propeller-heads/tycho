@@ -2016,7 +2016,7 @@ async fn process_state(
             Some(Arc::from(state.clone_box())),
             token_in,
             token_out,
-            amount_in.clone(),
+            amount_in,
             chain,
             None,
             amount_out_result.gas,
