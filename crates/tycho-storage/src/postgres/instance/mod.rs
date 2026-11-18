@@ -77,6 +77,7 @@ mod shared_tables {
     diesel::allow_tables_to_appear_in_same_query!(extraction_state, protocol_system);
     diesel::allow_tables_to_appear_in_same_query!(protocol_component, protocol_system);
     diesel::allow_tables_to_appear_in_same_query!(component_tvl, protocol_system);
+    diesel::allow_tables_to_appear_in_same_query!(component_balance, protocol_system);
     diesel::allow_tables_to_appear_in_same_query!(protocol_component, protocol_type);
     diesel::allow_tables_to_appear_in_same_query!(protocol_component_holds_token, token);
     diesel::allow_tables_to_appear_in_same_query!(component_balance, token);
