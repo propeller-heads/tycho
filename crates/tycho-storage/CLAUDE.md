@@ -31,6 +31,7 @@ postgres/
     │   ├── component.rs — protocol components and their TVL from the active instance of each protocol
     │   ├── contract.rs — contracts, slots and account balances of a protocol's active instance at the latest version
     │   ├── state.rs    — protocol state and component balances of the active instance at the latest version
+    │   ├── token.rs    — tokens, prices and token owners; tokens by `token.address`, owners and the traded filter from the active instances
     │   └── version.rs  — the check that the current tables can answer a version
     ├── orm.rs          — Diesel row and insert structs for every `tycho` table
     ├── schema.rs       — auto-generated (`[print_schema.instance]` in diesel.toml)
