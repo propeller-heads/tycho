@@ -44,11 +44,11 @@ use tycho_common::{
 };
 
 use super::{
-    instance::gateway::PostgresGatewayNew,
+    instance::{gateway::PostgresGatewayNew, origins::BatchOrigins},
     is_transaction_conflict,
     pool::{self, PooledConnection, EXTRACTION_POOL},
     snapshot::{bound_snapshot_reads, snapshot_transaction},
-    PostgresError, PostgresGateway,
+    InstanceId, PostgresError, PostgresGateway,
 };
 
 /// Represents different types of database write operations.
@@ -158,6 +158,9 @@ pub struct DBTransaction {
     block_range: BlockRange,
     size: usize,
     operations: Vec<WriteOp>,
+    /// Instance whose tables the operations go to. `None` writes the shared tables of the old
+    /// schema.
+    instance: Option<InstanceId>,
     tx: oneshot::Sender<Result<(), StorageError>>,
     /// Purely used to add an attribute to the span when the transaction is commited
     owner: Option<String>,
@@ -405,6 +408,16 @@ impl DBCacheWriteExecutor {
                 .repeatable_read()
                 .run(|conn| {
                     async {
+                        if let Some(instance) = new_db_tx.instance {
+                            // Read before any write, so a batch whose transactions don't resolve
+                            // writes nothing.
+                            let origins = BatchOrigins::from_ops(&new_db_tx.operations)?;
+                            for op in new_db_tx.operations.iter() {
+                                self.execute_instance_write_op(instance, &origins, op, conn)
+                                    .await?;
+                            }
+                            return Ok(());
+                        }
                         for op in new_db_tx.operations.iter() {
                             match self.execute_write_op(op, conn).await {
                                 Err(PostgresError(StorageError::DuplicateEntry(entity, id))) => {
@@ -582,6 +595,54 @@ impl DBCacheWriteExecutor {
         };
         Ok(())
     }
+
+    /// Executes one op of a batch of `instance` on the instance tables.
+    ///
+    /// Stores no transactions: a versioned row takes the block and order of its change from
+    /// `origins`.
+    /// Fails with [`StorageError::Unsupported`] for an op the instance tables don't take yet.
+    #[instrument(skip_all, fields(op = operation.variant_name(), %instance))]
+    async fn execute_instance_write_op(
+        &self,
+        instance: InstanceId,
+        origins: &BatchOrigins,
+        operation: &WriteOp,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(), PostgresError> {
+        trace!(op=?operation, %instance, name="ExecuteInstanceWriteOp");
+        match operation {
+            WriteOp::UpsertBlock(blocks) => {
+                self.instance_gateway
+                    .upsert_block(blocks, conn)
+                    .await?
+            }
+            // Read into the origins before the first op; there is no table to write.
+            WriteOp::UpsertTx(_) => {}
+            WriteOp::SaveExtractionState(state) => {
+                self.instance_gateway
+                    .save_state(instance, origins, state, conn)
+                    .await?
+            }
+            WriteOp::InsertContract(_) |
+            WriteOp::UpdateContracts(_) |
+            WriteOp::InsertAccountBalances(_) |
+            WriteOp::InsertProtocolComponents(_) |
+            WriteOp::InsertTokens(_) |
+            WriteOp::UpdateTokens(_) |
+            WriteOp::InsertComponentBalances(_) |
+            WriteOp::UpsertProtocolState(_) |
+            WriteOp::InsertEntryPoints(_) |
+            WriteOp::InsertEntryPointTracingParams(_) |
+            WriteOp::UpsertTracedEntryPoints(_) => {
+                return Err(StorageError::Unsupported(format!(
+                    "{} for instance {instance}",
+                    operation.variant_name()
+                ))
+                .into());
+            }
+        };
+        Ok(())
+    }
 }
 
 #[derive(Hash, Eq, PartialEq, Debug)]
@@ -607,6 +668,8 @@ pub struct CachedGateway {
 
     // TODO: Remove Mutex. It is not needed but avoids changing the Extractor trait.
     open_tx: Arc<Mutex<Option<OpenTx>>>,
+    /// Instance this gateway writes for, see [`CachedGateway::for_instance`].
+    instance: Option<InstanceId>,
     /// Height of the newest block whose staged writes reached the store. `0` means
     /// nothing flushed yet, so a real flushed height of 0 reads as `None`.
     flushed_block_height: AtomicU64,
@@ -622,6 +685,7 @@ impl Clone for CachedGateway {
         Self {
             // create a separate open tx state for new instances
             open_tx: Arc::new(Mutex::new(None)),
+            instance: self.instance,
             // each instance tracks the flush progress of its own transactions
             flushed_block_height: AtomicU64::new(0),
             tx: self.tx.clone(),
@@ -647,6 +711,7 @@ impl CachedGateway {
                     block_range: BlockRange::new(block, block),
                     size: 0,
                     operations: vec![],
+                    instance: self.instance,
                     tx,
                     owner: owner.map(String::from),
                     caller_span: tracing::Span::none(),
@@ -737,6 +802,7 @@ impl CachedGateway {
         CachedGateway {
             tx,
             open_tx: Arc::new(Mutex::new(None)),
+            instance: None,
             flushed_block_height: AtomicU64::new(0),
             pool,
             pool_label: EXTRACTION_POOL,
@@ -750,10 +816,14 @@ impl CachedGateway {
     ///
     /// Use this instead of `clone()` when the intent is to create an independent writer
     /// (e.g. for a restarted extractor) rather than sharing cache state.
+    ///
+    /// It keeps the instance set by [`CachedGateway::for_instance`], so a restarted extractor
+    /// writes to the same instance.
     pub fn new_instance(&self) -> Self {
         CachedGateway {
             tx: self.tx.clone(),
             open_tx: Arc::new(Mutex::new(None)),
+            instance: self.instance,
             // a fresh writer has not flushed anything yet
             flushed_block_height: AtomicU64::new(0),
             pool: self.pool.clone(),
@@ -761,6 +831,18 @@ impl CachedGateway {
             state_gateway: self.state_gateway.clone(),
             lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
         }
+    }
+
+    /// Creates a fresh gateway, as [`CachedGateway::new_instance`] does, whose writes go to the
+    /// tables of `instance` instead of the shared tables.
+    ///
+    /// A batch of this gateway fails when it holds an operation that the instance tables don't
+    /// support yet, and nothing of that batch is written. `upsert_tx` stores nothing: the write
+    /// executor reads the transactions of a batch only for the block and order of each versioned
+    /// change. Reads still go to the shared tables, so it does not read back the extraction state
+    /// that it writes.
+    pub fn for_instance(&self, instance: InstanceId) -> Self {
+        CachedGateway { instance: Some(instance), ..self.new_instance() }
     }
 
     /// Creates a gateway that shares this one's write channel and state caches but takes its
