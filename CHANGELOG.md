@@ -1,3 +1,10 @@
+## [0.529.3](https://github.com/propeller-heads/tycho/compare/0.529.2...0.529.3) (2026-11-18)
+
+
+### Bug Fixes
+
+* **router-trades:** start a sink at START_BLOCK without a stop block ([419668c](https://github.com/propeller-heads/tycho/commit/419668cd7bf40d4d4540012ba23f8ea15a69c0d1))
+
 ## [0.529.2](https://github.com/propeller-heads/tycho/compare/0.529.1...0.529.2) (2026-11-18)
 
 
