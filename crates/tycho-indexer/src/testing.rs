@@ -611,11 +611,12 @@ mod gateway_mock {
                 Self: 'async_trait;
 
             #[allow(clippy::type_complexity, reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`")]
-            fn get_component_balances<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
+            fn get_component_balances<'life0, 'life1, 'life2, 'life3, 'life4, 'life5, 'async_trait>(
                 &'life0 self,
                 chain: &'life1 Chain,
-                ids: Option<&'life2 [&'life3 str]>,
-                version: Option<&'life4 Version>,
+                system: &'life2 str,
+                ids: Option<&'life3 [&'life4 str]>,
+                version: Option<&'life5 Version>,
             ) -> ::core::pin::Pin<
                 Box<
                     dyn ::core::future::Future<
@@ -629,6 +630,7 @@ mod gateway_mock {
                 'life2: 'async_trait,
                 'life3: 'async_trait,
                 'life4: 'async_trait,
+                'life5: 'async_trait,
                 Self: 'async_trait;
 
             #[allow(clippy::type_complexity, reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`")]

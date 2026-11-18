@@ -3979,7 +3979,7 @@ mod test {
         .collect();
 
         let res = gw
-            .get_component_balances(&Chain::Ethereum, Some(&["state1"]), None, &mut conn)
+            .get_component_balances(&Chain::Ethereum, None, Some(&["state1"]), None, &mut conn)
             .await
             .expect("retrieving balances failed!");
 
@@ -4096,6 +4096,7 @@ mod test {
         let res = gw
             .get_component_balances(
                 &Chain::Ethereum,
+                None,
                 Some(&["state3"]),
                 Some(&Version::from_block_number(Chain::Ethereum, 1)),
                 &mut conn,
