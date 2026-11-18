@@ -16,8 +16,3 @@ prost = "0.11"
 substreams = "0.5.22"
 substreams-ethereum = "0.9.9"
 tycho-substreams = "0.6.0"
-
-
-[build-dependencies]
-anyhow = "1"
-substreams-ethereum = "0.9.9"
