@@ -291,7 +291,7 @@ pub(super) mod test_fixtures {
     /// Owns the collections a [`HookCreationParams`] borrows, so a test can build params for an
     /// arbitrary hook address with only the attributes it sets, on a bare pool state.
     #[derive(Default)]
-    pub struct BareSnapshot {
+    pub(crate) struct BareSnapshot {
         account_balances: HashMap<Bytes, HashMap<Bytes, Bytes>>,
         all_tokens: HashMap<Bytes, Token>,
         attributes: HashMap<String, Bytes>,
@@ -300,13 +300,13 @@ pub(super) mod test_fixtures {
 
     impl BareSnapshot {
         /// A snapshot carrying `attributes` and nothing else.
-        pub fn with_attributes(attributes: HashMap<String, Bytes>) -> Self {
+        pub(crate) fn with_attributes(attributes: HashMap<String, Bytes>) -> Self {
             Self { attributes, ..Default::default() }
         }
 
         /// Creation params for `hook` over this snapshot, on a pool state with no liquidity and
         /// no block timestamp.
-        pub fn params(&self, hook: Address) -> HookCreationParams<'_> {
+        pub(crate) fn params(&self, hook: Address) -> HookCreationParams<'_> {
             let state = UniswapV4State::new(
                 0,
                 U256::from(1),
