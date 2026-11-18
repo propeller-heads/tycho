@@ -192,7 +192,7 @@ pub(super) struct UniswapV4UserData {
 }
 
 impl UniswapV4UserData {
-    fn from_swap_user_data(user_data: Option<&Bytes>) -> Result<Self, EncodingError> {
+    pub(super) fn from_swap_user_data(user_data: Option<&Bytes>) -> Result<Self, EncodingError> {
         match user_data {
             Some(bytes) if !bytes.is_empty() => serde_json::from_slice(bytes).map_err(|e| {
                 EncodingError::FatalError(format!("Invalid UniswapV4 user_data JSON: {}", e))
