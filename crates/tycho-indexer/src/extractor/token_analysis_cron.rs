@@ -171,7 +171,7 @@ async fn analyze_batch(
         .await?;
     let component_ids = token_owner
         .values()
-        .map(|(cid, _)| cid.as_str())
+        .map(|owner| owner.component_id.as_str())
         .collect::<Vec<_>>();
     let components = gw
         .get_protocol_components(&chain, None, Some(&component_ids), None, None)
@@ -197,9 +197,9 @@ async fn analyze_batch(
 
     let candidates_per_token = token_owner
         .into_iter()
-        .filter_map(|(address, (cid, _))| {
-            let Some(pc) = components.get(&cid) else {
-                warn!(component_id=?cid, "Failed to find component for id!");
+        .filter_map(|(address, owner)| {
+            let Some(pc) = components.get(&owner.component_id) else {
+                warn!(component_id=?owner.component_id, "Failed to find component for id!");
                 return None;
             };
             let candidates =
