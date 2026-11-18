@@ -229,6 +229,24 @@ contract TychoRouterTestSetup is
         return pausers;
     }
 
+    /// Deploys `artifact` with `constructorArgs` at `at` and registers it on the router, with
+    /// its timelock already passed at the fork timestamp. A fixed address keeps the executor
+    /// where the Rust-encoded calldata (config/test_executor_addresses.json) names it, whatever
+    /// the deployments in `setUp` add. The test then runs at the fork block's own time.
+    function deployExecutorAt(
+        string memory artifact,
+        bytes memory constructorArgs,
+        address at
+    ) internal {
+        deployCodeTo(artifact, constructorArgs, at);
+        address[] memory executors = new address[](1);
+        executors[0] = at;
+        vm.warp(forkTimestamp - _SETUP_TIME_OFFSET_NEW_EXECUTOR);
+        vm.prank(EXECUTOR_SETTER);
+        tychoRouter.setExecutors(executors);
+        vm.warp(forkTimestamp);
+    }
+
     function deployRouter() public returns (TychoRouterExposed) {
         // Use vm.etch to place dummy bytecode at address(123) so it passes the
         // .code.length check in the constructor without deploying a contract
