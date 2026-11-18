@@ -5958,7 +5958,12 @@ mod test_serial_db {
             let cached_gw: CachedGateway = gw.state_gateway;
 
             let res = cached_gw
-                .get_contract(&ContractId::new(Chain::Ethereum, VM_CONTRACT.into()), None, true)
+                .get_contract(
+                    &ContractId::new(Chain::Ethereum, VM_CONTRACT.into()),
+                    "test",
+                    None,
+                    true,
+                )
                 .await
                 .expect("test successfully inserted ambient contract");
             assert_eq!(res, exp);

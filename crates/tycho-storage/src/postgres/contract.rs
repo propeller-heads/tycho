@@ -2136,7 +2136,7 @@ mod test {
         let gateway = EVMGateway::from_connection(&mut conn).await;
         let id = ContractId::new(Chain::Ethereum, Bytes::from(acc_address));
         let result = gateway
-            .get_contract(&id, None, include_slots, &mut conn)
+            .get_contract(&id, "", None, include_slots, &mut conn)
             .await
             .unwrap();
 
@@ -2191,7 +2191,7 @@ mod test {
         let addresses = ids.as_deref();
 
         let results = gw
-            .get_contracts(&Chain::Ethereum, addresses, version.as_ref(), true, None, &mut conn)
+            .get_contracts(&Chain::Ethereum, "", addresses, version.as_ref(), true, None, &mut conn)
             .await
             .unwrap()
             .entity;
@@ -2253,6 +2253,7 @@ mod test {
         let result = gw
             .get_contracts(
                 &Chain::Ethereum,
+                "",
                 addresses,
                 version.as_ref(),
                 true,
@@ -2280,6 +2281,7 @@ mod test {
             let result = gw
                 .get_contracts(
                     &Chain::Ethereum,
+                    "",
                     None,
                     None,
                     true,
@@ -2308,7 +2310,7 @@ mod test {
             Bytes::from("6B175474E89094C44Da98b954EedeAC495271d0F"),
         );
         let result = gateway
-            .get_contract(&contract_id, None, false, &mut conn)
+            .get_contract(&contract_id, "", None, false, &mut conn)
             .await;
         if let Err(StorageError::NotFound(entity, id)) = result {
             assert_eq!(entity, "Account");
@@ -2387,7 +2389,7 @@ mod test {
             Bytes::from("6B175474E89094C44Da98b954EedeAC495271d0F"),
         );
         let actual = gateway
-            .get_contract(&contract_id, None, true, &mut conn)
+            .get_contract(&contract_id, "", None, true, &mut conn)
             .await
             .unwrap();
         assert_eq!(expected, actual);
@@ -2449,7 +2451,7 @@ mod test {
         // get contract used below to compare does not include slots
         account.slots = HashMap::new();
         let updated = gw
-            .get_contract(&contract_id, None, false, &mut conn)
+            .get_contract(&contract_id, "", None, false, &mut conn)
             .await
             .expect("updated in db");
         assert_eq!(updated, account);
@@ -3117,7 +3119,14 @@ mod test {
         .collect();
 
         let res = gw
-            .get_account_balances(&Chain::Ethereum, Some(&[account_addr]), None, false, &mut conn)
+            .get_account_balances(
+                &Chain::Ethereum,
+                "",
+                Some(&[account_addr]),
+                None,
+                false,
+                &mut conn,
+            )
             .await
             .expect("retrieving balances failed!");
 
