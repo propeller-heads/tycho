@@ -6,7 +6,7 @@ traces its sample swaps through it.
 
 `V4MiniRouter.sol` is a copy of `evm/src/V4MiniRouter.sol` from
 `propeller-heads/tycho-v4-hooks-prototype`, commit `f666a4634` ("feat: add receive ETH capability
-to the minirouter").
+to the minirouter"). Only its licence header is changed, to this repository's licence.
 
 ## Build
 
