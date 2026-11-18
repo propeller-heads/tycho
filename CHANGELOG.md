@@ -1,3 +1,10 @@
+## [0.529.2](https://github.com/propeller-heads/tycho/compare/0.529.1...0.529.2) (2026-11-18)
+
+
+### Bug Fixes
+
+* **tycho-simulation:** deny a price level venue that allowlists callers ([fde8a10](https://github.com/propeller-heads/tycho/commit/fde8a10c083871ba8dac416eb200e6ea03e7fcce))
+
 ## [0.529.1](https://github.com/propeller-heads/tycho/compare/0.529.0...0.529.1) (2026-11-18)
 
 ## [0.529.0](https://github.com/propeller-heads/tycho/compare/0.528.0...0.529.0) (2026-11-18)
