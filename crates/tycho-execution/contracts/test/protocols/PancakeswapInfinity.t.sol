@@ -545,10 +545,8 @@ contract PancakeswapInfinityRobinhoodForkTest is Constants, TestUtils {
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("robinhood"), ROBINHOOD_FORK_BLOCK);
-        address[] memory args = vm.parseJsonAddressArray(
-            vm.readFile("../config/executor_deployments.json"),
-            ".robinhood.pancakeswap_infinity_cl.args"
-        );
+        address[] memory args =
+            executorDeploymentArgs("robinhood", "pancakeswap_infinity_cl");
         executor = new PancakeswapInfinityRobinhoodExecutorExposed(
             args[0], args[1], args[2]
         );

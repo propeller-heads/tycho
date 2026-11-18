@@ -48,7 +48,7 @@ fn to_u256_if_fits(value: &U512) -> Option<U256> {
         .then(|| U256::from_limbs([limbs[0], limbs[1], limbs[2], limbs[3]]))
 }
 
-fn truncate_to_u256(value: U512) -> Result<U256, SimulationError> {
+pub fn truncate_to_u256(value: U512) -> Result<U256, SimulationError> {
     to_u256_if_fits(&value)
         .ok_or_else(|| SimulationError::FatalError("Overflow: Value exceeds 256 bits".to_string()))
 }

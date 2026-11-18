@@ -33,8 +33,14 @@ for any protocol indexed by Tycho.
     `cpmm.rs` / `clmm.rs` / `safe_math.rs` / `u256_num.rs` / `utils.rs` are shared math helpers,
     not protocols. Uniswap V4 hook handlers register per `(Chain, hook address)` in
     `uniswap_v4/hooks/hook_handler_creator.rs`; the generic VM fallback covers only Ethereum and
-    Unichain, Pons V2 is the native handler for Robinhood, and PancakeSwap Infinity's
-    `CLAlphaHook` (`pancakeswap_clalpha/`) is the native handler on BSC. A registered handler is
+    Unichain, Pons V2 is the native handler for Robinhood, PancakeSwap Infinity's
+    `CLAlphaHook` (`pancakeswap_clalpha/`) is the native handler on BSC, and Montra's
+    `LaunchHook` (`montra/`, `uniswap_v4_hooks` pools of the with-hooks package's Elysium
+    manifest) is the native handler on Elysium. A
+    handler can price itself without simulation through the optional `HookHandler` methods
+    `spot_fees`, `max_amount_in`, `check_swap_outcome` and `swaps_from_empty_range`; their
+    contracts, and which of them must be answered together, are in `hooks/hook_handler.rs`. A
+    registered handler is
     instantiated whatever the hook address bits say, and decides which callbacks run through
     `HookHandler::has_permission`, because Infinity keeps permissions in the pool key. The
     `pancakeswap_infinity_cl_hooks` system skips the address-bit check entirely, so its pools fail

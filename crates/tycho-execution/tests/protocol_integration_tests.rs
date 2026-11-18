@@ -4879,3 +4879,116 @@ fn test_single_encoding_strategy_euclid_partial_fill() {
         "test_single_encoding_strategy_euclid_partial_fill",
     );
 }
+
+/// A single Montra swap on Elysium, by pool and tokens, with the amounts the router checks.
+/// Expected outputs are V4Quoter 0x379F556c5a748BD7Cc9baF0F7A344094Ac1814f5
+/// `quoteExactInputSingle` results at Elysium block 6024400.
+struct MontraSingleSwap {
+    pool_id: &'static str,
+    token_in: Bytes,
+    token_out: Bytes,
+    amount_in: &'static str,
+    expected_amount_out: &'static str,
+    user_transfer_type: UserTransferType,
+}
+
+/// Writes the router calldata of `case` under `name`, for UniswapV4Montra.t.sol, which runs it
+/// and asserts the output. The minimum output is 1% below the expected one. The component is
+/// the one the `uniswap_v4_hooks` Elysium extractor emits for a Montra pool: a Uniswap V4 pool
+/// with Montra's `LaunchHook`, the dynamic-fee flag and tick spacing 200.
+fn write_montra_single_swap(name: &str, case: MontraSingleSwap) {
+    let component = ProtocolComponent {
+        id: case.pool_id.to_string(),
+        protocol_system: "uniswap_v4_hooks".to_string(),
+        static_attributes: HashMap::from([
+            ("key_lp_fee".to_string(), Bytes::from("0x00800000")),
+            ("tick_spacing".to_string(), Bytes::from("0x00c8")),
+            ("hooks".to_string(), Bytes::from("0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec")),
+            ("pool_id".to_string(), Bytes::from(case.pool_id)),
+        ]),
+        ..Default::default()
+    };
+    let expected_amount_out = BigUint::from_str(case.expected_amount_out).unwrap();
+    let min_amount_out = &expected_amount_out * 99u32 / 100u32;
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        case.token_in.clone(),
+        case.token_out.clone(),
+        BigUint::from_str(case.amount_in).unwrap(),
+        expected_amount_out,
+        min_amount_out,
+        vec![Swap::new(
+            component,
+            default_token(case.token_in),
+            default_token(case.token_out),
+            BigUint::ZERO,
+        )],
+    )
+    .with_user_transfer_type(case.user_transfer_type);
+    let encoded = get_tycho_router_encoder(Chain::Elysium)
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()
+        .remove(0);
+    let calldata = encode_tycho_router_call(
+        Chain::Elysium.id(),
+        &encoded,
+        &solution,
+        &Chain::Elysium.native_token().address,
+        Some(get_signer()),
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    write_calldata_to_file(name, &encode(calldata));
+}
+
+#[test]
+fn test_single_encoding_strategy_montra_native_quote_buy() {
+    // HYPE ───(Montra 0x850fd929)──> launch token, 1 HYPE paid as value
+    write_montra_single_swap(
+        "test_single_encoding_strategy_montra_native_quote_buy",
+        MontraSingleSwap {
+            pool_id: "0x850fd929fb9399c5d881c587a601e47b8eb20b361bb224651fcd2883852e22e9",
+            token_in: Chain::Elysium.native_token().address,
+            token_out: Bytes::from("0x95925e9c25fe28a046bcd43662b826afac06b22d"),
+            amount_in: "1000000000000000000",
+            expected_amount_out: "22658136496415342153969658",
+            user_transfer_type: UserTransferType::TransferFrom,
+        },
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_montra_native_quote_sell() {
+    // launch token ───(Montra 0x35bd0e6a)──> HYPE, 1e24 of the token through Permit2
+    write_montra_single_swap(
+        "test_single_encoding_strategy_montra_native_quote_sell",
+        MontraSingleSwap {
+            pool_id: "0x35bd0e6a8b82e0e18b0381757d97ba01cde11a02740f006132dd40395ffc8ce2",
+            token_in: Bytes::from("0x32193afd14c53f12c45a4c04eca9f7ba98e3ec71"),
+            token_out: Chain::Elysium.native_token().address,
+            amount_in: "1000000000000000000000000",
+            expected_amount_out: "5092761962617617745",
+            user_transfer_type: UserTransferType::TransferFromPermit2,
+        },
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_montra_erc20_quote_sell() {
+    // launch token ───(Montra 0x33f724fd)──> wNVDAx, 1e24 of the token through Permit2
+    write_montra_single_swap(
+        "test_single_encoding_strategy_montra_erc20_quote_sell",
+        MontraSingleSwap {
+            pool_id: "0x33f724fd9727a72d72c2777a17577874e02fa4a6207f88177bedad3c207cc28a",
+            token_in: Bytes::from("0xec8a718f0bc06c25b92082f7ba595931e0d579dc"),
+            token_out: Bytes::from("0x11265018bf2d5a99fb71efae73ad670203c1df44"),
+            amount_in: "1000000000000000000000000",
+            expected_amount_out: "22834129896015656",
+            user_transfer_type: UserTransferType::TransferFromPermit2,
+        },
+    );
+}

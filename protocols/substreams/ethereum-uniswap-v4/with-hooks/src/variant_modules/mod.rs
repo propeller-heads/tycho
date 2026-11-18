@@ -1,6 +1,12 @@
 #[path = "1_map_pool_created.rs"]
 pub mod map_pool_created;
 
+#[path = "1_map_montra_pools_created.rs"]
+pub mod map_montra_pools_created;
+
+#[path = "2_store_montra_slots.rs"]
+pub mod store_montra_slots;
+
 #[path = "2_store_euler_hooks.rs"]
 pub mod store_euler_hooks;
 
@@ -21,6 +27,9 @@ pub mod map_protocol_changes;
 
 #[path = "6_map_pons_enriched_block_changes.rs"]
 pub mod map_pons_enriched_block_changes;
+
+#[path = "6_map_montra_enriched_block_changes.rs"]
+pub mod map_montra_enriched_block_changes;
 
 #[cfg(test)]
 mod tests;
