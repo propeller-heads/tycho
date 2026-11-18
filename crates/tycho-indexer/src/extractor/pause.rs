@@ -49,10 +49,9 @@ struct SystemPauses {
 }
 
 impl PauseRegistry {
-    /// Builds the registry from the pauses in effect on `chain`, queuing future events for
-    /// `extracted_systems`.
-    ///
-    /// Queues no events: these pauses started before this process did.
+    /// Builds the registry from the pauses in effect on `chain`. Later refreshes queue events
+    /// for `extracted_systems`; the loaded pauses queue none, since they started before this
+    /// process did.
     ///
     /// # Errors
     /// Returns the storage error if the pauses cannot be read.
