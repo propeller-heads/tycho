@@ -3,8 +3,11 @@ use std::collections::HashMap;
 use diesel::{pg::Pg, prelude::*};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::{
-    models::{protocol::ComponentBalance, Address, Chain, ComponentId},
-    storage::{StorageError, Version},
+    models::{
+        protocol::{ComponentBalance, ProtocolComponentState},
+        Address, Balance, Chain, ComponentId, PaginationParams,
+    },
+    storage::{StorageError, Version, WithTotal},
     Bytes,
 };
 
@@ -14,7 +17,7 @@ use crate::postgres::{
         active::active_instance_head,
         gateway::PostgresGatewayNew,
         orm as iorm,
-        schema::tycho::{component_balance, protocol_component},
+        schema::tycho::{component_balance, protocol_component, protocol_state},
         InstanceId,
     },
     PostgresError,
@@ -64,6 +67,114 @@ impl PostgresGatewayNew {
         }
         Ok(balances)
     }
+
+    /// Returns the state of the components of `system`'s active instance. The total is always
+    /// `None`.
+    ///
+    /// - `at`: the version. `Unsupported` for a version before the head of the instance.
+    /// - `system`: the protocol system. Required, because a pool id can repeat across protocol
+    ///   systems: `None` is `Unsupported`. `NotFound` for an unknown name. A protocol system
+    ///   without an active instance has no states.
+    /// - `ids`: only components with these external ids.
+    /// - `retrieve_balances`: add the token balances of each component.
+    /// - `pagination_params`: `Unsupported` when set. Page the component ids instead.
+    ///
+    /// A component without state attributes is absent, even with balances. `NotFound` for an
+    /// unknown chain.
+    #[expect(clippy::too_many_arguments, reason = "one argument per query filter")]
+    pub async fn get_protocol_states(
+        &self,
+        chain: &Chain,
+        at: Option<Version>,
+        system: Option<String>,
+        ids: Option<&[&str]>,
+        retrieve_balances: bool,
+        pagination_params: Option<&PaginationParams>,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<WithTotal<Vec<ProtocolComponentState>>, StorageError> {
+        self.get_chain_id(chain)?;
+        let Some(system) = system else {
+            return Err(StorageError::Unsupported(
+                "protocol states need a protocol system: a pool id can repeat across protocols"
+                    .to_string(),
+            ));
+        };
+        self.get_protocol_system_id(&system)?;
+        if pagination_params.is_some() {
+            return Err(StorageError::Unsupported(
+                "protocol states are not paged: page the component ids".to_string(),
+            ));
+        }
+        states_of(&system, ids, at.as_ref(), retrieve_balances, conn).await
+    }
+}
+
+/// Reads the states of the matching components of the active instance of `system`.
+async fn states_of(
+    system: &str,
+    ids: Option<&[&str]>,
+    at: Option<&Version>,
+    retrieve_balances: bool,
+    conn: &mut AsyncPgConnection,
+) -> Result<WithTotal<Vec<ProtocolComponentState>>, StorageError> {
+    let Some(active) = active_instance_head(system, conn).await? else {
+        return Ok(WithTotal { entity: Vec::new(), total: None });
+    };
+    check_current(&active, at, conn).await?;
+    let instance = active.id;
+
+    let mut query = protocol_state::table
+        .inner_join(
+            protocol_component::table.on(protocol_component::instance_id
+                .eq(protocol_state::instance_id)
+                .and(protocol_component::id.eq(protocol_state::protocol_component_id))),
+        )
+        .filter(protocol_state::instance_id.eq(instance))
+        .filter(protocol_component::instance_id.eq(instance))
+        .select((
+            protocol_component::external_id,
+            protocol_state::attribute_name,
+            protocol_state::attribute_value,
+        ))
+        .into_boxed::<Pg>();
+    if let Some(ids) = ids {
+        query = query.filter(protocol_component::external_id.eq_any(ids));
+    }
+    let rows: Vec<(ComponentId, String, Bytes)> = query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?;
+
+    let mut attributes: HashMap<ComponentId, HashMap<String, Bytes>> = HashMap::new();
+    for (external_id, name, value) in rows {
+        attributes
+            .entry(external_id)
+            .or_default()
+            .insert(name, value);
+    }
+
+    let mut balances: HashMap<ComponentId, HashMap<Address, Balance>> = HashMap::new();
+    if retrieve_balances {
+        for (external_id, row) in balance_rows(instance, ids, conn).await? {
+            if attributes.contains_key(&external_id) {
+                balances
+                    .entry(external_id)
+                    .or_default()
+                    .insert(row.token, row.new_balance);
+            }
+        }
+    }
+
+    let states = attributes
+        .into_iter()
+        .map(|(external_id, attributes)| {
+            let balances = balances
+                .remove(&external_id)
+                .unwrap_or_default();
+            ProtocolComponentState::new(&external_id, attributes, balances)
+        })
+        .collect();
+    Ok(WithTotal { entity: states, total: None })
 }
 
 /// Loads the balance rows of the components of `instance`, each with its component's external id.
