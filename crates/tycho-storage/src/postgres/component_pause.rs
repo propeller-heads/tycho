@@ -163,7 +163,7 @@ impl PostgresGateway {
                     actor: row.actor,
                     evidence_url: row.evidence_url,
                 },
-                paused_since: row.paused_at,
+                paused_at: row.paused_at,
             })
             .collect())
     }

@@ -288,7 +288,7 @@ pub struct ComponentPause {
     pub protocol_system: ProtocolSystem,
     pub record: PauseRecord,
     /// When the pause started.
-    pub paused_since: NaiveDateTime,
+    pub paused_at: NaiveDateTime,
 }
 
 /// Token quality range filter
