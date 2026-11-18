@@ -1,21 +1,27 @@
-use std::collections::HashMap;
+use std::{cmp::Ordering, collections::HashMap};
 
 use chrono::NaiveDateTime;
 use diesel::{dsl::exists, pg::Pg, prelude::*};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::{
-    models::{protocol::QualityRange, token::Token, Address, Chain, PaginationParams},
+    models::{
+        protocol::QualityRange,
+        token::{Token, TokenOwner},
+        Address, Chain, ComponentId, PaginationParams,
+    },
     storage::{StorageError, WithTotal},
     Bytes,
 };
 
 use crate::postgres::{
-    count_to_i64,
+    compare_balances, count_to_i64,
     instance::{
-        active::active_instance_ids, gateway::PostgresGatewayNew, schema::tycho::component_balance,
+        active::active_instance_ids,
+        gateway::PostgresGatewayNew,
+        schema::tycho::{component_balance, protocol_component, protocol_instance},
     },
     orm,
-    schema::{token, token_price},
+    schema::{protocol_system, token, token_price},
     PostgresError,
 };
 
@@ -115,6 +121,74 @@ impl PostgresGatewayNew {
             .await
             .map_err(PostgresError::from)?;
         Ok(prices.into_iter().collect())
+    }
+
+    /// Returns, per token, the component of an active instance with the largest balance of the
+    /// token, and the component's protocol system.
+    ///
+    /// - `min_balance`: only balances whose float value is at least this.
+    ///
+    /// Balances compare as unsigned integers. On a tie, the component of the lower instance id,
+    /// then the lower component id, stays. A token without such a balance is absent. `NotFound`
+    /// for an unknown chain.
+    pub async fn get_token_owners(
+        &self,
+        chain: &Chain,
+        tokens: &[Address],
+        min_balance: Option<f64>,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<HashMap<Address, TokenOwner>, StorageError> {
+        self.get_chain_id(chain)?;
+        let instances = active_instance_ids(conn).await?;
+        if instances.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut query = component_balance::table
+            .inner_join(
+                protocol_component::table.on(protocol_component::instance_id
+                    .eq(component_balance::instance_id)
+                    .and(protocol_component::id.eq(component_balance::protocol_component_id))),
+            )
+            .inner_join(
+                protocol_instance::table
+                    .on(protocol_instance::id.eq(protocol_component::instance_id)),
+            )
+            .inner_join(
+                protocol_system::table
+                    .on(protocol_system::id.eq(protocol_instance::protocol_system_id)),
+            )
+            .filter(component_balance::instance_id.eq_any(&instances))
+            .filter(protocol_component::instance_id.eq_any(&instances))
+            .filter(component_balance::token.eq_any(tokens))
+            .order_by((component_balance::instance_id, component_balance::protocol_component_id))
+            .select((
+                component_balance::token,
+                protocol_system::name,
+                protocol_component::external_id,
+                component_balance::new_balance,
+            ))
+            .into_boxed::<Pg>();
+        if let Some(min_balance) = min_balance {
+            query = query.filter(component_balance::balance_float.ge(min_balance));
+        }
+        let rows: Vec<(Address, String, ComponentId, Bytes)> = query
+            .load(conn)
+            .await
+            .map_err(PostgresError::from)?;
+
+        let mut owners: HashMap<Address, TokenOwner> = HashMap::new();
+        for (token, protocol_system, component_id, balance) in rows {
+            let larger = owners
+                .get(&token)
+                .is_none_or(|current| {
+                    compare_balances(&balance, &current.balance) == Ordering::Greater
+                });
+            if larger {
+                owners.insert(token, TokenOwner { protocol_system, component_id, balance });
+            }
+        }
+        Ok(owners)
     }
 }
 
