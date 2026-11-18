@@ -42,12 +42,13 @@ these pools natively from the attributes.
 
 Run the Elysium `uniswap_v4_hooks` extractor with no `dci_plugin`, or with type `rpc`, never with
 type `uniswap_v4_hooks`. tycho-indexer attaches that plugin by extractor config, not by manifest.
-It would hand every Montra pool (its hook has swap permissions) to its default orchestrator, which
-fails on them and writes them `paused` with value 2 or 3. The simulation's Montra hook handler
-reads any `paused` value other than empty or 0 as paused (`decode_paused` in
-`tycho-simulation`'s `hooks/montra/mod.rs`), so the stream keeps decoding, but every Montra pool
-then stays paused and unquotable for good. No package code guards this. The integration test cannot catch it, since the harness always runs
-with `--dci-plugin rpc`.
+Nobody has run it on Elysium; what follows is read from tycho-indexer's hooks DCI code, not
+observed. The plugin would hand every Montra pool (its hook has swap permissions) to its default
+orchestrator, which traces through `debug_storageRangeAt` (unavailable on Elysium, above), and
+after failures writes a pool `paused` with value 2 or 3. The simulation reads any `paused` value
+other than empty or 0 as paused, so the stream would keep decoding, but every Montra pool would
+then stay paused and unquotable. No package code guards this, and the integration test cannot
+catch it, since the harness always runs with `--dci-plugin rpc`.
 
 ### Balances
 
@@ -55,10 +56,10 @@ Balances come from the shared V4 pipeline: each pool's token amounts follow its 
 events, with `balance_owner` the `PoolManager`. The hook takes its fee as an ERC-6909 claim on the
 `PoolManager`, held by the hook, outside the pool's amounts. The `PoolManager` keeps every pool's
 tokens in one balance and stores no per-pool amount, so the integration test reads each pool's
-amounts with the `UniswapV4Balances` lens (`protocols/adapter-integration/evm/src/balance-lenses/`),
-which derives them from the pool's ticks and liquidity at its current price. The pipeline estimates each swap's
-LP fee and prices a liquidity change at the price of its block, so its balance can differ from the
-lens's by the rounding of those estimates.
+amounts with the `UniswapV4Balances` lens, which derives them from the pool's ticks and liquidity
+at its current price. The pipeline estimates each swap's LP fee and prices a liquidity change at
+the price of its block, so its balance can differ from the lens's by the rounding of those
+estimates.
 
 ### Upgrade boundary
 
@@ -70,7 +71,7 @@ The package follows or misses the contracts that can change as follows:
 |---|---|---|
 | `LaunchFactory` proxy `0x38d3ef3a06d18fa3286fb5deafe611be725fcd15` (EIP-1967, implementation `0x54b5b72311fa360cd827ccaf2835bfba44f63840` at blocks 588508 to 6002000) | yes | An upgrade can launch pools with other terms or sequencing, but cannot write a live pool's `PoolConfig` or `PoolKey`: the factory address is an immutable in the hook, and `register` and `seed` refuse registered pools. The package decodes every `PoolConfig` write whatever its caller, so it follows new terms. The creation-time pause catches a launch split over several transactions. |
 | Quote tokens KNTQ, wNVDAx, wSPYx, wQQQx, EQTSLA, EQSPCX, behind beacon `0x659f40efd07d70224b7ac61e4721f6f3e11b625e` (implementation `0xbD080eeF044a3E6226757487C5cef33568AfEfD6` at blocks 300000 to 6024400) | yes | Not followed. An upgrade that taxes or blocks transfers is invisible to the package, and the simulation would over-quote pools in that token. |
-| A new Montra hook (the `LaunchpadRegistry` lists hooks) | n/a | `map_montra_pools_created` creates none of its pools until a maintainer adds its address to `montra_hooks`. Before adding it, the maintainer checks its storage layout against `src/montra/pool_config.rs`. |
+| A new Montra hook (the `LaunchpadRegistry` lists hooks) | n/a | `map_montra_pools_created` creates none of its pools until a maintainer adds its address to `montra_hooks`. Before adding it, the maintainer checks its storage layout against `src/montra/pool_config.rs`. `store_montra_slots` keys each slot by the pool's own hook, so one hook's writes are never read as another's pool, whatever their layouts. |
 
 ### Store cost
 
@@ -79,3 +80,21 @@ words), each value about 70 bytes. At 97,167 pools registered by block 6024400 t
 583,000 keys, growing by six per launch. Per block, the terminal module reads it once for each
 distinct hook slot a transaction writes, watched or not: a swap's `PoolConfig` word 0 and every
 fee-accounting slot of the hook it updates.
+
+### Terms the hook refuses
+
+The package emits a pool's `PoolConfig` terms as written; it does not validate them, so a value
+the hook would never accept cannot stop the extractor. The simulation refuses to quote a pool
+whose terms the hook's `register` refuses. One of those rules was established on a fork rather
+than read from source: with an anti-snipe window set, `register` reverts `InvalidFeeConfig()` for
+a start rate at or below the total fee (Elysium fork at block 7964700, windows of 1 to 1800 s,
+totals 5000 to 100000 pips), and without a window it accepts only a start rate of 0.
+
+### Quotes in the next block
+
+The decoder prices every state for the next block, at the latest block's timestamp plus one
+second on Elysium. Elysium makes a block about every 100 ms and timestamps whole seconds, so the
+swap often lands in a block with the same timestamp as the latest one. Inside an anti-snipe
+window a buy is then quoted at up to one second's decay below the rate it pays (97,000 pips for
+a 10-second window from 990,000 to 20,000), and a pool holding past its LP line can be quoted
+with its LP fee on one second early. Outside those windows the estimate changes nothing.
