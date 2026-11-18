@@ -87,7 +87,7 @@ A message names its assets by address and prices every level in human units:
   "books": [
     {
       "maker": "Fermi",
-      "quoteAddress": "0x5979458912f80b96d30d4220af8e2e4925a33320",
+      "quoteAddress": "0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977",
       "token1": "WBTC",
       "token2": "USDC",
       "token1Address": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",

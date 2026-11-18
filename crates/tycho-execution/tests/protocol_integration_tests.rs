@@ -1741,9 +1741,9 @@ fn test_sequential_encoding_strategy_uniswap_v2_ring_swap_v2() {
 }
 
 #[test]
-fn test_single_encoding_strategy_fermiswap_weth_usdc() {
-    // WETH -> (FermiSwap) -> USDC
-    let token_in = weth();
+fn test_single_encoding_strategy_fermiswap_usdt_usdc() {
+    // USDT -> (FermiSwap) -> USDC
+    let token_in = usdt();
     let token_out = usdc();
 
     let swap = Swap::new(
@@ -1763,9 +1763,9 @@ fn test_single_encoding_strategy_fermiswap_weth_usdc() {
         alice_address(),
         token_in,
         token_out,
-        BigUint::from_str("1_000000000000000000").unwrap(),
-        BigUint::from(2_114_000_000_u64),
-        BigUint::from(2071720000u64),
+        BigUint::from_str("168_143_666_903").unwrap(),
+        BigUint::from(167_996_000_000_u64),
+        BigUint::from(167_000_000_000_u64),
         vec![swap],
     );
 
@@ -1788,7 +1788,7 @@ fn test_single_encoding_strategy_fermiswap_weth_usdc() {
     .data;
     let hex_calldata = encode(&calldata);
     write_calldata_to_file(
-        "test_single_encoding_strategy_fermiswap_weth_usdc",
+        "test_single_encoding_strategy_fermiswap_usdt_usdc",
         hex_calldata.as_str(),
     );
 }

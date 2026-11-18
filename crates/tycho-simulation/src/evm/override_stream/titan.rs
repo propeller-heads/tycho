@@ -116,7 +116,7 @@ const BOPAMM_PROTOCOL_SYSTEM: &str = "vm:bopamm";
 /// FermiSwap venue aliases on Titan's quote stream: the FermiSwap oracle and the FermiSwapper
 /// router. Both keys carry the same registry diffs; either serves the protocol.
 const FERMISWAP_VENUES: &[&str] =
-    &["0xb1076fe3ab5e28005c7c323bac5ac06a680d452e", "0x5979458912f80b96d30d4220af8e2e4925a33320"];
+    &["0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977", "0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977"];
 /// Kipseli venue aliases on Titan's quote stream: the Kipseli oracle and the KipseliPropAMMWrapper
 /// router, both carrying the same registry diffs.
 const KIPSELI_VENUES: &[&str] =
@@ -597,7 +597,7 @@ mod tests {
         "slot": 14285824,
         "blockNumber": 25051224,
         "timestamp": 1778253913749564761,
-        "0xb1076fe3ab5e28005c7c323bac5ac06a680d452e": {
+        "0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977": {
             "stateOverride": {
                 "0x1038c87766e36d1925889e6f26d10e0012d50fed": {
                     "balance": "0x0",
