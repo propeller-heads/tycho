@@ -116,8 +116,11 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
     ///
     /// A hook that returns `Some` from [`HookHandler::spot_fees`] or from
     /// [`HookHandler::unspecified_fee_amount`] is priced from that answer and is never asked for a
-    /// spot price, so such a hook does not need to implement this method meaningfully.
-    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError>;
+    /// spot price, so such a hook keeps the default, which fails with a `RecoverableError`
+    /// saying the method is not implemented.
+    fn spot_price(&self, _base: &Token, _quote: &Token) -> Result<f64, SimulationError> {
+        Err(SimulationError::RecoverableError("spot_price is not implemented for this hook".into()))
+    }
 
     /// The fees a marginal exact-input swap in the direction given by `zero_for_one` pays: the LP
     /// fee the hook makes the pool charge, and the hook's own fee rate.
@@ -195,11 +198,18 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
     /// The hook's minimum and maximum swap amounts for the pair, which `get_limits` consults for
     /// a pool with no liquidity and no ticks. It is never asked when
     /// [`HookHandler::max_amount_in`] answers `Some`, which supersedes it.
+    ///
+    /// The default fails with a `RecoverableError` whose message says the method is not
+    /// implemented, which `get_limits` reads as a signal to find the limits by trial swaps.
     fn get_amount_ranges(
         &self,
-        token_in: Bytes,
-        token_out: Bytes,
-    ) -> Result<AmountRanges, SimulationError>;
+        _token_in: Bytes,
+        _token_out: Bytes,
+    ) -> Result<AmountRanges, SimulationError> {
+        Err(SimulationError::RecoverableError(
+            "get_amount_ranges is not implemented for this hook".into(),
+        ))
+    }
 
     // Called on each state update to update the internal state of the HookHandler
     fn delta_transition(

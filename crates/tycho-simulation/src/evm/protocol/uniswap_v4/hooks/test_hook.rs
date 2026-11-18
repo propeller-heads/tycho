@@ -21,8 +21,8 @@ use crate::{
             hook_handler::HookHandler,
             hook_handler_creator::{HookCreationParams, HookHandlerCreator},
             models::{
-                AfterSwapDelta, AfterSwapParameters, AmountRanges, BeforeSwapOutput,
-                BeforeSwapParameters, HookSpotFees, SwapOutcome, SwapParams, WithGasEstimate,
+                AfterSwapDelta, AfterSwapParameters, BeforeSwapOutput, BeforeSwapParameters,
+                HookSpotFees, SwapOutcome, SwapParams, WithGasEstimate,
             },
         },
         state::UniswapV4State,
@@ -55,6 +55,8 @@ pub struct ExtensionTestHook {
     pub refuse_outcome_below: Option<U256>,
     /// `check_swap_outcome` refuses a swap that leaves part of its input unfilled.
     pub refuse_unfilled_input: bool,
+    /// `check_swap_outcome` fails with a `RecoverableError`, as a hook that cannot check would.
+    pub fail_outcome_check: bool,
     /// What `swaps_from_empty_range` answers.
     pub swaps_from_empty_range: bool,
 }
@@ -67,6 +69,7 @@ impl Default for ExtensionTestHook {
             max_amount_in: None,
             refuse_outcome_below: None,
             refuse_unfilled_input: false,
+            fail_outcome_check: false,
             swaps_from_empty_range: false,
         }
     }
@@ -103,10 +106,6 @@ impl HookHandler for ExtensionTestHook {
         Err(SimulationError::RecoverableError("not implemented".into()))
     }
 
-    fn spot_price(&self, _: &Token, _: &Token) -> Result<f64, SimulationError> {
-        Err(SimulationError::RecoverableError("not implemented".into()))
-    }
-
     fn spot_fees(&self, _: bool) -> Result<Option<HookSpotFees>, SimulationError> {
         match self.spot_fees {
             SpotFeesAnswer::NoFees => Ok(None),
@@ -125,6 +124,9 @@ impl HookHandler for ExtensionTestHook {
     }
 
     fn check_swap_outcome(&self, _: bool, outcome: &SwapOutcome) -> Result<(), SimulationError> {
+        if self.fail_outcome_check {
+            return Err(SimulationError::RecoverableError("the hook cannot check".into()));
+        }
         if self.refuse_unfilled_input && !outcome.amount_unfilled.is_zero() {
             return Err(SimulationError::InvalidInput("part of the input is unfilled".into(), None));
         }
@@ -134,10 +136,6 @@ impl HookHandler for ExtensionTestHook {
             }
             _ => Ok(()),
         }
-    }
-
-    fn get_amount_ranges(&self, _: Bytes, _: Bytes) -> Result<AmountRanges, SimulationError> {
-        Err(SimulationError::RecoverableError("not implemented".into()))
     }
 
     fn delta_transition(
