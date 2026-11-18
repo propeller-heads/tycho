@@ -181,11 +181,8 @@ async fn main() {
     {
         if cli.disable_pamm {
             panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, set EUCLID_ENABLED=true, or drop --disable-pamm to run Metric on its own.");
-        } else {
-            println!(
-                "No authenticated RFQ credentials found. Continuing with the pAMM feeds only.\n"
-            );
         }
+        println!("No authenticated RFQ credentials found. Continuing with the pAMM feeds only.\n");
     }
 
     println!("Loading tokens from Tycho... {url}", url = tycho_url.as_str());
