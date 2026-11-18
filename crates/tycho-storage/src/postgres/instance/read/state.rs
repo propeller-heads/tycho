@@ -208,7 +208,8 @@ mod tests {
     use std::collections::HashMap;
 
     use chrono::{NaiveDate, NaiveDateTime};
-    use diesel_async::AsyncPgConnection;
+    use diesel::prelude::*;
+    use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
     use tycho_common::{
         models::{
             protocol::{ComponentBalance, ProtocolComponentState},
@@ -220,8 +221,14 @@ mod tests {
 
     use crate::postgres::{
         db_fixtures,
-        instance::{gateway::PostgresGatewayNew, InstanceId},
-        testing::instance_test_connection,
+        instance::{
+            gateway::PostgresGatewayNew,
+            schema::tycho::{extraction_state, protocol_state},
+            InstanceId,
+        },
+        snapshot::snapshot_transaction,
+        testing::{instance_test_connection, run_against_db},
+        PostgresError,
     };
 
     struct Setup {
@@ -657,5 +664,55 @@ mod tests {
 
         assert!(matches!(latest, Err(StorageError::Unsupported(_))), "{latest:?}");
         assert!(matches!(versioned, Err(StorageError::Unsupported(_))), "{versioned:?}");
+    }
+
+    #[tokio::test]
+    async fn test_serial_db_state_read_sees_the_callers_snapshot() {
+        run_against_db(|pool| async move {
+            let mut reader = pool.get().await.unwrap();
+            let mut writer = pool.get().await.unwrap();
+            let s = setup(&mut writer).await;
+            let a = component_with_state(&mut writer, s.curve, "a", "0x01").await;
+            db_fixtures::set_instance_head(&mut writer, s.curve, day(2)).await;
+
+            let (before, during) = snapshot_transaction(&mut reader)
+                .run(|reader| {
+                    let gateway = &s.gateway;
+                    let writer = &mut writer;
+                    async move {
+                        let before =
+                            states(gateway, reader, Some("vm:curve"), None, None, Some(at(day(2))))
+                                .await;
+                        diesel::update(
+                            protocol_state::table
+                                .filter(protocol_state::instance_id.eq(s.curve))
+                                .filter(protocol_state::protocol_component_id.eq(a)),
+                        )
+                        .set(protocol_state::attribute_value.eq(b("0x02")))
+                        .execute(writer)
+                        .await?;
+                        diesel::update(extraction_state::table.find(s.curve))
+                            .set(extraction_state::block_ts.eq(day(3)))
+                            .execute(writer)
+                            .await?;
+                        let during =
+                            states(gateway, reader, Some("vm:curve"), None, None, Some(at(day(2))))
+                                .await;
+                        Ok::<_, PostgresError>((before, during))
+                    }
+                    .scope_boxed()
+                })
+                .await
+                .unwrap();
+
+            let expected = vec![ProtocolComponentState::new(
+                "a",
+                [("reserve".to_string(), b("0x01"))].into(),
+                HashMap::new(),
+            )];
+            assert_eq!(before, Ok((expected.clone(), None)));
+            assert_eq!(during, Ok((expected, None)));
+        })
+        .await;
     }
 }
