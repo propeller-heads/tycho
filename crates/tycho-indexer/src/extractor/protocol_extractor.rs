@@ -2286,7 +2286,7 @@ impl ExtractorGateway for ExtractorPgGateway {
         component_ids: &[&'a str],
     ) -> Result<HashMap<String, HashMap<Bytes, ComponentBalance>>, StorageError> {
         self.state_gateway
-            .get_component_balances(&self.chain, Some(component_ids), None)
+            .get_component_balances(&self.chain, &self.protocol_system, Some(component_ids), None)
             .await
     }
 
