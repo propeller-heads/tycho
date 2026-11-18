@@ -10,7 +10,6 @@ use diesel::{
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use itertools::Itertools;
-use num_bigint::BigUint;
 use tracing::{debug_span, error, instrument, trace, warn, Instrument, Level};
 use tycho_common::{
     models::{
@@ -27,8 +26,8 @@ use tycho_common::{
 };
 
 use super::{
-    convert_int, count_to_i64, maybe_lookup_block_ts, maybe_lookup_version_ts, orm, page_window,
-    schema, storage_error_from_diesel, truncate_to_byte_limit,
+    compare_balances, convert_int, count_to_i64, maybe_lookup_block_ts, maybe_lookup_version_ts,
+    orm, page_window, schema, storage_error_from_diesel, truncate_to_byte_limit,
     versioning::{apply_partitioned_versioning, VersioningEntry},
     PostgresError, PostgresGateway, WithOrdinal, WithTxHash, MAX_TS, MAX_VERSION_TS,
 };
@@ -2056,12 +2055,6 @@ fn largest_balance_per_token(
         }
     }
     largest
-}
-
-/// Compares two balances by numeric value. Balances are big-endian unsigned integers stored with
-/// varying lengths and leading zeros, so a plain byte comparison would rank `0xfe` above `0x00ff`.
-fn compare_balances(a: &Bytes, b: &Bytes) -> Ordering {
-    BigUint::from_bytes_be(a).cmp(&BigUint::from_bytes_be(b))
 }
 
 #[cfg(test)]

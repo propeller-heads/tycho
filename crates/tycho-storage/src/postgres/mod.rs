@@ -128,7 +128,10 @@
 //! into a single transaction. This guarantees preservation of valid state
 //! throughout the application lifetime, even if the process panics during
 //! database operations.
-use std::{collections::HashMap, hash::Hash, ops::Deref, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    cmp::Ordering, collections::HashMap, hash::Hash, ops::Deref, str::FromStr, sync::Arc,
+    time::Duration,
+};
 
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
@@ -137,10 +140,12 @@ use diesel_async::{
     AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection,
 };
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use num_bigint::BigUint;
 use tracing::{debug, info};
 use tycho_common::{
     models::{token::Token, Chain, PaginationParams, TxHash},
     storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
+    Bytes,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -403,6 +408,12 @@ where
             std::any::type_name::<U>()
         ))
     })
+}
+
+/// Compares two balances by numeric value. Balances are big-endian unsigned integers stored with
+/// varying lengths and leading zeros, so a plain byte comparison would rank `0xfe` above `0x00ff`.
+pub(crate) fn compare_balances(a: &Bytes, b: &Bytes) -> Ordering {
+    BigUint::from_bytes_be(a).cmp(&BigUint::from_bytes_be(b))
 }
 
 /// Converts a collection length to the `i64` of a database count.
