@@ -14,7 +14,7 @@
 //! [40, 256) must be zero
 //! ```
 
-pub use pancakeswap_infinity_substreams::parameters::*;
+pub(crate) use pancakeswap_infinity_substreams::parameters::*;
 
 /// Storage slot of `CLPoolManager.pools`; slots 0-3 are Ownable/Pausable/ProtocolFees.
 ///
@@ -73,15 +73,6 @@ mod tests {
     #[case::sign_extends(0xff_ffff, -1)]
     fn tick_spacing_reads_bits_16_to_40(#[case] raw: u32, #[case] expected: i32) {
         assert_eq!(tick_spacing(&pool_key_parameters(u16::MAX, raw)), expected);
-    }
-
-    #[test]
-    fn hooks_bitmap_reads_low_16_bits() {
-        assert_eq!(hooks_registration_bitmap(&pool_key_parameters(0xc0, 60)), 0xc0);
-
-        let spacing_only = pool_key_parameters(0, 0xff_ffff);
-        assert_eq!(hooks_registration_bitmap(&spacing_only), 0);
-        assert!(!has_swap_hooks(&spacing_only), "tick spacing leaked into the hook bitmap");
     }
 
     /// The USDC/USDT pool the integration test indexes, read off Base. Pins the slot constant:

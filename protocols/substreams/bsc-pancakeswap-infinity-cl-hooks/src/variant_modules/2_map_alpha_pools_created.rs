@@ -1,8 +1,8 @@
 use base_pancakeswap_infinity_cl::{
-    abi::cl_pool_manager::events::Initialize, modules::map_pool_created::pool_component, parameters,
+    abi::cl_pool_manager::events::Initialize, modules::map_pool_created::pool_component,
 };
 use ethabi::ethereum_types::Address;
-use pancakeswap_infinity_substreams::params::decode_address;
+use pancakeswap_infinity_substreams::{parameters::is_dynamic_fee, params::decode_address};
 use serde::Deserialize;
 use substreams::{
     scalar::BigInt,
@@ -71,7 +71,7 @@ fn alpha_pool<S: StoreGet<BigInt>>(
     let fee: u32 = event.fee.clone().into();
     if !hooks.contains(&event.hooks) ||
         !has_alpha_swap_permissions(&event.parameters) ||
-        parameters::is_dynamic_fee(fee)
+        is_dynamic_fee(fee)
     {
         return None;
     }
@@ -105,7 +105,8 @@ fn alpha_pool<S: StoreGet<BigInt>>(
 
 #[cfg(test)]
 mod tests {
-    use base_pancakeswap_infinity_cl::parameters::{pool_state_base_slot, CL_POOLS_MAPPING_SLOT};
+    use base_pancakeswap_infinity_cl::parameters::CL_POOLS_MAPPING_SLOT;
+    use pancakeswap_infinity_substreams::parameters::pool_state_base_slot;
     use rstest::rstest;
     use substreams_ethereum::pb::eth::v2::{Call, StorageChange};
 

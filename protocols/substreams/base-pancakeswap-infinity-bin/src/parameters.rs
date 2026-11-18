@@ -15,7 +15,7 @@
 //! [32, 256) must be zero
 //! ```
 
-pub use pancakeswap_infinity_substreams::parameters::*;
+pub(crate) use pancakeswap_infinity_substreams::parameters::*;
 use tiny_keccak::{Hasher, Keccak};
 
 /// Storage slot of `BinPoolManager.pools`. The inherited state takes slots 0-3 (`_owner`,
