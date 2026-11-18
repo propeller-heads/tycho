@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import "forge-std/Test.sol";
 import {IBalanceLens} from "src/balance-lenses/IBalanceLens.sol";
+import {BalanceLens} from "src/balance-lenses/BalanceLens.sol";
 import {UniswapV4Balances} from "src/balance-lenses/UniswapV4Balances.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
@@ -224,9 +225,7 @@ contract UniswapV4BalancesTest is Test {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                UniswapV4Balances.UniswapV4Balances__LiquidityMismatch.selector,
-                0,
-                5
+                UniswapV4Balances.LiquidityMismatch.selector, 0, 5
             )
         );
         balancesAt(1);
@@ -235,9 +234,7 @@ contract UniswapV4BalancesTest is Test {
     function testAnUninitializedPoolReverts() public {
         vm.expectRevert(
             abi.encodeWithSelector(
-                UniswapV4Balances.UniswapV4Balances__PoolNotInitialized
-                .selector,
-                POOL_ID
+                UniswapV4Balances.PoolNotInitialized.selector, POOL_ID
             )
         );
         balancesAt(1);
@@ -252,7 +249,8 @@ contract UniswapV4BalancesTest is Test {
         balancesAt(1);
         uint256 used = before - gasleft();
 
-        assertGt(used, 26_000_000);
+        // An upper bound only: a cheaper compiler or v4-core release is no
+        // failure, a node gas cap is.
         assertLt(used, 30_000_000);
     }
 
@@ -273,9 +271,7 @@ contract UniswapV4BalancesTest is Test {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                UniswapV4Balances.UniswapV4Balances__LiquidityMismatch.selector,
-                1e18,
-                7
+                UniswapV4Balances.LiquidityMismatch.selector, 1e18, 7
             )
         );
         balancesAt(1);
@@ -287,8 +283,7 @@ contract UniswapV4BalancesTest is Test {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                UniswapV4Balances.UniswapV4Balances__NegativeLiquidity.selector,
-                MIN_TICK
+                UniswapV4Balances.NegativeLiquidity.selector, MIN_TICK
             )
         );
         balancesAt(1);
@@ -298,9 +293,7 @@ contract UniswapV4BalancesTest is Test {
         bytes memory id = abi.encodePacked(address(0xBEEF));
 
         vm.expectRevert(
-            abi.encodeWithSelector(
-                UniswapV4Balances.UniswapV4Balances__NotAPoolId.selector, id
-            )
+            abi.encodeWithSelector(UniswapV4Balances.NotAPoolId.selector, id)
         );
         lens.balances(id, tokens(TOKEN_A, TOKEN_B), attributes(1));
     }
@@ -308,9 +301,7 @@ contract UniswapV4BalancesTest is Test {
     function testATickSpacingOfZeroReverts() public {
         vm.expectRevert(
             abi.encodeWithSelector(
-                UniswapV4Balances.UniswapV4Balances__InvalidTickSpacing
-                .selector,
-                0
+                UniswapV4Balances.InvalidTickSpacing.selector, 0
             )
         );
         balancesAt(0);
@@ -319,9 +310,7 @@ contract UniswapV4BalancesTest is Test {
     function testATickSpacingAboveV4BoundsReverts() public {
         vm.expectRevert(
             abi.encodeWithSelector(
-                UniswapV4Balances.UniswapV4Balances__InvalidTickSpacing
-                .selector,
-                32768
+                UniswapV4Balances.InvalidTickSpacing.selector, 32768
             )
         );
         balancesAt(32768);
@@ -332,10 +321,68 @@ contract UniswapV4BalancesTest is Test {
         one[0] = TOKEN_A;
 
         vm.expectRevert(
-            abi.encodeWithSelector(
-                UniswapV4Balances.UniswapV4Balances__NotTwoTokens.selector, 1
-            )
+            abi.encodeWithSelector(UniswapV4Balances.NotTwoTokens.selector, 1)
         );
         lens.balances(abi.encodePacked(POOL_ID), one, attributes(1));
+    }
+
+    /// @notice After a swap down crosses tick 0 and stops on its price,
+    /// v4 leaves the price at tick 0's and the tick at -1, and the active
+    /// liquidity is the range below. The lens reads the same amounts as at
+    /// tick 0 and finds the liquidity of the range holding tick -1.
+    function testAPriceOnATickAfterADownwardCross() public {
+        setSlot0(PRICE_AT_TICK_0, -1);
+        setLiquidity(3e18);
+        setTick(MIN_TICK, 3e18);
+        setTick(0, -25e17);
+        setTick(MAX_TICK, -5e17);
+
+        uint256[] memory amounts = balancesAt(1);
+
+        assertEq(amounts[0], 499999999999999999);
+        assertEq(amounts[1], 2999999999999999999);
+    }
+
+    /// @notice The native currency is address(0), always currency0.
+    function testTheNativeCurrencyIsCurrency0InEitherOrder() public {
+        setRangesBelowAndAboveThePrice();
+
+        uint256[] memory nativeFirst = lens.balances(
+            abi.encodePacked(POOL_ID),
+            tokens(address(0), TOKEN_B),
+            attributes(1)
+        );
+        uint256[] memory nativeSecond = lens.balances(
+            abi.encodePacked(POOL_ID),
+            tokens(TOKEN_B, address(0)),
+            attributes(1)
+        );
+
+        assertEq(nativeFirst[0], 499999999999999999);
+        assertEq(nativeFirst[1], 2999999999999999999);
+        assertEq(nativeSecond[0], 2999999999999999999);
+        assertEq(nativeSecond[1], 499999999999999999);
+    }
+
+    function testATickSpacingLongerThanAWordReverts() public {
+        IBalanceLens.Attribute[] memory list = attributes(1);
+        list[0].value = new bytes(33);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(BalanceLens.NotAUint.selector, list[0].value)
+        );
+        lens.balances(abi.encodePacked(POOL_ID), tokens(TOKEN_A, TOKEN_B), list);
+    }
+
+    function testAComponentWithoutABalanceOwnerReverts() public {
+        IBalanceLens.Attribute[] memory list = new IBalanceLens.Attribute[](1);
+        list[0] = attributes(1)[0];
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BalanceLens.MissingAttribute.selector, "balance_owner"
+            )
+        );
+        lens.balances(abi.encodePacked(POOL_ID), tokens(TOKEN_A, TOKEN_B), list);
     }
 }
