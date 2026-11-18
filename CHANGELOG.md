@@ -1,3 +1,21 @@
+## [0.529.0](https://github.com/propeller-heads/tycho/compare/0.528.0...0.529.0) (2026-11-18)
+
+
+### Features
+
+* **common:** add admin pause methods to ProtocolGateway ([8d644f4](https://github.com/propeller-heads/tycho/commit/8d644f4abb73903592985e572cbacb6ddd6ef6f2))
+* **storage:** add the component_pause table ([e798521](https://github.com/propeller-heads/tycho/commit/e798521a6f5e8135d8a915b25789fc5b89b301cd))
+* **storage:** record admin pauses in Postgres ([537457b](https://github.com/propeller-heads/tycho/commit/537457b9b7f57a42fc5a542f0b4a6ceb69cafa8e))
+* **storage:** record who unpaused a component and why ([c138b79](https://github.com/propeller-heads/tycho/commit/c138b793f3d4f7c9c083750ca2ee02c099d68077))
+
+
+### Bug Fixes
+
+* **storage:** allow one open pause per component on a chain ([19b5fff](https://github.com/propeller-heads/tycho/commit/19b5fff19d63b58e3cba0bcc5de4dce5191d8ecc))
+* **storage:** insert pauses in batches ([02f37e1](https://github.com/propeller-heads/tycho/commit/02f37e12313e57eab28d48413fc8c65710fdc85c))
+* **storage:** pause components of systems added after startup ([1a0ef02](https://github.com/propeller-heads/tycho/commit/1a0ef024c613e75c844945dea0b8ccc92bab910b))
+* **storage:** pause every component of a call or none ([a7c571a](https://github.com/propeller-heads/tycho/commit/a7c571a8c454a54f7c410f6420fd16c2b15af70e))
+
 ## [0.528.0](https://github.com/propeller-heads/tycho/compare/0.527.5...0.528.0) (2026-11-18)
 
 
