@@ -152,10 +152,15 @@ pub fn default_served_pamms() -> Vec<PriceLevelStreamConfig> {
 /// [`add_pamm`](super::stream::PriceLevelStreamBuilder::add_pamm) entry for one of these
 /// addresses overrides the denial.
 pub fn default_denied_pamms() -> Vec<Bytes> {
-    // No streamed venue is currently known to reject the executor's swap. This is where one
-    // goes that gates settlement — on a taker allowlist, say — or otherwise reverts a swap sent
-    // by an arbitrary caller.
-    Vec::new()
+    // Venues that settle only for callers on their own allowlist, which Tycho's routers are not on.
+    let pamms = [
+        // Unnamed venue; reverts `NotWhitelisted()` for the TychoRouterV3 (2026-11-17).
+        "0xb8d4e06e3038b07b4376ba3020eabce69f673463",
+    ];
+    pamms
+        .into_iter()
+        .map(|address| Bytes::from_str(address).expect("hardcoded pAMM address must parse"))
+        .collect()
 }
 
 /// The streamed identities Titan streams some venues under, each paired with that venue's canonical
