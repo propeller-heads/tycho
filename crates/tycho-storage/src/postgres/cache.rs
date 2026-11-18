@@ -31,7 +31,7 @@ use tycho_common::{
             ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
             ProtocolComponentState, ProtocolComponentStateDelta, QualityRange, UnpauseRecord,
         },
-        token::Token,
+        token::{Token, TokenOwner},
         Address, Chain, ComponentId, ContractId, EntryPointId, ExtractionState, PaginationParams,
         ProtocolType, TxHash,
     },
@@ -995,7 +995,7 @@ impl ProtocolGateway for CachedGateway {
         chain: &Chain,
         tokens: &[Address],
         min_balance: Option<f64>,
-    ) -> Result<HashMap<Address, (ComponentId, Bytes)>, StorageError> {
+    ) -> Result<HashMap<Address, TokenOwner>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
             .get_token_owners(chain, tokens, min_balance, &mut conn)
