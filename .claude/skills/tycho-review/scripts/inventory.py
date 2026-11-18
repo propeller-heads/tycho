@@ -34,6 +34,8 @@ CHAINS = {  # name: (chain id, RPC variables in the repo's spellings)
     "arc": (5042, ["ARC_RPC_URL"]),
     "zksync": (324, ["ZKSYNC_RPC_URL"]),
 }
+# Keep in step with `Chain::try_id` in crates/tycho-common/src/models/mod.rs: a chain missing here
+# makes the inventory unusable for it, and the integration's reviewer builds it by hand.
 SLOTS = {  # EIP-1967
     "implementation": "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc",
     "beacon": "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50",
