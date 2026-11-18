@@ -319,7 +319,7 @@ impl BookStreamProcessor {
                     let mut bebop_builder = BebopFeedBuilder::new(
                         book_config.clone(),
                         Arc::clone(usd_quote_tokens),
-                        key.clone(),
+                        key,
                     )
                     .origin_address(
                         Bytes::from_str(USER_ADDR)
@@ -348,8 +348,8 @@ impl BookStreamProcessor {
                     let mut builder = HashflowFeedBuilder::new(
                         book_config.clone(),
                         Arc::clone(usd_quote_tokens),
-                        user.clone(),
-                        key.clone(),
+                        user,
+                        key,
                     )
                     .feed_config(HttpFeedConfig {
                         poll_interval: Duration::from_secs(30),
@@ -372,8 +372,8 @@ impl BookStreamProcessor {
                     let mut builder = LiquoriceFeedBuilder::new(
                         book_config.clone(),
                         Arc::clone(usd_quote_tokens),
-                        user.clone(),
-                        key.clone(),
+                        user,
+                        key,
                     )
                     .feed_config(HttpFeedConfig {
                         poll_interval: Duration::from_secs(30),
@@ -420,7 +420,7 @@ impl BookStreamProcessor {
                     let mut builder = NativeFeedBuilder::new(
                         book_config.clone(),
                         Arc::clone(usd_quote_tokens),
-                        key.clone(),
+                        key,
                     )
                     .feed_config(HttpFeedConfig {
                         poll_interval: Duration::from_secs(30),

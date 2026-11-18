@@ -201,11 +201,12 @@ pub struct EuclidDeclined {
 }
 
 impl EuclidFirmQuote {
-    /// What the signed order pays for the trade `params` asked for on `chain`, once the quote
-    /// is checked to be that trade: the router and call the executor allows, the assets, the
-    /// fill amount the executor patches, the recipient, the filler the order admits, and an
-    /// expiry still ahead. A quote that fails here would only revert on chain, except an
-    /// expired one, which is no quote: asking again gets a fresh order.
+    /// What the signed order pays for the trade `params` asked for on `chain`.
+    ///
+    /// A quote whose router, call, assets, fill amount, recipient or admitted filler differ from
+    /// that trade is a `FatalError`: it would only revert on chain. An order that has expired,
+    /// or that pays nothing for the fill, is `QuoteNotFound`, like a declined request: the
+    /// router would refuse it too, and asking again may get a fresh order.
     pub fn amount_out(
         &self,
         chain: EuclidSupportedChain,
@@ -259,21 +260,32 @@ impl EuclidFirmQuote {
                 order.allowedSender, params.sender
             )));
         }
-        // `info` carries the nonce in its low 64 bits and the expiry in the 64 above.
+        // `info` carries the nonce in its low 64 bits and the expiry in the 64 above. The router
+        // reads an expiry of 0 as an order that never expires.
         let expiry = ((order.info >> 64usize) & U256::from(u64::MAX)).to::<u64>();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_before_epoch| {
-                RFQError::FatalError("system clock is before the epoch".to_string())
-            })?
-            .as_secs();
-        if expiry <= now {
+        if expiry != 0 {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_before_epoch| {
+                    RFQError::FatalError("system clock is before the epoch".to_string())
+                })?
+                .as_secs();
+            if expiry <= now {
+                return Err(RFQError::QuoteNotFound(format!(
+                    "Euclid order expired at {expiry}, now {now}"
+                )));
+            }
+        }
+        // What the router pays for `fill`: the maker's amount, pro rata, rounded down. The
+        // router reverts a fill that pays nothing (`RFQSwapWithZeroAmount`).
+        let amount_out = u256_to_biguint(order.makingAmount) * fill / taking_amount;
+        if amount_out.is_zero() {
             return Err(RFQError::QuoteNotFound(format!(
-                "Euclid order expired at {expiry}, now {now}"
+                "Euclid order pays nothing for a fill of {}",
+                params.amount_in
             )));
         }
-        // What the router pays for `fill`: the maker's amount, pro rata, rounded down.
-        Ok(u256_to_biguint(order.makingAmount) * fill / taking_amount)
+        Ok(amount_out)
     }
 }
 
@@ -413,7 +425,7 @@ mod tests {
     }
 
     /// The recorded quote is the trade it was requested for, and pays what its signed order
-    /// says, not what the JSON beside it says.
+    /// says.
     #[test]
     fn the_recorded_quote_pays_what_its_order_signs() {
         let amount_out = quote_with(|_| {})
@@ -424,7 +436,8 @@ mod tests {
 
     /// A smaller fill of the same order pays pro rata, rounded down, as the router does. Half
     /// the order divides exactly; a third of it and one wei pays 6241692 * (1e15 + 1) / 3e15 =
-    /// 2080564.000...002, which only rounding down turns into 2080564.
+    /// 2080564.000...002, which the router rounds down to 2080564 where rounding up would give
+    /// 2080565.
     #[rstest]
     #[case::half(1_500_000_000_000_000, 3_120_846)]
     #[case::a_third_and_a_wei(1_000_000_000_000_001, 2_080_564)]
@@ -442,9 +455,9 @@ mod tests {
     /// Every way a quote can disagree with the request it answers fails, each for its own
     /// reason.
     #[rstest]
-    #[case::amount(
-        |p: &mut GetAmountOutParams, _: &mut fillOrderRFQToCall| p.amount_in = BigUint::from(1u8),
-        "calldata fills 3000000000000000, requested 1"
+    #[case::fill_word(
+        |_: &mut GetAmountOutParams, c: &mut fillOrderRFQToCall| c.flagsAndAmount = U256::from(1u8),
+        "calldata fills 1, requested 3000000000000000"
     )]
     #[case::token_in(
         |p: &mut GetAmountOutParams, _: &mut fillOrderRFQToCall| p.token_in = bytes(USDC),
@@ -461,10 +474,6 @@ mod tests {
     #[case::sender(
         |p: &mut GetAmountOutParams, _: &mut fillOrderRFQToCall| p.sender = bytes(USDC),
         "admits"
-    )]
-    #[case::fill_word(
-        |_: &mut GetAmountOutParams, c: &mut fillOrderRFQToCall| c.flagsAndAmount = U256::from(1u8),
-        "calldata fills 1,"
     )]
     fn a_quote_that_disagrees_with_the_request_fails(
         #[case] tamper: fn(&mut GetAmountOutParams, &mut fillOrderRFQToCall),
@@ -492,6 +501,31 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(&error, RFQError::QuoteNotFound(message) if message.contains("expired at 1,")),
+            "{error:?}"
+        );
+    }
+
+    /// An expiry of 0 is an order that never expires, as the router reads it.
+    #[test]
+    fn an_order_without_an_expiry_is_quoted() {
+        let quote = quote_with(|call| call.order.info &= U256::from(u64::MAX));
+        let amount_out = quote
+            .amount_out(EuclidSupportedChain::Ethereum, &recorded_params())
+            .unwrap();
+        assert_eq!(amount_out, BigUint::from(6_241_692u64));
+    }
+
+    /// A fill of one wei pays 6241692 * 1 / 3e15, which rounds down to nothing, a fill the
+    /// router reverts; so it is no quote.
+    #[test]
+    fn a_fill_that_pays_nothing_is_no_quote() {
+        let quote = quote_with(|call| call.flagsAndAmount = U256::from(1u8));
+        let params = GetAmountOutParams { amount_in: BigUint::from(1u8), ..recorded_params() };
+        let error = quote
+            .amount_out(EuclidSupportedChain::Ethereum, &params)
+            .unwrap_err();
+        assert!(
+            matches!(&error, RFQError::QuoteNotFound(message) if message.contains("pays nothing")),
             "{error:?}"
         );
     }

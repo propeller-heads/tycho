@@ -14,7 +14,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 ## Supported Protocols
 
 - **On-chain Protocols**: All DEX protocols supported by Tycho (Uniswap V2/V3, Curve, Balancer, etc.)
-- **RFQ Protocols**: Request-for-Quote venues (Bebop, Hashflow, Liquorice, Native), each run when its credentials are set, and Euclid, whose gateway is public and which runs on Ethereum without any
+- **RFQ Protocols**: Request-for-Quote venues (Bebop, Hashflow, Liquorice, Native), each run when its credentials are set, and Euclid, whose gateway is public and which runs on Ethereum without credentials. Euclid's swaps are simulated, but fail to encode and are skipped with a warning until its executor is deployed and listed in `executor_addresses.json`
 - **pAMM Book Feeds**: venues selected by `--pamm` (default: Metric; BaiBai on Base when listed). BaiBai's swaps are simulated, but fail to encode and are skipped with a warning until its executor is deployed and listed in `executor_addresses.json`
 - **Price Level Stream**: Titan pAMM price level stream venues (`pricelevelstream:*`, Ethereum only)
 
