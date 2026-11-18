@@ -1,3 +1,13 @@
+## [0.530.0](https://github.com/propeller-heads/tycho/compare/0.529.3...0.530.0) (2026-11-18)
+
+
+### Features
+
+* **indexer:** clear the pause-dependent response caches on a change ([02009cd](https://github.com/propeller-heads/tycho/commit/02009cdfbcf46f18f7a315f6428e051ac5c70128))
+* **indexer:** keep an in-memory registry of admin pauses ([dfe5e4b](https://github.com/propeller-heads/tycho/commit/dfe5e4bfcd840680e020597e454f5ff7a8618a47))
+* **indexer:** let an rpc response cache be cleared ([eb51921](https://github.com/propeller-heads/tycho/commit/eb51921ed7ef15572c8547aeb77769bbd1e3f7bb))
+* **indexer:** load and refresh admin pauses at startup ([748321c](https://github.com/propeller-heads/tycho/commit/748321cd5476b416d3b314d4e97a605357cdf48d))
+
 ## [0.529.3](https://github.com/propeller-heads/tycho/compare/0.529.2...0.529.3) (2026-11-18)
 
 
