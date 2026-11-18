@@ -113,10 +113,9 @@ const KIPSELI_PROTOCOL_SYSTEM: &str = "vm:kipseli";
 /// bopAMM protocol system identifier as indexed by Tycho.
 const BOPAMM_PROTOCOL_SYSTEM: &str = "vm:bopamm";
 
-/// FermiSwap venue aliases on Titan's quote stream: the FermiSwap oracle and the FermiSwapper
-/// router. Both keys carry the same registry diffs; either serves the protocol.
-const FERMISWAP_VENUES: &[&str] =
-    &["0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977", "0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977"];
+/// FermiSwap venue on Titan's quote stream: the FermiSwapper router, which Titan keys its books and
+/// overrides by.
+const FERMISWAP_VENUES: &[&str] = &["0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977"];
 /// Kipseli venue aliases on Titan's quote stream: the Kipseli oracle and the KipseliPropAMMWrapper
 /// router, both carrying the same registry diffs.
 const KIPSELI_VENUES: &[&str] =
@@ -657,13 +656,13 @@ mod tests {
             .is_none());
     }
 
-    /// The sample message is keyed by the FermiSwap oracle (`FERMISWAP_VENUES[0]`), so listing the
-    /// router alias first must fall through to the oracle rather than give up.
+    /// The sample message is keyed by the FermiSwap router (`FERMISWAP_VENUES[0]`), so listing an
+    /// address the frame lacks first must fall through to the router rather than give up.
     #[test]
     fn extract_any_venue_falls_back_to_a_later_alias() {
         let message = serde_json::from_str::<TitanMessage>(SAMPLE_MESSAGE).expect("valid JSON");
         let aliases = [
-            FERMISWAP_VENUES[1]
+            KIPSELI_VENUES[0]
                 .parse::<Address>()
                 .unwrap(),
             FERMISWAP_VENUES[0]
@@ -672,7 +671,7 @@ mod tests {
         ];
         let snapshot = TitanProvider::extract_any_venue(&message, &aliases)
             .expect("extract must succeed")
-            .expect("oracle alias is present in the frame");
+            .expect("router alias is present in the frame");
         assert_eq!(snapshot.block_number, Some(25051224));
     }
 
