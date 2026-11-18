@@ -6090,6 +6090,14 @@ mod test_serial_db {
                 handle.await.unwrap().unwrap();
             }
 
+            let stored_balances = extractor
+                .gateway
+                .inner
+                .get_components_balances(&["pc_1"])
+                .await
+                .unwrap();
+            assert!(stored_balances.contains_key("pc_1"), "{stored_balances:?}");
+
             let client_msg = extractor
                 .handle_revert(BlockUndoSignal {
                     last_valid_block: Some(BlockRef {
