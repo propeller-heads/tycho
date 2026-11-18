@@ -32,6 +32,14 @@ impl PostgresGatewayNew {
         })
     }
 
+    /// Uses the given name caches instead of loading them from the database.
+    pub(crate) fn with_caches(
+        chain_id_cache: Arc<ChainEnumCache>,
+        protocol_system_id_cache: Arc<ProtocolSystemEnumCache>,
+    ) -> Self {
+        Self { chain_id_cache, protocol_system_id_cache }
+    }
+
     #[cfg(test)]
     pub async fn from_connection(conn: &mut AsyncPgConnection) -> Self {
         let chain_id_cache = ChainEnumCache::from_connection(conn)

@@ -44,6 +44,7 @@ use tycho_common::{
 };
 
 use super::{
+    instance::gateway::PostgresGatewayNew,
     is_transaction_conflict,
     pool::{self, PooledConnection, EXTRACTION_POOL},
     snapshot::{bound_snapshot_reads, snapshot_transaction},
@@ -320,6 +321,8 @@ pub(crate) struct DBCacheWriteExecutor {
     chain: Chain,
     pool: Pool<AsyncPgConnection>,
     state_gateway: PostgresGateway,
+    /// Writes the batches of a gateway bound to an instance.
+    instance_gateway: PostgresGatewayNew,
     persisted_block: Option<models::blockchain::Block>,
     msg_receiver: mpsc::Receiver<DBCacheMessage>,
     max_retries: u64,
@@ -345,7 +348,23 @@ impl DBCacheWriteExecutor {
 
         debug!("Persisted block: {:?}", persisted_block);
 
-        Self { name, chain, pool, state_gateway, persisted_block, msg_receiver, max_retries: 3 }
+        // Shares the name caches, so both gateways know the same chains and protocols.
+        let instance_gateway = PostgresGatewayNew::with_caches(
+            state_gateway.chain_id_cache.clone(),
+            state_gateway
+                .protocol_system_id_cache
+                .clone(),
+        );
+        Self {
+            name,
+            chain,
+            pool,
+            state_gateway,
+            instance_gateway,
+            persisted_block,
+            msg_receiver,
+            max_retries: 3,
+        }
     }
 
     /// Spawns a task to process incoming database messages (write requests or flush commands).
