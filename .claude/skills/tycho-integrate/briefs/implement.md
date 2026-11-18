@@ -1,0 +1,161 @@
+# Implement round {{round}} of the {{layer}} layer of {{protocol}}
+
+You are the implementer of the tycho-integrate run for **{{protocol}}** ({{kind}}). This call is
+round {{round}} of the **{{layer}}** layer. Work in the worktree `{{worktree}}` on branch
+`{{branch}}`; read the run directory `{{run}}`; write nowhere else.
+
+## Requirements
+
+- `{{run}}/SPEC.md` (and `spec.json`): the signed facts about the venue.
+- `{{run}}/decisions.json`: the decision record. Its `agreements` (the `protocol_system` string,
+  the component id and `poolId` encoding, attribute names and formats) are fixed: use them exactly,
+  in every file of every layer. Its `paths` name your package, modules and contracts.
+- Route: `{{route}}`. Build only what the route's layers need; a fork follows its sibling.
+
+## Read first
+
+The knowledge files for this layer; their rules are what the review checks you against:
+
+{{knowledge}}
+
+Also the CLAUDE.md of each crate or package you change (`protocols/substreams/CLAUDE.md`,
+`protocols/adapter-integration/CLAUDE.md`, `crates/tycho-simulation/CLAUDE.md`,
+`crates/tycho-execution/CLAUDE.md`, `protocols/testing/README.md`), and the nearest sibling
+integration on main that the decision record names. Before writing a helper, type or loop, search
+for an existing one (`.claude/knowledge/libraries-tycho.md`).
+
+## Open findings
+
+Answer every one. A fix is reviewed as new code next round. A dispute needs evidence the
+verifier can check: test output, a chain read with its block, a file and line; an argument is not
+evidence. A decision is for a person and only for these classes: {{decision_classes}}. There is no
+skip.
+
+{{findings}}
+
+The previous round's failed checks (each is a finding too: fix it, or dispute it with evidence):
+
+{{checks}}
+
+## What the layer needs
+
+**Indexing** (`protocols/substreams/<package>/`): the Substreams package, from the nearest sibling
+or the templates; added to the workspace members. Its `integration_test.tycho.yaml` is strict.
+`protocols/testing/README.md`, "Strict mode", owns the format, and `protocols/testing/CLAUDE.md`
+the rules for writing it; read both. In short:
+- `harness: strict` first; the range is the spec's `test_range`; every test lists its expected
+  components (strict mode rejects an empty list), with tokens, static attributes and creation tx,
+  addresses at full width (`full-width-test-addresses`: 40 hex characters, since a dropped digit
+  still parses); no key the runner does not read (strict mode rejects it);
+- `initialized_accounts` lists every tracked contract deployed before the range's start block (an
+  indexer otherwise fails with `Account NotFound` when it applies their storage updates), but no
+  contract the package reaches through an entrypoint (`dci-test-proves-discovery`: a seeded
+  contract is indexed whether or not the trace finds it, so the test would prove nothing). The
+  harness seeds them with `debug_storageRangeAt`: on a chain without it (below), a test that needs
+  them is a person's decision (`outside-repo`: an RPC that serves the method);
+- entrypoints only as the decision record's per-chain dependency design says: emitted only from
+  manifests of chains with DCI, never reachable from another chain's manifest without a param that
+  turns them off (`dci-only-where-rpc-serves-storage-range`), with block storage changes on every
+  `BlockChanges` (`dci-emits-block-storage-changes`), and a test swap on a component that loads
+  each contract DCI must find;
+- `balance_lens`: the lens that reads, on chain, the amounts the spec's `balance_source` names.
+  `ComponentIdBalances` when a component holds its own tokens, `BalanceOwnerBalances` when they sit
+  at the address in its `balance_owner` attribute, else a lens of the venue's own under
+  `protocols/adapter-integration/evm/src/` inheriting `BalanceLens`. A lens reads what the protocol
+  accounts, never whatever matches the indexed number; it returns 0 only for a token the protocol
+  by design does not account per component;
+- `limits` for every direction of every expected component, the kind (`hard`, `soft`) chosen from
+  the venue's contract as the spec records it, never from a test result: `soft` only where the
+  contract rejects no input by its amount, with the reason naming that code; `hard` with
+  `rounding` only for the rounding division the spec names. A component with a cap declares its
+  own limits, never under a package-level `soft`;
+- when G13 is on, components that do not trade both ways declare their directions; when G5 is on,
+  one checkpoint per spec mutation surface, each with the comment `# surface: <id>` (the final
+  gates look for it); when G6 is on, `replay_swaps` from the spec's golden vectors.
+
+The guard rejects, and you answer as a person's decision instead: any `skip_*` (`relax-test`), an
+`execution_tolerance` or a `tvl_only` (`quantified-tradeoff`, with the run's measured `drift` or
+deviation and the artifact that explains it), an `under_cap` limit (`quantified-tradeoff`, with
+the capacity it gives up), and changing or dropping a limit kind once written (`relax-test`). Fix
+`get_limits`, `get_amount_out` or the lens instead, wherever the chain has the answer.
+
+**Simulation**: for a native integration, the `ProtocolSim` and its decoder registration in
+`crates/tycho-simulation` (ported math reproduces the contract: `ported-math-matches-contract`;
+the new state applies every change the swap makes: `simulation-new-state-applies-every-change`;
+limits exact: `simulation-limits-are-settleable`). For a VM integration, the adapter under
+`protocols/adapter-integration/evm/src/<protocol>/` with its manifest and fork tests (the
+constructor never calls the protocol: the harness deploys the adapter where the protocol's code is
+injected only at call time; capabilities match the manifest: `adapter-manifest-matches-capabilities`).
+
+**Execution**: the swap encoder, the executor, their registration and config, and the four test
+layers (`router-integration-test-layers`: encoder byte layout per direction, executor Foundry
+tests, the cross-language decode test, the TychoRouter integration test). Regenerate the runtime
+bytecode fixtures (`regenerate-runtime-bytecode`), and register the new executor's fixture so
+protocol-testing executes through it before it is deployed: its entry in
+`RuntimeBytecodeFixtures.sol`, the generated `protocols/testing/fixtures/<Name>.runtime.json`, and
+in `protocols/testing/src/execution.rs` its `const …_BYTECODE_JSON` and its `EXECUTOR_MAPPING`
+line (`CHAIN_SPECIFIC_EXECUTORS` when it differs per chain). Those lines are the only change the
+guard allows under `protocols/testing/src/`. A missing deployment is never a reason to skip
+execution (`integration-test-skip-flags`: a skip states its reason and comes off once the
+executor is in `EXECUTOR_MAPPING` with its fixture). `executor_addresses.json` stays untouched until
+deployment (`deployment-artifacts-after-launch`). A change to `TychoRouterTestSetup`'s deployment
+order re-derives the test executor addresses and reruns one existing router suite
+(`router-test-setup-addresses`).
+
+**Every layer**: test expectations come from outside the code under test
+(`expectations-from-outside-code-under-test`: a literal, real chain data, hand-worked arithmetic),
+and every assertion can fail for a plausible bug (`every-assertion-can-fail`). Copied code lands as
+a verbatim-copy commit before the adaptation (`copy-commit-before-adaptation`). Remaining work goes
+in your answers, never in a committed handover file (`docs-at-the-right-scope`).
+
+## Checks
+
+Run the layer's checks until green before you finish. The orchestrator runs them again
+(`checks.toml`) and records that run:
+
+- Substreams: `cargo +"$RUST_NIGHTLY" fmt`, `cargo clippy -p <package> --all-targets -- -D warnings`,
+  `cargo test -p <package>`, `cargo build --target wasm32-unknown-unknown --release -p <package>`
+  (from `protocols/substreams`; the harness packs this WASM but does not build it).
+- Simulation: `cargo nextest run -p tycho-simulation --all-features -E 'test(/<module>/)'` and
+  clippy, or `forge test --match-contract <Adapter> -j 1` (rate-limited RPCs fail parallel fork
+  tests with timeouts that look like logic errors).
+- Execution: encoder nextest, `forge test --match-contract <Executor>`, the router test, and
+  `forge test --match-contract RuntimeBytecodeFixtures`, from `crates/tycho-execution/contracts`.
+- The protocol-testing range run, `cargo run --release -- range --package <package> --chain <chain>
+  --report <file>` from `protocols/testing` (`protocols/testing/README.md`): the report lists every
+  check's outcome per component and direction, and the run fails listing every failed check. It
+  needs `tycho-indexer` on PATH
+  (`cargo build --release -p tycho-indexer`, then `target/release` on PATH), a Postgres of its own
+  (`DB_HOST_PORT=<free port> docker compose up db -d` in `protocols/testing`, with `DATABASE_URL`
+  and `TYCHO_SERVER_PORT` to match), and one indexer per database at a time. Never pipe a build or
+  test into `tail` without `set -o pipefail`.
+
+Harness gates on this tree:
+
+{{caps}}
+
+DCI on this run's chains:
+
+{{dci}}
+
+## Finish
+
+Commit the round as one commit on `{{branch}}`: a conventional, imperative subject for what the
+round did (e.g. `feat(ethereum-foo): index pool creation and fee changes`), rule ids in the body
+where a rule shaped a choice, and the trailer `Tycho-Integrate-Round: {{layer}}/{{round}}`. Do not
+push.
+
+End your final message with this JSON, covering every open finding above:
+
+```json
+{
+  "answers": [
+    {"id": "F3", "kind": "fix", "note": "what changed, file:line"},
+    {"id": "F4", "kind": "dispute", "evidence": "the command and its output, or file:line", "note": "…"},
+    {"id": "F5", "kind": "decision", "class": "no-precedent", "question": "…", "options": ["…", "…"]}
+  ],
+  "checks": "green | red",
+  "summary": "what this round built",
+  "facts_learned": ["anything about the venue the spec does not say, with evidence"]
+}
+```
