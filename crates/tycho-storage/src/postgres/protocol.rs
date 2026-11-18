@@ -3842,21 +3842,35 @@ mod test {
         assert_eq!(res, exp);
     }
 
+    fn owner(protocol_system: &str, component_id: &str, balance: &str) -> TokenOwner {
+        TokenOwner {
+            protocol_system: protocol_system.to_string(),
+            component_id: component_id.to_string(),
+            balance: Bytes::from(balance),
+        }
+    }
+
     #[rstest]
-    #[case::dai(&[DAI], HashMap::from([
-        (Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f"), (
-            "state3".to_string(),
-            Bytes::from("0x00000000000000000000000000000000000000000000006c6b935b8bbd400000")
-        ))]))]
-    #[case::weth(&[WETH], HashMap::from([
-        (Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"), (
-            "state1".to_string(),
-            Bytes::from("0x0000000000000000000000000000000000000000000000000de0b6b3a7640000")
-        ))]))]
+    #[case::dai(&[DAI], HashMap::from([(
+        Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f"),
+        owner(
+            "ambient",
+            "state3",
+            "0x00000000000000000000000000000000000000000000006c6b935b8bbd400000",
+        ),
+    )]))]
+    #[case::weth(&[WETH], HashMap::from([(
+        Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),
+        owner(
+            "ambient",
+            "state1",
+            "0x0000000000000000000000000000000000000000000000000de0b6b3a7640000",
+        ),
+    )]))]
     #[tokio::test]
     async fn test_get_token_owners(
         #[case] tokens: &[&str],
-        #[case] exp: HashMap<Address, (String, Bytes)>,
+        #[case] exp: HashMap<Address, TokenOwner>,
     ) {
         let mut conn = setup_db().await;
         setup_data(&mut conn).await;
@@ -3892,18 +3906,13 @@ mod test {
         let token_ids = HashMap::from([(1_i64, token.clone())]);
         let rows = rows
             .iter()
-            .map(|(component_id, balance)| {
-                (1_i64, component_id.to_string(), Bytes::from(*balance))
-            });
+            .map(|(component_id, balance)| (1_i64, owner("vm:curve", component_id, balance)));
 
         let res = largest_balance_per_token(rows, &token_ids);
 
         assert_eq!(
             res,
-            HashMap::from([(
-                token,
-                ("curve".to_string(), Bytes::from("0x08c7be39eaf21f5b7efb68"))
-            )])
+            HashMap::from([(token, owner("vm:curve", "curve", "0x08c7be39eaf21f5b7efb68"))])
         );
     }
 
@@ -3912,14 +3921,14 @@ mod test {
         let token = Bytes::from(USDTB);
         let token_ids = HashMap::from([(1_i64, token.clone())]);
         let rows = vec![
-            (1_i64, "first".to_string(), Bytes::from("0x00ff")),
-            (1_i64, "second".to_string(), Bytes::from("0xff")),
-            (2_i64, "unknown_token".to_string(), Bytes::from("0xffff")),
+            (1_i64, owner("vm:curve", "first", "0x00ff")),
+            (1_i64, owner("uniswap_v4", "second", "0xff")),
+            (2_i64, owner("vm:curve", "unknown_token", "0xffff")),
         ];
 
         let res = largest_balance_per_token(rows, &token_ids);
 
-        assert_eq!(res, HashMap::from([(token, ("first".to_string(), Bytes::from("0x00ff")))]));
+        assert_eq!(res, HashMap::from([(token, owner("vm:curve", "first", "0x00ff"))]));
     }
 
     #[tokio::test]

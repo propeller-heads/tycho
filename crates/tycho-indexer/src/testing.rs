@@ -17,7 +17,7 @@ use tycho_common::{
             ComponentBalance, ProtocolComponent, ProtocolComponentState,
             ProtocolComponentStateDelta, QualityRange,
         },
-        token::Token,
+        token::{Token, TokenOwner},
         Address, Chain, ComponentId, ContractId, EntryPointId, ExtractionState, PaginationParams,
         ProtocolType, TxHash,
     },
@@ -400,7 +400,7 @@ mod gateway_mock {
                 Box<
                     dyn ::core::future::Future<
                         Output = Result<
-                            HashMap<Address, (ComponentId, Bytes)>,
+                            HashMap<Address, TokenOwner>,
                             StorageError,
                         >,
                     > + ::core::marker::Send + 'async_trait,
