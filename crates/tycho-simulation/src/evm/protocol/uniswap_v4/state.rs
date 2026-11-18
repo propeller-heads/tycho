@@ -1656,12 +1656,18 @@ mod tests {
     /// A full-range position of 2^126 liquidity walked up from tick 0 to tick 880000 needs about
     /// 2^126 * 1.0001^440000 ≈ 1.09e57 of token1 net of fees. At no LP fee that fits the 2^200
     /// (≈ 1.61e60) budget; at 999900 pips the gross input is 10^4 times the net, about 1.09e61,
-    /// so the walk stops short and says so. The no-fee walk's input and output are v4's
+    /// so the walk stops short and says so. At 990000 pips (the highest rate a Montra pool
+    /// charges) the gross input is 10^2 times the net, about 1.09e59, inside the budget. At
+    /// 999500 pips it is 2000 times the net, about 2.18e60: above 2^200 and below 2^201, so a
+    /// budget raised by a single bit would reach the target there. The no-fee walk's input and
+    /// output are v4's
     /// `getAmount1Delta` rounded up and `getAmount0Delta` rounded down, summed over its 58 steps
     /// to each tick-bitmap word edge at spacing 60, worked out with an independent Python port
     /// of `TickMath.getSqrtPriceAtTick`.
     #[rstest]
     #[case::no_fee_within_the_budget(None, true)]
+    #[case::montra_cap_within_the_budget(Some(990_000), true)]
+    #[case::fee_just_past_the_budget(Some(999_500), false)]
     #[case::fee_above_the_budget_bound(Some(999_900), false)]
     fn test_amount_in_to_price_against_the_input_budget(
         #[case] lp_fee_override: Option<u32>,
@@ -1685,6 +1691,8 @@ mod tests {
         let walk = pool.amount_in_to_price(false, target, lp_fee_override);
 
         match (walk, reaches_target) {
+            // A fee only scales the input; that the walk reaches the target is the point.
+            (Ok(_), true) if lp_fee_override.is_some() => {}
             (Ok(walk), true) => assert_eq!(
                 (walk.amount_in, walk.amount_out, walk.liquidity),
                 (
