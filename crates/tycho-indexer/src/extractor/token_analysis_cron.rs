@@ -351,7 +351,10 @@ mod test {
     use mockall::Sequence;
     use rstest::rstest;
     use tycho_common::{
-        models::{protocol::ProtocolComponent, token::TokenOwner, ChangeType},
+        models::{
+            protocol::{ProtocolComponent, ProtocolComponentState},
+            ChangeType,
+        },
         storage::WithTotal,
     };
 
@@ -740,6 +743,88 @@ mod test {
                 .iter()
                 .map(|e| Bytes::from(*e))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_owners_in_two_protocols_with_the_same_pool_id() {
+        let curve_token = Bytes::from("0x00000000000000000000000000000000000000a1");
+        let v4_token = Bytes::from("0x00000000000000000000000000000000000000a2");
+        let protocols = [
+            (
+                "vm:curve",
+                curve_token.clone(),
+                FACTORY,
+                "0x00000000000000000000000000000000000000c1",
+            ),
+            (
+                "uniswap_v4",
+                v4_token.clone(),
+                POOL_MANAGER,
+                "0x00000000000000000000000000000000000000c2",
+            ),
+        ];
+        let owners = protocols
+            .iter()
+            .map(|(system, token, _, _)| {
+                let owner = TokenOwner {
+                    protocol_system: system.to_string(),
+                    component_id: POOL.to_string(),
+                    balance: Bytes::from("0x01"),
+                };
+                (token.clone(), owner)
+            })
+            .collect::<HashMap<_, _>>();
+        let mut gw = testing::MockGateway::new();
+        for (system, token, contract, balance_owner) in protocols {
+            gw.expect_get_protocol_components()
+                .withf(move |_, s, ids, _, _| {
+                    s.as_deref() == Some(system) && ids == &Some(&[POOL][..])
+                })
+                .times(1)
+                .returning(move |_, _, _, _, _| {
+                    let component = ProtocolComponent::new(
+                        POOL,
+                        system,
+                        "pool",
+                        Chain::Ethereum,
+                        vec![token.clone()],
+                        vec![Bytes::from(contract)],
+                        HashMap::new(),
+                        ChangeType::Creation,
+                        Bytes::from("0x00"),
+                        NaiveDateTime::default(),
+                    );
+                    Box::pin(async { Ok(WithTotal { entity: vec![component], total: Some(1) }) })
+                });
+            gw.expect_get_protocol_states()
+                .withf(move |_, _, s, ids, _, _| {
+                    s.as_deref() == Some(system) && ids == &Some(&[POOL][..])
+                })
+                .times(1)
+                .returning(move |_, _, _, _, _, _| {
+                    let state = ProtocolComponentState::new(
+                        POOL,
+                        HashMap::from([("balance_owner".to_string(), Bytes::from(balance_owner))]),
+                        HashMap::new(),
+                    );
+                    Box::pin(async { Ok(WithTotal { entity: vec![state], total: Some(1) }) })
+                });
+        }
+
+        let candidates = holder_candidates(&Chain::Ethereum, &gw, owners)
+            .await
+            .expect("holder candidates failed");
+
+        let expected = |balance_owner: &str, contract: &str| {
+            vec![Bytes::from(balance_owner), Bytes::from(POOL), Bytes::from(contract)]
+        };
+        assert_eq!(
+            candidates,
+            HashMap::from([
+                (curve_token, expected("0x00000000000000000000000000000000000000c1", FACTORY)),
+                (v4_token, expected("0x00000000000000000000000000000000000000c2", POOL_MANAGER)),
+            ])
         );
     }
 
