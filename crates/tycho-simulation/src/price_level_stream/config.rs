@@ -81,7 +81,7 @@ pub fn default_served_pamms() -> Vec<PriceLevelStreamConfig> {
     // router-level overhead (user/input/fee transfers): tycho-execution's gas estimator accounts
     // for those on top of this per-swap value.
     let pamms = [
-        // The FermiSwapper router. Measured ~21k-165k (2026-11-18).
+        // The FermiSwapper router. Measured ~47k-165k (2026-11-19).
         ("fermiswap", "0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977", 170_000u64),
         // The KipseliPropAMMWrapper router. Measured ~308k-329k (2026-08-18). Titan's venue docs
         // list a newer Kipseli router (0x342b8458…), which has no activity. The stream keys
