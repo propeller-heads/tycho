@@ -36,7 +36,7 @@ use crate::{
             utils::{
                 add_fee_markup,
                 uniswap::{
-                    i24_be_bytes_to_i32, liquidity_math,
+                    i24_be_bytes_to_i32,
                     lp_fee::{self, is_dynamic},
                     pool_tick::PoolTick,
                     sqrt_price_math::{
@@ -338,7 +338,17 @@ impl UniswapV4State {
             });
         }
 
-        if self.liquidity == 0 {
+        // On chain, v4-core's `Pool.swap` has no liquidity check: from a price outside every
+        // position its step loop moves through the empty range to the next initialized tick and
+        // takes up the liquidity there. A pool refuses such a swap unless its hook opts in
+        // (`HookHandler::swaps_from_empty_range`), because `get_limits` reports a zero limit at
+        // zero active liquidity unless the hook bounds the limits itself.
+        let hook_swaps_from_empty_range = self
+            .hook
+            .as_ref()
+            .is_some_and(|hook| hook.swaps_from_empty_range());
+        if self.liquidity == 0 && (!hook_swaps_from_empty_range || self.has_no_initialized_ticks())
+        {
             return Err(SimulationError::RecoverableError("No liquidity".to_string()));
         }
         let price_limit = if let Some(limit) = sqrt_price_limit {
@@ -409,6 +419,12 @@ impl UniswapV4State {
                     (tick, info)
                 }
                 Err(tick_err) => match tick_err.kind {
+                    // Past the last initialized tick, v4-core's step loop goes on through the
+                    // empty range to the price limit, swapping nothing more; a hook that follows
+                    // v4 there then judges the outcome.
+                    TickListErrorKind::TicksExeeded if hook_swaps_from_empty_range => {
+                        (if zero_for_one { MIN_TICK } else { MAX_TICK }, None)
+                    }
                     TickListErrorKind::TicksExeeded => {
                         let new_state = self.clone_post_swap(
                             state.sqrt_price,
@@ -480,10 +496,8 @@ impl UniswapV4State {
             }
             if state.sqrt_price == step.sqrt_price_next {
                 if let Some(info) = next_tick_info {
-                    let liquidity_raw = info.net_liquidity;
-                    let liquidity_net = if zero_for_one { -liquidity_raw } else { liquidity_raw };
                     state.liquidity =
-                        liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;
+                        info.liquidity_after_crossing(state.liquidity, zero_for_one)?;
                     gas_used = safe_add_u256(gas_used, U256::from(self.gas_costs.per_tick))?;
                 }
                 state.tick =
@@ -992,6 +1006,14 @@ impl ProtocolSim for UniswapV4State {
                     .amount;
                 return Ok((max_in, max_out));
             }
+            // Such a hook quotes swaps out of an empty range, which the limits derived from the
+            // pool's liquidity below report as zero.
+            if hook.swaps_from_empty_range() {
+                return Err(SimulationError::FatalError(format!(
+                    "hook {} swaps from an empty range but reports no max_amount_in",
+                    hook.address()
+                )));
+            }
             // Check if pool has no liquidity & ticks -> hook manages liquidity
             if self.liquidity == 0 && self.has_no_initialized_ticks() {
                 // If the hook has a get_amount_ranges entrypoint, call it and return (0, limits[1])
@@ -1092,12 +1114,9 @@ impl ProtocolSim for UniswapV4State {
             // For zero_for_one, liquidity is removed when crossing a tick
             // For one_for_zero, liquidity is added when crossing a tick
             if let Some(info) = next_tick_info {
-                let liquidity_raw = info.net_liquidity;
-                let liquidity_delta = if zero_for_one { -liquidity_raw } else { liquidity_raw };
-
                 // Check if applying this liquidity delta would cause underflow
                 // If so, stop here rather than continuing with invalid state
-                match liquidity_math::add_liquidity_delta(current_liquidity, liquidity_delta) {
+                match info.liquidity_after_crossing(current_liquidity, zero_for_one) {
                     Ok(new_liquidity) => {
                         current_liquidity = new_liquidity;
                     }
@@ -3648,6 +3667,167 @@ mod tests {
         assert_ne!(result.sqrt_price, get_sqrt_ratio_at_tick(-120).unwrap());
         assert_ne!(expected_tick, pool.tick.value());
         assert_eq!(result.tick.value(), expected_tick);
+    }
+
+    /// A pool priced at the upper edge of its only position: liquidity 0, tick 0, position
+    /// [-600, 0) of L = 1e18.
+    fn empty_range_pool() -> UniswapV4State {
+        let liquidity = 1_000_000_000_000_000_000i128;
+        UniswapV4State::new(
+            0,
+            U256::from(1u64) << 96,
+            UniswapV4Fees::new(0, 0, 3_000),
+            0,
+            60,
+            vec![TickInfo::new(-600, liquidity).unwrap(), TickInfo::new(0, -liquidity).unwrap()],
+        )
+        .unwrap()
+    }
+
+    /// Without a hook that opts in, a pool with no active liquidity refuses to swap and reports
+    /// no limits, even with liquidity ahead: quotes and limits give the same answer.
+    #[test]
+    fn test_a_pool_without_active_liquidity_refuses_and_reports_no_limits() {
+        let pool = empty_range_pool();
+
+        let quote =
+            pool.get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_x(), &token_y());
+        assert!(
+            matches!(&quote, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity"),
+            "{quote:?}"
+        );
+        let limits = pool
+            .get_limits(token_x().address, token_y().address)
+            .expect("limits");
+        assert_eq!(limits, (BigUint::ZERO, BigUint::ZERO));
+    }
+
+    /// The state v4 leaves after crossing tick 0 downwards (tick -1, the position active) swaps
+    /// into the position. Expected by hand at sqrtP = 2^96, L = 1e18, fee 0.3%:
+    /// `less = 997e12`, `sqrtP' = ceil(L * 2^96 / (L + less))`,
+    /// `out = floor(L * (2^96 - sqrtP') / 2^96)`.
+    #[test]
+    fn test_swap_from_the_upper_edge_inside_the_position() {
+        let liquidity = 1_000_000_000_000_000_000i128;
+        let pool = UniswapV4State::new(
+            liquidity.cast_unsigned(),
+            U256::from(1u64) << 96,
+            UniswapV4Fees::new(0, 0, 3_000),
+            -1,
+            60,
+            vec![TickInfo::new(-600, liquidity).unwrap(), TickInfo::new(0, -liquidity).unwrap()],
+        )
+        .unwrap();
+
+        let out = pool
+            .get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_x(), &token_y())
+            .expect("the swap reaches the position");
+
+        assert_eq!(out.amount, BigUint::from(996_006_981_039_903u64));
+        let new_state = out
+            .new_state
+            .as_any()
+            .downcast_ref::<UniswapV4State>()
+            .unwrap();
+        assert_eq!(new_state.liquidity, 1_000_000_000_000_000_000u128);
+        assert_eq!(new_state.sqrt_price, U256::from_str("79149250711305166342700278159").unwrap());
+    }
+
+    /// A hook that opts into swaps from an empty range but states no `max_amount_in` leaves
+    /// `get_limits` with nothing but liquidity-derived limits, which are zero there: it refuses.
+    #[test]
+    fn test_get_limits_refuses_empty_range_swaps_without_max_amount_in() {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let mut pool = create_basic_v4_test_pool();
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            swaps_from_empty_range: true,
+            ..Default::default()
+        }));
+
+        let limits = pool.get_limits(token_in.address, token_out.address);
+
+        assert!(
+            matches!(&limits, Err(SimulationError::FatalError(m)) if m.contains("no max_amount_in")),
+            "{limits:?}"
+        );
+    }
+
+    /// A hook that opts in lets a swap start with no active liquidity: it crosses the tick at the
+    /// price and fills in the position behind it, as the state after crossing it would.
+    #[test]
+    fn test_swap_from_an_empty_range_fills_in_the_liquidity_ahead_for_an_opted_in_hook() {
+        let mut pool = empty_range_pool();
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            swaps_from_empty_range: true,
+            ..Default::default()
+        }));
+
+        let out = pool
+            .get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_x(), &token_y())
+            .expect("the opted-in hook swaps from the empty range");
+
+        assert_eq!(out.amount, BigUint::from(996_006_981_039_903u64));
+    }
+
+    /// An opted-in hook also lets a swap run past the last initialized tick to the price limit.
+    /// The input left over reaches `check_swap_outcome` as unfilled, and the hook decides.
+    #[rstest]
+    #[case::hook_accepts_the_leftover(false)]
+    #[case::hook_refuses_the_leftover(true)]
+    fn test_swap_past_the_last_tick_reports_the_unfilled_input(#[case] refuse_unfilled: bool) {
+        let liquidity = 1_000_000_000_000_000_000i128;
+        let mut pool = UniswapV4State::new(
+            liquidity.cast_unsigned(),
+            U256::from(1u64) << 96,
+            UniswapV4Fees::new(0, 0, 3_000),
+            -1,
+            60,
+            vec![TickInfo::new(-600, liquidity).unwrap(), TickInfo::new(0, -liquidity).unwrap()],
+        )
+        .unwrap();
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            swaps_from_empty_range: true,
+            refuse_unfilled_input: refuse_unfilled,
+            ..Default::default()
+        }));
+        // The position holds about 0.03 of token Y, so this input cannot fill.
+        let amount_in = BigUint::from(1_000_000_000_000_000_000u64);
+
+        let result = pool.get_amount_out(amount_in, &token_x(), &token_y());
+
+        match result {
+            Err(SimulationError::InvalidInput(msg, None)) if refuse_unfilled => {
+                assert_eq!(msg, "part of the input is unfilled");
+            }
+            Ok(out) if !refuse_unfilled => assert!(out.amount > BigUint::zero()),
+            other => panic!("expected refuse_unfilled = {refuse_unfilled}, got {other:?}"),
+        }
+    }
+
+    /// Without the opt-in, a swap that runs past the last initialized tick is refused, as before.
+    #[test]
+    fn test_swap_past_the_last_tick_without_the_opt_in_is_refused() {
+        let liquidity = 1_000_000_000_000_000_000i128;
+        let pool = UniswapV4State::new(
+            liquidity.cast_unsigned(),
+            U256::from(1u64) << 96,
+            UniswapV4Fees::new(0, 0, 3_000),
+            -1,
+            60,
+            vec![TickInfo::new(-600, liquidity).unwrap(), TickInfo::new(0, -liquidity).unwrap()],
+        )
+        .unwrap();
+
+        let result = pool.get_amount_out(
+            BigUint::from(1_000_000_000_000_000_000u64),
+            &token_x(),
+            &token_y(),
+        );
+
+        assert!(
+            matches!(&result, Err(SimulationError::InvalidInput(m, _)) if m == "Ticks exceeded"),
+            "{result:?}"
+        );
     }
 
     #[test]
