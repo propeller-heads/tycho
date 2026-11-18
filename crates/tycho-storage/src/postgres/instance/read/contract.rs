@@ -91,3 +91,221 @@ async fn load_account_balances(
     }
     Ok(balances)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use chrono::{NaiveDate, NaiveDateTime};
+    use diesel_async::AsyncPgConnection;
+    use tycho_common::{
+        models::{contract::AccountBalance, Address, Chain},
+        storage::{BlockOrTimestamp, StorageError, Version, VersionKind},
+        Bytes,
+    };
+
+    use crate::postgres::{
+        db_fixtures,
+        instance::{gateway::PostgresGatewayNew, InstanceId},
+        testing::instance_test_connection,
+    };
+
+    struct Setup {
+        gateway: PostgresGatewayNew,
+        curve_system_id: i64,
+        curve: InstanceId,
+        uniswap_v4: InstanceId,
+    }
+
+    /// "vm:curve" and "uniswap_v4" on ethereum, each pointing to an instance.
+    async fn setup(conn: &mut AsyncPgConnection) -> Setup {
+        db_fixtures::insert_chain(conn, "ethereum").await;
+        let curve_system_id =
+            db_fixtures::insert_protocol_system(conn, "vm:curve".to_string()).await;
+        let uniswap_v4_system_id =
+            db_fixtures::insert_protocol_system(conn, "uniswap_v4".to_string()).await;
+        let curve = db_fixtures::insert_instance(conn, curve_system_id, "0.0.1").await;
+        let uniswap_v4 = db_fixtures::insert_instance(conn, uniswap_v4_system_id, "0.0.1").await;
+        db_fixtures::set_active_instance(conn, curve_system_id, Some(curve)).await;
+        db_fixtures::set_active_instance(conn, uniswap_v4_system_id, Some(uniswap_v4)).await;
+        let gateway = PostgresGatewayNew::from_connection(conn).await;
+        Setup { gateway, curve_system_id, curve, uniswap_v4 }
+    }
+
+    fn b(hex: &str) -> Bytes {
+        Bytes::from(hex)
+    }
+
+    fn eth() -> Address {
+        Chain::Ethereum.native_token().address
+    }
+
+    fn day(d: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2020, 1, d)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date")
+    }
+
+    fn at(ts: NaiveDateTime) -> Version {
+        Version(BlockOrTimestamp::Timestamp(ts), VersionKind::Last)
+    }
+
+    /// Inserts an account at `address` with a native balance of `native` and a balance of
+    /// `token_balance` in the token `0x02`. Returns the account id.
+    async fn account_with_balances(
+        conn: &mut AsyncPgConnection,
+        instance: InstanceId,
+        address: &str,
+        native: &str,
+        token_balance: &str,
+    ) -> i64 {
+        let id = db_fixtures::insert_instance_account(conn, instance, b(address)).await;
+        db_fixtures::insert_instance_account_balance(conn, instance, id, eth(), b(native)).await;
+        db_fixtures::insert_instance_account_balance(
+            conn,
+            instance,
+            id,
+            b("0x02"),
+            b(token_balance),
+        )
+        .await;
+        id
+    }
+
+    async fn balances(
+        gateway: &PostgresGatewayNew,
+        conn: &mut AsyncPgConnection,
+        system: &str,
+        include_native: bool,
+        at: Option<&Version>,
+    ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
+        gateway
+            .get_account_balances(&Chain::Ethereum, system, None, at, include_native, conn)
+            .await
+    }
+
+    fn balance(account: &str, token: Address, value: &str) -> (Address, AccountBalance) {
+        (token.clone(), AccountBalance::new(b(account), token, b(value), Bytes::zero(32)))
+    }
+
+    #[tokio::test]
+    async fn test_balances_of_an_account() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        account_with_balances(&mut conn, s.curve, "0xaa", "0x01", "0x05").await;
+
+        let without_native = balances(&s.gateway, &mut conn, "vm:curve", false, None)
+            .await
+            .unwrap();
+        let with_native = balances(&s.gateway, &mut conn, "vm:curve", true, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            without_native,
+            [(b("0xaa"), [balance("0xaa", b("0x02"), "0x05")].into())].into()
+        );
+        assert_eq!(
+            with_native,
+            [(
+                b("0xaa"),
+                [balance("0xaa", eth(), "0x01"), balance("0xaa", b("0x02"), "0x05")].into()
+            )]
+            .into()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_balances_of_some_accounts() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        account_with_balances(&mut conn, s.curve, "0xaa", "0x01", "0x05").await;
+        account_with_balances(&mut conn, s.curve, "0xbb", "0x01", "0x06").await;
+
+        let result = s
+            .gateway
+            .get_account_balances(
+                &Chain::Ethereum,
+                "vm:curve",
+                Some(&[b("0xbb")]),
+                None,
+                false,
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result, [(b("0xbb"), [balance("0xbb", b("0x02"), "0x06")].into())].into());
+    }
+
+    #[tokio::test]
+    async fn test_shared_account_balances_come_from_the_protocol_copy() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        account_with_balances(&mut conn, s.curve, "0xaa", "0x01", "0x05").await;
+        account_with_balances(&mut conn, s.uniswap_v4, "0xaa", "0x02", "0x06").await;
+
+        for (system, native, token_balance) in
+            [("vm:curve", "0x01", "0x05"), ("uniswap_v4", "0x02", "0x06")]
+        {
+            let result = balances(&s.gateway, &mut conn, system, true, None)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                result,
+                [(
+                    b("0xaa"),
+                    [balance("0xaa", eth(), native), balance("0xaa", b("0x02"), token_balance)]
+                        .into()
+                )]
+                .into(),
+                "{system}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_balances_of_unknown_protocol_fail() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+
+        for system in ["not-a-protocol", ""] {
+            let result = balances(&s.gateway, &mut conn, system, true, None).await;
+
+            assert!(matches!(result, Err(StorageError::NotFound(..))), "{system:?}: {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_balances_skip_instances_that_are_not_active() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let next = db_fixtures::insert_instance(&mut conn, s.curve_system_id, "0.0.2").await;
+        account_with_balances(&mut conn, s.curve, "0xaa", "0x01", "0x05").await;
+        account_with_balances(&mut conn, next, "0xaa", "0x02", "0x06").await;
+
+        let active = balances(&s.gateway, &mut conn, "vm:curve", false, None)
+            .await
+            .unwrap();
+        db_fixtures::set_active_instance(&mut conn, s.curve_system_id, None).await;
+        let cleared = balances(&s.gateway, &mut conn, "vm:curve", false, None)
+            .await
+            .unwrap();
+
+        assert_eq!(active, [(b("0xaa"), [balance("0xaa", b("0x02"), "0x05")].into())].into());
+        assert!(cleared.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_account_balances_before_head_are_unsupported() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        account_with_balances(&mut conn, s.curve, "0xaa", "0x01", "0x05").await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, day(2)).await;
+
+        let result = balances(&s.gateway, &mut conn, "vm:curve", true, Some(&at(day(1)))).await;
+
+        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+    }
+}
