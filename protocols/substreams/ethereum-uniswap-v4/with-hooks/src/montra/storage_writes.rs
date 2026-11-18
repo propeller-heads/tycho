@@ -2,7 +2,7 @@
 //!
 //! [`storage_writes`] returns every slot a transaction wrote across a set of hooks, with the value
 //! before and after. It orders writes by ordinal and keeps the first old value and the last new
-//! value, as [`crate::storage::tx_storage_writes`] does. It differs from that function in four
+//! value, as [`crate::storage::tx_storage_writes`] does. It differs from that function in five
 //! ways:
 //!
 //! - It reads a set of contracts and lists every slot written, where `tx_storage_writes` reads one
@@ -12,8 +12,10 @@
 //! - It returns a slot whose last write restores its first value, where `tx_storage_writes` drops
 //!   it. The seed check (`PoolConfig` words 1 and 2 written) then holds whatever values `seed`
 //!   writes.
-//! - It fails on a storage change with an address other than 20 bytes, or a hook change with a key
-//!   or value wider than a word, where `tx_storage_writes` skips such a change.
+//! - It fails on a hook change with a key or value wider than a word, where `tx_storage_writes`
+//!   skips such a change.
+//! - It does not check the transaction's status: its caller passes only successful transactions
+//!   (`Block::transactions`), where `tx_storage_writes` returns nothing for a failed one itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,9 +27,11 @@ use crate::{
     storage::{pad32, Word},
 };
 
-/// The net effect of one transaction on one storage slot.
+/// The net effect of one transaction on one storage slot of one contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SlotWrite {
+    /// The contract whose storage the slot is.
+    pub(crate) contract: Address,
     pub(crate) slot: Word,
     /// The value the slot held before the transaction's first write to it.
     pub(crate) old_value: Word,
@@ -43,31 +47,26 @@ pub(crate) struct SlotWrite {
 /// `old_value` of its first write and the `new_value` of its last, by ordinal. A slot whose last
 /// write restores its first `old_value` is returned with the two equal; callers compare them.
 ///
-/// Fails when any storage change of a call kept has an address other than 20 bytes, and when a
-/// change to one of `contracts` has a key or value longer than 32 bytes. The EVM writes neither,
-/// so either means a malformed block source, and the malformed change may be a `PoolKey` write
-/// that pauses the pool.
+/// Fails when a change to one of `contracts` has a key or value longer than 32 bytes. The EVM
+/// writes neither, so either means a malformed block source, and the malformed change may be a
+/// `PoolKey` write that pauses the pool. A change whose address is not 20 bytes is no listed
+/// contract's, so it is skipped like any other contract's.
 pub(crate) fn storage_writes(
     tx: &TransactionTrace,
     contracts: &BTreeSet<Address>,
 ) -> Result<Vec<SlotWrite>> {
-    let mut changes: Vec<(Address, &StorageChange)> = Vec::new();
-    for change in tx
+    let mut changes: Vec<(Address, &StorageChange)> = tx
         .calls
         .iter()
         .filter(|call| !call.state_reverted)
         .flat_map(|call| call.storage_changes.iter())
-    {
-        let contract = Address::try_from(change.address.as_slice()).map_err(
-            |_: std::array::TryFromSliceError| {
-                // The error carries no detail beyond the length the message names.
-                malformed(tx, change, "address", &change.address)
-            },
-        )?;
-        if contracts.contains(&contract) {
-            changes.push((contract, change));
-        }
-    }
+        .filter_map(|change| {
+            Address::try_from(change.address.as_slice())
+                .ok()
+                .filter(|contract| contracts.contains(contract))
+                .map(|contract| (contract, change))
+        })
+        .collect();
     // Calls are listed in call order, and a parent's writes after a nested call carry ordinals
     // above the nested call's, so only the ordinal gives execution order.
     changes.sort_unstable_by_key(|(_, change)| change.ordinal);
@@ -83,7 +82,7 @@ pub(crate) fn storage_writes(
         writes
             .entry((contract, slot))
             .and_modify(|write| write.new_value = new_value)
-            .or_insert(SlotWrite { slot, old_value, new_value });
+            .or_insert(SlotWrite { contract, slot, old_value, new_value });
     }
     Ok(writes.into_values().collect())
 }
@@ -108,6 +107,8 @@ fn malformed(
 mod tests {
     use substreams_ethereum::pb::eth::v2::Call;
 
+    use rstest::rstest;
+
     use super::*;
     use crate::montra::test_fixtures::{HOOK, POOL_MANAGER as OTHER};
 
@@ -125,7 +126,11 @@ mod tests {
         }
     }
 
-    fn tx(calls: Vec<Call>) -> TransactionTrace {
+    fn write(contract: Address, slot: &str, old_value: Word, new_value: Word) -> SlotWrite {
+        SlotWrite { contract, slot: word(slot), old_value, new_value }
+    }
+
+    fn trace(calls: Vec<Call>) -> TransactionTrace {
         TransactionTrace { calls, ..Default::default() }
     }
 
@@ -137,33 +142,33 @@ mod tests {
     fn test_writes_are_netted_per_slot_by_ordinal_across_calls() {
         // The outer call writes the slot after a nested call did: the nested call is listed second
         // but has the lower ordinal.
-        let tx = tx(vec![
+        let tx = trace(vec![
             call(vec![change(&HOOK, "01", "bb", "cc", 9)], false),
             call(vec![change(&HOOK, "01", "aa", "bb", 4)], false),
         ]);
 
         assert_eq!(
             storage_writes(&tx, &BTreeSet::from([HOOK])).unwrap(),
-            vec![SlotWrite { slot: word("01"), old_value: word("aa"), new_value: word("cc") }]
+            vec![write(HOOK, "01", word("aa"), word("cc"))]
         );
     }
 
     #[test]
     fn test_slot_restored_to_its_old_value_is_returned_unchanged() {
-        let tx = tx(vec![call(
+        let tx = trace(vec![call(
             vec![change(&HOOK, "01", "aa", "bb", 1), change(&HOOK, "01", "bb", "aa", 2)],
             false,
         )]);
 
         assert_eq!(
             storage_writes(&tx, &BTreeSet::from([HOOK])).unwrap(),
-            vec![SlotWrite { slot: word("01"), old_value: word("aa"), new_value: word("aa") }]
+            vec![write(HOOK, "01", word("aa"), word("aa"))]
         );
     }
 
     #[test]
     fn test_writes_of_reverted_calls_and_other_contracts_are_ignored() {
-        let tx = tx(vec![
+        let tx = trace(vec![
             call(vec![change(&HOOK, "01", "aa", "bb", 1)], false),
             call(vec![change(&HOOK, "01", "bb", "ff", 2)], true),
             call(vec![change(&OTHER, "01", "aa", "ee", 3)], false),
@@ -171,28 +176,25 @@ mod tests {
 
         assert_eq!(
             storage_writes(&tx, &BTreeSet::from([HOOK])).unwrap(),
-            vec![SlotWrite { slot: word("01"), old_value: word("aa"), new_value: word("bb") }]
+            vec![write(HOOK, "01", word("aa"), word("bb"))]
         );
     }
 
     #[test]
     fn test_same_slot_of_two_contracts_is_two_writes() {
         // HOOK sorts before OTHER but writes after it: the writes come back in contract order.
-        let tx = tx(vec![call(
+        let tx = trace(vec![call(
             vec![change(&OTHER, "01", "", "0b", 1), change(&HOOK, "01", "", "0a", 2)],
             false,
         )]);
 
         assert_eq!(
             storage_writes(&tx, &BTreeSet::from([HOOK, OTHER])).unwrap(),
-            vec![
-                SlotWrite { slot: word("01"), old_value: [0; 32], new_value: word("0a") },
-                SlotWrite { slot: word("01"), old_value: [0; 32], new_value: word("0b") },
-            ]
+            vec![write(HOOK, "01", [0; 32], word("0a")), write(OTHER, "01", [0; 32], word("0b")),]
         );
     }
 
-    #[rstest::rstest]
+    #[rstest]
     #[case::oversized_key(change(&HOOK, &"01".repeat(33), "aa", "bb", 7), "key is 33 bytes")]
     #[case::oversized_old_value(
         change(&HOOK, "02", &"01".repeat(33), "bb", 7),
@@ -202,12 +204,8 @@ mod tests {
         change(&HOOK, "02", "aa", &"01".repeat(34), 7),
         "new value is 34 bytes"
     )]
-    #[case::short_address(
-        StorageChange { address: HOOK[..19].to_vec(), ..change(&HOOK, "02", "aa", "bb", 7) },
-        "address is 19 bytes"
-    )]
     fn test_malformed_storage_change_fails(#[case] malformed: StorageChange, #[case] cause: &str) {
-        let mut tx = tx(vec![call(vec![change(&HOOK, "03", "aa", "bb", 3), malformed], false)]);
+        let mut tx = trace(vec![call(vec![change(&HOOK, "03", "aa", "bb", 3), malformed], false)]);
         tx.hash = vec![0xab; 32];
 
         let error = storage_writes(&tx, &BTreeSet::from([HOOK]))
@@ -219,6 +217,20 @@ mod tests {
                 "transaction 0x{} has a storage change (ordinal 7) whose {cause}",
                 "ab".repeat(32)
             )
+        );
+    }
+
+    /// A change whose address is not 20 bytes is no hook's: it is skipped, so a defective change
+    /// of another contract cannot fail the block, and the hook's own writes still come back.
+    #[test]
+    fn test_change_with_a_malformed_address_is_skipped() {
+        let short =
+            StorageChange { address: HOOK[..19].to_vec(), ..change(&HOOK, "02", "aa", "bb", 7) };
+        let tx = trace(vec![call(vec![change(&HOOK, "03", "aa", "bb", 3), short], false)]);
+
+        assert_eq!(
+            storage_writes(&tx, &BTreeSet::from([HOOK])).unwrap(),
+            vec![write(HOOK, "03", word("aa"), word("bb"))]
         );
     }
 }

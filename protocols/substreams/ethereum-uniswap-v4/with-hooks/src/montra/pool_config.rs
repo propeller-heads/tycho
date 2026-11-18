@@ -1,7 +1,7 @@
 //! The Montra `LaunchHook`'s per-pool storage, and the `montra_*` attributes decoded from it.
 //!
-//! The hook (0x6b1216a4..., one runtime code hash from its deployment at 588510 to 6002000)
-//! keeps `mapping(bytes32 poolId => PoolConfig)` at base slot 2, four words, and
+//! The hook (0x6b1216a4...; its code hash, sampled at three blocks, is in the package Readme's
+//! upgrade boundary) keeps `mapping(bytes32 poolId => PoolConfig)` at base slot 2, four words, and
 //! `mapping(bytes32 poolId => PoolKey)` at base slot 3, three words. `PoolConfig` word 3 is the fee
 //! recipient, which the simulation does not read, so this package does not watch it. The layout
 //! below was read off the launch transaction 0xcfeabcb8...'s storage writes and checked against the
@@ -11,7 +11,10 @@
 
 use anyhow::{anyhow, Result};
 
-use crate::storage::{is_uint_window, mapping_slot, read_uint, word_at_offset, Word};
+use crate::{
+    address_list::Address,
+    storage::{is_uint_window, mapping_slot, read_uint, word_at_offset, Word},
+};
 
 /// Base slot of the hook's `PoolConfig` mapping.
 const POOL_CONFIG_MAPPING_SLOT: u64 = 2;
@@ -195,9 +198,10 @@ pub(crate) fn pool_slots(pool_id: &Word) -> Vec<(HookWord, Word)> {
         .collect()
 }
 
-/// The `store_montra_slots` key of a hook slot.
-pub(crate) fn slot_store_key(slot: &Word) -> String {
-    format!("slot:0x{}", hex::encode(slot))
+/// The `store_montra_slots` key of slot `slot` of hook `hook`. The key names the hook, so a write
+/// is matched to a pool only when the contract that made it is the pool's own hook.
+pub(crate) fn slot_store_key(hook: &Address, slot: &Word) -> String {
+    format!("slot:0x{}:0x{}", hex::encode(hook), hex::encode(slot))
 }
 
 /// The pool and word a watched hook slot belongs to, as `store_montra_slots` holds it.
@@ -400,12 +404,14 @@ mod tests {
     }
 
     #[test]
-    fn test_slot_store_key_is_the_prefixed_lowercase_slot() {
+    fn test_slot_store_key_is_the_prefixed_lowercase_hook_and_slot() {
         assert_eq!(
-            slot_store_key(&hex!(
-                "306FDF70B142AD82D1DC56D41DBE6C099CE69473A61006B145DED747BD98C505"
-            )),
-            "slot:0x306fdf70b142ad82d1dc56d41dbe6c099ce69473a61006b145ded747bd98c505"
+            slot_store_key(
+                &hex!("6B1216A40B65C83E9C9E18A562C446697B8CF8EC"),
+                &hex!("306FDF70B142AD82D1DC56D41DBE6C099CE69473A61006B145DED747BD98C505")
+            ),
+            "slot:0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec:\
+             0x306fdf70b142ad82d1dc56d41dbe6c099ce69473a61006b145ded747bd98c505"
         );
     }
 }
