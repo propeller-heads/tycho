@@ -23,7 +23,7 @@ postgres/
 ├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
 ├── orm.rs              — Diesel Queryable/Insertable structs for every table
 ├── schema.rs           — auto-generated Diesel table! macros
-└── instance/           — per-instance `tycho` schema, not yet read or written by the public gateways
+└── instance/           — per-instance `tycho` schema, not yet read or written by the public gateways; callers run each read in one `snapshot_transaction`
     ├── mod.rs          — `InstanceId` newtype; joins with the shared `public` tables
     ├── active.rs       — the active instance of one protocol and of all protocols, looked up once per read from `protocol_system.active_instance_id`
     ├── gateway.rs      — PostgresGatewayNew, inner gateway on the instance tables (renamed to PostgresGateway at cut-over)
