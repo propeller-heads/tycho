@@ -458,12 +458,13 @@ impl ProtocolGateway for DirectGateway {
     async fn get_component_balances(
         &self,
         chain: &Chain,
+        system: &str,
         ids: Option<&[&str]>,
         version: Option<&Version>,
     ) -> Result<HashMap<String, HashMap<Bytes, ComponentBalance>>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
-            .get_component_balances(chain, ids, version, &mut conn)
+            .get_component_balances(chain, Some(system), ids, version, &mut conn)
             .await
     }
 
