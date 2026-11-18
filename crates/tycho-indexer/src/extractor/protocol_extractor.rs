@@ -5634,7 +5634,7 @@ mod test_serial_db {
             .await
             .expect("failed to build postgres gateway");
 
-        let gw = ExtractorPgGateway::new("test", Chain::Ethereum, 1000, cached_gw);
+        let gw = ExtractorPgGateway::new("test", "test", Chain::Ethereum, 1000, cached_gw);
         (gw, chain_id)
     }
 
@@ -6036,6 +6036,7 @@ mod test_serial_db {
 
             let gw = ExtractorPgGateway::new(
                 "native_name",
+                "native_protocol_system",
                 Chain::Ethereum,
                 0,
                 cached_gw.clone(),
@@ -6228,6 +6229,7 @@ mod test_serial_db {
 
             let gw = ExtractorPgGateway::new(
                 "vm_name",
+                "vm_protocol_system",
                 Chain::Ethereum,
                 0,
                 cached_gw.clone(),
@@ -6441,7 +6443,13 @@ mod test_serial_db {
                 .await
                 .unwrap();
 
-            let gw = ExtractorPgGateway::new("vm_name", Chain::Ethereum, 0, cached_gw.clone());
+            let gw = ExtractorPgGateway::new(
+                "vm_name",
+                "vm_protocol_system",
+                Chain::Ethereum,
+                0,
+                cached_gw.clone(),
+            );
             let protocol_types = HashMap::from([
                 ("pt_1".to_string(), ProtocolType::default()),
                 ("pt_2".to_string(), ProtocolType::default()),
