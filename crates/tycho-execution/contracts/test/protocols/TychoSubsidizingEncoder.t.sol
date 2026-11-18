@@ -43,11 +43,18 @@ contract TychoSubsidizingEncoderTest is TychoRouterTestSetup {
             SUBSIDY_PAYER
         );
         payer = SubsidyPayer(SUBSIDY_PAYER);
-        deployExecutorAt(
+        deployCodeTo(
             "TychoSubsidizingExecutor.sol:TychoSubsidizingExecutor",
             abi.encode(SUBSIDY_PAYER),
             SUBSIDIZING_EXECUTOR
         );
+
+        address[] memory executors = new address[](1);
+        executors[0] = SUBSIDIZING_EXECUTOR;
+        vm.warp(block.timestamp - tychoRouter.DELAY_EXECUTOR_ACTIVATION());
+        vm.prank(EXECUTOR_SETTER);
+        tychoRouter.setExecutors(executors);
+        vm.warp(forkTimestamp);
 
         deal(DAI_ADDR, SUBSIDY_PAYER, 100 ether);
         deal(USDC_ADDR, SUBSIDY_PAYER, 100_000000);
