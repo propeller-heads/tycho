@@ -1,3 +1,10 @@
+## [0.527.5](https://github.com/propeller-heads/tycho/compare/0.527.4...0.527.5) (2026-11-18)
+
+
+### Bug Fixes
+
+* **simulation:** return None from crypto solvers on out-of-domain D ([f76df43](https://github.com/propeller-heads/tycho/commit/f76df43956060895960ca2adb52175fd2f63f196))
+
 ## [0.527.4](https://github.com/propeller-heads/tycho/compare/0.527.3...0.527.4) (2026-11-17)
 
 
