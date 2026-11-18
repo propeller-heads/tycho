@@ -56,6 +56,20 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
         true
     }
 
+    /// Whether the pool swaps through ranges with no active liquidity, as v4-core's `Pool.swap`
+    /// does on chain (it has no liquidity check): from such a range into the liquidity ahead, and
+    /// past the last initialized tick on to the price limit, where the input left over reaches
+    /// [`HookHandler::check_swap_outcome`] as unfilled.
+    ///
+    /// The default is `false`: such a pool refuses to swap from zero active liquidity, matching
+    /// `get_limits`, which reports a zero limit there, and refuses an input that runs past the
+    /// last initialized tick with `InvalidInput("Ticks exceeded")`. A hook returning `true` must
+    /// also answer `Some` from [`HookHandler::max_amount_in`], so that limits and quotes agree
+    /// on that state; `get_limits` fails with `FatalError` for a hook that does not.
+    fn swaps_from_empty_range(&self) -> bool {
+        false
+    }
+
     /// Gas the pool manager spends on each call to this hook beyond what the hook's own gas
     /// estimates cover: encoding the call, the call itself and decoding the result.
     ///
@@ -129,7 +143,9 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
     /// When it answers `Some`, `get_limits` reports that input and the output a swap of it
     /// returns, and does not derive limits from the pool's liquidity or from
     /// [`HookHandler::get_amount_ranges`]. `get_limits` asks only while
-    /// [`HookHandler::swaps_enabled`] holds. The default returns `Ok(None)`.
+    /// [`HookHandler::swaps_enabled`] holds. A hook whose
+    /// [`HookHandler::swaps_from_empty_range`] is `true` must answer `Some` here. The default
+    /// returns `Ok(None)`.
     fn max_amount_in(
         &self,
         _state: &UniswapV4State,

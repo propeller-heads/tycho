@@ -53,6 +53,10 @@ pub struct ExtensionTestHook {
     pub max_amount_in: Option<U256>,
     /// `check_swap_outcome` refuses a swap that ends below this sqrt price.
     pub refuse_outcome_below: Option<U256>,
+    /// `check_swap_outcome` refuses a swap that leaves part of its input unfilled.
+    pub refuse_unfilled_input: bool,
+    /// What `swaps_from_empty_range` answers.
+    pub swaps_from_empty_range: bool,
 }
 
 impl Default for ExtensionTestHook {
@@ -62,6 +66,8 @@ impl Default for ExtensionTestHook {
             spot_fees: SpotFeesAnswer::NoFees,
             max_amount_in: None,
             refuse_outcome_below: None,
+            refuse_unfilled_input: false,
+            swaps_from_empty_range: false,
         }
     }
 }
@@ -69,6 +75,10 @@ impl Default for ExtensionTestHook {
 impl HookHandler for ExtensionTestHook {
     fn address(&self) -> Address {
         self.address
+    }
+
+    fn swaps_from_empty_range(&self) -> bool {
+        self.swaps_from_empty_range
     }
 
     fn before_swap(
@@ -115,6 +125,9 @@ impl HookHandler for ExtensionTestHook {
     }
 
     fn check_swap_outcome(&self, _: bool, outcome: &SwapOutcome) -> Result<(), SimulationError> {
+        if self.refuse_unfilled_input && !outcome.amount_unfilled.is_zero() {
+            return Err(SimulationError::InvalidInput("part of the input is unfilled".into(), None));
+        }
         match self.refuse_outcome_below {
             Some(floor) if outcome.sqrt_price_x96 < floor => {
                 Err(SimulationError::InvalidInput("the swap ends below the floor".into(), None))
