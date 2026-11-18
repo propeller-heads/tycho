@@ -2337,12 +2337,11 @@ mod tests {
 
     #[test]
     #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
-    fn test_generic_hook_modifying_its_position_after_a_tick_crossing() {
-        // VIBE/ETH pool 0x415829f72e9f54531c26eae76f107618540e898a45d6ae35959e143f5faca704. Its
-        // CappedBurnHook collects its position's fees in afterSwap, and the position starts at
-        // tick 75780, which this VIBE sell crosses. The hook reads that tick's fee growth
-        // outside, so it only quotes when the tick is crossed as on chain. The V4 quoter at this
-        // block returns 4706330068709201748 wei.
+    fn test_generic_hook_trimming_its_position_after_the_swap() {
+        // VIBE/ETH pool 0x415829f72e9f54531c26eae76f107618540e898a45d6ae35959e143f5faca704. At
+        // the price after this VIBE sell, its CappedBurnHook holds more VIBE than its cap, so in
+        // afterSwap it removes liquidity from its full-range position (ticks -887220 and 887220),
+        // as it does on chain. The V4 quoter at this block returns 4706330068709201748 wei.
         let block = BlockHeader {
             number: 26435833,
             hash: Bytes::from_str(
