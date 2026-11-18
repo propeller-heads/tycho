@@ -26,6 +26,7 @@ pub mod orm;
 #[cfg_attr(not(test), expect(dead_code, reason = "no public gateway calls it until cut-over"))]
 mod read;
 pub mod schema;
+pub mod write;
 
 use std::fmt;
 
