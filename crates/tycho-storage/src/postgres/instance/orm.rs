@@ -2,8 +2,8 @@
 //!
 //! Each table has a row struct for reads. Tables whose rows get database-filled columns (a
 //! sequence id, `inserted_ts`, `modified_ts`) also have a `New*` struct for inserts that leaves
-//! those columns out. History tables and the link tables without such columns use one struct for
-//! both.
+//! those columns out. Link tables without such columns use one struct for both. History tables
+//! use one struct for both, except those that a writer fills (`New*History`).
 //!
 //! Field order follows the column order of `schema.rs`, which `Queryable` relies on.
 use chrono::NaiveDateTime;
@@ -152,7 +152,7 @@ pub struct NewProtocolComponentHoldsToken {
     pub token_index: i16,
 }
 
-#[derive(Debug, Identifiable, Queryable, Selectable)]
+#[derive(Debug, Identifiable, Queryable, QueryableByName, Selectable)]
 #[diesel(table_name = tycho::protocol_state)]
 #[diesel(primary_key(instance_id, protocol_component_id, attribute_name))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -168,7 +168,7 @@ pub struct ProtocolState {
     pub modified_ts: NaiveDateTime,
 }
 
-#[derive(Debug, Insertable)]
+#[derive(Debug, Clone, Insertable)]
 #[diesel(table_name = tycho::protocol_state)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct NewProtocolState {
@@ -195,6 +195,20 @@ pub struct ProtocolStateHistory {
     pub tx_index: i32,
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = tycho::protocol_state_history)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewProtocolStateHistory {
+    pub instance_id: InstanceId,
+    pub protocol_component_id: i64,
+    pub attribute_name: String,
+    pub attribute_value: Bytes,
+    pub previous_value: Option<Bytes>,
+    pub valid_from: NaiveDateTime,
+    pub valid_to: NaiveDateTime,
+    pub tx_index: i32,
 }
 
 #[derive(Debug, Identifiable, Queryable, Selectable)]
