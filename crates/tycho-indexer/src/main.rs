@@ -118,7 +118,8 @@ fn init_chains(path: &str) -> Result<(), ExtractionError> {
 }
 
 type ExtractionTasks = Vec<JoinHandle<Result<(), ExtractionError>>>;
-type ServerTasks = Vec<JoinHandle<Result<(), ExtractionError>>>; //TODO: introduce an error type for it
+// TODO: introduce an error type for it
+type ServerTasks = Vec<JoinHandle<Result<(), ExtractionError>>>;
 
 fn main() -> Result<(), anyhow::Error> {
     let cli: Cli = Cli::parse();
