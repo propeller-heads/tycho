@@ -1,4 +1,5 @@
 use crate::pb::pancakeswap::infinity::bin::Transaction;
+use substreams_ethereum::pb::eth::v2::TransactionTrace;
 
 #[path = "1_map_pool_created.rs"]
 pub mod map_pool_created;
@@ -30,7 +31,33 @@ pub mod store_bin_reserves;
 #[path = "8_map_protocol_changes.rs"]
 pub mod map_protocol_changes;
 
-pancakeswap_infinity_substreams::transaction_conversions!(Transaction);
+impl From<&TransactionTrace> for Transaction {
+    fn from(value: &TransactionTrace) -> Self {
+        Self {
+            hash: value.hash.clone(),
+            from: value.from.clone(),
+            to: value.to.clone(),
+            index: value.index.into(),
+        }
+    }
+}
+
+impl From<Transaction> for tycho_substreams::prelude::Transaction {
+    fn from(value: Transaction) -> Self {
+        Self { hash: value.hash, from: value.from, to: value.to, index: value.index }
+    }
+}
+
+impl From<&Transaction> for tycho_substreams::prelude::Transaction {
+    fn from(value: &Transaction) -> Self {
+        Self {
+            hash: value.hash.clone(),
+            from: value.from.clone(),
+            to: value.to.clone(),
+            index: value.index,
+        }
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod test_stores {

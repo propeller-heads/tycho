@@ -2142,9 +2142,7 @@ dependencies = [
  "rstest",
  "serde",
  "serde_qs 0.13.0",
- "substreams-ethereum 0.9.13",
  "tiny-keccak",
- "tycho-substreams 0.8.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]

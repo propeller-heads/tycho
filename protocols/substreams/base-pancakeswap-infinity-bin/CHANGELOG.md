@@ -2,9 +2,9 @@
 
 ## v0.1.1
 
-The hook bitmap, dynamic fee flag, `pool_state_base_slot`, protocol fee split, deployment params
-and `Transaction` conversions come from the `pancakeswap-infinity-substreams` crate, shared with
-the CL package. The output is unchanged; the wasm hash is not.
+The hook bitmap, dynamic fee flag, `pool_state_base_slot`, protocol fee split and deployment params
+come from the `pancakeswap-infinity-substreams` crate, shared with the CL package. The output is
+unchanged; the wasm hash is not.
 
 ## v0.1.0
 

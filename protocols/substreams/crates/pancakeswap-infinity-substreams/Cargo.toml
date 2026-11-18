@@ -14,5 +14,3 @@ tiny-keccak = { version = "2", features = ["keccak"] }
 
 [dev-dependencies]
 rstest = "0.24.0"
-substreams-ethereum = "0.9.9"
-tycho-substreams = "0.8.0"
