@@ -66,7 +66,7 @@ impl FromSql<Int4, Pg> for InstanceId {
 // generated schema already does.
 mod shared_tables {
     use super::schema::tycho::{
-        account_balance, component_balance, component_tvl, protocol_component,
+        account_balance, component_balance, component_tvl, extraction_state, protocol_component,
         protocol_component_holds_token, protocol_instance,
     };
     use crate::postgres::schema::{protocol_system, protocol_type, token};
@@ -74,6 +74,7 @@ mod shared_tables {
     diesel::joinable!(protocol_instance -> protocol_system (protocol_system_id));
 
     diesel::allow_tables_to_appear_in_same_query!(protocol_instance, protocol_system);
+    diesel::allow_tables_to_appear_in_same_query!(extraction_state, protocol_system);
     diesel::allow_tables_to_appear_in_same_query!(protocol_component, protocol_system);
     diesel::allow_tables_to_appear_in_same_query!(component_tvl, protocol_system);
     diesel::allow_tables_to_appear_in_same_query!(protocol_component, protocol_type);

@@ -14,10 +14,23 @@
 //! A protocol with no active instance yields no rows, and so does an unknown protocol name:
 //! check the name first where it must exist.
 
+use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 
-use crate::postgres::{instance::InstanceId, schema::protocol_system, PostgresError, StorageError};
+use crate::postgres::{
+    instance::{schema::tycho::extraction_state, InstanceId},
+    schema::protocol_system,
+    PostgresError, StorageError,
+};
+
+/// The active instance of a protocol system, with its head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveInstance {
+    pub id: InstanceId,
+    /// The block timestamp of the instance's extraction state. `None` if it has none yet.
+    pub head: Option<NaiveDateTime>,
+}
 
 /// The active instance of the protocol system `name`.
 ///
@@ -36,6 +49,29 @@ pub async fn active_instance(
         .optional()
         .map_err(PostgresError::from)?;
     Ok(id.flatten())
+}
+
+/// The active instance of the protocol system `name`, with its head, in one query.
+///
+/// `None` if the protocol system has no active instance, or if no protocol system has that name.
+/// Filter with the returned id as a bound value, as for [`active_instance`].
+pub async fn active_instance_head(
+    name: &str,
+    conn: &mut AsyncPgConnection,
+) -> Result<Option<ActiveInstance>, StorageError> {
+    let row = protocol_system::table
+        .left_join(
+            extraction_state::table.on(extraction_state::instance_id
+                .nullable()
+                .eq(protocol_system::active_instance_id)),
+        )
+        .filter(protocol_system::name.eq(name))
+        .select((protocol_system::active_instance_id, extraction_state::block_ts.nullable()))
+        .first::<(Option<InstanceId>, Option<NaiveDateTime>)>(conn)
+        .await
+        .optional()
+        .map_err(PostgresError::from)?;
+    Ok(row.and_then(|(id, head)| id.map(|id| ActiveInstance { id, head })))
 }
 
 /// The active instance of every protocol system that has one.
