@@ -91,6 +91,8 @@ pub async fn active_instance_ids(
 
 #[cfg(test)]
 mod tests {
+    use chrono::NaiveDate;
+
     use super::*;
     use crate::postgres::{db_fixtures, testing::instance_test_connection};
 
@@ -191,5 +193,55 @@ mod tests {
                 .unwrap(),
             Vec::new()
         );
+    }
+
+    fn day(d: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2020, 1, d)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date")
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_head_has_the_extraction_state() {
+        let mut conn = instance_test_connection().await;
+        let setup = setup_protocols(&mut conn).await;
+        db_fixtures::set_instance_head(&mut conn, setup.curve, day(2)).await;
+        db_fixtures::set_instance_head(&mut conn, setup.uniswap_v4, day(3)).await;
+
+        assert_eq!(
+            active_instance_head("vm:curve", &mut conn)
+                .await
+                .unwrap(),
+            Some(ActiveInstance { id: setup.curve, head: Some(day(2)) })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_head_without_extraction_state() {
+        let mut conn = instance_test_connection().await;
+        let setup = setup_protocols(&mut conn).await;
+
+        assert_eq!(
+            active_instance_head("vm:curve", &mut conn)
+                .await
+                .unwrap(),
+            Some(ActiveInstance { id: setup.curve, head: None })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_head_of_an_inactive_or_unknown_protocol() {
+        let mut conn = instance_test_connection().await;
+        setup_protocols(&mut conn).await;
+
+        let inactive = active_instance_head("vm:old", &mut conn)
+            .await
+            .unwrap();
+        let unknown = active_instance_head("not-a-protocol", &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(inactive, None);
+        assert_eq!(unknown, None);
     }
 }
