@@ -43,7 +43,7 @@ tests:
         tvl_only: &montra_tvl_only
           bps: 0.01
           wei: 1000
-          reason: "the shared Uniswap v4 balance pipeline (5_map_store_balance_changes.rs) rounds each swap's estimated LP fee share to nearest and prices liquidity changes at the block's sqrt price, so indexed balances sit slightly above the UniswapV4Balances lens, never below it. Measured by a range --report run of all three tests with tvl_only removed, over the 37 components they list: at most 0.0028 bps (7 units of the 8-decimal EQSPCX, pool 0x0ee0fec1), and 1-4 wei on tokens the lens reads as 0. bps 0.01 is the smallest step. The drift grows with a pool's swaps and has no fixed bound, so wei 1000 is headroom over the 4 wei measured."
+          reason: "the shared Uniswap v4 balance pipeline (5_map_store_balance_changes.rs) rounds each swap's estimated LP fee share to nearest and prices liquidity changes at the block's sqrt price, so indexed balances sit slightly above the UniswapV4Balances lens, never below it. Measured by a range --report run of all three tests with tvl_only removed, over the 37 entries they list (36 distinct pools; 0x4937bb23 is in two tests): at most 0.0028 bps (7 units of the 8-decimal EQSPCX, pool 0x0ee0fec1), and 1-4 wei on tokens the lens reads as 0. bps 0.01 is the smallest step. The drift grows with a pool's swaps and has no fixed bound, so wei 1000 is headroom over the 4 wei measured."
       # native quote; launched at block 1032795
       - id: "0x06602fee3eef46c193ab60f7b658a1254aa382dd0545d18a66c94f4f8a6337af"
         tokens:
@@ -451,7 +451,7 @@ tests:
   # first two tests never meet. One pool takes full-range positions, which reach past the opening
   # (the hook's PastOpening refusal); two take a 24-position ladder each, so a limit walks across
   # 25 more initialized ticks. Counted from the PoolManager's ModifyLiquidity logs whose sender is
-  # not the hook (spec, refs/logs/pm_modifyliquidity_nonhook_588510_6001999.jsonl).
+  # not the hook (eth_getLogs on the PoolManager, topic0 ModifyLiquidity, blocks 588510-6001999).
   - name: test_outside_liquidity
     start_block: 4959600
     stop_block: 5003000
