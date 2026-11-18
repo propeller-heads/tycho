@@ -94,7 +94,7 @@ impl PostgresGatewayNew {
             ));
         };
         self.get_protocol_system_id(&system)?;
-        let Some(instance) = active_instance(conn, &system).await? else {
+        let Some(instance) = active_instance(&system, conn).await? else {
             return Ok(WithTotal { entity: HashMap::new(), total: Some(0) });
         };
 
@@ -257,7 +257,7 @@ async fn load_components_of(
     pagination_params: Option<&PaginationParams>,
     conn: &mut AsyncPgConnection,
 ) -> Result<(Vec<(iorm::ProtocolComponent, String)>, i64), StorageError> {
-    let Some(instance) = active_instance(conn, system).await? else {
+    let Some(instance) = active_instance(system, conn).await? else {
         return Ok((Vec::new(), 0));
     };
     let filtered = || {
