@@ -23,7 +23,7 @@ pub const POOL_STARTED_AT_UPDATED: [u8; 32] = [
 /// Parses the comma-separated hook addresses (hex, no `0x`) the manifest lists as `CLAlphaHook`.
 pub fn parse_hooks(list: &str) -> Result<Vec<Vec<u8>>, substreams::errors::Error> {
     list.split(',')
-        .map(|hook| decode_address("hooks", hook.trim()))
+        .map(|hook| Ok(decode_address("hooks", hook.trim())?.to_vec()))
         .collect()
 }
 

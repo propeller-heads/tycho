@@ -11,13 +11,13 @@ struct RawDeployment {
     vault: String,
 }
 
-/// The two Infinity contracts a package indexes against, as 20-byte addresses.
+/// The two Infinity contracts a package indexes against.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Deployment {
     /// The pool manager, the emitter of `Initialize`.
-    pub pool_manager: Vec<u8>,
+    pub pool_manager: [u8; 20],
     /// Holds every pool's funds, so it is `balance_owner` on every component.
-    pub vault: Vec<u8>,
+    pub vault: [u8; 20],
 }
 
 impl Deployment {
@@ -34,12 +34,10 @@ impl Deployment {
 }
 
 /// Decodes a 20-byte address given as hex without the `0x` prefix; `name` is for the error.
-pub fn decode_address(name: &str, value: &str) -> Result<Vec<u8>, anyhow::Error> {
+pub fn decode_address(name: &str, value: &str) -> Result<[u8; 20], anyhow::Error> {
     let bytes = hex::decode(value).map_err(|err| anyhow!("Invalid {name} {value:?}: {err}"))?;
-    if bytes.len() != 20 {
-        return Err(anyhow!("Invalid {name} {value:?}: expected 20 bytes, got {}", bytes.len()));
-    }
-    Ok(bytes)
+    <[u8; 20]>::try_from(bytes.as_slice())
+        .map_err(|_| anyhow!("Invalid {name} {value:?}: expected 20 bytes, got {}", bytes.len()))
 }
 
 #[cfg(test)]
@@ -59,8 +57,8 @@ mod tests {
         assert_eq!(
             deployment,
             Deployment {
-                pool_manager: hex::decode(POOL_MANAGER).unwrap(),
-                vault: hex::decode(VAULT).unwrap(),
+                pool_manager: hex::decode(POOL_MANAGER).unwrap().try_into().unwrap(),
+                vault: hex::decode(VAULT).unwrap().try_into().unwrap(),
             }
         );
     }
