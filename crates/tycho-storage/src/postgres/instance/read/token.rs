@@ -200,7 +200,11 @@ mod tests {
     use diesel::prelude::*;
     use diesel_async::{AsyncPgConnection, RunQueryDsl};
     use tycho_common::{
-        models::{protocol::QualityRange, token::Token, Address, Chain, PaginationParams},
+        models::{
+            protocol::QualityRange,
+            token::{Token, TokenOwner},
+            Address, Chain, PaginationParams,
+        },
         storage::StorageError,
         Bytes,
     };
@@ -280,6 +284,14 @@ mod tests {
             balance_float,
         )
         .await;
+    }
+
+    fn owner(protocol_system: &str, component_id: &str, balance: &str) -> TokenOwner {
+        TokenOwner {
+            protocol_system: protocol_system.to_string(),
+            component_id: component_id.to_string(),
+            balance: b(balance),
+        }
     }
 
     fn b(hex: &str) -> Bytes {
@@ -455,5 +467,73 @@ mod tests {
 
         assert!(matches!(tokens, Err(StorageError::NotFound(..))), "{tokens:?}");
         assert!(matches!(prices, Err(StorageError::NotFound(..))), "{prices:?}");
+    }
+
+    #[tokio::test]
+    async fn test_owner_is_the_largest_balance_across_protocols() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        pool(&mut conn, s.active, "curve_pool", A, "0xfe", 254.0).await;
+        pool(&mut conn, s.uniswap_v4, "v4_pool", A, "0x00ff", 255.0).await;
+
+        let owners = s
+            .gateway
+            .get_token_owners(&Chain::Ethereum, &[b(A)], None, &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(owners, HashMap::from([(b(A), owner("uniswap_v4", "v4_pool", "0x00ff"))]));
+    }
+
+    #[tokio::test]
+    async fn test_owners_skip_instances_that_are_not_active() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        pool(&mut conn, s.active, "active_pool", A, "0x01", 1.0).await;
+        pool(&mut conn, s.inactive, "inactive_pool", A, "0xff", 255.0).await;
+
+        let owners = s
+            .gateway
+            .get_token_owners(&Chain::Ethereum, &[b(A)], None, &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(owners, HashMap::from([(b(A), owner("vm:curve", "active_pool", "0x01"))]));
+    }
+
+    #[tokio::test]
+    async fn test_owners_respect_min_balance() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        pool(&mut conn, s.active, "pool", A, "0x0a", 10.0).await;
+
+        let below = s
+            .gateway
+            .get_token_owners(&Chain::Ethereum, &[b(A)], Some(100.0), &mut conn)
+            .await
+            .unwrap();
+        let above = s
+            .gateway
+            .get_token_owners(&Chain::Ethereum, &[b(A)], Some(5.0), &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(below, HashMap::new());
+        assert_eq!(above, HashMap::from([(b(A), owner("vm:curve", "pool", "0x0a"))]));
+    }
+
+    #[tokio::test]
+    async fn test_token_without_balance_has_no_owner() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        pool(&mut conn, s.active, "pool", A, "0x01", 1.0).await;
+
+        let owners = s
+            .gateway
+            .get_token_owners(&Chain::Ethereum, &[b(A), b(B)], None, &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(owners, HashMap::from([(b(A), owner("vm:curve", "pool", "0x01"))]));
     }
 }
