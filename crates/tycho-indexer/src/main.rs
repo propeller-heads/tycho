@@ -45,7 +45,7 @@ use tycho_common::{
         blockchain::{Block, Transaction},
         chain_config::{init_chain_registry, ChainConfigRegistry},
         contract::AccountDelta,
-        Address, Chain, ExtractionState, ImplementationType,
+        Address, Chain, ExtractionState, ImplementationType, ProtocolSystem,
     },
     storage::{ChainGateway, ComponentPauseGateway, ContractStateGateway, ExtractionStateGateway},
     traits::{AccountExtractor, StorageSnapshotRequest},
@@ -609,7 +609,7 @@ async fn run_rpc(
 async fn start_pause_refresher<G>(
     gateway: G,
     chain: Chain,
-    extracted_systems: HashSet<String>,
+    extracted_systems: HashSet<ProtocolSystem>,
 ) -> Result<(watch::Receiver<()>, JoinHandle<Result<(), ExtractionError>>), ExtractionError>
 where
     G: ComponentPauseGateway + Send + Sync + 'static,

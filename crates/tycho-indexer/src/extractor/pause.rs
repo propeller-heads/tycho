@@ -85,57 +85,60 @@ impl PauseRegistry {
             .unwrap_or_default()
     }
 
-    /// Makes `current` the paused set of every system. For each extracted system, queues one
-    /// event for each component whose pause started or ended.
+    /// Replaces the paused set of every system with `now_paused`. For each extracted system,
+    /// queues one event for each component whose pause started or ended.
     ///
     /// Returns whether any paused set changed.
-    fn apply(&mut self, mut current: HashMap<ProtocolSystem, HashSet<ComponentId>>) -> bool {
+    fn replace_paused_sets(
+        &mut self,
+        mut now_paused: HashMap<ProtocolSystem, HashSet<ComponentId>>,
+    ) -> bool {
         let mut changed = false;
         for (system, pauses) in &mut self.systems {
             let queue_events = self.extracted_systems.contains(system);
-            changed |= pauses.update(
-                current
+            changed |= pauses.replace_paused(
+                now_paused
                     .remove(system)
                     .unwrap_or_default(),
                 queue_events,
             );
         }
-        for (system, paused) in current {
+        for (system, paused) in now_paused {
             let queue_events = self.extracted_systems.contains(&system);
             changed |= self
                 .systems
                 .entry(system)
                 .or_default()
-                .update(paused, queue_events);
+                .replace_paused(paused, queue_events);
         }
         changed
     }
 }
 
 impl SystemPauses {
-    /// Replaces the paused set with `current`. With `queue_events`, also queues a `Pause` for
+    /// Replaces the paused set with `now_paused`. With `queue_events`, also queues a `Pause` for
     /// each newly paused component and an `Unpause` for each one no longer paused.
     ///
     /// Returns whether the set changed.
-    fn update(&mut self, current: HashSet<ComponentId>, queue_events: bool) -> bool {
-        if self.paused == current {
+    fn replace_paused(&mut self, now_paused: HashSet<ComponentId>, queue_events: bool) -> bool {
+        if self.paused == now_paused {
             return false;
         }
         if queue_events {
             self.pending.extend(
-                current
+                now_paused
                     .difference(&self.paused)
                     .cloned()
                     .map(PauseEvent::Pause),
             );
             self.pending.extend(
                 self.paused
-                    .difference(&current)
+                    .difference(&now_paused)
                     .cloned()
                     .map(PauseEvent::Unpause),
             );
         }
-        self.paused = current;
+        self.paused = now_paused;
         true
     }
 }
@@ -199,7 +202,7 @@ impl<G: ComponentPauseGateway> PauseRefresher<G> {
             .registry
             .write()
             .expect("pause registry lock poisoned")
-            .apply(group_by_system(pauses));
+            .replace_paused_sets(group_by_system(pauses));
         if changed {
             self.changes.send_replace(());
         }
