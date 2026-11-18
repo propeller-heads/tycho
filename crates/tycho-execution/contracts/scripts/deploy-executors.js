@@ -36,6 +36,7 @@ const deploy_protocols = {
         "rfq:metric",
         "pricelevelstream",
         "rfq:native",
+        "rfq:euclid",
         "sky",
         "lido_v4",
         "etherfi",

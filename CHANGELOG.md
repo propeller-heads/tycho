@@ -1,3 +1,38 @@
+## [0.529.0](https://github.com/propeller-heads/tycho/compare/0.528.0...0.529.0) (2026-11-18)
+
+
+### Features
+
+* **common:** add admin pause methods to ProtocolGateway ([8d644f4](https://github.com/propeller-heads/tycho/commit/8d644f4abb73903592985e572cbacb6ddd6ef6f2))
+* **storage:** add the component_pause table ([e798521](https://github.com/propeller-heads/tycho/commit/e798521a6f5e8135d8a915b25789fc5b89b301cd))
+* **storage:** record admin pauses in Postgres ([537457b](https://github.com/propeller-heads/tycho/commit/537457b9b7f57a42fc5a542f0b4a6ceb69cafa8e))
+* **storage:** record who unpaused a component and why ([c138b79](https://github.com/propeller-heads/tycho/commit/c138b793f3d4f7c9c083750ca2ee02c099d68077))
+
+
+### Bug Fixes
+
+* **storage:** allow one open pause per component on a chain ([19b5fff](https://github.com/propeller-heads/tycho/commit/19b5fff19d63b58e3cba0bcc5de4dce5191d8ecc))
+* **storage:** insert pauses in batches ([02f37e1](https://github.com/propeller-heads/tycho/commit/02f37e12313e57eab28d48413fc8c65710fdc85c))
+* **storage:** pause components of systems added after startup ([1a0ef02](https://github.com/propeller-heads/tycho/commit/1a0ef024c613e75c844945dea0b8ccc92bab910b))
+* **storage:** pause every component of a call or none ([a7c571a](https://github.com/propeller-heads/tycho/commit/a7c571a8c454a54f7c410f6420fd16c2b15af70e))
+
+## [0.528.0](https://github.com/propeller-heads/tycho/compare/0.527.5...0.528.0) (2026-11-18)
+
+
+### Features
+
+* **rfq:** add Euclid Protocol RFQ provider ([1e0b24a](https://github.com/propeller-heads/tycho/commit/1e0b24a0e003be6cc8b0219276352acf1e4fe909))
+
+
+### Bug Fixes
+
+* **euclid:** address round-2 review ([6e78a2b](https://github.com/propeller-heads/tycho/commit/6e78a2befa86fc6f0f032728639a9ca185a3e5fc))
+* **euclid:** follow the router on unexpiring and zero-pay orders ([879ef3d](https://github.com/propeller-heads/tycho/commit/879ef3d61282b26d24d1b1ac98bc2cebab364d5f))
+* **execution:** annotate EuclidExecutor for forge lint ([b550c91](https://github.com/propeller-heads/tycho/commit/b550c91684712ad511c9d1346ad70ef91d2b9d00))
+* **execution:** count Euclid's output transfer in the gas estimate ([34e29b0](https://github.com/propeller-heads/tycho/commit/34e29b0ac3628d43b1931131055d3912b84749dd))
+* **execution:** reject Euclid calldata the executor reverts on ([84bfeaf](https://github.com/propeller-heads/tycho/commit/84bfeafe968f12b3a33fbabca398086104b653f8))
+* **simulation:** name the clock failure in Euclid's expiry check ([eeba70b](https://github.com/propeller-heads/tycho/commit/eeba70b464dacd35ea1eaafcd153858c34e941a9))
+
 ## [0.527.5](https://github.com/propeller-heads/tycho/compare/0.527.4...0.527.5) (2026-11-18)
 
 

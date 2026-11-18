@@ -21,7 +21,7 @@ use crate::encoding::{
             bebop::BebopSwapEncoder, bebop_fallback::BebopFallbackSwapEncoder,
             bopamm::BopAMMSwapEncoder, curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder,
             ekubo_v3::EkuboV3SwapEncoder, erc_4626::ERC4626SwapEncoder,
-            etherfi::EtherfiSwapEncoder, fallback::FallbackSwapEncoder,
+            etherfi::EtherfiSwapEncoder, euclid::EuclidSwapEncoder, fallback::FallbackSwapEncoder,
             fermiswap::FermiSwapEncoder, fluid_v1::FluidV1SwapEncoder,
             hashflow::HashflowSwapEncoder, hashflow_fallback::HashflowFallbackSwapEncoder,
             lido_v4::LidoV4SwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
@@ -257,6 +257,9 @@ impl SwapEncoderRegistry {
             }
             "rfq:bebop" => {
                 Ok(Box::new(BebopSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "rfq:euclid" => {
+                Ok(Box::new(EuclidSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "rfq:hashflow" => {
                 Ok(Box::new(HashflowSwapEncoder::new(executor_address, self.chain, config)?))
