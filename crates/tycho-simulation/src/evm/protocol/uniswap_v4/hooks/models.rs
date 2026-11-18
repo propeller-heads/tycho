@@ -155,12 +155,25 @@ impl BeforeSwapOutput {
     }
 }
 
+/// The pool's price, tick and active liquidity after a swap, and the initialized ticks it crossed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolStateAfterSwap {
+    pub sqrt_price_x96: U256,
+    pub tick: i32,
+    pub liquidity: u128,
+    pub crossed_ticks: Vec<i32>,
+}
+
 pub struct AfterSwapParameters {
     pub context: StateContext,
     pub sender: Address,
     pub swap_params: SwapParams,
     pub delta: BalanceDelta,
     pub hook_data: Bytes,
+    /// The PoolManager updates the pool's price, tick, liquidity and crossed ticks before it calls
+    /// `afterSwap`, so a hook that reads them sees these values. `None` keeps the values stored in
+    /// the PoolManager.
+    pub pool_state: Option<PoolStateAfterSwap>,
 }
 
 #[derive(Debug, Clone)]

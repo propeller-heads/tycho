@@ -314,6 +314,7 @@ mod tests {
                 I128::try_from(128499868287523768i128).unwrap(),
             ),
             hook_data: Bytes::new(),
+            pool_state: None,
         };
 
         let result = handler
