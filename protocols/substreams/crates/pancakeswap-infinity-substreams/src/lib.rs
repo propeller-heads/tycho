@@ -22,12 +22,6 @@ pub mod params;
 #[macro_export]
 macro_rules! transaction_conversions {
     ($transaction:ty) => {
-        impl From<::substreams_ethereum::pb::eth::v2::TransactionTrace> for $transaction {
-            fn from(value: ::substreams_ethereum::pb::eth::v2::TransactionTrace) -> Self {
-                Self { hash: value.hash, from: value.from, to: value.to, index: value.index.into() }
-            }
-        }
-
         impl From<&::substreams_ethereum::pb::eth::v2::TransactionTrace> for $transaction {
             fn from(value: &::substreams_ethereum::pb::eth::v2::TransactionTrace) -> Self {
                 Self {
@@ -74,7 +68,7 @@ mod tests {
     transaction_conversions!(Transaction);
 
     #[test]
-    fn trace_round_trips_to_the_tycho_transaction() {
+    fn trace_converts_to_the_package_then_the_tycho_transaction() {
         let trace = TransactionTrace {
             hash: vec![1, 2],
             from: vec![3],
@@ -83,8 +77,7 @@ mod tests {
             ..Default::default()
         };
 
-        let owned = Transaction::from(trace.clone());
-        assert_eq!(owned, Transaction::from(&trace));
+        let owned = Transaction::from(&trace);
         assert_eq!(owned, Transaction { hash: vec![1, 2], from: vec![3], to: vec![4], index: 7 });
 
         let tycho = tycho_substreams::prelude::Transaction::from(&owned);
