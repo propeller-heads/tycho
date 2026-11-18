@@ -18,4 +18,6 @@ pub mod hook_handler_creator;
 pub mod models;
 pub mod pancakeswap_clalpha;
 pub mod pons_v2;
+#[cfg(test)]
+pub mod test_hook;
 pub mod utils;
