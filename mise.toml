@@ -8,7 +8,7 @@ locked = true
 [env]
 # The toolchain for rustfmt and clippy, because the formatter configuration uses unstable
 # options. Commands pass it explicitly as `cargo +$RUST_NIGHTLY`.
-RUST_NIGHTLY = "nightly-2026-06-28"
+RUST_NIGHTLY = "nightly-2026-11-01"
 
 [tools]
 # Rust is deliberately absent. Its toolchains are pinned in the rust-toolchain.toml files, which

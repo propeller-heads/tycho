@@ -1214,10 +1214,7 @@ where
                     .entry_point_with_params
                     .clone()
                     .into();
-            let tracing_result: dto::TracingResult = traced_entry_point
-                .tracing_result
-                .clone()
-                .into();
+            let tracing_result: dto::TracingResult = traced_entry_point.tracing_result.into();
             let component_id = entry_point_to_component
                 .get(
                     &entry_point_with_tracing_params
@@ -1227,10 +1224,8 @@ where
                 )
                 .cloned()
                 .unwrap_or_default();
-            traced_entry_points.insert(
-                component_id.to_string(),
-                vec![(entry_point_with_tracing_params, tracing_result)],
-            );
+            traced_entry_points
+                .insert(component_id, vec![(entry_point_with_tracing_params, tracing_result)]);
         }
         Ok(dto::AddEntryPointRequestResponse { traced_entry_points })
     }

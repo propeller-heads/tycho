@@ -677,7 +677,7 @@ fn ladder_component(
             );
             let input = execution_input(
                 &swap,
-                amount_in.clone(),
+                amount_in,
                 Quote { amount: amount_out_result.amount, gas: amount_out_result.gas },
             )?;
             part.executions

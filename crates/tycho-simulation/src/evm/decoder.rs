@@ -539,7 +539,7 @@ where
                         let impl_update = ResponseAccount {
                             address: impl_addr,
                             slots: HashMap::new(),
-                            ..account.clone()
+                            ..account
                         };
                         storage_by_address.insert(impl_addr, impl_update);
                     } else {
@@ -868,7 +868,7 @@ where
                             let impl_update = AccountUpdate {
                                 address: impl_addr,
                                 slots: HashMap::new(),
-                                ..update.clone()
+                                ..update
                             };
                             account_update_by_address.insert(impl_addr, impl_update);
                         }
@@ -1899,9 +1899,8 @@ mod tests {
             Ok(res) => {
                 if !skip_failures {
                     panic!("Expected failures to be raised")
-                } else {
-                    assert_eq!(res.states.len(), 0);
                 }
+                assert_eq!(res.states.len(), 0);
             }
         }
     }
