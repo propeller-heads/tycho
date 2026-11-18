@@ -27,7 +27,8 @@ contract TestUtils is Test {
     }
 
     /// The constructor arguments config/executor_deployments.json deploys the executor of
-    /// `protocol` with on `chain`.
+    /// `protocol` with on `chain`, for an executor whose arguments are all addresses. Reverts
+    /// when the file has no such entry or an argument is not an address.
     function executorDeploymentArgs(string memory chain, string memory protocol)
         internal
         view
@@ -36,6 +37,19 @@ contract TestUtils is Test {
         return vm.parseJsonAddressArray(
             vm.readFile("../config/executor_deployments.json"),
             string.concat(".", chain, ".", protocol, ".args")
+        );
+    }
+
+    /// The address config/test_executor_addresses.json gives the test executor of `protocol`
+    /// on `chain`, which the Rust-encoded calldata names. Reverts when the file has no entry.
+    function testExecutorAddress(string memory chain, string memory protocol)
+        internal
+        view
+        returns (address)
+    {
+        return vm.parseJsonAddress(
+            vm.readFile("../config/test_executor_addresses.json"),
+            string.concat(".", chain, ".", protocol)
         );
     }
 }
