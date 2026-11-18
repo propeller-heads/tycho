@@ -210,7 +210,10 @@ mod tests {
     use chrono::{NaiveDate, NaiveDateTime};
     use diesel_async::AsyncPgConnection;
     use tycho_common::{
-        models::{protocol::ComponentBalance, Address, Chain, ComponentId},
+        models::{
+            protocol::{ComponentBalance, ProtocolComponentState},
+            Address, Chain, ComponentId, PaginationParams,
+        },
         storage::{BlockOrTimestamp, StorageError, Version, VersionKind},
         Bytes,
     };
@@ -425,5 +428,234 @@ mod tests {
         let result = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(day(1)))).await;
 
         assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+    }
+
+    async fn states(
+        gateway: &PostgresGatewayNew,
+        conn: &mut AsyncPgConnection,
+        system: Option<&str>,
+        ids: Option<&[&str]>,
+        pagination: Option<&PaginationParams>,
+        at: Option<Version>,
+    ) -> Result<(Vec<ProtocolComponentState>, Option<i64>), StorageError> {
+        let page = gateway
+            .get_protocol_states(
+                &Chain::Ethereum,
+                at,
+                system.map(str::to_string),
+                ids,
+                true,
+                pagination,
+                conn,
+            )
+            .await?;
+        let mut entity = page.entity;
+        if pagination.is_none() {
+            entity.sort_by(|a, b| a.component_id.cmp(&b.component_id));
+        }
+        Ok((entity, page.total))
+    }
+
+    /// Inserts a component with one token and the attribute "reserve" set to `value`.
+    async fn component_with_state(
+        conn: &mut AsyncPgConnection,
+        instance: InstanceId,
+        external_id: &str,
+        value: &str,
+    ) -> i64 {
+        let id =
+            db_fixtures::insert_instance_component(conn, instance, external_id, &[b("0x01")]).await;
+        db_fixtures::insert_instance_state(conn, instance, id, "reserve", b(value)).await;
+        id
+    }
+
+    fn component_ids(states: &[ProtocolComponentState]) -> Vec<&str> {
+        states
+            .iter()
+            .map(|state| state.component_id.as_str())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_states_of_a_protocol() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        db_fixtures::insert_instance_state(&mut conn, s.curve, a, "x", b("0x0a")).await;
+        db_fixtures::insert_instance_state(&mut conn, s.curve, a, "y", b("0x0b")).await;
+        db_fixtures::insert_instance_component_balance(
+            &mut conn,
+            s.curve,
+            a,
+            b("0x01"),
+            b("0x10"),
+            16.0,
+        )
+        .await;
+        let c = db_fixtures::insert_instance_component(&mut conn, s.curve, "c", &[b("0x01")]).await;
+        db_fixtures::insert_instance_state(&mut conn, s.curve, c, "x", b("0x0c")).await;
+        db_fixtures::insert_instance_state(&mut conn, s.curve, c, "y", b("0x0d")).await;
+        component_with_state(&mut conn, s.uniswap_v4, "u", "0x01").await;
+
+        let (result, total) = states(&s.gateway, &mut conn, Some("vm:curve"), None, None, None)
+            .await
+            .unwrap();
+
+        let expected = vec![
+            ProtocolComponentState::new(
+                "a",
+                [("x".to_string(), b("0x0a")), ("y".to_string(), b("0x0b"))].into(),
+                [(b("0x01"), b("0x10"))].into(),
+            ),
+            ProtocolComponentState::new(
+                "c",
+                [("x".to_string(), b("0x0c")), ("y".to_string(), b("0x0d"))].into(),
+                HashMap::new(),
+            ),
+        ];
+        assert_eq!(result, expected);
+        assert_eq!(total, None);
+    }
+
+    #[tokio::test]
+    async fn test_states_with_ids() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        component_with_state(&mut conn, s.curve, "a", "0x01").await;
+        component_with_state(&mut conn, s.curve, "c", "0x02").await;
+
+        let (result, _) = states(&s.gateway, &mut conn, Some("vm:curve"), Some(&["a"]), None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(component_ids(&result), vec!["a"]);
+    }
+
+    #[tokio::test]
+    async fn test_states_with_same_pool_id_stay_apart() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        component_with_state(&mut conn, s.curve, "0xpool", "0x01").await;
+        component_with_state(&mut conn, s.uniswap_v4, "0xpool", "0x02").await;
+
+        for (system, value) in [("vm:curve", b("0x01")), ("uniswap_v4", b("0x02"))] {
+            let (result, _) = states(&s.gateway, &mut conn, Some(system), None, None, None)
+                .await
+                .unwrap();
+
+            assert_eq!(result.len(), 1, "{system}");
+            assert_eq!(result[0].attributes, [("reserve".to_string(), value)].into(), "{system}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_states_skip_components_without_state_rows() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        component_with_state(&mut conn, s.curve, "a", "0x01").await;
+        component_with_balance(&mut conn, s.curve, "balance-only", "0x10").await;
+        db_fixtures::insert_instance_component(&mut conn, s.curve, "empty", &[b("0x01")]).await;
+
+        let (result, _) = states(&s.gateway, &mut conn, Some("vm:curve"), None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(component_ids(&result), vec!["a"]);
+    }
+
+    #[tokio::test]
+    async fn test_states_skip_instances_that_are_not_active() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let next = db_fixtures::insert_instance(&mut conn, s.curve_system_id, "0.0.2").await;
+        component_with_state(&mut conn, s.curve, "a", "0x01").await;
+        component_with_state(&mut conn, next, "b", "0x02").await;
+
+        let (result, _) = states(&s.gateway, &mut conn, Some("vm:curve"), None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(component_ids(&result), vec!["a"]);
+    }
+
+    #[tokio::test]
+    async fn test_states_of_unknown_protocol_fail() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        component_with_state(&mut conn, s.curve, "a", "0x01").await;
+
+        for system in ["not-a-protocol", ""] {
+            let result = states(&s.gateway, &mut conn, Some(system), None, None, None).await;
+
+            assert!(matches!(result, Err(StorageError::NotFound(..))), "{system:?}: {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_states_of_inactive_protocol_are_empty() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        component_with_state(&mut conn, s.curve, "a", "0x01").await;
+        db_fixtures::set_active_instance(&mut conn, s.curve_system_id, None).await;
+
+        let (inactive, _) = states(&s.gateway, &mut conn, Some("vm:curve"), None, None, None)
+            .await
+            .unwrap();
+
+        assert!(inactive.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_states_paging_is_unsupported() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        component_with_state(&mut conn, s.curve, "a", "0x01").await;
+
+        let result = states(
+            &s.gateway,
+            &mut conn,
+            Some("vm:curve"),
+            None,
+            Some(&PaginationParams::new(0, 2)),
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_states_before_head_are_unsupported() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        component_with_state(&mut conn, s.curve, "a", "0x01").await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, day(2)).await;
+
+        let result =
+            states(&s.gateway, &mut conn, Some("vm:curve"), None, None, Some(at(day(1)))).await;
+
+        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+    }
+    #[tokio::test]
+    async fn test_states_by_id_need_a_protocol() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+
+        let result = states(&s.gateway, &mut conn, None, Some(&["a"]), None, None).await;
+
+        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_states_without_a_protocol_are_unsupported() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        component_with_state(&mut conn, s.curve, "a", "0x01").await;
+
+        let latest = states(&s.gateway, &mut conn, None, None, None, None).await;
+        let versioned = states(&s.gateway, &mut conn, None, None, None, Some(at(day(1)))).await;
+
+        assert!(matches!(latest, Err(StorageError::Unsupported(_))), "{latest:?}");
+        assert!(matches!(versioned, Err(StorageError::Unsupported(_))), "{versioned:?}");
     }
 }
