@@ -41,8 +41,9 @@ pub const SEED_TICK_UPPER_ATTRIBUTE: &str = "montra_seed_tick_upper";
 /// Tycho's pause flag of a component, which [`decode_paused`] reads.
 pub const PAUSED_ATTRIBUTE: &str = "paused";
 
-/// Every `montra_*` attribute, all of which [`MontraPoolConfig::from_attributes`] requires.
-const POOL_CONFIG_ATTRIBUTES: [&str; 11] = [
+/// Every `montra_*` attribute, all of which [`MontraPoolConfig::from_attributes`] requires (a
+/// test checks that each one is), and none of which the indexer deletes.
+pub(super) const POOL_CONFIG_ATTRIBUTES: [&str; 11] = [
     TOTAL_FEE_PIPS_ATTRIBUTE,
     LP_FEE_PIPS_ATTRIBUTE,
     QUOTE_IS_CURRENCY0_ATTRIBUTE,
@@ -61,13 +62,13 @@ const UINT24_LIMIT: u32 = 1 << 24;
 
 /// `MAX_TOTAL_FEE_PIPS()` of [`hook_handler::MONTRA_HOOK_ELYSIUM`] at block 6002000: the largest
 /// `totalFeePips` its `register` accepts.
-pub const MAX_TOTAL_FEE_PIPS_ELYSIUM: u32 = 100_000;
+pub(crate) const MAX_TOTAL_FEE_PIPS_ELYSIUM: u32 = 100_000;
 /// `MAX_EARLY_BUY_FEE_PIPS()` of the same hook at block 6002000: the largest
 /// `earlyBuyFeeStartPips` its `register` accepts.
-pub const MAX_EARLY_BUY_FEE_PIPS_ELYSIUM: u32 = 990_000;
+pub(crate) const MAX_EARLY_BUY_FEE_PIPS_ELYSIUM: u32 = 990_000;
 /// `MAX_EARLY_BUY_FEE_WINDOW()` of the same hook at block 6002000: the longest
 /// `earlyBuyFeeWindow`, in seconds, its `register` accepts.
-pub const MAX_EARLY_BUY_FEE_WINDOW_SECONDS_ELYSIUM: u64 = 1_800;
+pub(crate) const MAX_EARLY_BUY_FEE_WINDOW_SECONDS_ELYSIUM: u64 = 1_800;
 
 /// `PoolConfig.stage`, the hook's `Stage` enum, stored as one byte from 0 to 4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,8 +110,9 @@ impl AntiSnipeTerms {
 /// publishes them.
 ///
 /// The decoder keeps terms the hook's `register` and `lowerTotalFee` would refuse, so that one
-/// such pool does not fail the stream; [`MontraPoolConfig::check_terms`] refuses them when the
-/// pool is quoted.
+/// such pool does not fail the stream. Construction checks the terms once and keeps the refusal,
+/// which [`MontraPoolConfig::check_terms`] and every quoting method return; on terms it accepts
+/// the quoting arithmetic cannot fail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MontraPoolConfig {
     total_fee_pips: u32,
@@ -122,6 +124,8 @@ pub struct MontraPoolConfig {
     lp_held_seconds: u64,
     seed_tick_lower: i32,
     seed_tick_upper: i32,
+    /// Why the hook refuses these terms, naming them; `None` when it accepts them.
+    refusal: Option<String>,
 }
 
 impl MontraPoolConfig {
@@ -132,24 +136,7 @@ impl MontraPoolConfig {
     pub fn from_attributes(
         attributes: &HashMap<String, Bytes>,
     ) -> Result<Self, InvalidSnapshotError> {
-        let mut config = Self {
-            total_fee_pips: 0,
-            lp_fee_pips: 0,
-            quote_is_currency0: false,
-            anti_snipe: AntiSnipeTerms { until: 0, start_pips: 0, seconds: 0 },
-            stage: Stage::Launched,
-            lp_crossed_at: 0,
-            lp_held_seconds: 0,
-            seed_tick_lower: 0,
-            seed_tick_upper: 0,
-        };
-        for name in POOL_CONFIG_ATTRIBUTES {
-            let value = attributes
-                .get(name)
-                .ok_or_else(|| InvalidSnapshotError::MissingAttribute(name.to_string()))?;
-            config.set(name, value)?;
-        }
-        Ok(config)
+        Self::decode(attributes, None)
     }
 
     /// This config with the `montra_*` attributes of `updated` applied; other names are ignored.
@@ -160,98 +147,165 @@ impl MontraPoolConfig {
         &self,
         updated: &HashMap<String, Bytes>,
     ) -> Result<Self, InvalidSnapshotError> {
-        let mut config = self.clone();
-        for name in POOL_CONFIG_ATTRIBUTES {
-            if let Some(value) = updated.get(name) {
-                config.set(name, value)?;
+        Self::decode(updated, Some(self))
+    }
+
+    /// Decodes each `montra_*` attribute of `attributes` in the format the indexer writes it,
+    /// taking an absent one from `base`, or failing with `MissingAttribute` without a `base`.
+    fn decode(
+        attributes: &HashMap<String, Bytes>,
+        base: Option<&Self>,
+    ) -> Result<Self, InvalidSnapshotError> {
+        fn field<T>(
+            attributes: &HashMap<String, Bytes>,
+            name: &str,
+            decode: impl FnOnce(&str, &Bytes) -> Result<T, InvalidSnapshotError>,
+            base: Option<T>,
+        ) -> Result<T, InvalidSnapshotError> {
+            match (attributes.get(name), base) {
+                (Some(value), _) => decode(name, value),
+                (None, Some(base)) => Ok(base),
+                (None, None) => Err(InvalidSnapshotError::MissingAttribute(name.to_string())),
             }
         }
+        let mut config = Self {
+            total_fee_pips: field(
+                attributes,
+                TOTAL_FEE_PIPS_ATTRIBUTE,
+                pips,
+                base.map(|b| b.total_fee_pips),
+            )?,
+            lp_fee_pips: field(
+                attributes,
+                LP_FEE_PIPS_ATTRIBUTE,
+                pips,
+                base.map(|b| b.lp_fee_pips),
+            )?,
+            quote_is_currency0: field(
+                attributes,
+                QUOTE_IS_CURRENCY0_ATTRIBUTE,
+                flag,
+                base.map(|b| b.quote_is_currency0),
+            )?,
+            anti_snipe: AntiSnipeTerms {
+                until: field(
+                    attributes,
+                    EARLY_BUY_FEE_UNTIL_ATTRIBUTE,
+                    u64_be,
+                    base.map(|b| b.anti_snipe.until),
+                )?,
+                start_pips: field(
+                    attributes,
+                    EARLY_BUY_FEE_START_PIPS_ATTRIBUTE,
+                    pips,
+                    base.map(|b| b.anti_snipe.start_pips),
+                )?,
+                seconds: field(
+                    attributes,
+                    EARLY_BUY_FEE_WINDOW_SECONDS_ATTRIBUTE,
+                    u64_be,
+                    base.map(|b| b.anti_snipe.seconds),
+                )?,
+            },
+            stage: field(attributes, STAGE_ATTRIBUTE, stage, base.map(|b| b.stage))?,
+            lp_crossed_at: field(
+                attributes,
+                LP_CROSSED_AT_ATTRIBUTE,
+                u64_be,
+                base.map(|b| b.lp_crossed_at),
+            )?,
+            lp_held_seconds: field(
+                attributes,
+                LP_HELD_SECONDS_ATTRIBUTE,
+                u64_be,
+                base.map(|b| b.lp_held_seconds),
+            )?,
+            seed_tick_lower: field(
+                attributes,
+                SEED_TICK_LOWER_ATTRIBUTE,
+                tick,
+                base.map(|b| b.seed_tick_lower),
+            )?,
+            seed_tick_upper: field(
+                attributes,
+                SEED_TICK_UPPER_ATTRIBUTE,
+                tick,
+                base.map(|b| b.seed_tick_upper),
+            )?,
+            refusal: None,
+        };
+        config.refusal = config.refusal();
         Ok(config)
     }
 
-    /// Decodes `value` as the attribute `name`, in the format the indexer writes it.
-    fn set(&mut self, name: &str, value: &Bytes) -> Result<(), InvalidSnapshotError> {
-        match name {
-            TOTAL_FEE_PIPS_ATTRIBUTE => self.total_fee_pips = pips(name, value)?,
-            LP_FEE_PIPS_ATTRIBUTE => self.lp_fee_pips = pips(name, value)?,
-            QUOTE_IS_CURRENCY0_ATTRIBUTE => self.quote_is_currency0 = flag(name, value)?,
-            EARLY_BUY_FEE_UNTIL_ATTRIBUTE => self.anti_snipe.until = u64_be(name, value)?,
-            EARLY_BUY_FEE_START_PIPS_ATTRIBUTE => self.anti_snipe.start_pips = pips(name, value)?,
-            EARLY_BUY_FEE_WINDOW_SECONDS_ATTRIBUTE => {
-                self.anti_snipe.seconds = u64_be(name, value)?
-            }
-            STAGE_ATTRIBUTE => self.stage = stage(value)?,
-            LP_CROSSED_AT_ATTRIBUTE => self.lp_crossed_at = u64_be(name, value)?,
-            LP_HELD_SECONDS_ATTRIBUTE => self.lp_held_seconds = u64_be(name, value)?,
-            SEED_TICK_LOWER_ATTRIBUTE => self.seed_tick_lower = tick(name, value)?,
-            SEED_TICK_UPPER_ATTRIBUTE => self.seed_tick_upper = tick(name, value)?,
-            other => {
-                return Err(InvalidSnapshotError::ValueError(format!(
-                    "{other} is not a montra pool config attribute"
-                )))
-            }
-        }
-        Ok(())
-    }
-
-    /// Refuses with `InvalidInput`, naming them, the terms the hook's `register` and
-    /// `lowerTotalFee` refuse:
+    /// Why the hook's `register` and `lowerTotalFee` refuse these terms, naming them, or `None`:
     /// - `totalFeePips` above [`MAX_TOTAL_FEE_PIPS_ELYSIUM`];
     /// - `lpFeePips` above `totalFeePips`;
     /// - while an anti-snipe window is set, a start rate above [`MAX_EARLY_BUY_FEE_PIPS_ELYSIUM`]
     ///   or at or below the total, and a window longer than
     ///   [`MAX_EARLY_BUY_FEE_WINDOW_SECONDS_ELYSIUM`] or than `earlyBuyFeeUntil`.
     ///
-    /// Without a window no quote reads the start rate or the window, so `check_terms` does not
-    /// check them.
-    pub fn check_terms(&self) -> Result<(), SimulationError> {
-        let refuse = |terms: String| {
-            SimulationError::InvalidInput(
-                format!("montra pool config: the hook refuses {terms}"),
-                None,
-            )
-        };
+    /// The start rate at or below the total is the hook's own refusal, not a conservative one:
+    /// on a fork of Elysium at block 7964700, `register` reverted `InvalidFeeConfig()` for every
+    /// window from 1 to 1800 s with a start rate equal to or below totals of 5000, 20000 and
+    /// 100000 pips, and accepted a start of total + 1. `lowerTotalFee` only lowers the total, so
+    /// no later write brings the start down to it. Without a window `register` accepts only a
+    /// start rate of 0, and no quote reads the start rate or the window, so they are not checked
+    /// then.
+    fn refusal(&self) -> Option<String> {
         if self.total_fee_pips > MAX_TOTAL_FEE_PIPS_ELYSIUM {
-            return Err(refuse(format!(
+            return Some(format!(
                 "{TOTAL_FEE_PIPS_ATTRIBUTE} {} above its cap {MAX_TOTAL_FEE_PIPS_ELYSIUM}",
                 self.total_fee_pips
-            )));
+            ));
         }
         if self.lp_fee_pips > self.total_fee_pips {
-            return Err(refuse(format!(
+            return Some(format!(
                 "{LP_FEE_PIPS_ATTRIBUTE} {} above {TOTAL_FEE_PIPS_ATTRIBUTE} {}",
                 self.lp_fee_pips, self.total_fee_pips
-            )));
+            ));
         }
-        let Some(window) = self.anti_snipe.window() else { return Ok(()) };
+        let window = self.anti_snipe.window()?;
         if window.start_pips > MAX_EARLY_BUY_FEE_PIPS_ELYSIUM {
-            return Err(refuse(format!(
+            return Some(format!(
                 "{EARLY_BUY_FEE_START_PIPS_ATTRIBUTE} {} above its cap \
                  {MAX_EARLY_BUY_FEE_PIPS_ELYSIUM}",
                 window.start_pips
-            )));
+            ));
         }
         if window.seconds > MAX_EARLY_BUY_FEE_WINDOW_SECONDS_ELYSIUM {
-            return Err(refuse(format!(
+            return Some(format!(
                 "{EARLY_BUY_FEE_WINDOW_SECONDS_ATTRIBUTE} {} above its cap \
                  {MAX_EARLY_BUY_FEE_WINDOW_SECONDS_ELYSIUM}",
                 window.seconds
-            )));
+            ));
         }
         if window.start_pips <= self.total_fee_pips {
-            return Err(refuse(format!(
+            return Some(format!(
                 "{EARLY_BUY_FEE_START_PIPS_ATTRIBUTE} {} at or below {TOTAL_FEE_PIPS_ATTRIBUTE} {}",
                 window.start_pips, self.total_fee_pips
-            )));
+            ));
         }
         if window.seconds > window.until {
-            return Err(refuse(format!(
+            return Some(format!(
                 "{EARLY_BUY_FEE_WINDOW_SECONDS_ATTRIBUTE} {} longer than \
                  {EARLY_BUY_FEE_UNTIL_ATTRIBUTE} {}",
                 window.seconds, window.until
-            )));
+            ));
         }
-        Ok(())
+        None
+    }
+
+    /// Refuses with `InvalidInput` terms the hook refuses, naming them (see [`Self::refusal`]
+    /// for the rules).
+    pub fn check_terms(&self) -> Result<(), SimulationError> {
+        match &self.refusal {
+            None => Ok(()),
+            Some(terms) => Err(SimulationError::InvalidInput(
+                format!("montra pool config: the hook refuses {terms}"),
+                None,
+            )),
+        }
     }
 
     /// `totalFeePips`.
@@ -267,11 +321,9 @@ impl MontraPoolConfig {
     /// The anti-snipe rate in pips a buy pays at `timestamp`: `earlyBuyFeeStartPips` until the
     /// window starts, decaying linearly with the decay floored (so the rate rounds up) to
     /// `totalFeePips` at `earlyBuyFeeUntil`, and `totalFeePips` from then on or when no window is
-    /// set.
+    /// set. On terms the hook accepts the rate is never below `totalFeePips`.
     ///
-    /// Refuses the terms [`Self::check_terms`] refuses. On terms it accepts, the decay stays
-    /// below `earlyBuyFeeStartPips - totalFeePips`, since the elapsed part of the window is
-    /// shorter than the window; a decay outside that range fails with `FatalError` naming it.
+    /// Refuses the terms [`Self::check_terms`] refuses.
     pub fn buy_fee_pips(&self, timestamp: u64) -> Result<u32, SimulationError> {
         self.check_terms()?;
         let total = self.total_fee_pips;
@@ -279,30 +331,30 @@ impl MontraPoolConfig {
         if timestamp >= window.until {
             return Ok(total);
         }
-        // `check_terms` keeps the window inside `until` and the start above the total.
-        let window_start = window.until - window.seconds;
+        // Accepted terms keep the window inside `until` and the start above the total, so
+        // neither subtraction saturates, and the decay, a share of the span below one since
+        // window_start < timestamp < until, never reaches the total.
+        let window_start = window
+            .until
+            .saturating_sub(window.seconds);
         if timestamp <= window_start {
             return Ok(window.start_pips);
         }
-        // Here window_start < timestamp < until, so the window is at least one second long.
-        let span = window.start_pips - total;
+        let span = window.start_pips.saturating_sub(total);
         let decay = u64::from(span) * (timestamp - window_start) / window.seconds;
-        u32::try_from(decay)
-            .ok()
-            .filter(|decay| *decay < span)
-            .map(|decay| window.start_pips - decay)
-            .ok_or_else(|| {
-                SimulationError::FatalError(format!(
-                    "montra pool config: the anti-snipe decay {decay} at {timestamp} is not \
-                     below the span {span} from the start rate to the total"
-                ))
-            })
+        let decay = u32::try_from(decay).unwrap_or(u32::MAX);
+        Ok(window
+            .start_pips
+            .saturating_sub(decay)
+            .max(total))
     }
 
-    /// The LP fee in pips the pool charges at `timestamp`: `lpFeePips` at `LpActive`, and at
-    /// `LpCrossed` once the price has held past the LP line for
-    /// [`hook_handler::MONTRA_LP_LINE_HOLD_SECONDS_ELYSIUM`] in total; 0 otherwise.
-    pub fn lp_fee_in_force_pips(&self, timestamp: u64) -> u32 {
+    /// The LP fee in pips the pool charges at `timestamp`, `None` while it charges none:
+    /// `lpFeePips` at `LpActive`, and at `LpCrossed` once the price has held past the LP line for
+    /// [`hook_handler::MONTRA_LP_LINE_HOLD_SECONDS_ELYSIUM`] in total. An `lpFeePips` of 0 is
+    /// none too: the hook's `beforeSwap` then sets no override and the pool charges its own
+    /// slot0 fee, which is 0 for a Montra pool.
+    pub fn lp_fee_in_force_pips(&self, timestamp: u64) -> Option<u32> {
         let held_long_enough = || {
             // `lpCrossedAt` is the timestamp of an earlier block, so on chain the hook's
             // `block.timestamp - lpCrossedAt` never goes negative. A sum past `u64::MAX` has
@@ -317,11 +369,7 @@ impl MontraPoolConfig {
             Stage::LpCrossed => held_long_enough(),
             Stage::Launched | Stage::Crossed | Stage::Graduated => false,
         };
-        if lp_on {
-            self.lp_fee_pips
-        } else {
-            0
-        }
+        (lp_on && self.lp_fee_pips != 0).then_some(self.lp_fee_pips)
     }
 
     /// The tick the seed position starts at, which a sell may not take the price past:
@@ -385,7 +433,7 @@ fn flag(name: &str, value: &Bytes) -> Result<bool, InvalidSnapshotError> {
 }
 
 /// A one-byte stage, one of [`Stage`]'s variants.
-fn stage(value: &Bytes) -> Result<Stage, InvalidSnapshotError> {
+fn stage(_name: &str, value: &Bytes) -> Result<Stage, InvalidSnapshotError> {
     match value.as_ref() {
         [0] => Ok(Stage::Launched),
         [1] => Ok(Stage::Crossed),

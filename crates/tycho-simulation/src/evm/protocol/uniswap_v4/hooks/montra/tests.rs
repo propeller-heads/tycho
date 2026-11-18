@@ -63,7 +63,8 @@ use crate::{
         },
         utils::uniswap::{
             lp_fee::{DYNAMIC_FEE_FLAG, OVERRIDE_FEE_FLAG},
-            tick_math::MAX_TICK,
+            tick_list::TickInfo,
+            tick_math::{get_sqrt_ratio_at_tick, MAX_TICK},
         },
     },
     protocol::{
@@ -179,7 +180,8 @@ fn before_swap_params(zero_for_one: bool, amount_specified: i128) -> BeforeSwapP
 }
 
 /// `currentBuyFeeRate` of pool 0x8dba98f9... at block 6001266 with only the block time
-/// overridden (S 990000, T 20000, W 10, t0 = 1794584110).
+/// overridden: start rate 990000 pips, total fee 20000, a 10-second window starting at
+/// 1794584110.
 #[rstest]
 #[case::before_window(-5, 990_000)]
 #[case::window_start(0, 990_000)]
@@ -214,8 +216,9 @@ fn test_buy_fee_pips_matches_current_buy_fee_rate_on_a_ten_second_window(
     );
 }
 
-/// The same probe on pool 0xa4d4ff7a... at block 2681095 (S 990000, T 10000, W 1800,
-/// t0 = 1794171257): the decay is floored, so the rate rounds up.
+/// The same probe on pool 0xa4d4ff7a... at block 2681095 (start rate 990000 pips, total fee
+/// 10000, a 1800-second window starting at 1794171257): the decay is floored, so the rate rounds
+/// up.
 #[rstest]
 #[case::one(1, 989_456)]
 #[case::seven(7, 986_189)]
@@ -244,21 +247,29 @@ fn test_buy_fee_pips_rounds_the_rate_up_on_a_thirty_minute_window(
 /// V4Quoter on pool 0x61a799e0... at block 713191 (stage 3, lpCrossedAt 1793853345, held
 /// 28): the LP fee switches on at exactly 600 s held, and stage 4 always charges it.
 #[rstest]
-#[case::held_598(3, 598, 0)]
-#[case::held_599(3, 599, 0)]
-#[case::held_600(3, 600, 1_000)]
-#[case::held_601(3, 601, 1_000)]
-#[case::lp_active(4, 0, 1_000)]
-#[case::graduated(2, 10_000, 0)]
-#[case::launched(0, 10_000, 0)]
+#[case::held_598(3, 598, None)]
+#[case::held_599(3, 599, None)]
+#[case::held_600(3, 600, Some(1_000))]
+#[case::held_601(3, 601, Some(1_000))]
+#[case::lp_active(4, 0, Some(1_000))]
+#[case::graduated(2, 10_000, None)]
+#[case::launched(0, 10_000, None)]
 fn test_lp_fee_in_force_switches_on_at_six_hundred_seconds_held(
     #[case] stage: u8,
     #[case] held_total: u64,
-    #[case] expected: u32,
+    #[case] expected: Option<u32>,
 ) {
     let crossed_at = 1_793_853_345;
     let terms = Terms { stage, lp_crossed_at: crossed_at, lp_held: 28, ..PLAIN };
     assert_eq!(config(terms).lp_fee_in_force_pips(crossed_at + held_total - 28), expected);
+}
+
+/// An LP fee of 0 at `LpActive` is no LP fee in force: the swap runs at the pool's own slot0
+/// fee, which is 0 too.
+#[test]
+fn test_a_zero_lp_fee_is_no_lp_fee_in_force() {
+    let terms = Terms { lp: 0, stage: 4, ..PLAIN };
+    assert_eq!(config(terms).lp_fee_in_force_pips(1_000), None);
 }
 
 #[test]
@@ -328,16 +339,10 @@ fn test_before_swap_on_a_sell_with_the_lp_fee_off() {
 }
 
 #[rstest]
-#[case::zero(0, "SwapAmountCannotBeZero")]
-#[case::exact_output(1_000, "exact-output")]
-#[case::past_int128(i128::MIN, "int128")]
-fn test_before_swap_refuses_what_the_pool_reverts(#[case] amount: i128, #[case] reason: &str) {
-    let amount = if amount == i128::MIN {
-        // One past type(int128).max as an exact input.
-        -(I256::try_from(i128::MAX).expect("fits") + I256::ONE)
-    } else {
-        I256::try_from(amount).expect("fits")
-    };
+#[case::zero(I256::ZERO, "SwapAmountCannotBeZero")]
+#[case::exact_output(I256::try_from(1_000).unwrap(), "exact-output")]
+#[case::one_past_int128_max(-(I256::try_from(i128::MAX).unwrap() + I256::ONE), "int128")]
+fn test_before_swap_refuses_what_the_pool_reverts(#[case] amount: I256, #[case] reason: &str) {
     let mut params = before_swap_params(true, 0);
     params.swap_params.amount_specified = amount;
 
@@ -469,7 +474,6 @@ fn test_check_swap_outcome_refuses_a_sell_past_the_opening(
     #[case] offset: i64,
     #[case] reason: Option<&str>,
 ) {
-    use crate::evm::protocol::utils::uniswap::tick_math::get_sqrt_ratio_at_tick;
     let terms = Terms { quote_is_currency0, seed_lower: -116_400, seed_upper: 169_800, ..PLAIN };
     let opening = if quote_is_currency0 { 169_800 } else { -116_400 };
     let at = get_sqrt_ratio_at_tick(opening).expect("in range");
@@ -616,8 +620,10 @@ fn test_from_attributes_rejects_malformed_terms(
 /// naming the attribute. The caps are the hook's `MAX_TOTAL_FEE_PIPS()` (100000),
 /// `MAX_EARLY_BUY_FEE_PIPS()` (990000) and `MAX_EARLY_BUY_FEE_WINDOW()` (1800), read from
 /// `MONTRA_HOOK_ELYSIUM` at block 6002000; `check_terms` accepts each cap itself. It refuses an
-/// anti-snipe start equal to the total too, and a window longer than `earlyBuyFeeUntil`; with no
-/// window it checks neither the start nor the window.
+/// anti-snipe start at or below the total, as `register` does: on a fork of Elysium at block
+/// 7964700 it reverted `InvalidFeeConfig()` for a start of 20000, 19999, 10000 and 0 against a
+/// total of 20000 with a 600 s window, and accepted 20001. It refuses a window longer than
+/// `earlyBuyFeeUntil` too; with no window it checks neither the start nor the window.
 #[rstest]
 #[case::total_above_cap(Terms { total: 100_001, ..PLAIN }, Some(TOTAL_FEE_PIPS_ATTRIBUTE))]
 #[case::total_at_cap(Terms { total: 100_000, ..PLAIN }, None)]
@@ -629,6 +635,10 @@ fn test_from_attributes_rejects_malformed_terms(
 )]
 #[case::start_at_total(
     Terms { early_until: 2_000, early_start: 10_000, early_window: 100, ..PLAIN },
+    Some(EARLY_BUY_FEE_START_PIPS_ATTRIBUTE)
+)]
+#[case::start_zero_with_a_window(
+    Terms { early_until: 2_000, early_start: 0, early_window: 100, ..PLAIN },
     Some(EARLY_BUY_FEE_START_PIPS_ATTRIBUTE)
 )]
 #[case::start_above_total(
@@ -668,6 +678,48 @@ fn test_check_terms(#[case] terms: Terms, #[case] refused: Option<&str>) {
         }
         (result, _) => panic!("expected {refused:?}, got {result:?}"),
     }
+    // Every quote of a pool with refused terms is refused the same way, at any time, inside
+    // the window and long after it.
+    for timestamp in [1_950, 1_000_000] {
+        match (config.buy_fee_pips(timestamp), refused) {
+            (Ok(_), None) | (Err(SimulationError::InvalidInput(..)), Some(_)) => {}
+            (result, _) => panic!("buy_fee_pips at {timestamp}: {result:?}"),
+        }
+    }
+}
+
+/// Terms refused at decode are checked again after an update: lowering the start to the total
+/// refuses a pool that was accepted, and raising it back accepts it again.
+#[test]
+fn test_with_updates_rechecks_the_terms() {
+    let window = Terms { early_until: 2_000, early_start: 10_001, early_window: 100, ..PLAIN };
+    let accepted = config(window);
+    assert!(accepted.check_terms().is_ok());
+
+    let at_total = accepted
+        .with_updates(&attributes(Terms { early_start: 10_000, ..window }))
+        .expect("decodes");
+    assert!(matches!(at_total.check_terms(), Err(SimulationError::InvalidInput(..))));
+
+    let back = at_total
+        .with_updates(&attributes(window))
+        .expect("decodes");
+    assert_eq!(back, accepted);
+}
+
+/// `from_attributes` requires every name `POOL_CONFIG_ATTRIBUTES` lists, which is also the list
+/// `delta_transition` refuses to see deleted, so the two cannot drift apart.
+#[test]
+fn test_every_pool_config_attribute_is_required() {
+    for name in super::POOL_CONFIG_ATTRIBUTES {
+        let mut attributes = attributes(PLAIN);
+        assert!(attributes.remove(name).is_some(), "{name} is not in the test map");
+        match MontraPoolConfig::from_attributes(&attributes) {
+            Err(InvalidSnapshotError::MissingAttribute(missing)) => assert_eq!(missing, name),
+            other => panic!("without {name}: {other:?}"),
+        }
+    }
+    assert_eq!(attributes(PLAIN).len(), super::POOL_CONFIG_ATTRIBUTES.len());
 }
 
 fn delta(updated: Vec<(&str, Bytes)>, deleted: &[&str]) -> ProtocolStateDelta {
@@ -713,6 +765,22 @@ fn test_delta_transition_rejects_a_bad_delta(#[case] bad: ProtocolStateDelta) {
     hook.delta_transition(bad, &HashMap::new(), &Balances::default())
         .expect_err("rejected");
     assert_eq!(hook, handler(PLAIN, 1_000));
+}
+
+/// A delta without a pause entry leaves a paused pool paused, whatever else it updates: only a
+/// pause value or the deletion of `paused` changes it.
+#[test]
+fn test_delta_transition_without_a_pause_entry_keeps_the_pool_paused() {
+    let mut hook = MontraHookHandler::new(MONTRA_HOOK_ELYSIUM, config(PLAIN), true, 1_000);
+    hook.delta_transition(
+        delta(vec![(TOTAL_FEE_PIPS_ATTRIBUTE, Bytes::from(5_000u64.to_be_bytes().to_vec()))], &[]),
+        &HashMap::new(),
+        &Balances::default(),
+    )
+    .expect("valid delta");
+
+    let expected = config(Terms { total: 5_000, lp: 1_000, ..PLAIN });
+    assert_eq!(hook, MontraHookHandler::new(MONTRA_HOOK_ELYSIUM, expected, true, 1_000));
 }
 
 /// A pause value other than `[0]` and `[1]` applies and pauses the pool.
@@ -1036,7 +1104,9 @@ fn test_replay_covers_the_fee_regimes() {
     let swaps = recording().swaps;
     let regime = |swap: &RecordedSwap| {
         let config = config(swap.pool.config);
-        let lp_on = config.lp_fee_in_force_pips(swap.pool.timestamp) > 0;
+        let lp_on = config
+            .lp_fee_in_force_pips(swap.pool.timestamp)
+            .is_some();
         let buy_rate = config
             .buy_fee_pips(swap.pool.timestamp)
             .expect("in range");
@@ -1217,6 +1287,9 @@ fn test_spot_price_matches_small_v4_quoter_quotes() {
         let spot_sell = state
             .spot_price(&quote, &launch)
             .expect("sell side prices");
+        // The quotes are of small amounts in raw units, so their ratio carries the rounding of
+        // one raw output unit in about 1e7; 1e-6 relative leaves room for that and nothing for
+        // a fee that is off by a single pip (1e-6 of the price).
         let close = |a: f64, b: f64| ((a - b) / b).abs() < 1e-6;
         assert!(
             close(spot_buy, buy_price),
@@ -1262,6 +1335,9 @@ fn test_limits_are_the_edge_of_quotes_on_recorded_states() {
     let swaps = recording().swaps;
     let mut edges_checked = 0;
     let mut zero_limits = 0;
+    // Every 7th swap (57 of 393) covers each era, stage and quote kind the recording holds
+    // (test_replay_covers_eras_stages_and_quote_kinds) while keeping the exact-edge checks, about
+    // 50 quotes per state, to a few seconds.
     for swap in swaps.iter().step_by(7) {
         for (stage, outside) in [(swap.pool.config.stage, false), (4, false), (4, true)] {
             let mut pool = swap.pool.clone();
@@ -1694,4 +1770,117 @@ fn test_query_pool_swap_refuses_a_montra_pool() {
             token_out.address
         );
     }
+}
+
+/// `max_gross_buy` is the largest gross buy whose net of the hook's fee fits: it fits and one
+/// more unit does not, at fees across the hook's range and at nets around fee-rounding edges.
+#[rstest]
+fn test_max_gross_buy_is_the_largest_fitting_input(
+    #[values(0, 1, 9_999, 10_000, 100_000, 989_999, 990_000)] hook_fee_pips: u32,
+    #[values(0, 1, 99, 1_000_000, 123_456_789_012_345_678_901, u128::MAX)] max_net: u128,
+) {
+    let max_net = U256::from(max_net);
+    let net = |gross: U256| gross - gross * U256::from(hook_fee_pips) / U256::from(1_000_000u32);
+    let gross = super::hook_handler::max_gross_buy(max_net, hook_fee_pips).expect("fits");
+    assert!(net(gross) <= max_net, "{gross} at {hook_fee_pips}");
+    assert!(net(gross + U256::from(1)) > max_net, "{gross} + 1 at {hook_fee_pips}");
+}
+
+/// A pool quoted in `currency0` whose seed holds `liquidity` from the seed extreme of `terms` up
+/// to its opening, plus `extra` ticks, with the price at `tick`: at the opening (no liquidity
+/// active there), as a freshly seeded pool sits, or inside the seed.
+fn seeded_state(liquidity: u128, extra: &[(i32, i128)], terms: Terms, tick: i32) -> UniswapV4State {
+    let net = i128::try_from(liquidity).expect("fits");
+    let mut ticks = vec![
+        TickInfo::new(terms.seed_lower, net).unwrap(),
+        TickInfo::new(terms.seed_upper, -net).unwrap(),
+    ];
+    ticks.extend(
+        extra
+            .iter()
+            .map(|(index, net)| TickInfo::new(*index, *net).unwrap()),
+    );
+    ticks.sort_by_key(|tick| tick.index);
+    let active = if tick < terms.seed_upper { liquidity } else { 0 };
+    let mut state = UniswapV4State::new(
+        active,
+        get_sqrt_ratio_at_tick(tick).unwrap(),
+        UniswapV4Fees::new(0, 0, DYNAMIC_FEE_FLAG),
+        tick,
+        200,
+        ticks,
+    )
+    .unwrap();
+    state.set_hook_handler(Box::new(handler(terms, 1_000)));
+    state
+}
+
+/// The buy limit is capped at `type(int128).max`, the largest input a v4 swap delta carries: a
+/// seed of 2^100 liquidity takes about 2^164 of the quote to walk to the seed extreme, and the
+/// limit reports the cap instead, which `before_swap` accepts and one more unit it refuses.
+#[test]
+fn test_the_buy_limit_is_capped_at_int128_max() {
+    let state = seeded_state(1 << 100, &[], PLAIN, PLAIN.seed_upper);
+    let target = get_sqrt_ratio_at_tick(PLAIN.seed_lower).unwrap();
+    let walk = state
+        .amount_in_to_price(true, target, None)
+        .expect("walks to the seed extreme");
+    let int128_max = U256::from(u128::MAX >> 1);
+    assert!(walk.amount_in > int128_max, "{}", walk.amount_in);
+
+    let hook = handler(PLAIN, 1_000);
+    let limit = hook
+        .max_amount_in(&state, true)
+        .expect("a limit")
+        .expect("Montra answers");
+    assert_eq!(limit, int128_max);
+
+    let at_cap = -I256::from_raw(int128_max);
+    for (amount, accepted) in [(at_cap, true), (at_cap - I256::ONE, false)] {
+        let mut params = before_swap_params(true, 0);
+        params.swap_params.amount_specified = amount;
+        assert_eq!(
+            hook.before_swap(params, None, None)
+                .is_ok(),
+            accepted,
+            "{amount}"
+        );
+    }
+}
+
+/// v4 keeps a tick whose net liquidity is 0 in its bitmap while its gross liquidity is not, and
+/// a swap step ends there; the indexed tick list drops it. A sell limit computed without such a
+/// tick is at most 2 raw units below the limit with it (one from the extra step's input rounded
+/// up, one from its LP fee rounded up), never above it, and a quote at it settles on the state
+/// that has the tick.
+#[rstest]
+fn test_a_net_zero_tick_lowers_the_sell_limit_by_at_most_two_units(
+    #[values(Terms { stage: 2, ..PLAIN }, Terms { stage: 4, ..PLAIN })] terms: Terms,
+) {
+    // A pool after some buys: the price at tick 100000 inside the seed, a net-0 tick at 120000
+    // between it and the opening at 169800.
+    let liquidity: u128 = 1 << 80;
+    let indexed = seeded_state(liquidity, &[], terms, 100_000);
+    let on_chain = seeded_state(liquidity, &[(120_000, 0)], terms, 100_000);
+
+    let hook = handler(terms, 1_000);
+    let sell = false;
+    let limit = |state: &UniswapV4State| {
+        hook.max_amount_in(state, sell)
+            .expect("a limit")
+            .expect("Montra answers")
+    };
+    let (indexed_limit, chain_limit) = (limit(&indexed), limit(&on_chain));
+    assert!(indexed_limit <= chain_limit, "{indexed_limit} > {chain_limit}");
+    assert!(chain_limit - indexed_limit <= U256::from(2), "{indexed_limit} vs {chain_limit}");
+
+    let token0 = token(&Bytes::from(Address::ZERO.to_vec()), 18);
+    let token1 = token(&Bytes::from(Address::repeat_byte(1).to_vec()), 18);
+    on_chain
+        .get_amount_out(
+            crate::evm::protocol::u256_num::u256_to_biguint(indexed_limit),
+            &token1,
+            &token0,
+        )
+        .expect("the indexed limit settles on the chain's tick set");
 }

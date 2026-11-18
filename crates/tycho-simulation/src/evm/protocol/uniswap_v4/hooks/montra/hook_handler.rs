@@ -17,9 +17,8 @@ use crate::evm::protocol::{
         hooks::{
             hook_handler::HookHandler,
             models::{
-                AfterSwapDelta, AfterSwapParameters, AmountRanges, BeforeSwapDelta,
-                BeforeSwapOutput, BeforeSwapParameters, HookSpotFees, SwapOutcome, SwapParams,
-                WithGasEstimate,
+                AfterSwapDelta, AfterSwapParameters, BeforeSwapDelta, BeforeSwapOutput,
+                BeforeSwapParameters, HookSpotFees, SwapOutcome, SwapParams, WithGasEstimate,
             },
         },
         state::UniswapV4State,
@@ -41,7 +40,7 @@ pub const MONTRA_HOOK_ELYSIUM: Address = address!("6b1216a40b65c83e9c9e18a562c44
 
 /// The immutable `lpLineHold()` of [`MONTRA_HOOK_ELYSIUM`]: the seconds the price must hold past
 /// the LP line, in total, before the LP fee switches on. 600 at block 6002000.
-pub const MONTRA_LP_LINE_HOLD_SECONDS_ELYSIUM: u64 = 600;
+pub(crate) const MONTRA_LP_LINE_HOLD_SECONDS_ELYSIUM: u64 = 600;
 
 /// The largest amount a v4 `BalanceDelta` can carry, `type(int128).max`. A larger input
 /// overflows the pool manager's int128 deltas and the swap reverts.
@@ -54,28 +53,39 @@ const INT128_MAX: U256 = U256::from_limbs([u64::MAX, u64::MAX >> 1, 0, 0]);
 /// writing an accrual slot from zero (a zero-to-nonzero SSTORE). The swap that switches a pool's
 /// LP fee on also calls `updateDynamicLPFee` and costs 33,092 (block 713192), once per pool.
 /// Re-measure by re-recording when the hook changes.
-pub const MONTRA_BUY_BEFORE_SWAP_GAS: u64 = 22_491;
+pub(crate) const MONTRA_BUY_BEFORE_SWAP_GAS: u64 = 22_491;
 
 /// Gas of the hook's `afterSwap` on a buy, measured the same way: range 3,720 to 8,787.
-pub const MONTRA_BUY_AFTER_SWAP_GAS: u64 = 5_570;
+pub(crate) const MONTRA_BUY_AFTER_SWAP_GAS: u64 = 5_570;
 
 /// Gas of the hook's `beforeSwap` on a sell, measured the same way over the recording's 132
 /// sells: range 1,913 to 3,913.
-pub const MONTRA_SELL_BEFORE_SWAP_GAS: u64 = 3_913;
+pub(crate) const MONTRA_SELL_BEFORE_SWAP_GAS: u64 = 3_913;
 
 /// Gas of the hook's `afterSwap` on a sell, measured the same way: range 24,533 to 59,069, about
 /// 10% above 30,000, writing an accrual slot from zero.
-pub const MONTRA_SELL_AFTER_SWAP_GAS: u64 = 24_818;
+pub(crate) const MONTRA_SELL_AFTER_SWAP_GAS: u64 = 24_818;
 
-/// Gas the PoolManager spends per hook call outside the call frames above, an empirical
-/// residual that is not broken down further. Half of the difference between the lower
-/// median, over the same swaps, of the PoolManager `swap` frame minus both hook frames (32,616)
-/// and the lower median `swap` frame of the 58 hookless Elysium v4 swaps in blocks
-/// 5990000-5990400 (27,256), as the recording holds them.
-pub const MONTRA_HOOK_DISPATCH_GAS: u64 = 2_680;
+/// Gas the PoolManager spends per hook call outside the call frames above: half of the
+/// difference between the lower median, over the same swaps, of the PoolManager `swap` frame
+/// minus both hook frames (32,616) and the lower median `swap` frame of the 58 hookless Elysium
+/// v4 swaps in blocks 5990000-5990400 (27,256), as the recording holds them.
+///
+/// The difference is what `Hooks.sol` adds around each of the two calls: building and
+/// ABI-encoding the call (`PoolKey`, `SwapParams`, hook data), the `CALL` itself (the hook is a
+/// warm account after its first call), decoding and checking the returned selector and deltas,
+/// and applying the hook's delta to the swap's `BalanceDelta` and the hook's own account delta.
+/// The trace does not split those further, so the two calls are taken to cost the same. The
+/// hookless sample may take a different number of swap steps than a Montra swap; the step gas
+/// itself comes from `SwapGasCosts::UNISWAP_V4`, fitted on Ethereum and not re-measured on
+/// Elysium. A quote assumes an external sender: the hook exempts its factory's own swaps from
+/// its fees, which no router path can be.
+pub(crate) const MONTRA_HOOK_DISPATCH_GAS: u64 = 2_680;
 
-/// Native model of Montra's `LaunchHook` for one pool, from the integration spec's verified
-/// behaviour of the deployed hook (no verified source is published).
+/// Native model of Montra's `LaunchHook` for one pool. The hook has no published source; the
+/// model follows its behaviour as measured on chain and on forks of Elysium (`eth_call` probes
+/// and replayed swaps, cited by block beside each test in `tests.rs`), and the replay test
+/// (`tests/assets/hooks/montra/replay.json`) checks it against recorded swaps to the wei.
 ///
 /// Every exact-input swap pays a fee in the pool's quote asset of `h = rate - lpInForce` pips:
 /// - a buy (input = quote) pays `floor(amountIn * h / 1e6)` out of its input in `beforeSwap`, and
@@ -93,6 +103,17 @@ pub const MONTRA_HOOK_DISPATCH_GAS: u64 = 2_680;
 /// line for [`MONTRA_LP_LINE_HOLD_SECONDS_ELYSIUM`]. `apply_block` moves the handler to the block
 /// a quote is for, and reports a change when one of those two did or when the terms fail to
 /// compute before or after the move.
+///
+/// That block's timestamp is an estimate: the decoder prices every state for the next block at
+/// the latest header's timestamp plus the chain's `block_time_secs`, 1 on Elysium. Elysium makes
+/// blocks about every 100 ms with whole-second timestamps, so the next block usually carries the
+/// same timestamp as the latest one (15 of 30 consecutive blocks sampled), and a quote is then
+/// one second ahead of the block the swap lands in. Inside an anti-snipe window the buy rate
+/// falls by `(start - total) / window` pips per second, so such a buy is quoted at a rate up to
+/// one second's decay below what it pays (97,000 pips for a 10-second window from 990,000 to
+/// 20,000; about 540 for 1,800 seconds), and its output is overstated by that much. The LP fee
+/// can likewise be quoted on one second before it switches on, which understates a quote. Outside
+/// a window and an LP hold the timestamp changes nothing.
 ///
 /// The hook refuses a swap the pool cannot fill in full (`PartialFillRejected`) and a sell that
 /// leaves the price past the pool's opening tick (`PastOpening`); `check_swap_outcome` refuses
@@ -131,7 +152,8 @@ pub struct MontraHookHandler {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct QuotingTerms {
     buy_fee_pips: u32,
-    lp_fee_pips: u32,
+    /// `None` while the pool charges no LP fee ([`MontraPoolConfig::lp_fee_in_force_pips`]).
+    lp_fee_pips: Option<u32>,
 }
 
 impl MontraHookHandler {
@@ -163,28 +185,24 @@ impl MontraHookHandler {
         zero_for_one == self.config.quote_is_currency0()
     }
 
-    /// The LP fee in force and the hook's fee `h = rate - lpInForce`, both in pips, of a swap in
-    /// the direction given by `zero_for_one`.
+    /// The fees of a swap in the direction given by `zero_for_one`: the LP fee in force, which
+    /// the swap runs at as its LP fee override (`None`: the pool's own slot0 fee, 0 for a Montra
+    /// pool, whose key carries the dynamic-fee flag), and the hook's fee `h = rate - lpInForce`
+    /// in pips.
     ///
     /// Refuses with `InvalidInput` the terms [`MontraPoolConfig::check_terms`] refuses. Terms it
-    /// accepts keep `lp <= total <= rate`, so the subtraction cannot fail then; an error names
-    /// that broken invariant.
-    fn fees_pips(&self, zero_for_one: bool) -> Result<(u32, u32), SimulationError> {
+    /// accepts keep `lp <= total <= rate`, so the subtraction does not saturate.
+    fn fees(&self, zero_for_one: bool) -> Result<HookSpotFees, SimulationError> {
         let terms = self.quoting_terms()?;
         let rate = if self.is_buy(zero_for_one) {
             terms.buy_fee_pips
         } else {
             self.config.total_fee_pips()
         };
-        let hook_fee_pips = rate
-            .checked_sub(terms.lp_fee_pips)
-            .ok_or_else(|| {
-                SimulationError::FatalError(format!(
-                    "montra hook {}: LP fee {} exceeds the rate {rate}",
-                    self.address, terms.lp_fee_pips
-                ))
-            })?;
-        Ok((terms.lp_fee_pips, hook_fee_pips))
+        Ok(HookSpotFees {
+            lp_fee_override: terms.lp_fee_pips,
+            hook_fee_pips: rate.saturating_sub(terms.lp_fee_pips.unwrap_or(0)),
+        })
     }
 
     fn refuse(&self, reason: &str) -> SimulationError {
@@ -192,33 +210,23 @@ impl MontraHookHandler {
     }
 
     /// What the hook does to a swap whose pool output is `gross_out`, in the direction given by
-    /// `zero_for_one`, at the hook's fee `hook_fee_pips` for that direction
-    /// ([`Self::fees_pips`]): the fee it takes from that output (a sell's
-    /// `floor(gross_out * h / 1e6)`, nothing on a buy) and what the swapper receives after it.
+    /// `zero_for_one`: the fee it takes from that output (a sell's `floor(gross_out * h / 1e6)`
+    /// at the sell's hook fee [`Self::fees`], nothing on a buy) and what the swapper receives
+    /// after it.
     ///
-    /// Expects a `hook_fee_pips` from terms [`MontraPoolConfig::check_terms`] accepts, which
-    /// keep a sell's fee below the output. Fails as [`hook_fee`] does, and with `FatalError` when
-    /// the fee exceeds `gross_out`, which only a rate outside those terms causes.
+    /// Refuses as [`Self::fees`] does and fails as [`hook_fee`] does. A sell's hook fee is below
+    /// the total fee, at most 10%, so the fee never exceeds the output.
     fn split_output(
         &self,
         zero_for_one: bool,
         gross_out: U256,
-        hook_fee_pips: u32,
     ) -> Result<OutputSplit, SimulationError> {
         let fee = if self.is_buy(zero_for_one) {
             U256::ZERO
         } else {
-            hook_fee(gross_out, hook_fee_pips)?
+            hook_fee(gross_out, self.fees(zero_for_one)?.hook_fee_pips)?
         };
-        let swapper_out = gross_out
-            .checked_sub(fee)
-            .ok_or_else(|| {
-                SimulationError::FatalError(format!(
-                    "montra hook {}: the fee {fee} exceeds the output {gross_out}",
-                    self.address
-                ))
-            })?;
-        Ok(OutputSplit { hook_fee: fee, swapper_out })
+        Ok(OutputSplit { hook_fee: fee, swapper_out: gross_out.saturating_sub(fee) })
     }
 }
 
@@ -228,14 +236,6 @@ struct OutputSplit {
     hook_fee: U256,
     /// What the swapper receives.
     swapper_out: U256,
-}
-
-/// The LP fee override a swap runs at, given the LP fee in force: none while the LP fee is
-/// off, as the hook's `beforeSwap` returns none then. The pool's own LP fee is then its
-/// slot0 fee, 0 for a Montra pool, whose key carries the dynamic-fee flag (which
-/// `UniswapV4Fees` maps to 0). Every path that sets a swap's LP fee goes through here.
-fn swap_lp_fee_override(lp_fee_pips: u32) -> Option<u32> {
-    (lp_fee_pips != 0).then_some(lp_fee_pips)
 }
 
 /// `floor(amount * fee_pips / 1e6)`, the hook's fee on `amount`.
@@ -265,32 +265,18 @@ fn kept_pips(fee_pips: u32) -> Result<u32, SimulationError> {
 /// The largest gross buy input `A` whose net `A - floor(A * h / 1e6)` the pool can still
 /// swap within `max_net`.
 ///
-/// The net is `ceil(A * (1e6 - h) / 1e6)`, so the largest such `A` is
-/// `floor(max_net * 1e6 / (1e6 - h))`. The result is checked against the forward formula: it
-/// fits and one more unit does not.
-fn max_gross_buy(max_net: U256, hook_fee_pips: u32) -> Result<U256, SimulationError> {
+/// The net is `ceil(A * (1e6 - h) / 1e6)`, which is at most `max_net` exactly when
+/// `A * (1e6 - h) <= max_net * 1e6`, so the largest such `A` is
+/// `floor(max_net * 1e6 / (1e6 - h))` (`test_max_gross_buy_is_the_largest_fitting_input` checks
+/// it against the forward formula). Fails when the fee leaves nothing to swap or the result
+/// overflows 256 bits.
+pub(super) fn max_gross_buy(max_net: U256, hook_fee_pips: u32) -> Result<U256, SimulationError> {
     let kept_pips = kept_pips(hook_fee_pips)?;
-    let gross =
-        mul_div(max_net, U256::from(FEE_PIPS_DENOMINATOR), U256::from(kept_pips)).map_err(|e| {
-            SimulationError::FatalError(format!(
-                "montra hook: the gross buy for a net of {max_net} at {hook_fee_pips} pips: {e}"
-            ))
-        })?;
-    let net = |gross: U256| -> Result<U256, SimulationError> {
-        Ok(gross - hook_fee(gross, hook_fee_pips)?)
-    };
-    let next = gross
-        .checked_add(U256::from(1))
-        .ok_or_else(|| {
-            SimulationError::FatalError(format!("montra hook: buy limit of {max_net} overflows"))
-        })?;
-    if net(gross)? > max_net || net(next)? <= max_net {
-        return Err(SimulationError::FatalError(format!(
-            "montra hook: {gross} is not the largest buy whose net fits {max_net} at \
-             {hook_fee_pips} pips"
-        )));
-    }
-    Ok(gross)
+    mul_div(max_net, U256::from(FEE_PIPS_DENOMINATOR), U256::from(kept_pips)).map_err(|e| {
+        SimulationError::FatalError(format!(
+            "montra hook: the gross buy for a net of {max_net} at {hook_fee_pips} pips: {e}"
+        ))
+    })
 }
 
 /// The square-root price at `tick`, inside the range a swap's price limit allows: the
@@ -386,7 +372,7 @@ impl HookHandler for MontraHookHandler {
         _transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
     ) -> Result<WithGasEstimate<BeforeSwapOutput>, SimulationError> {
         let zero_for_one = params.swap_params.zero_for_one;
-        let (lp_fee, hook_fee_pips) = self.fees_pips(zero_for_one)?;
+        let fees = self.fees(zero_for_one)?;
         if self.paused {
             return Err(self.refuse("the pool is paused"));
         }
@@ -403,7 +389,7 @@ impl HookHandler for MontraHookHandler {
         }
 
         let (fee, gas_estimate) = if self.is_buy(zero_for_one) {
-            (hook_fee(amount_in, hook_fee_pips)?, MONTRA_BUY_BEFORE_SWAP_GAS)
+            (hook_fee(amount_in, fees.hook_fee_pips)?, MONTRA_BUY_BEFORE_SWAP_GAS)
         } else {
             (U256::ZERO, MONTRA_SELL_BEFORE_SWAP_GAS)
         };
@@ -411,7 +397,8 @@ impl HookHandler for MontraHookHandler {
         // the hook's claim on the input. It sits in the upper 128 bits of a `BeforeSwapDelta`.
         let amount_delta = BeforeSwapDelta(I256::from_raw(fee) << 128);
 
-        let fee_override = swap_lp_fee_override(lp_fee)
+        let fee_override = fees
+            .lp_fee_override
             .map_or(U24::ZERO, |lp_fee_override| U24::from(lp_fee_override | OVERRIDE_FEE_FLAG));
 
         Ok(WithGasEstimate {
@@ -437,9 +424,7 @@ impl HookHandler for MontraHookHandler {
         let zero_for_one = params.swap_params.zero_for_one;
         // An exact-input swap's output is the unspecified leg: currency1 when selling currency0.
         let gross_out = if zero_for_one { params.delta.amount1() } else { params.delta.amount0() };
-        let (_, hook_fee_pips) = self.fees_pips(zero_for_one)?;
-        let split =
-            self.split_output(zero_for_one, U256::from(gross_out.unsigned_abs()), hook_fee_pips)?;
+        let split = self.split_output(zero_for_one, U256::from(gross_out.unsigned_abs()))?;
         if split.swapper_out.is_zero() {
             return Err(self.refuse("the swap's output is 0, which no minimum output accepts"));
         }
@@ -493,15 +478,10 @@ impl HookHandler for MontraHookHandler {
 
     /// The hook's fee for the direction, as a fraction of the amount it is charged on.
     fn fee(&self, _context: &UniswapV4State, params: SwapParams) -> Result<f64, SimulationError> {
-        let (_, hook_fee_pips) = self.fees_pips(params.zero_for_one)?;
+        let hook_fee_pips = self
+            .fees(params.zero_for_one)?
+            .hook_fee_pips;
         Ok(f64::from(hook_fee_pips) / f64::from(FEE_PIPS_DENOMINATOR))
-    }
-
-    /// Never consulted: [`Self::spot_fees`] always answers.
-    fn spot_price(&self, _base: &Token, _quote: &Token) -> Result<f64, SimulationError> {
-        Err(SimulationError::RecoverableError(
-            "spot_price is not implemented for MontraHookHandler".into(),
-        ))
     }
 
     /// The LP fee in force and the hook's fee for the direction. Answers while the pool is
@@ -510,8 +490,7 @@ impl HookHandler for MontraHookHandler {
     ///
     /// Fails with `InvalidInput` on terms [`MontraPoolConfig::check_terms`] refuses.
     fn spot_fees(&self, zero_for_one: bool) -> Result<Option<HookSpotFees>, SimulationError> {
-        let (lp_fee, hook_fee_pips) = self.fees_pips(zero_for_one)?;
-        Ok(Some(HookSpotFees { lp_fee_override: swap_lp_fee_override(lp_fee), hook_fee_pips }))
+        Ok(Some(self.fees(zero_for_one)?))
     }
 
     /// The largest input that settles in the direction, capped at `type(int128).max`. Fails with
@@ -544,8 +523,8 @@ impl HookHandler for MontraHookHandler {
         state: &UniswapV4State,
         zero_for_one: bool,
     ) -> Result<Option<U256>, SimulationError> {
-        let (lp_fee, hook_fee_pips) = self.fees_pips(zero_for_one)?;
-        let lp_fee_override = swap_lp_fee_override(lp_fee);
+        let fees = self.fees(zero_for_one)?;
+        let lp_fee_override = fees.lp_fee_override;
         let bound_tick = if self.is_buy(zero_for_one) {
             self.config.seed_extreme_tick()
         } else {
@@ -554,14 +533,14 @@ impl HookHandler for MontraHookHandler {
         let target = swap_bound_sqrt_price(bound_tick, zero_for_one)?;
         let walk = state.amount_in_to_price(zero_for_one, target, lp_fee_override)?;
         if self
-            .split_output(zero_for_one, walk.amount_out, hook_fee_pips)?
+            .split_output(zero_for_one, walk.amount_out)?
             .swapper_out
             .is_zero()
         {
             return Ok(Some(U256::ZERO));
         }
         let limit = if self.is_buy(zero_for_one) {
-            max_gross_buy(walk.amount_in, hook_fee_pips)?
+            max_gross_buy(walk.amount_in, fees.hook_fee_pips)?
         } else {
             let swap_fee = state.swap_fee_pips(zero_for_one, lp_fee_override)?;
             let absorbed = input_absorbed_at_price(target, walk.liquidity, zero_for_one, swap_fee)?;
@@ -577,18 +556,6 @@ impl HookHandler for MontraHookHandler {
         Ok(Some(limit.min(INT128_MAX)))
     }
 
-    /// Reports "not implemented": [`Self::max_amount_in`] answers for every direction, so
-    /// `get_limits` never asks for amount ranges.
-    fn get_amount_ranges(
-        &self,
-        _token_in: Bytes,
-        _token_out: Bytes,
-    ) -> Result<AmountRanges, SimulationError> {
-        Err(SimulationError::RecoverableError(
-            "get_amount_ranges is not implemented for MontraHookHandler".into(),
-        ))
-    }
-
     /// Applies the updated `montra_*` attributes and the pause flag (set, or deleted to
     /// unpause, read by [`decode_paused`]), and ignores every other attribute. Terms the hook
     /// would refuse apply; quoting refuses them.
@@ -601,10 +568,13 @@ impl HookHandler for MontraHookHandler {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        if let Some(deleted) = delta
-            .deleted_attributes
+        if let Some(deleted) = POOL_CONFIG_ATTRIBUTES
             .iter()
-            .find(|name| POOL_CONFIG_ATTRIBUTES.contains(&name.as_str()))
+            .find(|name| {
+                delta
+                    .deleted_attributes
+                    .contains(**name)
+            })
         {
             return Err(TransitionError::DecodeError(format!(
                 "montra hook {}: {deleted} was deleted, so the pool's terms are unknown",
