@@ -2,7 +2,9 @@
 //!
 //! An address is 20 hexadecimal bytes, with the `0x` prefix optional and the digits read
 //! case-insensitively. An address list is a non-empty, comma-separated list of such addresses
-//! without duplicates.
+//! without duplicates or the zero address.
+
+use std::collections::BTreeSet;
 
 use anyhow::{anyhow, Result};
 
@@ -25,18 +27,26 @@ pub(crate) fn parse_address(key: &str, value: &str) -> Result<Address> {
 
 /// Parses `value`, the value of parameter `key`, as an address list, in the order it lists them.
 /// Fails, naming `key`, when `value` is empty, when an entry is empty, when an entry fails
-/// [`parse_address`], and when an address appears twice in any case.
+/// [`parse_address`], when an entry is the zero address, and when an address appears twice in any
+/// case.
+///
+/// The zero address is refused because a list names hooks, and a pool without a hook has the zero
+/// address as its `PoolKey.hooks`: a zero entry would select every hookless pool.
 pub(crate) fn parse_address_list(key: &str, value: &str) -> Result<Vec<Address>> {
     if value.is_empty() {
         return Err(anyhow!("`{key}` lists no address"));
     }
     let mut addresses = Vec::new();
+    let mut seen = BTreeSet::new();
     for (position, entry) in value.split(',').enumerate() {
         if entry.is_empty() {
             return Err(anyhow!("`{key}` entry {} is empty", position + 1));
         }
         let address = parse_address(key, entry)?;
-        if addresses.contains(&address) {
+        if address == [0; 20] {
+            return Err(anyhow!("`{key}` lists the zero address, which names no hook"));
+        }
+        if !seen.insert(address) {
             return Err(anyhow!("`{key}` lists `{entry}` twice"));
         }
         addresses.push(address);
@@ -82,6 +92,10 @@ mod tests {
     #[case::too_long(
         "6b1216a40b65c83e9c9e18a562c446697b8cf8ecaa",
         "`hooks` value `6b1216a40b65c83e9c9e18a562c446697b8cf8ecaa` is 21 bytes, not 20"
+    )]
+    #[case::zero_address(
+        "6b1216a40b65c83e9c9e18a562c446697b8cf8ec,0x0000000000000000000000000000000000000000",
+        "`hooks` lists the zero address, which names no hook"
     )]
     #[case::duplicate(
         "6b1216a40b65c83e9c9e18a562c446697b8cf8ec,0x6B1216A40B65C83E9C9E18A562C446697B8CF8EC",
