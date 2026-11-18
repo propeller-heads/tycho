@@ -375,6 +375,28 @@ mod test_serial_db {
     }
 
     #[tokio::test]
+    async fn test_pause_components_later_batch_fails() {
+        let mut conn = setup_db().await;
+        let gw = setup_pause_gateway(&mut conn).await;
+        // The first batch is valid; the second holds one id too long for its column.
+        let mut pauses: Vec<_> = (0..orm::NewComponentPause::MAX_BATCH_SIZE)
+            .map(|i| pause(&format!("pool_{i}"), "r"))
+            .collect();
+        pauses.push(pause(&"x".repeat(256), "r"));
+
+        let res = gw
+            .pause_components(&Chain::Ethereum, SYSTEM, &pauses, &mut conn)
+            .await;
+
+        assert!(res.is_err(), "got {res:?}");
+        let paused = gw
+            .get_component_pauses(&Chain::Ethereum, &mut conn)
+            .await
+            .expect("reading pauses failed");
+        assert!(paused.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_pause_components_other_system() {
         let mut conn = setup_db().await;
         let gw = setup_pause_gateway(&mut conn).await;
