@@ -3,6 +3,8 @@
 
 Usage: ELYSIUM_RPC_URL=<archive node with debug_traceTransaction> python3 record_replay.py replay.json [head]
 
+Needs Foundry's `cast` on PATH (or its path in `CAST`), which encodes and decodes the calls.
+
 `head` is the block taken as the chain's head, the chain's latest block when omitted; passing the
 `head` of an earlier recording reproduces it.
 
@@ -23,8 +25,9 @@ swap with its transaction, pool and reason:
 - `swapped twice`: the transaction swapped the pool more than once, and its logs cannot tell the
   swaps apart;
 - `exact output`: Tycho quotes exact-input swaps only;
-- `earlier swap in block`: another swap on the pool ran earlier in the same block, so the pool
-  state read at the end of the previous block is not the state the swap started from;
+- `earlier change in block`: an earlier transaction in the same block emitted a PoolManager or
+  hook log for the pool (a swap, a liquidity change, a donation, a fee update), so the pool state
+  read at the end of the previous block may not be the state the swap started from;
 - `launch buy`: the pool did not exist at the end of the previous block (a launch transaction's own
   first buy, which pays the total fee and no anti-snipe rate).
 
@@ -33,7 +36,9 @@ For each case the recorder reads, at the end of block N - 1 and from the node al
   bitmap words over the whole usable range, then each set tick's `liquidityNet`), by
   `eth_getStorageAt` on the v4-core `StateLibrary` layout (pools mapping at slot 6, liquidity at
   +3, ticks at +4, tick bitmap at +5);
-- the hook's `poolKey(bytes32)` and `poolConfig(bytes32)` getters, decoded by their published ABI;
+- the hook's `poolKey(bytes32)` and `poolConfig(bytes32)` getters, decoded by the ABI Montra's
+  documentation lists for them (the hook's source is not published; the tuple matches the storage
+  words the indexer decodes);
 - both currencies' `decimals()` (18 for the native asset);
 - block N's timestamp, which is the clock the hook prices the swap at.
 
@@ -74,7 +79,9 @@ import time
 import urllib.error
 import urllib.request
 
-RPC = os.environ["ELYSIUM_RPC_URL"]
+RPC = os.environ.get("ELYSIUM_RPC_URL") or sys.exit(
+    "record_replay.py: set ELYSIUM_RPC_URL to an Elysium archive node with debug_traceTransaction"
+)
 CAST = os.environ.get("CAST", "cast")
 HOOK = "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
 POOL_MANAGER = "0xe2e105d3f7209a9da11f83ccf3e7398a753823f1"
@@ -96,10 +103,12 @@ LOG_CHUNK_BLOCKS = 2_000
 BATCH_SIZE = 200
 TARGETS = [
     # (what the target covers, pool, first block, last block, at most this many transactions)
-    # Graduates at 1030049 and crosses its LP line in the blocks after (spec test range 1).
+    # Graduates at 1030049 and crosses its LP line in the blocks after (the with-hooks package's
+    # test_native_pool_through_the_lp_fee_switch range).
     ("stage 1, native quote", "0x35bd0e6a8b82e0e18b0381757d97ba01cde11a02740f006132dd40395ffc8ce2",
      1_030_000, 1_031_999, 40),
-    # Launched 4970022 and graduates in its launch block (spec test range 2).
+    # Launched 4970022 and graduates in its launch block (the with-hooks package's
+    # test_erc20_quotes_and_a_second_lp_fee_switch range).
     ("stage 1, native quote", "0x4937bb23c0503b32cf26d119cdfa5772d40a3900f5a1783437546e2e52025764",
      4_970_022, 4_971_999, 40),
     ("EQSPCX as currency1", "0x61379950571780e6649da42c72d93788a084b276b89bcddb4ba3c3a6a62a750e",
@@ -214,7 +223,11 @@ def is_transient(error):
 def post(body, attempts=10):
     """The decoded JSON reply to `body`, retrying transient failures (`is_transient`) with
     exponential backoff. A JSON-RPC error inside the reply is returned as is: an `eth_call` revert
-    is the answer `rpc_reply` callers read."""
+    is the answer `rpc_reply` callers read.
+
+    The retry policy is a choice, not a limit of the node: ten attempts with waits of 1, 2, 4, ...
+    seconds capped at 60 ride out about five minutes of rate limiting, and the 300-second timeout
+    leaves room for the slowest `debug_traceTransaction` replies seen while recording."""
     for attempt in range(attempts):
         http_request = urllib.request.Request(RPC, data=body, headers={"Content-Type": "application/json"})
         try:
@@ -447,13 +460,15 @@ def cases_of_tx(tx, fee_topic, swap_topic, slots_cache):
     swaps, skipped = swaps_of_receipt(receipt, fee_topic, swap_topic)
     cases = []
     for pool, zero_for_one, amount_in, fee, pool_output in swaps:
+        # Every PoolManager event of a pool (Swap, ModifyLiquidity, Donate) and every hook event
+        # of one (FeeAccrued, fee updates) carries the pool id as its first indexed topic.
         earlier = rpc(
             "eth_getLogs",
-            [{"address": POOL_MANAGER, "topics": [swap_topic, pool],
+            [{"address": [POOL_MANAGER, HOOK], "topics": [None, pool],
               "fromBlock": hex(block), "toBlock": hex(block)}],
         )
         if any(int(l["transactionIndex"], 16) < int(receipt["transactionIndex"], 16) for l in earlier):
-            skipped.append((pool, "earlier swap in block"))
+            skipped.append((pool, "earlier change in block"))
             continue
         state = read_pool(pool, block - 1, slots_cache)
         if state is None:
