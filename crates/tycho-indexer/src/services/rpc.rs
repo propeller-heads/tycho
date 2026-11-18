@@ -2968,6 +2968,37 @@ mod tests {
         assert_eq!(state.pagination.total, 2);
     }
 
+    #[tokio::test]
+    async fn test_contract_state_passes_protocol_system() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_contracts()
+            .withf(|_, protocol_system, _, _, _, _| protocol_system == "uniswap_v2")
+            .times(1)
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        let req_handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let request = dto::StateRequestBody {
+            contract_ids: None,
+            protocol_system: "uniswap_v2".to_string(),
+            version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 0, page_size: 10 },
+        };
+
+        req_handler
+            .get_contract_state_inner(request)
+            .await
+            .unwrap();
+    }
+
     /// Helper used to make tracing results comparisons deterministic.
     #[expect(
         clippy::type_complexity,
