@@ -119,7 +119,7 @@ pub trait AccountExtractor {
     /// returns: Result<HashMap<Bytes, AccountDelta, RandomState>, Self::Error>
     /// A result containing a HashMap where the keys are `Bytes` (addresses) and the values are
     /// `AccountDelta` objects.
-    // TODO: do not return `AccountUpdate` but `Account`
+    // TODO: do not return `AccountDelta` but `Account`
     async fn get_accounts_at_block(
         &self,
         block: &Block,
