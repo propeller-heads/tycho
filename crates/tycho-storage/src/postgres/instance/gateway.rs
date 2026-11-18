@@ -8,6 +8,10 @@ use crate::postgres::{ChainEnumCache, FromConnection, ProtocolSystemEnumCache};
 /// Inner gateway on the `tycho` instance tables. It runs the SQL for the public gateways and reads
 /// each protocol's active instance.
 ///
+/// A read runs several statements and starts no transaction. Run each read in one
+/// [`snapshot_transaction`](crate::postgres::snapshot::snapshot_transaction), so a block that
+/// commits between its statements cannot change the answer.
+///
 /// A working name while both inner gateways exist: the cut-over renames it to `PostgresGateway`
 /// and deletes the gateway on the old tables.
 pub struct PostgresGatewayNew {
