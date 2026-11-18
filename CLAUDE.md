@@ -51,6 +51,10 @@ When spawning subagents, pass the relevant knowledge document contents to them.
 - `tycho-review`: Review a PR, a stack of PRs as one change, a branch, a range, the working changes or a path against
   the knowledge base, with verified findings written to `.claude/reviews/`. Posts nothing. Trigger words: "review",
   "review this PR", "check my changes before a PR".
+- `tycho-integrate`: Take a DEX integration request (protocol, chains, one anchor) to one reviewed, tested PR: on-chain
+  research into a signed spec, a decision record, indexing, simulation and execution in rounds checked by
+  `tycho-review`, final gates, and the PR on approval. Unattended between three gates. Trigger words: "integrate
+  <protocol>", "tycho-integrate", "status of the integration run".
 - `plan`: Guided feature planning with iterative user input. Gathers requirements, validates assumptions, proposes a
   solution. **Always use this skill** when the user wants to plan, design, or architect a feature before coding. Trigger
   words: "plan", "design", "architect", "think through", "figure out how to".
