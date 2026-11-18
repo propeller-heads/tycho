@@ -99,7 +99,11 @@ What runs:
 - the old head is not in the clone (the script reports it);
 - the earlier report was made from different knowledge: `git diff --stat <its knowledge commit>
   <base> -- .claude/knowledge` is not empty (a change to the skill alone does not count);
-- the PR's base branch changed, as when a stack is restacked onto another branch;
+- the PR's base branch was replaced, as when a stack is restacked onto another branch or the base
+  was rewritten (the old report's base commit is not an ancestor of the current base). A base that
+  only advanced is not a change: `git merge-base --is-ancestor <old base> <base>` holds, the
+  per-file PR diff is taken from the merge base, and a stack's shared branch that moved on holds the
+  stack's own base commits, which are not in any PR's diff;
 - the lines that differ between the two PR diffs are more than a third of the PR's diff lines (the
   script reports `fallback`).
 
@@ -463,5 +467,22 @@ In order:
    deterministic checks with their source (CI, local, not run);
 6. the integration inventory, when an integration pass ran;
 7. refuted findings with their counter-evidence, in a `<details>` block.
+
+Beside it, the same findings as data for scripts (the `tycho-integrate` ledger reads them):
+`<report>.findings.json`, with the report's path, target, base, head and level, and:
+
+- `findings`: every finding of section 2 and the pre-existing list, each with the Findings format
+  fields as `severity`, `file`, `lines` (`"<start>-<end>"`), `quote`, `claim`, `evidence`,
+  `failure_scenario`, `rule`, `pr`, `pre_existing`, `verification` (`{"method", "result"}`), and
+  `earlier_id`: the id of the earlier finding it restates, when an earlier finding carried an id
+  (an `--existing` file may give each entry one, such as `F12`); a finding that restates an earlier
+  one reports it there rather than as new;
+- `earlier`: every earlier finding, as `{"id", "status", "evidence", "rule", "file", "claim"}`, with
+  the status of section 4 (`fixed`, `open`, `deferred`, `disproven`). An entry the `--existing` file
+  gave no id is numbered `E<n>` in file order, and `rule`, `file` and `claim` are always filled in,
+  so the caller matches it to its own ids (the `tycho-integrate` ledger matches by file and claim)
+  instead of by position;
+- `refuted`: the refuted findings, as `{"rule", "file", "claim", "counter_evidence"}`;
+- `not_run`: the parts that did not run, one string each.
 
 Post nothing: which findings become PR comments is the reviewer's call.
