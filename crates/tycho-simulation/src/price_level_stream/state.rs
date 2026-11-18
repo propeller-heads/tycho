@@ -19,7 +19,7 @@ use tycho_common::{
 };
 
 use super::{overrides::PammSimulationOverrides, telemetry};
-use crate::utils::decimals_scale;
+use crate::{book::sim::saturating_sub, utils::decimals_scale};
 
 /// How long the quotes of one price level message stay quotable: one slot after the message's `ts`.
 /// Titan prices the block it is building, so quotes older than one slot were priced for a block
@@ -369,13 +369,6 @@ fn whole_unit_price(
         SimulationError::RecoverableError("Can't convert amount out to f64".to_string())
     })?;
     Ok((amount_out / decimals_scale(quote.decimals)) / (amount_in / decimals_scale(base.decimals)))
-}
-
-/// `amount` less `taken`, or zero when `taken` is larger.
-fn saturating_sub(amount: &BigUint, taken: &BigUint) -> BigUint {
-    amount
-        .checked_sub(taken)
-        .unwrap_or_default()
 }
 
 #[typetag::serde]

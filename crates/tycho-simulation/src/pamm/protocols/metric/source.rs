@@ -195,12 +195,7 @@ impl MetricBookAssembler {
                 );
                 continue;
             };
-            let state = MetricState {
-                base_token: token0.clone(),
-                quote_token: token1.clone(),
-                metadata,
-                bid_ask,
-            };
+            let state = MetricState::new(token0.clone(), token1.clone(), metadata, bid_ask);
             books.insert(pair_book(
                 self.protocol_system,
                 PROTOCOL_TYPE,

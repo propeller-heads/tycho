@@ -22,7 +22,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use num_bigint::BigUint;
-use num_traits::{CheckedSub, Zero};
+use num_traits::Zero;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tycho_common::{
     models::{token::Token, Chain},
@@ -36,7 +36,7 @@ use tycho_common::{
 use crate::{
     book::{
         component::{encode_swap_directions, pair_book, PairState, SWAP_DIRECTIONS_ATTRIBUTE},
-        Book, Books,
+        sim, Book, Books,
     },
     protocol::models::ProtocolComponent,
 };
@@ -309,13 +309,6 @@ impl<P: PairState, S> From<Vec<VenueBook<P, S>>> for VenueBooks<P, S> {
 /// A book and what it answered to a swap.
 type Answered<'a, P, S> = (&'a VenueBook<P, S>, Result<GetAmountOutResult, SimulationError>);
 
-/// `amount` less `taken`, or nothing where `taken` is more.
-fn saturating_sub(amount: &BigUint, taken: &BigUint) -> BigUint {
-    amount
-        .checked_sub(taken)
-        .unwrap_or_default()
-}
-
 impl<P: PairState + PricesAfterFill, T: Turns> AllPairs<P, T> {
     pub fn new(books: Vec<VenueBook<P, T::Signer>>, rule: T::Rule) -> Self {
         AllPairs { books: Arc::new(books.into()), untaken: T::untaken(rule), fills: Vec::new() }
@@ -521,8 +514,8 @@ impl<P: PairState + PricesAfterFill, T: Turns> AllPairs<P, T> {
                 .get_limits(sell_token.clone(), buy_token.clone())
                 .map(|(sell, buy)| match filled {
                     Some(fill) => (
-                        saturating_sub(&sell, &fill.amount_in),
-                        saturating_sub(&buy, &fill.amount_out),
+                        sim::saturating_sub(&sell, &fill.amount_in),
+                        sim::saturating_sub(&buy, &fill.amount_out),
                     ),
                     None => (sell, buy),
                 });
@@ -578,7 +571,7 @@ impl<P: PairState + PricesAfterFill, T: Turns> AllPairs<P, T> {
         let continued = |mut result: GetAmountOutResult| {
             let merged_out = result.amount.clone();
             if let Some(previous) = previous {
-                result.amount = saturating_sub(&merged_out, &previous.amount_out);
+                result.amount = sim::saturating_sub(&merged_out, &previous.amount_out);
                 result.gas = BigUint::zero();
             }
             let fill = PairFill {

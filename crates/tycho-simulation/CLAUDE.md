@@ -148,20 +148,21 @@ for any protocol indexed by Tycho.
   `fallback:rfq:{venue}` instead, so tycho-execution routes their swaps through that venue's
   fallback router; off by default. The Native and Liquorice routers are not deployed yet. The
   fallback routers trade ERC20s only, so Native's fallback feed offers no native-token books
-- **`pamm/`**: book feeds for pAMMs — venues priced off-chain but executed directly against
-  the pool, no binding quote (Metric and BaiBai; their states do not implement
-  `IndicativelyPriced`, and each client is held by the feed alone rather than by every state).
-  Metric polls the venue's API; BaiBai reads its on-chain curve over JSON-RPC (one batch per
-  poll: a Multicall3 call, and each proxy's implementation slot, checked against the
-  implementation it is pinned to) and prices it with the contract's arithmetic, at the fee the
-  entrypoint reports for the taker, read every poll: Tycho's Base router unless
-  `BaibaiFeedBuilder::taker` sets another. BaiBai has no venue API, so instead of the
-  per-provider `client.rs`/`source.rs`/`models.rs` split it has `reader.rs` (the batch read and
-  its decoding), `math.rs` (the CurveBook's arithmetic) and `feed.rs` (the feed, its builder and
-  the book assembly), beside `state.rs`; its tests run on `test_support.rs` (the recordings and a
-  fake node) and `testdata/` (the recordings and `record_fixture.py`, which makes them).
-  The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
-  it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
+- **`pamm/`**: book feeds for pAMMs — venues priced off-chain but executed directly against the
+  pool, no binding quote (Metric and BaiBai; their states do not implement `IndicativelyPriced`,
+  and each client is held by the feed alone rather than by every state). `MetricState` records
+  each swap's fill, as `PriceLevelStreamState` does; see `MetricState::get_amount_out`. Metric
+  polls the venue's API; BaiBai reads its on-chain curve over JSON-RPC (one batch per poll: a
+  Multicall3 call, and each proxy's implementation slot, checked against the implementation it is
+  pinned to) and prices it with the contract's arithmetic, at the fee the entrypoint reports for
+  the taker, read every poll: Tycho's Base router unless `BaibaiFeedBuilder::taker` sets another.
+  BaiBai has no venue API, so instead of the per-provider `client.rs`/`source.rs`/`models.rs`
+  split it has `reader.rs` (the batch read and its decoding), `math.rs` (the CurveBook's
+  arithmetic) and `feed.rs` (the feed, its builder and the book assembly), beside `state.rs`; its
+  tests run on `test_support.rs` (the recordings and a fake node) and `testdata/` (the recordings
+  and `record_fixture.py`, which makes them). The line to `rfq/` is the counterparty: a maker who
+  can decline a specific trade after pricing it makes an RFQ, a pool that fills any taker with
+  fresh price data makes a pAMM
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
   Titan WebSocket's price level messages directly into `Update`s (no indexer feed
   round-trip); `PriceLevelStreamState` quotes by interpolating its quotes, records each swap's
