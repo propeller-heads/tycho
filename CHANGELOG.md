@@ -1,3 +1,12 @@
+## [0.532.1](https://github.com/propeller-heads/tycho/compare/0.532.0...0.532.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **simulation:** list the FermiSwap router once in the Titan aliases ([cb192aa](https://github.com/propeller-heads/tycho/commit/cb192aaa4c80b75b2f822ed6260f765e1f26e5cf))
+* **simulation:** measure the FermiSwap gas on completed swaps only ([ced7df1](https://github.com/propeller-heads/tycho/commit/ced7df1792bff6bde349de0c0d31c36480fdc056))
+* **simulation:** serve the new FermiSwap router as fermiswap ([2ed1859](https://github.com/propeller-heads/tycho/commit/2ed1859e704e8716aed6c56307200651ce42e863))
+
 ## [0.532.0](https://github.com/propeller-heads/tycho/compare/0.531.0...0.532.0) (2026-11-19)
 
 
