@@ -805,7 +805,7 @@ async fn load_entity_cache(
     let cursors = SnapshotCursors { role, cursors: std::mem::take(&mut snapshot.cursors) };
     let accounts = snapshot.accounts.len();
     let components = snapshot.components.len();
-    let watermark = snapshot.watermark;
+    let watermark = snapshot.watermark.clone();
     let cache = Arc::new(EntityCache::from_snapshot(snapshot));
     let catch_up = Arc::new(CacheCatchUp::new(Arc::clone(&cache), gateway, chain, watermark));
     let elapsed = started.elapsed();

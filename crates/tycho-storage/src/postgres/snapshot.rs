@@ -20,6 +20,7 @@ use diesel::{
     BoolExpressionMethods, ExpressionMethods, QueryDsl,
 };
 use diesel_async::{pg::TransactionBuilder, AsyncPgConnection, RunQueryDsl};
+use tracing::debug;
 use tycho_common::{
     models::{
         contract::{Account, AccountBalance},
@@ -86,7 +87,7 @@ pub async fn bound_snapshot_reads(conn: &mut AsyncPgConnection) -> Result<(), Po
 ///   restart the indexer, so it loads a new snapshot.
 /// - A long-running transaction holds the watermark back, so each catch-up reads more rows again.
 ///   That costs time, but loses nothing.
-fn written_since(table: &str, since: CommitWatermark) -> diesel::expression::SqlLiteral<Bool> {
+fn written_since(table: &str, since: &CommitWatermark) -> diesel::expression::SqlLiteral<Bool> {
     // The low 32 bits of a 64-bit transaction id are its `xid`. Ids below 3 are reserved; the
     // first normal id is the oldest a row can carry.
     let xid = (since.transaction_id() & u64::from(u32::MAX)).max(3);
@@ -97,7 +98,7 @@ fn written_since(table: &str, since: CommitWatermark) -> diesel::expression::Sql
 /// `since`, only the accounts whose own row was written at or after it.
 fn account_ids(
     chain_id: i64,
-    since: Option<CommitWatermark>,
+    since: Option<&CommitWatermark>,
 ) -> schema::account::BoxedQuery<'static, Pg, BigInt> {
     let mut query = schema::account::table
         .filter(schema::account::chain_id.eq(chain_id))
@@ -175,7 +176,7 @@ impl PostgresGateway {
     pub(crate) async fn account_snapshots_written_since(
         &self,
         chain: &Chain,
-        since: CommitWatermark,
+        since: &CommitWatermark,
         conn: &mut AsyncPgConnection,
     ) -> Result<Vec<AccountSnapshot>, StorageError> {
         self.read_account_snapshots(chain, Some(since), conn)
@@ -185,7 +186,7 @@ impl PostgresGateway {
     async fn read_account_snapshots(
         &self,
         chain: &Chain,
-        since: Option<CommitWatermark>,
+        since: Option<&CommitWatermark>,
         conn: &mut AsyncPgConnection,
     ) -> Result<Vec<AccountSnapshot>, StorageError> {
         let chain_id = self.get_chain_id(chain)?;
@@ -341,14 +342,23 @@ impl PostgresGateway {
     /// The live slots, balances and code of the accounts of `chain` whose rows were written at or
     /// after `since`, by account address. Each value is timestamped with its row's `valid_from`;
     /// of two live rows for one key, the newer one wins.
+    ///
+    /// The `xmin` filter alone scans every row of the value tables. When
+    /// [`Self::transaction_floor`] finds a bound, the reads also keep only the rows whose
+    /// `modify_tx` is at or above it, so Postgres finds them through the `modify_tx` index. The
+    /// result is the same.
     pub(crate) async fn account_changes_since(
         &self,
         chain: &Chain,
-        since: CommitWatermark,
+        since: &CommitWatermark,
         conn: &mut AsyncPgConnection,
     ) -> Result<HashMap<Address, AccountChanges>, StorageError> {
         let chain_id = self.get_chain_id(chain)?;
         let native_token_id = self.get_native_token_id(chain)?;
+        let lowest_modify_tx = self
+            .transaction_floor(chain_id, since, conn)
+            .await?
+            .unwrap_or(i64::MIN);
         let mut changes: HashMap<Address, AccountChanges> = HashMap::new();
 
         for (address, slot, value, valid_from) in schema::contract_storage::table
@@ -356,6 +366,7 @@ impl PostgresGateway {
             .filter(schema::account::chain_id.eq(chain_id))
             .filter(schema::contract_storage::valid_to.eq(MAX_TS))
             .filter(written_since("contract_storage", since))
+            .filter(schema::contract_storage::modify_tx.ge(lowest_modify_tx))
             .select((
                 schema::account::address,
                 schema::contract_storage::slot,
@@ -382,6 +393,7 @@ impl PostgresGateway {
                     .or(schema::contract_code::valid_to.eq(MAX_TS)),
             )
             .filter(written_since("contract_code", since))
+            .filter(schema::contract_code::modify_tx.ge(lowest_modify_tx))
             .select((
                 schema::account::address,
                 schema::contract_code::code,
@@ -418,6 +430,7 @@ impl PostgresGateway {
                     .or(schema::account_balance::valid_to.eq(MAX_TS)),
             )
             .filter(written_since("account_balance", since))
+            .filter(schema::account_balance::modify_tx.ge(lowest_modify_tx))
             .select((
                 schema::account_balance::account_id,
                 schema::account_balance::token_id,
@@ -438,6 +451,7 @@ impl PostgresGateway {
                                 .or(schema::account_balance::valid_to.eq(MAX_TS)),
                         )
                         .filter(written_since("account_balance", since))
+                        .filter(schema::account_balance::modify_tx.ge(lowest_modify_tx))
                         .select(schema::account_balance::account_id),
                 ),
             )
@@ -478,6 +492,64 @@ impl PostgresGateway {
             }
         }
         Ok(changes)
+    }
+
+    /// The lowest `transaction.id` that a value row written at or after `since` can reference, or
+    /// `None` when this read cannot bound it.
+    ///
+    /// An extractor writes the rows of a block with the ids of that block's transactions. After
+    /// `since`, it writes only blocks after the one it had committed then. So every row written
+    /// after `since` references a transaction of a block after the lowest of those blocks, among
+    /// the extractors that committed since. The bound is the lowest id of those transactions.
+    ///
+    /// The id order is not the commit order: several extractors write one block in separate
+    /// commits, and the later commits reuse the transaction rows of the first. That is why the
+    /// bound comes from the blocks, not from the newest id at `since`.
+    ///
+    /// `None` when an extractor that committed since `since` had committed nothing at `since`,
+    /// when no extractor committed since, or when no transaction follows the lowest block.
+    pub(crate) async fn transaction_floor(
+        &self,
+        chain_id: i64,
+        since: &CommitWatermark,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Option<i64>, StorageError> {
+        let committed_since: Vec<String> = schema::extraction_state::table
+            .filter(schema::extraction_state::chain_id.eq(chain_id))
+            .filter(written_since("extraction_state", since))
+            .select(schema::extraction_state::name)
+            .get_results(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        let mut lowest_block: Option<u64> = None;
+        for name in &committed_since {
+            let Some(&block) = since.committed_blocks().get(name) else {
+                debug!(extractor = name, "No catch-up bound: the extractor had no block");
+                return Ok(None);
+            };
+            lowest_block = Some(lowest_block.map_or(block, |lowest| lowest.min(block)));
+        }
+        let Some(lowest_block) = lowest_block else {
+            return Ok(None);
+        };
+        let lowest_block = i64::try_from(lowest_block).map_err(|_too_large| {
+            StorageError::Unexpected(format!("Block number {lowest_block} does not fit an i64"))
+        })?;
+        let floor: Option<i64> = schema::transaction::table
+            .inner_join(schema::block::table)
+            .filter(schema::block::chain_id.eq(chain_id))
+            .filter(schema::block::number.gt(lowest_block))
+            .select(diesel::dsl::min(schema::transaction::id))
+            .get_result(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        debug!(
+            extractors = committed_since.len(),
+            lowest_block,
+            ?floor,
+            "Catch-up bound on transaction ids"
+        );
+        Ok(floor)
     }
 
     /// The watermark of the current transaction snapshot: every row written after the
@@ -1105,7 +1177,7 @@ mod test_serial_db {
             drop(conn);
 
             let delta = gateway
-                .catch_up_read(&Chain::Ethereum, watermark, "ambient")
+                .catch_up_read(&Chain::Ethereum, watermark.clone(), "ambient")
                 .await
                 .unwrap();
 
@@ -1144,7 +1216,165 @@ mod test_serial_db {
                 .components
                 .iter()
                 .all(|component| component.system == "ambient"));
-            assert!(delta.watermark > watermark);
+            assert!(delta.watermark.transaction_id() > watermark.transaction_id());
+        })
+        .await;
+    }
+
+    async fn insert_extraction_state(
+        conn: &mut AsyncPgConnection,
+        chain_id: i64,
+        name: &str,
+        block_id: i64,
+    ) {
+        diesel::insert_into(schema::extraction_state::table)
+            .values(&orm::NewExtractionState {
+                name,
+                chain_id,
+                attributes: None,
+                cursor: Some("cursor".as_bytes()),
+                version: "0.1.0",
+                modified_ts: chrono::Utc::now().naive_utc(),
+                block_id,
+            })
+            .execute(conn)
+            .await
+            .unwrap();
+    }
+
+    /// Moves the extractor `name` to `block_id`, as its next commit does.
+    async fn commit_extraction_state(conn: &mut AsyncPgConnection, name: &str, block_id: i64) {
+        diesel::update(
+            schema::extraction_state::table.filter(schema::extraction_state::name.eq(name)),
+        )
+        .set(schema::extraction_state::block_id.eq(block_id))
+        .execute(conn)
+        .await
+        .unwrap();
+    }
+
+    /// The ids of the blocks of `setup_accounts`, by number: blocks 1 and 2.
+    async fn block_ids(conn: &mut AsyncPgConnection) -> Vec<i64> {
+        schema::block::table
+            .order_by(schema::block::number)
+            .select(schema::block::id)
+            .load(conn)
+            .await
+            .unwrap()
+    }
+
+    /// Block 3 after the blocks of `setup_accounts`, with one transaction. Returns the id of the
+    /// transaction.
+    async fn insert_block_3_with_transaction(conn: &mut AsyncPgConnection, chain_id: i64) -> i64 {
+        let block_id: i64 = diesel::insert_into(schema::block::table)
+            .values((
+                schema::block::hash.eq(Bytes::from([3u8; 32])),
+                schema::block::parent_hash.eq(Bytes::from([2u8; 32])),
+                schema::block::number.eq(3),
+                schema::block::ts.eq(db_fixtures::yesterday_one_am()),
+                schema::block::chain_id.eq(chain_id),
+            ))
+            .returning(schema::block::id)
+            .get_result(conn)
+            .await
+            .unwrap();
+        db_fixtures::insert_txns(
+            conn,
+            &[(block_id, 1, "0x3333333333333333333333333333333333333333333333333333333333333333")],
+        )
+        .await[0]
+    }
+
+    /// Several extractors write one block in separate commits, and the later commits reuse the
+    /// transaction rows of the first. A row written after the watermark can then reference a
+    /// transaction inserted before it, and the catch-up must still read it.
+    #[tokio::test]
+    async fn catch_up_reads_rows_that_reference_a_transaction_older_than_the_watermark_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let f = setup_accounts(&mut conn).await;
+            let blocks = block_ids(&mut conn).await;
+            insert_extraction_state(&mut conn, f.chain_id, "ambient", blocks[0]).await;
+            let gateway = cached_gateway(&pool, PostgresGateway::from_connection(&mut conn).await);
+            let watermark = gateway
+                .state_snapshot(&Chain::Ethereum)
+                .await
+                .unwrap()
+                .watermark;
+            assert_eq!(watermark.committed_blocks(), &HashMap::from([("ambient".to_string(), 1)]));
+            let written = db_fixtures::yesterday_one_am();
+            // `txn[2]` is a transaction of block 2, inserted before the watermark.
+            db_fixtures::insert_slots(&mut conn, f.c0, f.txn[2], &written, None, &[(7, 7, None)])
+                .await;
+            // `txn[0]` is a transaction of block 1, which the extractor had committed. No commit
+            // after the watermark writes such a row, so the bound leaves it out.
+            db_fixtures::insert_slots(&mut conn, f.c0, f.txn[0], &written, None, &[(8, 8, None)])
+                .await;
+            commit_extraction_state(&mut conn, "ambient", blocks[1]).await;
+            drop(conn);
+
+            let read = gateway
+                .catch_up_read(&Chain::Ethereum, watermark, "ambient")
+                .await
+                .unwrap();
+
+            let slots = &read.changes[&Bytes::from_str(C0).unwrap()].slots;
+            assert!(slots.contains_key(&Bytes::from(7u64).lpad(32, 0)));
+            assert!(!slots.contains_key(&Bytes::from(8u64).lpad(32, 0)));
+            assert_eq!(read.watermark.committed_blocks()["ambient"], 2);
+        })
+        .await;
+    }
+
+    /// Only the extractors that committed since the watermark count, and one that had no block
+    /// at the watermark leaves the read without a bound.
+    #[tokio::test]
+    async fn transaction_floor_follows_the_extractors_that_committed_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let f = setup_accounts(&mut conn).await;
+            let blocks = block_ids(&mut conn).await;
+            let block_3_tx = insert_block_3_with_transaction(&mut conn, f.chain_id).await;
+            insert_extraction_state(&mut conn, f.chain_id, "stopped", blocks[0]).await;
+            insert_extraction_state(&mut conn, f.chain_id, "running", blocks[1]).await;
+            let gw = PostgresGateway::from_connection(&mut conn).await;
+            let watermark = cached_gateway(&pool, gw.clone())
+                .state_snapshot(&Chain::Ethereum)
+                .await
+                .unwrap()
+                .watermark;
+
+            assert_eq!(
+                gw.transaction_floor(f.chain_id, &watermark, &mut conn)
+                    .await
+                    .unwrap(),
+                None,
+                "no extractor committed since the watermark"
+            );
+
+            let block_3: i64 = schema::block::table
+                .filter(schema::block::number.eq(3))
+                .select(schema::block::id)
+                .first(&mut conn)
+                .await
+                .unwrap();
+            commit_extraction_state(&mut conn, "running", block_3).await;
+            assert_eq!(
+                gw.transaction_floor(f.chain_id, &watermark, &mut conn)
+                    .await
+                    .unwrap(),
+                Some(block_3_tx),
+                "the first transaction after block 2; the stopped extractor at block 1 is ignored"
+            );
+
+            insert_extraction_state(&mut conn, f.chain_id, "new", block_3).await;
+            assert_eq!(
+                gw.transaction_floor(f.chain_id, &watermark, &mut conn)
+                    .await
+                    .unwrap(),
+                None,
+                "the new extractor had no block at the watermark"
+            );
         })
         .await;
     }

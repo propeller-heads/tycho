@@ -37,8 +37,9 @@ use tycho_common::{
     },
     storage::{
         BlockIdentifier, BlockOrTimestamp, CatchUpRead, ChainGateway, CommitWatermark,
-        ContractStateGateway, EntryPointFilter, EntryPointGateway, ExtractionStateGateway, Gateway,
-        ProtocolGateway, StateSnapshot, StateSnapshotGateway, StorageError, Version, WithTotal,
+        ContractStateGateway, EntryPointFilter, EntryPointGateway, ExtractionStateGateway,
+        ExtractorCursor, Gateway, ProtocolGateway, StateSnapshot, StateSnapshotGateway,
+        StorageError, Version, WithTotal,
     },
     Bytes,
 };
@@ -1454,6 +1455,15 @@ impl EntryPointGateway for CachedGateway {
 
 impl Gateway for CachedGateway {}
 
+/// The number of the block of each extractor cursor, by extractor name.
+fn committed_blocks(cursors: &HashMap<String, ExtractorCursor>) -> HashMap<String, u64> {
+    let mut blocks = HashMap::with_capacity(cursors.len());
+    for (name, cursor) in cursors {
+        blocks.insert(name.clone(), cursor.block.number);
+    }
+    blocks
+}
+
 #[async_trait]
 impl StateSnapshotGateway for CachedGateway {
     /// Reads on one pooled connection in one [`snapshot_transaction`], so every part of the
@@ -1482,6 +1492,7 @@ impl StateSnapshotGateway for CachedGateway {
                         .state_gateway
                         .get_extractor_cursors(chain, conn)
                         .await?;
+                    let watermark = watermark.with_committed_blocks(committed_blocks(&cursors));
                     Result::<_, PostgresError>::Ok(StateSnapshot {
                         accounts,
                         components,
@@ -1514,11 +1525,11 @@ impl StateSnapshotGateway for CachedGateway {
                         .await?;
                     let accounts = self
                         .state_gateway
-                        .account_snapshots_written_since(chain, since, conn)
+                        .account_snapshots_written_since(chain, &since, conn)
                         .await?;
                     let changes = self
                         .state_gateway
-                        .account_changes_since(chain, since, conn)
+                        .account_changes_since(chain, &since, conn)
                         .await?;
                     let components = self
                         .state_gateway
@@ -1528,6 +1539,7 @@ impl StateSnapshotGateway for CachedGateway {
                         .state_gateway
                         .get_extractor_cursors(chain, conn)
                         .await?;
+                    let watermark = watermark.with_committed_blocks(committed_blocks(&cursors));
                     Result::<_, PostgresError>::Ok(CatchUpRead {
                         accounts,
                         changes,

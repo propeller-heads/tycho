@@ -31,8 +31,9 @@ pub struct CacheCatchUp {
     /// all of a system's components.
     ///
     /// Catch-ups of different systems run in parallel. Each reads from the watermark it finds
-    /// when it starts, and after its apply the watermark is the larger of the two. An older read
-    /// applied after a newer one changes nothing: its values have older timestamps.
+    /// when it starts, and after its apply the watermark is the newer of the two, by transaction
+    /// id, with the committed blocks of the same read. An older read applied after a newer one
+    /// changes nothing: its values have older timestamps.
     watermark: Mutex<CommitWatermark>,
 }
 
@@ -67,25 +68,28 @@ impl CacheCatchUp {
     /// next call reads the same rows again.
     pub async fn catch_up(&self, system: &str) -> Result<Option<ExtractorCursor>, StorageError> {
         let started = Instant::now();
-        let since = *self.lock_watermark();
+        let since = self.lock_watermark().clone();
+        let since_transaction_id = since.transaction_id();
         let read = self
             .gateway
             .catch_up_read(&self.chain, since, system)
             .await?;
         let read_duration = started.elapsed();
         let cursor = read.cursors.get(system).cloned();
-        let read_watermark = read.watermark;
+        let read_watermark = read.watermark.clone();
         let counts = self.cache.apply_catch_up(read, system);
         {
             let mut watermark = self.lock_watermark();
-            *watermark = (*watermark).max(read_watermark);
+            if read_watermark.transaction_id() > watermark.transaction_id() {
+                *watermark = read_watermark;
+            }
         }
         let elapsed = started.elapsed();
         counter!("entity_cache_catch_ups_total").increment(1);
         histogram!("entity_cache_catch_up_duration_seconds").record(elapsed.as_secs_f64());
         info!(
             system,
-            ?since,
+            since = since_transaction_id,
             read = ?read_duration,
             ?elapsed,
             ?counts,
@@ -94,8 +98,8 @@ impl CacheCatchUp {
         Ok(cursor)
     }
 
-    /// The watermark. A panic while it was held cannot leave it half written, because it is
-    /// `Copy` and every write is one assignment, so a poisoned lock is used as it is.
+    /// The watermark. A panic while it was held cannot leave it half written, because every write
+    /// is one assignment of a whole watermark, so a poisoned lock is used as it is.
     fn lock_watermark(&self) -> std::sync::MutexGuard<'_, CommitWatermark> {
         self.watermark
             .lock()

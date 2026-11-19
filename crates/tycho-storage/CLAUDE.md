@@ -19,7 +19,7 @@ postgres/
 ├── entry_point.rs      — entry point + tracing param/result persistence
 ├── extraction_state.rs — extractor checkpoint (cursor, block hash) persistence; committed block and cursor per extractor
 ├── leader_lock.rs      — LeaderLock: session advisory lock electing the single database writer
-├── snapshot.rs         — one-transaction reads for the entity cache (StateSnapshotGateway): all live state and each extractor's cursor, or what a catch-up reads: the account rows written since a commit watermark (`xmin`) and every live component of one system
+├── snapshot.rs         — one-transaction reads for the entity cache (StateSnapshotGateway): all live state and each extractor's cursor, or what a catch-up reads: the account rows written since a commit watermark (`xmin`, narrowed through the `modify_tx` index by a bound from the extractors' committed blocks) and every live component of one system
 ├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
 ├── writer_epoch.rs     — single-writer fencing: increment / verify the `writer_epoch` row
 ├── orm.rs              — Diesel Queryable/Insertable structs for every table

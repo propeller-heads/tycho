@@ -899,16 +899,37 @@ pub struct ExtractorCursor {
 /// (`pg_current_snapshot()`), not a [`StateSnapshot`]. The watermark is the `xmin` of that
 /// transaction snapshot: the oldest transaction that was still running when the read started, as
 /// a 64-bit transaction id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CommitWatermark(u64);
+///
+/// The watermark also holds the block each extractor had committed in the same read. A later
+/// catch-up uses these blocks to find the oldest rows it must read through an index, instead of
+/// a scan of every row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitWatermark {
+    transaction_id: u64,
+    committed_blocks: HashMap<String, u64>,
+}
 
 impl CommitWatermark {
+    /// A watermark without committed blocks. A catch-up from it scans every row.
     pub fn new(transaction_id: u64) -> Self {
-        Self(transaction_id)
+        Self { transaction_id, committed_blocks: HashMap::new() }
+    }
+
+    /// Sets the number of the block each extractor had committed when the read started, by
+    /// extractor name.
+    pub fn with_committed_blocks(mut self, committed_blocks: HashMap<String, u64>) -> Self {
+        self.committed_blocks = committed_blocks;
+        self
     }
 
     pub fn transaction_id(&self) -> u64 {
-        self.0
+        self.transaction_id
+    }
+
+    /// By extractor name: the number of the block the extractor had committed when the read
+    /// started. An extractor that had committed nothing has no entry.
+    pub fn committed_blocks(&self) -> &HashMap<String, u64> {
+        &self.committed_blocks
     }
 }
 
