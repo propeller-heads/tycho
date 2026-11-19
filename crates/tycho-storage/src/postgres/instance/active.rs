@@ -15,21 +15,30 @@
 //! check the name first where it must exist.
 
 use chrono::NaiveDateTime;
-use diesel::prelude::*;
+use diesel::{prelude::*, sql_types::Timestamptz};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 
 use crate::postgres::{
-    instance::{schema::tycho::extraction_state, InstanceId},
+    instance::{
+        schema::tycho::{extraction_state, protocol_instance},
+        InstanceId,
+    },
     schema::protocol_system,
     PostgresError, StorageError,
 };
 
-/// The active instance of a protocol system, with its head.
+/// The active instance of a protocol system, with its head, its base block time and the retention
+/// horizon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActiveInstance {
     pub id: InstanceId,
     /// The block timestamp of the instance's extraction state. `None` if it has none yet.
     pub head: Option<NaiveDateTime>,
+    /// The block timestamp of the base block of an imported or migrated instance. `None` for an
+    /// instance synced in place. The instance has no history before it.
+    pub base: Option<NaiveDateTime>,
+    /// The oldest version whose history is complete: `now()` minus `partition_retention()`.
+    pub retention_horizon: NaiveDateTime,
 }
 
 /// The active instance of the protocol system `name`.
@@ -51,7 +60,8 @@ pub async fn active_instance(
     Ok(id.flatten())
 }
 
-/// The active instance of the protocol system `name`, with its head, in one query.
+/// The active instance of the protocol system `name`, with its head, its base block time and the
+/// retention horizon, in one query.
 ///
 /// `None` if the protocol system has no active instance, or if no protocol system has that name.
 /// Filter with the returned id as a bound value, as for [`active_instance`].
@@ -65,13 +75,27 @@ pub async fn active_instance_head(
                 .nullable()
                 .eq(protocol_system::active_instance_id)),
         )
+        .left_join(
+            protocol_instance::table.on(protocol_instance::id
+                .nullable()
+                .eq(protocol_system::active_instance_id)),
+        )
         .filter(protocol_system::name.eq(name))
-        .select((protocol_system::active_instance_id, extraction_state::block_ts.nullable()))
-        .first::<(Option<InstanceId>, Option<NaiveDateTime>)>(conn)
+        .select((
+            protocol_system::active_instance_id,
+            extraction_state::block_ts.nullable(),
+            protocol_instance::base_block_ts.nullable(),
+            diesel::dsl::sql::<Timestamptz>("now() - partition_retention()"),
+        ))
+        .first::<(Option<InstanceId>, Option<NaiveDateTime>, Option<NaiveDateTime>, NaiveDateTime)>(
+            conn,
+        )
         .await
         .optional()
         .map_err(PostgresError::from)?;
-    Ok(row.and_then(|(id, head)| id.map(|id| ActiveInstance { id, head })))
+    Ok(row.and_then(|(id, head, base, retention_horizon)| {
+        id.map(|id| ActiveInstance { id, head, base, retention_horizon })
+    }))
 }
 
 /// The active instance of every protocol system that has one.
@@ -208,12 +232,11 @@ mod tests {
         db_fixtures::set_instance_head(&mut conn, setup.curve, day(2)).await;
         db_fixtures::set_instance_head(&mut conn, setup.uniswap_v4, day(3)).await;
 
-        assert_eq!(
-            active_instance_head("vm:curve", &mut conn)
-                .await
-                .unwrap(),
-            Some(ActiveInstance { id: setup.curve, head: Some(day(2)) })
-        );
+        let found = active_instance_head("vm:curve", &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(found.map(|i| (i.id, i.head)), Some((setup.curve, Some(day(2)))));
     }
 
     #[tokio::test]
@@ -221,12 +244,11 @@ mod tests {
         let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
 
-        assert_eq!(
-            active_instance_head("vm:curve", &mut conn)
-                .await
-                .unwrap(),
-            Some(ActiveInstance { id: setup.curve, head: None })
-        );
+        let found = active_instance_head("vm:curve", &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(found.map(|i| (i.id, i.head)), Some((setup.curve, None)));
     }
 
     #[tokio::test]
@@ -243,5 +265,50 @@ mod tests {
 
         assert_eq!(inactive, None);
         assert_eq!(unknown, None);
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_head_has_the_base_block() {
+        let mut conn = instance_test_connection().await;
+        let setup = setup_protocols(&mut conn).await;
+        diesel::update(protocol_instance::table.filter(protocol_instance::id.eq(setup.curve)))
+            .set(protocol_instance::base_block_ts.eq(day(1)))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+
+        let curve = active_instance_head("vm:curve", &mut conn)
+            .await
+            .unwrap()
+            .unwrap();
+        let uniswap_v4 = active_instance_head("uniswap_v4", &mut conn)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(curve.base, Some(day(1)));
+        assert_eq!(uniswap_v4.base, None);
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_head_has_the_retention_horizon() {
+        let mut conn = instance_test_connection().await;
+        let setup = setup_protocols(&mut conn).await;
+        diesel::sql_query("UPDATE partition_retention_config SET retention = '7 days'")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        let expected = diesel::select(diesel::dsl::sql::<Timestamptz>("now() - interval '7 days'"))
+            .get_result::<NaiveDateTime>(&mut conn)
+            .await
+            .unwrap();
+
+        let found = active_instance_head("vm:curve", &mut conn)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(found.id, setup.curve);
+        assert_eq!(found.retention_horizon, expected);
     }
 }
