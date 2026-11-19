@@ -6,3 +6,7 @@
 
 pub mod block;
 mod extraction_state;
+#[cfg_attr(not(test), expect(dead_code, reason = "no instance write op versions rows yet"))]
+mod state;
+#[cfg_attr(not(test), expect(dead_code, reason = "no instance write op versions rows yet"))]
+pub mod versioning;
