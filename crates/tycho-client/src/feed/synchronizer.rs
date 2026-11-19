@@ -5625,19 +5625,21 @@ mod test {
             .is_empty());
     }
 
+    /// The fetch ran at block 1 and reported "Paused" as paused. A buffered block may unpause it.
     #[rstest::rstest]
-    #[case::still_paused(false, true)]
-    #[case::unpaused_since(true, false)]
+    #[case::still_paused(None, true)]
+    #[case::unpaused_at_snapshot_block(Some(1), true)]
+    #[case::unpaused_since(Some(2), false)]
     #[tokio::test]
     async fn test_drain_snapshot_records_paused(
-        #[case] unpaused_since: bool,
+        #[case] unpaused_at: Option<u64>,
         #[case] expect_paused: bool,
     ) {
         let mut state_sync = with_mocked_clients(true, false, None, None);
         let (task, tx) = snapshot_task_in_flight("Pool");
         state_sync.snapshot_tasks.push(task);
-        if unpaused_since {
-            let mut unpause = make_block_changes(2, None);
+        if let Some(block) = unpaused_at {
+            let mut unpause = make_block_changes(block, None);
             unpause.unpaused_components = HashSet::from(["Paused".to_string()]);
             state_sync.buffered_deltas.push(unpause);
         }
@@ -5655,6 +5657,8 @@ mod test {
             .component_tracker
             .drop_paused_from(&mut later_fetch);
         assert_eq!(later_fetch.is_empty(), expect_paused);
+        let queued = state_sync.snapshot_queue.get("Paused");
+        assert_eq!(queued == Some(&SnapshotStatus::Backoff), !expect_paused);
     }
 
     /// Directly exercises all four mutation paths of `apply_deltas_to_snapshot`:
