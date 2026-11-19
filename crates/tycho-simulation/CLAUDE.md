@@ -43,13 +43,23 @@ for any protocol indexed by Tycho.
     steps they already took (`utils/uniswap/swap_step_cache.rs`), shared by their clones: code
     that changes a state's price, tick, liquidity, fee or ticks must start an empty step cache,
     and changes ticks only through `Arc::make_mut`
-  - **Algebra Integral plugins** (`algebra_integral/plugin/`): no protocol state yet, only what
-    every DEX built on Algebra Integral shares for its pools' plugins. `PluginHandler` answers for
-    one pool's plugin (fees, whether swaps are enabled, hook gas); handlers register per
-    `(Chain, plugin implementation)` in `registry.rs`, with a generic VM fallback on Ethereum
-    only that the first DEX registers. A native handler is a `ComposedPlugin` of fee, gate and
-    gas modules. `modules/<vendor>/<module>.rs` decodes the `<module>/<field>` attributes that
-    the file of the same path in `protocols/substreams/ethereum-algebra-integral` emits
+  - **Algebra Integral** (`algebra_integral/`): native state shared by every DEX built on
+    Algebra Integral 1.2, each under its own protocol system (`nami_v4` is the first).
+    `AlgebraIntegralState` walks the tick list in `state.rs` with the step math of
+    `swap_math.rs`; a pool whose `plugin_config` has `BEFORE_SWAP` takes its fee and hook gas
+    from a `PluginHandler` (`plugin/`), otherwise it charges its stored fee. Handlers register
+    per `(Chain, plugin implementation)` in `plugin/registry.rs`, with a generic VM fallback on
+    Ethereum only; `plugin/deployments/<dex>.rs` holds each DEX's implementations and
+    `initialize_plugin_handlers` registers them when a stream is built. A native handler is a
+    `ComposedPlugin` of fee, gate and gas modules. `plugin/modules/<vendor>/<module>.rs` decodes
+    the `<module>/<field>` attributes that the file of the same path in
+    `protocols/substreams/ethereum-algebra-integral` emits; an attribute a plugin never wrote is
+    absent, and Nami's modules read it as zero. The state keeps the plugin's implementation and
+    module attributes and rebuilds the handler when a delta changes them: a plugin it cannot
+    reproduce fails a snapshot decode, and after a delta stops the pool's quotes without failing
+    the delta. Its serialized form holds those attributes, so deserializing needs the handlers
+    registered. Nami's fee sources (`modules/nami/nyse_fee_source.rs`, `gold_fee_source.rs`) are
+    ports of pure contracts, checked against `testdata/` recorded from the Solidity
   - **Hybrid** (`fluid/`, `balancer_v3/`, `curve/`): native Rust quote math over VM-indexed pool
     state (each has both `state.rs` and `vm.rs`)
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for

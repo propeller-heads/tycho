@@ -130,6 +130,7 @@ use crate::{
         override_stream::{self, StateOverrideProvider},
         pending::PendingBlockProcessor,
         protocol::{
+            algebra_integral::plugin::deployments::initialize_plugin_handlers,
             filters::uniswap_v4_non_angstrom_hook_pool_filter,
             native_wrapper::state::NativeWrapperState,
             uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
@@ -804,6 +805,9 @@ impl ProtocolStreamBuilder {
         initialize_hook_handlers().map_err(|e| {
             StreamError::SetUpError(format!("Error initializing hook handlers: {e:?}"))
         })?;
+        initialize_plugin_handlers().map_err(|e| {
+            StreamError::SetUpError(format!("Error initializing plugin handlers: {e:?}"))
+        })?;
         self.install_override_providers();
         let (_, rx) = self.stream_builder.build().await?;
         let decoder = Arc::new(self.decoder);
@@ -879,6 +883,9 @@ impl ProtocolStreamBuilder {
     ) -> Result<impl Stream<Item = Result<Update, StreamDecodeError>>, StreamError> {
         initialize_hook_handlers().map_err(|e| {
             StreamError::SetUpError(format!("Error initializing hook handlers: {e:?}"))
+        })?;
+        initialize_plugin_handlers().map_err(|e| {
+            StreamError::SetUpError(format!("Error initializing plugin handlers: {e:?}"))
         })?;
         self.install_override_providers();
         let (_, rx) = self.stream_builder.build().await?;

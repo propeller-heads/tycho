@@ -18,8 +18,18 @@ use alloy::primitives::{Address, I256, U256};
 use tycho_common::simulation::{errors::SimulationError, protocol_sim::BlockContext};
 
 pub mod composed;
+pub mod deployments;
 pub mod modules;
 pub mod registry;
+
+/// Attribute holding a pool's `pluginConfig`.
+pub const PLUGIN_CONFIG_ATTRIBUTE: &str = "plugin_config";
+/// A pool calls its plugin's `beforeSwap` when its `pluginConfig` has this flag.
+pub const BEFORE_SWAP_FLAG: u8 = 1;
+/// A pool calls its plugin's `afterSwap` when its `pluginConfig` has this flag.
+pub const AFTER_SWAP_FLAG: u8 = 1 << 1;
+/// A pool accepts a fee from `beforeSwap` only when its `pluginConfig` has this flag.
+pub const DYNAMIC_FEE_FLAG: u8 = 1 << 7;
 
 /// Storage slot values per contract.
 pub type StorageOverrides = HashMap<Address, HashMap<U256, U256>>;
