@@ -601,7 +601,8 @@ where
             // Messages keep arriving during the delay, so we discard them instead of sleeping:
             // a sleep would overflow the subscription buffer on fast chains.
             let mut snapshot_not_before: Option<Instant> = None;
-            // Components the messages consumed below unpause and no later one pauses again.
+            // Components unpaused by a message consumed while starting and not paused again by a
+            // later one.
             let mut unpaused_while_starting: HashSet<String> = HashSet::new();
             let (msg, header) = 'init: loop {
                 let mut warned_waiting_for_new_block = false;
@@ -1301,9 +1302,12 @@ where
     }
 
     /// Records the components a finished background fetch found paused, and removes every paused
-    /// component from its result. While the fetch ran, a block may have paused a component it
-    /// returned, or unpaused one it found paused. It queues the components unpaused that way, so
-    /// the next block fetches them again.
+    /// component from the result's components and states. Their contract storage stays in the
+    /// result.
+    ///
+    /// While the fetch ran, a block may have paused a component it returned, or unpaused one it
+    /// found paused. It queues the components unpaused that way, so the next block fetches them
+    /// again.
     fn apply_fetch_pauses(&mut self, fetch_result: &mut SnapshotFetchResult) {
         let unpaused_since: HashSet<&String> = self
             .buffered_deltas

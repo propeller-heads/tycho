@@ -160,8 +160,8 @@ pub struct ComponentTracker<R: RPCClient> {
     /// Derived from tracked components. We need this if subscribed to a vm extractor because
     /// updates are emitted on a contract level instead of a component level.
     pub contracts: HashSet<Address>,
-    /// Components the server reported as paused that no block has unpaused since. They are
-    /// not tracked.
+    /// Ids of the components the server reported as paused and nothing has unpaused since:
+    /// neither a block nor the pause check after a restart. The tracker does not track them.
     paused: HashSet<ComponentId>,
     /// Client to retrieve necessary protocol components from the rpc.
     rpc_client: R,
@@ -425,20 +425,20 @@ where
             .collect()
     }
 
-    /// Remembers the ids a components response reported as paused, so they are not tracked
-    /// until a block unpauses them.
+    /// Records the ids a components response reported as paused, so the tracker does not track
+    /// them until they are unpaused.
     pub(crate) fn record_paused(&mut self, paused: HashSet<ComponentId>) {
         if !paused.is_empty() {
-            self.log_paused(&paused, "Skipping paused components");
+            self.log_paused(&paused, "Recorded paused components");
         }
         self.paused.extend(paused);
     }
 
-    /// Asks the server which components are paused now, and remembers the answer. Call it after
+    /// Asks the server which components are paused now, and records the answer. Call it after
     /// missing blocks, since their pause and unpause events are lost.
     ///
-    /// Asks about every tracked component and every component remembered as paused. Returns the
-    /// ids that were remembered as paused and no longer are.
+    /// Asks about every tracked component and every component recorded as paused. Returns the
+    /// ids that were recorded as paused and no longer are.
     pub(crate) async fn refresh_paused(&mut self) -> Result<HashSet<ComponentId>, RPCError> {
         let mut ids: HashSet<ComponentId> = self
             .components
@@ -517,7 +517,7 @@ where
             .collect())
     }
 
-    /// Remembers the components a block pauses, and forgets the ones it unpauses.
+    /// Records the components a block pauses, and removes the ones it unpauses.
     pub(crate) fn record_pause_events(&mut self, deltas: &BlockAggregatedChanges) {
         for id in &deltas.unpaused_components {
             self.paused.remove(id);

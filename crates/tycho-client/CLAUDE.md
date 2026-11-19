@@ -15,9 +15,9 @@ feed/
   mod.rs            BlockSynchronizer — aligns N synchronizers by block, emits FeedMessage
   dto.rs            Consumer-facing feed types: ComponentWithState, Snapshot, StateSyncMessage, FeedMessage
   synchronizer.rs   ProtocolStateSynchronizer — manages snapshot + delta sync for one extractor
-  component_tracker.rs  Filters components by TVL threshold or explicit ID list; keeps paused
-                    components out of the feed until a block unpauses them, then re-adds those
-                    that pass the filter
+  component_tracker.rs  Filters components with a TVL filter or an id filter; keeps paused
+                    components out of the feed until a block or the pause check after a restart
+                    unpauses them, then re-adds those that pass the filter
   block_history.rs  Validates block chain continuity; classifies incoming blocks
 cli.rs / main.rs    CLI binary for manual testing
 ```
@@ -44,9 +44,10 @@ TychoStreamBuilder (stream.rs)
    the delay sets the snapshot.
    The server sends each pause and unpause once, so the synchronizer records both from every
    message it consumes while starting. On a restart after a gap, it asks the server whether the
-   tracked components, and the ones it remembers as paused, are paused now. Before the first
+   tracked components, and the ones it recorded as paused, are paused now. Before the first
    snapshot it stops tracking the paused components and starts tracking the unpaused ones that
-   pass the filter. On a restart it reports the stopped ones as removed in the first message.
+   pass the filter. When no snapshot follows, it queues those for a background snapshot instead.
+   On a restart it reports the stopped ones as removed in the first message.
 2. `HttpRPCClient` fetches initial snapshot at that block synchronously; all subsequent new
    components are fetched via background tasks (`spawn_snapshot_task`) so the delta loop never
    blocks on RPC. Each component moves through `SnapshotStatus` (`Deferred` → `InFlight`
