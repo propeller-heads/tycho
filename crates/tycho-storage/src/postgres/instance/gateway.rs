@@ -4,7 +4,8 @@ use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
 use tycho_common::{models::Chain, storage::StorageError};
 
 use crate::postgres::{
-    instance::cache::token::TokenCache, ChainEnumCache, FromConnection, ProtocolSystemEnumCache,
+    instance::cache::{component_index::ComponentIndex, token::TokenCache},
+    ChainEnumCache, FromConnection, ProtocolSystemEnumCache,
 };
 
 /// Inner gateway on the `tycho` instance tables. It runs the SQL for the public gateways and reads
@@ -20,6 +21,7 @@ pub struct PostgresGatewayNew {
     pub(super) chain_id_cache: Arc<ChainEnumCache>,
     pub(super) protocol_system_id_cache: Arc<ProtocolSystemEnumCache>,
     pub(super) token_cache: Option<Arc<TokenCache>>,
+    pub(super) component_index: Option<Arc<ComponentIndex>>,
 }
 
 impl PostgresGatewayNew {
@@ -33,6 +35,7 @@ impl PostgresGatewayNew {
             chain_id_cache: Arc::new(chain_id_cache),
             protocol_system_id_cache: Arc::new(protocol_system_id_cache),
             token_cache: None,
+            component_index: None,
         })
     }
 
@@ -41,7 +44,7 @@ impl PostgresGatewayNew {
         chain_id_cache: Arc<ChainEnumCache>,
         protocol_system_id_cache: Arc<ProtocolSystemEnumCache>,
     ) -> Self {
-        Self { chain_id_cache, protocol_system_id_cache, token_cache: None }
+        Self { chain_id_cache, protocol_system_id_cache, token_cache: None, component_index: None }
     }
 
     #[cfg(test)]
@@ -56,6 +59,7 @@ impl PostgresGatewayNew {
             chain_id_cache: Arc::new(chain_id_cache),
             protocol_system_id_cache: Arc::new(protocol_system_id_cache),
             token_cache: None,
+            component_index: None,
         }
     }
 
@@ -63,6 +67,14 @@ impl PostgresGatewayNew {
     #[cfg_attr(not(test), expect(dead_code, reason = "no builder wires it until cut-over"))]
     pub fn with_token_cache(mut self, cache: Arc<TokenCache>) -> Self {
         self.token_cache = Some(cache);
+        self
+    }
+
+    /// Counts and pages `get_protocol_components` reads of one protocol without ids from `index`,
+    /// when it has a unit for the protocol's active instance.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no builder wires it until cut-over"))]
+    pub fn with_component_index(mut self, index: Arc<ComponentIndex>) -> Self {
+        self.component_index = Some(index);
         self
     }
 
