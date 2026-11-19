@@ -351,10 +351,13 @@ returns. A catch-up reads in one snapshot transaction (`StateSnapshotGateway::ca
 every live component of the system, the account rows written since the watermark, and the
 extractor cursors. The watermark is a point in the database's commit order (`CommitWatermark`, the
 `xmin` of the Postgres transaction snapshot); a row qualifies when its own `xmin` is not older. The
-account read covers every system, so `CacheCatchUp` keeps one watermark: the one of its newest
-read. `EntityCache::apply_catch_up` then replaces the system's components and writes each account
-value with the fold rule (`AccountWrites`), all under one hold of the write lock. The watermark
-lock is held for the whole catch-up, so one catch-up runs at a time. A failed catch-up ends
+account read covers every system, so `CacheCatchUp` keeps one watermark: the newest of the reads
+it applied. `EntityCache::apply_catch_up` then replaces the system's components and writes each
+account value with the fold rule (`AccountWrites`), all under one hold of the write lock.
+Catch-ups of different systems run in parallel: no lock is held during the read, and the apply
+and the move of the watermark happen with no await between them, so a dropped catch-up changes
+nothing. An older read applied after a newer one changes nothing either, because its values have
+older timestamps and the watermark keeps the larger value. A failed catch-up ends
 supervision, like a failed build.
 While a follower waits for the leader to sync an extractor's history, its supervisor also catches
 the cache up for that system every hour (`WAITING_CATCH_UP_INTERVAL`), so the catch-up at the end

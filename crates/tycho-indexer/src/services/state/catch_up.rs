@@ -6,7 +6,10 @@
 //! and writes it into the cache ([`EntityCache::apply_catch_up`]), and returns the cursor of the
 //! system's extractor from the same read, so the extractor resumes right after it.
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use metrics::{counter, histogram};
 use tracing::info;
@@ -22,14 +25,15 @@ pub struct CacheCatchUp {
     cache: Arc<EntityCache>,
     gateway: Arc<dyn StateSnapshotGateway + Send + Sync>,
     chain: Chain,
-    /// The watermark of the newest database read, of the startup snapshot or of a catch-up. Every
-    /// read covers the whole chain, so one watermark serves every system: the next read takes the
-    /// account rows written since it. Components need none, because a read takes all of a
-    /// system's components.
+    /// The newest watermark of a read that the cache holds, of the startup snapshot or of a
+    /// catch-up. Every read covers the whole chain, so one watermark serves every system: the next
+    /// read takes the account rows written since it. Components need none, because a read takes
+    /// all of a system's components.
     ///
-    /// A catch-up holds the lock from its read until it has written the cache, so one catch-up
-    /// runs at a time, and each starts from the watermark the one before it left.
-    watermark: tokio::sync::Mutex<CommitWatermark>,
+    /// Catch-ups of different systems run in parallel. Each reads from the watermark it finds
+    /// when it starts, and after its apply the watermark is the larger of the two. An older read
+    /// applied after a newer one changes nothing: its values have older timestamps.
+    watermark: Mutex<CommitWatermark>,
 }
 
 impl CacheCatchUp {
@@ -41,7 +45,7 @@ impl CacheCatchUp {
         chain: Chain,
         watermark: CommitWatermark,
     ) -> Self {
-        Self { cache, gateway, chain, watermark: tokio::sync::Mutex::new(watermark) }
+        Self { cache, gateway, chain, watermark: Mutex::new(watermark) }
     }
 
     /// Brings the components of `system`, and the accounts, up to date with the database, and
@@ -49,25 +53,33 @@ impl CacheCatchUp {
     /// block of `system` up to that cursor, so the extractor resumes right after it. The cursor is
     /// `None` when the extractor has committed nothing.
     ///
-    /// A call waits for the catch-up that runs. Run it only while `system`'s extractor is
-    /// stopped: the catch-up replaces the system's components.
+    /// Catch-ups of different systems can run at the same time. Run one only while `system`'s
+    /// extractor is stopped, and never two for the same system: the catch-up replaces the
+    /// system's components.
+    ///
+    /// Nothing changes until the read is complete. The apply and the move of the watermark then
+    /// happen together, with no await between them. A caller can drop the future at any point,
+    /// and the cache and the watermark stay consistent.
     ///
     /// # Errors
     ///
     /// `StorageError` when the read fails. The cache and the watermark do not change then, so the
     /// next call reads the same rows again.
     pub async fn catch_up(&self, system: &str) -> Result<Option<ExtractorCursor>, StorageError> {
-        let mut watermark = self.watermark.lock().await;
         let started = Instant::now();
-        let since = *watermark;
+        let since = *self.lock_watermark();
         let read = self
             .gateway
             .catch_up_read(&self.chain, since, system)
             .await?;
         let read_duration = started.elapsed();
         let cursor = read.cursors.get(system).cloned();
-        *watermark = read.watermark;
+        let read_watermark = read.watermark;
         let counts = self.cache.apply_catch_up(read, system);
+        {
+            let mut watermark = self.lock_watermark();
+            *watermark = (*watermark).max(read_watermark);
+        }
         let elapsed = started.elapsed();
         counter!("entity_cache_catch_ups_total").increment(1);
         histogram!("entity_cache_catch_up_duration_seconds").record(elapsed.as_secs_f64());
@@ -80,6 +92,14 @@ impl CacheCatchUp {
             "Entity cache caught up"
         );
         Ok(cursor)
+    }
+
+    /// The watermark. A panic while it was held cannot leave it half written, because it is
+    /// `Copy` and every write is one assignment, so a poisoned lock is used as it is.
+    fn lock_watermark(&self) -> std::sync::MutexGuard<'_, CommitWatermark> {
+        self.watermark
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -141,6 +161,71 @@ mod test {
         }
     }
 
+    /// Answers each `catch_up_read` with the read a test sends for that call, so a test decides
+    /// when each read completes and in which order.
+    struct HeldGateway {
+        calls: std::sync::Mutex<Vec<(CommitWatermark, String)>>,
+        pending: std::sync::Mutex<VecDeque<tokio::sync::oneshot::Receiver<CatchUpRead>>>,
+    }
+
+    impl HeldGateway {
+        /// A gateway for `n` calls, and the senders that complete them, in the order of the calls.
+        fn new(n: usize) -> (Arc<Self>, Vec<tokio::sync::oneshot::Sender<CatchUpRead>>) {
+            let mut senders = Vec::new();
+            let mut receivers = VecDeque::new();
+            for _ in 0..n {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                senders.push(tx);
+                receivers.push_back(rx);
+            }
+            let gateway = Arc::new(Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+                pending: std::sync::Mutex::new(receivers),
+            });
+            (gateway, senders)
+        }
+
+        fn calls(&self) -> Vec<(CommitWatermark, String)> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        /// Yields until the gateway has received `n` calls.
+        async fn wait_for_calls(&self, n: usize) {
+            while self.calls.lock().unwrap().len() < n {
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StateSnapshotGateway for HeldGateway {
+        async fn state_snapshot(&self, _chain: &Chain) -> Result<StateSnapshot, StorageError> {
+            Err(StorageError::Unexpected("not used".to_string()))
+        }
+
+        async fn catch_up_read(
+            &self,
+            _chain: &Chain,
+            since: CommitWatermark,
+            system: &str,
+        ) -> Result<CatchUpRead, StorageError> {
+            let receiver = {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((since, system.to_string()));
+                self.pending
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("a read for every call")
+            };
+            receiver
+                .await
+                .map_err(|err| StorageError::Unexpected(format!("read dropped: {err}")))
+        }
+    }
+
     fn component(id: &str, block: u64) -> ComponentSnapshot {
         ComponentSnapshot {
             system: SYSTEM.to_string(),
@@ -171,7 +256,9 @@ mod test {
     }
 
     /// A catch-up of a cache built from a snapshot at watermark 100 that holds component `c1`.
-    fn catch_up_from(gateway: Arc<QueuedGateway>) -> (Arc<EntityCache>, CacheCatchUp) {
+    fn catch_up_from(
+        gateway: Arc<dyn StateSnapshotGateway + Send + Sync>,
+    ) -> (Arc<EntityCache>, CacheCatchUp) {
         let cache = Arc::new(EntityCache::from_snapshot(StateSnapshot {
             accounts: vec![],
             components: vec![component("c1", 5)],
@@ -242,6 +329,69 @@ mod test {
             vec![
                 (CommitWatermark::new(100), SYSTEM.to_string()),
                 (CommitWatermark::new(100), SYSTEM.to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn catch_ups_read_in_parallel_and_keep_the_newest_watermark() {
+        let (gateway, mut senders) = HeldGateway::new(3);
+        let (_, catch_up) = catch_up_from(gateway.clone());
+        let catch_up = Arc::new(catch_up);
+        let older = tokio::spawn({
+            let catch_up = Arc::clone(&catch_up);
+            async move { catch_up.catch_up("a").await }
+        });
+        gateway.wait_for_calls(1).await;
+        let newer = tokio::spawn({
+            let catch_up = Arc::clone(&catch_up);
+            async move { catch_up.catch_up("b").await }
+        });
+        gateway.wait_for_calls(2).await;
+        let third = senders.pop().unwrap();
+        let newer_read = senders.pop().unwrap();
+        let older_read = senders.pop().unwrap();
+
+        newer_read.send(read(300)).unwrap();
+        newer.await.unwrap().unwrap();
+        older_read.send(read(200)).unwrap();
+        older.await.unwrap().unwrap();
+        third.send(read(400)).unwrap();
+        catch_up.catch_up("c").await.unwrap();
+
+        assert_eq!(
+            gateway.calls(),
+            vec![
+                (CommitWatermark::new(100), "a".to_string()),
+                (CommitWatermark::new(100), "b".to_string()),
+                (CommitWatermark::new(300), "c".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_catch_up_leaves_the_cache_and_the_watermark_unchanged() {
+        let (gateway, mut senders) = HeldGateway::new(2);
+        let (cache, catch_up) = catch_up_from(gateway.clone());
+
+        {
+            let dropped = std::pin::pin!(catch_up.catch_up(SYSTEM));
+            assert!(futures03::poll!(dropped).is_pending());
+        }
+        let second = senders.pop().unwrap();
+        drop(senders);
+        second.send(read(300)).unwrap();
+        catch_up
+            .catch_up("other")
+            .await
+            .unwrap();
+
+        assert!(holds(&cache, "c1"));
+        assert_eq!(
+            gateway.calls(),
+            vec![
+                (CommitWatermark::new(100), SYSTEM.to_string()),
+                (CommitWatermark::new(100), "other".to_string()),
             ]
         );
     }
