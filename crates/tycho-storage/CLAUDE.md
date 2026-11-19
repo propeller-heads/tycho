@@ -23,16 +23,20 @@ postgres/
 ├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
 ├── orm.rs              — Diesel Queryable/Insertable structs for every table
 ├── schema.rs           — auto-generated Diesel table! macros
-└── instance/           — per-instance `tycho` schema, not yet read or written by the public gateways; callers run each read in one `snapshot_transaction`
+└── instance/           — per-instance `tycho` schema; written by gateways bound to an instance, not yet read by the public gateways; callers run each read in one `snapshot_transaction`
     ├── mod.rs          — `InstanceId` newtype; joins with the shared `public` tables
     ├── active.rs       — the active instance of one protocol and of all protocols, looked up once per read from `protocol_system.active_instance_id`
     ├── gateway.rs      — PostgresGatewayNew, inner gateway on the instance tables (renamed to PostgresGateway at cut-over)
+    ├── origins.rs      — BatchOrigins: block number, timestamp and tx index of each change in a batch
     ├── read/           — its read methods, one file per domain
     │   ├── component.rs — protocol components and their TVL from the active instance of each protocol
     │   ├── contract.rs — contracts, slots and account balances of a protocol's active instance at the latest version
     │   ├── state.rs    — protocol state and component balances of the active instance at the latest version
     │   ├── token.rs    — tokens, prices and token owners; tokens by `token.address`, owners and the traded filter from the active instances
     │   └── version.rs  — the check that the current tables can answer a version
+    ├── write/          — its write methods, one file per domain
+    │   ├── block.rs    — blocks, in the shared `public.block` table; the old gateway calls its SQL too
+    │   └── extraction_state.rs — cursor and last block of each instance
     ├── orm.rs          — Diesel row and insert structs for every `tycho` table
     ├── schema.rs       — auto-generated (`[print_schema.instance]` in diesel.toml)
     └── tests.rs        — schema behaviour: leaves, FKs, partition routing, history days
@@ -56,6 +60,13 @@ instances. No table has a DEFAULT partition.
   history tables.
 - `public.protocol_system.active_instance_id` records which instance readers see.
   `public.token.address` is how instance tables refer to tokens.
+- `CachedGateway::for_instance(id)` makes a gateway whose batches the write executor runs through
+  `execute_instance_write_op` on `PostgresGatewayNew`, instead of `execute_write_op` on the old
+  gateway. No transactions are stored: versioned rows take their block timestamp and tx index
+  from the batch (`instance::origins`), and `UpsertTx` writes nothing. It writes blocks and
+  `tycho.extraction_state` so far; any other op fails the whole batch with
+  `StorageError::Unsupported`. At cut-over, `execute_write_op` and the
+  old gateway are deleted, and `PostgresGatewayNew` is renamed.
 
 ## Architecture
 

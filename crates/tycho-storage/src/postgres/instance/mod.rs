@@ -14,17 +14,19 @@
 //! Tables in `public` (tokens, blocks, protocol types and names) stay shared; instance tables
 //! refer to them by natural key, with no foreign key.
 //!
-//! Nothing reads or writes these tables yet; the read and write paths move onto them in later
-//! changes.
+//! No public gateway reads these tables yet. A `CachedGateway` bound to an instance writes its
+//! batches into them; an op they don't take yet fails the whole batch.
 
 #[cfg_attr(not(test), expect(dead_code, reason = "no read of the instance tables uses them yet"))]
 pub mod active;
 #[cfg_attr(not(test), expect(dead_code, reason = "no public gateway calls it until cut-over"))]
 pub mod gateway;
+pub mod origins;
 pub mod orm;
 #[cfg_attr(not(test), expect(dead_code, reason = "no public gateway calls it until cut-over"))]
 mod read;
 pub mod schema;
+pub mod write;
 
 use std::fmt;
 
