@@ -6,9 +6,8 @@ use crate::{
     postgres,
     postgres::{
         cache::CachedGateway,
-        direct::DirectGateway,
+        instance::gateway::PostgresGatewayNew,
         pool::{spawn_status_gauges, DIRECT_POOL, EXTRACTION_POOL, POOL_STATUS_PERIOD, RPC_POOL},
-        PostgresGateway,
     },
 };
 
@@ -22,12 +21,15 @@ pub struct GatewayBuilder {
     component_index: bool,
 }
 
+#[cfg(old_gateway)]
 /// How often the token cache polls for token rows modified by other processes.
 const TOKEN_CACHE_REFRESH_PERIOD: std::time::Duration = std::time::Duration::from_secs(60);
 
+#[cfg(old_gateway)]
 /// How often the component index polls for new components and changed TVL.
 const COMPONENT_INDEX_REFRESH_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
 
+#[cfg(old_gateway)]
 /// How often the component index reads all components and TVL again, to correct what the polls
 /// cannot see (see the `component_index` module docs).
 const COMPONENT_INDEX_FULL_RELOAD_INTERVAL: std::time::Duration =
@@ -94,30 +96,19 @@ impl GatewayBuilder {
         postgres::ensure_protocol_systems(&self.protocol_systems, &mut conn).await;
         drop(conn);
 
-        let inner_gw = PostgresGateway::new(
-            pool.clone(),
-            self.retention_horizon,
-            self.token_cache
-                .then_some(self.chains.as_slice()),
-            self.component_index
-                .then(|| self.single_chain())
-                .transpose()?,
-        )
-        .await?;
-        spawn_refresh_tasks(&inner_gw, &pool);
+        let instance_gw = PostgresGatewayNew::new(pool.clone(), self.retention_horizon).await?;
         spawn_status_gauges(pool.clone(), EXTRACTION_POOL, POOL_STATUS_PERIOD);
         let (tx, rx) = mpsc::channel(10);
         let write_executor = postgres::cache::DBCacheWriteExecutor::new(
             chain.to_string(),
-            chain,
             pool.clone(),
-            inner_gw.clone(),
+            instance_gw,
             rx,
         )
         .await;
         let handle = write_executor.run();
 
-        let cached_gw = CachedGateway::new(tx, pool.clone(), inner_gw.clone());
+        let cached_gw = CachedGateway::new(tx, pool.clone());
         Ok((cached_gw, handle))
     }
 
@@ -137,25 +128,15 @@ impl GatewayBuilder {
 
     pub async fn build_gw(self) -> Result<CachedGateway, StorageError> {
         let pool = postgres::connect(&self.database_url).await?;
-
-        let inner_gw = PostgresGateway::new(
-            pool.clone(),
-            self.retention_horizon,
-            self.token_cache
-                .then_some(self.chains.as_slice()),
-            self.component_index
-                .then(|| self.single_chain())
-                .transpose()?,
-        )
-        .await?;
-        spawn_refresh_tasks(&inner_gw, &pool);
         let (tx, _) = mpsc::channel(10);
 
-        let cached_gw = CachedGateway::new(tx, pool.clone(), inner_gw);
-        Ok(cached_gw)
+        Ok(CachedGateway::new(tx, pool))
     }
 
-    pub async fn build_direct_gw(self) -> Result<DirectGateway, StorageError> {
+    /// Builds a gateway for request handling, with no database writer.
+    ///
+    /// While the old gateway is off, this is a [`CachedGateway`] whose reads fail.
+    pub async fn build_direct_gw(self) -> Result<CachedGateway, StorageError> {
         let chain = self.single_chain()?;
         let pool = postgres::new_rpc_pool(&self.database_url)?;
         postgres::run_migrations(&self.database_url);
@@ -167,24 +148,14 @@ impl GatewayBuilder {
         postgres::ensure_protocol_systems(&self.protocol_systems, &mut conn).await;
         drop(conn);
 
-        let inner_gw = PostgresGateway::new(
-            pool.clone(),
-            self.retention_horizon,
-            self.token_cache
-                .then_some(self.chains.as_slice()),
-            self.component_index
-                .then(|| self.single_chain())
-                .transpose()?,
-        )
-        .await?;
-        spawn_refresh_tasks(&inner_gw, &pool);
         spawn_status_gauges(pool.clone(), DIRECT_POOL, POOL_STATUS_PERIOD);
+        let (tx, _) = mpsc::channel(10);
 
-        let direct_gw = DirectGateway::new(pool.clone(), inner_gw, chain);
-        Ok(direct_gw)
+        Ok(CachedGateway::new(tx, pool))
     }
 }
 
+#[cfg(old_gateway)]
 fn spawn_refresh_tasks(
     gateway: &PostgresGateway,
     pool: &diesel_async::pooled_connection::deadpool::Pool<diesel_async::AsyncPgConnection>,
