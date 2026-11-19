@@ -1906,6 +1906,35 @@ mod test_serial_db {
         .await;
     }
 
+    #[test_log::test(tokio::test)]
+    async fn test_batch_without_instance_writes_nothing() {
+        run_against_db(|connection_pool| async move {
+            let (instance_gw, _instance, handle) = setup_instance_gateway(&connection_pool).await;
+            let cached_gw = CachedGateway { instance: None, ..instance_gw.new_instance() };
+            let block_1 = get_sample_block(1);
+
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+            let res = cached_gw.commit_transaction(0).await;
+            handle.abort();
+
+            assert!(matches!(res, Err(StorageError::Unsupported(_))), "{res:?}");
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            assert!(stored_block_hashes(&mut connection)
+                .await
+                .is_empty());
+        })
+        .await;
+    }
+
     /// Hashes of the stored blocks.
     async fn stored_block_hashes(conn: &mut AsyncPgConnection) -> Vec<Bytes> {
         schema::block::table
