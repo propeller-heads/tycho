@@ -213,6 +213,11 @@ where
         guard.tokens = tokens;
     }
 
+    /// Returns read access to the decoder's token metadata, keyed by token address.
+    pub(crate) async fn tokens(&self) -> RwLockReadGuard<'_, HashMap<Bytes, Token>> {
+        RwLockReadGuard::map(self.state.read().await, |state| &state.tokens)
+    }
+
     pub fn skip_state_decode_failures(&mut self, skip: bool) {
         self.skip_state_decode_failures = skip;
     }
