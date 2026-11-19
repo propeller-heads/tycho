@@ -822,7 +822,7 @@ mod test {
     #[case::ids(ids_filter())]
     #[case::tvl(tvl_filter())]
     fn test_filter_updated_paused(#[case] filter: ComponentFilter) {
-        let tracker = new_tracker(filter, &["pool"]);
+        let mut tracker = new_tracker(filter, &["pool"]);
 
         let (to_add, to_remove) =
             tracker.filter_updated_components(&block_changes(&["pool"], &[], &[]));
@@ -847,7 +847,7 @@ mod test {
 
     #[test]
     fn test_filter_updated_unpaused_ids_case_insensitive() {
-        let tracker = new_tracker(ids_filter(), &[]);
+        let mut tracker = new_tracker(ids_filter(), &[]);
 
         let (to_add, _) = tracker.filter_updated_components(&block_changes(&[], &["Pool"], &[]));
 
@@ -862,7 +862,7 @@ mod test {
         #[case] filter: ComponentFilter,
         #[case] changes: BlockAggregatedChanges,
     ) {
-        let tracker = new_tracker(filter, &[]);
+        let mut tracker = new_tracker(filter, &[]);
 
         let (to_add, to_remove) = tracker.filter_updated_components(&changes);
 
@@ -872,7 +872,7 @@ mod test {
 
     #[test]
     fn test_filter_updated_tvl_and_pause_in_one_block() {
-        let tracker = new_tracker(tvl_filter(), &["pool"]);
+        let mut tracker = new_tracker(tvl_filter(), &["pool"]);
 
         let (to_add, to_remove) =
             tracker.filter_updated_components(&block_changes(&["pool"], &[], &[("pool", 20.0)]));
@@ -884,7 +884,7 @@ mod test {
     #[test]
     fn test_filter_updated_paused_in_earlier_block() {
         let mut tracker = new_tracker(tvl_filter(), &[]);
-        tracker.record_pause_events(&block_changes(&["pool"], &[], &[]));
+        tracker.filter_updated_components(&block_changes(&["pool"], &[], &[]));
 
         let (to_add, _) =
             tracker.filter_updated_components(&block_changes(&[], &[], &[("pool", 20.0)]));
@@ -895,8 +895,8 @@ mod test {
     #[test]
     fn test_filter_updated_unpaused_in_earlier_block() {
         let mut tracker = new_tracker(tvl_filter(), &[]);
-        tracker.record_pause_events(&block_changes(&["pool"], &[], &[]));
-        tracker.record_pause_events(&block_changes(&[], &["pool"], &[]));
+        tracker.filter_updated_components(&block_changes(&["pool"], &[], &[]));
+        tracker.filter_updated_components(&block_changes(&[], &["pool"], &[]));
 
         let (to_add, _) =
             tracker.filter_updated_components(&block_changes(&[], &[], &[("pool", 20.0)]));
