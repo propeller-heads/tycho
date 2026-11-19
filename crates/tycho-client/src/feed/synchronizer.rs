@@ -601,8 +601,8 @@ where
             // Messages keep arriving during the delay, so we discard them instead of sleeping:
             // a sleep would overflow the subscription buffer on fast chains.
             let mut snapshot_not_before: Option<Instant> = None;
-            // Components unpaused by a message consumed while starting and not paused again by a
-            // later one.
+            // Components unpaused by a message consumed while starting. The tracker skips the ones
+            // a later message paused again.
             let mut unpaused_while_starting: HashSet<String> = HashSet::new();
             let (msg, header) = 'init: loop {
                 let mut warned_waiting_for_new_block = false;
@@ -631,9 +631,6 @@ where
 
                     // The server sends each pause once, so record it even from a skipped message.
                     self.component_tracker.record_pause_events(&msg);
-                    for id in &msg.paused_components {
-                        unpaused_while_starting.remove(id);
-                    }
                     unpaused_while_starting.extend(msg.unpaused_components.iter().cloned());
 
                     let incoming: BlockHeader = (&msg).into();
