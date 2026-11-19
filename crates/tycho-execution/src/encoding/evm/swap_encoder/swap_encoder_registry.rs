@@ -549,10 +549,9 @@ mod tests {
 
     #[test]
     fn test_registry_configured_with_subsidizing_executor_without_payer() {
-        let executors =
-            r#"{"ethereum": {"subsidy": "0x1111111111111111111111111111111111111111"}}"#;
+        let executors = r#"{"polygon": {"subsidy": "0x1111111111111111111111111111111111111111"}}"#;
 
-        let result = SwapEncoderRegistry::new(Chain::Ethereum)
+        let result = SwapEncoderRegistry::new(Chain::Polygon)
             .add_default_encoders(Some(executors.to_string()));
 
         assert!(
