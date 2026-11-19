@@ -69,6 +69,17 @@ pub async fn bound_snapshot_reads(conn: &mut AsyncPgConnection) -> Result<(), Po
     Ok(())
 }
 
+/// Plans every later statement of the current transaction with its bound values, so Postgres plans
+/// and locks only the instance leaves the values name. The setting ends with the transaction.
+#[cfg_attr(not(test), expect(dead_code, reason = "no read cache calls it until cut-over"))]
+pub async fn force_custom_plans(conn: &mut AsyncPgConnection) -> Result<(), PostgresError> {
+    diesel::sql_query("SELECT set_config('plan_cache_mode', 'force_custom_plan', true)")
+        .execute(conn)
+        .await
+        .map_err(PostgresError::from)?;
+    Ok(())
+}
+
 /// Subquery for the ids of the live accounts of a chain: not deleted, with a live code row.
 fn account_ids(chain_id: i64) -> schema::account::BoxedQuery<'static, Pg, BigInt> {
     schema::account::table
@@ -1089,5 +1100,54 @@ mod test_serial_db {
             assert_eq!(after, before, "the pooled connection keeps its own timeout");
         })
         .await;
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use diesel::{sql_query, sql_types::Text, QueryableByName};
+    use diesel_async::{
+        scoped_futures::ScopedFutureExt, AsyncConnection, AsyncPgConnection, RunQueryDsl,
+    };
+
+    use super::*;
+
+    #[derive(QueryableByName)]
+    struct PlanCacheMode {
+        #[diesel(sql_type = Text)]
+        plan_cache_mode: String,
+    }
+
+    async fn plan_cache_mode(conn: &mut AsyncPgConnection) -> Result<String, PostgresError> {
+        Ok(sql_query("SHOW plan_cache_mode")
+            .get_result::<PlanCacheMode>(conn)
+            .await
+            .map_err(PostgresError::from)?
+            .plan_cache_mode)
+    }
+
+    #[tokio::test]
+    async fn test_force_custom_plans_ends_with_the_transaction() {
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests");
+        let mut conn = AsyncPgConnection::establish(&db_url)
+            .await
+            .unwrap();
+
+        let inside = snapshot_transaction(&mut conn)
+            .run(|conn| {
+                async move {
+                    force_custom_plans(conn).await?;
+                    plan_cache_mode(conn).await
+                }
+                .scope_boxed()
+            })
+            .await
+            .unwrap();
+        let after = plan_cache_mode(&mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(inside, "force_custom_plan");
+        assert_eq!(after, "auto");
     }
 }

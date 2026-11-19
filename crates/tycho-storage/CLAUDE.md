@@ -28,6 +28,9 @@ postgres/
     ├── active.rs       — the active instance of one protocol and of all protocols, looked up once per read from `protocol_system.active_instance_id`
     ├── gateway.rs      — PostgresGatewayNew, inner gateway on the instance tables (renamed to PostgresGateway at cut-over)
     ├── origins.rs      — BatchOrigins: block number, timestamp and tx index of each change in a batch
+    ├── cache/          — read caches of PostgresGatewayNew, one unit per active instance; nothing loads them before cut-over
+    │   ├── token_store.rs — token list, address map and quality bitmaps; also used by `postgres/token_cache.rs`
+    │   └── token.rs    — token cache; trade times per instance unit
     ├── read/           — its read methods, one file per domain
     │   ├── component.rs — protocol components and their TVL from the active instance of each protocol
     │   ├── contract.rs — contracts, slots and account balances of a protocol's active instance at the latest version
@@ -108,6 +111,13 @@ the `index` and `rpc` commands, on by default). Kept fresh by a 1 s poll of new 
 of `component_tvl` rows with a newer `modified_ts` (`idx_component_tvl_modified_ts`), and a full
 reload every hour. See the module docs for design and for the unexpected cases only the full
 reload corrects.
+
+The new token cache (`instance/cache/token.rs`) loads in one `snapshot_transaction` with bounded
+reads and `force_custom_plans`: `active_protocols` and the token rows come from one snapshot.
+`PostgresGatewayNew::with_token_cache` gives it to the gateway, and `get_tokens` then answers from
+it. The write-through (`add_tokens`, `upsert_tokens`, `update_last_traded`) updates the cache. Only
+`update_last_traded` takes the instance.
+`refresh` polls `public.token` for out-of-process writers.
 
 Every gateway checkout and the DB writer checkout go through `pool::checkout`. It opens a
 `db_pool_checkout` span and records the wait in `db_pool_checkout_duration_seconds{pool}`. The

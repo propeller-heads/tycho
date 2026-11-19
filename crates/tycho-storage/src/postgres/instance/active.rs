@@ -89,6 +89,20 @@ pub async fn active_instance_ids(
         .map_err(PostgresError::from)?)
 }
 
+/// The protocol systems that have an active instance, each with that instance, in instance id
+/// order. Empty if no protocol system has one.
+pub async fn active_protocols(
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<(String, InstanceId)>, StorageError> {
+    Ok(protocol_system::table
+        .filter(protocol_system::active_instance_id.is_not_null())
+        .order(protocol_system::active_instance_id)
+        .select((protocol_system::name, protocol_system::active_instance_id.assume_not_null()))
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
@@ -189,6 +203,37 @@ mod tests {
 
         assert_eq!(
             active_instance_ids(&mut conn)
+                .await
+                .unwrap(),
+            Vec::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_active_protocols_lists_names_with_their_instance() {
+        let mut conn = instance_test_connection().await;
+        let setup = setup_protocols(&mut conn).await;
+
+        assert_eq!(
+            active_protocols(&mut conn)
+                .await
+                .unwrap(),
+            vec![
+                ("vm:curve".to_string(), setup.curve),
+                ("uniswap_v4".to_string(), setup.uniswap_v4)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_active_protocols_is_empty_without_pointers() {
+        let mut conn = instance_test_connection().await;
+        let setup = setup_protocols(&mut conn).await;
+        db_fixtures::set_active_instance(&mut conn, setup.curve_system_id, None).await;
+        db_fixtures::set_active_instance(&mut conn, setup.uniswap_v4_system_id, None).await;
+
+        assert_eq!(
+            active_protocols(&mut conn)
                 .await
                 .unwrap(),
             Vec::new()

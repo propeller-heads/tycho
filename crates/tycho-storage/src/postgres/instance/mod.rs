@@ -19,6 +19,7 @@
 
 #[cfg_attr(not(test), expect(dead_code, reason = "no read of the instance tables uses them yet"))]
 pub mod active;
+pub mod cache;
 #[cfg_attr(not(test), expect(dead_code, reason = "no public gateway calls it until cut-over"))]
 pub mod gateway;
 pub mod origins;

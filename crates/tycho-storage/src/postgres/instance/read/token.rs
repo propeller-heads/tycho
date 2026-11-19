@@ -17,6 +17,7 @@ use crate::postgres::{
     compare_balances, count_to_i64,
     instance::{
         active::active_instance_ids,
+        cache::token_store::TokenQuery,
         gateway::PostgresGatewayNew,
         schema::tycho::{component_balance, protocol_component, protocol_instance},
     },
@@ -46,6 +47,20 @@ impl PostgresGatewayNew {
         conn: &mut AsyncPgConnection,
     ) -> Result<WithTotal<Vec<Token>>, StorageError> {
         self.get_chain_id(&chain)?;
+        if let Some(cache) = &self.token_cache {
+            return cache.query_tokens(&TokenQuery {
+                chain,
+                addresses: address.map(|addresses| {
+                    addresses
+                        .iter()
+                        .map(|address| (*address).clone())
+                        .collect()
+                }),
+                quality_range: quality,
+                last_traded_ts_threshold: traded_n_days_ago,
+                pagination: pagination_params.cloned(),
+            });
+        }
         let instances = match traded_n_days_ago {
             Some(_) => active_instance_ids(conn).await?,
             None => Vec::new(),
@@ -193,8 +208,8 @@ impl PostgresGatewayNew {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
+pub mod tests {
+    use std::{collections::HashMap, sync::Arc};
 
     use chrono::{NaiveDate, NaiveDateTime};
     use diesel::prelude::*;
@@ -211,26 +226,27 @@ mod tests {
 
     use crate::postgres::{
         db_fixtures,
-        instance::{gateway::PostgresGatewayNew, InstanceId},
+        instance::{cache::token::TokenCache, gateway::PostgresGatewayNew, InstanceId},
         schema,
         testing::instance_test_connection,
     };
 
-    const A: &str = "0x00000000000000000000000000000000000000a1";
-    const B: &str = "0x00000000000000000000000000000000000000b1";
-    const C: &str = "0x00000000000000000000000000000000000000c1";
+    pub const A: &str = "0x00000000000000000000000000000000000000a1";
+    pub const B: &str = "0x00000000000000000000000000000000000000b1";
+    pub const C: &str = "0x00000000000000000000000000000000000000c1";
 
-    struct Setup {
-        gateway: PostgresGatewayNew,
-        chain_id: i64,
-        active: InstanceId,
-        inactive: InstanceId,
-        uniswap_v4: InstanceId,
+    pub struct Setup {
+        pub gateway: PostgresGatewayNew,
+        pub chain_id: i64,
+        pub curve_system_id: i64,
+        pub active: InstanceId,
+        pub inactive: InstanceId,
+        pub uniswap_v4: InstanceId,
     }
 
     /// "vm:curve" and "uniswap_v4" on ethereum, each pointing to an instance. "vm:curve" has a
     /// second `ready` instance it does not point to.
-    async fn setup(conn: &mut AsyncPgConnection) -> Setup {
+    pub async fn setup(conn: &mut AsyncPgConnection) -> Setup {
         let chain_id = db_fixtures::insert_chain(conn, "ethereum").await;
         let curve_system_id =
             db_fixtures::insert_protocol_system(conn, "vm:curve".to_string()).await;
@@ -242,11 +258,11 @@ mod tests {
         db_fixtures::set_active_instance(conn, curve_system_id, Some(active)).await;
         db_fixtures::set_active_instance(conn, uniswap_v4_system_id, Some(uniswap_v4)).await;
         let gateway = PostgresGatewayNew::from_connection(conn).await;
-        Setup { gateway, chain_id, active, inactive, uniswap_v4 }
+        Setup { gateway, chain_id, curve_system_id, active, inactive, uniswap_v4 }
     }
 
     /// Inserts a token at the `0x`-prefixed `address` and returns its id.
-    async fn token(
+    pub async fn token(
         conn: &mut AsyncPgConnection,
         chain_id: i64,
         address: &str,
@@ -265,7 +281,7 @@ mod tests {
     }
 
     /// Inserts the pool `external_id` of the instance with a balance of `token`.
-    async fn pool(
+    pub async fn pool(
         conn: &mut AsyncPgConnection,
         instance: InstanceId,
         external_id: &str,
@@ -294,11 +310,11 @@ mod tests {
         }
     }
 
-    fn b(hex: &str) -> Bytes {
+    pub fn b(hex: &str) -> Bytes {
         Bytes::from(hex)
     }
 
-    fn addresses(tokens: &[Token]) -> Vec<Address> {
+    pub fn addresses(tokens: &[Token]) -> Vec<Address> {
         tokens
             .iter()
             .map(|token| token.address.clone())
@@ -535,5 +551,39 @@ mod tests {
             .unwrap();
 
         assert_eq!(owners, HashMap::from([(b(A), owner("vm:curve", "pool", "0x01"))]));
+    }
+
+    #[tokio::test]
+    async fn test_get_tokens_reads_the_token_cache() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        token(&mut conn, s.chain_id, A, "A", 100).await;
+        let cache = TokenCache::load(Chain::Ethereum, &mut conn)
+            .await
+            .expect("loading the token cache failed");
+        let g = "0x00000000000000000000000000000000000000f1";
+        token(&mut conn, s.chain_id, g, "G", 100).await;
+        let cached = s
+            .gateway
+            .with_token_cache(Arc::new(cache));
+        let uncached = PostgresGatewayNew::from_connection(&mut conn).await;
+
+        let from_cache = cached
+            .get_tokens(Chain::Ethereum, None, QualityRange::None(), None, None, &mut conn)
+            .await
+            .unwrap();
+        let from_sql = uncached
+            .get_tokens(Chain::Ethereum, None, QualityRange::None(), None, None, &mut conn)
+            .await
+            .unwrap();
+
+        let symbols = |tokens: &[Token]| {
+            tokens
+                .iter()
+                .map(|token| token.symbol.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(symbols(&from_cache.entity), vec!["A"]);
+        assert_eq!(symbols(&from_sql.entity), vec!["A", "G"]);
     }
 }
