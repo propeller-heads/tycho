@@ -5337,12 +5337,14 @@ mod test {
             .component_tracker
             .record_pause_events(&pause);
 
-        let removed = state_sync
-            .apply_missed_pauses(&header_of(&make_block_changes(1, None)), &HashSet::new())
+        state_sync
+            .apply_missed_pauses(&header_of(&make_block_changes(1, None)))
             .await
             .expect("apply missed pauses");
 
-        assert!(removed.is_empty());
+        assert!(state_sync
+            .removed_while_starting
+            .is_empty());
         assert!(state_sync
             .component_tracker
             .components
@@ -5371,7 +5373,7 @@ mod test {
         state_sync.last_synced_block = Some(header_of(&make_block_changes(1, None)));
 
         state_sync
-            .apply_missed_pauses(&header_of(&make_block_changes(5, None)), &HashSet::new())
+            .apply_missed_pauses(&header_of(&make_block_changes(5, None)))
             .await
             .expect("apply missed pauses");
 
@@ -5393,12 +5395,10 @@ mod test {
             MockDeltasClient::new(),
         );
         state_sync.last_synced_block = Some(header_of(&make_block_changes(1, None)));
+        state_sync.unpaused_while_starting = HashSet::from(["pool".to_string()]);
 
         state_sync
-            .apply_missed_pauses(
-                &header_of(&make_block_changes(2, None)),
-                &HashSet::from(["pool".to_string()]),
-            )
+            .apply_missed_pauses(&header_of(&make_block_changes(2, None)))
             .await
             .expect("apply missed pauses");
 
@@ -5407,6 +5407,89 @@ mod test {
             .components
             .is_empty());
         assert_eq!(state_sync.snapshot_queue.get("pool"), Some(&SnapshotStatus::Backoff));
+    }
+
+    /// A restart stops tracking "Pool", which the server reports as paused, and its first attempt
+    /// fails. The retry finds "Pool" already stopped, yet still reports it as removed.
+    #[tokio::test]
+    async fn test_apply_missed_pauses_retry_keeps_removed() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                let pool = ProtocolComponent { id: "Pool".to_string(), ..Default::default() };
+                let components =
+                    ComponentsWithPauses::new(vec![pool], HashSet::from(["Pool".to_string()]));
+                Ok(Page::new(components, 1, 0, 100))
+            });
+        let mut state_sync = with_filter(
+            ComponentFilter::with_tvl_range(5.0, 10.0),
+            rpc_client,
+            MockDeltasClient::new(),
+        );
+        let pool = ProtocolComponent { id: "Pool".to_string(), ..Default::default() };
+        state_sync
+            .component_tracker
+            .components
+            .insert("Pool".to_string(), pool);
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(1, None)));
+        state_sync
+            .apply_missed_pauses(&header_of(&make_block_changes(5, None)))
+            .await
+            .expect("first attempt");
+
+        state_sync
+            .apply_missed_pauses(&header_of(&make_block_changes(6, None)))
+            .await
+            .expect("retry");
+
+        assert_eq!(
+            state_sync
+                .removed_while_starting
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["Pool"]
+        );
+    }
+
+    /// "pool" was unpaused while starting, and the first attempt fails to start tracking it. The
+    /// retry tracks it.
+    #[tokio::test]
+    async fn test_apply_missed_pauses_retry_keeps_unpaused() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .times(1)
+            .returning(|_| Err(RPCError::Fatal("server unreachable".to_string())));
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                let pool = ProtocolComponent { id: "pool".to_string(), ..Default::default() };
+                Ok(Page::new(none_paused(vec![pool]), 1, 0, 100))
+            });
+        let mut state_sync = with_filter(
+            ComponentFilter::Ids(vec!["pool".to_string()]),
+            rpc_client,
+            MockDeltasClient::new(),
+        );
+        state_sync.unpaused_while_starting = HashSet::from(["pool".to_string()]);
+        let first_header = header_of(&make_block_changes(1, None));
+        state_sync
+            .apply_missed_pauses(&first_header)
+            .await
+            .expect_err("first attempt fails");
+
+        state_sync
+            .apply_missed_pauses(&first_header)
+            .await
+            .expect("retry");
+
+        assert_eq!(
+            state_sync
+                .component_tracker
+                .get_tracked_component_ids(),
+            vec!["pool"]
+        );
     }
 
     /// Runs `state_sync` until its first message, then shuts it down.
