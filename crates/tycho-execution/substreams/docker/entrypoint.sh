@@ -5,7 +5,8 @@
 #                     START_BLOCK, STOP_BLOCK, FLUSH_INTERVAL (default 100), METRICS_ADDR,
 #                     TYCHO_S3_BUCKET, SPKG_CACHE_DIR
 #   entrypoint price  DSN, TYCHO_<CHAIN>_DATABASE_URL...; optional MAX_AGE (default "1 hour"),
-#                     INTERVAL (default 60), LOCAL_PRICING=1 for local stand-in tables
+#                     INTERVAL (default 60), VAULT_SNAPSHOT_INTERVAL (default 600),
+#                     LOCAL_PRICING=1 for local stand-in tables
 #
 # Both modes wait for the database first, so the container can start together with Postgres.
 # `sink` applies schema.sql with `substreams-sink-sql setup`; `price` registers the postgres_fdw
