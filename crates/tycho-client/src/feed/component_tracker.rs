@@ -875,51 +875,36 @@ mod test {
         assert_eq!(to_remove, vec!["pool".to_string()]);
     }
 
+    /// "pool" was paused by an earlier block; `changes` unpauses a component.
     #[rstest::rstest]
-    #[case::ids(ids_filter())]
-    #[case::tvl(tvl_filter())]
-    fn test_filter_updated_unpaused(#[case] filter: ComponentFilter) {
+    #[case::ids(ids_filter(), block_changes(&[], &["pool"], &[]), &["pool"])]
+    #[case::mixed_case_id(ids_filter(), block_changes(&[], &["Pool"], &[]), &["Pool"])]
+    #[case::not_in_ids(ids_filter(), block_changes(&[], &["other_pool"], &[]), &[])]
+    #[case::above_tvl(tvl_filter(), block_changes(&[], &["pool"], &[("pool", 20.0)]), &["pool"])]
+    #[case::below_tvl(tvl_filter(), block_changes(&[], &["pool"], &[("pool", 7.0)]), &[])]
+    #[case::no_tvl(tvl_filter(), block_changes(&[], &["pool"], &[]), &[])]
+    fn test_filter_updated_unpaused(
+        #[case] filter: ComponentFilter,
+        #[case] changes: BlockAggregatedChanges,
+        #[case] expected_add: &[&str],
+    ) {
         let mut tracker = new_tracker(filter, &[]);
         tracker.record_pause_events(&block_changes(&["pool"], &[], &[]));
 
-        let (to_add, to_remove) =
-            tracker.filter_updated_components(&block_changes(&[], &["pool"], &[("pool", 20.0)]));
+        let (to_add, to_remove) = tracker.filter_updated_components(&changes);
 
-        assert_eq!(to_add, vec!["pool".to_string()]);
+        assert_eq!(to_add, expected_add);
         assert!(to_remove.is_empty());
-    }
-
-    #[test]
-    fn test_filter_updated_unpaused_ids_case_insensitive() {
-        let mut tracker = new_tracker(ids_filter(), &[]);
-
-        let (to_add, _) = tracker.filter_updated_components(&block_changes(&[], &["Pool"], &[]));
-
-        assert_eq!(to_add, vec!["Pool".to_string()]);
     }
 
     #[rstest::rstest]
-    #[case::not_in_ids(ids_filter(), block_changes(&[], &["other_pool"], &[]))]
-    #[case::below_tvl(tvl_filter(), block_changes(&[], &["pool"], &[("pool", 7.0)]))]
-    #[case::no_tvl(tvl_filter(), block_changes(&[], &["pool"], &[]))]
-    fn test_filter_updated_unpaused_rejected(
-        #[case] filter: ComponentFilter,
-        #[case] changes: BlockAggregatedChanges,
-    ) {
-        let mut tracker = new_tracker(filter, &[]);
-
-        let (to_add, to_remove) = tracker.filter_updated_components(&changes);
-
-        assert!(to_add.is_empty());
-        assert!(to_remove.is_empty());
-    }
-
-    #[test]
-    fn test_filter_updated_tvl_and_pause_in_one_block() {
+    #[case::above_add_tvl(20.0)]
+    #[case::below_remove_tvl(1.0)]
+    fn test_filter_updated_tvl_and_pause_in_one_block(#[case] tvl: f64) {
         let mut tracker = new_tracker(tvl_filter(), &["pool"]);
 
         let (to_add, to_remove) =
-            tracker.filter_updated_components(&block_changes(&["pool"], &[], &[("pool", 20.0)]));
+            tracker.filter_updated_components(&block_changes(&["pool"], &[], &[("pool", tvl)]));
 
         assert!(to_add.is_empty());
         assert_eq!(to_remove, vec!["pool".to_string()]);
@@ -1004,8 +989,8 @@ mod test {
         assert!(tracker.paused.contains("pool"));
     }
 
-    /// A TVL-filter pool that is remembered as paused is not tracked, so only the remembered
-    /// pause can make the refresh ask about it.
+    /// With a TVL filter, a paused component is not tracked, so the refresh asks about it only
+    /// because it is recorded as paused.
     #[tokio::test]
     async fn test_refresh_paused_untracked_pool() {
         let mut tracker = new_tracker(tvl_filter(), &[]);
