@@ -964,4 +964,25 @@ mod test {
         assert!(tracker.components.is_empty());
         assert!(tracker.paused.contains("pool"));
     }
+
+    /// A TVL-filter pool that is remembered as paused is not tracked, so only the remembered
+    /// pause can make the refresh ask about it.
+    #[tokio::test]
+    async fn test_refresh_paused_untracked_pool() {
+        let mut tracker = new_tracker(tvl_filter(), &[]);
+        tracker.record_pause_events(&block_changes(&["pool"], &[], &[]));
+        let pool = ProtocolComponent { id: "pool".to_string(), ..Default::default() };
+        tracker
+            .rpc_client
+            .expect_get_protocol_components_paginated()
+            .returning(move |_| Ok(none_paused(vec![pool.clone()])));
+
+        let unpaused = tracker
+            .refresh_paused()
+            .await
+            .expect("refresh paused");
+
+        assert_eq!(unpaused, HashSet::from(["pool".to_string()]));
+        assert!(!tracker.paused.contains("pool"));
+    }
 }

@@ -3998,20 +3998,27 @@ mod test {
 
     /// Returns a deltas client whose subscription emits `blocks` 50 ms apart.
     fn mock_deltas_emitting(blocks: Vec<u64>) -> MockDeltasClient {
+        mock_deltas_sending(
+            blocks
+                .into_iter()
+                .map(|block| make_block_changes(block, None))
+                .collect(),
+        )
+    }
+
+    fn mock_deltas_sending(messages: Vec<BlockAggregatedChanges>) -> MockDeltasClient {
         let mut deltas_client = MockDeltasClient::new();
         let (tx, rx) = channel(128);
         deltas_client
             .expect_subscribe()
             .return_once(move |_, _| {
                 tokio::spawn(async move {
-                    for block in blocks {
+                    for message in messages {
                         #[expect(
                             clippy::let_underscore_must_use,
                             reason = "the outcome is not under test"
                         )]
-                        let _ = tx
-                            .send(make_block_changes(block, None))
-                            .await;
+                        let _ = tx.send(message).await;
                         sleep(Duration::from_millis(50)).await;
                     }
                 });
@@ -5243,6 +5250,225 @@ mod test {
         harness.close().await;
 
         assert!(fetched_batches.is_empty());
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_partial_mode_applies_pause_from_skipped_message() {
+        let (rpc_client, deltas_client, tx) = mock_clients_for_state_sync(None);
+        let mut state_sync = with_mocked_clients(true, true, Some(rpc_client), Some(deltas_client))
+            .with_partial_blocks(true);
+        state_sync
+            .initialize()
+            .await
+            .expect("Init failed");
+        let (handle, mut block_rx) = state_sync.start().await;
+        let (jh, close_tx) = handle.split();
+
+        let mut pause = make_block_changes(1, Some(0));
+        pause.paused_components = HashSet::from(["Component1".to_string()]);
+        tx.send(pause).await.unwrap();
+        let mut first = make_block_changes(2, Some(0));
+        first.component_tvl =
+            HashMap::from([("Component1".to_string(), 100.0), ("Component2".to_string(), 100.0)]);
+        tx.send(first).await.unwrap();
+        let msg = timeout(Duration::from_millis(100), block_rx.recv())
+            .await
+            .expect("Should receive message")
+            .expect("Channel open")
+            .expect("No error");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
+        let _ = close_tx.send(());
+        jh.await.expect("Task should not panic");
+
+        let tvl = msg
+            .deltas
+            .expect("First message has deltas")
+            .component_tvl;
+        assert_eq!(tvl.keys().collect::<Vec<_>>(), vec!["Component2"]);
+    }
+
+    fn with_filter(
+        filter: ComponentFilter,
+        rpc_client: MockRPCClient,
+        deltas_client: MockDeltasClient,
+    ) -> ProtocolStateSynchronizer<ArcRPCClient<MockRPCClient>, ArcDeltasClient<MockDeltasClient>>
+    {
+        ProtocolStateSynchronizer::new(
+            ExtractorIdentity::new(Chain::Ethereum, "uniswap-v2"),
+            true,
+            filter,
+            1,
+            Duration::from_secs(0),
+            true,
+            false,
+            true,
+            ArcRPCClient(Arc::new(rpc_client)),
+            ArcDeltasClient(Arc::new(deltas_client)),
+            10_u64,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_apply_missed_pauses_first_start() {
+        let mut state_sync = with_filter(
+            ComponentFilter::with_tvl_range(5.0, 10.0),
+            MockRPCClient::new(),
+            MockDeltasClient::new(),
+        );
+        let pool = ProtocolComponent { id: "Pool".to_string(), ..Default::default() };
+        state_sync
+            .component_tracker
+            .components
+            .insert("Pool".to_string(), pool);
+        let mut pause = make_block_changes(1, None);
+        pause.paused_components = HashSet::from(["Pool".to_string()]);
+        state_sync
+            .component_tracker
+            .record_pause_events(&pause);
+
+        let removed = state_sync
+            .apply_missed_pauses(&header_of(&make_block_changes(1, None)), &HashSet::new())
+            .await
+            .expect("apply missed pauses");
+
+        assert!(removed.is_empty());
+        assert!(state_sync
+            .component_tracker
+            .components
+            .is_empty());
+    }
+
+    /// With an id filter, a pool unpaused during the gap before a restart is tracked again.
+    #[tokio::test]
+    async fn test_apply_missed_pauses_restart_tracks_unpaused() {
+        let pool = || ProtocolComponent { id: "pool".to_string(), ..Default::default() };
+        // Serves both the restart's paged request and the request to start tracking.
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(move |_| Ok(Page::new(none_paused(vec![pool()]), 1, 0, 100)));
+        let mut state_sync = with_filter(
+            ComponentFilter::Ids(vec!["pool".to_string()]),
+            rpc_client,
+            MockDeltasClient::new(),
+        );
+        let mut pause = make_block_changes(1, None);
+        pause.paused_components = HashSet::from(["pool".to_string()]);
+        state_sync
+            .component_tracker
+            .record_pause_events(&pause);
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(1, None)));
+
+        state_sync
+            .apply_missed_pauses(&header_of(&make_block_changes(5, None)), &HashSet::new())
+            .await
+            .expect("apply missed pauses");
+
+        assert_eq!(
+            state_sync
+                .component_tracker
+                .get_tracked_component_ids(),
+            vec!["pool"]
+        );
+    }
+
+    /// Runs `state_sync` until its first message, then shuts it down.
+    async fn first_message(
+        mut state_sync: ProtocolStateSynchronizer<
+            ArcRPCClient<MockRPCClient>,
+            ArcDeltasClient<MockDeltasClient>,
+        >,
+    ) -> StateSyncMessage<BlockHeader> {
+        let (block_tx, mut block_rx) = channel(10);
+        let (end_tx, end_rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            state_sync
+                .state_sync(&block_tx, end_rx, Duration::ZERO)
+                .await
+        });
+        let msg = timeout(Duration::from_millis(500), block_rx.recv())
+            .await
+            .expect("Should receive the first message")
+            .expect("Channel should be open")
+            .expect("Should not be an error");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
+        let _ = end_tx.send(());
+        handle
+            .await
+            .expect("Task should not panic")
+            .expect("state sync should end without an error");
+        msg
+    }
+
+    #[tokio::test]
+    async fn test_restart_reports_pool_paused_during_gap() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                let pool = ProtocolComponent { id: "Pool".to_string(), ..Default::default() };
+                let components =
+                    ComponentsWithPauses::new(vec![pool], HashSet::from(["Pool".to_string()]));
+                Ok(Page::new(components, 1, 0, 100))
+            });
+        let mut state_sync = with_filter(
+            ComponentFilter::with_tvl_range(5.0, 10.0),
+            rpc_client,
+            mock_deltas_emitting(vec![10]),
+        );
+        let pool = ProtocolComponent { id: "Pool".to_string(), ..Default::default() };
+        state_sync
+            .component_tracker
+            .components
+            .insert("Pool".to_string(), pool);
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(5, None)));
+
+        let msg = first_message(state_sync).await;
+
+        assert_eq!(
+            msg.removed_components
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["Pool"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_partial_mode_applies_unpause_from_skipped_message() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                let pool = ProtocolComponent { id: "pool".to_string(), ..Default::default() };
+                Ok(Page::new(none_paused(vec![pool]), 1, 0, 100))
+            });
+        rpc_client
+            .expect_get_snapshots()
+            .returning(|_, _, _| Ok(Snapshot::default()));
+        let mut unpause = make_block_changes(1, Some(0));
+        unpause.unpaused_components = HashSet::from(["pool".to_string()]);
+        let mut first = make_block_changes(2, Some(0));
+        first.component_tvl = HashMap::from([("pool".to_string(), 1.0)]);
+        let state_sync = with_filter(
+            ComponentFilter::Ids(vec!["pool".to_string()]),
+            rpc_client,
+            mock_deltas_sending(vec![unpause, first]),
+        )
+        .with_partial_blocks(true);
+
+        let msg = first_message(state_sync).await;
+
+        let tvl = msg
+            .deltas
+            .expect("First message has deltas")
+            .component_tvl;
+        assert_eq!(tvl.keys().collect::<Vec<_>>(), vec!["pool"]);
     }
 
     /// A snapshot task in flight for `component_id`, spawned now, and the sender that completes
