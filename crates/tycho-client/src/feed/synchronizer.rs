@@ -432,8 +432,7 @@ async fn fetch_snapshot_background<R: RPCClient>(
         .get_protocol_components(request)
         .await?
         .into_data()
-        .into_components()
-        .into_iter()
+        .into_not_paused()
         .map(|pc| (pc.id.clone(), pc))
         .collect();
 
