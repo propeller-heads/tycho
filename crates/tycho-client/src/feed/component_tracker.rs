@@ -433,6 +433,47 @@ where
             .extend(paused.iter().cloned());
     }
 
+    /// Asks the server which components are paused now, and remembers the answer. Call it after
+    /// missing blocks, since their pause and unpause events are lost.
+    ///
+    /// Asks about every tracked component and every component remembered as paused. Returns the
+    /// ids that were remembered as paused and no longer are.
+    pub(crate) async fn refresh_paused(&mut self) -> Result<HashSet<ComponentId>, RPCError> {
+        let mut ids: HashSet<ComponentId> = self
+            .components
+            .keys()
+            .cloned()
+            .collect();
+        ids.extend(self.paused.iter().cloned());
+        if ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let params = ProtocolComponentsPaginatedParams::new(
+            self.chain,
+            self.protocol_system.as_str(),
+            RPC_CLIENT_CONCURRENCY,
+        )
+        .with_component_ids(ids.into_iter().collect());
+        let response = self
+            .rpc_client
+            .get_protocol_components_paginated(params)
+            .await?;
+
+        let paused = response.paused_component_ids();
+        let unpaused: HashSet<ComponentId> = response
+            .components()
+            .iter()
+            .map(|component| &component.id)
+            .filter(|id| !paused.contains(*id) && self.paused.contains(*id))
+            .cloned()
+            .collect();
+        for id in &unpaused {
+            self.paused.remove(id);
+        }
+        self.record_paused(paused);
+        Ok(unpaused)
+    }
+
     /// Remembers the components a block pauses, and forgets the ones it unpauses.
     pub(crate) fn record_pause_events(&mut self, deltas: &BlockAggregatedChanges) {
         for id in &deltas.unpaused_components {
@@ -459,6 +500,21 @@ where
             components.remove(id);
         }
         dropped
+    }
+
+    /// Stops tracking the tracked components that are paused, logs them, and returns them.
+    pub(crate) fn stop_tracking_paused(&mut self) -> HashMap<ComponentId, ProtocolComponent> {
+        let paused: Vec<ComponentId> = self
+            .components
+            .keys()
+            .filter(|id| self.paused.contains(*id))
+            .cloned()
+            .collect();
+        if paused.is_empty() {
+            return HashMap::new();
+        }
+        self.log_paused(&paused, "Stopped tracking paused components");
+        self.stop_tracking(&paused)
     }
 
     /// Logs `message` with the paused `components`. With an id filter, the user asked for these

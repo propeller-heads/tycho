@@ -601,6 +601,8 @@ where
             // Messages keep arriving during the delay, so we discard them instead of sleeping:
             // a sleep would overflow the subscription buffer on fast chains.
             let mut snapshot_not_before: Option<Instant> = None;
+            // Components the messages consumed below unpause and no later one pauses again.
+            let mut unpaused_while_starting: HashSet<String> = HashSet::new();
             let (msg, header) = 'init: loop {
                 let mut warned_waiting_for_new_block = false;
                 let mut warned_skipping_synced = false;
@@ -625,6 +627,13 @@ where
                             return Ok(());
                         }
                     };
+
+                    // The server sends each pause once, so record it even from a skipped message.
+                    self.component_tracker.record_pause_events(&msg);
+                    for id in &msg.paused_components {
+                        unpaused_while_starting.remove(id);
+                    }
+                    unpaused_while_starting.extend(msg.unpaused_components.iter().cloned());
 
                     let incoming: BlockHeader = (&msg).into();
 
@@ -690,16 +699,18 @@ where
                     break msg;
                 };
 
+                let header: BlockHeader = (&first_msg).into();
+                let paused_components =
+                    self.apply_missed_pauses(&header, &unpaused_while_starting).await?;
                 self.filter_deltas(&mut first_msg);
 
                 // initial snapshot
                 info!(height = first_msg.get_block().number, "First deltas received");
-                let header: BlockHeader = (&first_msg).into();
                 let deltas_msg = StateSyncMessage {
                     header: header.clone(),
                     snapshots: Default::default(),
                     deltas: Some(first_msg),
-                    removed_components: Default::default(),
+                    removed_components: paused_components,
                 };
 
                 // If possible skip retrieving snapshots
@@ -1243,6 +1254,54 @@ where
         }
 
         result
+    }
+
+    /// Applies the pauses and unpauses the synchronizer has not acted on before its first message.
+    /// They come from the messages consumed while looking for the first block, whose unpauses are
+    /// in `unpaused`. On a restart after a gap, they also come from the missed blocks, which only
+    /// the server can tell.
+    ///
+    /// Starts tracking the unpaused components that pass the filter, and stops tracking the paused
+    /// ones. On a restart, returns the stopped components so the consumer drops them. On the first
+    /// start, returns none, because the consumer never received them.
+    async fn apply_missed_pauses(
+        &mut self,
+        first_header: &BlockHeader,
+        unpaused: &HashSet<String>,
+    ) -> Result<HashMap<String, ProtocolComponent>, SynchronizerError> {
+        let mut unpaused = unpaused.clone();
+        if self.last_synced_block.is_some() && !self.is_next_expected(first_header) {
+            unpaused.extend(
+                self.component_tracker
+                    .refresh_paused()
+                    .await?,
+            );
+        }
+
+        let changes =
+            BlockAggregatedChanges { unpaused_components: unpaused, ..Default::default() };
+        let (to_add, _) = self
+            .component_tracker
+            .filter_updated_components(&changes);
+        let to_add: Vec<&String> = to_add
+            .iter()
+            .filter(|id| {
+                !self
+                    .component_tracker
+                    .components
+                    .contains_key(id.as_str())
+            })
+            .collect();
+        if !to_add.is_empty() {
+            self.component_tracker
+                .start_tracking(&to_add)
+                .await?;
+        }
+
+        let removed = self
+            .component_tracker
+            .stop_tracking_paused();
+        Ok(if self.last_synced_block.is_some() { removed } else { HashMap::new() })
     }
 
     /// Records the components a finished background fetch found paused, and removes every paused
