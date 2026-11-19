@@ -3,9 +3,28 @@ pragma solidity ^0.8.26;
 import "../TychoRouterTestSetup.sol";
 import "@permit2/src/interfaces/IAllowanceTransfer.sol";
 import "@src/executors/UniswapV3Executor.sol";
-import {Constants} from "../Constants.sol";
+import {
+    ALICE,
+    BASE_USDC,
+    BASE_cbBTC,
+    BSC_WBNB,
+    Constants,
+    DAI_ADDR,
+    POLYGON_USDC,
+    POLYGON_WETH,
+    WETH_ADDR
+} from "../Constants.sol";
 import {Permit2TestHelper} from "../Permit2TestHelper.sol";
 import {Test} from "../../lib/forge-std/src/Test.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {DAI_WETH_USV3, UniswapV3Deployment} from "../deployments/UniswapV3.sol";
+
+address constant ARBITRUM_WETH = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1;
+address constant ARBITRUM_USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
+address constant BSC_WETH = 0x2170Ed0880ac9A755fd29B2688956BD959F933F8;
+//Pancakeswap v3
+address constant PANCAKESWAPV3_cbBTC_USDC_POOL =
+    0xb94b22332ABf5f89877A14Cc88f2aBC48c34B3Df;
 
 contract UniswapV3ExecutorExposed is UniswapV3Executor {
     constructor() UniswapV3Executor() {}
@@ -188,7 +207,10 @@ contract UniswapV3ExecutorTest is Test, TestUtils, Constants {
     }
 }
 
-contract TychoRouterForUniswapV3Test is TychoRouterTestSetup {
+contract TychoRouterForUniswapV3Test is
+    TychoRouterTestSetup,
+    UniswapV3Deployment
+{
     function testSingleSwapUSV3Permit2() public {
         // Trade 1 WETH for DAI with 1 swap on Uniswap V3 using Permit2
         // Tests entire USV3 flow including callback
@@ -206,8 +228,7 @@ contract TychoRouterForUniswapV3Test is TychoRouterTestSetup {
         bool zeroForOne = false;
         bytes memory protocolData =
             encodeUniswapV3Swap(WETH_ADDR, DAI_ADDR, DAI_WETH_USV3, zeroForOne);
-        bytes memory swap =
-            encodeSingleSwap(address(usv3Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV3Executor, protocolData);
 
         tychoRouter.singleSwapPermit2(
             amountIn,
@@ -253,7 +274,10 @@ contract TychoRouterForUniswapV3Test is TychoRouterTestSetup {
     }
 }
 
-contract TychoRouterForUniswapV3PolygonTest is TychoRouterTestSetup {
+contract TychoRouterForUniswapV3PolygonTest is
+    TychoRouterTestSetup,
+    UniswapV3Deployment
+{
     function getChain() public pure override returns (string memory) {
         return "polygon";
     }
@@ -282,7 +306,10 @@ contract TychoRouterForUniswapV3PolygonTest is TychoRouterTestSetup {
     }
 }
 
-contract TychoRouterForUniswapV3BscTest is TychoRouterTestSetup {
+contract TychoRouterForUniswapV3BscTest is
+    TychoRouterTestSetup,
+    UniswapV3Deployment
+{
     function getChain() public pure override returns (string memory) {
         return "bsc";
     }
@@ -311,7 +338,10 @@ contract TychoRouterForUniswapV3BscTest is TychoRouterTestSetup {
     }
 }
 
-contract TychoRouterForUniswapV3ArbitrumTest is TychoRouterTestSetup {
+contract TychoRouterForUniswapV3ArbitrumTest is
+    TychoRouterTestSetup,
+    UniswapV3Deployment
+{
     function getChain() public pure override returns (string memory) {
         return "arbitrum";
     }

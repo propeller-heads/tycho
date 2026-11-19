@@ -8,6 +8,9 @@ import {
     FermiSwapExecutor__InvalidDataLength
 } from "../../src/executors/FermiSwapExecutor.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {ALICE, USDC_ADDR, WETH_ADDR} from "../Constants.sol";
+import {FERMI_SWAPPER, FermiSwapDeployment} from "../deployments/FermiSwap.sol";
 
 contract FermiSwapExecutorExposed is FermiSwapExecutor {
     constructor(address fermiSwapper_) FermiSwapExecutor(fermiSwapper_) {}
@@ -105,7 +108,7 @@ contract FermiSwapExecutorTest is TestUtils, Constants {
     }
 }
 
-contract FermiSwapRouterTest is TychoRouterTestSetup {
+contract FermiSwapRouterTest is TychoRouterTestSetup, FermiSwapDeployment {
     function getForkBlock() public pure override returns (uint256) {
         return 25143884;
     }

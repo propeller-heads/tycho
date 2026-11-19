@@ -296,7 +296,7 @@ mod tests {
             origin: None,
         };
         let encoder = UniswapV4SwapEncoder::new(
-            Bytes::from("0xF62849F9A0B5Bf2913b396098F7c7019b51A820a"),
+            Bytes::from("0xE79ABa453C638458a49af2c18bEE8a0ea684dF10"),
             Chain::Ethereum,
             None,
         )
@@ -461,7 +461,7 @@ mod tests {
         );
 
         let encoder = UniswapV4SwapEncoder::new(
-            Bytes::from("0xF62849F9A0B5Bf2913b396098F7c7019b51A820a"),
+            Bytes::from("0xE79ABa453C638458a49af2c18bEE8a0ea684dF10"),
             Chain::Ethereum,
             None,
         )
@@ -585,7 +585,7 @@ mod tests {
             // - ANGSTROM_API_URL (optional)
             // - ANGSTROM_BLOCKS_IN_FUTURE (optional)
             let encoder = UniswapV4SwapEncoder::new(
-                Bytes::from("0xF62849F9A0B5Bf2913b396098F7c7019b51A820a"),
+                Bytes::from("0xE79ABa453C638458a49af2c18bEE8a0ea684dF10"),
                 Chain::Ethereum,
                 Some(HashMap::from([(
                     "angstrom_hook_address".to_string(),

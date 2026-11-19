@@ -4,6 +4,8 @@ import "./EkuboV3MevCaptureV21.t.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {tickToSqrtRatio} from "@ekubo-v3/math/ticks.sol";
 import {amount0Delta, amount1Delta} from "@ekubo-v3/math/delta.sol";
+import {USDC_ADDR, USDT_ADDR} from "../Constants.sol";
+import {EKUBO_V3_SIGNED_EXCLUSIVE_SWAP} from "../deployments/EkuboV3.sol";
 
 string constant MEV_CAPTURE_V21_GAS_ROWS =
     "../../tycho-simulation/src/evm/protocol/ekubo_v3/assets/mev_capture_v21_gas.json";

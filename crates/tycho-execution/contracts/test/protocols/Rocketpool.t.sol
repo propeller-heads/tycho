@@ -2,7 +2,7 @@ pragma solidity ^0.8.26;
 
 import "../TychoRouterTestSetup.sol";
 import {CommonBase} from "../../lib/forge-std/src/Base.sol";
-import {Constants} from "../Constants.sol";
+import {ALICE, Constants, ETH_ADDR, RETH_ADDR} from "../Constants.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {
     RocketpoolExecutor,
@@ -14,6 +14,11 @@ import {StdChains} from "../../lib/forge-std/src/StdChains.sol";
 import {StdCheats, StdCheatsSafe} from "../../lib/forge-std/src/StdCheats.sol";
 import {StdUtils} from "../../lib/forge-std/src/StdUtils.sol";
 import {TestUtils} from "../TestUtils.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    ROCKET_DEPOSIT_POOL,
+    RocketpoolDeployment
+} from "../deployments/Rocketpool.sol";
 
 contract RocketpoolExecutorExposed is RocketpoolExecutor {
     constructor(address _rocketDepositPool)
@@ -224,7 +229,7 @@ contract RocketpoolExecutorTest is TestUtils, Constants {
 
 /// @notice Tests Rocketpool deposit (ETH -> rETH) via TychoRouterV3
 /// Tx 0xe0f1db165b621cb1e50b629af9d47e064be464fbcc7f2bcba3df1d27dbb916be at block 24480105contract
-contract RocketpoolDepositTest is TychoRouterTestSetup {
+contract RocketpoolDepositTest is TychoRouterTestSetup, RocketpoolDeployment {
     function getForkBlock() public pure override returns (uint256) {
         return 24480104;
     }
@@ -258,7 +263,7 @@ contract RocketpoolDepositTest is TychoRouterTestSetup {
 
 /// @notice Tests Rocketpool burn (rETH -> ETH) via TychoRouterV3
 /// Block 24481338: user burned 2515686112138065226
-contract RocketpoolBurnTest is TychoRouterTestSetup {
+contract RocketpoolBurnTest is TychoRouterTestSetup, RocketpoolDeployment {
     function getForkBlock() public pure override returns (uint256) {
         return 24481337;
     }

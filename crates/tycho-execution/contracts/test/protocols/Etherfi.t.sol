@@ -3,8 +3,16 @@ pragma solidity ^0.8.26;
 import "../TychoRouterTestSetup.sol";
 import "../TestUtils.sol";
 import "@src/executors/EtherfiExecutor.sol";
-import {Constants} from "../Constants.sol";
+import {Constants, ETH_ADDR} from "../Constants.sol";
 import {Vm} from "forge-std/Vm.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    EETH_ADDR,
+    EtherfiDeployment,
+    LIQUIDITY_POOL_ADDR,
+    REDEMPTION_MANAGER_ADDR,
+    WEETH_ADDR
+} from "../deployments/Etherfi.sol";
 
 // Match the `ethereum-etherfi` snapshot block so indexing and execution
 // tests use the same contract implementations and state.
@@ -246,7 +254,7 @@ contract EtherfiExecutorTest is Constants, TestUtils {
     }
 }
 
-contract TychoRouterForEtherfiTest is TychoRouterTestSetup {
+contract TychoRouterForEtherfiTest is TychoRouterTestSetup, EtherfiDeployment {
     function getForkBlock() public pure override returns (uint256) {
         return ETHERFI_FORK_BLOCK;
     }

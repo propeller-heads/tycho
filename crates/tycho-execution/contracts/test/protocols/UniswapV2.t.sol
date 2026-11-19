@@ -7,13 +7,23 @@ import {
     UniswapV2Executor__InvalidDataLength,
     IUniswapV2Pair
 } from "@src/executors/UniswapV2Executor.sol";
-import {Constants} from "../Constants.sol";
+import {
+    BASE_MAG7,
+    BASE_USDC,
+    Constants,
+    DAI_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
 import {Permit2TestHelper} from "../Permit2TestHelper.sol";
 import {Test} from "../../lib/forge-std/src/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
     SafeERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {
+    DAI_WETH_UNIV2_POOL,
+    USDC_MAG7_POOL
+} from "../deployments/UniswapV2.sol";
 
 contract UniswapV2ExecutorExposed is UniswapV2Executor {
     constructor(uint256 _feeBps) UniswapV2Executor(_feeBps) {}

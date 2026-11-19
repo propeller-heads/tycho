@@ -14,7 +14,13 @@ import {
     PancakeswapInfinityRobinhoodExecutor__UnknownPoolType,
     PancakeswapInfinityRobinhoodExecutor__ZeroAddress
 } from "@src/executors/PancakeswapInfinityRobinhoodExecutor.sol";
-import {Constants} from "../Constants.sol";
+import {IPancakeswapInfinityVault} from "@interfaces/IPancakeswapInfinity.sol";
+import {TransferManager} from "@src/TransferManager.sol";
+import {ALICE, BASE_USDC, BASE_WETH, Constants} from "../Constants.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    PancakeswapInfinityDeployment
+} from "../deployments/PancakeswapInfinity.sol";
 
 address constant INFINITY_VAULT = 0x238a358808379702088667322f80aC48bAd5e6c4;
 address constant INFINITY_CL_POOL_MANAGER =
@@ -236,31 +242,16 @@ contract PancakeswapInfinityExecutorTest is Constants, TestUtils {
  * config/test_executor_addresses.json under "pancakeswap_infinity_cl"; the Rust registry
  * resolves "pancakeswap_infinity_bin" to the same executor, so there is no second entry.
  */
-contract TychoRouterForPancakeswapInfinityTest is TychoRouterTestSetup {
+contract TychoRouterForPancakeswapInfinityTest is
+    TychoRouterTestSetup,
+    PancakeswapInfinityDeployment
+{
     function getChain() public pure override returns (string memory) {
         return "base";
     }
 
     function getForkBlock() public pure override returns (uint256) {
         return INFINITY_FORK_BLOCK;
-    }
-
-    function testExecutorDeployedAndWhitelisted() public view {
-        address executor = address(pancakeswapInfinityExecutor);
-
-        assertTrue(executor != address(0), "executor is not deployed");
-        assertTrue(
-            tychoRouter.executorsActivationTimestamp(executor) != 0,
-            "executor is not whitelisted on the router"
-        );
-        // Pinned: deployExecutors moves every CREATE address after the executor it
-        // inserts, so a reordering has to fail here rather than silently stale the
-        // address the Rust encoder tests read.
-        assertEq(
-            executor,
-            0xe54a55121A47451c5727ADBAF9b9FC1643477e25,
-            "executor address drifted from test_executor_addresses.json"
-        );
     }
 
     /// A CL swap through the Dispatcher, which measures the output at the receiver.
@@ -272,7 +263,7 @@ contract TychoRouterForPancakeswapInfinityTest is TychoRouterTestSetup {
         uint256 balanceBefore = IERC20(BASE_USDT).balanceOf(ALICE);
 
         bytes memory swap = encodeSingleSwap(
-            address(pancakeswapInfinityExecutor),
+            pancakeswapInfinityExecutor,
             usdcUsdtSwapData(BASE_USDC, BASE_USDT, true)
         );
 
@@ -308,7 +299,7 @@ contract TychoRouterForPancakeswapInfinityTest is TychoRouterTestSetup {
         uint256 balanceBefore = IERC20(BASE_USDT).balanceOf(ALICE);
 
         bytes memory swap = encodeSingleSwap(
-            address(pancakeswapInfinityExecutor),
+            pancakeswapInfinityExecutor,
             binSwapData(BASE_USDC, BASE_USDT, true, 7)
         );
 
@@ -359,7 +350,7 @@ contract TychoRouterForPancakeswapInfinityTest is TychoRouterTestSetup {
             BOB,
             noClientFee(),
             encodeSingleSwap(
-                address(pancakeswapInfinityExecutor),
+                pancakeswapInfinityExecutor,
                 binSwapData(BASE_USDC, ETH_ADDRESS, false, 201)
             )
         );

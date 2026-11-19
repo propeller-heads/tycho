@@ -30,6 +30,28 @@ import {
 } from "../../src/fallback/PropAMMFallbackRouter.sol";
 import {UniswapV2Math__ZeroReserves} from "../../lib/UniswapV2Math.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    ALICE,
+    DAI_ADDR,
+    USDC_ADDR,
+    USDE_ADDR,
+    USDT_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
+import {PropAMMFallbackDeployment} from "../deployments/PropAMMFallback.sol";
+import {
+    DAI_WETH_UNIV2_POOL,
+    UniswapV2Deployment,
+    USDC_WETH_USV2
+} from "../deployments/UniswapV2.sol";
+import {TRICRYPTO_POOL, TRIPOOL} from "../deployments/Curve.sol";
+import {FLUIDV1_LIQUIDITY} from "../deployments/FluidV1.sol";
+import {
+    UNISWAP_V3_STATIC_QUOTER,
+    USDC_WETH_USV3
+} from "../deployments/UniswapV3.sol";
+import {POOL_MANAGER} from "../deployments/UniswapV4.sol";
 
 /// @notice Builds the protocol entries `TychoFallbackRouter` decodes.
 library FallbackSwaps {
@@ -1375,7 +1397,11 @@ contract PropAMMFallbackRouterAerodromeTest is
 
 /// @notice The same claim through the whole TychoRouter: the swap's input lands at the fallback
 /// router, not at a pool, which is what makes the retry fundable.
-contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
+contract PropAMMFallbackExecutorTest is
+    TychoRouterTestSetup,
+    PropAMMFallbackDeployment,
+    UniswapV2Deployment
+{
     MockPropAMM pamm;
 
     /// Measured at getForkBlock() against the pools each test names, so the
@@ -1442,7 +1468,8 @@ contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
             address tokenIn,
             address tokenOut,
             bool outputToRouter
-        ) = propAMMFallbackExecutor.getTransferData(_swapData());
+        ) = PropAMMFallbackExecutor(propAMMFallbackExecutor)
+            .getTransferData(_swapData());
 
         assertEq(
             uint8(transferType), uint8(TransferManager.TransferType.Transfer)
@@ -1455,7 +1482,8 @@ contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
 
     function testFundsExpectedAddress() public view {
         assertEq(
-            propAMMFallbackExecutor.fundsExpectedAddress(_swapData()),
+            PropAMMFallbackExecutor(propAMMFallbackExecutor)
+                .fundsExpectedAddress(_swapData()),
             address(propAMMFallbackRouter)
         );
     }
@@ -1466,9 +1494,8 @@ contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
                 FallbackExecutor__InvalidDataLength.selector, 40
             )
         );
-        propAMMFallbackExecutor.getTransferData(
-            abi.encodePacked(USDC_ADDR, WETH_ADDR)
-        );
+        PropAMMFallbackExecutor(propAMMFallbackExecutor)
+            .getTransferData(abi.encodePacked(USDC_ADDR, WETH_ADDR));
     }
 
     function testConstructorRejectsZeroAddress() public {
@@ -1491,7 +1518,7 @@ contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
             1 ether,
             ALICE,
             noClientFee(),
-            encodeSingleSwap(address(propAMMFallbackExecutor), _swapData())
+            encodeSingleSwap(propAMMFallbackExecutor, _swapData())
         );
         vm.stopPrank();
 
@@ -1519,7 +1546,7 @@ contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
             5 ether,
             ALICE,
             noClientFee(),
-            encodeSingleSwap(address(propAMMFallbackExecutor), _swapData())
+            encodeSingleSwap(propAMMFallbackExecutor, _swapData())
         );
         vm.stopPrank();
 
@@ -1545,7 +1572,7 @@ contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
             1000 ether,
             ALICE,
             noClientFee(),
-            encodeSingleSwap(address(propAMMFallbackExecutor), _swapData())
+            encodeSingleSwap(propAMMFallbackExecutor, _swapData())
         );
         vm.stopPrank();
     }
@@ -1556,10 +1583,9 @@ contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
         deal(USDC_ADDR, ALICE, amountIn);
 
         bytes[] memory swaps = new bytes[](2);
-        swaps[0] =
-            encodeSequentialSwap(address(propAMMFallbackExecutor), _swapData());
+        swaps[0] = encodeSequentialSwap(propAMMFallbackExecutor, _swapData());
         swaps[1] = encodeSequentialSwap(
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
         );
 
@@ -1591,11 +1617,11 @@ contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
 
         bytes[] memory swaps = new bytes[](2);
         swaps[0] = encodeSequentialSwap(
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(USDC_WETH_USV2, USDC_ADDR, WETH_ADDR)
         );
         swaps[1] = encodeSequentialSwap(
-            address(propAMMFallbackExecutor),
+            propAMMFallbackExecutor,
             abi.encodePacked(
                 WETH_ADDR,
                 DAI_ADDR,
@@ -1645,7 +1671,7 @@ contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
             1 ether,
             ALICE,
             noClientFee(),
-            encodeSingleSwap(address(propAMMFallbackExecutor), _swapData())
+            encodeSingleSwap(propAMMFallbackExecutor, _swapData())
         );
         vm.stopPrank();
 
@@ -1674,14 +1700,14 @@ contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             (0xffffff * 60) / 100, // 60%
-            address(propAMMFallbackExecutor),
+            propAMMFallbackExecutor,
             _swapData()
         );
         swaps[1] = encodeSplitSwap(
             uint8(0),
             uint8(1),
             uint24(0), // remainder
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(USDC_WETH_USV2, USDC_ADDR, WETH_ADDR)
         );
 
@@ -1732,7 +1758,7 @@ contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
             1 ether,
             ALICE,
             noClientFee(),
-            encodeSingleSwap(address(propAMMFallbackExecutor), swapData)
+            encodeSingleSwap(propAMMFallbackExecutor, swapData)
         );
         vm.stopPrank();
     }

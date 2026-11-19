@@ -4,12 +4,18 @@ pragma solidity ^0.8.26;
 import "../TestUtils.sol";
 import "../TychoRouterTestSetup.sol";
 import "@src/executors/LiquoriceExecutor.sol";
-import {Constants} from "../Constants.sol";
+import {Constants, USDC_ADDR, WETH_ADDR} from "../Constants.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Permit2TestHelper} from "../Permit2TestHelper.sol";
 import {
     SafeERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    LIQUORICE_BALANCE_MANAGER,
+    LIQUORICE_SETTLEMENT,
+    LiquoriceDeployment
+} from "../deployments/Liquorice.sol";
 
 /// @dev Mirrors the deployed settlement at LIQUORICE_SETTLEMENT. The tuple shapes are what the
 ///      selectors are derived from, so they must match the deployed ABI field for field.
@@ -587,7 +593,10 @@ contract LiquoriceExecutorTest is
     }
 }
 
-contract TychoRouterForLiquoriceTest is TychoRouterTestSetup {
+contract TychoRouterForLiquoriceTest is
+    TychoRouterTestSetup,
+    LiquoriceDeployment
+{
     using SafeERC20 for IERC20;
 
     address constant MAKER = 0x06465bcEEaef280Bb7340A58D75dfc5E1F687058;

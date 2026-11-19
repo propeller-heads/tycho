@@ -30,7 +30,7 @@ checklists are in `crates/tycho-execution/CLAUDE.md`.
 
 - Fork tests require `RPC_URL` (Ethereum mainnet) and `BASE_RPC_URL` env vars
 
-How Rust-encoded calldata reaches the Solidity tests (`calldata.txt`) is described in
+How Rust-encoded calldata reaches the Solidity tests (one `.hex` fixture per test) is described in
 `crates/tycho-execution/CLAUDE.md` § Conventions › Testing.
 
 ## Project Config

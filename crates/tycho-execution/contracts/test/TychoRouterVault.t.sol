@@ -27,6 +27,31 @@ import {
 } from "@uniswap-v2/contracts/interfaces/IUniswapV2Pair.sol";
 import "./TychoRouterTestSetup.sol";
 import {NativeWrapExecutor} from "../src/executors/NativeWrapExecutor.sol";
+import {ExecutorDeployment} from "./ExecutorDeployment.sol";
+import {
+    ALICE,
+    ALICE_PK,
+    DAI_ADDR,
+    ETH_ADDR,
+    RETH_ADDR,
+    USDC_ADDR,
+    WBTC_ADDR,
+    WETH_ADDR
+} from "./Constants.sol";
+import {CurveDeployment} from "./deployments/Curve.sol";
+import {ERC4626Deployment} from "./deployments/ERC4626.sol";
+import {NativeWrapDeployment} from "./deployments/NativeWrap.sol";
+import {RocketpoolDeployment} from "./deployments/Rocketpool.sol";
+import {
+    DAI_USDC_POOL,
+    DAI_WETH_UNIV2_POOL,
+    UniswapV2Deployment,
+    USDC_WBTC_POOL,
+    USDC_WETH_USV2,
+    WETH_WBTC_POOL
+} from "./deployments/UniswapV2.sol";
+import {UniswapV3Deployment, USDC_WETH_USV3} from "./deployments/UniswapV3.sol";
+import {UniswapV4Deployment} from "./deployments/UniswapV4.sol";
 
 /**
  * @title VaultSwapBatcher
@@ -100,7 +125,16 @@ contract SharesWithoutAssetsVault is ERC20 {
  * @title TychoRouterUsingVaultTest
  * @notice Test cases for different swap scenarios relating to the Vault
  */
-contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
+contract TychoRouterUsingVaultTest is
+    TychoRouterTestSetup,
+    CurveDeployment,
+    ERC4626Deployment,
+    NativeWrapDeployment,
+    RocketpoolDeployment,
+    UniswapV2Deployment,
+    UniswapV3Deployment,
+    UniswapV4Deployment
+{
     function getForkBlock() public pure override returns (uint256) {
         return 24480104;
     }
@@ -149,7 +183,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             0,
-            address(erc4626Executor),
+            erc4626Executor,
             abi.encodePacked(USDC_ADDR, address(fake))
         );
         // Hop 2: "redeem" the shares for nothing
@@ -157,7 +191,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             uint8(1),
             uint8(1),
             0,
-            address(erc4626Executor),
+            erc4626Executor,
             abi.encodePacked(address(fake), address(fake))
         );
 
@@ -212,7 +246,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
         uint256 amountIn = 1 ether;
         deal(WETH_ADDR, ALICE, amountIn * 2);
         bytes memory swap = encodeSingleSwap(
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
         );
 
@@ -241,7 +275,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
         uint256 amountIn = 1 ether;
         deal(WETH_ADDR, ALICE, amountIn);
         bytes memory swap = encodeSingleSwap(
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
         );
 
@@ -276,7 +310,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             (0xffffff * 60) / 100, // 60%
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
         );
 
@@ -285,7 +319,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             0, // 40%
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
         );
 
@@ -351,7 +385,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
     // ==================== Native Transfer tests ====================
     function _rocketpoolEthRethSwap() private view returns (bytes memory swap) {
         swap = encodeSingleSwap(
-            address(rocketpoolExecutor),
+            rocketpoolExecutor,
             abi.encodePacked(
                 uint8(1) // isDeposit = true
             )
@@ -476,7 +510,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             pool
         );
 
-        swaps[0] = encodeSingleSwap(address(usv4Executor), protocolData);
+        swaps[0] = encodeSingleSwap(uniswapV4Executor, protocolData);
 
         // Second swap: ETH -> rETH (use credit from first swap)
         swaps[1] = _rocketpoolEthRethSwap();
@@ -596,8 +630,8 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             encodeUniswapV2Swap(USDC_WETH_USV2, WETH_ADDR, USDC_ADDR);
 
         bytes[] memory swaps = new bytes[](2);
-        swaps[0] = encodeSequentialSwap(address(usv3Executor), usdcWethV3Data);
-        swaps[1] = encodeSequentialSwap(address(usv2Executor), wethUsdcV2Data);
+        swaps[0] = encodeSequentialSwap(uniswapV3Executor, usdcWethV3Data);
+        swaps[1] = encodeSequentialSwap(uniswapV2Executor, wethUsdcV2Data);
 
         bytes memory encodedSwaps = pleEncode(swaps);
         ClientFeeParams memory feeParams = makeClientFeeParams(
@@ -655,10 +689,10 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
         // Hop 1: WETH → ETH (unwrap), Hop 2: ETH → WETH (wrap)
         bytes[] memory swaps = new bytes[](2);
         swaps[0] = encodeSequentialSwap(
-            address(nativeWrapExecutor), abi.encodePacked(uint8(0))
+            nativeWrapExecutor, abi.encodePacked(uint8(0))
         );
         swaps[1] = encodeSequentialSwap(
-            address(nativeWrapExecutor), abi.encodePacked(uint8(1))
+            nativeWrapExecutor, abi.encodePacked(uint8(1))
         );
 
         // Client contributes up to amountIn to cover the break-even shortfall.
@@ -715,8 +749,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         uint256 expectedAmountOut = 1900 * 1e18;
         uint256 amountOut = tychoRouter.singleSwap(
@@ -783,8 +816,8 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             encodeUniswapV2Swap(USDC_WETH_USV2, WETH_ADDR, USDC_ADDR);
 
         bytes[] memory swaps = new bytes[](2);
-        swaps[0] = encodeSequentialSwap(address(usv3Executor), usdcWethV3Data);
-        swaps[1] = encodeSequentialSwap(address(usv2Executor), wethUsdcV2Data);
+        swaps[0] = encodeSequentialSwap(uniswapV3Executor, usdcWethV3Data);
+        swaps[1] = encodeSequentialSwap(uniswapV2Executor, wethUsdcV2Data);
 
         uint256 amountOut = tychoRouter.sequentialSwapUsingVault(
             amountIn,
@@ -848,8 +881,8 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             encodeUniswapV2Swap(USDC_WETH_USV2, WETH_ADDR, USDC_ADDR);
 
         bytes[] memory swaps = new bytes[](2);
-        swaps[0] = encodeSequentialSwap(address(usv3Executor), usdcWethV3Data);
-        swaps[1] = encodeSequentialSwap(address(usv2Executor), wethUsdcV2Data);
+        swaps[0] = encodeSequentialSwap(uniswapV3Executor, usdcWethV3Data);
+        swaps[1] = encodeSequentialSwap(uniswapV2Executor, wethUsdcV2Data);
 
         uint256 amountOut = tychoRouter.sequentialSwap(
             amountIn,
@@ -901,28 +934,28 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             (0xffffff * 60) / 100,
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
         );
         swaps[1] = encodeSplitSwap(
             uint8(1),
             uint8(3),
             uint24(0),
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(USDC_WBTC_POOL, WBTC_ADDR, USDC_ADDR)
         );
         swaps[2] = encodeSplitSwap(
             uint8(0),
             uint8(2),
             uint24(0),
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
         );
         swaps[3] = encodeSplitSwap(
             uint8(2),
             uint8(3),
             uint24(0),
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(DAI_USDC_POOL, DAI_ADDR, USDC_ADDR)
         );
 
@@ -968,7 +1001,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
         deal(WETH_ADDR, address(batcher), totalDeposit);
 
         bytes memory swap = encodeSingleSwap(
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
         );
 
@@ -1010,8 +1043,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
 
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         uint256 expectedAmountOut = 1988227843622901622874;
         uint256 amountOut = tychoRouter.singleSwapUsingVault(

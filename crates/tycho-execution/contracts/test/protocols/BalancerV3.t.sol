@@ -4,6 +4,12 @@ import "../TychoRouterTestSetup.sol";
 import {
     BalancerV3Executor__InvalidDataLength
 } from "../../src/executors/BalancerV3Executor.sol";
+import {BalancerV3Executor} from "../../src/executors/BalancerV3Executor.sol";
+import {TransferManager} from "@src/TransferManager.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {ALICE, WBTC_ADDR, WETH_ADDR} from "../Constants.sol";
+import {BalancerV3Deployment} from "../deployments/BalancerV3.sol";
+import {UniswapV3Deployment} from "../deployments/UniswapV3.sol";
 
 contract BalancerV3ExecutorExposed is BalancerV3Executor {
     constructor() BalancerV3Executor() {}
@@ -148,7 +154,11 @@ contract BalancerV3ExecutorTest is Constants, TestUtils {
     }
 }
 
-contract TychoRouterForBalancerV3Test is TychoRouterTestSetup {
+contract TychoRouterForBalancerV3Test is
+    TychoRouterTestSetup,
+    BalancerV3Deployment,
+    UniswapV3Deployment
+{
     function getForkBlock() public pure override returns (uint256) {
         return 22644371;
     }

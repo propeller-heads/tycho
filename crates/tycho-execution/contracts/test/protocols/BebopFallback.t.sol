@@ -22,6 +22,12 @@ import {
     BebopFallbackRouter__InvalidSelector,
     BebopFallbackRouter__InvalidTarget
 } from "../../src/fallback/BebopFallbackRouter.sol";
+import {WBTC_ADDR, WETH_ADDR} from "../Constants.sol";
+import {BEBOP_ROUTER, BEBOP_SETTLEMENT} from "../deployments/Bebop.sol";
+import {FLUIDV1_LIQUIDITY} from "../deployments/FluidV1.sol";
+import {WETH_WBTC_POOL} from "../deployments/UniswapV2.sol";
+import {UNISWAP_V3_STATIC_QUOTER} from "../deployments/UniswapV3.sol";
+import {POOL_MANAGER} from "../deployments/UniswapV4.sol";
 
 /// @dev Uses `BebopExecutorTest.testSingleOrder`'s signed order, whose taker is `TAKER`.
 contract BebopFallbackRouterTest is FallbackRouterAssertions, TestUtils {

@@ -2,12 +2,17 @@
 pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {Constants} from "../Constants.sol";
+import {ALICE, BASE_USDC, BASE_WETH, Constants} from "../Constants.sol";
 import {TestUtils} from "../TestUtils.sol";
 import {TychoRouterTestSetup} from "../TychoRouterTestSetup.sol";
 import {PropAMMExecutor} from "@src/executors/PropAMMExecutor.sol";
 import {IPropAMM} from "@interfaces/IPropAMM.sol";
 import {MockPropAMM} from "./PropAMM.t.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {BiconomyDeployment} from "../deployments/Biconomy.sol";
+
+// A block where a maker's WETH/USDC boards on the Biconomy venue are live in both directions.
+uint256 constant BASE_FORK_BLOCK = 52549180;
 
 interface IBiconomyVenue {
     error BadRecipient();
@@ -18,13 +23,12 @@ interface IBiconomyVenue {
 /// directions.
 contract BiconomyVenueBaseForkTest is TestUtils, Constants {
     address constant VENUE = 0x0000009E5F98cDB4dd1E1d2E15B220217c88B3b8;
-    uint256 constant FORK_BLOCK = 52549180;
     address RECEIVER = makeAddr("biconomy-receiver");
 
     PropAMMExecutor executor;
 
     function setUp() public {
-        vm.createSelectFork(vm.rpcUrl("base"), FORK_BLOCK);
+        vm.createSelectFork(vm.rpcUrl("base"), BASE_FORK_BLOCK);
         executor = new PropAMMExecutor();
     }
 
@@ -69,19 +73,23 @@ contract BiconomyVenueBaseForkTest is TestUtils, Constants {
     }
 }
 
-contract BiconomyRouterTest is TychoRouterTestSetup {
+contract BiconomyRouterTest is TychoRouterTestSetup, BiconomyDeployment {
     // Must match the venue address in the Rust test that writes the calldata.
     address constant MOCK_VENUE = 0x2222222222222222222222222222222222222222;
 
+    function getChain() public pure override returns (string memory) {
+        return "base";
+    }
+
     function getForkBlock() public pure override returns (uint256) {
-        return 25143884;
+        return BASE_FORK_BLOCK;
     }
 
     function setUp() public override {
         super.setUp();
         deployCodeTo("PropAMM.t.sol:MockPropAMM", MOCK_VENUE);
-        MockPropAMM(MOCK_VENUE).setPrice(WETH_ADDR, USDC_ADDR, 2000e6);
-        deal(USDC_ADDR, MOCK_VENUE, 1_000_000e6);
+        MockPropAMM(MOCK_VENUE).setPrice(BASE_WETH, BASE_USDC, 2000e6);
+        deal(BASE_USDC, MOCK_VENUE, 1_000_000e6);
     }
 
     function testSingleSwap() public {
@@ -90,22 +98,22 @@ contract BiconomyRouterTest is TychoRouterTestSetup {
             "test_single_encoding_strategy_biconomy_weth_usdc"
         );
 
-        deal(WETH_ADDR, ALICE, amountIn);
+        deal(BASE_WETH, ALICE, amountIn);
         vm.startPrank(ALICE);
-        IERC20(WETH_ADDR).approve(tychoRouterAddr, type(uint256).max);
+        IERC20(BASE_WETH).approve(tychoRouterAddr, type(uint256).max);
 
-        uint256 usdcBalanceBefore = IERC20(USDC_ADDR).balanceOf(ALICE);
-        uint256 wethBalanceBefore = IERC20(WETH_ADDR).balanceOf(ALICE);
+        uint256 usdcBalanceBefore = IERC20(BASE_USDC).balanceOf(ALICE);
+        uint256 wethBalanceBefore = IERC20(BASE_WETH).balanceOf(ALICE);
         (bool success,) = tychoRouterAddr.call(callData);
         uint256 usdcDelta =
-            IERC20(USDC_ADDR).balanceOf(ALICE) - usdcBalanceBefore;
+            IERC20(BASE_USDC).balanceOf(ALICE) - usdcBalanceBefore;
         uint256 wethDelta =
-            wethBalanceBefore - IERC20(WETH_ADDR).balanceOf(ALICE);
+            wethBalanceBefore - IERC20(BASE_WETH).balanceOf(ALICE);
 
         assertTrue(success, "Call Failed");
         assertEq(usdcDelta, 2000e6);
         assertEq(wethDelta, amountIn);
-        assertEq(IERC20(WETH_ADDR).balanceOf(tychoRouterAddr), 0);
-        assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(BASE_WETH).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(BASE_USDC).balanceOf(tychoRouterAddr), 0);
     }
 }

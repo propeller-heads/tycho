@@ -1,57 +1,19 @@
 pragma solidity ^0.8.26;
 
-// Executors
-import {BalancerV2Executor} from "../src/executors/BalancerV2Executor.sol";
-import {BalancerV3Executor} from "../src/executors/BalancerV3Executor.sol";
-import {BebopExecutor} from "../src/executors/BebopExecutor.sol";
-import {CurveExecutor} from "../src/executors/CurveExecutor.sol";
-import {EkuboExecutor} from "../src/executors/EkuboExecutor.sol";
-import {EkuboV3Executor} from "../src/executors/ekubo_v3/EkuboV3Executor.sol";
-import {EtherfiExecutor} from "../src/executors/EtherfiExecutor.sol";
-import {FermiSwapExecutor} from "../src/executors/FermiSwapExecutor.sol";
-import {BopAMMExecutor} from "../src/executors/BopAMMExecutor.sol";
 import {
-    LiquidityPartyExecutor
-} from "../src/executors/LiquidityPartyExecutor.sol";
-import {HashflowExecutor} from "../src/executors/HashflowExecutor.sol";
-import {MaverickV2Executor} from "../src/executors/MaverickV2Executor.sol";
-import {PropAMMExecutor} from "../src/executors/PropAMMExecutor.sol";
-import {
-    PropAMMFallbackExecutor
-} from "../src/executors/PropAMMFallbackExecutor.sol";
-import {PropAMMFallbackRouter} from "../src/fallback/PropAMMFallbackRouter.sol";
-import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
-import {UniswapV2Executor} from "../src/executors/UniswapV2Executor.sol";
-import {
-    UniswapV3Executor,
     IUniswapV3Pool
-} from "../src/executors/UniswapV3Executor.sol";
-import {UniswapV4Executor} from "../src/executors/UniswapV4Executor.sol";
-import {FluidV1Executor} from "../src/executors/FluidV1Executor.sol";
-import {SlipstreamsExecutor} from "../src/executors/SlipstreamsExecutor.sol";
-import {RocketpoolExecutor} from "../src/executors/RocketpoolExecutor.sol";
-import {ERC4626Executor} from "../src/executors/ERC4626Executor.sol";
-import {NativeWrapExecutor} from "../src/executors/NativeWrapExecutor.sol";
-import {LidoV4Executor} from "../src/executors/LidoV4Executor.sol";
+} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+import {CREATE3} from "@solady/utils/CREATE3.sol";
 import {
-    PancakeswapInfinityExecutor,
-    IPancakeswapInfinityVault
-} from "../src/executors/PancakeswapInfinityExecutor.sol";
-import {LiquoriceExecutor} from "../src/executors/LiquoriceExecutor.sol";
-import {AerodromeV1Executor} from "../src/executors/AerodromeV1Executor.sol";
-import {AeroBasicExecutor} from "../src/executors/AeroBasicExecutor.sol";
-import {EuclidExecutor} from "@src/executors/EuclidExecutor.sol";
-import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
-import {RingSwapV2Executor} from "../src/executors/RingSwapV2Executor.sol";
-import {NativeExecutor} from "../src/executors/NativeExecutor.sol";
-import {SkyExecutor} from "../src/executors/SkyExecutor.sol";
-import {TransferManager} from "../src/TransferManager.sol";
+    ExecutorDeployment,
+    ExecutorDeployments
+} from "./ExecutorDeployment.sol";
+
 // Test utilities and mocks
 import "./Constants.sol";
 import "./TestUtils.sol";
 import {Permit2TestHelper} from "./Permit2TestHelper.sol";
 import {ClientFeeTestHelper} from "./ClientFeeTestHelper.sol";
-import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
 // Core contracts
 import "@src/TychoRouterV3.sol";
@@ -130,48 +92,15 @@ contract TychoRouterExposed is TychoRouterV3 {
     }
 }
 
-contract TychoRouterTestSetup is
+abstract contract TychoRouterTestSetup is
     Constants,
     Permit2TestHelper,
     ClientFeeTestHelper,
-    TestUtils
+    TestUtils,
+    ExecutorDeployments
 {
     TychoRouterExposed tychoRouter;
     address tychoRouterAddr;
-    UniswapV2Executor public usv2Executor;
-    UniswapV3Executor public usv3Executor;
-    UniswapV3Executor public pancakev3Executor;
-    UniswapV4Executor public usv4Executor;
-    BalancerV2Executor public balancerv2Executor;
-    EkuboExecutor public ekuboExecutor;
-    CurveExecutor public curveExecutor;
-    MaverickV2Executor public maverickv2Executor;
-    BalancerV3Executor public balancerV3Executor;
-    BebopExecutor public bebopExecutor;
-    HashflowExecutor public hashflowExecutor;
-    FluidV1Executor public fluidV1Executor;
-    SlipstreamsExecutor public slipstreamsExecutor;
-    RocketpoolExecutor public rocketpoolExecutor;
-    ERC4626Executor public erc4626Executor;
-    NativeWrapExecutor public nativeWrapExecutor;
-    LidoV4Executor public lidoV4Executor;
-    PancakeswapInfinityExecutor public pancakeswapInfinityExecutor;
-    EkuboV3Executor public ekuboV3Executor;
-    EtherfiExecutor public etherfiExecutor;
-    LiquidityPartyExecutor public liquidityPartyExecutor;
-    LiquoriceExecutor public liquoriceExecutor;
-    AerodromeV1Executor public aerodromeV1Executor;
-    AeroBasicExecutor public aeroBasicExecutor;
-    EuclidExecutor public euclidExecutor;
-    FermiSwapExecutor public fermiSwapExecutor;
-    MetricExecutor public metricExecutor;
-    BopAMMExecutor public bopAMMExecutor;
-    RingSwapV2Executor public ringSwapV2Executor;
-    NativeExecutor public nativeExecutor;
-    PropAMMExecutor public propAMMExecutor;
-    SkyExecutor public skyExecutor;
-    PropAMMFallbackRouter public propAMMFallbackRouter;
-    PropAMMFallbackExecutor public propAMMFallbackExecutor;
 
     FeeCalculator feeCalculator;
     address routerFeeReceiver;
@@ -249,168 +178,16 @@ contract TychoRouterTestSetup is
         return tychoRouter;
     }
 
-    function deployExecutors() public returns (address[] memory) {
-        address poolManagerAddress = 0x000000000004444c5dc75cB358380D2e3dE08A90;
-        address ekuboCore = 0xe0e0e08A6A4b9Dc7bD67BCB7aadE5cF48157d444;
-        address ekuboMevResist = 0x553a2EFc570c9e104942cEC6aC1c18118e54C091;
-
-        IPoolManager poolManager = IPoolManager(poolManagerAddress);
-        usv2Executor = new UniswapV2Executor(30);
-        usv3Executor = new UniswapV3Executor();
-        usv4Executor = new UniswapV4Executor(poolManager, ANGSTROM_HOOK);
-        pancakev3Executor = new UniswapV3Executor();
-        balancerv2Executor = new BalancerV2Executor();
-        ekuboExecutor = new EkuboExecutor(ekuboCore, ekuboMevResist);
-        curveExecutor = new CurveExecutor(ETH_ADDR, STETH_ADDR);
-        maverickv2Executor = new MaverickV2Executor();
-        balancerV3Executor = new BalancerV3Executor();
-        bebopExecutor = new BebopExecutor(BEBOP_SETTLEMENT, BEBOP_ROUTER);
-        hashflowExecutor = new HashflowExecutor(HASHFLOW_ROUTER);
-        fluidV1Executor = new FluidV1Executor(FLUIDV1_LIQUIDITY);
-        slipstreamsExecutor = new SlipstreamsExecutor();
-        rocketpoolExecutor = new RocketpoolExecutor(ROCKET_DEPOSIT_POOL);
-        erc4626Executor = new ERC4626Executor();
-        nativeWrapExecutor = new NativeWrapExecutor(WETH_ADDR);
-        ekuboV3Executor = new EkuboV3Executor(EKUBO_V3_SIGNED_EXCLUSIVE_SWAP);
-        // Etch placeholder bytecode if Etherfi contracts are not yet deployed
-        // on this chain/block (e.g. non-mainnet forks or early mainnet blocks).
-        if (EETH_ADDR.code.length == 0) vm.etch(EETH_ADDR, bytes("1"));
-        if (LIQUIDITY_POOL_ADDR.code.length == 0) {
-            vm.etch(LIQUIDITY_POOL_ADDR, bytes("1"));
-        }
-        if (WEETH_ADDR.code.length == 0) vm.etch(WEETH_ADDR, bytes("1"));
-        if (REDEMPTION_MANAGER_ADDR.code.length == 0) {
-            vm.etch(REDEMPTION_MANAGER_ADDR, bytes("1"));
-        }
-        etherfiExecutor = new EtherfiExecutor(
-            ETH_ADDR,
-            EETH_ADDR,
-            LIQUIDITY_POOL_ADDR,
-            WEETH_ADDR,
-            REDEMPTION_MANAGER_ADDR
-        );
-        // Etch placeholder bytecode if Liquorice contracts are not yet
-        // deployed at this fork block.
-        if (LIQUORICE_SETTLEMENT.code.length == 0) {
-            vm.etch(LIQUORICE_SETTLEMENT, bytes("1"));
-        }
-        if (LIQUORICE_BALANCE_MANAGER.code.length == 0) {
-            vm.etch(LIQUORICE_BALANCE_MANAGER, bytes("1"));
-        }
-        liquoriceExecutor = new LiquoriceExecutor(
-            LIQUORICE_SETTLEMENT, LIQUORICE_BALANCE_MANAGER
-        );
-        liquidityPartyExecutor = new LiquidityPartyExecutor();
-        aerodromeV1Executor = new AerodromeV1Executor();
-        fermiSwapExecutor = new FermiSwapExecutor(FERMI_SWAPPER);
-        metricExecutor = new MetricExecutor();
-        bopAMMExecutor = new BopAMMExecutor(BOPAMM_SETTLEMENT);
-        ringSwapV2Executor =
-            new RingSwapV2Executor(RING_FEW_FACTORY, RING_SWAP_FACTORY);
-        propAMMExecutor = new PropAMMExecutor();
-        // Every executor's address here is deterministic from its deploy order, and the
-        // Rust-generated calldata.txt hardcodes those addresses, so inserting a deployment
-        // invalidates every entry after it. Add new deployments at the end of this block.
-        //
-        // The Sky venues exist only on mainnet, and the executor's constructor
-        // reads their token wiring, so it cannot deploy on forks where the
-        // venues have no code. It is deployed after the fixed executor set, so
-        // skipping it does not shift those executors' deterministic addresses.
-        bool skyDeployable = SKY_DAI_USDS_CONVERTER.code.length != 0;
-        if (skyDeployable) {
-            skyExecutor = new SkyExecutor(
-                SKY_LITE_PSM, SKY_USDS_PSM_WRAPPER, SKY_DAI_USDS_CONVERTER
+    /// `msg.sender` in the executor constructors is the CREATE3 proxy.
+    function deployExecutors() private returns (address[] memory deployed) {
+        deployed = new address[](deploymentHooks.length);
+        for (uint256 i = 0; i < deploymentHooks.length; i++) {
+            ExecutorDeployment memory d = deploymentHooks[i]();
+            deployed[i] = CREATE3.deployDeterministic(
+                abi.encodePacked(vm.getCode(d.contractName), d.constructorArgs),
+                keccak256(bytes(d.protocolSystem))
             );
         }
-
-        address nativeRouterV6 = getNativeRouterV6();
-        bool supportsNative = nativeRouterV6 != address(0);
-        if (supportsNative) {
-            // Some protocol tests use fork blocks from before Native V6 was
-            // deployed. The executor is not exercised in those tests, but its
-            // constructor still requires the configured Router to have code.
-            if (nativeRouterV6.code.length == 0) {
-                vm.etch(nativeRouterV6, bytes("1"));
-            }
-            nativeExecutor = new NativeExecutor(nativeRouterV6);
-        }
-
-        propAMMFallbackRouter = new PropAMMFallbackRouter(
-            poolManager,
-            FLUIDV1_LIQUIDITY,
-            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
-        );
-        propAMMFallbackExecutor =
-            new PropAMMFallbackExecutor(address(propAMMFallbackRouter));
-        // Last, per the note above: Lido V4 is only configured on mainnet, where both Sky and
-        // Native always deploy, so appending it shifts no address before it.
-        lidoV4Executor = new LidoV4Executor(STETH_ADDR, WSTETH_ADDR);
-        // PancakeSwap Infinity (Base and BNB share these addresses). The constructor only
-        // stores immutables, so it deploys on every fork.
-        pancakeswapInfinityExecutor = new PancakeswapInfinityExecutor(
-            IPancakeswapInfinityVault(
-                0x238a358808379702088667322f80aC48bAd5e6c4
-            ),
-            0xa0FfB9c1CE1Fe56963B0321B32E7A0302114058b,
-            0xC697d2898e0D09264376196696c51D7aBbbAA4a9
-        );
-        aeroBasicExecutor = new AeroBasicExecutor();
-        // Appended last: every earlier executor keeps its CREATE address.
-        euclidExecutor = new EuclidExecutor(ONEINCH_ROUTER_V5);
-
-        address[] memory executors = new address[](
-            31 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
-        );
-        executors[0] = address(usv2Executor);
-        executors[1] = address(usv3Executor);
-        executors[2] = address(pancakev3Executor);
-        executors[3] = address(usv4Executor);
-        executors[4] = address(balancerv2Executor);
-        executors[5] = address(ekuboExecutor);
-        executors[6] = address(curveExecutor);
-        executors[7] = address(maverickv2Executor);
-        executors[8] = address(balancerV3Executor);
-        executors[9] = address(bebopExecutor);
-        executors[10] = address(hashflowExecutor);
-        executors[11] = address(fluidV1Executor);
-        executors[12] = address(slipstreamsExecutor);
-        executors[13] = address(rocketpoolExecutor);
-        executors[14] = address(erc4626Executor);
-        executors[15] = address(nativeWrapExecutor);
-        executors[16] = address(ekuboV3Executor);
-        executors[17] = address(etherfiExecutor);
-        executors[18] = address(liquoriceExecutor);
-        executors[19] = address(liquidityPartyExecutor);
-        executors[20] = address(aerodromeV1Executor);
-        executors[21] = address(fermiSwapExecutor);
-        executors[22] = address(metricExecutor);
-        executors[23] = address(bopAMMExecutor);
-        executors[24] = address(ringSwapV2Executor);
-        executors[25] = address(propAMMExecutor);
-        executors[26] = address(propAMMFallbackExecutor);
-        executors[27] = address(lidoV4Executor);
-        executors[28] = address(pancakeswapInfinityExecutor);
-        executors[29] = address(aeroBasicExecutor);
-        executors[30] = address(euclidExecutor);
-        uint256 nextExecutorIndex = 31;
-        if (skyDeployable) {
-            executors[nextExecutorIndex] = address(skyExecutor);
-            nextExecutorIndex++;
-        }
-        if (supportsNative) {
-            executors[nextExecutorIndex] = address(nativeExecutor);
-        }
-
-        return executors;
-    }
-
-    function getNativeRouterV6() internal view returns (address) {
-        if (block.chainid == 1) return NATIVE_ROUTER_V6_ETHEREUM;
-        if (block.chainid == 8453) return NATIVE_ROUTER_V6_BASE;
-        if (block.chainid == 42161) return NATIVE_ROUTER_V6_ARBITRUM;
-        if (block.chainid == 56) return NATIVE_ROUTER_V6_BSC;
-        if (block.chainid == 4663) return NATIVE_ROUTER_V6_ROBINHOOD;
-        return address(0);
     }
 
     function deployFeeCalculator() public {

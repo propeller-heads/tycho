@@ -6,10 +6,35 @@ import "../TestUtils.sol";
 import "../TychoRouterTestSetup.sol";
 import "./UniswapV4Utils.sol";
 import "@src/executors/UniswapV4Executor.sol";
-import {Constants} from "../Constants.sol";
+import {
+    ALICE,
+    Constants,
+    DAI_ADDR,
+    PEPE_ADDR,
+    PERMIT2_ADDRESS,
+    USDC_ADDR,
+    USDE_ADDR,
+    USDT_ADDR,
+    WBTC_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
 import {SafeCallback} from "@uniswap/v4-periphery/src/base/SafeCallback.sol";
 import {Test} from "../../lib/forge-std/src/Test.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    UniswapV2Deployment,
+    WETH_WBTC_POOL
+} from "../deployments/UniswapV2.sol";
+import {DAI_USDT_USV3, UniswapV3Deployment} from "../deployments/UniswapV3.sol";
+import {
+    ANGSTROM_HOOK,
+    POOL_MANAGER,
+    UniswapV4Deployment
+} from "../deployments/UniswapV4.sol";
+
+address constant RLUSD_ADDR =
+    address(0x8292Bb45bf1Ee4d140127049757C2E0fF06317eD);
 
 contract UniswapV4ExecutorExposed is UniswapV4Executor {
     using SafeERC20 for IERC20;
@@ -438,7 +463,10 @@ contract UniswapV4ExecutorTestForEuler is Constants, TestUtils {
     }
 }
 
-contract TychoRouterForUniswapV4Test is TychoRouterTestSetup {
+contract TychoRouterForUniswapV4Test is
+    TychoRouterTestSetup,
+    UniswapV4Deployment
+{
     function testSingleSwapUSV4CallbackPermit2() public {
         vm.startPrank(ALICE);
         uint256 amountIn = 100 ether;
@@ -462,8 +490,7 @@ contract TychoRouterForUniswapV4Test is TychoRouterTestSetup {
             USDE_ADDR, USDT_ADDR, true, false, pools
         );
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv4Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV4Executor, protocolData);
 
         tychoRouter.singleSwapPermit2(
             amountIn,
@@ -509,8 +536,7 @@ contract TychoRouterForUniswapV4Test is TychoRouterTestSetup {
             USDE_ADDR, WBTC_ADDR, true, false, pools
         );
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv4Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV4Executor, protocolData);
 
         vm.startPrank(ALICE);
         IERC20(USDE_ADDR).approve(tychoRouterAddr, amountIn);
@@ -605,7 +631,10 @@ contract TychoRouterForUniswapV4Test is TychoRouterTestSetup {
     }
 }
 
-contract TychoRouterForUniswapV4AndEulerTest is TychoRouterTestSetup {
+contract TychoRouterForUniswapV4AndEulerTest is
+    TychoRouterTestSetup,
+    UniswapV4Deployment
+{
     function getForkBlock() public view virtual override returns (uint256) {
         return 22689128;
     }
@@ -637,7 +666,10 @@ contract TychoRouterForUniswapV4AndEulerTest is TychoRouterTestSetup {
     }
 }
 
-contract TychoRouterUSV4FeeTokenTest is TychoRouterTestSetup {
+contract TychoRouterUSV4FeeTokenTest is
+    TychoRouterTestSetup,
+    UniswapV4Deployment
+{
     function getForkBlock() public view virtual override returns (uint256) {
         return 23550000;
     }
@@ -809,7 +841,12 @@ contract ExternalSettlerMock {
     }
 }
 
-contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
+contract ExternalSettlerNoUnlockTest is
+    TychoRouterTestSetup,
+    UniswapV2Deployment,
+    UniswapV3Deployment,
+    UniswapV4Deployment
+{
     ExternalSettlerMock settler;
 
     function getForkBlock() public view virtual override returns (uint256) {
@@ -850,8 +887,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
         bytes memory protocolData = UniswapV4Utils.encodeExactInput(
             USDE_ADDR, USDT_ADDR, true, true, pools
         );
-        bytes memory swap =
-            encodeSingleSwap(address(usv4Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV4Executor, protocolData);
 
         bytes memory tychoCalldata = abi.encodeCall(
             tychoRouter.singleSwap,
@@ -901,7 +937,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
         bytes[] memory swaps = new bytes[](2);
 
         swaps[0] = encodeSequentialSwap(
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
         );
 
@@ -917,7 +953,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
         bytes memory v4ProtocolData = UniswapV4Utils.encodeExactInput(
             WBTC_ADDR, USDT_ADDR, true, true, v4Pools
         );
-        swaps[1] = encodeSequentialSwap(address(usv4Executor), v4ProtocolData);
+        swaps[1] = encodeSequentialSwap(uniswapV4Executor, v4ProtocolData);
 
         bytes memory tychoCalldata = abi.encodeCall(
             tychoRouter.sequentialSwap,
@@ -975,10 +1011,10 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
         bytes memory v4ProtocolData = UniswapV4Utils.encodeExactInput(
             USDT_ADDR, WBTC_ADDR, false, true, v4Pools
         );
-        swaps[0] = encodeSequentialSwap(address(usv4Executor), v4ProtocolData);
+        swaps[0] = encodeSequentialSwap(uniswapV4Executor, v4ProtocolData);
 
         swaps[1] = encodeSequentialSwap(
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(WETH_WBTC_POOL, WBTC_ADDR, WETH_ADDR)
         );
 
@@ -1036,7 +1072,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
             hookData: bytes("")
         });
         swaps[0] = encodeSequentialSwap(
-            address(usv4Executor),
+            uniswapV4Executor,
             UniswapV4Utils.encodeExactInput(
                 USDE_ADDR, USDT_ADDR, true, true, v4PoolsHop1
             )
@@ -1052,7 +1088,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
             hookData: bytes("")
         });
         swaps[1] = encodeSequentialSwap(
-            address(usv4Executor),
+            uniswapV4Executor,
             UniswapV4Utils.encodeExactInput(
                 USDT_ADDR, WBTC_ADDR, false, true, v4PoolsHop2
             )
@@ -1116,14 +1152,14 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
             hookData: bytes("")
         });
         swaps[0] = encodeSequentialSwap(
-            address(usv4Executor),
+            uniswapV4Executor,
             UniswapV4Utils.encodeExactInput(
                 USDE_ADDR, USDT_ADDR, true, true, v4PoolsHop1
             )
         );
 
         swaps[1] = encodeSequentialSwap(
-            address(usv3Executor),
+            uniswapV3Executor,
             encodeUniswapV3Swap(USDT_ADDR, DAI_ADDR, DAI_USDT_USV3, false)
         );
 
@@ -1137,7 +1173,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
             hookData: bytes("")
         });
         swaps[2] = encodeSequentialSwap(
-            address(usv4Executor),
+            uniswapV4Executor,
             UniswapV4Utils.encodeExactInput(
                 DAI_ADDR, USDC_ADDR, true, true, v4PoolsHop3
             )

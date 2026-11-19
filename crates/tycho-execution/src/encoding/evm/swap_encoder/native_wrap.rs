@@ -116,7 +116,7 @@ mod tests {
             origin: None,
         };
         let encoder = WrapSwapEncoder::new(
-            Bytes::from("0x13aa49bAc059d709dd0a18D6bb63290076a702D7"),
+            Bytes::from("0x6ECB76d89623a47355D61740727831fe1Ef0CE6C"),
             Chain::Ethereum,
             None,
         )

@@ -2,7 +2,7 @@ pragma solidity ^0.8.26;
 
 import "@src/Vault.sol";
 import {TestUtils} from "./TestUtils.sol";
-import {Constants} from "./Constants.sol";
+import {ALICE, Constants, ETH_ADDR, USDC_ADDR} from "./Constants.sol";
 
 contract VaultExposed is Vault {
     function updateDeltaAccountingFrom(

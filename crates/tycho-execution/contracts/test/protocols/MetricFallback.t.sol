@@ -24,6 +24,21 @@ import {
     MetricFallbackRouter,
     MetricFallbackRouter__InvalidDataLength
 } from "../../src/fallback/MetricFallbackRouter.sol";
+import {
+    BASE_USDC,
+    BASE_WETH,
+    BSC_WBNB,
+    POLYGON_USDC,
+    POLYGON_WETH,
+    USDC_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
+import {FLUIDV1_LIQUIDITY} from "../deployments/FluidV1.sol";
+import {
+    UNISWAP_V3_STATIC_QUOTER,
+    USDC_WETH_USV3
+} from "../deployments/UniswapV3.sol";
+import {POOL_MANAGER} from "../deployments/UniswapV4.sol";
 
 /// @notice Metric's v1 periphery lens; see
 /// https://docs.metric.xyz/RSm94m71kqtGICv4iKRj/developers/smart-contracts-reference/get-quote

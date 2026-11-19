@@ -25,7 +25,7 @@ For protocol-specific constant addresses, add them to <a href="https://github.co
 
 Once your `SwapEncoder` is implemented:
 
-* Add a placeholder address to <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/config/executor_addresses.json" target="_blank" rel="noopener noreferrer">config/executor\_addresses.json</a> and <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/config/test_executor_addresses.json" target="_blank" rel="noopener noreferrer">config/test\_executor\_addresses.json</a>
+* Add a placeholder address to <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/config/executor_addresses.json" target="_blank" rel="noopener noreferrer">config/executor\_addresses.json</a>, and your executor's test address to <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/config/test_executor_addresses.json" target="_blank" rel="noopener noreferrer">config/test\_executor\_addresses.json</a> (see "Full TychoRouterV3 Integration Test" under Testing)
 * Register your encoder in <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/src/encoding/evm/swap_encoder/swap_encoder_registry.rs" target="_blank" rel="noopener noreferrer">`SwapEncoderRegister`</a> if you want it included as a default protocol
 
 <details>
@@ -239,17 +239,19 @@ Use the helper functions:
 * `write_calldata_to_file()` in the encoding module (Rust)
 * `loadCallDataFromFile()` in the execution module (Solidity)
 
-These helpers save and load the calldata to/from `calldata.txt`.
+These helpers save and load the calldata to/from `contracts/test/assets/calldata/<test name>.hex`.
 
 #### 2. Full TychoRouterV3 Integration Test
 
 * In `tests/protocol_integration_tests.rs`, write a Rust test that encodes a single swap and saves the calldata using `write_calldata_to_file()`.
-* In `TychoRouterTestSetup`, deploy your new executor and add it to executors list in `deployExecutors`.
-* Run the setup to retrieve your executor’s deployed address and add it to <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/config/test_executor_addresses.json" target="_blank" rel="noopener noreferrer">config/test\_executor\_addresses.json</a>.
-* Create a new Solidity test contract that inherits from `TychoRouterTestSetup`. For example:
+* Add `contracts/test/deployments/YourProtocol.sol` with your protocol system, your executor's contract name, the constructor arguments the tests deploy it with and your protocol's addresses the tests use (its singletons and pools), following the existing files. It defines the contract `YourProtocolDeployment`, which registers the deployment with `TychoRouterTestSetup` and holds the executor's address as `yourProtocolExecutor`.
+* Add your executor's address to <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/config/test_executor_addresses.json" target="_blank" rel="noopener noreferrer">config/test\_executor\_addresses.json</a>. Executors are deployed with CREATE3 at an address that depends only on their protocol system, so the address is known before any deployment: `ExecutorAddressesTest` prints it for a wrong or placeholder entry.
+* Create a new Solidity test contract that inherits from `TychoRouterTestSetup` and from the deployment of each executor its swaps go through. The setup deploys and registers those executors. For example:
 
 ```solidity
- contract TychoRouterForYouProtocolTest is TychoRouterTestSetup {
+import {YourProtocolDeployment} from "../deployments/YourProtocol.sol";
+
+contract TychoRouterForYourProtocolTest is TychoRouterTestSetup, YourProtocolDeployment {
     function getForkBlock() public pure override returns (uint256) {
         return 22644371; // Use a block that fits your test scenario
     }
@@ -266,7 +268,7 @@ These tests ensure your integration works end-to-end within Tycho’s architectu
 
 Once your implementation is approved:
 
-1. **Declare the executor's deployment** by adding its contract name and constructor arguments to <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/config/executor_deployments.json" target="_blank" rel="noopener noreferrer">`config/executor_deployments.json`</a> (keyed by chain and protocol) and listing its protocol in the `deploy_protocols` map in `deploy-executors.js`. The deploy script and the SDK test-fixture generation both read the constructor arguments from this config.
+1. **Declare the executor's deployment** by adding its contract name and constructor arguments to <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/config/executor_deployments.json" target="_blank" rel="noopener noreferrer">`config/executor_deployments.json`</a> (keyed by chain and protocol). `deploy-executors.js` deploys every protocol configured for the network, and the SDK test-fixture generation reads the constructor arguments from the same config.
 2. **Deploy the executor contract** on the appropriate network (more <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/contracts/scripts/README.md" target="_blank" rel="noopener noreferrer">here</a>).
 3. **Contact us** to whitelist the new executor address on our main router contract.
 4. **Update the configuration** by adding the new executor address to `executor_addresses.json` and register the `SwapEncoder` within the `SwapEncoderBuilder` .

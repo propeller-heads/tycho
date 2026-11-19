@@ -3,7 +3,17 @@ pragma solidity ^0.8.26;
 import "../TestUtils.sol";
 import "../TychoRouterTestSetup.sol";
 import "@src/executors/SkyExecutor.sol";
-import {Constants} from "../Constants.sol";
+import {ALICE, Constants, DAI_ADDR, USDC_ADDR} from "../Constants.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    SKY_DAI_USDS_CONVERTER,
+    SKY_LITE_PSM,
+    SKY_USDS_PSM_WRAPPER,
+    SkyDeployment
+} from "../deployments/Sky.sol";
+
+address constant USDS_ADDR =
+    address(0xdC035D45d973E3EC169d2276DDab16f1e407384F);
 
 contract SkyExecutorExposed is SkyExecutor {
     constructor(address psm_, address wrapper_, address converter_)
@@ -256,18 +266,9 @@ contract SkyExecutorTest is Constants, TestUtils {
     }
 }
 
-contract TychoRouterForSkyTest is TychoRouterTestSetup {
+contract TychoRouterForSkyTest is TychoRouterTestSetup, SkyDeployment {
     function getForkBlock() public pure override returns (uint256) {
         return 25600000;
-    }
-
-    function testSkyExecutorAddress() public view {
-        // Pins the deterministic test-deployment address used in
-        // config/test_executor_addresses.json; fails loudly if the deploy
-        // order in TychoRouterTestSetup changes.
-        assertEq(
-            address(skyExecutor), 0xDA5A5ADC64C8013d334A0DA9e711B364Af7A4C2d
-        );
     }
 
     function testSingleSkyIntegration() public {

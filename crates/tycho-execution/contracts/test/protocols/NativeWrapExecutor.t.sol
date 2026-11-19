@@ -2,7 +2,7 @@ pragma solidity ^0.8.26;
 
 import "../TychoRouterTestSetup.sol";
 import {CommonBase} from "../../lib/forge-std/src/Base.sol";
-import {Constants} from "../Constants.sol";
+import {ALICE, Constants, ETH_ADDR, WETH_ADDR} from "../Constants.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {
     NativeWrapExecutor,
@@ -14,6 +14,8 @@ import {StdChains} from "../../lib/forge-std/src/StdChains.sol";
 import {StdCheats, StdCheatsSafe} from "../../lib/forge-std/src/StdCheats.sol";
 import {StdUtils} from "../../lib/forge-std/src/StdUtils.sol";
 import {TestUtils} from "../TestUtils.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {NativeWrapDeployment} from "../deployments/NativeWrap.sol";
 
 contract NativeWrapExecutorExposed is NativeWrapExecutor {
     constructor(address wrappedAddress) NativeWrapExecutor(wrappedAddress) {}
@@ -162,7 +164,7 @@ contract NativeWrapExecutorTest is TestUtils, Constants {
     }
 }
 
-contract WrapTest is TychoRouterTestSetup {
+contract WrapTest is TychoRouterTestSetup, NativeWrapDeployment {
     function testSingleSwapWrap() public {
         // ETH -> wETH
         IWrapped WETH = IWrapped(WETH_ADDR);

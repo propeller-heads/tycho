@@ -6,6 +6,22 @@ import "./TychoRouterTestSetup.sol";
 import {Vault__InsufficientBalance} from "@src/Vault.sol";
 import {UniswapV4Executor} from "@src/executors/UniswapV4Executor.sol";
 import {UniswapV4Utils} from "./protocols/UniswapV4Utils.sol";
+import {ExecutorDeployment} from "./ExecutorDeployment.sol";
+import {
+    ALICE,
+    ALICE_PK,
+    CLIENT_FEE_RECEIVER_PK,
+    DAI_ADDR,
+    PERMIT2_ADDRESS,
+    USDC_ADDR,
+    WETH_ADDR
+} from "./Constants.sol";
+import {SlipstreamsDeployment} from "./deployments/Slipstreams.sol";
+import {
+    DAI_WETH_UNIV2_POOL,
+    UniswapV2Deployment
+} from "./deployments/UniswapV2.sol";
+import {UniswapV4Deployment} from "./deployments/UniswapV4.sol";
 
 contract LyingSwapOutputPool {
     // Fake UniswapV2 pool that reports reserves that would result in ~1000 USDC output
@@ -26,7 +42,7 @@ contract LyingSwapOutputPool {
     function swap(uint256, uint256, address, bytes calldata) external {}
 }
 
-contract FalseTokenCallbackPool is TychoRouterTestSetup {
+contract FalseTokenCallbackPool is Constants {
     // When swap() is called, calls back into TychoRouterV3 with crafted data
     // instructing the router to transfer USDC to this contract.
 
@@ -47,7 +63,11 @@ contract FalseTokenCallbackPool is TychoRouterTestSetup {
     }
 }
 
-contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
+contract TychoRouterSingleSwapTest is
+    TychoRouterTestSetup,
+    SlipstreamsDeployment,
+    UniswapV2Deployment
+{
     function testSingleSwapPermit2() public {
         // Trade 1 WETH for DAI with 1 swap on Uniswap V2 using Permit2
         // 1 WETH   ->   DAI
@@ -64,8 +84,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         uint256 expectedAmountOut = 2008817438608734439722;
         tychoRouter.singleSwapPermit2(
@@ -101,8 +120,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         uint256 expectedAmountOut = 2000 * 1e18;
         uint256 amountOut = tychoRouter.singleSwap(
@@ -137,8 +155,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         vm.expectRevert(TychoRouter__AmountOutZero.selector);
         tychoRouter.singleSwap(
@@ -154,8 +171,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
 
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         // minAmountOut above expectedAmountOut is rejected
         vm.expectRevert(
@@ -183,8 +199,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
 
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         // minAmountOut of zero is rejected
         vm.expectRevert(
@@ -215,8 +230,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
 
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         uint256 expectedAmountOut = 2000 * 1e18;
         uint256 amountOut = tychoRouter.singleSwap(
@@ -237,8 +251,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
     function testSingleSwapZeroInput() public {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         vm.expectRevert(TychoRouter__ZeroInput.selector);
         tychoRouter.singleSwap(
@@ -270,8 +283,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory protocolData = abi.encodePacked(
             WETH_ADDR, DAI_ADDR, bytes3(0), address(maliciousPool), uint8(1)
         );
-        bytes memory swap =
-            encodeSingleSwap(address(slipstreamsExecutor), protocolData);
+        bytes memory swap = encodeSingleSwap(slipstreamsExecutor, protocolData);
 
         vm.expectRevert(TychoRouter__ZeroInput.selector);
         tychoRouter.singleSwapUsingVault(
@@ -295,8 +307,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         uint256 expectedAmountOut = 2600 * 1e18;
         vm.expectRevert();
@@ -325,8 +336,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         uint256 minAmountOut = 5600 * 1e18;
 
@@ -370,8 +380,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         uint256 minAmountOut = 2020 * 1e18;
         ClientFeeParams memory feeParams = ClientFeeParams({
@@ -432,8 +441,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         uint256 minAmountOut = 2020 * 1e18;
         vm.expectRevert(
@@ -472,8 +480,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         uint256 minAmountOut = 2020 * 1e18;
         uint256 swapAmount = 2018817438608734439722;
@@ -536,8 +543,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         uint256 minAmountOut = 2020 * 1e18;
         ClientFeeParams memory feeParams = makeClientFeeParams(
@@ -595,8 +601,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(ZKML_WETH_UNIV2_POOL, WETH_ADDR, ZKML_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         uint256 amountOut = tychoRouter.singleSwap(
             amountIn, WETH_ADDR, ZKML_ADDR, 1, 1, ALICE, noClientFee(), swap
@@ -629,8 +634,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(ZKML_WETH_UNIV2_POOL, ZKML_ADDR, WETH_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         uint256 amountOut = tychoRouter.singleSwap(
             amountIn, ZKML_ADDR, WETH_ADDR, 1, 1, ALICE, noClientFee(), swap
@@ -694,8 +698,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
 
         bytes memory protocolData =
             encodeUniswapV2Swap(address(fakePool), WETH_ADDR, USDC_ADDR);
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         // The executor calculates ~996 USDC from fake reserves and calls pool.swap(),
         // but the pool sends nothing.
@@ -728,8 +731,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
 
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, WETH_ADDR);
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -743,7 +745,10 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
     }
 }
 
-contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
+contract TychoRouterSingleSwapFeeTokenTest is
+    TychoRouterTestSetup,
+    UniswapV4Deployment
+{
     // TWIF/USDC V4 pool exists at this block
     function getForkBlock() public view override returns (uint256) {
         return 22689128;
@@ -774,8 +779,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
         bytes memory protocolData = UniswapV4Utils.encodeExactInput(
             USDC_ADDR, TWIF, false, false, pools
         );
-        bytes memory swap =
-            encodeSingleSwap(address(usv4Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV4Executor, protocolData);
 
         ClientFeeParams memory feeParams = makeClientFeeParams(
             1, // 1 bps (0.01%)
@@ -852,8 +856,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
         bytes memory protocolData = UniswapV4Utils.encodeExactInput(
             USDC_ADDR, TWIF, false, false, pools
         );
-        bytes memory swap =
-            encodeSingleSwap(address(usv4Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV4Executor, protocolData);
 
         ClientFeeParams memory feeParams = makeClientFeeParams(
             0, // no client fee

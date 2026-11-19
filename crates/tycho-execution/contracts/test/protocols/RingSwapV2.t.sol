@@ -2,7 +2,16 @@ pragma solidity ^0.8.26;
 
 import "../TychoRouterTestSetup.sol";
 import {TestUtils} from "../TestUtils.sol";
-import {Constants} from "../Constants.sol";
+import {
+    ALICE,
+    BSC_WBNB,
+    Constants,
+    DAI_ADDR,
+    USDC_ADDR,
+    USDT_ADDR,
+    WBTC_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
 import {TransferManager} from "@src/TransferManager.sol";
 import {
     RingSwapV2Executor,
@@ -16,6 +25,13 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
     IUniswapV2Pair
 } from "@uniswap-v2/contracts/interfaces/IUniswapV2Pair.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    RING_FEW_FACTORY,
+    RING_SWAP_FACTORY,
+    RingSwapV2Deployment
+} from "../deployments/RingSwapV2.sol";
+import {UniswapV2Deployment} from "../deployments/UniswapV2.sol";
 
 interface IFewWrappedTokenWithUnderlying {
     function token() external view returns (address);
@@ -428,8 +444,6 @@ contract RingSwapV2ExecutorBscTest is TestUtils {
         0xEeE400Eabfba8F60f4e6B351D8577394BeB972CD;
     address internal constant BSC_RING_WBNB_USDT_PAIR =
         0x653Cd6B4F72585647aC9F7086550CA7E5C8E8a4c;
-    address internal constant BSC_WBNB =
-        0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
     address internal constant BSC_USDT =
         0x55d398326f99059fF775485246999027B3197955;
     address internal constant BSC_FW_WBNB =
@@ -595,7 +609,11 @@ contract RingSwapV2ExecutorBscTest is TestUtils {
     }
 }
 
-contract TychoRouterForRingSwapV2Test is TychoRouterTestSetup {
+contract TychoRouterForRingSwapV2Test is
+    TychoRouterTestSetup,
+    RingSwapV2Deployment,
+    UniswapV2Deployment
+{
     uint256 internal constant RING_FORK_BLOCK = 25283712;
 
     address internal constant RING_DAI_WETH_PAIR =
@@ -664,8 +682,7 @@ contract TychoRouterForRingSwapV2Test is TychoRouterTestSetup {
         bytes memory protocolData = abi.encodePacked(
             maliciousPair, DAI_ADDR, WETH_ADDR, FW_DAI, FW_WETH
         );
-        bytes memory swap =
-            encodeSingleSwap(address(ringSwapV2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(ringSwapV2Executor, protocolData);
 
         deal(DAI_ADDR, ALICE, amountIn);
         vm.startPrank(ALICE);
@@ -695,8 +712,7 @@ contract TychoRouterForRingSwapV2Test is TychoRouterTestSetup {
         bytes memory protocolData = abi.encodePacked(
             RING_DAI_WETH_PAIR, DAI_ADDR, WETH_ADDR, fakeFewToken, FW_WETH
         );
-        bytes memory swap =
-            encodeSingleSwap(address(ringSwapV2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(ringSwapV2Executor, protocolData);
 
         deal(DAI_ADDR, ALICE, amountIn);
         vm.startPrank(ALICE);

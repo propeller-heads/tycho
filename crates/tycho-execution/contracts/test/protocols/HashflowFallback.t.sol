@@ -19,6 +19,14 @@ import {
     HashflowFallbackRouter__AddressZero,
     HashflowFallbackRouter__InvalidDataLength
 } from "../../src/fallback/HashflowFallbackRouter.sol";
+import {ALICE, USDC_ADDR, WETH_ADDR} from "../Constants.sol";
+import {HASHFLOW_ROUTER} from "../deployments/Hashflow.sol";
+import {FLUIDV1_LIQUIDITY} from "../deployments/FluidV1.sol";
+import {
+    UNISWAP_V3_STATIC_QUOTER,
+    USDC_WETH_USV3
+} from "../deployments/UniswapV3.sol";
+import {POOL_MANAGER} from "../deployments/UniswapV4.sol";
 
 /// @dev Uses `HashflowExecutorECR20Test`'s signed quote, whose trader is `ALICE`.
 contract HashflowFallbackRouterTest is FallbackRouterAssertions, TestUtils {

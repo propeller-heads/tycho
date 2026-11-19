@@ -3,7 +3,15 @@ pragma solidity ^0.8.26;
 import "../TychoRouterTestSetup.sol";
 import "@src/executors/HashflowExecutor.sol";
 import "forge-std/Test.sol";
-import {Constants} from "../Constants.sol";
+import {
+    ALICE,
+    Constants,
+    USDC_ADDR,
+    WBTC_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {HASHFLOW_ROUTER, HashflowDeployment} from "../deployments/Hashflow.sol";
 
 contract HashflowUtils is Test {
     constructor() {}
@@ -376,7 +384,10 @@ contract HashflowExecutorExposed is HashflowExecutor {
     }
 }
 
-contract TychoRouterSingleSwapTestForHashflow is TychoRouterTestSetup {
+contract TychoRouterSingleSwapTestForHashflow is
+    TychoRouterTestSetup,
+    HashflowDeployment
+{
     function getForkBlock() public pure override returns (uint256) {
         return 25975860;
     }

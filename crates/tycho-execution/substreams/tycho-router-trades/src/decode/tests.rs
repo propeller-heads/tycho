@@ -4,19 +4,28 @@ use substreams_ethereum::pb::eth::v2::Call;
 use super::*;
 use crate::abi::{tycho_router_v2 as v2, tycho_router_v3_0 as v3_0, tycho_router_v3_1 as v3_1};
 
-/// Calldata produced by the `tycho-execution` encoder tests (V3.1 router ABI).
-const FIXTURES: &str = include_str!("../../../../contracts/test/assets/calldata.txt");
+/// Calldata produced by the `tycho-execution` encoder tests (V3.1 router ABI), one
+/// `<test name>.hex` file per test.
+const FIXTURES_DIR: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/test/assets/calldata");
 
 fn call_with_input(input: Vec<u8>) -> Call {
     Call { input, ..Default::default() }
 }
 
 fn fixtures() -> Vec<(String, Vec<u8>)> {
-    FIXTURES
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .map(|(name, data)| (name.to_string(), hex::decode(data.trim()).expect("fixture hex")))
-        .collect()
+    let mut fixtures: Vec<(String, Vec<u8>)> = std::fs::read_dir(FIXTURES_DIR)
+        .expect("calldata fixture directory")
+        .map(|entry| entry.expect("fixture entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "hex"))
+        .map(|path| {
+            let name = path.file_stem().expect("fixture name").to_string_lossy().into_owned();
+            let data = std::fs::read_to_string(&path).expect("fixture file");
+            (name, hex::decode(data.trim()).expect("fixture hex"))
+        })
+        .collect();
+    fixtures.sort();
+    fixtures
 }
 
 const SWAP_FUNCTIONS: [&str; 9] = [

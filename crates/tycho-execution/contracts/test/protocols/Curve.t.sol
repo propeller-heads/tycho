@@ -2,8 +2,59 @@ pragma solidity ^0.8.26;
 
 import "../TychoRouterTestSetup.sol";
 import "@src/executors/CurveExecutor.sol";
-import {Constants} from "../Constants.sol";
+import {
+    ALICE,
+    Constants,
+    DAI_ADDR,
+    ETH_ADDR,
+    STETH_ADDR,
+    USDC_ADDR,
+    USDE_ADDR,
+    USDT_ADDR,
+    WBTC_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
 import {Test} from "../../lib/forge-std/src/Test.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    CurveDeployment,
+    STETH_POOL,
+    TRICRYPTO_POOL,
+    TRIPOOL
+} from "../deployments/Curve.sol";
+
+address constant SUSD_ADDR =
+    address(0x57Ab1ec28D129707052df4dF418D58a2D46d5f51);
+address constant FRAX_ADDR =
+    address(0x853d955aCEf822Db058eb8505911ED77F175b99e);
+address constant DOLA_ADDR =
+    address(0x865377367054516e17014CcdED1e7d814EDC9ce4);
+address constant XYO_ADDR = address(0x55296f69f40Ea6d20E478533C15A6B08B654E758);
+address constant UWU_ADDR = address(0x55C08ca52497e2f1534B59E2917BF524D4765257);
+address constant CRVUSD_ADDR =
+    address(0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E);
+address constant WSTTAO_ADDR =
+    address(0xe9633C52f4c8B7BDeb08c4A7fE8a5c1B84AFCf67);
+address constant WTAO_ADDR =
+    address(0x77E06c9eCCf2E797fd462A92B6D7642EF85b0A44);
+address constant BSGG_ADDR =
+    address(0xdA16Cf041E2780618c49Dbae5d734B89a6Bac9b3);
+address constant FRAXPYUSD_POOL =
+    address(0xA5588F7cdf560811710A2D82D3C9c99769DB1Dcb);
+address constant TRICRYPTO2_POOL = 0xD51a44d3FaE010294C616388b506AcdA1bfAAE46;
+address constant SUSD_POOL = 0xA5407eAE9Ba41422680e2e00537571bcC53efBfD;
+address constant FRAX_USDC_POOL = 0xDcEF968d416a41Cdac0ED8702fAC8128A64241A2;
+address constant USDE_USDC_POOL = 0x02950460E2b9529D0E00284A5fA2d7bDF3fA4d72;
+address constant DOLA_FRAXPYUSD_POOL =
+    0xef484de8C07B6e2d732A92B5F78e81B38f99f95E;
+address constant ETH_XYO_POOL = 0x99e09ee2d6Bb16c0F5ADDfEA649dbB2C1d524624;
+address constant UWU_WETH_POOL = 0x77146B0a1d08B6844376dF6d9da99bA7F1b19e71;
+address constant CRVUSD_USDT_POOL = 0x390f3595bCa2Df7d23783dFd126427CCeb997BF4;
+address constant WSTTAO_WTAO_POOL = 0xf2DCf6336D8250754B4527f57b275b19c8D5CF88;
+address constant BSGG_USDT_POOL = 0x5500307Bcf134E5851FB4D7D8D1Dc556dCdB84B4;
+// Curve meta registry
+address constant CURVE_META_REGISTRY =
+    0xF98B45FA17DE75FB1aD0e7aFD971b0ca00e379fC;
 
 interface ICurvePool {
     function coins(uint256 i) external view returns (address);
@@ -364,7 +415,7 @@ contract CurveExecutorTest is Test, TestUtils, Constants {
     }
 }
 
-contract TychoRouterForCurveTest is TychoRouterTestSetup {
+contract TychoRouterForCurveTest is TychoRouterTestSetup, CurveDeployment {
     function testSingleCurveIntegration() public {
         deal(UWU_ADDR, ALICE, 1 ether);
 
@@ -397,8 +448,7 @@ contract TychoRouterForCurveTest is TychoRouterTestSetup {
             uint8(1) // j = 1 (stETH)
         );
 
-        bytes memory swap =
-            encodeSingleSwap(address(curveExecutor), curveStEthData);
+        bytes memory swap = encodeSingleSwap(curveExecutor, curveStEthData);
 
         uint256 amountOut = tychoRouter.singleSwap{value: amountIn}(
             amountIn,

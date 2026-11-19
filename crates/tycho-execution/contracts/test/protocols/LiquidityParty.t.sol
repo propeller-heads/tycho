@@ -3,7 +3,7 @@ pragma solidity ^0.8.26;
 
 import "../TestUtils.sol";
 import "@src/executors/LiquidityPartyExecutor.sol";
-import {Constants} from "../Constants.sol";
+import {Constants, USDC_ADDR, WETH_ADDR} from "../Constants.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 contract LiquidityPartyExecutorExposed is LiquidityPartyExecutor {

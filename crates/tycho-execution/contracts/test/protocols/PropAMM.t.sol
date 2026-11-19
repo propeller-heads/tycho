@@ -12,6 +12,9 @@ import {
 import {IPropAMM} from "@interfaces/IPropAMM.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {MockERC20} from "forge-std/mocks/MockERC20.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {ALICE, USDC_ADDR, WETH_ADDR} from "../Constants.sol";
+import {PropAMMDeployment} from "../deployments/PropAMM.sol";
 
 /// @notice Minimal `IPropAMM` implementation paying a configurable fixed
 /// price per pair out of its own (dealt) balance, honoring the push-payment
@@ -175,7 +178,7 @@ contract PropAMMExecutorTest is TestUtils, Constants {
     }
 }
 
-contract PropAMMRouterTest is TychoRouterTestSetup {
+contract PropAMMRouterTest is TychoRouterTestSetup, PropAMMDeployment {
     address constant MOCK_PAMM = 0x1111111111111111111111111111111111111111;
 
     function getForkBlock() public pure override returns (uint256) {

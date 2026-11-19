@@ -6,8 +6,11 @@ import {
     FluidV1Executor__InvalidCallback
 } from "@src/executors/FluidV1Executor.sol";
 import {IFluidV1Dex} from "@interfaces/IFluidV1Dex.sol";
-import {Constants} from "../Constants.sol";
+import {ALICE, Constants, DAI_ADDR, ETH_ADDR} from "../Constants.sol";
 import "forge-std/Test.sol";
+import {TransferManager} from "@src/TransferManager.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {FLUIDV1_LIQUIDITY, FluidV1Deployment} from "../deployments/FluidV1.sol";
 
 contract FluidV1ExecutorExposed is FluidV1Executor {
     constructor(address _liquidity) FluidV1Executor(_liquidity) {}
@@ -199,7 +202,7 @@ contract FluidV1ExecutorTest is Test, Constants {
     }
 }
 
-contract TychoRouterForFluidV1Test is TychoRouterTestSetup {
+contract TychoRouterForFluidV1Test is TychoRouterTestSetup, FluidV1Deployment {
     function getForkBlock() public pure override returns (uint256) {
         return 23768324;
     }
@@ -259,8 +262,7 @@ contract TychoRouterForFluidV1Test is TychoRouterTestSetup {
             address(ezETH), // tokenOut
             true // isNativeSell
         );
-        bytes memory swap =
-            encodeSingleSwap(address(fluidV1Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(fluidV1Executor, protocolData);
 
         vm.prank(ALICE);
         uint256 amountOut = tychoRouter.singleSwap{value: amountIn}(

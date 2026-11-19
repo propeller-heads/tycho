@@ -2,6 +2,7 @@ pragma solidity ^0.8.26;
 
 import "@src/Dispatcher.sol";
 import "./TychoRouterTestSetup.sol";
+import {PERMIT2_ADDRESS, WETH_ADDR} from "./Constants.sol";
 
 error RevertingExecutor__Custom(uint256 code);
 

@@ -5,9 +5,11 @@ import {TestUtils} from "../TestUtils.sol";
 import {AeroBasicExecutor} from "@src/executors/AeroBasicExecutor.sol";
 import {AerodromeV1Executor} from "@src/executors/AerodromeV1Executor.sol";
 import {IAeroBasicPool} from "@interfaces/IAeroBasicPool.sol";
-import {Constants} from "../Constants.sol";
+import {ALICE, Constants} from "../Constants.sol";
 import {TransferManager} from "@src/TransferManager.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {AeroBasicDeployment} from "../deployments/AeroBasic.sol";
 
 abstract contract AeroBasicTestBase {
     /// Base block with AERO basic pools live; the aero_basic simulation fixture uses it too.
@@ -148,7 +150,8 @@ contract AeroBasicExecutorTest is Constants, TestUtils, AeroBasicTestBase {
 
 contract TychoRouterForAeroBasicTest is
     TychoRouterTestSetup,
-    AeroBasicTestBase
+    AeroBasicTestBase,
+    AeroBasicDeployment
 {
     function getChain() public pure override returns (string memory) {
         return "base";

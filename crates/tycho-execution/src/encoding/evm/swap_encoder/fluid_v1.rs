@@ -102,7 +102,7 @@ mod tests {
             origin: None,
         };
         let encoder = FluidV1SwapEncoder::new(
-            Bytes::from("0x212224D2F2d262cd093eE13240ca4873fcCBbA3C"),
+            Bytes::from("0xdcb259E873a31E046a6FDA43DB61D7A296c2736f"),
             Chain::Ethereum,
             None,
         )

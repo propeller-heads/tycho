@@ -1,7 +1,7 @@
 pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {Constants} from "../Constants.sol";
+import {BASE_USDC, Constants} from "../Constants.sol";
 import {TestUtils} from "../TestUtils.sol";
 import {TychoRouterTestSetup} from "../TychoRouterTestSetup.sol";
 import {TransferManager} from "@src/TransferManager.sol";
@@ -11,6 +11,8 @@ import {
     LunarBaseExecutor,
     LunarBaseExecutor__InvalidDataLength
 } from "@src/executors/LunarBaseExecutor.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {LunarBaseDeployment} from "../deployments/LunarBase.sol";
 
 contract LunarBaseExecutorExposed is LunarBaseExecutor {
     function decodeParams(bytes calldata data)
@@ -44,12 +46,12 @@ contract LunarBaseExecutorTest is Constants, TestUtils {
     bytes32 internal constant POOL_ACCESS_SLOT =
         0x9832e62c6c6e13b4465b385de9f563995a2974f4f839176dcccf0b12e5c11200;
 
-    LunarBaseExecutorExposed lunarBaseExecutor;
+    LunarBaseExecutorExposed executor;
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("base"), 46498514);
-        lunarBaseExecutor = new LunarBaseExecutorExposed();
-        _whitelistSwapCaller(address(lunarBaseExecutor));
+        executor = new LunarBaseExecutorExposed();
+        _whitelistSwapCaller(address(executor));
     }
 
     function testDecodeParams() public view {
@@ -61,7 +63,7 @@ contract LunarBaseExecutorTest is Constants, TestUtils {
             address tokenIn,
             address tokenOut,
             uint256 amountOutMinimum
-        ) = lunarBaseExecutor.decodeParams(params);
+        ) = executor.decodeParams(params);
 
         assertEq(pool, LUNARBASE_POOL);
         assertEq(tokenIn, ETH_ADDRESS);
@@ -74,7 +76,7 @@ contract LunarBaseExecutorTest is Constants, TestUtils {
             abi.encodePacked(LUNARBASE_POOL, NATIVE_TOKEN);
 
         vm.expectRevert(LunarBaseExecutor__InvalidDataLength.selector);
-        lunarBaseExecutor.decodeParams(invalidParams);
+        executor.decodeParams(invalidParams);
     }
 
     function testGetTransferDataNativeInput() public {
@@ -87,7 +89,7 @@ contract LunarBaseExecutorTest is Constants, TestUtils {
             address tokenIn,
             address tokenOut,
             bool outputToRouter
-        ) = lunarBaseExecutor.getTransferData(params);
+        ) = executor.getTransferData(params);
 
         assertEq(
             uint8(transferType),
@@ -109,7 +111,7 @@ contract LunarBaseExecutorTest is Constants, TestUtils {
             address tokenIn,
             address tokenOut,
             bool outputToRouter
-        ) = lunarBaseExecutor.getTransferData(params);
+        ) = executor.getTransferData(params);
 
         assertEq(
             uint8(transferType),
@@ -125,14 +127,14 @@ contract LunarBaseExecutorTest is Constants, TestUtils {
         bytes memory params =
             abi.encodePacked(LUNARBASE_POOL, ETH_ADDRESS, BASE_USDC);
 
-        assertEq(lunarBaseExecutor.fundsExpectedAddress(params), address(this));
+        assertEq(executor.fundsExpectedAddress(params), address(this));
     }
 
     function testFundsExpectedAddressErc20Input() public view {
         bytes memory params =
             abi.encodePacked(LUNARBASE_POOL, BASE_USDC, ETH_ADDRESS);
 
-        assertEq(lunarBaseExecutor.fundsExpectedAddress(params), address(this));
+        assertEq(executor.fundsExpectedAddress(params), address(this));
     }
 
     function testSwapNativeInputAllowsSurplusMsgValue() public {
@@ -140,34 +142,32 @@ contract LunarBaseExecutorTest is Constants, TestUtils {
         uint256 msgValue = 0.02 ether;
         bytes memory params =
             abi.encodePacked(LUNARBASE_POOL, ETH_ADDRESS, BASE_USDC);
-        uint256 expectedAmountOut = _quoteAs(
-            address(lunarBaseExecutor), NATIVE_TOKEN, BASE_USDC, amountIn
-        );
+        uint256 expectedAmountOut =
+            _quoteAs(address(executor), NATIVE_TOKEN, BASE_USDC, amountIn);
 
         assertGt(expectedAmountOut, 0);
         vm.deal(address(this), msgValue);
 
         uint256 balanceBefore = IERC20(BASE_USDC).balanceOf(BOB);
-        lunarBaseExecutor.swap{value: msgValue}(amountIn, params, BOB);
+        executor.swap{value: msgValue}(amountIn, params, BOB);
         uint256 balanceAfter = IERC20(BASE_USDC).balanceOf(BOB);
 
         assertEq(balanceAfter - balanceBefore, expectedAmountOut);
-        assertEq(address(lunarBaseExecutor).balance, msgValue - amountIn);
+        assertEq(address(executor).balance, msgValue - amountIn);
     }
 
     function testSwapNativeInput() public {
         uint256 amountIn = 0.01 ether;
         bytes memory params =
             abi.encodePacked(LUNARBASE_POOL, ETH_ADDRESS, BASE_USDC);
-        uint256 expectedAmountOut = _quoteAs(
-            address(lunarBaseExecutor), NATIVE_TOKEN, BASE_USDC, amountIn
-        );
+        uint256 expectedAmountOut =
+            _quoteAs(address(executor), NATIVE_TOKEN, BASE_USDC, amountIn);
 
         assertGt(expectedAmountOut, 0);
         vm.deal(address(this), amountIn);
 
         uint256 balanceBefore = IERC20(BASE_USDC).balanceOf(BOB);
-        lunarBaseExecutor.swap{value: amountIn}(amountIn, params, BOB);
+        executor.swap{value: amountIn}(amountIn, params, BOB);
         uint256 balanceAfter = IERC20(BASE_USDC).balanceOf(BOB);
 
         assertEq(balanceAfter - balanceBefore, expectedAmountOut);
@@ -177,21 +177,20 @@ contract LunarBaseExecutorTest is Constants, TestUtils {
         uint256 amountIn = 20e6;
         bytes memory params =
             abi.encodePacked(LUNARBASE_POOL, BASE_USDC, ETH_ADDRESS);
-        uint256 expectedAmountOut = _quoteAs(
-            address(lunarBaseExecutor), BASE_USDC, NATIVE_TOKEN, amountIn
-        );
+        uint256 expectedAmountOut =
+            _quoteAs(address(executor), BASE_USDC, NATIVE_TOKEN, amountIn);
 
         assertGt(expectedAmountOut, 0);
-        deal(BASE_USDC, address(lunarBaseExecutor), amountIn);
-        vm.prank(address(lunarBaseExecutor));
+        deal(BASE_USDC, address(executor), amountIn);
+        vm.prank(address(executor));
         IERC20(BASE_USDC).approve(LUNARBASE_POOL, amountIn);
 
         uint256 balanceBefore = BOB.balance;
-        lunarBaseExecutor.swap(amountIn, params, BOB);
+        executor.swap(amountIn, params, BOB);
         uint256 balanceAfter = BOB.balance;
 
         assertEq(balanceAfter - balanceBefore, expectedAmountOut);
-        assertEq(IERC20(BASE_USDC).balanceOf(address(lunarBaseExecutor)), 0);
+        assertEq(IERC20(BASE_USDC).balanceOf(address(executor)), 0);
     }
 
     function _quoteAs(
@@ -215,15 +214,16 @@ contract LunarBaseExecutorTest is Constants, TestUtils {
     }
 }
 
-contract TychoRouterForLunarBaseTest is TychoRouterTestSetup {
+contract TychoRouterForLunarBaseTest is
+    TychoRouterTestSetup,
+    LunarBaseDeployment
+{
     address internal constant LUNARBASE_POOL =
         0x0000eFC4ec03a7c47D3a38A9Be7Ff1d52dD01b99;
     address internal constant NATIVE_TOKEN =
         0x0000000000000000000000000000000000000000;
     bytes32 internal constant POOL_ACCESS_SLOT =
         0x9832e62c6c6e13b4465b385de9f563995a2974f4f839176dcccf0b12e5c11200;
-
-    LunarBaseExecutor lunarBaseExecutor;
 
     function getChain() public pure override returns (string memory) {
         return "base";
@@ -236,14 +236,7 @@ contract TychoRouterForLunarBaseTest is TychoRouterTestSetup {
     function setUp() public override {
         super.setUp();
 
-        lunarBaseExecutor = new LunarBaseExecutor();
         _whitelistSwapCaller(tychoRouterAddr);
-        address[] memory executors = new address[](1);
-        executors[0] = address(lunarBaseExecutor);
-
-        vm.prank(EXECUTOR_SETTER);
-        tychoRouter.setExecutors(executors);
-        vm.warp(block.timestamp + tychoRouter.DELAY_EXECUTOR_ACTIVATION());
     }
 
     function testSingleSwapNativeInputThroughRouter() public {
@@ -251,7 +244,7 @@ contract TychoRouterForLunarBaseTest is TychoRouterTestSetup {
         uint256 expectedAmountOut =
             _quoteAs(tychoRouterAddr, NATIVE_TOKEN, BASE_USDC, amountIn);
         bytes memory swap = encodeSingleSwap(
-            address(lunarBaseExecutor),
+            lunarBaseExecutor,
             abi.encodePacked(LUNARBASE_POOL, ETH_ADDRESS, BASE_USDC)
         );
 
@@ -273,7 +266,7 @@ contract TychoRouterForLunarBaseTest is TychoRouterTestSetup {
         uint256 expectedAmountOut =
             _quoteAs(tychoRouterAddr, BASE_USDC, NATIVE_TOKEN, amountIn);
         bytes memory swap = encodeSingleSwap(
-            address(lunarBaseExecutor),
+            lunarBaseExecutor,
             abi.encodePacked(LUNARBASE_POOL, BASE_USDC, ETH_ADDRESS)
         );
 
