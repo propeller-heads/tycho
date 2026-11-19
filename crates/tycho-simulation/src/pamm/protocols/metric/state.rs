@@ -658,6 +658,28 @@ mod tests {
         );
     }
 
+    /// A zero ask price is no quote, so the ask side is not traded even with bins on it:
+    /// `directions`, `get_limits` and `get_amount_out` all leave it out, and the bid side still
+    /// trades.
+    #[test]
+    fn zero_ask_price_is_not_quoted() {
+        let mut state = state();
+        state.bid_ask.ask_adj = BigUint::zero();
+
+        assert!(state.bid_ask.is_quotable());
+        assert_eq!(state.directions(), vec![(weth().address, usdc().address)]);
+        assert!(matches!(
+            state.get_limits(usdc().address, weth().address),
+            Err(SimulationError::RecoverableError(_))
+        ));
+        let Err(SimulationError::InvalidInput(msg, None)) =
+            state.get_amount_out(big("300000000"), &usdc(), &weth())
+        else {
+            panic!("buying WETH from a zero ask price must fail");
+        };
+        assert!(msg.contains("no tradable side"), "{msg}");
+    }
+
     #[test]
     fn book_without_quotes_has_no_spot_price() {
         let mut state = state();

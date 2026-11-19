@@ -195,9 +195,10 @@ impl MetricBidAskResponse {
         !self.bid_adj.is_zero()
     }
 
-    /// Whether the pool quotes an ask: the API sends `askAdj = 2^128 - 1` when it does not.
+    /// Whether the pool quotes an ask: the API sends `askAdj = 2^128 - 1` when it does not, and a
+    /// zero price is no quote because the spot price divides by it.
     fn quotes_ask(&self) -> bool {
-        self.ask_adj != BigUint::from(u128::MAX)
+        !self.ask_adj.is_zero() && self.ask_adj != BigUint::from(u128::MAX)
     }
 
     /// The bid price, or `None` when the pool quotes no bid.
