@@ -1276,23 +1276,13 @@ where
             );
         }
 
-        let changes =
-            BlockAggregatedChanges { unpaused_components: unpaused, ..Default::default() };
-        let (to_add, _) = self
+        let to_add = self
             .component_tracker
-            .filter_updated_components(&changes);
-        let to_add: Vec<&String> = to_add
-            .iter()
-            .filter(|id| {
-                !self
-                    .component_tracker
-                    .components
-                    .contains_key(id.as_str())
-            })
-            .collect();
+            .unpaused_to_track(&unpaused)
+            .await?;
         if !to_add.is_empty() {
             self.component_tracker
-                .start_tracking(&to_add)
+                .start_tracking(&to_add.iter().collect::<Vec<_>>())
                 .await?;
         }
 

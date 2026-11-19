@@ -473,6 +473,50 @@ where
         Ok(unpaused)
     }
 
+    /// Returns the components of `unpaused` that are not tracked and pass the filter. With a TVL
+    /// filter, asks the server which of them are above the add threshold, and records the ones it
+    /// reports as paused.
+    pub(crate) async fn unpaused_to_track(
+        &mut self,
+        unpaused: &HashSet<ComponentId>,
+    ) -> Result<Vec<ComponentId>, RPCError> {
+        let untracked: Vec<ComponentId> = unpaused
+            .iter()
+            .filter(|id| !self.components.contains_key(*id) && !self.paused.contains(*id))
+            .cloned()
+            .collect();
+        if untracked.is_empty() {
+            return Ok(Vec::new());
+        }
+        let add_tvl = match &self.filter.variant {
+            ComponentFilterVariant::Ids(ids) => {
+                return Ok(untracked
+                    .into_iter()
+                    .filter(|id| ids.contains(&id.to_lowercase()))
+                    .collect());
+            }
+            ComponentFilterVariant::MinimumTVLRange { range: (_, add_tvl), .. } => *add_tvl,
+        };
+        let params = ProtocolComponentsPaginatedParams::new(
+            self.chain,
+            self.protocol_system.as_str(),
+            RPC_CLIENT_CONCURRENCY,
+        )
+        .with_component_ids(untracked)
+        .with_tvl_gt(add_tvl);
+        let (above_add_tvl, paused) = self
+            .rpc_client
+            .get_protocol_components_paginated(params)
+            .await?
+            .into_parts();
+        self.record_paused(paused);
+        Ok(above_add_tvl
+            .into_iter()
+            .map(|component| component.id)
+            .filter(|id| !self.filter.is_blocklisted(id))
+            .collect())
+    }
+
     /// Remembers the components a block pauses, and forgets the ones it unpauses.
     pub(crate) fn record_pause_events(&mut self, deltas: &BlockAggregatedChanges) {
         for id in &deltas.unpaused_components {
