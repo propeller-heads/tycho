@@ -284,6 +284,9 @@ enum SnapshotStatus {
 
 struct SnapshotFetchResult {
     components: HashMap<String, ProtocolComponent>,
+    /// Ids of the requested components the server reported as paused. `components` leaves
+    /// them out.
+    paused_component_ids: HashSet<String>,
     contract_ids: HashSet<Bytes>,
     dci_update: DCIUpdate,
     snapshot: Snapshot,
@@ -419,6 +422,7 @@ async fn fetch_snapshot_background<R: RPCClient>(
     if component_ids.is_empty() {
         return Ok(SnapshotFetchResult {
             components: HashMap::new(),
+            paused_component_ids: HashSet::new(),
             contract_ids: HashSet::new(),
             dci_update: DCIUpdate::default(),
             snapshot: Snapshot::default(),
@@ -428,10 +432,12 @@ async fn fetch_snapshot_background<R: RPCClient>(
 
     let request = crate::rpc::ProtocolComponentsParams::new(params.chain, &params.protocol_system)
         .with_component_ids(component_ids);
-    let components: HashMap<String, ProtocolComponent> = rpc_client
+    let response = rpc_client
         .get_protocol_components(request)
         .await?
-        .into_data()
+        .into_data();
+    let paused_component_ids = response.paused_component_ids().clone();
+    let components: HashMap<String, ProtocolComponent> = response
         .into_not_paused()
         .map(|pc| (pc.id.clone(), pc))
         .collect();
@@ -445,7 +451,14 @@ async fn fetch_snapshot_background<R: RPCClient>(
     let (snapshot, dci_update, contract_ids) =
         fetch_snapshot(&rpc_client, components.clone(), contract_ids, &params).await?;
 
-    Ok(SnapshotFetchResult { components, contract_ids, dci_update, snapshot, snapshot_block })
+    Ok(SnapshotFetchResult {
+        components,
+        paused_component_ids,
+        contract_ids,
+        dci_update,
+        snapshot,
+        snapshot_block,
+    })
 }
 
 impl<R, D> ProtocolStateSynchronizer<R, D>
@@ -795,6 +808,10 @@ where
                         if let Some(mut deltas) = deltas_opt {
                             let header: BlockHeader = (&deltas).into();
                             debug!(block_number=?header.number, "Received delta message");
+
+                            // Record pauses before draining, so a snapshot that finishes after its
+                            // component was paused is dropped.
+                            self.component_tracker.record_pause_events(&deltas);
 
                             // Buffer unfiltered delta while any snapshot task is in-flight.
                             if !self.snapshot_tasks.is_empty() {
@@ -1147,6 +1164,8 @@ where
                     {
                         self.snapshot_backoff = None;
                     }
+                    let mut fetch_result = fetch_result;
+                    self.drop_paused(&mut fetch_result);
                     let new_component_ids: Vec<String> = fetch_result
                         .components
                         .keys()
@@ -1224,6 +1243,33 @@ where
         }
 
         result
+    }
+
+    /// Records the components a finished background fetch found paused, and removes every paused
+    /// component from its result. While the fetch ran, a block may have paused a component it
+    /// returned, or unpaused one it found paused.
+    fn drop_paused(&mut self, fetch_result: &mut SnapshotFetchResult) {
+        let unpaused_since: HashSet<&String> = self
+            .buffered_deltas
+            .iter()
+            .filter(|d| d.block.number > fetch_result.snapshot_block)
+            .flat_map(|d| d.unpaused_components.iter())
+            .collect();
+        let still_paused: HashSet<String> = fetch_result
+            .paused_component_ids
+            .iter()
+            .filter(|id| !unpaused_since.contains(id))
+            .cloned()
+            .collect();
+        self.component_tracker
+            .record_paused(&still_paused);
+
+        let dropped = self
+            .component_tracker
+            .drop_paused_from(&mut fetch_result.components);
+        for id in &dropped {
+            fetch_result.snapshot.states.remove(id);
+        }
     }
 
     fn is_next_expected(&self, incoming: &BlockHeader) -> bool {

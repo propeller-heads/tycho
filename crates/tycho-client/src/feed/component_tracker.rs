@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use tracing::{debug, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 use tycho_common::models::{
     blockchain::{BlockAggregatedChanges, DCIUpdate},
     protocol::ProtocolComponent,
@@ -160,6 +160,9 @@ pub struct ComponentTracker<R: RPCClient> {
     /// Derived from tracked components. We need this if subscribed to a vm extractor because
     /// updates are emitted on a contract level instead of a component level.
     pub contracts: HashSet<Address>,
+    /// Components the server reported as paused that no block has unpaused since. They are
+    /// not tracked.
+    paused: HashSet<ComponentId>,
     /// Client to retrieve necessary protocol components from the rpc.
     rpc_client: R,
 }
@@ -177,6 +180,7 @@ where
             contracts: Default::default(),
             rpc_client: rpc,
             entrypoints: Default::default(),
+            paused: Default::default(),
         }
     }
 
@@ -201,10 +205,12 @@ where
             paginated_params = paginated_params.with_tvl_gt(tvl);
         }
 
-        self.components = self
+        let response = self
             .rpc_client
             .get_protocol_components_paginated(paginated_params)
-            .await?
+            .await?;
+        self.record_paused(response.paused_component_ids());
+        self.components = response
             .into_not_paused()
             .map(|comp| (comp.id.clone(), comp))
             .filter(|(id, _)| !self.filter.is_blocklisted(id))
@@ -287,7 +293,7 @@ where
             return Ok(());
         }
 
-        let components = self
+        let response = self
             .rpc_client
             .get_protocol_components(
                 crate::rpc::ProtocolComponentsParams::new(
@@ -302,7 +308,9 @@ where
                 ),
             )
             .await?
-            .into_data()
+            .into_data();
+        self.record_paused(response.paused_component_ids());
+        let components = response
             .into_not_paused()
             .map(|comp| (comp.id.clone(), comp))
             .collect::<HashMap<_, _>>();
@@ -415,6 +423,54 @@ where
             .collect()
     }
 
+    /// Remembers the ids a components response reported as paused, so they are not tracked
+    /// until a block unpauses them.
+    pub(crate) fn record_paused(&mut self, paused: &HashSet<ComponentId>) {
+        if !paused.is_empty() {
+            self.log_paused(paused, "Skipping paused components");
+        }
+        self.paused
+            .extend(paused.iter().cloned());
+    }
+
+    /// Remembers the components a block pauses, and forgets the ones it unpauses.
+    pub(crate) fn record_pause_events(&mut self, deltas: &BlockAggregatedChanges) {
+        for id in &deltas.unpaused_components {
+            self.paused.remove(id);
+        }
+        self.paused
+            .extend(deltas.paused_components.iter().cloned());
+    }
+
+    /// Removes the paused components from `components`, logs them, and returns their ids.
+    pub(crate) fn drop_paused_from(
+        &self,
+        components: &mut HashMap<ComponentId, ProtocolComponent>,
+    ) -> Vec<ComponentId> {
+        let dropped: Vec<ComponentId> = components
+            .keys()
+            .filter(|id| self.paused.contains(*id))
+            .cloned()
+            .collect();
+        if !dropped.is_empty() {
+            self.log_paused(&dropped, "Dropping paused components");
+        }
+        for id in &dropped {
+            components.remove(id);
+        }
+        dropped
+    }
+
+    /// Logs `message` with the paused `components`. With an id filter, the user asked for these
+    /// components by id, so it logs at info. With a TVL filter, pauses are routine, so it logs at
+    /// debug.
+    fn log_paused(&self, components: &impl std::fmt::Debug, message: &str) {
+        match &self.filter.variant {
+            ComponentFilterVariant::Ids(_) => info!(?components, "{message}"),
+            ComponentFilterVariant::MinimumTVLRange { .. } => debug!(?components, "{message}"),
+        }
+    }
+
     pub fn get_tracked_component_ids(&self) -> Vec<ComponentId> {
         self.components
             .keys()
@@ -422,14 +478,27 @@ where
             .collect()
     }
 
-    /// Given BlockAggregatedChanges, filter out components that are no longer relevant and return
-    /// the components that need to be added or removed.
+    /// Returns the components to start and stop tracking after a block, as `(to_add, to_remove)`,
+    /// following the client's filter. With an id filter, a block only adds back components it
+    /// unpauses.
+    ///
+    /// Pauses override the filter. `to_remove` holds every component the block pauses. `to_add`
+    /// leaves out every component that is still paused: one the block pauses, or one an earlier
+    /// block or response paused that this block does not unpause.
     pub fn filter_updated_components(
         &self,
         deltas: &BlockAggregatedChanges,
     ) -> (Vec<ComponentId>, Vec<ComponentId>) {
-        match &self.filter.variant {
-            ComponentFilterVariant::Ids(_) => (Default::default(), Default::default()),
+        let (mut to_add, mut to_remove) = match &self.filter.variant {
+            ComponentFilterVariant::Ids(ids) => {
+                let to_add = deltas
+                    .unpaused_components
+                    .iter()
+                    .filter(|id| ids.contains(&id.to_lowercase()))
+                    .cloned()
+                    .collect();
+                (to_add, Vec::new())
+            }
             ComponentFilterVariant::MinimumTVLRange { range: (remove_tvl, add_tvl), .. } => {
                 let (mut to_add, mut to_remove): (Vec<_>, Vec<_>) = deltas
                     .component_tvl
@@ -450,7 +519,17 @@ where
 
                 (to_add, to_remove)
             }
-        }
+        };
+
+        // The caller may not have recorded this block's pauses yet, so check them here too.
+        to_add.retain(|id| {
+            !deltas.paused_components.contains(id) &&
+                (!self.paused.contains(id) || deltas.unpaused_components.contains(id))
+        });
+        to_remove.retain(|id| !deltas.paused_components.contains(id));
+        to_remove.extend(deltas.paused_components.iter().cloned());
+
+        (to_add, to_remove)
     }
 }
 
