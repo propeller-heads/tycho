@@ -117,53 +117,51 @@ fn plan_writes<R: VersionedRow>(
 ) -> Result<VersionWrites<R>, StorageError> {
     changes.sort_by_key(|change| change.origin);
 
-    let mut last_version = BTreeMap::new();
-    let mut latest = BTreeMap::new();
-    for row in stored {
-        last_version.insert(row.key(), row.version());
-        latest.insert(row.key(), row);
-    }
+    // The start of the last version of each key, and its latest row: `None` once deleted.
+    let mut latest: BTreeMap<_, _> = stored
+        .into_iter()
+        .map(|row| (row.key(), (row.version(), Some(row))))
+        .collect();
 
-    let mut changed = BTreeSet::new();
     let mut history = Vec::new();
     for change in changes {
         let key = change.key();
         let version = (change.origin.valid_from, change.origin.tx_index);
-        if let Some(last) = last_version.insert(key.clone(), version) {
-            if version <= last {
+        let replaced = match latest.remove(&key) {
+            Some((last, _)) if version <= last => {
                 return Err(StorageError::Unexpected(format!(
                     "{} {key:?}: a change at {version:?} does not start after the version it \
                      replaces, at {last:?}",
                     R::ENTITY
                 )));
             }
-        }
-
-        let replaced = latest.remove(&key);
-        match change.kind {
+            Some((_, replaced)) => replaced,
+            None => None,
+        };
+        let next = match change.kind {
             ChangeKind::Update(mut row) => {
                 if let Some(replaced) = &replaced {
                     replaced.link_next(&mut row);
                 }
-                latest.insert(key.clone(), row);
+                Some(row)
             }
             ChangeKind::Delete(_) if replaced.is_none() => {
                 return Err(StorageError::NotFound(R::ENTITY.to_owned(), format!("{key:?}")));
             }
-            ChangeKind::Delete(_) => {}
-        }
+            ChangeKind::Delete(_) => None,
+        };
         if let Some(replaced) = replaced {
             if change.origin.valid_from > retention_horizon {
                 history.push(replaced.into_history(change.origin.valid_from));
             }
         }
-        changed.insert(key);
+        latest.insert(key, (version, next));
     }
 
     let mut current = Vec::new();
     let mut deleted = Vec::new();
-    for key in changed {
-        match latest.remove(&key) {
+    for (key, (_, row)) in latest {
+        match row {
             Some(row) => current.push(row),
             None => deleted.push(key),
         }
