@@ -1303,7 +1303,8 @@ where
 
     /// Records the components a finished background fetch found paused, and removes every paused
     /// component from its result. While the fetch ran, a block may have paused a component it
-    /// returned, or unpaused one it found paused.
+    /// returned, or unpaused one it found paused. It queues the components unpaused that way, so
+    /// the next block fetches them again.
     fn drop_paused(&mut self, fetch_result: &mut SnapshotFetchResult) {
         let unpaused_since: HashSet<&String> = self
             .buffered_deltas
@@ -1311,14 +1312,19 @@ where
             .filter(|d| d.block.number > fetch_result.snapshot_block)
             .flat_map(|d| d.unpaused_components.iter())
             .collect();
-        let still_paused: HashSet<String> = fetch_result
+        let (refetch, still_paused): (HashSet<String>, HashSet<String>) = fetch_result
             .paused_component_ids
             .iter()
-            .filter(|id| !unpaused_since.contains(id))
             .cloned()
-            .collect();
+            .partition(|id| unpaused_since.contains(id));
         self.component_tracker
             .record_paused(still_paused);
+        // The fetch left these out and the block that unpaused them found them in flight, so
+        // queue them like components whose backoff has ended: the next block fetches them again.
+        for id in refetch {
+            self.snapshot_queue
+                .insert(id, SnapshotStatus::Backoff);
+        }
 
         let dropped = self
             .component_tracker
