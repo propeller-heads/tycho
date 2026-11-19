@@ -499,7 +499,7 @@ impl ProtocolStreamBuilder {
         self
     }
 
-    /// Enables partial block updates (flashblocks).
+    /// Enables partial block updates on chains that have them.
     pub fn enable_partial_blocks(mut self) -> Self {
         self.stream_builder = self
             .stream_builder

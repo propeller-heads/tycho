@@ -310,7 +310,7 @@ impl TychoStreamBuilder {
         self
     }
 
-    /// Enables the client to receive partial block updates (flashblocks).
+    /// Enables the client to receive partial block updates on chains that have them.
     pub fn enable_partial_blocks(mut self) -> Self {
         self.partial_blocks = true;
         self

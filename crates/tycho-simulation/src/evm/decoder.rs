@@ -149,7 +149,7 @@ where
 
     /// The block a quote produced from `header` is expected to execute in.
     ///
-    /// A partial (flashblock) header describes a block that is still open, so a quote can still
+    /// A partial header describes a block that is still open, so a quote can still
     /// land in it. A confirmed header describes a closed block, so the quote targets the next one.
     fn execution_block(&self, header: &BlockHeader) -> BlockContext {
         if header.partial_block_index.is_some() {
