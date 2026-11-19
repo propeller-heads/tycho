@@ -1,6 +1,6 @@
 [package]
 name = "ethereum-curve"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 
 [lib]
@@ -19,6 +19,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_qs = "0.13.0"
 itertools = "0.13.0"
 serde_json = "1.0.133"
+
+[dev-dependencies]
+rstest = "0.24.0"
 
 [build-dependencies]
 anyhow = "1"
