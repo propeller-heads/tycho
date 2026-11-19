@@ -1840,6 +1840,160 @@ pub mod db_fixtures {
             .expect("inserting the protocol state history failed");
     }
 
+    /// Inserts a version of the balance of `token` in an account of the instance, with transaction
+    /// index 0. `valid_to` `None`: the current row. `Some`: a history row, after the creation of
+    /// the history partition of that day.
+    pub async fn insert_instance_account_balance_version(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        account_id: i64,
+        token: Bytes,
+        balance: Bytes,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        let Some(valid_to) = valid_to else {
+            diesel::insert_into(instance::schema::tycho::account_balance::table)
+                .values(instance::orm::NewAccountBalance {
+                    instance_id,
+                    account_id,
+                    token,
+                    balance,
+                    valid_from,
+                    tx_index: 0,
+                })
+                .execute(conn)
+                .await
+                .expect("inserting the account balance failed");
+            return;
+        };
+        sql_query(
+            "SELECT partman.create_partition_time('tycho.account_balance_history', ARRAY[$1])",
+        )
+        .bind::<diesel::sql_types::Timestamp, _>(valid_to)
+        .execute(conn)
+        .await
+        .expect("creating the history partition failed");
+        diesel::insert_into(instance::schema::tycho::account_balance_history::table)
+            .values(instance::orm::AccountBalanceHistory {
+                instance_id,
+                account_id,
+                token,
+                balance,
+                valid_from,
+                valid_to,
+                tx_index: 0,
+                inserted_ts: valid_from,
+                modified_ts: valid_from,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the account balance history failed");
+    }
+
+    /// Inserts a version of the code of an account of the instance, with code hash `0xc1`, code
+    /// transaction `0xc2` and transaction index 0. `valid_to` `None`: the current row. `Some`: a
+    /// history row, after the creation of the history partition of that day.
+    pub async fn insert_instance_code_version(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        account_id: i64,
+        code: Bytes,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        let Some(valid_to) = valid_to else {
+            diesel::insert_into(instance::schema::tycho::contract_code::table)
+                .values(instance::orm::NewContractCode {
+                    instance_id,
+                    account_id,
+                    code,
+                    hash: Bytes::from("0xc1"),
+                    modify_tx_hash: Bytes::from("0xc2"),
+                    valid_from,
+                    tx_index: 0,
+                })
+                .execute(conn)
+                .await
+                .expect("inserting the contract code failed");
+            return;
+        };
+        sql_query("SELECT partman.create_partition_time('tycho.contract_code_history', ARRAY[$1])")
+            .bind::<diesel::sql_types::Timestamp, _>(valid_to)
+            .execute(conn)
+            .await
+            .expect("creating the history partition failed");
+        diesel::insert_into(instance::schema::tycho::contract_code_history::table)
+            .values(instance::orm::ContractCodeHistory {
+                instance_id,
+                account_id,
+                code,
+                hash: Bytes::from("0xc1"),
+                modify_tx_hash: Bytes::from("0xc2"),
+                valid_from,
+                valid_to,
+                tx_index: 0,
+                inserted_ts: valid_from,
+                modified_ts: valid_from,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the contract code history failed");
+    }
+
+    /// Inserts a version of a storage slot of an account of the instance, with no previous value
+    /// and transaction index 0. `value` `None`: a deleted slot. `valid_to` `None`: the current
+    /// row. `Some`: a history row, after the creation of the history partition of that day.
+    pub async fn insert_instance_slot_version(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        account_id: i64,
+        slot: Bytes,
+        value: Option<Bytes>,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        let Some(valid_to) = valid_to else {
+            diesel::insert_into(instance::schema::tycho::contract_storage::table)
+                .values(instance::orm::NewContractStorage {
+                    instance_id,
+                    account_id,
+                    slot,
+                    value,
+                    previous_value: None,
+                    valid_from,
+                    tx_index: 0,
+                })
+                .execute(conn)
+                .await
+                .expect("inserting the contract slot failed");
+            return;
+        };
+        sql_query(
+            "SELECT partman.create_partition_time('tycho.contract_storage_history', ARRAY[$1])",
+        )
+        .bind::<diesel::sql_types::Timestamp, _>(valid_to)
+        .execute(conn)
+        .await
+        .expect("creating the history partition failed");
+        diesel::insert_into(instance::schema::tycho::contract_storage_history::table)
+            .values(instance::orm::ContractStorageHistory {
+                instance_id,
+                account_id,
+                slot,
+                value,
+                previous_value: None,
+                valid_from,
+                valid_to,
+                tx_index: 0,
+                inserted_ts: valid_from,
+                modified_ts: valid_from,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the contract slot history failed");
+    }
+
     /// Inserts the TVL of a component of the instance.
     pub async fn insert_instance_tvl(
         conn: &mut AsyncPgConnection,
