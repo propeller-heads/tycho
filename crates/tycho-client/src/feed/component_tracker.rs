@@ -205,6 +205,7 @@ where
             .rpc_client
             .get_protocol_components_paginated(paginated_params)
             .await?
+            .into_components()
             .into_iter()
             .map(|comp| (comp.id.clone(), comp))
             .filter(|(id, _)| !self.filter.is_blocklisted(id))
@@ -302,6 +303,8 @@ where
                 ),
             )
             .await?
+            .into_data()
+            .into_components()
             .into_iter()
             .map(|comp| (comp.id.clone(), comp))
             .collect::<HashMap<_, _>>();

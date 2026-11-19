@@ -6,8 +6,8 @@ use tycho_simulation::{
     tycho_client::{
         feed::synchronizer::Snapshot,
         rpc::{
-            AllTokensParams, HttpRPCClientOptions, ProtocolComponentsPaginatedParams, RPCClient,
-            TracedEntryPointsParams,
+            AllTokensParams, ComponentsWithPauses, HttpRPCClientOptions,
+            ProtocolComponentsPaginatedParams, RPCClient, TracedEntryPointsParams,
         },
         HttpRPCClient, SnapshotParameters,
     },
@@ -63,7 +63,7 @@ impl TychoClient {
         Ok(Self { http_client })
     }
 
-    /// Gets protocol components from the RPC server
+    /// Gets protocol components from the RPC server, including paused components.
     pub async fn get_protocol_components(
         &self,
         protocol_system: &str,
@@ -78,6 +78,7 @@ impl TychoClient {
                     .with_chunk_size(chunk_size),
             )
             .await
+            .map(ComponentsWithPauses::into_components)
             .map_err(RpcError::from)
     }
 

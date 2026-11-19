@@ -4,7 +4,7 @@
 //! Call (RPC) endpoints of Tycho. These endpoints are chiefly responsible for facilitating data
 //! queries, especially querying snapshots of data.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -59,6 +59,51 @@ impl ProtocolSystems {
 
     pub fn dci_protocols(&self) -> &[String] {
         &self.dci_protocols
+    }
+}
+
+/// Protocol components, with the ids of those that are paused.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ComponentsWithPauses {
+    components: Vec<ProtocolComponent>,
+    paused_component_ids: HashSet<ComponentId>,
+}
+
+impl ComponentsWithPauses {
+    pub fn new(
+        components: Vec<ProtocolComponent>,
+        paused_component_ids: HashSet<ComponentId>,
+    ) -> Self {
+        Self { components, paused_component_ids }
+    }
+
+    /// Every returned component, paused ones included.
+    pub fn components(&self) -> &[ProtocolComponent] {
+        &self.components
+    }
+
+    /// Ids of the paused components in `components`. Clients should not track them.
+    pub fn paused_component_ids(&self) -> &HashSet<ComponentId> {
+        &self.paused_component_ids
+    }
+
+    /// Returns every returned component, paused ones included.
+    pub fn into_components(self) -> Vec<ProtocolComponent> {
+        self.components
+    }
+
+    /// Returns the components that are not paused.
+    pub fn into_not_paused(self) -> impl Iterator<Item = ProtocolComponent> {
+        let paused_component_ids = self.paused_component_ids;
+        self.components
+            .into_iter()
+            .filter(move |component| !paused_component_ids.contains(&component.id))
+    }
+
+    fn extend(&mut self, other: ComponentsWithPauses) {
+        self.components.extend(other.components);
+        self.paused_component_ids
+            .extend(other.paused_component_ids);
     }
 }
 
@@ -848,18 +893,21 @@ pub trait RPCClient: Send + Sync {
     /// Retrieves protocol components matching the given filters.
     ///
     /// Pass `component_ids` to filter by specific IDs, or `tvl_gt` to filter by minimum TVL.
+    /// The response includes paused components; their ids are in
+    /// [`ComponentsWithPauses::paused_component_ids`].
     async fn get_protocol_components(
         &self,
         params: ProtocolComponentsParams,
-    ) -> Result<Page<Vec<ProtocolComponent>>, RPCError>;
+    ) -> Result<Page<ComponentsWithPauses>, RPCError>;
 
     /// Retrieves protocol components, fetching all pages automatically.
     ///
-    /// If `chunk_size` is `None`, it defaults to the maximum page size.
+    /// If `chunk_size` is `None`, it defaults to the maximum page size. The response includes
+    /// paused components; their ids are in [`ComponentsWithPauses::paused_component_ids`].
     async fn get_protocol_components_paginated(
         &self,
         params: ProtocolComponentsPaginatedParams,
-    ) -> Result<Vec<ProtocolComponent>, RPCError> {
+    ) -> Result<ComponentsWithPauses, RPCError> {
         let chain = params.chain;
         let protocol_system = params.protocol_system;
         let component_ids = params.component_ids;
@@ -899,9 +947,12 @@ pub trait RPCClient: Send + Sync {
                     })
                     .collect();
 
-                try_join_all(tasks)
-                    .await
-                    .map(|pages| pages.into_iter().flatten().collect())
+                let pages = try_join_all(tasks).await?;
+                let mut all = ComponentsWithPauses::default();
+                for page in pages {
+                    all.extend(page.into_data());
+                }
+                Ok(all)
             }
             None => {
                 // If no component ids are specified, we need to make requests based on the total
@@ -920,7 +971,7 @@ pub trait RPCClient: Send + Sync {
                 let total_items = first_page.total();
                 let total_pages = total_pages(total_items, page_size);
 
-                let mut all: Vec<ProtocolComponent> = first_page.into_data();
+                let mut all = first_page.into_data();
 
                 let mut page = 1;
                 while page < total_pages {
@@ -948,7 +999,7 @@ pub trait RPCClient: Send + Sync {
                     let responses = try_join_all(tasks).await?;
 
                     for resp in responses {
-                        all.extend(resp);
+                        all.extend(resp.into_data());
                     }
 
                     page += requests_in_this_iteration;
@@ -1600,7 +1651,7 @@ impl RPCClient for HttpRPCClient {
     async fn get_protocol_components(
         &self,
         params: ProtocolComponentsParams,
-    ) -> Result<Page<Vec<ProtocolComponent>>, RPCError> {
+    ) -> Result<Page<ComponentsWithPauses>, RPCError> {
         let request = ProtocolComponentsRequestBody {
             protocol_system: params.protocol_system,
             component_ids: params.component_ids,
@@ -1633,13 +1684,17 @@ impl RPCClient for HttpRPCClient {
             .map_err(|err| RPCError::from_parse_error(&err, &body))?;
         trace!(?dto_response, "Received protocol_components response from Tycho server");
 
-        let data: Vec<ProtocolComponent> = dto_response
+        let components = dto_response
             .protocol_components
             .into_iter()
             .map(ProtocolComponent::from)
             .collect();
+        let paused_component_ids = dto_response
+            .paused_component_ids
+            .into_iter()
+            .collect();
         Ok(Page::new(
-            data,
+            ComponentsWithPauses::new(components, paused_component_ids),
             dto_response.pagination.total,
             dto_response.pagination.page,
             dto_response.pagination.page_size,
