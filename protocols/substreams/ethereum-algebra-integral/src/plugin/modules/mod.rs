@@ -11,6 +11,7 @@
 use crate::plugin::storage::StorageField;
 
 pub mod algebra;
+pub mod nami;
 
 /// One plugin module's indexed storage.
 #[derive(Debug)]
@@ -22,7 +23,13 @@ pub struct PluginModule {
 }
 
 /// Every module the package indexes.
-pub const MODULES: &[&PluginModule] = &[&algebra::dynamic_fee::MODULE];
+pub const MODULES: &[&PluginModule] = &[
+    &algebra::dynamic_fee::MODULE,
+    &nami::anti_sniper::MODULE,
+    &nami::farming::MODULE,
+    &nami::fee_override::MODULE,
+    &nami::mevx::MODULE,
+];
 
 /// The indexed fields stored at `slot`, across all modules.
 pub(crate) fn fields_at(slot: &[u8; 32]) -> impl Iterator<Item = &'static StorageField> + '_ {
