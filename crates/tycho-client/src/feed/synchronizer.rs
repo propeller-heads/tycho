@@ -432,13 +432,13 @@ async fn fetch_snapshot_background<R: RPCClient>(
 
     let request = crate::rpc::ProtocolComponentsParams::new(params.chain, &params.protocol_system)
         .with_component_ids(component_ids);
-    let response = rpc_client
+    let (components, paused_component_ids) = rpc_client
         .get_protocol_components(request)
         .await?
-        .into_data();
-    let paused_component_ids = response.paused_component_ids().clone();
-    let components: HashMap<String, ProtocolComponent> = response
-        .into_not_paused()
+        .into_data()
+        .into_parts();
+    let components: HashMap<String, ProtocolComponent> = components
+        .into_iter()
         .map(|pc| (pc.id.clone(), pc))
         .collect();
 
@@ -1321,7 +1321,7 @@ where
             .cloned()
             .collect();
         self.component_tracker
-            .record_paused(&still_paused);
+            .record_paused(still_paused);
 
         let dropped = self
             .component_tracker

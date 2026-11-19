@@ -92,6 +92,17 @@ impl ComponentsWithPauses {
         self.components
     }
 
+    /// Returns the components that are not paused, and the ids of the paused ones.
+    pub fn into_parts(self) -> (Vec<ProtocolComponent>, HashSet<ComponentId>) {
+        let paused_component_ids = self.paused_component_ids;
+        let not_paused = self
+            .components
+            .into_iter()
+            .filter(|component| !paused_component_ids.contains(&component.id))
+            .collect();
+        (not_paused, paused_component_ids)
+    }
+
     /// Returns the components that are not paused.
     pub fn into_not_paused(self) -> impl Iterator<Item = ProtocolComponent> {
         let paused_component_ids = self.paused_component_ids;

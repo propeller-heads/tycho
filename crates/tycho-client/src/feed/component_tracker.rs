@@ -205,13 +205,14 @@ where
             paginated_params = paginated_params.with_tvl_gt(tvl);
         }
 
-        let response = self
+        let (components, paused) = self
             .rpc_client
             .get_protocol_components_paginated(paginated_params)
-            .await?;
-        self.record_paused(response.paused_component_ids());
-        self.components = response
-            .into_not_paused()
+            .await?
+            .into_parts();
+        self.record_paused(paused);
+        self.components = components
+            .into_iter()
             .map(|comp| (comp.id.clone(), comp))
             .filter(|(id, _)| !self.filter.is_blocklisted(id))
             .collect::<HashMap<_, _>>();
@@ -293,7 +294,7 @@ where
             return Ok(());
         }
 
-        let response = self
+        let (components, paused) = self
             .rpc_client
             .get_protocol_components(
                 crate::rpc::ProtocolComponentsParams::new(
@@ -308,10 +309,11 @@ where
                 ),
             )
             .await?
-            .into_data();
-        self.record_paused(response.paused_component_ids());
-        let components = response
-            .into_not_paused()
+            .into_data()
+            .into_parts();
+        self.record_paused(paused);
+        let components = components
+            .into_iter()
             .map(|comp| (comp.id.clone(), comp))
             .collect::<HashMap<_, _>>();
 
@@ -425,12 +427,11 @@ where
 
     /// Remembers the ids a components response reported as paused, so they are not tracked
     /// until a block unpauses them.
-    pub(crate) fn record_paused(&mut self, paused: &HashSet<ComponentId>) {
+    pub(crate) fn record_paused(&mut self, paused: HashSet<ComponentId>) {
         if !paused.is_empty() {
-            self.log_paused(paused, "Skipping paused components");
+            self.log_paused(&paused, "Skipping paused components");
         }
-        self.paused
-            .extend(paused.iter().cloned());
+        self.paused.extend(paused);
     }
 
     /// Asks the server which components are paused now, and remembers the answer. Call it after
@@ -454,18 +455,16 @@ where
             RPC_CLIENT_CONCURRENCY,
         )
         .with_component_ids(ids.into_iter().collect());
-        let response = self
+        let (not_paused, paused) = self
             .rpc_client
             .get_protocol_components_paginated(params)
-            .await?;
+            .await?
+            .into_parts();
 
-        let paused = response.paused_component_ids();
-        let unpaused: HashSet<ComponentId> = response
-            .components()
-            .iter()
-            .map(|component| &component.id)
-            .filter(|id| !paused.contains(*id) && self.paused.contains(*id))
-            .cloned()
+        let unpaused: HashSet<ComponentId> = not_paused
+            .into_iter()
+            .map(|component| component.id)
+            .filter(|id| self.paused.contains(id))
             .collect();
         for id in &unpaused {
             self.paused.remove(id);
