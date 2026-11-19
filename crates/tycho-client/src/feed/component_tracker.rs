@@ -548,9 +548,9 @@ where
     /// Stops tracking the tracked components that are paused, logs them, and returns them.
     pub(crate) fn stop_tracking_paused(&mut self) -> HashMap<ComponentId, ProtocolComponent> {
         let paused: Vec<ComponentId> = self
-            .components
-            .keys()
-            .filter(|id| self.paused.contains(*id))
+            .paused
+            .iter()
+            .filter(|id| self.components.contains_key(*id))
             .cloned()
             .collect();
         if paused.is_empty() {

@@ -1156,7 +1156,7 @@ where
 
         for mut p in pending {
             match p.receiver.try_recv() {
-                Ok(Ok(fetch_result)) => {
+                Ok(Ok(mut fetch_result)) => {
                     debug!(
                         components = ?p.component_ids,
                         extractor = %self.extractor_id.name,
@@ -1173,7 +1173,6 @@ where
                     {
                         self.snapshot_backoff = None;
                     }
-                    let mut fetch_result = fetch_result;
                     self.drop_paused(&mut fetch_result);
                     let new_component_ids: Vec<String> = fetch_result
                         .components
