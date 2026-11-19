@@ -411,7 +411,9 @@ It mirrors `protocols/substreams/release.sh`, including its rules:
   testing.
 
 Run it from CI with the **Release Router Trades Substreams** workflow (`workflow_dispatch`, with
-an optional space-separated `chains` input). It prints the `db_out` module hash of every package.
+an optional space-separated `chains` input), started from the release tag: only a tag can assume
+the role that uploads, so a run from a branch fails at its AWS credentials, and the run uses the
+workflow file as it is at that tag. It prints the `db_out` module hash of every package.
 That hash is the identity the cursors are keyed by, so compare it with the running
 `cursors_<chain>.id` before pinning, to know whether a chain will resume or restart.
 

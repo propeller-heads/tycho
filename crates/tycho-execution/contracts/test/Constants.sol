@@ -87,6 +87,9 @@ contract Constants is
     // Assets
     address ETH_ADDR = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
     address WETH_ADDR = address(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
+    /// @dev 1inch Aggregation Router v5, Euclid's settlement target
+    address ONEINCH_ROUTER_V5 =
+        address(0x1111111254EEB25477B68fb85Ed929f73A960582);
     address DAI_ADDR = address(0x6B175474E89094C44Da98b954EedeAC495271d0F);
     address BAL_ADDR = address(0xba100000625a3754423978a60c9317c58a424e3D);
     address USDC_ADDR = address(0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48);

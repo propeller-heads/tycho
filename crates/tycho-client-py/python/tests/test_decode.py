@@ -12,6 +12,7 @@ from tycho_indexer_client.dto import (
     SynchronizerState,
     SynchronizerStateEnum,
     Header,
+    ProtocolComponentsResponse,
 )
 
 
@@ -47,6 +48,48 @@ def test_decode_deltas(asset_dir):
             revert=False,
         ),
     )
+
+
+def test_decode_deltas_pause_fields(asset_dir):
+    with (asset_dir / "deltas.json").open("r") as fp:
+        data = json.load(fp)
+
+    deltas = FeedMessage(**data).state_msgs["uniswap_v2"].deltas
+
+    assert deltas.paused_components == {"0xbf16540c857b4e32ce6c37d2f7725c8eec869b8b"}
+    assert deltas.unpaused_components == {"0x844a5ccdc91e604f55085adfc02e4d52c8227099"}
+
+
+def test_decode_deltas_without_pause_fields(asset_dir):
+    with (asset_dir / "deltas.json").open("r") as fp:
+        data = json.load(fp)
+    raw_deltas = data["state_msgs"]["uniswap_v2"]["deltas"]
+    del raw_deltas["paused_components"]
+    del raw_deltas["unpaused_components"]
+
+    deltas = FeedMessage(**data).state_msgs["uniswap_v2"].deltas
+
+    assert deltas.paused_components == set()
+    assert deltas.unpaused_components == set()
+
+
+def test_decode_protocol_components_paused_ids(asset_dir):
+    with (asset_dir / "rpc" / "protocol_components.json").open("r") as fp:
+        data = json.load(fp)
+
+    response = ProtocolComponentsResponse(**data)
+
+    assert response.paused_component_ids == ["0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc"]
+
+
+def test_decode_protocol_components_without_paused_ids(asset_dir):
+    with (asset_dir / "rpc" / "protocol_components.json").open("r") as fp:
+        data = json.load(fp)
+    del data["paused_component_ids"]
+
+    response = ProtocolComponentsResponse(**data)
+
+    assert response.paused_component_ids == []
 
 
 # JSON shaped exactly as Tycho serialises `Chain::Custom("name")`: externally tagged with the chain

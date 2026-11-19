@@ -60,7 +60,10 @@ sink)
 		--history-table "substreams_history_${CHAIN}"
 	)
 	args=("$DSN" "$spkg")
-	[ -n "${START_BLOCK:-}${STOP_BLOCK:-}" ] && args+=("${START_BLOCK:-}:${STOP_BLOCK:-}")
+	# Flags rather than the positional START:STOP range, which substreams-sink-sql rejects
+	# without a stop block. An unset STOP_BLOCK keeps the sink following the chain.
+	[ -n "${START_BLOCK:-}" ] && args+=(--start-block "$START_BLOCK")
+	[ -n "${STOP_BLOCK:-}" ] && args+=(--stop-block "$STOP_BLOCK")
 	[ -n "${SUBSTREAMS_ENDPOINT:-}" ] && args+=(-e "$SUBSTREAMS_ENDPOINT")
 	wait_for_db "$DSN"
 	substreams-sink-sql setup "$DSN" "$spkg" "${system_table_args[@]}"

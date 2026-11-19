@@ -119,11 +119,12 @@ pub trait AccountExtractor {
     /// returns: Result<HashMap<Bytes, AccountDelta, RandomState>, Self::Error>
     /// A result containing a HashMap where the keys are `Bytes` (addresses) and the values are
     /// `AccountDelta` objects.
+    // TODO: do not return `AccountDelta` but `Account`
     async fn get_accounts_at_block(
         &self,
         block: &Block,
         requests: &[StorageSnapshotRequest],
-    ) -> Result<HashMap<Bytes, AccountDelta>, Self::Error>; //TODO: do not return `AccountUpdate` but `Account`
+    ) -> Result<HashMap<Bytes, AccountDelta>, Self::Error>;
 }
 
 /// Trait for analyzing a token, including its quality, transfer cost, and transfer tax.

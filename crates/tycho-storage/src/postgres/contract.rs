@@ -1223,11 +1223,11 @@ impl PostgresGateway {
                         if v.contains_key(&contract_id.address) {
                             return Err(StorageError::Unexpected(format!("Ambiguous update! Contract 0x{} received different updates in same tx!", hex::encode(&contract_id.address))));
                         }
-                        v.extend([(contract_id.address.clone(), slots)]);
+                        v.extend([(contract_id.address, slots)]);
                     }
 
                     Entry::Vacant(e) => {
-                        let v = [(contract_id.address.clone(), slots)]
+                        let v = [(contract_id.address, slots)]
                             .into_iter()
                             .collect();
                         e.insert(v);

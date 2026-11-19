@@ -1,4 +1,6 @@
+pub mod checks;
 pub mod execution;
+pub mod expectations;
 pub mod rpc_tools;
 pub mod token_prices;
 pub mod validation;
