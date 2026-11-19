@@ -375,6 +375,9 @@ mod tests {
 
         let result = write(&mut setup, vec![change]).await;
 
-        assert!(result.is_err());
+        assert!(
+            matches!(&result, Err(StorageError::Unexpected(msg)) if msg.contains("no partition")),
+            "{result:?}"
+        );
     }
 }
