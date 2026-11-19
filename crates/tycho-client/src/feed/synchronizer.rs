@@ -5329,20 +5329,20 @@ mod test {
             .is_empty());
     }
 
-    /// With an id filter, a pool unpaused during the gap before a restart is tracked again.
+    /// A component unpaused during the gap before a restart is tracked again.
+    #[rstest::rstest]
+    #[case::ids(ComponentFilter::Ids(vec!["pool".to_string()]))]
+    #[case::tvl(ComponentFilter::with_tvl_range(5.0, 10.0))]
     #[tokio::test]
-    async fn test_apply_missed_pauses_restart_tracks_unpaused() {
+    async fn test_apply_missed_pauses_restart_tracks_unpaused(#[case] filter: ComponentFilter) {
         let pool = || ProtocolComponent { id: "pool".to_string(), ..Default::default() };
-        // Serves both the restart's paged request and the request to start tracking.
+        // Answers every components request: the restart's pause check, the TVL check and the
+        // request to start tracking.
         let mut rpc_client = make_mock_client();
         rpc_client
             .expect_get_protocol_components()
             .returning(move |_| Ok(Page::new(none_paused(vec![pool()]), 1, 0, 100)));
-        let mut state_sync = with_filter(
-            ComponentFilter::Ids(vec!["pool".to_string()]),
-            rpc_client,
-            MockDeltasClient::new(),
-        );
+        let mut state_sync = with_filter(filter, rpc_client, MockDeltasClient::new());
         let mut pause = make_block_changes(1, None);
         pause.paused_components = HashSet::from(["pool".to_string()]);
         state_sync

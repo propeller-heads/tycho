@@ -1024,4 +1024,64 @@ mod test {
         assert_eq!(unpaused, HashSet::from(["pool".to_string()]));
         assert!(!tracker.paused.contains("pool"));
     }
+
+    #[rstest::rstest]
+    #[case::in_ids(&["Pool"], &[], &["Pool"])]
+    #[case::not_in_ids(&["other"], &[], &[])]
+    #[case::tracked(&["active"], &["active"], &[])]
+    #[tokio::test]
+    async fn test_unpaused_to_track_ids(
+        #[case] unpaused: &[&str],
+        #[case] tracked: &[&str],
+        #[case] expected: &[&str],
+    ) {
+        let mut tracker = new_tracker(ids_filter(), tracked);
+        let unpaused = unpaused
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect();
+
+        let to_track = tracker
+            .unpaused_to_track(&unpaused)
+            .await
+            .expect("unpaused to track");
+
+        assert_eq!(to_track, expected);
+    }
+
+    #[rstest::rstest]
+    #[case::above_add_tvl(false, &["pool"])]
+    #[case::still_paused(true, &[])]
+    #[tokio::test]
+    async fn test_unpaused_to_track_tvl(#[case] server_paused: bool, #[case] expected: &[&str]) {
+        let mut tracker = new_tracker(tvl_filter(), &[]);
+        let expected_params = ProtocolComponentsPaginatedParams::new(
+            Chain::Ethereum,
+            "uniswap-v2",
+            RPC_CLIENT_CONCURRENCY,
+        )
+        .with_component_ids(vec!["pool".to_string()])
+        .with_tvl_gt(10.0);
+        tracker
+            .rpc_client
+            .expect_get_protocol_components_paginated()
+            .withf(move |params| params == &expected_params)
+            .returning(move |_| {
+                let pool = ProtocolComponent { id: "pool".to_string(), ..Default::default() };
+                let paused = if server_paused {
+                    HashSet::from(["pool".to_string()])
+                } else {
+                    HashSet::new()
+                };
+                Ok(ComponentsWithPauses::new(vec![pool], paused))
+            });
+
+        let to_track = tracker
+            .unpaused_to_track(&HashSet::from(["pool".to_string()]))
+            .await
+            .expect("unpaused to track");
+
+        assert_eq!(to_track, expected);
+        assert_eq!(tracker.paused.contains("pool"), server_paused);
+    }
 }
