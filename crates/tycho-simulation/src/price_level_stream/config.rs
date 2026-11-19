@@ -61,8 +61,9 @@ impl PriceLevelStreamConfig {
 /// [`auto_detected_gas_cost`](super::stream::PriceLevelStreamBuilder::auto_detected_gas_cost).
 pub const DEFAULT_AUTO_DETECTED_GAS_COST: u64 = 335_000;
 
-/// The pAMMs known to be served by the Titan price level stream (as of 2026-10-19): FermiSwap,
-/// Kipseli, Metric, Bebop, TaurusFi, Tempest, Goliath, Stelaxis, and ElZorro.
+/// The pAMMs known to be served by the Titan price level stream (as of 2026-11-17): FermiSwap,
+/// Kipseli, Metric, Bebop, TaurusFi, Tempest, Goliath, Stelaxis, ElZorro, and two venues without a
+/// public name.
 ///
 /// Registered on a builder via
 /// [`with_known_pamms`](super::stream::PriceLevelStreamBuilder::with_known_pamms), so their
@@ -117,6 +118,20 @@ pub fn default_served_pamms() -> Vec<PriceLevelStreamConfig> {
         // The ElZorro router, which the stream keys its books by: a minimal proxy that emits the
         // pAMM swap event. Gas over 71 traced fills (2026-10-19): p50 ~35k, p90 ~68k, max ~97k.
         ("elzorro", "0xcf211b4dd0d2be5c173ea57bcf938fc61d1d3bd3", 105_000u64),
+        // Two venues without a public name, named by their address as auto-detection names them.
+        // Gas is the router call measured by the integration test over 2 days (2026-11-17) less
+        // the router overhead, not traced fills: ~124k-142k for the first, ~178k-262k (p50
+        // ~202k) for the second.
+        (
+            "0x6e27bb694393840e253262361b79187d4899e9cf",
+            "0x6e27bb694393840e253262361b79187d4899e9cf",
+            145_000u64,
+        ),
+        (
+            "0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977",
+            "0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977",
+            210_000u64,
+        ),
     ];
     pamms
         .into_iter()
@@ -137,10 +152,15 @@ pub fn default_served_pamms() -> Vec<PriceLevelStreamConfig> {
 /// [`add_pamm`](super::stream::PriceLevelStreamBuilder::add_pamm) entry for one of these
 /// addresses overrides the denial.
 pub fn default_denied_pamms() -> Vec<Bytes> {
-    // No streamed venue is currently known to reject the executor's swap. This is where one
-    // goes that gates settlement — on a taker allowlist, say — or otherwise reverts a swap sent
-    // by an arbitrary caller.
-    Vec::new()
+    // Venues that settle only for callers on their own allowlist, which Tycho's routers are not on.
+    let pamms = [
+        // Unnamed venue; reverts `NotWhitelisted()` for the TychoRouterV3 (2026-11-17).
+        "0xb8d4e06e3038b07b4376ba3020eabce69f673463",
+    ];
+    pamms
+        .into_iter()
+        .map(|address| Bytes::from_str(address).expect("hardcoded pAMM address must parse"))
+        .collect()
 }
 
 /// The streamed identities Titan streams some venues under, each paired with that venue's canonical

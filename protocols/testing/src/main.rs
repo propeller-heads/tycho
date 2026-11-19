@@ -1,4 +1,5 @@
 mod adapter_builder;
+mod balances;
 mod config;
 mod execution;
 mod report;
@@ -43,11 +44,17 @@ pub struct FullTestCommand {
     /// protocol's substreams configuration.
     #[arg(long)]
     initial_block: Option<u64>,
+
+    /// In strict mode, write the checks of every update with a failed check to this file, one line
+    /// of JSON per update
+    #[arg(long)]
+    report: Option<PathBuf>,
 }
 
 impl FullTestCommand {
     fn run(self) -> miette::Result<()> {
-        let test_type = TestType::Full(TestTypeFull { initial_block: self.initial_block });
+        let test_type =
+            TestType::Full(TestTypeFull { initial_block: self.initial_block, report: self.report });
         TestRunner::new(
             self.common_args
                 .into_config(test_type)?,
@@ -122,9 +129,10 @@ struct CommonArgs {
     #[arg(long, default_value_t = false)]
     prebuilt_wasm: bool,
 
-    /// If false (default), clears the DB and re-syncs from start. If true:
-    ///   - for the ranged test, it skips indexing and uses the current state
-    ///   - for the full test, it starts syncing from the last block in the db
+    /// If false (default), clears the DB and re-syncs from start. If true, the DB is kept:
+    ///   - for the ranged test, indexing is skipped and the current state is used
+    ///   - for the full test, the indexer still runs from the start block; whether it resumes from
+    ///     what the DB holds is the indexer's behaviour
     #[arg(long, default_value_t = false)]
     reuse_last_sync: bool,
 }
@@ -213,8 +221,12 @@ fn main() -> miette::Result<()> {
         Err(e) => return Err(miette::miette!("Failed to load .env file: {e}")),
     }
 
+    // The checks protocol-testing runs from tycho-test log their failures under `tycho_test`, so
+    // the default shows both.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("protocol_testing=info,tycho_test=info"));
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(filter)
         .with_target(false)
         .init();
 

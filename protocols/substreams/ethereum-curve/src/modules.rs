@@ -585,16 +585,11 @@ pub fn map_protocol_changes(
         .into_iter()
         .zip(deltas.balance_deltas)
         .map(|(store_delta, balance_delta)| {
-            let new_value_string = String::from_utf8(store_delta.new_value)
-                .unwrap()
-                .to_string();
             (
                 balance_delta.tx.unwrap(),
                 BalanceChange {
                     token: balance_delta.token,
-                    balance: BigInt::try_from(new_value_string)
-                        .unwrap()
-                        .to_signed_bytes_be(),
+                    balance: balance_from_store_value(store_delta.new_value),
                     component_id: format!(
                         "0x{}",
                         String::from_utf8(balance_delta.component_id).unwrap()
@@ -711,4 +706,42 @@ fn build_entrypoint_calldata(sig: &str, amount: &BigInt) -> Vec<u8> {
 
 fn get_token_decimals(wrapped_token: &[u8]) -> Option<BigInt> {
     abi::erc20::functions::Decimals {}.call(wrapped_token.to_owned())
+}
+
+/// Encodes a tallied balance from the balance store as the bytes of a `BalanceChange`.
+///
+/// The tally only sums `Transfer` deltas, so it drops below zero when a pool's balance grows
+/// without a `Transfer` (rebasing tokens such as stETH) and the pool is later drained. Tycho reads
+/// balance bytes as unsigned, so a negative tally is reported as zero instead of as
+/// two's-complement bytes that would read back as a huge balance.
+fn balance_from_store_value(new_value: Vec<u8>) -> Vec<u8> {
+    let new_value_string = String::from_utf8(new_value).unwrap();
+    BigInt::try_from(new_value_string)
+        .unwrap()
+        .max(BigInt::zero())
+        .to_signed_bytes_be()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn balance_from_store_value_keeps_positive_tally() {
+        assert_eq!(balance_from_store_value(b"1000".to_vec()), vec![0x03, 0xe8]);
+        assert_eq!(balance_from_store_value(b"255".to_vec()), vec![0x00, 0xff]);
+    }
+
+    #[test]
+    fn balance_from_store_value_keeps_zero_tally() {
+        assert_eq!(balance_from_store_value(b"0".to_vec()), vec![0x00]);
+    }
+
+    #[test]
+    fn balance_from_store_value_clamps_negative_tally_to_zero() {
+        // STRCx tally of pool 0x7d476d419bbc9f0115cd59ac35e8a71ae88192c2 after its drain, which
+        // was emitted as 0xff566a5ada7ec474 and read back as 18.4 STRCx.
+        assert_eq!(balance_from_store_value(b"-47733807595469708".to_vec()), vec![0x00]);
+        assert_eq!(balance_from_store_value(b"-1".to_vec()), vec![0x00]);
+    }
 }

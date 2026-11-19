@@ -121,11 +121,7 @@ impl<E: std::borrow::Borrow<RawValue>> RetryableError for RpcError<TransportErro
                 // Some nodes return `{"result": null}` under load (e.g. rate limiting)
                 // instead of a proper error response. Alloy treats this as a success
                 // with a null result, which fails deserialization. Retry like NullResp.
-                if text.trim() == "null" {
-                    return true;
-                }
-
-                false
+                text.trim() == "null"
             }
             Self::ErrorResp(err) => err.is_retry_err() || has_custom_retry_code(err),
             Self::NullResp => true,

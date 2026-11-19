@@ -78,9 +78,10 @@ pub struct SwapGasCosts {
 impl SwapGasCosts {
     /// Uniswap V4's PoolManager. Its singleton storage is warmer than a V3 standalone pool's, so a
     /// loop costs ~3,500. A tick crossing is warm ≈ 10–17k and cold ≈ 40–52k; the estimate is a
-    /// blend weighted toward cold.
+    /// blend weighted toward cold. The base matches PancakeSwap Infinity CL's fitted base: at 185k,
+    /// router swaps on every chain used a median ~45k–50k less than the estimate (November 2026).
     pub const UNISWAP_V4: Self =
-        Self { base: 185_000, per_bitmap_lookup: 3_500, per_tick: 29_000, settlement: 30_000 };
+        Self { base: 150_000, per_bitmap_lookup: 3_500, per_tick: 29_000, settlement: 30_000 };
 
     /// PancakeSwap Infinity's CLPoolManager, fitted by least squares to ~12.9k TychoRouter swaps
     /// through `pancakeswap_infinity_cl` and `pancakeswap_infinity_cl_hooks` on BSC (October

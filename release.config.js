@@ -40,15 +40,12 @@ const config = {
                     'echo "NEXT_RELEASE_VERSION=${nextRelease.version}" >> $GITHUB_OUTPUT',
                 prepareCmd:
                     "toml set --toml-path Cargo.toml workspace.package.version ${nextRelease.version}" +
-                    " && toml set --toml-path Cargo.toml workspace.dependencies.tycho.version ${nextRelease.version}" +
                     " && toml set --toml-path Cargo.toml workspace.dependencies.tycho-common.version ${nextRelease.version}" +
                     " && toml set --toml-path Cargo.toml workspace.dependencies.tycho-client.version ${nextRelease.version}" +
                     " && toml set --toml-path Cargo.toml workspace.dependencies.tycho-storage.version ${nextRelease.version}" +
                     " && toml set --toml-path Cargo.toml workspace.dependencies.tycho-ethereum.version ${nextRelease.version}" +
-                    " && toml set --toml-path Cargo.toml workspace.dependencies.tycho-indexer.version ${nextRelease.version}" +
                     " && toml set --toml-path Cargo.toml workspace.dependencies.tycho-simulation.version ${nextRelease.version}" +
                     " && toml set --toml-path Cargo.toml workspace.dependencies.tycho-test.version ${nextRelease.version}" +
-                    " && toml set --toml-path Cargo.toml workspace.dependencies.tycho-integration-test.version ${nextRelease.version}" +
                     " && toml set --toml-path Cargo.toml workspace.dependencies.tycho-execution.version ${nextRelease.version}" +
                     " && toml set --toml-path Cargo.toml workspace.dependencies.tycho-protobuf.version ${nextRelease.version}" +
                     " && cargo check --workspace",

@@ -43,12 +43,13 @@ pub(super) fn metadata_page(pools: &[serde_json::Value], next_offset: Option<u64
 
 /// The bid/ask body of a healthy, quotable pool; `unhealthy` flips the provider status.
 pub(super) fn bid_ask_json(server_ts: u64, unhealthy: bool) -> String {
-    let mut body = serde_json::json!({
+    let body = serde_json::json!({
         "bidAdj": q64(3000).to_string(),
         "askAdj": q64(3010).to_string(),
         "totalToken0Available": "1000000000000000000",
         "totalToken1Available": "3000000000",
         "serverTs": server_ts,
+        "priceProviderStatus": if unhealthy { "feed_down" } else { "healthy" },
         "depth": {
             "asks": [{
                 "binIdx": 0,
@@ -59,9 +60,6 @@ pub(super) fn bid_ask_json(server_ts: u64, unhealthy: bool) -> String {
             "bids": []
         }
     });
-    if unhealthy {
-        body["priceProviderStatus"] = serde_json::json!("degraded");
-    }
     body.to_string()
 }
 

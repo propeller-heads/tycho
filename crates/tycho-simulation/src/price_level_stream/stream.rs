@@ -948,7 +948,7 @@ mod tests {
         }
 
         // Registering a venue from the default deny set works in either call order. Any one of
-        // them exercises that; the set is empty while every streamed venue is executable.
+        // them exercises that.
         let Some(denied_venue) = default_denied_pamms().pop() else { return };
         let custom = || PriceLevelStreamConfig::new("custom", denied_venue.clone(), 1u64.into());
         for builder in [

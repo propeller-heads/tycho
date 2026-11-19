@@ -114,7 +114,8 @@ fn map_protocol_changes(
         .deltas
         .into_iter()
         .filter(|store_delta| {
-            let component_id = key::segment_at(&store_delta.key, 0).trim_start_matches("0x"); //key is component_id/pool_address + token
+            //key is component_id/pool_address + token
+            let component_id = key::segment_at(&store_delta.key, 0).trim_start_matches("0x");
             let token_address = key::segment_at(&store_delta.key, 1);
             let formatted_token_address = token_address.to_string();
 

@@ -53,7 +53,9 @@ impl BasePool {
     const BASE_SWAP_GAS_COST: u64 = 24_000;
     const PAY_METHOD_GAS_COST: u64 = 46_000;
     const WITHDRAW_METHOD_GAS_COST: u64 = 20_000;
-    const GAS_COST_OF_ONE_TICK_SPACING_CROSSED: u64 = 4_000;
+    /// Core searches one tick bitmap word of 256 tick spacings per swap step.
+    const TICK_SPACINGS_PER_BITMAP_WORD: u32 = 256;
+    const GAS_COST_OF_ONE_BITMAP_WORD_CROSSED: u64 = 4_000;
     const GAS_COST_OF_ONE_INITIALIZED_TICK_CROSSED: u64 = 20_000;
 
     pub fn new(
@@ -79,7 +81,8 @@ impl BasePool {
     }
 
     pub(super) fn gas_costs(resources: BasePoolResources) -> u64 {
-        u64::from(resources.tick_spacings_crossed) * Self::GAS_COST_OF_ONE_TICK_SPACING_CROSSED +
+        u64::from(resources.tick_spacings_crossed / Self::TICK_SPACINGS_PER_BITMAP_WORD) *
+            Self::GAS_COST_OF_ONE_BITMAP_WORD_CROSSED +
             u64::from(resources.initialized_ticks_crossed) *
                 Self::GAS_COST_OF_ONE_INITIALIZED_TICK_CROSSED
     }
