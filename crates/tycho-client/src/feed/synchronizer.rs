@@ -1407,7 +1407,7 @@ mod test {
     use super::*;
     use crate::{
         deltas::MockDeltasClient,
-        rpc::{MockRPCClient, Page},
+        rpc::{none_paused, ComponentsWithPauses, MockRPCClient, Page},
         DeltasError, RPCError,
     };
 
@@ -1443,7 +1443,7 @@ mod test {
         async fn get_protocol_components(
             &self,
             params: crate::rpc::ProtocolComponentsParams,
-        ) -> Result<crate::rpc::Page<Vec<ProtocolComponent>>, RPCError> {
+        ) -> Result<Page<ComponentsWithPauses>, RPCError> {
             self.0
                 .get_protocol_components(params)
                 .await
@@ -2172,10 +2172,10 @@ mod test {
             .returning(|_| {
                 // return Component3
                 Ok(Page::new(
-                    vec![
+                    none_paused(vec![
                         // this component shall have a tvl update above threshold
                         ProtocolComponent { id: "Component3".to_string(), ..Default::default() },
-                    ],
+                    ]),
                     1,
                     0,
                     100,
@@ -2227,13 +2227,13 @@ mod test {
             .returning(|_| {
                 // Initial sync of components
                 Ok(Page::new(
-                    vec![
+                    none_paused(vec![
                         // this component shall have a tvl update above threshold
                         ProtocolComponent { id: "Component1".to_string(), ..Default::default() },
                         // this component shall have a tvl update below threshold.
                         ProtocolComponent { id: "Component2".to_string(), ..Default::default() },
                         // a third component will have a tvl update above threshold
-                    ],
+                    ]),
                     2,
                     0,
                     100,
@@ -2590,7 +2590,10 @@ mod test {
             })
             .returning(|_| {
                 Ok(Page::new(
-                    vec![ProtocolComponent { id: "Component3".to_string(), ..Default::default() }],
+                    none_paused(vec![ProtocolComponent {
+                        id: "Component3".to_string(),
+                        ..Default::default()
+                    }]),
                     1,
                     0,
                     100,
@@ -2640,10 +2643,10 @@ mod test {
             .expect_get_protocol_components()
             .returning(|_| {
                 Ok(Page::new(
-                    vec![
+                    none_paused(vec![
                         ProtocolComponent { id: "Component1".to_string(), ..Default::default() },
                         ProtocolComponent { id: "Component2".to_string(), ..Default::default() },
-                    ],
+                    ]),
                     2,
                     0,
                     100,
@@ -2918,7 +2921,7 @@ mod test {
         // Mock the initial components call
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| Ok(Page::new(vec![], 0, 0, 0)));
+            .returning(|_| Ok(Page::new(none_paused(vec![]), 0, 0, 0)));
 
         // Set up deltas client that will wait for messages (blocking in state_sync)
         let (_tx, rx) = channel(1);
@@ -2977,7 +2980,7 @@ mod test {
         // Mock the initial components call
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| Ok(Page::new(vec![], 0, 0, 0)));
+            .returning(|_| Ok(Page::new(none_paused(vec![]), 0, 0, 0)));
 
         // Mock to fail during snapshot retrieval (this will cause an error during processing)
         rpc_client
@@ -3089,7 +3092,7 @@ mod test {
 
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| Ok(Page::new(vec![], 0, 0, 0)));
+            .returning(|_| Ok(Page::new(none_paused(vec![]), 0, 0, 0)));
 
         let (_tx, rx) = channel(1);
         deltas_client
@@ -3161,7 +3164,7 @@ mod test {
         // Mock the initial components call
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| Ok(Page::new(vec![], 0, 0, 0)));
+            .returning(|_| Ok(Page::new(none_paused(vec![]), 0, 0, 0)));
 
         // Mock the snapshot retrieval that happens after first message
         rpc_client
@@ -3286,7 +3289,7 @@ mod test {
         // Mock the initial components call to succeed
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| Ok(Page::new(vec![], 0, 0, 0)));
+            .returning(|_| Ok(Page::new(none_paused(vec![]), 0, 0, 0)));
 
         // Set up deltas client to consistently fail after subscription
         // This will cause connection errors and trigger retries
@@ -3353,7 +3356,7 @@ mod test {
         let mut rpc_client = make_mock_client();
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| Ok(Page::new(vec![], 0, 0, 0)));
+            .returning(|_| Ok(Page::new(none_paused(vec![]), 0, 0, 0)));
 
         let mut deltas_client = MockDeltasClient::new();
         let (resubscribed_tx, resubscribed_rx) = oneshot::channel();
@@ -3493,7 +3496,10 @@ mod test {
             .expect_get_protocol_components()
             .returning(|_| {
                 Ok(Page::new(
-                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    none_paused(vec![ProtocolComponent {
+                        id: "Component1".to_string(),
+                        ..Default::default()
+                    }]),
                     1,
                     0,
                     100,
@@ -3640,7 +3646,10 @@ mod test {
             .expect_get_protocol_components()
             .returning(|_| {
                 Ok(Page::new(
-                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    none_paused(vec![ProtocolComponent {
+                        id: "Component1".to_string(),
+                        ..Default::default()
+                    }]),
                     1,
                     0,
                     100,
@@ -3860,7 +3869,10 @@ mod test {
             .expect_get_protocol_components()
             .returning(|_| {
                 Ok(Page::new(
-                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    none_paused(vec![ProtocolComponent {
+                        id: "Component1".to_string(),
+                        ..Default::default()
+                    }]),
                     1,
                     0,
                     100,
@@ -3966,7 +3978,10 @@ mod test {
             .expect_get_protocol_components()
             .returning(|_| {
                 Ok(Page::new(
-                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    none_paused(vec![ProtocolComponent {
+                        id: "Component1".to_string(),
+                        ..Default::default()
+                    }]),
                     1,
                     0,
                     100,
@@ -4144,7 +4159,10 @@ mod test {
             .expect_get_protocol_components()
             .returning(|_| {
                 Ok(Page::new(
-                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    none_paused(vec![ProtocolComponent {
+                        id: "Component1".to_string(),
+                        ..Default::default()
+                    }]),
                     1,
                     0,
                     100,
@@ -4166,7 +4184,7 @@ mod test {
         let mut rpc_client = make_mock_client();
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| Ok(Page::new(vec![], 0, 0, 100)));
+            .returning(|_| Ok(Page::new(none_paused(vec![]), 0, 0, 100)));
         rpc_client
             .expect_get_snapshots()
             .never();
@@ -4530,10 +4548,10 @@ mod test {
             })
             .returning(|_| {
                 Ok(Page::new(
-                    vec![
+                    none_paused(vec![
                         ProtocolComponent { id: "BrandNew".to_string(), ..Default::default() },
                         ProtocolComponent { id: "Preexisting".to_string(), ..Default::default() },
-                    ],
+                    ]),
                     2,
                     0,
                     100,
@@ -4544,10 +4562,10 @@ mod test {
             .expect_get_protocol_components()
             .returning(|_| {
                 Ok(Page::new(
-                    vec![
+                    none_paused(vec![
                         ProtocolComponent { id: "Component1".to_string(), ..Default::default() },
                         ProtocolComponent { id: "Component2".to_string(), ..Default::default() },
-                    ],
+                    ]),
                     2,
                     0,
                     100,
@@ -4860,16 +4878,16 @@ mod test {
                         .map(|id| ProtocolComponent { id, ..Default::default() })
                         .collect();
                     let total = i64::try_from(components.len()).unwrap();
-                    Ok(Page::new(components, total, 0, 100))
+                    Ok(Page::new(none_paused(components), total, 0, 100))
                 });
             rpc_client
                 .expect_get_protocol_components()
                 .returning(|_| {
                     Ok(Page::new(
-                        vec![ProtocolComponent {
+                        none_paused(vec![ProtocolComponent {
                             id: "Component1".to_string(),
                             ..Default::default()
-                        }],
+                        }]),
                         1,
                         0,
                         100,

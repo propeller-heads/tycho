@@ -107,6 +107,12 @@ impl ComponentsWithPauses {
     }
 }
 
+/// Returns `components` as a response with no paused ids.
+#[cfg(test)]
+pub(crate) fn none_paused(components: Vec<ProtocolComponent>) -> ComponentsWithPauses {
+    ComponentsWithPauses::new(components, HashSet::new())
+}
+
 /// An RPC response page, bundling data with the pagination metadata the server returned.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Page<T> {
@@ -2290,6 +2296,60 @@ mod tests {
         chunks.assert();
     }
 
+    #[rstest]
+    #[case::by_count(false)]
+    #[case::by_id_chunk(true)]
+    #[tokio::test]
+    async fn test_get_protocol_components_paginated_merges_paused_ids(#[case] by_id: bool) {
+        let mut server = Server::new_async().await;
+        let page = |page: i64, id: &str| {
+            format!(
+                r#"{{"protocol_components": [{{"id": "{id}", "protocol_system": "uniswap_v2",
+                    "protocol_type_name": "Pool", "chain": "ethereum", "tokens": [],
+                    "contract_ids": [], "static_attributes": {{}}, "change": "Creation",
+                    "creation_tx": "0x00", "created_at": "2022-01-01T00:00:00"}}],
+                    "pagination": {{"page": {page}, "page_size": 1, "total": 2}},
+                    "paused_component_ids": ["{id}"]}}"#
+            )
+        };
+        for (page_number, id) in [(0, "pool_a"), (1, "pool_b")] {
+            // Id chunks are each requested as page 0, so match them by id instead.
+            let (matcher, page_number) = if by_id {
+                (serde_json::json!({"component_ids": [id]}), 0)
+            } else {
+                (serde_json::json!({"pagination": {"page": page_number}}), page_number)
+            };
+            server
+                .mock("POST", "/v1/protocol_components")
+                .match_body(mockito::Matcher::PartialJson(matcher))
+                .with_body(page(page_number, id))
+                .create_async()
+                .await;
+        }
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+        let mut params = ProtocolComponentsPaginatedParams::new(
+            Chain::Ethereum,
+            "uniswap_v2",
+            RPC_CLIENT_CONCURRENCY,
+        )
+        .with_chunk_size(1);
+        if by_id {
+            params = params.with_component_ids(vec!["pool_a".to_string(), "pool_b".to_string()]);
+        }
+
+        let components = client
+            .get_protocol_components_paginated(params)
+            .await
+            .expect("get components");
+
+        assert_eq!(components.components().len(), 2);
+        assert_eq!(
+            components.paused_component_ids(),
+            &HashSet::from(["pool_a".to_string(), "pool_b".to_string()])
+        );
+    }
+
     #[tokio::test]
     async fn test_get_component_tvl_paginated_requests_every_id_chunk_as_page_zero() {
         let mut server = Server::new_async().await;
@@ -2494,17 +2554,18 @@ mod tests {
             .expect("get state");
 
         mocked_server.assert();
-        assert_eq!(components.data().len(), 1);
-        assert_eq!(components.data()[0].id, "State1");
-        assert_eq!(components.data()[0].protocol_system, "ambient");
-        assert_eq!(components.data()[0].protocol_type_name, "Pool");
-        assert_eq!(components.data()[0].tokens.len(), 2);
+        assert_eq!(components.data().components().len(), 1);
+        let component = &components.data().components()[0];
+        assert_eq!(component.id, "State1");
+        assert_eq!(component.protocol_system, "ambient");
+        assert_eq!(component.protocol_type_name, "Pool");
+        assert_eq!(component.tokens.len(), 2);
         let expected_attributes =
             [("attribute_1".to_string(), Bytes::from(1000_u64.to_be_bytes()))]
                 .iter()
                 .cloned()
                 .collect::<HashMap<String, Bytes>>();
-        assert_eq!(components.data()[0].static_attributes, expected_attributes);
+        assert_eq!(component.static_attributes, expected_attributes);
     }
 
     #[tokio::test]

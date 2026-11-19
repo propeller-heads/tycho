@@ -461,7 +461,7 @@ mod test {
     use tycho_common::Bytes;
 
     use super::*;
-    use crate::rpc::MockRPCClient;
+    use crate::rpc::{none_paused, MockRPCClient};
 
     fn with_mocked_rpc() -> ComponentTracker<MockRPCClient> {
         let rpc = MockRPCClient::new();
@@ -492,7 +492,7 @@ mod test {
         tracker
             .rpc_client
             .expect_get_protocol_components_paginated()
-            .returning(move |_| Ok(vec![model_for_mock.clone()]));
+            .returning(move |_| Ok(none_paused(vec![model_for_mock.clone()])));
 
         tracker
             .initialise_components()
@@ -520,7 +520,9 @@ mod test {
         tracker
             .rpc_client
             .expect_get_protocol_components()
-            .returning(move |_| Ok(crate::rpc::Page::new(vec![model_for_mock.clone()], 1, 0, 100)));
+            .returning(move |_| {
+                Ok(crate::rpc::Page::new(none_paused(vec![model_for_mock.clone()]), 1, 0, 100))
+            });
 
         tracker
             .start_tracking(&components_arg)
@@ -597,7 +599,7 @@ mod test {
         tracker
             .rpc_client
             .expect_get_protocol_components_paginated()
-            .returning(move |_| Ok(vec![model_component.clone()]));
+            .returning(move |_| Ok(none_paused(vec![model_component.clone()])));
 
         tracker
             .initialise_components()
