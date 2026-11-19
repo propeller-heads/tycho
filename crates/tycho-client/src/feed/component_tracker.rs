@@ -459,7 +459,7 @@ mod test {
     use tycho_common::Bytes;
 
     use super::*;
-    use crate::rpc::{none_paused, MockRPCClient};
+    use crate::rpc::{none_paused, ComponentsWithPauses, MockRPCClient};
 
     fn with_mocked_rpc() -> ComponentTracker<MockRPCClient> {
         let rpc = MockRPCClient::new();
@@ -645,5 +645,79 @@ mod test {
             "Non-blocklisted component should be in to_add"
         );
         assert!(to_remove.is_empty());
+    }
+
+    fn ids_filter() -> ComponentFilter {
+        ComponentFilter::Ids(vec!["pool".to_string(), "active".to_string()])
+    }
+
+    fn tvl_filter() -> ComponentFilter {
+        ComponentFilter::with_tvl_range(5.0, 10.0)
+    }
+
+    fn new_tracker(filter: ComponentFilter, tracked: &[&str]) -> ComponentTracker<MockRPCClient> {
+        let mut tracker =
+            ComponentTracker::new(Chain::Ethereum, "uniswap-v2", filter, MockRPCClient::new());
+        for id in tracked {
+            let component = ProtocolComponent { id: (*id).to_string(), ..Default::default() };
+            tracker
+                .components
+                .insert((*id).to_string(), component);
+        }
+        tracker
+    }
+
+    #[rstest::rstest]
+    #[case::ids(ids_filter())]
+    #[case::tvl(tvl_filter())]
+    #[tokio::test]
+    async fn test_initialise_skips_paused(#[case] filter: ComponentFilter) {
+        let mut tracker = new_tracker(filter, &[]);
+        let paused = ProtocolComponent { id: "pool".to_string(), ..Default::default() };
+        let active = ProtocolComponent { id: "active".to_string(), ..Default::default() };
+        tracker
+            .rpc_client
+            .expect_get_protocol_components_paginated()
+            .returning(move |_| {
+                Ok(ComponentsWithPauses::new(
+                    vec![paused.clone(), active.clone()],
+                    HashSet::from(["pool".to_string()]),
+                ))
+            });
+
+        tracker
+            .initialise_components()
+            .await
+            .expect("initialise components");
+
+        assert_eq!(tracker.get_tracked_component_ids(), vec!["active".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_start_tracking_skips_paused() {
+        let mut tracker = new_tracker(tvl_filter(), &[]);
+        let paused = ProtocolComponent { id: "pool".to_string(), ..Default::default() };
+        tracker
+            .rpc_client
+            .expect_get_protocol_components()
+            .returning(move |_| {
+                Ok(crate::rpc::Page::new(
+                    ComponentsWithPauses::new(
+                        vec![paused.clone()],
+                        HashSet::from(["pool".to_string()]),
+                    ),
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        let pool = "pool".to_string();
+
+        tracker
+            .start_tracking(&[&pool])
+            .await
+            .expect("start tracking");
+
+        assert!(tracker.components.is_empty());
     }
 }

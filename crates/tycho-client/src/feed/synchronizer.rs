@@ -5350,4 +5350,36 @@ mod test {
         // Code updated
         assert_eq!(account.code, Bytes::from("0x0c0d"));
     }
+
+    #[tokio::test]
+    async fn test_fetch_snapshot_background_skips_paused() {
+        let mut rpc_client = MockRPCClient::new();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    ComponentsWithPauses::new(
+                        vec![ProtocolComponent { id: "Paused".to_string(), ..Default::default() }],
+                        HashSet::from(["Paused".to_string()]),
+                    ),
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        let params = FetchSnapshotParams {
+            chain: Chain::Ethereum,
+            protocol_system: "uniswap-v2".to_string(),
+            block_number: 1,
+            uses_dci: false,
+            retrieve_balances: true,
+            include_tvl: false,
+        };
+
+        let result = fetch_snapshot_background(rpc_client, vec!["Paused".to_string()], params)
+            .await
+            .expect("fetch snapshot");
+
+        assert!(result.components.is_empty());
+    }
 }
