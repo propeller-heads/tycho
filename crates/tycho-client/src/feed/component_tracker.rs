@@ -746,6 +746,113 @@ mod test {
         tracker
     }
 
+    fn block_changes(
+        paused: &[&str],
+        unpaused: &[&str],
+        tvl: &[(&str, f64)],
+    ) -> BlockAggregatedChanges {
+        let ids = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| (*id).to_string())
+                .collect()
+        };
+        BlockAggregatedChanges {
+            paused_components: ids(paused),
+            unpaused_components: ids(unpaused),
+            component_tvl: tvl
+                .iter()
+                .map(|(id, tvl)| ((*id).to_string(), *tvl))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::ids(ids_filter())]
+    #[case::tvl(tvl_filter())]
+    fn test_filter_updated_paused(#[case] filter: ComponentFilter) {
+        let tracker = new_tracker(filter, &["pool"]);
+
+        let (to_add, to_remove) =
+            tracker.filter_updated_components(&block_changes(&["pool"], &[], &[]));
+
+        assert!(to_add.is_empty());
+        assert_eq!(to_remove, vec!["pool".to_string()]);
+    }
+
+    #[rstest::rstest]
+    #[case::ids(ids_filter())]
+    #[case::tvl(tvl_filter())]
+    fn test_filter_updated_unpaused(#[case] filter: ComponentFilter) {
+        let mut tracker = new_tracker(filter, &[]);
+        tracker.record_pause_events(&block_changes(&["pool"], &[], &[]));
+
+        let (to_add, to_remove) =
+            tracker.filter_updated_components(&block_changes(&[], &["pool"], &[("pool", 20.0)]));
+
+        assert_eq!(to_add, vec!["pool".to_string()]);
+        assert!(to_remove.is_empty());
+    }
+
+    #[test]
+    fn test_filter_updated_unpaused_ids_case_insensitive() {
+        let tracker = new_tracker(ids_filter(), &[]);
+
+        let (to_add, _) = tracker.filter_updated_components(&block_changes(&[], &["Pool"], &[]));
+
+        assert_eq!(to_add, vec!["Pool".to_string()]);
+    }
+
+    #[rstest::rstest]
+    #[case::not_in_ids(ids_filter(), block_changes(&[], &["other_pool"], &[]))]
+    #[case::below_tvl(tvl_filter(), block_changes(&[], &["pool"], &[("pool", 7.0)]))]
+    #[case::no_tvl(tvl_filter(), block_changes(&[], &["pool"], &[]))]
+    fn test_filter_updated_unpaused_rejected(
+        #[case] filter: ComponentFilter,
+        #[case] changes: BlockAggregatedChanges,
+    ) {
+        let tracker = new_tracker(filter, &[]);
+
+        let (to_add, to_remove) = tracker.filter_updated_components(&changes);
+
+        assert!(to_add.is_empty());
+        assert!(to_remove.is_empty());
+    }
+
+    #[test]
+    fn test_filter_updated_tvl_and_pause_in_one_block() {
+        let tracker = new_tracker(tvl_filter(), &["pool"]);
+
+        let (to_add, to_remove) =
+            tracker.filter_updated_components(&block_changes(&["pool"], &[], &[("pool", 20.0)]));
+
+        assert!(to_add.is_empty());
+        assert_eq!(to_remove, vec!["pool".to_string()]);
+    }
+
+    #[test]
+    fn test_filter_updated_paused_in_earlier_block() {
+        let mut tracker = new_tracker(tvl_filter(), &[]);
+        tracker.record_pause_events(&block_changes(&["pool"], &[], &[]));
+
+        let (to_add, _) =
+            tracker.filter_updated_components(&block_changes(&[], &[], &[("pool", 20.0)]));
+
+        assert!(to_add.is_empty());
+    }
+
+    #[test]
+    fn test_filter_updated_unpaused_in_earlier_block() {
+        let mut tracker = new_tracker(tvl_filter(), &[]);
+        tracker.record_pause_events(&block_changes(&["pool"], &[], &[]));
+        tracker.record_pause_events(&block_changes(&[], &["pool"], &[]));
+
+        let (to_add, _) =
+            tracker.filter_updated_components(&block_changes(&[], &[], &[("pool", 20.0)]));
+
+        assert_eq!(to_add, vec!["pool".to_string()]);
+    }
+
     #[rstest::rstest]
     #[case::ids(ids_filter())]
     #[case::tvl(tvl_filter())]
@@ -770,6 +877,7 @@ mod test {
             .expect("initialise components");
 
         assert_eq!(tracker.get_tracked_component_ids(), vec!["active".to_string()]);
+        assert!(tracker.paused.contains("pool"));
     }
 
     #[tokio::test]
@@ -798,5 +906,6 @@ mod test {
             .expect("start tracking");
 
         assert!(tracker.components.is_empty());
+        assert!(tracker.paused.contains("pool"));
     }
 }

@@ -5165,6 +5165,27 @@ mod test {
         );
     }
 
+    /// Timeline: block 2 pauses "Pool"; block 3 reports its TVL above the add threshold, which
+    /// must not fetch it; block 4 lets a wrongly spawned fetch run before the check.
+    #[test_log::test(tokio::test)]
+    async fn test_delta_loop_skips_pool_paused_in_earlier_block() {
+        let mut harness = BackoffHarness::start(|_| false).await;
+
+        let mut pause = make_block_changes(2, None);
+        pause.paused_components = HashSet::from(["Pool".to_string()]);
+        harness.sync_block(pause).await;
+        harness
+            .sync_block_with_tvl(3, &[("Pool", 100.0)])
+            .await;
+        harness
+            .sync_block(make_block_changes(4, None))
+            .await;
+        let fetched_batches = harness.fetched_batches();
+        harness.close().await;
+
+        assert!(fetched_batches.is_empty());
+    }
+
     /// A snapshot task in flight for `component_id`, spawned now, and the sender that completes
     /// it.
     fn snapshot_task_in_flight(
@@ -5216,6 +5237,7 @@ mod test {
         )]
         let _ = old_ok_tx.send(Ok(SnapshotFetchResult {
             components: HashMap::new(),
+            paused_component_ids: HashSet::new(),
             contract_ids: HashSet::new(),
             dci_update: DCIUpdate::default(),
             snapshot: Snapshot::default(),
@@ -5233,6 +5255,92 @@ mod test {
             .expect("Results of older tasks do not reset the backoff");
         assert_eq!(backoff.failures, 1);
         assert_eq!(backoff.retry_at, backoff_started.retry_at);
+    }
+
+    /// A successful fetch at block 1 of `fetched`, with `paused` reported as paused.
+    fn fetch_result(fetched: &str, paused: &[&str]) -> SnapshotFetchResult {
+        let component = ProtocolComponent { id: fetched.to_string(), ..Default::default() };
+        let state = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: fetched.to_string(),
+                attributes: HashMap::new(),
+                balances: HashMap::new(),
+            },
+            component: component.clone(),
+            component_tvl: None,
+            entrypoints: vec![],
+        };
+        SnapshotFetchResult {
+            components: HashMap::from([(fetched.to_string(), component)]),
+            paused_component_ids: paused
+                .iter()
+                .map(|id| id.to_string())
+                .collect(),
+            contract_ids: HashSet::new(),
+            dci_update: DCIUpdate::default(),
+            snapshot: Snapshot {
+                states: HashMap::from([(fetched.to_string(), state)]),
+                vm_storage: HashMap::new(),
+            },
+            snapshot_block: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_drain_snapshot_paused_in_flight() {
+        let mut state_sync = with_mocked_clients(true, false, None, None);
+        let (task, tx) = snapshot_task_in_flight("Pool");
+        state_sync.snapshot_tasks.push(task);
+        let mut pause = make_block_changes(2, None);
+        pause.paused_components = HashSet::from(["Pool".to_string()]);
+        state_sync
+            .component_tracker
+            .record_pause_events(&pause);
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the snapshot task result is only consumed if the receiver is still held"
+        )]
+        let _ = tx.send(Ok(fetch_result("Pool", &[])));
+        let snapshot = state_sync.drain_completed_snapshots();
+
+        assert!(snapshot.states.is_empty());
+        assert!(state_sync
+            .component_tracker
+            .components
+            .is_empty());
+    }
+
+    #[rstest::rstest]
+    #[case::still_paused(false, true)]
+    #[case::unpaused_since(true, false)]
+    #[tokio::test]
+    async fn test_drain_snapshot_records_paused(
+        #[case] unpaused_since: bool,
+        #[case] expect_paused: bool,
+    ) {
+        let mut state_sync = with_mocked_clients(true, false, None, None);
+        let (task, tx) = snapshot_task_in_flight("Pool");
+        state_sync.snapshot_tasks.push(task);
+        if unpaused_since {
+            let mut unpause = make_block_changes(2, None);
+            unpause.unpaused_components = HashSet::from(["Paused".to_string()]);
+            state_sync.buffered_deltas.push(unpause);
+        }
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the snapshot task result is only consumed if the receiver is still held"
+        )]
+        let _ = tx.send(Ok(fetch_result("Pool", &["Paused"])));
+        state_sync.drain_completed_snapshots();
+
+        let paused = ProtocolComponent { id: "Paused".to_string(), ..Default::default() };
+        let mut later_fetch = HashMap::from([("Paused".to_string(), paused)]);
+        state_sync
+            .component_tracker
+            .drop_paused_from(&mut later_fetch);
+        assert_eq!(later_fetch.is_empty(), expect_paused);
     }
 
     /// Directly exercises all four mutation paths of `apply_deltas_to_snapshot`:
@@ -5427,5 +5535,6 @@ mod test {
             .expect("fetch snapshot");
 
         assert!(result.components.is_empty());
+        assert_eq!(result.paused_component_ids, HashSet::from(["Paused".to_string()]));
     }
 }
