@@ -1173,7 +1173,7 @@ where
                     {
                         self.snapshot_backoff = None;
                     }
-                    self.drop_paused(&mut fetch_result);
+                    self.apply_fetch_pauses(&mut fetch_result);
                     let new_component_ids: Vec<String> = fetch_result
                         .components
                         .keys()
@@ -1304,7 +1304,7 @@ where
     /// component from its result. While the fetch ran, a block may have paused a component it
     /// returned, or unpaused one it found paused. It queues the components unpaused that way, so
     /// the next block fetches them again.
-    fn drop_paused(&mut self, fetch_result: &mut SnapshotFetchResult) {
+    fn apply_fetch_pauses(&mut self, fetch_result: &mut SnapshotFetchResult) {
         let unpaused_since: HashSet<&String> = self
             .buffered_deltas
             .iter()
