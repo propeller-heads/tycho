@@ -533,17 +533,17 @@ where
             .collect()
     }
 
-    /// Returns the components to start and stop tracking after a block, as `(to_add, to_remove)`,
-    /// following the client's filter. With an id filter, a block only adds back components it
-    /// unpauses.
+    /// Records the block's pauses and unpauses, then returns the components to start and stop
+    /// tracking after the block, as `(to_add, to_remove)`, following the client's filter. With an
+    /// id filter, a block only adds back components it unpauses.
     ///
     /// Pauses override the filter. `to_remove` holds every component the block pauses. `to_add`
-    /// leaves out every component that is still paused: one the block pauses, or one an earlier
-    /// block or response paused that this block does not unpause.
+    /// leaves out every component that is still paused.
     pub fn filter_updated_components(
-        &self,
+        &mut self,
         deltas: &BlockAggregatedChanges,
     ) -> (Vec<ComponentId>, Vec<ComponentId>) {
+        self.record_pause_events(deltas);
         let (mut to_add, mut to_remove) = match &self.filter.variant {
             ComponentFilterVariant::Ids(ids) => {
                 let to_add = deltas
@@ -576,11 +576,7 @@ where
             }
         };
 
-        // The caller may not have recorded this block's pauses yet, so check them here too.
-        to_add.retain(|id| {
-            !deltas.paused_components.contains(id) &&
-                (!self.paused.contains(id) || deltas.unpaused_components.contains(id))
-        });
+        to_add.retain(|id| !self.paused.contains(id));
         to_remove.retain(|id| !deltas.paused_components.contains(id));
         to_remove.extend(deltas.paused_components.iter().cloned());
 

@@ -820,9 +820,10 @@ where
                             let header: BlockHeader = (&deltas).into();
                             debug!(block_number=?header.number, "Received delta message");
 
-                            // Record pauses before draining, so a snapshot that finishes after its
-                            // component was paused is dropped.
-                            self.component_tracker.record_pause_events(&deltas);
+                            // Filter before draining: it records the block's pauses, so the drain
+                            // drops a snapshot whose component this block pauses.
+                            let (to_add, to_remove) =
+                                self.component_tracker.filter_updated_components(&deltas);
 
                             // Buffer unfiltered delta while any snapshot task is in-flight.
                             if !self.snapshot_tasks.is_empty() {
@@ -846,9 +847,6 @@ where
                             }
 
                             let (snapshots, removed_components) = {
-                                let (to_add, to_remove) =
-                                    self.component_tracker.filter_updated_components(&deltas);
-
                                 self.remove_from_backoff(&to_remove);
 
                                 // Once the backoff has ended, take the waiting components out of
