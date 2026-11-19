@@ -1260,8 +1260,10 @@ where
     /// the server can tell.
     ///
     /// Starts tracking the unpaused components that pass the filter, and stops tracking the paused
-    /// ones. On a restart, returns the stopped components so the consumer drops them. On the first
-    /// start, returns none, because the consumer never received them.
+    /// ones. When no snapshot follows the first message, it queues the unpaused components instead,
+    /// so the next block fetches their snapshot in the background. On a restart, returns the
+    /// stopped components so the consumer drops them. On the first start, returns none, because
+    /// the consumer never received them.
     async fn apply_missed_pauses(
         &mut self,
         first_header: &BlockHeader,
@@ -1280,7 +1282,14 @@ where
             .component_tracker
             .unpaused_to_track(&unpaused)
             .await?;
-        if !to_add.is_empty() {
+        if self.is_next_expected(first_header) {
+            // No snapshot follows, so queue them like components whose backoff has ended: the
+            // next block fetches their snapshot in the background.
+            for id in to_add {
+                self.snapshot_queue
+                    .insert(id, SnapshotStatus::Backoff);
+            }
+        } else if !to_add.is_empty() {
             self.component_tracker
                 .start_tracking(&to_add.iter().collect::<Vec<_>>())
                 .await?;
