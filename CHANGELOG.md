@@ -1,3 +1,16 @@
+## [0.530.1](https://github.com/propeller-heads/tycho/compare/0.530.0...0.530.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **simulation:** quote Metric only on healthy pools and sides with depth ([683e777](https://github.com/propeller-heads/tycho/commit/683e77780a5847ee74bd4c32f904eb4518b7648d))
+* **simulation:** send the book TVL floor to Metric's metadata endpoint ([35fafb3](https://github.com/propeller-heads/tycho/commit/35fafb3986cc67dd1b6e6a47ffd46618722c769e))
+
+
+### Performance Improvements
+
+* **simulation:** refresh Metric's pool list every 15 s, not every poll ([8abd686](https://github.com/propeller-heads/tycho/commit/8abd68601ba027a61fa41de8f14dacba9853a397))
+
 ## [0.530.0](https://github.com/propeller-heads/tycho/compare/0.529.3...0.530.0) (2026-11-18)
 
 
