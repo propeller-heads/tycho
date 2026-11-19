@@ -5372,6 +5372,32 @@ mod test {
         );
     }
 
+    /// On a restart without a gap no snapshot follows, so an unpaused component waits in the
+    /// snapshot queue instead of being tracked without state.
+    #[tokio::test]
+    async fn test_apply_missed_pauses_restart_without_gap_queues_unpaused() {
+        let mut state_sync = with_filter(
+            ComponentFilter::Ids(vec!["pool".to_string()]),
+            MockRPCClient::new(),
+            MockDeltasClient::new(),
+        );
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(1, None)));
+
+        state_sync
+            .apply_missed_pauses(
+                &header_of(&make_block_changes(2, None)),
+                &HashSet::from(["pool".to_string()]),
+            )
+            .await
+            .expect("apply missed pauses");
+
+        assert!(state_sync
+            .component_tracker
+            .components
+            .is_empty());
+        assert_eq!(state_sync.snapshot_queue.get("pool"), Some(&SnapshotStatus::Backoff));
+    }
+
     /// Runs `state_sync` until its first message, then shuts it down.
     async fn first_message(
         mut state_sync: ProtocolStateSynchronizer<
