@@ -8,6 +8,9 @@ use crate::{serde_helpers::evm_address, snapshot_feed::errors::FeedError};
 
 const Q64_FLOAT: f64 = 18_446_744_073_709_551_616.0;
 
+/// The one `priceProviderStatus` Metric allows trading on.
+const HEALTHY_STATUS: &str = "healthy";
+
 /// The body Metric answers a request it will not serve with.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct MetricApiError {
@@ -145,8 +148,8 @@ pub struct MetricBidAskResponse {
     pub total_token1_available: Option<BigUint>,
     /// Server Unix timestamp (seconds) when the quote was produced.
     pub server_ts: u64,
-    /// Price-provider health for this quote: `healthy`, `feed_down` (no valid price right now),
-    /// or `internal_error`. `None` when the response omits the field.
+    /// Price-provider health for this quote: `healthy`, `feed_down`, `pool_refused`,
+    /// `pool_paused`, `internal_error` or `unknown`. `None` when the response omits the field.
     pub price_provider_status: Option<String>,
     /// Per-side depth bins. Absent on older responses and explicitly `null` when the endpoint is
     /// queried with `depth=false`; both decode to an empty book.
@@ -187,21 +190,44 @@ pub struct MetricDepthBin {
 }
 
 impl MetricBidAskResponse {
-    /// The bid price, or `None` when the pool quotes no bid: the API then sends `bidAdj = 0`.
+    /// Whether the pool quotes a bid: the API sends `bidAdj = 0` when it does not.
+    fn quotes_bid(&self) -> bool {
+        !self.bid_adj.is_zero()
+    }
+
+    /// Whether the pool quotes an ask: the API sends `askAdj = 2^128 - 1` when it does not.
+    fn quotes_ask(&self) -> bool {
+        self.ask_adj != BigUint::from(u128::MAX)
+    }
+
+    /// The bid price, or `None` when the pool quotes no bid.
     pub fn bid_price(&self) -> Result<Option<f64>, FeedError> {
-        if self.bid_adj.is_zero() {
+        if !self.quotes_bid() {
             return Ok(None);
         }
         q64_to_f64(&self.bid_adj).map(Some)
     }
 
-    /// The ask price, or `None` when the pool quotes no ask: the API then sends
-    /// `askAdj = 2^128 - 1`.
+    /// The ask price, or `None` when the pool quotes no ask.
     pub fn ask_price(&self) -> Result<Option<f64>, FeedError> {
-        if self.ask_adj == BigUint::from(u128::MAX) {
+        if !self.quotes_ask() {
             return Ok(None);
         }
         q64_to_f64(&self.ask_adj).map(Some)
+    }
+
+    /// The bins a swap selling token0 walks, when that side can be traded: the pool quotes a bid
+    /// and the bid side has depth, meaning its deepest bin reports some volume. Metric closes one
+    /// side of a `healthy` pool by sending that side's sentinel price with no bins, and sends a
+    /// side with no inventory as bins whose volumes are all zero; both read as untradable.
+    pub fn tradable_bids(&self) -> Option<&[MetricDepthBin]> {
+        (self.quotes_bid() && has_volume(&self.depth.bids)).then_some(self.depth.bids.as_slice())
+    }
+
+    /// The bins a swap buying token0 walks, when that side can be traded: the pool quotes an ask
+    /// and the ask side has depth. See [`tradable_bids`](Self::tradable_bids).
+    pub fn tradable_asks(&self) -> Option<&[MetricDepthBin]> {
+        (self.quotes_ask() && has_volume(&self.depth.asks)).then_some(self.depth.asks.as_slice())
     }
 
     pub fn total_token0_available(&self) -> Result<BigUint, FeedError> {
@@ -216,24 +242,25 @@ impl MetricBidAskResponse {
             .ok_or_else(|| FeedError::Parsing("totalToken1Available is null".to_string()))
     }
 
-    /// Whether the pool can currently be quoted.
+    /// Whether the pool can currently be quoted: Metric reports its price provider `healthy`,
+    /// both availability figures are present and at least one side is tradable.
     ///
-    /// The API's own `priceProviderStatus` is the primary gate: anything other than `healthy`
-    /// (e.g. `feed_down`, `internal_error`) is not quotable. When the field is absent the
-    /// structural checks below decide alone; they are always applied as defence in depth:
-    /// both availability figures must be non-null and the order book non-empty. Pools with empty
-    /// depth (e.g. `bidAdj=0` / `askAdj` sentinel and no bins) are treated as not quotable, since
-    /// depth-based pricing has no bins to walk.
+    /// Metric's rule is to trade on nothing but `healthy`, so a quote without a status is not
+    /// quotable either. `feed_down`, `pool_refused`, `pool_paused`, `internal_error` and
+    /// `unknown` all leave the pool out of this poll's book; the next poll asks again.
     pub fn is_quotable(&self) -> bool {
-        if let Some(status) = self.price_provider_status.as_deref() {
-            if status != "healthy" {
-                return false;
-            }
-        }
-        self.total_token0_available.is_some() &&
+        self.price_provider_status.as_deref() == Some(HEALTHY_STATUS) &&
+            self.total_token0_available.is_some() &&
             self.total_token1_available.is_some() &&
-            !(self.depth.bids.is_empty() && self.depth.asks.is_empty())
+            (self.tradable_bids().is_some() || self.tradable_asks().is_some())
     }
+}
+
+/// Whether a side's bins hold anything to trade. Volumes are cumulative, so the deepest bin
+/// carries the side's total.
+fn has_volume(bins: &[MetricDepthBin]) -> bool {
+    bins.last()
+        .is_some_and(|deepest| !deepest.cumulative_volume.is_zero())
 }
 
 /// Converts a Q64.64 fixed-point value to an f64 price.
@@ -398,16 +425,15 @@ mod tests {
         assert!(!response.is_quotable());
     }
 
-    #[test]
-    fn bid_ask_unhealthy_provider_status_is_not_quotable() {
-        // Structurally complete quote, but the API reports the price provider as down: the
-        // explicit status must veto quotability regardless of the structural checks.
-        let quotable = serde_json::json!({
+    /// A quote with depth on both sides, in the shape the batch endpoint answers.
+    fn two_sided_quote() -> serde_json::Value {
+        serde_json::json!({
             "bidAdj": "55340232221128654848000",
             "askAdj": "55524699661865750400000",
             "totalToken0Available": "1000000000000000000",
             "totalToken1Available": "3000000000",
             "serverTs": 1_787_710_476u64,
+            "priceProviderStatus": "healthy",
             "depth": {
                 "asks": [{
                     "binIdx": 0,
@@ -415,23 +441,110 @@ mod tests {
                     "cumulativeVolume": "1000000000000000000",
                     "cumulativeInputVolume": "3100000000"
                 }],
-                "bids": []
+                "bids": [{
+                    "binIdx": -1,
+                    "price": "53495557813757699686400",
+                    "cumulativeVolume": "3000000000",
+                    "cumulativeInputVolume": "1000000000000000000"
+                }]
             }
-        });
+        })
+    }
 
-        for (status, expected) in
-            [("healthy", true), ("feed_down", false), ("internal_error", false)]
-        {
-            let mut payload = quotable.clone();
-            payload["priceProviderStatus"] = serde_json::json!(status);
-            let response: MetricBidAskResponse = serde_json::from_value(payload).unwrap();
-            assert_eq!(response.is_quotable(), expected, "status {status}");
+    /// Metric trades on `healthy` alone, so every other status, and none at all, vetoes an
+    /// otherwise complete quote.
+    #[rstest]
+    #[case::healthy(Some("healthy"), true)]
+    #[case::feed_down(Some("feed_down"), false)]
+    #[case::pool_refused(Some("pool_refused"), false)]
+    #[case::pool_paused(Some("pool_paused"), false)]
+    #[case::internal_error(Some("internal_error"), false)]
+    #[case::unknown(Some("unknown"), false)]
+    #[case::absent(None, false)]
+    fn only_a_healthy_provider_is_quotable(#[case] status: Option<&str>, #[case] expected: bool) {
+        let mut payload = two_sided_quote();
+        match status {
+            Some(status) => payload["priceProviderStatus"] = serde_json::json!(status),
+            None => {
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("priceProviderStatus");
+            }
         }
+        let response: MetricBidAskResponse = serde_json::from_value(payload).unwrap();
 
-        // Absent status (older responses): structural checks decide.
-        let response: MetricBidAskResponse = serde_json::from_value(quotable).unwrap();
-        assert_eq!(response.price_provider_status, None);
+        assert_eq!(response.is_quotable(), expected);
+    }
+
+    /// A side is tradable only with both a price and depth. Metric closes one side of a
+    /// `healthy` pool with that side's sentinel and no bins; the other side keeps trading.
+    #[rstest]
+    #[case::both_sides(None, None, true, true)]
+    #[case::bid_closed(Some(("bidAdj", "0")), Some("bids"), false, true)]
+    #[case::ask_closed(
+        Some(("askAdj", "340282366920938463463374607431768211455")),
+        Some("asks"),
+        true,
+        false
+    )]
+    #[case::bid_priced_without_bins(None, Some("bids"), false, true)]
+    #[case::ask_bins_without_a_price(
+        Some(("askAdj", "340282366920938463463374607431768211455")),
+        None,
+        true,
+        false
+    )]
+    fn a_side_trades_only_with_a_price_and_depth(
+        #[case] sentinel: Option<(&str, &str)>,
+        #[case] emptied_side: Option<&str>,
+        #[case] bids_tradable: bool,
+        #[case] asks_tradable: bool,
+    ) {
+        let mut payload = two_sided_quote();
+        if let Some((field, value)) = sentinel {
+            payload[field] = serde_json::json!(value);
+        }
+        if let Some(side) = emptied_side {
+            payload["depth"][side] = serde_json::json!([]);
+        }
+        let response: MetricBidAskResponse = serde_json::from_value(payload).unwrap();
+
+        assert_eq!(response.tradable_bids().is_some(), bids_tradable);
+        assert_eq!(response.tradable_asks().is_some(), asks_tradable);
+        assert!(response.is_quotable(), "one tradable side keeps the pool quotable");
+    }
+
+    /// Metric sends a side with no inventory as bins whose cumulative volumes are all zero, priced
+    /// and under a `healthy` status (LONGSHORT/WETH bids on Ethereum, for one). Such a side fills
+    /// nothing, so it is not tradable; the other side keeps the pool quotable.
+    #[test]
+    fn a_side_whose_bins_hold_no_volume_is_not_tradable() {
+        let mut payload = two_sided_quote();
+        payload["depth"]["bids"] = serde_json::json!([
+            { "binIdx": -1, "price": "53495557813757699686400", "cumulativeVolume": "0",
+              "cumulativeInputVolume": "0" },
+            { "binIdx": -2, "price": "53311090373020604134400", "cumulativeVolume": "0",
+              "cumulativeInputVolume": "0" }
+        ]);
+        let response: MetricBidAskResponse = serde_json::from_value(payload).unwrap();
+
+        assert!(response.bid_price().unwrap().is_some());
+        assert!(response.tradable_bids().is_none());
+        assert!(response.tradable_asks().is_some());
         assert!(response.is_quotable());
+    }
+
+    /// A pool priced on both sides but with no depth on either has no side to trade.
+    #[test]
+    fn prices_without_depth_are_not_quotable() {
+        let mut payload = two_sided_quote();
+        payload["depth"] = serde_json::json!({ "asks": [], "bids": [] });
+        let response: MetricBidAskResponse = serde_json::from_value(payload).unwrap();
+
+        assert!(response.bid_price().unwrap().is_some());
+        assert!(response.ask_price().unwrap().is_some());
+        assert!(!response.is_quotable());
     }
 
     #[test]

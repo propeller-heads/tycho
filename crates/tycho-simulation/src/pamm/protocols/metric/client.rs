@@ -1,6 +1,7 @@
 //! Everything that talks to the `api.metric.xyz` v1 API.
 //!
-//! Endpoint reference: <https://docs.metric.xyz/RSm94m71kqtGICv4iKRj/developers/api>
+//! Endpoint reference: <https://docs.metric.xyz/reference/api/metadata> and
+//! <https://docs.metric.xyz/reference/api/retrieve-batch-bid-and-ask>
 
 use std::{collections::HashMap, num::NonZeroUsize};
 
@@ -30,8 +31,13 @@ const METRIC_API_URL: &str = "https://api.metric.xyz";
 /// Page size for the paginated metadata endpoint. The API clamps `count` to `[1, 500]`.
 const METADATA_PAGE_SIZE: u32 = 500;
 
-/// Currency the metadata endpoint values `tvlFiat` in; the threshold in `BookFeedConfig` is USD.
+/// Currency the metadata endpoint values `tvlFiat` and `minTvlFiat` in; the threshold in
+/// `BookFeedConfig` is USD.
 const TVL_FIAT_CURRENCY: &str = "USD";
+
+/// The TVL floor, in USD, the metadata endpoint applies when a request names none. A prices feed
+/// has no book settings to take a floor from, so it lists the pools Metric lists by default.
+pub(super) const METRIC_DEFAULT_MIN_TVL_USD: f64 = 10.0;
 
 /// Most pools the batch bid/ask endpoint quotes in one request.
 const BID_ASK_BATCH_SIZE: usize = 100;
@@ -46,8 +52,9 @@ const BID_ASK_TIMEOUT: Duration = Duration::from_secs(3);
 ///
 /// A poll's worst case is the metadata fetch plus
 /// `ceil(pools / (BID_ASK_BATCH_SIZE * this)) * BID_ASK_TIMEOUT`, and it has to stay inside the
-/// feed loop's whole-poll `request_timeout`. Metric serves fewer than `BID_ASK_BATCH_SIZE` pools
-/// per chain today, so a poll is a single batch.
+/// feed loop's whole-poll `request_timeout`. At the default the batches of up to
+/// `BID_ASK_BATCH_SIZE * 16` pools run in one round; Metric lists a few hundred pools on a chain
+/// with no TVL floor and under a hundred at its default floor of 10 USD.
 pub const DEFAULT_BID_ASK_CONCURRENCY: NonZeroUsize = NonZeroUsize::new(16).unwrap();
 
 /// Reads Metric's pool metadata and per-pool quotes. Unlike the RFQ venues' clients this one
@@ -60,7 +67,9 @@ pub struct MetricClient {
     metadata_endpoint: String,
     /// Prefix ending at /public/v1/evm/{chain_id}; pool-specific endpoints are derived from it.
     chain_endpoint: String,
-    /// Bearer trading key required by the authenticated endpoints (`bid_ask/batch`).
+    /// Bearer trading key, sent with every request: the batch bid/ask endpoint requires it, and so
+    /// does the metadata endpoint on the chains Metric serves to partners only. Metric answers an
+    /// invalid key with `401` on both.
     #[debug(skip)]
     api_key: String,
     bid_ask_concurrency: NonZeroUsize,
@@ -68,10 +77,8 @@ pub struct MetricClient {
 }
 
 impl MetricClient {
-    /// A client for the Metric deployment at `base_url`, serving the chain with `chain_id`.
-    /// Every endpoint it requests hangs off that chain's own prefix.
-    /// A client for Metric's API on `chain_id`. `base_url` points it somewhere else than the
-    /// venue, which is what
+    /// A client for Metric's API on `chain_id`; every endpoint it requests hangs off that chain's
+    /// own prefix. `base_url` points it somewhere else than the venue, which is what
     /// [`MetricFeedBuilder::base_url`](super::feed::MetricFeedBuilder::base_url) passes on.
     pub fn new(
         base_url: Option<&str>,
@@ -90,9 +97,14 @@ impl MetricClient {
         }
     }
 
-    /// Every pool the venue lists, by paging through the metadata endpoint until the API reports
-    /// no next page.
-    pub async fn fetch_metadata(&self) -> Result<Vec<MetricMetadata>, FeedError> {
+    /// Every pool the venue lists with a USD TVL of at least `min_tvl_usd`, by paging through the
+    /// metadata endpoint until the API reports no next page.
+    ///
+    /// The floor is applied by Metric, which also leaves out pools whose TVL it cannot compute
+    /// unless the floor is `0`. A negative or NaN floor is sent as `0`.
+    pub async fn fetch_metadata(&self, min_tvl_usd: f64) -> Result<Vec<MetricMetadata>, FeedError> {
+        // `f64::max` returns the other operand for NaN, so NaN becomes 0 as well.
+        let min_tvl_fiat = min_tvl_usd.max(0.0).to_string();
         let mut pools = Vec::new();
         let mut offset: u64 = 0;
         let mut pages: u32 = 0;
@@ -106,12 +118,14 @@ impl MetricClient {
                 // API omits TVL and every pool would fall below any non-zero threshold. `fiat`
                 // pins the currency `tvlFiat` is valued in so it matches `min_tvl_usd`; the API
                 // rejects anything but USD today, so a change there surfaces as an HTTP error
-                // instead of a silently re-denominated threshold.
+                // instead of a silently re-denominated threshold. `minTvlFiat` replaces the API's
+                // own default floor of `METRIC_DEFAULT_MIN_TVL_USD`.
                 .query(&[
                     ("count", METADATA_PAGE_SIZE.to_string()),
                     ("offset", offset.to_string()),
                     ("include24h", "true".to_string()),
                     ("fiat", TVL_FIAT_CURRENCY.to_string()),
+                    ("minTvlFiat", min_tvl_fiat.clone()),
                 ])
                 .bearer_auth(&self.api_key);
             let page: PaginatedMetadataResponse =
@@ -221,6 +235,8 @@ impl MetricClient {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use rstest::rstest;
     use tycho_common::models::Chain;
 
@@ -287,12 +303,52 @@ mod tests {
 
         // A broken stop condition polls the same page forever; the timeout turns that into a
         // failure.
-        let pools = timeout(Duration::from_secs(5), client.fetch_metadata())
-            .await
-            .expect("pagination must terminate")
-            .unwrap();
+        let pools =
+            timeout(Duration::from_secs(5), client.fetch_metadata(METRIC_DEFAULT_MIN_TVL_USD))
+                .await
+                .expect("pagination must terminate")
+                .unwrap();
 
         assert_eq!(pools.len(), expected_pools);
+    }
+
+    /// Every metadata page asks Metric for the floor it was given; a floor below zero or NaN asks
+    /// for every pool rather than being rejected by the API.
+    #[rstest]
+    #[case::a_configured_floor(1_000.0, "1000")]
+    #[case::a_fractional_floor(2.5, "2.5")]
+    #[case::no_floor(0.0, "0")]
+    #[case::a_negative_floor(-5.0, "0")]
+    #[case::nan(f64::NAN, "0")]
+    #[tokio::test]
+    async fn every_metadata_page_carries_the_tvl_floor(
+        #[case] min_tvl_usd: f64,
+        #[case] expected: &'static str,
+    ) {
+        let pages = [metadata_page(1, Some(500)), metadata_page(1, None)];
+        let floors = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&floors);
+        let server = spawn_http_server(move |request| {
+            let floor = request
+                .target
+                .split("minTvlFiat=")
+                .nth(1)
+                .and_then(|rest| rest.split('&').next())
+                .unwrap_or("<missing>")
+                .to_string();
+            recorded.lock().unwrap().push(floor);
+            let page = usize::from(request.target.contains("offset=500"));
+            Some(("200 OK", pages[page].clone()))
+        })
+        .await;
+        let client = client(&server.url(), Chain::Ethereum.id(), "key");
+
+        client
+            .fetch_metadata(min_tvl_usd)
+            .await
+            .unwrap();
+
+        assert_eq!(*floors.lock().unwrap(), vec![expected; 2]);
     }
 
     // MegaETH (4326) is omitted: Metric answers for its chain id but lists no pools on it.
@@ -311,7 +367,10 @@ mod tests {
     async fn live_metric_api_serves_quotable_pools(#[case] chain_id: u64) {
         let api_key = std::env::var("METRIC_API_KEY").expect("METRIC_API_KEY not set");
         let client = client("https://api.metric.xyz", chain_id, &api_key);
-        let metadata = client.fetch_metadata().await.unwrap();
+        let metadata = client
+            .fetch_metadata(METRIC_DEFAULT_MIN_TVL_USD)
+            .await
+            .unwrap();
         assert!(!metadata.is_empty());
 
         let pools = metadata.len();
@@ -384,7 +443,7 @@ mod tests {
         let client = client(&server.url(), Chain::Unichain.id(), "key");
 
         let error = client
-            .fetch_metadata()
+            .fetch_metadata(METRIC_DEFAULT_MIN_TVL_USD)
             .await
             .unwrap_err();
 
@@ -400,7 +459,7 @@ mod tests {
         let client = client("https://api.metric.xyz", Chain::Unichain.id(), &api_key);
 
         let error = client
-            .fetch_metadata()
+            .fetch_metadata(METRIC_DEFAULT_MIN_TVL_USD)
             .await
             .unwrap_err();
 
