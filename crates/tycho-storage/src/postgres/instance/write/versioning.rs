@@ -35,6 +35,9 @@ pub trait VersionedRow: Debug + Send + Sync + Sized {
 
     fn key(&self) -> Self::Key;
 
+    /// Instance of the row.
+    fn instance(&self) -> InstanceId;
+
     /// Start of the version: its `valid_from` and `tx_index`.
     fn version(&self) -> (NaiveDateTime, i32);
 
@@ -110,9 +113,11 @@ struct VersionWrites<R: VersionedRow> {
 
 /// Chains `changes` after the `stored` current rows of their keys, in the order they start.
 ///
-/// Fails with [`StorageError::Unexpected`] when a change does not start after the version it
-/// replaces, and with [`StorageError::NotFound`] when a deletion finds no version of its key.
+/// Fails with [`StorageError::Unexpected`] when an updated row is not of `instance` or a change
+/// does not start after the version it replaces, and with [`StorageError::NotFound`] when a
+/// deletion finds no version of its key.
 fn plan_writes<R: VersionedRow>(
+    instance: InstanceId,
     stored: Vec<R>,
     mut changes: Vec<VersionedChange<R>>,
     retention_horizon: NaiveDateTime,
@@ -142,6 +147,14 @@ fn plan_writes<R: VersionedRow>(
         };
         let next = match change {
             VersionedChange::Update(mut row) => {
+                if row.instance() != instance {
+                    return Err(StorageError::Unexpected(format!(
+                        "{} {key:?}: the row is of instance {}, but the batch writes instance \
+                         {instance}",
+                        R::ENTITY,
+                        row.instance()
+                    )));
+                }
                 if let Some(replaced) = &replaced {
                     replaced.link_next(&mut row);
                 }
@@ -175,10 +188,11 @@ fn plan_writes<R: VersionedRow>(
 impl PostgresGatewayNew {
     /// Applies `changes` of `instance` to the current and history tables of the entity `R`.
     ///
-    /// The changes can come in any order: they apply in the order they start. Fails when a
-    /// change does not start after the version it replaces, when a deletion finds no version of
-    /// its key, and when the history day of a replaced version does not exist. On a failure, some
-    /// rows can already be written; the caller rolls back its transaction.
+    /// The changes can come in any order: they apply in the order they start. Fails when an
+    /// updated row is not of `instance`, when a change does not start after the version it
+    /// replaces, when a deletion finds no version of its key, and when the history day of a
+    /// replaced version does not exist. On a failure, some rows can already be written; the
+    /// caller rolls back its transaction.
     pub(crate) async fn write_versions<R: VersionedRow>(
         &self,
         instance: InstanceId,
@@ -195,7 +209,7 @@ impl PostgresGatewayNew {
             .into_iter()
             .collect();
         let stored = R::load_current(instance, &keys, conn).await?;
-        let writes = plan_writes(stored, changes, self.retention_horizon)?;
+        let writes = plan_writes(instance, stored, changes, self.retention_horizon)?;
 
         if !writes.history.is_empty() {
             R::insert_history(&writes.history, conn).await?;

@@ -35,6 +35,10 @@ impl VersionedRow for NewProtocolState {
         (self.protocol_component_id, self.attribute_name.clone())
     }
 
+    fn instance(&self) -> InstanceId {
+        self.instance_id
+    }
+
     fn version(&self) -> (NaiveDateTime, i32) {
         (self.valid_from, self.tx_index)
     }
