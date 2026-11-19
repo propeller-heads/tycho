@@ -230,6 +230,9 @@ mod tests {
 
     use super::*;
 
+    /// Instance of every test row.
+    const INSTANCE: InstanceId = InstanceId(1);
+
     #[derive(Debug, Clone, PartialEq)]
     struct Row {
         key: u8,
@@ -253,6 +256,10 @@ mod tests {
 
         fn key(&self) -> u8 {
             self.key
+        }
+
+        fn instance(&self) -> InstanceId {
+            INSTANCE
         }
 
         fn version(&self) -> (NaiveDateTime, i32) {
@@ -329,7 +336,7 @@ mod tests {
         stored: Vec<Row>,
         changes: Vec<VersionedChange<Row>>,
     ) -> Result<VersionWrites<Row>, StorageError> {
-        plan_writes(stored, changes, NaiveDateTime::default())
+        plan_writes(INSTANCE, stored, changes, NaiveDateTime::default())
     }
 
     #[test]
@@ -395,7 +402,7 @@ mod tests {
         let stored = vec![row(1, 10, 1, 0), row(2, 10, 1, 0)];
         let changes = vec![update(1, 20, 2, 0), update(2, 20, 3, 0)];
 
-        let writes = plan_writes(stored, changes, ts(2)).unwrap();
+        let writes = plan_writes(INSTANCE, stored, changes, ts(2)).unwrap();
 
         assert_eq!(writes.current.len(), 2);
         assert_eq!(writes.history, vec![archived(row(2, 10, 1, 0), 3)]);
@@ -427,5 +434,22 @@ mod tests {
         let result = plan(vec![], vec![delete(1, 2, 0)]);
 
         assert!(matches!(result, Err(StorageError::NotFound(..))));
+    }
+
+    #[test]
+    fn test_row_of_another_instance_fails() {
+        let other_instance = InstanceId(2);
+
+        let result = plan_writes(
+            other_instance,
+            vec![],
+            vec![update(1, 20, 2, 0)],
+            NaiveDateTime::default(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(StorageError::Unexpected(msg)) if msg.contains("of instance 1")
+        ));
     }
 }
