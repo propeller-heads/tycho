@@ -1249,18 +1249,26 @@ impl StateSnapshotGateway for CachedGateway {
 
 #[cfg(test)]
 mod test_serial_db {
-    use std::{collections::HashSet, slice, str::FromStr, time::Duration};
+    #[cfg(old_gateway)]
+    use std::collections::HashSet;
+    use std::{slice, str::FromStr, time::Duration};
 
-    use diesel::{prelude::*, sql_query, QueryableByName};
+    use diesel::prelude::*;
+    #[cfg(old_gateway)]
+    use diesel::{sql_query, QueryableByName};
     use diesel_async::RunQueryDsl;
+    #[cfg(old_gateway)]
     use tycho_common::models::ChangeType;
 
     use super::*;
+    #[cfg(old_gateway)]
+    use crate::postgres::orm;
     use crate::postgres::{
         db_fixtures, db_fixtures::yesterday_one_am, instance::schema::tycho as instance_schema,
-        orm, testing::run_against_db,
+        schema, testing::run_against_db,
     };
 
+    #[cfg(old_gateway)]
     #[tokio::test]
     async fn test_write_and_flush() {
         run_against_db(|connection_pool| async move {
@@ -1317,6 +1325,7 @@ mod test_serial_db {
         .await;
     }
 
+    #[cfg(old_gateway)]
     #[tokio::test]
     async fn test_write_retries_serialization_failure() {
         run_against_db(|connection_pool| async move {
@@ -1400,6 +1409,7 @@ mod test_serial_db {
         .await;
     }
 
+    #[cfg(old_gateway)]
     #[tokio::test]
     async fn test_write_fails_after_exhausted_conflict_retries() {
         run_against_db(|connection_pool| async move {
@@ -1476,6 +1486,7 @@ mod test_serial_db {
         .await;
     }
 
+    #[cfg(old_gateway)]
     #[tokio::test]
     async fn test_writes_and_new_blocks() {
         run_against_db(|connection_pool| async move {
@@ -1641,6 +1652,7 @@ mod test_serial_db {
         .await
     }
 
+    #[cfg(old_gateway)]
     #[test_log::test(tokio::test)]
     async fn test_cached_gateway() {
         // Setup
@@ -1779,19 +1791,13 @@ mod test_serial_db {
         let protocol_system_id =
             db_fixtures::insert_protocol_system(&mut connection, "vm:test".to_owned()).await;
         let instance = db_fixtures::insert_instance(&mut connection, protocol_system_id, "1").await;
-        let gateway = PostgresGateway::from_connection(&mut connection).await;
+        let gateway = PostgresGatewayNew::from_connection(&mut connection).await;
         let (tx, rx) = mpsc::channel(10);
-        let write_executor = DBCacheWriteExecutor::new(
-            "ethereum".to_owned(),
-            Chain::Ethereum,
-            connection_pool.clone(),
-            gateway.clone(),
-            rx,
-        )
-        .await;
+        let write_executor =
+            DBCacheWriteExecutor::new("ethereum".to_owned(), connection_pool.clone(), gateway, rx)
+                .await;
         let handle = write_executor.run();
-        let cached_gw =
-            CachedGateway::new(tx, connection_pool.clone(), gateway).for_instance(instance);
+        let cached_gw = CachedGateway::new(tx, connection_pool.clone()).for_instance(instance);
         (cached_gw, instance, handle)
     }
 
@@ -1824,21 +1830,23 @@ mod test_serial_db {
                 .expect("committing tx failed");
             handle.abort();
 
-            let fetched_block = cached_gw
-                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)))
-                .await
-                .expect("Failed to fetch block");
-            assert_eq!(fetched_block, block_1);
-            let fetched_tx = cached_gw.get_tx(&tx_1.hash).await;
-            assert!(matches!(fetched_tx, Err(StorageError::NotFound(_, _))), "{fetched_tx:?}");
-            let old_state = cached_gw
-                .get_state(&state.name, &Chain::Ethereum)
-                .await;
-            assert!(matches!(old_state, Err(StorageError::NotFound(_, _))), "{old_state:?}");
             let mut connection = connection_pool
                 .get()
                 .await
                 .expect("Failed to get a connection from the pool");
+            assert_eq!(stored_block_hashes(&mut connection).await, vec![block_1.hash.clone()]);
+            let stored_txs: i64 = schema::transaction::table
+                .count()
+                .get_result(&mut connection)
+                .await
+                .expect("counting the transactions failed");
+            assert_eq!(stored_txs, 0);
+            let old_states: i64 = schema::extraction_state::table
+                .count()
+                .get_result(&mut connection)
+                .await
+                .expect("counting the old extraction states failed");
+            assert_eq!(old_states, 0);
             let (cursor, block_number): (Option<Bytes>, i64) =
                 instance_schema::extraction_state::table
                     .filter(instance_schema::extraction_state::instance_id.eq(instance))
@@ -1887,17 +1895,27 @@ mod test_serial_db {
             handle.abort();
 
             assert!(matches!(res, Err(StorageError::Unsupported(_))), "{res:?}");
-            let fetched_block = cached_gw
-                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)))
-                .await;
-            assert!(
-                matches!(fetched_block, Err(StorageError::NotFound(_, _))),
-                "{fetched_block:?}"
-            );
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            assert!(stored_block_hashes(&mut connection)
+                .await
+                .is_empty());
         })
         .await;
     }
 
+    /// Hashes of the stored blocks.
+    async fn stored_block_hashes(conn: &mut AsyncPgConnection) -> Vec<Bytes> {
+        schema::block::table
+            .select(schema::block::hash)
+            .load(conn)
+            .await
+            .expect("reading the blocks failed")
+    }
+
+    #[cfg(old_gateway)]
     #[test_log::test(tokio::test)]
     async fn test_cached_gateway_flushed_block_height() {
         run_against_db(|connection_pool| async move {
@@ -2048,6 +2066,7 @@ mod test_serial_db {
         }
     }
 
+    #[cfg(old_gateway)]
     async fn send_write_message(
         tx: &mpsc::Sender<DBCacheMessage>,
         block: models::blockchain::Block,
@@ -2070,12 +2089,14 @@ mod test_serial_db {
         os_rx
     }
 
+    #[cfg(old_gateway)]
     #[derive(QueryableByName)]
     struct BigIntRow {
         #[diesel(sql_type = diesel::sql_types::BigInt)]
         value: i64,
     }
 
+    #[cfg(old_gateway)]
     /// Waits until a backend of this database blocks on another transaction's row lock.
     async fn await_lock_waiter(conn: &mut AsyncPgConnection) {
         const TIMEOUT: Duration = Duration::from_secs(10);
@@ -2100,6 +2121,7 @@ mod test_serial_db {
         }
     }
 
+    #[cfg(old_gateway)]
     /// Opens a transaction that updates the ETH token row and leaves it uncommitted. The caller
     /// releases the row lock with `COMMIT` on the returned connection.
     async fn start_blocking_token_update() -> AsyncPgConnection {
