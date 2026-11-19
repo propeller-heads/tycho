@@ -71,26 +71,28 @@ pub trait VersionedRow: Debug + Send + Sync + Sized {
     ) -> Result<(), StorageError>;
 }
 
-/// A change to one key of a versioned entity, at its place on the chain.
+/// A change to one key of a versioned entity.
 #[derive(Debug)]
-pub struct VersionedChange<R: VersionedRow> {
-    pub origin: ChangeOrigin,
-    pub kind: ChangeKind<R>,
-}
-
-#[derive(Debug)]
-pub enum ChangeKind<R: VersionedRow> {
-    /// A new version of the row's key. The row starts at the change's origin.
+pub enum VersionedChange<R: VersionedRow> {
+    /// A new version of the row's key. It starts at the row's `valid_from` and `tx_index`.
     Update(R),
-    /// The end of the latest version of the key.
-    Delete(R::Key),
+    /// The end of the latest version of `key`, at `origin`.
+    Delete { key: R::Key, origin: ChangeOrigin },
 }
 
 impl<R: VersionedRow> VersionedChange<R> {
     fn key(&self) -> R::Key {
-        match &self.kind {
-            ChangeKind::Update(row) => row.key(),
-            ChangeKind::Delete(key) => key.clone(),
+        match self {
+            Self::Update(row) => row.key(),
+            Self::Delete { key, .. } => key.clone(),
+        }
+    }
+
+    /// Start of the change: its `valid_from` and `tx_index`.
+    fn version(&self) -> (NaiveDateTime, i32) {
+        match self {
+            Self::Update(row) => row.version(),
+            Self::Delete { origin, .. } => (origin.valid_from, origin.tx_index),
         }
     }
 }
@@ -106,7 +108,7 @@ struct VersionWrites<R: VersionedRow> {
     history: Vec<R::History>,
 }
 
-/// Chains `changes` after the `stored` current rows of their keys, in the order of their origins.
+/// Chains `changes` after the `stored` current rows of their keys, in the order they start.
 ///
 /// Fails with [`StorageError::Unexpected`] when a change does not start after the version it
 /// replaces, and with [`StorageError::NotFound`] when a deletion finds no version of its key.
@@ -115,7 +117,7 @@ fn plan_writes<R: VersionedRow>(
     mut changes: Vec<VersionedChange<R>>,
     retention_horizon: NaiveDateTime,
 ) -> Result<VersionWrites<R>, StorageError> {
-    changes.sort_by_key(|change| change.origin);
+    changes.sort_by_key(VersionedChange::version);
 
     // The start of the last version of each key, and its latest row: `None` once deleted.
     let mut latest: BTreeMap<_, _> = stored
@@ -126,7 +128,7 @@ fn plan_writes<R: VersionedRow>(
     let mut history = Vec::new();
     for change in changes {
         let key = change.key();
-        let version = (change.origin.valid_from, change.origin.tx_index);
+        let version = change.version();
         let replaced = match latest.remove(&key) {
             Some((last, _)) if version <= last => {
                 return Err(StorageError::Unexpected(format!(
@@ -138,21 +140,22 @@ fn plan_writes<R: VersionedRow>(
             Some((_, replaced)) => replaced,
             None => None,
         };
-        let next = match change.kind {
-            ChangeKind::Update(mut row) => {
+        let next = match change {
+            VersionedChange::Update(mut row) => {
                 if let Some(replaced) = &replaced {
                     replaced.link_next(&mut row);
                 }
                 Some(row)
             }
-            ChangeKind::Delete(_) if replaced.is_none() => {
+            VersionedChange::Delete { .. } if replaced.is_none() => {
                 return Err(StorageError::NotFound(R::ENTITY.to_owned(), format!("{key:?}")));
             }
-            ChangeKind::Delete(_) => None,
+            VersionedChange::Delete { .. } => None,
         };
         if let Some(replaced) = replaced {
-            if change.origin.valid_from > retention_horizon {
-                history.push(replaced.into_history(change.origin.valid_from));
+            let (valid_from, _) = version;
+            if valid_from > retention_horizon {
+                history.push(replaced.into_history(valid_from));
             }
         }
         latest.insert(key, (version, next));
@@ -172,7 +175,7 @@ fn plan_writes<R: VersionedRow>(
 impl PostgresGatewayNew {
     /// Applies `changes` of `instance` to the current and history tables of the entity `R`.
     ///
-    /// The changes can come in any order: they apply in the order of their origins. Fails when a
+    /// The changes can come in any order: they apply in the order they start. Fails when a
     /// change does not start after the version it replaces, when a deletion finds no version of
     /// its key, and when the history day of a replaced version does not exist. On a failure, some
     /// rows can already be written; the caller rolls back its transaction.

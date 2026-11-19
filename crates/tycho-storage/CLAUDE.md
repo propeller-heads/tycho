@@ -71,7 +71,7 @@ instances. No table has a DEFAULT partition.
   old gateway are deleted, and `PostgresGatewayNew` is renamed.
 - `PostgresGatewayNew::write_versions` versions the rows of an entity that implements
   `instance::write::versioning::VersionedRow` (protocol state so far). It applies the changes in
-  the order of their origins: each replaced version goes to `*_history`, ended at the start of the
+  the order they start: each replaced version goes to `*_history`, ended at the start of the
   next one, unless it ends at or before the retention horizon. A change that does not start after
   the version it replaces fails the batch; the old versioning skips it.
 
