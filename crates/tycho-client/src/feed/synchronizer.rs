@@ -178,6 +178,14 @@ pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     /// successful one. It covers the whole extractor because a stale snapshot block or a rate
     /// limit fails every component's request, not only the one that failed.
     snapshot_backoff: Option<SnapshotBackoff>,
+    /// Components unpaused while starting, by a consumed message or during the gap before a
+    /// restart, that the synchronizer has not acted on yet. It keeps them until it sends the first
+    /// message, so a failed start attempt does not lose them. The tracker skips the ones a later
+    /// message paused again.
+    unpaused_while_starting: HashSet<String>,
+    /// Components a restart stopped tracking because they are paused, which no sent message has
+    /// reported as removed yet.
+    removed_while_starting: HashMap<String, ProtocolComponent>,
 }
 
 /// An extractor's background snapshot backoff.
@@ -516,6 +524,8 @@ where
             buffered_deltas: Vec::new(),
             snapshot_queue: HashMap::new(),
             snapshot_backoff: None,
+            unpaused_while_starting: HashSet::new(),
+            removed_while_starting: HashMap::new(),
         }
     }
 
@@ -601,10 +611,7 @@ where
             // Messages keep arriving during the delay, so we discard them instead of sleeping:
             // a sleep would overflow the subscription buffer on fast chains.
             let mut snapshot_not_before: Option<Instant> = None;
-            // Components unpaused by a message consumed while starting. The tracker skips the ones
-            // a later message paused again.
-            let mut unpaused_while_starting: HashSet<String> = HashSet::new();
-            let (msg, header) = 'init: loop {
+            let (mut msg, header) = 'init: loop {
                 let mut warned_waiting_for_new_block = false;
                 let mut warned_skipping_synced = false;
                 let mut first_msg = loop {
@@ -631,7 +638,8 @@ where
 
                     // The server sends each pause once, so record it even from a skipped message.
                     self.component_tracker.record_pause_events(&msg);
-                    unpaused_while_starting.extend(msg.unpaused_components.iter().cloned());
+                    self.unpaused_while_starting
+                        .extend(msg.unpaused_components.iter().cloned());
 
                     let incoming: BlockHeader = (&msg).into();
 
@@ -698,8 +706,7 @@ where
                 };
 
                 let header: BlockHeader = (&first_msg).into();
-                let paused_components =
-                    self.apply_missed_pauses(&header, &unpaused_while_starting).await?;
+                self.apply_missed_pauses(&header).await?;
                 self.filter_deltas(&mut first_msg);
 
                 // initial snapshot
@@ -708,7 +715,7 @@ where
                     header: header.clone(),
                     snapshots: Default::default(),
                     deltas: Some(first_msg),
-                    removed_components: paused_components,
+                    removed_components: HashMap::new(),
                 };
 
                 // If possible skip retrieving snapshots
@@ -809,6 +816,9 @@ where
                 break 'init (deltas_msg, header);
             };
 
+            msg.removed_components
+                .extend(std::mem::take(&mut self.removed_while_starting));
+            self.unpaused_while_starting.clear();
             block_tx.send(Ok(msg)).await?;
             self.last_synced_block = Some(header);
             loop {
@@ -1253,31 +1263,30 @@ where
 
     /// Applies the pauses and unpauses the synchronizer has not acted on before its first message.
     /// They come from the messages consumed while looking for the first block, whose unpauses are
-    /// in `unpaused`. On a restart after a gap, they also come from the missed blocks, which only
-    /// the server can tell.
+    /// in `unpaused_while_starting`. On a restart after a gap, it also asks the server, because the
+    /// pauses of the missed blocks never reached the client.
     ///
     /// Starts tracking the unpaused components that pass the filter, and stops tracking the paused
     /// ones. When no snapshot follows the first message, it queues the unpaused components instead,
-    /// so the next block fetches their snapshot in the background. On a restart, returns the
-    /// stopped components so the consumer drops them. On the first start, returns none, because
-    /// the consumer never received them.
+    /// so the next block fetches their snapshot in the background. On a restart, it adds the
+    /// stopped components to `removed_while_starting`, so the first message reports them as
+    /// removed. On the first start it does not, because the consumer never received them.
     async fn apply_missed_pauses(
         &mut self,
         first_header: &BlockHeader,
-        unpaused: &HashSet<String>,
-    ) -> Result<HashMap<String, ProtocolComponent>, SynchronizerError> {
-        let mut unpaused = unpaused.clone();
+    ) -> Result<(), SynchronizerError> {
         if self.last_synced_block.is_some() && !self.is_next_expected(first_header) {
-            unpaused.extend(
-                self.component_tracker
-                    .refresh_paused()
-                    .await?,
-            );
+            let unpaused = self
+                .component_tracker
+                .refresh_paused()
+                .await?;
+            self.unpaused_while_starting
+                .extend(unpaused);
         }
 
         let to_add = self
             .component_tracker
-            .unpaused_to_track(&unpaused)
+            .unpaused_to_track(&self.unpaused_while_starting)
             .await?;
         if self.is_next_expected(first_header) {
             // No snapshot follows, so queue them like components whose backoff has ended: the
@@ -1295,7 +1304,15 @@ where
         let removed = self
             .component_tracker
             .stop_tracking_paused();
-        Ok(if self.last_synced_block.is_some() { removed } else { HashMap::new() })
+        if self.last_synced_block.is_some() {
+            // An earlier attempt may have stopped a component that this attempt tracks again.
+            let tracked = &self.component_tracker.components;
+            self.removed_while_starting
+                .retain(|id, _| !tracked.contains_key(id));
+            self.removed_while_starting
+                .extend(removed);
+        }
+        Ok(())
     }
 
     /// Records the components a finished background fetch found paused, and removes every paused
