@@ -1,3 +1,21 @@
+## [0.532.0](https://github.com/propeller-heads/tycho/compare/0.531.0...0.532.0) (2026-11-19)
+
+
+### Features
+
+* **execution:** configure the subsidy payers for the new executors ([68cfceb](https://github.com/propeller-heads/tycho/commit/68cfcebf63cb95810e39b4b010d0dd8b3a50c853))
+* **execution:** deploy the subsidizing executors with the new payers ([c172208](https://github.com/propeller-heads/tycho/commit/c17220812379b03d2199b128ab695c42cd2f1f80))
+* **execution:** let the subsidy payer follow a router redeploy ([81d629d](https://github.com/propeller-heads/tycho/commit/81d629da3bf28b7c91e938ce4bb2ded9def3c208))
+* **execution:** list the redeployed subsidizing executors ([2d24303](https://github.com/propeller-heads/tycho/commit/2d243032f1af1fab1ab0b17e2959b8d70e0c47bd))
+* **execution:** redeploy the subsidy payers for the new routers ([86c021b](https://github.com/propeller-heads/tycho/commit/86c021b4cb425410eba32fb38c4939e293c2eb94))
+* **router-trades:** refresh the vault balance snapshot from the pricer ([3b85fa6](https://github.com/propeller-heads/tycho/commit/3b85fa6cfcefa18fc98b6905e7fcaccffa2fc17f))
+* **router-trades:** store vault balances in a snapshot table ([cf11cd7](https://github.com/propeller-heads/tycho/commit/cf11cd7de6b5883c208042d42d228f41a6d01ec4))
+
+
+### Performance Improvements
+
+* **router-trades:** read the vault panels from the balance snapshot ([87488a5](https://github.com/propeller-heads/tycho/commit/87488a50c8709d24c5009d79699fa9b6dedf37f2))
+
 ## [0.531.0](https://github.com/propeller-heads/tycho/compare/0.530.1...0.531.0) (2026-11-19)
 
 
