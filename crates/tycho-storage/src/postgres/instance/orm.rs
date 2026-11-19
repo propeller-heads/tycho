@@ -168,7 +168,7 @@ pub struct ProtocolState {
     pub modified_ts: NaiveDateTime,
 }
 
-#[derive(Debug, Clone, Insertable)]
+#[derive(Debug, Insertable)]
 #[diesel(table_name = tycho::protocol_state)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct NewProtocolState {

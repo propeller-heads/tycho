@@ -23,7 +23,7 @@ use crate::postgres::instance::{gateway::PostgresGatewayNew, origins::ChangeOrig
 
 /// A row of the current table of a versioned entity.
 #[async_trait]
-pub trait VersionedRow: Clone + Debug + Send + Sync + Sized {
+pub trait VersionedRow: Debug + Send + Sync + Sized {
     /// Name of the entity, for error messages.
     const ENTITY: &'static str;
 
