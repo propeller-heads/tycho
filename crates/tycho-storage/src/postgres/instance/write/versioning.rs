@@ -300,14 +300,11 @@ mod tests {
     }
 
     fn update(key: u8, value: u8, block: u32, tx_index: i32) -> VersionedChange<Row> {
-        VersionedChange {
-            origin: origin(block, tx_index),
-            kind: ChangeKind::Update(row(key, value, block, tx_index)),
-        }
+        VersionedChange::Update(row(key, value, block, tx_index))
     }
 
     fn delete(key: u8, block: u32, tx_index: i32) -> VersionedChange<Row> {
-        VersionedChange { origin: origin(block, tx_index), kind: ChangeKind::Delete(key) }
+        VersionedChange::Delete { key, origin: origin(block, tx_index) }
     }
 
     fn archived(row: Row, valid_to_block: u32) -> HistoryRow {

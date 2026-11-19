@@ -162,10 +162,8 @@ mod tests {
     use crate::postgres::{
         db_fixtures,
         instance::{
-            gateway::PostgresGatewayNew,
-            origins::ChangeOrigin,
-            orm::ProtocolStateHistory,
-            write::versioning::{ChangeKind, VersionedChange},
+            gateway::PostgresGatewayNew, origins::ChangeOrigin, orm::ProtocolStateHistory,
+            write::versioning::VersionedChange,
         },
         testing::instance_test_connection,
     };
@@ -218,18 +216,15 @@ mod tests {
         new: u64,
         origin: ChangeOrigin,
     ) -> VersionedChange<NewProtocolState> {
-        VersionedChange {
-            origin,
-            kind: ChangeKind::Update(NewProtocolState {
-                instance_id: setup.instance,
-                protocol_component_id: setup.component,
-                attribute_name: name.to_string(),
-                attribute_value: value(new),
-                previous_value: None,
-                valid_from: origin.valid_from,
-                tx_index: origin.tx_index,
-            }),
-        }
+        VersionedChange::Update(NewProtocolState {
+            instance_id: setup.instance,
+            protocol_component_id: setup.component,
+            attribute_name: name.to_string(),
+            attribute_value: value(new),
+            previous_value: None,
+            valid_from: origin.valid_from,
+            tx_index: origin.tx_index,
+        })
     }
 
     fn delete(
@@ -237,7 +232,7 @@ mod tests {
         name: &str,
         origin: ChangeOrigin,
     ) -> VersionedChange<NewProtocolState> {
-        VersionedChange { origin, kind: ChangeKind::Delete((setup.component, name.to_string())) }
+        VersionedChange::Delete { key: (setup.component, name.to_string()), origin }
     }
 
     async fn write(
