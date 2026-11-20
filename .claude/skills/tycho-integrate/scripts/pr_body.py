@@ -69,14 +69,21 @@ def render(protocol: str, shadow: bool = False) -> tuple:
     new_executor = "execution" in layers
 
     kind = spec.get("kind", "?")
+    open_findings = [f for l in layers for f in st.open_findings(l)]
+    blocking = [f for f in open_findings if f["severity"] == "blocking"]
+    closed = {l: st.closed[l] for l in layers if l in st.closed}
     out = [
         f"Integrates {spec.get('protocol', protocol)} ({kind}) on {', '.join(spec.get('chains', []))} as "
         f"`{agreements.get('protocol_system', '?')}`. "
         + ("This PR carries every layer: " if route.get("kind") == "new" else f"A {route['kind']} of `{route.get('sibling')}`; this PR carries: ")
         + ", ".join(LAYER_TITLES[l].lower() for l in layers) + ".",
         "",
-        "Written by the tycho-integrate pipeline: the implementer and `/tycho-review` resolved the review "
-        "findings before this PR was opened; what is left is listed under \"For a person\".",
+        ("Written by the tycho-integrate pipeline: the implementer and `/tycho-review` resolved every "
+         "review finding before this PR was opened." if not open_findings else
+         f"Written by the tycho-integrate pipeline. {len(open_findings)} review findings are still open"
+         + (f", {len(blocking)} of them blocking" if blocking else "")
+         + (f" (layers a person closed at a cap: {', '.join(closed)})" if closed else "")
+         + "; they are listed under \"For a person\"."),
         "",
     ]
     out += [
@@ -131,6 +138,9 @@ def render(protocol: str, shadow: bool = False) -> tuple:
     (run / "PR-spend.md").write_text("\n".join(spend) + "\n")
 
     person = [f"**{d['id']}** [{d['class']}] {d['question']}" for d in st.open_decisions()]
+    person += [f"Blocking finding {f['id']} still open in {f['layer']}"
+               + (f" (closed by {closed[f['layer']]} without converging)" if f["layer"] in closed else "")
+               + f": `{f['rule']}` at `{f['file']}`: {f['claim']}" for f in blocking]
     person += [f"Open risk: {r}" for r in spec.get("open_risks", [])]
     for g in final.get("gates", []):
         if g["status"] in ("fail", "warn"):
@@ -139,10 +149,10 @@ def render(protocol: str, shadow: bool = False) -> tuple:
     out += [f"- {p}" for p in person] or ["- Nothing to decide."]
     out += ["", "Rollout, outside this PR:", ""]
     out += [f"- {r}" for r in rollout(values, spec, new_executor)]
-    open_findings = [f for l in layers for f in st.open_findings(l)]
-    if open_findings:
-        out += ["", "Review findings still open (from the final review, below blocking):", ""]
-        out += [f"- [{f['severity']}] `{f['rule']}` at `{f['file']}`: {f['claim']}" for f in open_findings]
+    lesser = [f for f in open_findings if f["severity"] != "blocking"]
+    if lesser:
+        out += ["", "Review findings still open, below blocking:", ""]
+        out += [f"- [{f['severity']}] `{f['rule']}` at `{f['file']}`: {f['claim']}" for f in lesser]
     if shadow:
         out += ["", "Shadow mode: the decision record and the review ledger are held back until a person has reviewed this PR blind."]
     held_text = "# Decision record and review ledger\n" + "\n".join(held).rstrip() + "\n" if shadow else ""

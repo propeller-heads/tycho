@@ -129,7 +129,9 @@ GUARDED_YAML_KEYS = (
 )
 # Guarded lines the implementer may add: a new package starts strict.
 ALLOWED_NEW_YAML_LINES = ("harness: strict",)
-GUARDED_YAML_RE = re.compile(r"^\s*-?\s*(" + "|".join(GUARDED_YAML_KEYS) + r")\s*:")
+# A guarded key anywhere on the line: block (`  - skip_execution: true`), flow
+# (`- {id: "0x..", skip_execution: true}`) or quoted (`"skip_execution": true`).
+GUARDED_YAML_RE = re.compile(r"(^|[{,\s-])[\"']?(" + "|".join(GUARDED_YAML_KEYS) + r")[\"']?\s*:")
 # An `under_cap` limit gives up capacity below the venue's bound: a quantified trade-off.
 UNDER_CAP_RE = re.compile(r"\bunder_cap\b")
 # A declared limit kind. Writing one is the implementer's work, from the contract; changing or
@@ -153,7 +155,7 @@ def guarded_path(rel: str) -> bool:
 def guarded_yaml_line(line: str, removed: bool) -> bool:
     """A yaml line the implementer may not add, change or remove: a test-relaxing key, an
     `under_cap` limit, or (removed or changed) a declared limit kind."""
-    if GUARDED_YAML_RE.match(line) or UNDER_CAP_RE.search(line):
+    if GUARDED_YAML_RE.search(line) or UNDER_CAP_RE.search(line):
         return True
     return removed and LIMIT_KIND_RE.search(line) is not None
 

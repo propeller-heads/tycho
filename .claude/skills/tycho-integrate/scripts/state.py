@@ -26,7 +26,6 @@ import argparse
 import datetime
 import json
 import re
-import subprocess
 import sys
 import tomllib
 from collections import defaultdict
@@ -686,11 +685,11 @@ def check_guards(worktree: Path, rev_from: str, rev_to: str) -> list:
     """Paths and yaml lines the implementer's commits changed but may not; with `rev_to` HEAD, the
     worktree's uncommitted changes too, since the layer checks run on the working tree."""
     def git(*args):
-        return subprocess.run(["git", "-C", str(worktree), *args], capture_output=True, text=True, check=True).stdout
+        return schema.git("-C", str(worktree), *args).stdout
 
     def show(rev, path):
         """A file at a revision; None where it does not exist there (added or deleted)."""
-        proc = subprocess.run(["git", "-C", str(worktree), "show", f"{rev}:{path}"], capture_output=True, text=True)
+        proc = schema.git("-C", str(worktree), "show", f"{rev}:{path}", check=False)
         return proc.stdout if proc.returncode == 0 else None
 
     def changed_lines(sha, path):

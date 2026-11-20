@@ -36,7 +36,7 @@ EXECUTION_RS = "protocols/testing/src/execution.rs"
 
 
 def git(tree: Path, *args) -> str:
-    return subprocess.run(["git", "-C", str(tree), *args], capture_output=True, text=True, check=True).stdout
+    return schema.git("-C", str(tree), *args).stdout
 
 
 def integration_yamls(tree: Path, package: str) -> list:
@@ -237,7 +237,7 @@ def gate_executor_fixture(tree: Path, system: str, chains: list, yamls: list) ->
     a missing deployment is never a reason to skip it (`integration-test-skip-flags`)."""
     if not system:
         return gate("executor-fixture", "fail", "decisions.json names no protocol_system")
-    skips = [str(p.relative_to(tree)) for p in yamls if re.search(r"^\s*-?\s*[\"']?skip_execution[\"']?\s*:", p.read_text(), re.M)]
+    skips = [str(p.relative_to(tree)) for p in yamls if re.search(r"(^|[{,\s-])[\"']?skip_execution[\"']?\s*:", p.read_text(), re.M)]
     if skips:
         return gate("executor-fixture", "fail", f"skip_execution in {skips}: execution runs through the fixture; a skip needs a person's decision with hard evidence")
     problems, found = [], []
