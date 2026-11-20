@@ -1506,7 +1506,6 @@ async fn process_update(
             before_block,
             &block,
             router_overwrites_data.clone(),
-            None,
         )
         .await
         .map_err(|(e, _, _)| batch_failed(e, &results))?;
@@ -1518,7 +1517,6 @@ async fn process_update(
             next_block,
             &block,
             router_overwrites_data.clone(),
-            None,
             chain.block_time_secs(),
         )
         .await
@@ -1526,15 +1524,10 @@ async fn process_update(
         results.extend(batch);
     }
     if !after_block.is_empty() {
-        let batch = simulate_swap_transaction(
-            &rpc_tools,
-            after_block,
-            &block,
-            router_overwrites_data,
-            None,
-        )
-        .await
-        .map_err(|(e, _, _)| batch_failed(e, &results))?;
+        let batch =
+            simulate_swap_transaction(&rpc_tools, after_block, &block, router_overwrites_data)
+                .await
+                .map_err(|(e, _, _)| batch_failed(e, &results))?;
         results.extend(batch);
     }
 
@@ -1837,7 +1830,7 @@ async fn process_state(
             .map(|perm| (perm[0].clone(), perm[1].clone()))
             .collect(),
     };
-    let account_overwrites = simulation_overwrites(state.as_ref());
+    let account_overwrites = simulation_overwrites(state.as_ref(), block.header.number);
     let package = strict.package(&component.protocol_system);
     let mut execution_infos = HashMap::new();
     let mut probes = HashMap::new();
@@ -2359,12 +2352,24 @@ fn record_swaps_without_simulation_overrides(
 
 /// The account overwrites a state's swaps are simulated with: for a price level stream state, the
 /// account state Titan priced its quote on. `None` for any other state, and for a price level
-/// stream state that carries no simulation overrides.
-fn simulation_overwrites(state: &dyn ProtocolSim) -> Option<AddressHashMap<AccountOverride>> {
+/// stream state that carries no simulation overrides. Overrides that name a block other than
+/// `block_number`, the block the swaps are simulated at, are logged at debug level.
+fn simulation_overwrites(
+    state: &dyn ProtocolSim,
+    block_number: u64,
+) -> Option<AddressHashMap<AccountOverride>> {
     let overrides = state
         .as_any()
         .downcast_ref::<PriceLevelStreamState>()?
         .simulation_overrides()?;
+    // A freshness-guard revert of such a swap may come from the block mismatch rather than from
+    // the overridden values, and `is_stale_quote` counts it as a real revert.
+    if let Some(overrides_block) = overrides
+        .block_number
+        .filter(|overrides_block| *overrides_block != block_number)
+    {
+        debug!(overrides_block, block_number, "Simulation overrides name a different block");
+    }
     Some(pamm_account_overwrites(overrides))
 }
 
