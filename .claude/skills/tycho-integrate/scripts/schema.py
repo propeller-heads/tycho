@@ -6,6 +6,7 @@ of error strings; an empty list means the document is valid.
 
 import difflib
 import json
+import os
 import re
 import subprocess
 from collections import Counter
@@ -47,8 +48,15 @@ ESCAPE_SEVERITIES = ("blocking", "suggestion", "nit")
 # rating that would allow one.
 ANSWER_KINDS = ("fix", "dispute", "decision")
 
-# Statuses a finding moves through in the ledger.
-FINDING_STATUSES = ("open", "fixed", "refuted", "decision")
+# Statuses a finding moves through in the ledger. `waived`: a person accepted a failing check.
+FINDING_STATUSES = ("open", "fixed", "refuted", "decision", "waived")
+
+# Review severities, most severe first; every severity must be answered (no skips in v1).
+SEVERITIES = ("blocking", "suggestion", "question", "nit")
+
+# The ledger events the orchestrator may append by hand (`state.py append`). Every other event is
+# written by the script that owns its rule: rounds, reviews, findings, verdicts, stops.
+APPENDABLE = ("stage", "gate", "escape")
 
 SPEC_SECTIONS = (
     "summary",
@@ -282,6 +290,49 @@ EVENT_FIELDS = {
 }
 
 
+# The git-ignored env files the tests read, from the person's checkout. worktree.py links them into
+# the run's worktree; the scripts load them (the shell's own variables win). protocols/testing's
+# runner reads its own `.env` from its directory, so the scripts must see it too.
+ENV_FILES = ("docker/.env", ".env", "protocols/testing/.env")
+
+
+def load_env_files() -> list:
+    """Loads ENV_FILES into the environment; the names it set."""
+    loaded = []
+    for rel in ENV_FILES:
+        path = repo_root() / rel
+        if not path.exists():
+            continue
+        for line in path.read_text(errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.removeprefix("export ").partition("=")
+            key, value = key.strip(), value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+                loaded.append(key)
+    return loaded
+
+
+def rpc_vars(chain: str) -> list:
+    """The variable names the repo uses for a chain's RPC, most specific first."""
+    if chain == "ethereum":
+        return ["RPC_URL", "ETH_RPC_URL"]
+    names = {"arbitrum": ["ARBITRUM_RPC_URL", "ARB_RPC_URL"]}
+    return names.get(chain, [f"{chain.upper()}_RPC_URL"])
+
+
+def rpc_url(chain: str):
+    """The chain's RPC URL from the environment (after `load_env_files`), or None."""
+    return next((os.environ[n] for n in rpc_vars(chain) if os.environ.get(n)), None)
+
+
+def git(*args, cwd=None, check=True) -> subprocess.CompletedProcess:
+    """One git command, its output captured as text."""
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=check)
+
+
 def repo_root() -> Path:
     """The main checkout's root, also when called from inside a worktree."""
     out = subprocess.run(
@@ -324,6 +375,20 @@ def branch(protocol: str) -> str:
 BASE = "main"
 
 
+def run_chains(run: Path) -> tuple:
+    """(primary chain, every chain) of a run, from its intake (else its spec). The rounds test the
+    primary; the final gates test every chain."""
+    doc = {}
+    for name in ("intake.json", "spec.json"):
+        if (run / name).exists():
+            doc = load_json(run / name)
+            if doc.get("chains"):
+                break
+    chains = list(doc.get("chains") or ["ethereum"])
+    primary = doc.get("primary_chain") or chains[0]
+    return primary, [primary] + [c for c in chains if c != primary]
+
+
 def load_json(path: Path):
     with open(path) as f:
         return json.load(f)
@@ -349,6 +414,8 @@ def validate_intake(doc: dict) -> list:
     errors = []
     _need(doc, "protocol", str, "intake", errors)
     _need(doc, "chains", list, "intake", errors)
+    if doc.get("primary_chain") and doc["primary_chain"] not in (doc.get("chains") or []):
+        errors.append("intake: `primary_chain` must be one of `chains`")
     anchor = doc.get("anchor") or {}
     if not any(anchor.get(k) for k in ("contracts", "docs", "swap_txs")):
         errors.append("intake: one anchor is required (a contract, docs or a swap tx)")
@@ -483,6 +550,10 @@ def validate_event(event: dict) -> list:
         errors.append(f"event answer: a decision answer carries a `class` in {DECISION_CLASSES}")
     if kind == "escape" and (event.get("cause") not in ESCAPE_CAUSES or event.get("severity") not in ESCAPE_SEVERITIES):
         errors.append(f"event escape: `cause` in {ESCAPE_CAUSES} and `severity` in {ESCAPE_SEVERITIES}")
+    if kind == "verdict" and event.get("status") not in FINDING_STATUSES:
+        errors.append(f"event verdict: `status` must be one of {FINDING_STATUSES}")
+    if kind == "finding" and event.get("severity") not in SEVERITIES:
+        errors.append(f"event finding: `severity` must be one of {SEVERITIES}")
     if kind == "decision_needed" and event.get("class") not in DECISION_CLASSES:
         errors.append(f"event decision_needed: `class` must be one of {DECISION_CLASSES}")
     if kind in ("round", "review", "finding", "guard_violation") and event.get("layer") not in LAYERS:

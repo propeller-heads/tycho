@@ -33,7 +33,10 @@ skip.
 
 {{findings}}
 
-The previous round's failed checks (each is a finding too: fix it, or dispute it with evidence):
+The previous round's failed checks, for detail. Each is also a finding above (rule
+`check:<step>[:<check>]`), answered the same way: fix it; dispute it with evidence that the failure
+is not the code's (the review verifies it, and a refuted check finding no longer holds the layer);
+or make it a decision for a person, who may accept the failure.
 
 {{checks}}
 
@@ -143,10 +146,12 @@ DCI on this run's chains:
 
 ## Finish
 
-Commit the round as one commit on `{{branch}}`: a conventional, imperative subject for what the
-round did (e.g. `feat(ethereum-foo): index pool creation and fee changes`), rule ids in the body
-where a rule shaped a choice, and the trailer `Tycho-Integrate-Round: {{layer}}/{{round}}`. Do not
-push.
+Commit the round on `{{branch}}`, usually as one commit: a conventional, imperative subject for
+what it did (e.g. `feat(ethereum-foo): index pool creation and fee changes`), rule ids in the body
+where a rule shaped a choice, and the trailer `Tycho-Integrate-Round: {{layer}}/{{round}}` on every
+commit of the round. Code copied from elsewhere is the exception: its verbatim copy is a commit of
+its own, before the commit that adapts it (`copy-commit-before-adaptation`); the PR keeps that
+history. Do not push.
 
 End your final message with this JSON, covering every open finding above:
 

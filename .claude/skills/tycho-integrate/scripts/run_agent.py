@@ -24,7 +24,6 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import envcheck  # noqa: E402
 import schema  # noqa: E402
 import state as ledger  # noqa: E402
 
@@ -108,7 +107,7 @@ def main() -> None:
         cmd += ["--model", args.model]
 
     worktree = schema.worktree_dir(args.protocol)
-    envcheck.load_env_files()  # a headless session sees the repo's .env (RPC URLs), not only the shell's
+    schema.load_env_files()  # a headless session sees the repo's .env (RPC URLs), not only the shell's
     env = {
         **os.environ,
         "TYCHO_INTEGRATE_GUARD": args.role,

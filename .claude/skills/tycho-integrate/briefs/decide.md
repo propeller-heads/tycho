@@ -98,8 +98,12 @@ sibling on main. Leave out what this route does not build.
     "adapter_pool_id": "how the adapter decodes it (VM only)",
     "attributes": [{"name": "…", "format": "8-byte big-endian u64", "written_by": "indexing", "read_by": "simulation decoder and delta_transition"}]
   },
-  "paths": {"package": "ethereum-…", "sim_module": "…", "adapter": "…", "executor": "…", "encoder": "…", "router_test": "…"}
+  "paths": {"package": "ethereum-…", "test_package": {"ethereum": "ethereum-…", "base": "base-…"}, "sim_module": "…", "adapter": "…", "executor": "…", "encoder": "…", "router_test": "…"}
 }
 ```
+
+A `paths` value is one string, or a map from chain to string where the chains differ (each chain's
+package or test package); every chain of the run needs one. Values are names or paths only
+(letters, digits and `_./:-`): the checks format them into commands.
 
 End your final message with `{"decisions": <n>, "open": ["D…"]}`.

@@ -66,7 +66,6 @@ def render(protocol: str, shadow: bool = False) -> tuple:
     agreements = dec.get("agreements") or {}
     values = {**(dec.get("paths") or {}), "protocol_system": agreements.get("protocol_system")}
     route = intake.get("route") or {"kind": "new"}
-    gates = {g["name"]: g for g in final.get("gates", [])}
     new_executor = "execution" in layers
 
     kind = spec.get("kind", "?")

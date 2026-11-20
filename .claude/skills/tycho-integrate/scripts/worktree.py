@@ -10,18 +10,16 @@ checkout, which is never touched.
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import schema  # noqa: E402
 
-ENV_FILES = ("docker/.env", ".env", "protocols/testing/.env")
+ENV_FILES = schema.ENV_FILES
 
 
-def git(*args, cwd=None, check=True) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=check)
+git = schema.git
 
 
 def main() -> None:

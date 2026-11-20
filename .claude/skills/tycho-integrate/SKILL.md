@@ -75,11 +75,15 @@ checklist: source repo and commit, known quirks, admin powers, a contact at the 
 venue already integrated. No grilling: research verifies every value as a lead.
 
 ```json
-{"protocol": "Foo Swap v2", "chains": ["ethereum"],
+{"protocol": "Foo Swap v2", "chains": ["ethereum", "base"], "primary_chain": "ethereum",
  "anchor": {"contracts": ["0x…"], "docs": "https://…", "swap_txs": ["0x…"]},
  "source": {"repo": "…", "commit": "…"}, "kind_hint": "…", "scope": {"markets": "all"},
  "offchain": {"credentials_env": []}, "known_quirks": [], "contacts": "", "notes": ""}
 ```
+
+`primary_chain` (default: the first chain) is the chain every round tests; the final gates test
+every chain, and a chain they find red reopens the layer for rounds that test it beside the primary
+(step 9, `layer_checks.py --chains <chain>`). `S/envcheck.py --protocol P` validates the intake.
 
 `S/state.py P init` first. Intake is never edited afterwards; anything learned later is a spec
 amendment. Run `envcheck.py --protocol P` again now that the chains and credentials are known.
@@ -189,12 +193,16 @@ round of layer `L`, number `N` (`N` = rounds so far + 1):
    It covers the round's commits and the worktree's uncommitted changes. When the person answers
    the guard escalation by accepting the change, record it with `decide --accept-guard`; the final
    `guards` gate fails on any guarded change on the branch nobody accepted.
-4. **Check and record.** `S/layer_checks.py --protocol P --layer L --round N`, then
+4. **Check and record.** `S/layer_checks.py --protocol P --layer L --round N` (with `--chains
+   <chain>` while the layer answers a chain the final gates found red), then
    `S/state.py P round --layer L --head $(git -C <worktree> rev-parse HEAD) --checks green|red
    --checks-file RUN/rounds/L-N/checks.json`. The protocol-testing step runs `range --report`;
    `checks.json` carries each failed check of that report (`state.components`, `balances`,
-   `sim.ladder`, `exec.ladder`, `limits.*` …) per component and direction, and the implementer's
-   next round sees them in its findings file.
+   `sim.ladder`, `exec.ladder`, `limits.*` …) per component and direction. Each failed check
+   becomes a ledger finding (rule `check:<step>[:<check>]`) that the implementer answers like a
+   review's; one that passes again is closed. A person's decision on one is recorded with
+   `decide --waive` when it accepts the failure. Recording the same head again replaces the round,
+   so a rerun never adds one.
 5. **Review.**
    ```bash
    S/state.py P answers-file --layer L --out RUN/rounds/L-N/existing.md
@@ -206,13 +214,21 @@ round of layer `L`, number `N` (`N` = rounds so far + 1):
    ```
    The report's path is the last line of the output; the sidecar is beside it
    (`<report>.findings.json`). Copy both into `RUN/reviews/`.
-   `S/state.py P ingest-review --layer L --round N --sidecar <sidecar>`.
+   `S/state.py P ingest-review --layer L --round N --sidecar <sidecar>`. It refuses a sidecar of
+   another commit than the round's, records one whose passes did not all run as partial (it does
+   not count as the round's review: run the review again), and ignores a sidecar it already has.
 6. **Next.** `S/state.py P next --layer L` returns:
    - `continue`: the next round;
    - `clean`: mark `build:L` done and start the next layer;
    - `closed`: a person ended this layer's loop (answered a round or dollar cap without granting more, or
      any escalation with `decide --close`): mark `build:L` done and start the next layer, as for `clean`; its open findings go
      in the PR and the `layers-clean` gate passes it, naming the decision;
+   - `escalate` with reason `infra`: the environment failed, not the code (`layer_checks.py`
+     named the cause and ran the step twice). Ask the person with the question it opened; once the
+     environment is fixed, rerun step 4 at the same head, which replaces the round. No implementer
+     round runs for it;
+   - `stopped`: the person stopped the run at the integration's dollar cap; mark the stage
+     `stopped` and end;
    - `escalate`: ask the person the decision it opened (its `decision` id; `state.py P status`
      shows the question), with what the ledger shows: the open findings, the disputes and both
      sides' evidence, the spend. Record the answer with `decide`, then continue the loop. The
@@ -227,9 +243,10 @@ the ledger's findings (the existing file), never review transcripts.
    ```bash
    S/prompt.py --protocol P --brief final-review --out RUN/prompts/final-review.md
    S/run_agent.py --protocol P --label final-review --role reviewer --cwd . --prompt-file RUN/prompts/final-review.md --out RUN/out/final-review.md
-   S/state.py P ingest-review --layer auto --round <next round of each layer> --sidecar <sidecar>
+   S/state.py P ingest-review --layer auto --sidecar <sidecar>
    ```
-   (`--layer auto` assigns each finding a layer by its file, from `.claude/knowledge/paths.toml`.)
+   (`--layer auto` reviews each built layer at its last round, and assigns each finding a layer by
+   its file, from `.claude/knowledge/paths.toml`; a file of no built layer goes to the route's last.)
    A layer with a new `blocking` finding gets more rounds (step 9, with `next --extra-rounds` up to
    `budgets.toml` `final.extra_rounds`), then this stage runs again; past that, it escalates.
    Findings below blocking stay in the ledger and the PR lists them.
@@ -305,8 +322,9 @@ comment:
    person in one question for all comments. Each escape is fixed at its cause: a knowledge record
    for `missing-knowledge`/`no-rule`/`rule-judged-ok`, a test for `test-gap`; propose those
    changes to the person as follow-ups, never inside this PR.
-2. Turn the comments into a sidecar (`{"findings": [{"rule": "human-review", "file", "lines",
-   "claim", "severity"}]}`) and `ingest-review --layer auto`; the affected layers run rounds as in
+2. Turn the comments into a sidecar (`{"head": "<the reviewed commit>", "findings": [{"rule":
+   "human-review", "file", "lines", "claim", "severity"}]}`, every finding with its severity) and
+   `ingest-review --layer auto`; the affected layers run rounds as in
    step 9. Ask before every push. Then post `RUN/PR-held.md` as a PR comment, with approval.
 
 ## Budgets

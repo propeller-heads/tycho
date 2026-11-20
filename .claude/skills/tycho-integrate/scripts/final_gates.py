@@ -17,7 +17,6 @@ The fresh full review is not run here: the skill runs it through run_agent.py.
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
@@ -131,23 +130,36 @@ def gate_mutation_surfaces(spec: dict, yamls: list, caps: dict) -> dict:
     return gate("mutation-surface-tests", "pass", f"{len(spec.get('mutation_surfaces', []))} surfaces each have a checkpoint")
 
 
+def address_word(word) -> str:
+    """The address in a 32-byte word, or None for an empty or zero word."""
+    hexpart = (word or "")[2:] if (word or "").startswith("0x") else (word or "")
+    if len(hexpart) < 40 or int(hexpart, 16) == 0:
+        return None
+    return "0x" + hexpart[-40:]
+
+
 def proxy_drift(spec: dict) -> list:
     """Each spec proxy's implementation at the latest block, compared with the spec."""
     rows = []
     for p in spec.get("proxies", []):
-        names = envcheck.rpc_var(p["chain"])
-        url = next((v for v in (os.environ.get(n) for n in names) if v), None)
+        url = schema.rpc_url(p["chain"])
         if not url:
-            rows.append({**p, "status": "unread", "detail": f"no {' or '.join(names)}"})
+            rows.append({**p, "status": "unread", "detail": f"no {' or '.join(schema.rpc_vars(p['chain']))}"})
             continue
         try:
-            slot = (p.get("slot") or EIP1967_IMPL_SLOT).lower()
+            slot = (p.get("slot") or (EIP1967_BEACON_SLOT if p.get("beacon") else EIP1967_IMPL_SLOT)).lower()
             word = envcheck.rpc(url, "eth_getStorageAt", [p["proxy"], slot, "latest"])
             if slot == EIP1967_BEACON_SLOT or p.get("beacon"):
                 # A beacon proxy's slot holds the beacon, not the implementation: ask the beacon.
-                beacon = "0x" + word[-40:]
+                beacon = address_word(word)
+                if beacon is None:
+                    rows.append({**p, "status": "unread", "detail": f"slot {slot} holds no beacon"})
+                    continue
                 word = envcheck.rpc(url, "eth_call", [{"to": beacon, "data": IMPLEMENTATION_SELECTOR}, "latest"])
-            now = "0x" + word[-40:]
+            now = address_word(word)
+            if now is None:
+                rows.append({**p, "status": "unread", "detail": f"no implementation address read ({word!r})"})
+                continue
             same = now.lower() == p["implementation"].lower()
             rows.append({**p, "now": now, "status": "same" if same else "upgraded"})
         except Exception as e:  # noqa: BLE001 - reported per proxy
@@ -167,10 +179,11 @@ def gate_proxies(spec: dict) -> dict:
 
 
 def gate_base_current(tree: Path) -> dict:
-    """The run pins its base at the worktree's creation; main moves
-    on while the layers are built, and a squash-merge of the pinned base leaves it unreachable. The
-    gates before Gate 3 must run on a branch that contains the base's tip, or what merges is
-    untested: stale router slots and removed helpers only show after a rebase."""
+    """The run pins its base at the worktree's creation; main moves on while the layers are built.
+    The gates before Gate 3 must run on a branch that contains the base's tip, or what merges is
+    untested: stale router slots and removed helpers only show after a rebase. Behind by any
+    commit, or not comparable (a failed fetch), fails: the files both sides changed only say where
+    to look first."""
     base = f"origin/{schema.BASE}"
     try:
         git(tree, "fetch", "origin", schema.BASE)
@@ -180,12 +193,12 @@ def gate_base_current(tree: Path) -> dict:
         mine = set(git(tree, "diff", "--name-only", f"{base}...HEAD").split())
         theirs = set(git(tree, "diff", "--name-only", f"HEAD...{base}").split())
     except (subprocess.CalledProcessError, ValueError) as e:
-        return gate("base-current", "warn", f"could not compare with {base}: {e}")
+        return gate("base-current", "fail", f"could not compare with {base}: {e}")
     overlap = sorted(mine & theirs)
     detail = (f"{base} is {behind} commits ahead of the branch; "
               + (f"{len(overlap)} files changed on both sides (e.g. {overlap[0]})" if overlap else "no file changed on both sides")
               + ": rebase onto it, rerun the layer checks and these gates before Gate 3")
-    return gate("base-current", "fail" if overlap else "warn", detail, behind=behind, overlap=overlap[:20])
+    return gate("base-current", "fail", detail, behind=behind, overlap=overlap[:20])
 
 
 def gate_sibling_executors(tree: Path) -> dict:
@@ -218,22 +231,27 @@ def executor_fixture(tree: Path, protocol_system: str, chain: str):
     return f"protocols/testing/fixtures/{const.group(1)}" if const else None
 
 
-def gate_executor_fixture(tree: Path, values: dict, yamls: list) -> dict:
-    """protocol-testing executes through the executor's runtime bytecode, planted at the test
-    address, so execution is tested before the executor is deployed; a missing deployment is never
-    a reason to skip it (`integration-test-skip-flags`)."""
-    system, chain = values.get("protocol_system", ""), values.get("chain", "ethereum")
+def gate_executor_fixture(tree: Path, system: str, chains: list, yamls: list) -> dict:
+    """On every chain of the run, protocol-testing executes through the executor's runtime
+    bytecode, planted at the test address, so execution is tested before the executor is deployed;
+    a missing deployment is never a reason to skip it (`integration-test-skip-flags`)."""
     if not system:
         return gate("executor-fixture", "fail", "decisions.json names no protocol_system")
-    skips = [str(p.relative_to(tree)) for p in yamls if re.search(r"^\s*skip_execution\s*:", p.read_text(), re.M)]
+    skips = [str(p.relative_to(tree)) for p in yamls if re.search(r"^\s*-?\s*[\"']?skip_execution[\"']?\s*:", p.read_text(), re.M)]
     if skips:
         return gate("executor-fixture", "fail", f"skip_execution in {skips}: execution runs through the fixture; a skip needs a person's decision with hard evidence")
-    fixture = executor_fixture(tree, system, chain)
-    if fixture is None:
-        return gate("executor-fixture", "fail", f"{system} on {chain} has no executor fixture in {EXECUTION_RS} (EXECUTOR_MAPPING or CHAIN_SPECIFIC_EXECUTORS)")
-    if not (tree / fixture).exists():
-        return gate("executor-fixture", "fail", f"{EXECUTION_RS} maps {system} to {fixture}, which does not exist")
-    return gate("executor-fixture", "pass", f"{system} on {chain} executes through {fixture}")
+    problems, found = [], []
+    for chain in chains:
+        fixture = executor_fixture(tree, system, chain)
+        if fixture is None:
+            problems.append(f"{system} on {chain} has no executor fixture in {EXECUTION_RS} (EXECUTOR_MAPPING or CHAIN_SPECIFIC_EXECUTORS)")
+        elif not (tree / fixture).exists():
+            problems.append(f"{EXECUTION_RS} maps {system} on {chain} to {fixture}, which does not exist")
+        else:
+            found.append(f"{chain}: {fixture}")
+    if problems:
+        return gate("executor-fixture", "fail", "; ".join(problems))
+    return gate("executor-fixture", "pass", f"{system} executes through its fixture on " + ", ".join(found))
 
 
 def gate_strict_yamls(yamls: list, tree: Path) -> dict:
@@ -263,13 +281,19 @@ def main() -> None:
     p.add_argument("--round", type=int, default=1, help="the final-gates attempt, for the checks' output directory")
     args = p.parse_args()
 
-    envcheck.load_env_files()  # the proxy re-check reads the chain's RPC
+    schema.load_env_files()  # the proxy re-check reads the chain's RPC
     run = schema.run_dir(args.protocol)
     tree = schema.worktree_dir(args.protocol)
     spec = schema.load_json(run / "spec.json")
     dec = schema.load_json(run / "decisions.json") if (run / "decisions.json").exists() else {}
-    values = {**(dec.get("paths") or {}), "protocol_system": (dec.get("agreements") or {}).get("protocol_system", ""), "chain": (spec.get("chains") or ["ethereum"])[0]}
-    yamls = integration_yamls(tree, values.get("package", ""))
+    _, chains = schema.run_chains(run)
+    system = (dec.get("agreements") or {}).get("protocol_system", "")
+    # Every chain's package and test package: a clone's yaml sits under its own name.
+    names = set()
+    for key in ("package", "test_package"):
+        v = (dec.get("paths") or {}).get(key)
+        names.update(v.values() if isinstance(v, dict) else [v] if v else [])
+    yamls = sorted({y for name in names for y in integration_yamls(tree, name)} or set(integration_yamls(tree, "")))
 
     if args.recheck:
         rows = proxy_drift(spec)
@@ -286,7 +310,7 @@ def main() -> None:
         gate_proxies(spec),
         gate_base_current(tree),
         gate_sibling_executors(tree),
-        gate_executor_fixture(tree, values, yamls),
+        gate_executor_fixture(tree, system, chains, yamls),
         gate_strict_yamls(yamls, tree),
     ]
     off = [{"gap": g, **info} for g, info in caps.items() if not info["on"]]

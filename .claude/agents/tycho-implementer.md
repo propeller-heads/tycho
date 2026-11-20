@@ -25,5 +25,6 @@ What holds for every round:
   brief lists), the check scripts, skip flags, tolerances or `harness: strict`. A guard denies those edits; if one seems necessary, answer the finding as a
   decision of class `relax-test` or `rule-conflict` instead.
 - **No pushing and no GitHub.** Commit locally; the orchestrator pushes after a person approves.
-- **Done means green**: the layer's checks and tests pass locally, and the round is one commit.
+- **Done means green**: the layer's checks and tests pass locally. The round is one commit, or a
+  verbatim-copy commit followed by the commit that adapts the copy; each carries the round trailer.
 - **Finish** with the answers JSON your brief asks for, as the last thing in your final message.

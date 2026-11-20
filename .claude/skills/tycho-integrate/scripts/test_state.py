@@ -53,7 +53,13 @@ class RunCase(unittest.TestCase):
         self.add(t="review", layer=layer, n=n, report="r.md", open=len(self.state().open_findings(layer)))
 
     def sidecar(self, data):
-        path = Path(self.tmp.name) / "s.findings.json"
+        """A review sidecar of the latest round's commit, at a path of its own (as each review has)."""
+        self.sidecars = getattr(self, "sidecars", 0) + 1
+        rounds = [e for e in ledger.read_events(self.run) if e["t"] == "round"]
+        data = {"head": rounds[-1]["head"] if rounds else "", **data}
+        for f in data.get("findings", []):
+            f.setdefault("severity", "blocking")
+        path = Path(self.tmp.name) / f"s{self.sidecars}.findings.json"
         path.write_text(json.dumps(data))
         return path
 
@@ -399,7 +405,7 @@ class GuardHoles(Guards):
 
     def test_researcher_and_reviewer_bash_writes_stay_in_their_directories(self):
         target = str(self.tree / self.EXECUTION_RS)
-        self.assertEqual(self.hook("reviewer", "Bash", {"command": f"echo x > /etc/foo"}), "deny")
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": "echo x > /etc/foo"}), "deny")
         self.assertEqual(self.hook("reviewer", "Bash", {"command": f"sed -i s/a/b/ {target}"}), "deny")
         self.assertEqual(self.hook("researcher", "Bash", {"command": f"python3 -c \"open('{target}','w').write('x')\""}), "deny")
         self.assertEqual(self.hook("reviewer", "Bash", {"command": f"python3 -c \"open('{self.tree}/.claude/reviews/r.md','w').write('x')\""}), "allow")
@@ -464,6 +470,127 @@ class SpecValidation(unittest.TestCase):
 
     def test_unknown_non_critical_fact_is_allowed(self):
         self.assertEqual(schema.validate_spec(self.spec(status="unknown")), [])
+
+
+class ResumeAndReviewIdentity(RunCase):
+    """Re-running a step after a crash, and reviews of the wrong commit, change nothing."""
+
+    def test_a_round_recorded_again_at_the_same_head_is_the_same_round(self):
+        for _ in range(5):
+            ledger.record_round(self.run, self.state(), "indexing", "abc", "red", None)
+        self.assertEqual([r["n"] for r in self.state().rounds["indexing"]], [1])
+        ledger.record_round(self.run, self.state(), "indexing", "abc", "green", None)
+        self.assertEqual(self.state().rounds["indexing"][-1]["checks"], "green")
+
+    def test_ingesting_a_sidecar_twice_counts_one_review(self):
+        for _ in range(2):
+            n = self.round()
+            path = self.sidecar({"findings": [{"rule": "r", "file": "src/a.rs", "claim": "c"}, {"rule": "q", "file": "src/b.rs", "claim": "d"}]})
+            ledger.ingest_review(self.run, "indexing", n, path)
+        self.assertTrue(ledger.ingest_review(self.run, "indexing", n, path)["duplicate"])
+        self.assertEqual([r["n"] for r in self.state().reviews["indexing"]], [1, 2])
+        self.assertEqual(self.next()["action"], "continue")
+
+    def test_a_review_of_another_commit_or_with_passes_not_run_does_not_count(self):
+        n = self.round()
+        with self.assertRaises(SystemExit):
+            ledger.ingest_review(self.run, "indexing", n, self.sidecar({"head": "bbbb", "findings": []}))
+        ledger.ingest_review(self.run, "indexing", n, self.sidecar({"not_run": ["every pass"], "findings": []}))
+        self.assertEqual(self.next(), {"action": "continue", "reason": "the last round's review did not run every pass"})
+
+    def test_a_finding_without_a_severity_is_refused(self):
+        n = self.round()
+        path = self.sidecar({"findings": [{"rule": "r", "file": "f", "claim": "c"}]})
+        data = json.loads(path.read_text())
+        del data["findings"][0]["severity"]
+        path.write_text(json.dumps(data))
+        with self.assertRaises(SystemExit):
+            ledger.ingest_review(self.run, "indexing", n, path)
+
+    def test_append_cannot_close_a_finding_with_an_unknown_status(self):
+        self.assertTrue(schema.validate_event({"t": "verdict", "id": "F1", "status": "closed", "by": "x", "round": 1}))
+        self.assertNotIn("verdict", schema.APPENDABLE)
+
+    def test_auto_reviews_each_layer_at_its_own_last_round(self):
+        (self.run / "intake.json").write_text(json.dumps({"route": {"kind": "new", "layers": ["indexing", "simulation"]}}))
+        for _ in range(3):
+            self.review(self.round("indexing"), "indexing")
+        self.review(self.round("simulation"), "simulation")
+        ledger.ingest_review(self.run, "auto", None, self.sidecar({"findings": [{"rule": "r", "file": "docs/x.md", "claim": "c"}]}))
+        st = self.state()
+        self.assertEqual([r["n"] for r in st.reviews["indexing"]], [1, 2, 3])
+        self.assertEqual([r["n"] for r in st.reviews["simulation"]], [1])
+        # a file of no built layer keeps the route's last layer open
+        self.assertEqual([f["layer"] for f in st.findings.values()], ["simulation"])
+        self.assertEqual(self.next("indexing")["action"], "clean")
+
+
+class RunStop(RunCase):
+    def test_the_integration_cap_answered_without_dollars_stops_the_run(self):
+        self.round(checks="red")
+        self.add(t="spend", label="x", usd=BUDGETS["integration"]["usd"], layer="indexing")
+        result = self.next()
+        self.assertEqual(result["reason"], "integration-usd-cap")
+        did = ledger.escalate(self.run, self.state(), "indexing", result)
+        self.add(t="decision", id=did, choice="stop the run", by="person")
+        self.assertEqual(self.next()["action"], "stopped")
+        self.assertEqual(self.next("simulation")["action"], "stopped")
+        self.assertEqual(ledger.resume_point(self.run, self.state())["stage"], "stopped")
+
+
+class FailedChecks(RunCase):
+    def checks(self, failing):
+        path = Path(self.tmp.name) / f"checks{len(self.state().rounds['indexing'])}.json"
+        steps = [{"name": "protocol-testing", "status": "fail", "checks": [{"test": "t", "check": c, "outcome": "fail", "detail": "x"} for c in failing]}] if failing else []
+        path.write_text(json.dumps({"steps": steps}))
+        return path
+
+    def test_a_failed_check_is_a_finding_a_dispute_can_settle(self):
+        ledger.record_round(self.run, self.state(), "indexing", "h1", "red", self.checks(["balances"]))
+        [f] = self.state().open_findings("indexing")
+        self.assertEqual(f["rule"], "check:protocol-testing:balances")
+        self.review(1)
+        self.assertEqual(self.next()["reason"], "checks red")
+        # the review upholds the implementer's dispute: the failure is accepted
+        self.add(t="verdict", id=f["id"], status="refuted", by="review", round=1)
+        self.assertEqual(self.next()["action"], "clean")
+
+    def test_a_check_that_passes_again_closes_its_finding(self):
+        ledger.record_round(self.run, self.state(), "indexing", "h1", "red", self.checks(["balances"]))
+        ledger.record_round(self.run, self.state(), "indexing", "h2", "green", self.checks([]))
+        self.assertEqual(self.state().open_findings("indexing"), [])
+
+
+class Environment(RunCase):
+    def test_an_infrastructure_failure_goes_to_a_person_not_the_implementer(self):
+        checks = Path(self.tmp.name) / "checks.json"
+        checks.write_text(json.dumps({"steps": [{"name": "protocol-testing", "status": "infra", "infra": "substreams token", "detail": "x (twice)", "tail": ["401"]}]}))
+        ledger.record_round(self.run, self.state(), "indexing", "h1", "red", checks)
+        self.assertEqual(self.state().open_findings("indexing"), [])
+        result = self.next()
+        self.assertEqual((result["reason"], result["class"]), ("infra", "outside-repo"))
+        self.assertIn("substreams token", result["question"])
+        # fixed and rerun at the same head: the same round, and the layer goes on
+        checks.write_text(json.dumps({"steps": []}))
+        ledger.record_round(self.run, self.state(), "indexing", "h1", "green", checks)
+        self.assertEqual(len(self.state().rounds["indexing"]), 1)
+        self.assertEqual(self.next()["reason"], "not reviewed")
+
+    def test_infrastructure_causes_are_told_from_code_failures(self):
+        self.assertEqual(layer_checks.infra_cause("HTTP 429 Too Many Requests"), "rpc rate limit")
+        self.assertEqual(layer_checks.infra_cause("code = Unauthenticated desc = invalid token from substreams"), "substreams token")
+        self.assertIsNone(layer_checks.infra_cause("thread 'main' panicked: assertion `left == right` failed"))
+
+
+class Chains(RunCase):
+    def test_the_primary_chain_comes_first_and_paths_resolve_per_chain(self):
+        (self.run / "intake.json").write_text(json.dumps({"chains": ["ethereum", "base"], "primary_chain": "base"}))
+        self.assertEqual(schema.run_chains(self.run), ("base", ["base", "ethereum"]))
+        (self.run / "decisions.json").write_text(json.dumps({"agreements": {"protocol_system": "foo"},
+                                                             "paths": {"package": "foo", "test_package": {"ethereum": "ethereum-foo", "base": "base-foo"}}}))
+        self.assertEqual(layer_checks.placeholders(self.run, Path("/t"), "base")["test_package"], "base-foo")
+        self.assertEqual(layer_checks.placeholders(self.run, Path("/t"), "ethereum")["test_package"], "ethereum-foo")
+        self.assertTrue(schema.validate_intake({"protocol": "Foo", "chains": ["ethereum"], "primary_chain": "base", "anchor": {"docs": "x"}}))
 
 
 class LayersCleanGate(RunCase):
@@ -536,7 +663,7 @@ class ClosedLayers(RunCase):
     def test_earlier_findings_with_unknown_ids_match_by_file_and_claim(self):
         self.finding("F1")
         sidecar = Path(self.tmp.name) / "s.json"
-        sidecar.write_text(json.dumps({"earlier": [{"id": "E7", "status": "fixed", "file": "src/a.rs", "claim": "claim F1"}], "findings": []}))
+        sidecar.write_text(json.dumps({"head": "h1", "earlier": [{"id": "E7", "status": "fixed", "file": "src/a.rs", "claim": "claim F1"}], "findings": []}))
         self.add(t="round", layer="indexing", n=1, head="h1", checks="green")
         result = ledger.ingest_review(self.run, "indexing", 1, sidecar)
         self.assertEqual(result["unmatched_earlier"], [])

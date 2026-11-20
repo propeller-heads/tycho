@@ -33,33 +33,9 @@ MIN_FREE_GB = 40
 HARNESS_PORTS = (5431, 4242)  # protocol-testing's Postgres and indexer defaults
 TOOLS = ("cargo", "forge", "cast", "anvil", "substreams", "docker", "gh", "claude", "git")
 # Files the tests read their environment from; a variable set in the shell wins.
-ENV_FILES = ("docker/.env", ".env")
-
-
-def load_env_files() -> list:
-    loaded = []
-    for rel in ENV_FILES:
-        path = schema.repo_root() / rel
-        if not path.exists():
-            continue
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.removeprefix("export ").partition("=")
-            key, value = key.strip(), value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
-                loaded.append(key)
-    return loaded
-
-
-def rpc_var(chain: str) -> list:
-    """The variable names the repo uses for a chain's RPC, most specific first."""
-    if chain == "ethereum":
-        return ["RPC_URL", "ETH_RPC_URL"]
-    names = {"arbitrum": ["ARBITRUM_RPC_URL", "ARB_RPC_URL"]}
-    return names.get(chain, [f"{chain.upper()}_RPC_URL"])
+ENV_FILES = schema.ENV_FILES
+load_env_files = schema.load_env_files
+rpc_var = schema.rpc_vars
 
 
 def rpc(url: str, method: str, params: list, timeout=20):
@@ -108,7 +84,10 @@ def check_rpc(chain: str, contract) -> list:
     return results
 
 
-def check_substreams_token() -> tuple:
+def check_substreams_token(hours: float = 6) -> tuple:
+    """Whether SUBSTREAMS_API_TOKEN is set and, when it is a JWT with an expiry, still valid for
+    `hours` (a run's start asks for 6; a harness run for its own timeout). An opaque token is
+    taken as valid: the server is the only judge of it."""
     tok = os.environ.get("SUBSTREAMS_API_TOKEN", "")
     if not tok:
         return ("substreams-token", False, "set SUBSTREAMS_API_TOKEN")
@@ -116,8 +95,8 @@ def check_substreams_token() -> tuple:
         payload = tok.split(".")[1]
         payload += "=" * (-len(payload) % 4)
         exp = json.loads(base64.urlsafe_b64decode(payload)).get("exp")
-        if exp and exp < time.time() + 6 * 3600:
-            return ("substreams-token", False, "SUBSTREAMS_API_TOKEN expires within 6 hours; renew it")
+        if exp and exp < time.time() + hours * 3600:
+            return ("substreams-token", False, f"SUBSTREAMS_API_TOKEN expires within {hours:g} hours; renew it")
     except Exception:  # noqa: BLE001 - an opaque token is fine
         pass
     return ("substreams-token", True, "set")
@@ -170,6 +149,9 @@ def main() -> None:
         intake_path = schema.run_dir(args.protocol) / "intake.json"
         if intake_path.exists():
             intake = schema.load_json(intake_path)
+            errors = schema.validate_intake(intake)
+            if errors:
+                raise SystemExit("intake.json: " + "; ".join(errors))
             chains = chains or intake.get("chains", [])
             contracts = contracts or (intake.get("anchor", {}).get("contracts") or [])
             creds = creds or (intake.get("offchain", {}).get("credentials_env") or [])
