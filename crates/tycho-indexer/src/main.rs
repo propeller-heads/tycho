@@ -721,12 +721,16 @@ async fn create_indexing_tasks(
         .map(|supervisor| runtime.spawn(supervisor.run()))
         .collect::<Vec<_>>();
 
+    // The election ends cleanly only when the shutdown releases the leader lock. The shutdown
+    // still stops the server after that, so a clean end must not end the services.
     let election_task = tokio::spawn(async move {
-        election_task
-            .await
-            .unwrap_or_else(|err| {
+        match election_task.await {
+            Ok(Ok(())) => std::future::pending().await,
+            Ok(Err(err)) => Err(err),
+            Err(err) => {
                 Err(ExtractionError::Unknown(format!("Leader election task panicked: {err}")))
-            })
+            }
+        }
     });
 
     Ok((supervisor_tasks, vec![server_task, shutdown_task, election_task]))
