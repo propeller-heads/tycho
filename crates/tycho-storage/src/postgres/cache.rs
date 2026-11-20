@@ -1518,27 +1518,46 @@ impl StateSnapshotGateway for CachedGateway {
         snapshot_transaction(&mut conn)
             .run(|conn| {
                 async move {
+                    let t0 = std::time::Instant::now();
                     bound_snapshot_reads(conn).await?;
                     let watermark = self
                         .state_gateway
                         .snapshot_watermark(conn)
                         .await?;
+                    let t_watermark = t0.elapsed();
                     let accounts = self
                         .state_gateway
                         .account_snapshots_written_since(chain, &since, conn)
                         .await?;
+                    let t_accounts = t0.elapsed();
                     let changes = self
                         .state_gateway
                         .account_changes_since(chain, &since, conn)
                         .await?;
+                    let t_changes = t0.elapsed();
                     let components = self
                         .state_gateway
                         .component_snapshots(chain, Some(system), conn)
                         .await?;
+                    let t_components = t0.elapsed();
                     let cursors = self
                         .state_gateway
                         .get_extractor_cursors(chain, conn)
                         .await?;
+                    let t_cursors = t0.elapsed();
+                    info!(
+                        system,
+                        since = since.transaction_id(),
+                        watermark = ?t_watermark,
+                        accounts = ?(t_accounts - t_watermark),
+                        n_accounts = accounts.len(),
+                        changes = ?(t_changes - t_accounts),
+                        n_changes = changes.len(),
+                        components = ?(t_components - t_changes),
+                        n_components = components.len(),
+                        cursors = ?(t_cursors - t_components),
+                        "Catch-up read timings"
+                    );
                     let watermark = watermark.with_committed_blocks(committed_blocks(&cursors));
                     Result::<_, PostgresError>::Ok(CatchUpRead {
                         accounts,
