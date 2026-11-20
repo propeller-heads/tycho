@@ -12,9 +12,9 @@ Change no code and post nothing.
 
 Headless session notes (this session cannot ask for permission):
 
-- The Write and Edit tools are refused under `.claude/` ("a sensitive file"), the review report and
-  sidecar included. Write them with `python3` through Bash (`Path(...).write_text(...)`); the
-  guard allows exactly `.claude/reviews/` and the run directory.
+- The Write and Edit tools are refused under `.claude/reviews/` ("a sensitive file"), the review
+  report and sidecar included. Write those with `python3` through Bash (`Path(...).write_text(...)`);
+  the guard allows exactly `.claude/reviews/` and the run directory, which Write reaches directly.
 - There may be no Grep or Glob tool, in a subagent too: search with `rg` or `grep` and `find`
   through Bash. Tell every subagent you start both points in its brief.
 - Run the deterministic checks (`run_checks.py`, step 12) as the skill says; "no Bash" is not a

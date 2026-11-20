@@ -22,6 +22,8 @@ What changed, and why:
 - After Gate 1, never edit a signed fact in place: append to `amendments`
   (`{"n": <next>, "fact_id": "S3", "old": "…", "new": "…", "evidence": "…", "source": "person | chain"}`)
   and update the fact's claim and evidence. Each amendment is one fact.
+- An amendment of the spec's `kind_fact` changes `kind` (and `vm_reads`) with it: the kind picks
+  the checks every layer runs.
 
 End your final message with:
 

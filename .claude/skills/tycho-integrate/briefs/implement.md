@@ -94,8 +94,11 @@ bytecode fixtures (`regenerate-runtime-bytecode`), and register the new executor
 protocol-testing executes through it before it is deployed: its entry in
 `RuntimeBytecodeFixtures.sol`, the generated `protocols/testing/fixtures/<Name>.runtime.json`, and
 in `protocols/testing/src/execution.rs` its `const …_BYTECODE_JSON` and its `EXECUTOR_MAPPING`
-line (`CHAIN_SPECIFIC_EXECUTORS` when it differs per chain). Those lines are the only change the
-guard allows under `protocols/testing/src/`. A missing deployment is never a reason to skip
+line (`CHAIN_SPECIFIC_EXECUTORS` when it differs per chain). The guard allows three changes under
+`protocols/testing/src/`, and nothing else there: these executor lines; in the simulation layer,
+a native or hybrid state's decoder arm in `state_registry.rs` `register_protocol` (with its
+import), without which protocol-testing simulates the system as `EVMPoolState`; and for a
+config-only fork, its package's `CLONE_TO_BASE_PROTOCOL` entry in `test_runner.rs`. A missing deployment is never a reason to skip
 execution (`integration-test-skip-flags`: a skip states its reason and comes off once the
 executor is in `EXECUTOR_MAPPING` with its fixture). `executor_addresses.json` stays untouched until
 deployment (`deployment-artifacts-after-launch`). A change to `TychoRouterTestSetup`'s deployment

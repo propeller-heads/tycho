@@ -23,7 +23,10 @@ cite it; never paraphrase one you have not read.
 
 Questions every integration answers (more as the venue needs):
 
-- **Implementation type**: native `ProtocolSim` or VM adapter, from the spec's pricing facts.
+- **Implementation type**: not yours to decide. The spec's `kind` (native, hybrid or vm) was set
+  by research and signed at Gate 1; cite its `kind_fact` in every decision that depends on it. If
+  something you find contradicts the kind, say so in your summary as a spec amendment of that fact,
+  not as a decision.
 - **Component model**: what one component is, and its id (`component-id-matches-pool-identity`
   in `.claude/knowledge/indexing.md`: an id identifies exactly one pool chain-wide).
 - **Discovery and refresh**: which events or storage writes create components and change their

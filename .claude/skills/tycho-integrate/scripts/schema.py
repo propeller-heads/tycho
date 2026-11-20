@@ -13,6 +13,10 @@ from pathlib import Path
 
 LAYERS = ("indexing", "simulation", "execution")
 
+# How a venue is simulated (`crates/tycho-simulation/CLAUDE.md`, "Choosing an approach"): native
+# Rust math; hybrid, native math over VM-indexed state; or a Solidity adapter run in the VM.
+SIM_KINDS = ("native", "hybrid", "vm")
+
 # Intake routes (assess-protocol's four cases). `integrated` stops the run.
 ROUTES = ("new", "fork", "partial", "integrated")
 
@@ -88,12 +92,11 @@ GUARDED_PATHS = (
     ".github/**",
 )
 
-# Guarded files the implementer may still extend, and the only lines it may add to them (it removes
-# none): a new executor's runtime bytecode fixture, and its `EXECUTOR_MAPPING` or
-# `CHAIN_SPECIFIC_EXECUTORS` entry, which let protocol-testing execute through it before it is
-# deployed (`protocols/testing/README.md`, "Runtime Bytecode Fixtures").
-GUARDED_PATH_ADDITIONS = {
-    "protocols/testing/src/execution.rs": re.compile(
+# In protocols/testing's executor table, the only lines the implementer may add (it removes none): a
+# new executor's runtime bytecode fixture, and its `EXECUTOR_MAPPING` or `CHAIN_SPECIFIC_EXECUTORS`
+# entry, which let protocol-testing execute through it before it is deployed
+# (`protocols/testing/README.md`, "Runtime Bytecode Fixtures").
+EXECUTOR_TABLE_LINES = re.compile(
         r"\s*("
         r"const [A-Z0-9_]+_BYTECODE_JSON: &str =( include_str!\(\"\.\./fixtures/[A-Za-z0-9_]+\.runtime\.json\"\);)?"
         r"|include_str!\(\"\.\./fixtures/[A-Za-z0-9_]+\.runtime\.json\"\);"
@@ -102,8 +105,7 @@ GUARDED_PATH_ADDITIONS = {
         # the same entry as rustfmt splits it: `(`, `(Chain::X, "system"),`, `CONST,`, `),`
         r"|\(|\),|\(Chain::[A-Za-z]+, \"[a-z0-9_:]+\"\),|[A-Z0-9_]+_BYTECODE_JSON,"
         r")?\s*"
-    ),
-}
+)
 
 # Keys of a strict integration test yaml (`protocols/testing/README.md`, "Strict mode") that relax
 # a test. Adding, changing or removing a line with one of them is the person's decision (class
@@ -164,22 +166,10 @@ def line_diff(old: str, new: str) -> tuple:
     return list((o - n).elements()), list((n - o).elements())
 
 
-def disallowed_additions(rel: str, removed: list, added: list):
-    """For a guarded file in GUARDED_PATH_ADDITIONS: the removed lines and the added lines outside
-    the allowed shapes (empty when the change is allowed). None for any other path."""
-    allowed = GUARDED_PATH_ADDITIONS.get(rel)
-    if allowed is None:
-        return None
-    return [f"- {l.strip()}" for l in removed if l.strip()] + [f"+ {l.strip()}" for l in added if not allowed.fullmatch(l)]
-
-def disallowed_additions_text(rel: str, old: str, new: str):
-    """`disallowed_additions` on whole file texts, which also lets a guarded file's `#[cfg(test)]`
-    region grow: a test beside a fixture registration is the implementer's work. Anything removed,
-    and any added line outside the allowed shapes and the test region, is reported. None for a path
-    outside GUARDED_PATH_ADDITIONS."""
-    allowed = GUARDED_PATH_ADDITIONS.get(rel)
-    if allowed is None:
-        return None
+def _executor_table_change(old: str, new: str) -> list:
+    """protocols/testing's executor table: fixture and mapping lines may be added, and its
+    `#[cfg(test)]` region may grow (a test beside a fixture registration is the implementer's work).
+    Anything removed, and any added line outside those, is reported."""
     old_l, new_l = old.splitlines(), new.splitlines()
     test_start = next((i for i, l in enumerate(new_l) if l.strip() == "#[cfg(test)]"), None)
     bad = []
@@ -188,8 +178,88 @@ def disallowed_additions_text(rel: str, old: str, new: str):
             bad += [f"- {l.strip()}" for l in old_l[i1:i2] if l.strip()]
         if op in ("replace", "insert"):
             bad += [f"+ {new_l[j].strip()}" for j in range(j1, j2)
-                    if not allowed.fullmatch(new_l[j]) and not (test_start is not None and j > test_start)]
+                    if not EXECUTOR_TABLE_LINES.fullmatch(new_l[j]) and not (test_start is not None and j > test_start)]
     return bad
+
+
+_STRING_OR_COMMENT = re.compile(r'"(?:[^"\\]|\\.)*"|//[^\n]*|/\*.*?\*/', re.S)
+_STRING_OR_SPACE = re.compile(r'"(?:[^"\\]|\\.)*"|\s+')
+
+
+def rust_compact(text: str) -> str:
+    """Rust source without comments and whitespace (string literals kept), so two texts that differ
+    only in rustfmt's layout compare equal: rustfmt reflows a whole import block or call when one
+    item is added."""
+    text = _STRING_OR_COMMENT.sub(lambda m: m.group(0) if m.group(0).startswith('"') else "", text)
+    return _STRING_OR_SPACE.sub(lambda m: m.group(0) if m.group(0).startswith('"') else "", text)
+
+
+def _strip_new(new: str, old: str, rx: re.Pattern, span: tuple = None, key_only: bool = False) -> str:
+    """`new` without the matches of `rx` (within `span`) that name only systems or packages absent
+    from `old`: every string literal of the match, or with `key_only` its first."""
+    lo, hi = span or (0, len(new))
+    out, last = [], lo
+    for m in rx.finditer(new, lo, hi):
+        lits = re.findall(r'"[^"]*"', m.group(0))
+        if all(lit not in old for lit in (lits[:1] if key_only else lits)):
+            out.append(new[last:m.start()])
+            last = m.end()
+    return new[:lo] + "".join(out) + new[last:]
+
+
+# A new decoder arm in `register_protocol`, compacted.
+_REGISTRY_ARM = re.compile(
+    r'"[a-z0-9_:]+"(?:\|"[a-z0-9_:]+")*=>stream_builder\.exchange_with_decoder_context::<[A-Za-z0-9_:<>]+>'
+    r"\(protocol_system,tvl_filter,None,decoder_context,?\),"
+)
+_SIM_IMPORT = re.compile(r"usetycho_simulation::\{.*?\};", re.S)
+
+
+def _state_registry_change(old: str, new: str) -> list:
+    """protocols/testing's decoder registry: a new protocol system gets a decoder arm, and its state
+    type may be imported. Nothing else may change: existing arms, the default arm and the TVL filter
+    stay as they are."""
+    o, n = rust_compact(old), rust_compact(new)
+    n = _strip_new(n, o, _REGISTRY_ARM)
+    o_imp, n_imp = _SIM_IMPORT.search(o), _SIM_IMPORT.search(n)
+    if o_imp and n_imp:
+        # An import only names a type; its tokens may grow, none may go.
+        tok = lambda s: Counter(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", s))
+        if tok(o_imp.group(0)) - tok(n_imp.group(0)):
+            return ["an existing import was removed"]
+        o, n = o[:o_imp.start()] + o[o_imp.end():], n[:n_imp.start()] + n[n_imp.end():]
+    return [] if o == n else ["only a new protocol system's decoder arm (and its state type's import) may be added"]
+
+
+_CLONE_MAP = re.compile(r"staticCLONE_TO_BASE_PROTOCOL:.*?HashMap::from\(\[(.*?)\]\)", re.S)
+_CLONE_ENTRY = re.compile(r'\("[a-z0-9_/-]+","[a-z0-9_/-]+"\),')
+
+
+def _test_runner_change(old: str, new: str) -> list:
+    """protocols/testing's runner: a config-only fork's package may be mapped to its base package in
+    `CLONE_TO_BASE_PROTOCOL`. Nothing else may change."""
+    o, n = rust_compact(old), rust_compact(new)
+    m = _CLONE_MAP.search(n)
+    if m:
+        n = _strip_new(n, o, _CLONE_ENTRY, m.span(1), key_only=True)
+    return [] if o == n else ["only a new package's CLONE_TO_BASE_PROTOCOL entry may be added"]
+
+
+# Guarded files the implementer may still extend, each with the check of a change to it: (old text,
+# new text) -> what is not allowed (empty when the change is). These are the harness wiring a new
+# integration needs: its executor's fixture, its decoder, and a config-only fork's base package.
+GUARDED_PATH_EDITS = {
+    "protocols/testing/src/execution.rs": _executor_table_change,
+    "protocols/testing/src/state_registry.rs": _state_registry_change,
+    "protocols/testing/src/test_runner.rs": _test_runner_change,
+}
+
+
+def disallowed_change(rel: str, old: str, new: str):
+    """What a change to a guarded file may not do (empty when allowed); None for a guarded path
+    that may not change at all. `old` and `new` are whole files, or an edit's old and new strings."""
+    check = GUARDED_PATH_EDITS.get(rel)
+    return None if check is None else check(old, new)
 
 
 # Required fields per ledger event type. Events may carry more.
@@ -236,7 +306,10 @@ def slug(protocol: str) -> str:
 
 
 def run_dir(protocol: str) -> Path:
-    return repo_root() / ".claude" / "integrations" / slug(protocol)
+    """The run's state. It sits under `.claude/worktrees/`, the one part of `.claude/` that Claude
+    Code does not treat as protected: a headless agent's Write anywhere else under `.claude/` is
+    refused as a sensitive file."""
+    return repo_root() / ".claude" / "worktrees" / "integrations" / slug(protocol)
 
 
 def worktree_dir(protocol: str) -> Path:
@@ -247,24 +320,8 @@ def branch(protocol: str) -> str:
     return f"integrate/{slug(protocol)}"
 
 
-# The run builds on `origin/main`. Until the strict integration-test suite (stack #1804, top PR
-# #1773) is on main, the worktree also merges this branch, so the run's packages are tested in
-# strict mode with the limit, tolerance and balance-lens checks, and the PR targets this branch.
-# Set to None once the stack has merged.
-HARNESS_BRANCH = "test/strict-cluster-checks"
-
-
-def harness_pending() -> bool:
-    """Whether the strict suite's branch is still off `origin/main` (as last fetched)."""
-    if not HARNESS_BRANCH:
-        return False
-    proc = subprocess.run(["git", "merge-base", "--is-ancestor", f"origin/{HARNESS_BRANCH}", "origin/main"], cwd=repo_root(), capture_output=True)
-    return proc.returncode != 0
-
-
-def pr_base() -> str:
-    """The branch the run's PR targets: the suite's while it is unmerged, else main."""
-    return HARNESS_BRANCH if harness_pending() else "main"
+# The branch a run builds on and its PR targets.
+BASE = "main"
 
 
 def load_json(path: Path):
@@ -313,8 +370,12 @@ def validate_spec(doc: dict) -> list:
     run; an unknown is written as unknown, never as a claim."""
     errors = []
     _need(doc, "protocol", str, "spec", errors)
-    if doc.get("kind") not in ("native", "vm"):
-        errors.append("spec: `kind` must be native or vm")
+    if doc.get("kind") not in SIM_KINDS:
+        errors.append(f"spec: `kind` must be one of {SIM_KINDS}")
+    # The kind is one fact, so a later change to it is an amendment that reopens what rests on it.
+    _need(doc, "kind_fact", str, "spec", errors)
+    if doc.get("kind") == "hybrid" and not doc.get("vm_reads"):
+        errors.append("spec: a hybrid names its `vm_reads`, the state the quote reads through the VM")
     _need(doc, "facts", list, "spec", errors)
     ids = set()
     for i, fact in enumerate(doc.get("facts", [])):
@@ -350,6 +411,8 @@ def validate_spec(doc: dict) -> list:
             errors.append(f"spec.limits[{i}]: `kind` must be one of {LIMIT_KINDS}")
         if not limit.get("why") or not limit.get("fact_ids"):
             errors.append(f"spec.limits[{i}]: a limit kind needs its `why` and the `fact_ids` that show it")
+    if doc.get("kind_fact") and doc["kind_fact"] not in ids:
+        errors.append(f"spec: `kind_fact` {doc['kind_fact']} is not a fact")
     for i, ref in enumerate(_fact_refs(doc)):
         if ref not in ids:
             errors.append(f"spec: reference to unknown fact {ref}")

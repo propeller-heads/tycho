@@ -7,8 +7,9 @@ with the reason. The role and the run come from the environment `run_agent.py` s
 - implementer: writes only inside the run's worktree, never to a guarded path (the knowledge
   base, the test harness, the check scripts, CI) and never a line that relaxes an integration
   test (a skip flag, a tolerance, `tvl_only`, `harness`, an `under_cap` limit, a changed limit
-  kind); no push and no GitHub. The one guarded file it may extend is protocols/testing's
-  executor table, with a new executor's fixture and mapping lines only.
+  kind); no push and no GitHub. The guarded files it may extend are protocols/testing's wiring
+  for a new integration (`schema.GUARDED_PATH_EDITS`): the executor's fixture and mapping, the
+  decoder arm, and a config-only fork's base package.
 - researcher: writes only under the run directory (spec, fork scripts, cloned references).
 - reviewer: writes only under `.claude/reviews/` and the run directory.
 
@@ -111,12 +112,12 @@ def check_edit(role: str, tool: str, inp: dict, worktree: Path, run: Path, repo:
         deny(f"the implementer writes only inside the worktree {worktree}; {path} is outside")
     rel = str(path.resolve().relative_to(worktree.resolve()))
     if schema.guarded_path(rel):
-        texts = resulting_file(tool, inp)
-        bad = schema.disallowed_additions_text(rel, *texts) if texts else schema.disallowed_additions(rel, *schema.line_diff(*edited_text(tool, inp)))
+        texts = resulting_file(tool, inp) or edited_text(tool, inp)
+        bad = schema.disallowed_change(rel, *texts)
         if bad is None:
             deny(f"{rel} is guarded during a run (knowledge, test harness, check scripts, CI); answer the finding as a decision instead")
         if bad:
-            deny(f"in {rel} only a new executor's fixture and mapping lines may be added, nothing removed; these are not: {bad}")
+            deny(f"{rel} is guarded; only the new integration's wiring may be added to it, nothing else changed: {bad}")
         return
     if schema.INTEGRATION_YAML_RE.search(rel):
         lines = guarded_yaml_lines(*edited_text(tool, inp))

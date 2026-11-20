@@ -87,9 +87,10 @@ def render(spec: dict, intake: dict, env: dict = None) -> str:
     out = [
         f"# {spec['protocol']}: integration spec",
         "",
-        f"Kind: **{spec.get('kind')}** · chains: {', '.join(spec.get('chains', []))} · route: **{route.get('kind', 'new')}**"
+        f"Kind: **{spec.get('kind')}** ({spec.get('kind_fact', 'no kind fact')}) · chains: {', '.join(spec.get('chains', []))} · route: **{route.get('kind', 'new')}**"
         + (f" (sibling `{route.get('sibling')}`, layers {', '.join(route.get('layers', []))})" if route.get("sibling") else ""),
         "",
+        *([f"Hybrid: the quote reads through the VM: {'; '.join(spec['vm_reads'])}.", ""] if spec.get("vm_reads") else []),
         "Every fact links its evidence: a transaction, a block or a command anyone can rerun. An "
         "unknown is written as unknown. Generated from `spec.json`; do not edit.",
         "",

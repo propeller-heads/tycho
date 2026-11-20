@@ -13,6 +13,8 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import final_gates  # noqa: E402
+import layer_checks  # noqa: E402
 import schema  # noqa: E402
 import state as ledger  # noqa: E402
 
@@ -293,6 +295,39 @@ class Guards(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertIn("let strict = false", found[0]["why"])
 
+    REGISTRY_RS = "protocols/testing/src/state_registry.rs"
+    REGISTRY = (
+        "use tycho_simulation::{\n    evm::protocol::{sky::state::SkyState, vm::state::EVMPoolState},\n};\n\n"
+        "pub fn register_protocol() {\n    match protocol_system {\n"
+        '        "sky" => stream_builder.exchange_with_decoder_context::<SkyState>(\n'
+        "            protocol_system,\n            tvl_filter,\n            None,\n            decoder_context,\n        ),\n"
+        "        // Default to EVMPoolState\n        _ => default(),\n    }\n}\n"
+    )
+    ARM = (
+        '        "foo" => stream_builder.exchange_with_decoder_context::<FooState>(\n'
+        "            protocol_system,\n            tvl_filter,\n            None,\n            decoder_context,\n        ),\n"
+    )
+
+    def test_a_new_decoder_arm_and_its_import_are_allowed_in_the_registry(self):
+        self.commit(self.REGISTRY_RS, self.REGISTRY)
+        base = self.git("rev-parse", "HEAD").strip()
+        added = self.REGISTRY.replace("sky::state::SkyState,", "foo::state::FooState, sky::state::SkyState,").replace("        // Default", self.ARM + "        // Default")
+        self.commit(self.REGISTRY_RS, added)
+        self.assertEqual(ledger.check_guards(self.tree, base, "HEAD"), [])
+        # an arm that also claims an existing system shadows its decoder
+        self.commit(self.REGISTRY_RS, added.replace('"foo" =>', '"foo" | "sky" =>'))
+        self.assertEqual(len(ledger.check_guards(self.tree, base, "HEAD")), 1)
+
+    def test_only_a_new_package_may_be_mapped_to_a_base_package(self):
+        runner = "protocols/testing/src/test_runner.rs"
+        text = 'static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {\n    HashMap::from([\n        ("base-a", "ethereum-a"),\n    ])\n});\n'
+        self.commit(runner, text)
+        base = self.git("rev-parse", "HEAD").strip()
+        self.commit(runner, text.replace('("base-a", "ethereum-a"),', '("base-a", "ethereum-a"),\n        ("arc-a", "ethereum-a"),'))
+        self.assertEqual(ledger.check_guards(self.tree, base, "HEAD"), [])
+        self.commit(runner, text.replace('"ethereum-a"', '"ethereum-b"'))
+        self.assertEqual(len(ledger.check_guards(self.tree, base, "HEAD")), 1)
+
     def test_changing_a_limit_kind_or_declaring_under_cap_is_a_violation(self):
         yaml = "pkg/integration_test.tycho.yaml"
         self.commit(yaml, "harness: strict\nlimits: {kind: hard}\ntests: []\n")
@@ -332,7 +367,18 @@ class Guards(unittest.TestCase):
 
 class SpecValidation(unittest.TestCase):
     def spec(self, **fact):
-        return {"protocol": "Foo", "kind": "native", "facts": [{"id": "S1", "section": "swap", "claim": "fee is 30 bps", **fact}]}
+        return {"protocol": "Foo", "kind": "native", "kind_fact": "S1", "facts": [{"id": "S1", "section": "swap", "claim": "fee is 30 bps", **fact}]}
+
+    def test_the_kind_is_one_of_three_and_rests_on_a_fact(self):
+        ok = self.spec(status="unknown")
+        self.assertTrue(schema.validate_spec({**ok, "kind": "rfq"}))
+        self.assertTrue(schema.validate_spec({**ok, "kind_fact": "S9"}))
+        self.assertTrue(schema.validate_spec({k: v for k, v in ok.items() if k != "kind_fact"}))
+
+    def test_a_hybrid_names_what_it_reads_through_the_vm(self):
+        hybrid = {**self.spec(status="unknown"), "kind": "hybrid"}
+        self.assertTrue(any("vm_reads" in e for e in schema.validate_spec(hybrid)))
+        self.assertEqual(schema.validate_spec({**hybrid, "vm_reads": ["pool storage of the vault"]}), [])
 
     def test_critical_fact_without_evidence_stops_the_run(self):
         errors = schema.validate_spec(self.spec(critical=True, status="unknown"))
@@ -344,6 +390,44 @@ class SpecValidation(unittest.TestCase):
 
     def test_unknown_non_critical_fact_is_allowed(self):
         self.assertEqual(schema.validate_spec(self.spec(status="unknown")), [])
+
+
+class LayersCleanGate(RunCase):
+    def test_a_finding_after_a_clean_stop_reopens_the_layer(self):
+        (self.run / "intake.json").write_text(json.dumps({"route": {"kind": "new", "layers": ["indexing"]}}))
+        self.review(self.round())
+        self.assertEqual(self.next()["action"], "clean")
+        self.add(t="stop", layer="indexing", reason="clean")
+        self.assertEqual(final_gates.gate_layers_clean(self.run)["status"], "pass")
+        self.finding("F1")
+        self.round(checks="red")
+        self.assertEqual(self.state().stops, {})
+        self.assertEqual(final_gates.gate_layers_clean(self.run)["status"], "fail")
+
+
+class ProtocolTestingReport(unittest.TestCase):
+    STEP = {"report_checks": {"indexing": ["index", "state.components", "balances"], "simulation": ["decode", "sim.ladder"], "execution": ["*"]}}
+
+    def judge(self, results, layer, exit_code=1):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "r.json"
+            if results is not None:
+                path.write_text(json.dumps({"results": results}))
+            return layer_checks.judge_report(path, layer_checks.layer_patterns(self.STEP, layer), exit_code)[0]
+
+    def test_each_layer_answers_for_its_own_and_earlier_checks(self):
+        results = [{"check": "index", "outcome": "pass"}, {"check": "balances", "outcome": "pass"},
+                   {"check": "sim.ladder", "outcome": "fail"}, {"check": "exec.ladder", "outcome": "not_run", "reason": "sim.ladder failed"}]
+        self.assertEqual(self.judge(results, "indexing"), "pass")
+        self.assertEqual(self.judge(results, "simulation"), "fail")
+        self.assertEqual(self.judge(results, "final"), "fail")
+
+    def test_a_missing_report_or_an_unexplained_exit_fails(self):
+        self.assertEqual(self.judge(None, "indexing", exit_code=0), "fail")
+        self.assertEqual(self.judge([], "indexing", exit_code=0), "fail")
+        self.assertEqual(self.judge([{"check": "index", "outcome": "pass"}], "indexing", exit_code=101), "fail")
+        self.assertEqual(self.judge([{"check": "index", "outcome": "skipped"}], "indexing", exit_code=0), "fail")
+        self.assertEqual(self.judge([{"check": "index", "outcome": "skipped", "reason": "dust"}], "indexing", exit_code=0), "pass")
 
 
 class ClosedLayers(RunCase):

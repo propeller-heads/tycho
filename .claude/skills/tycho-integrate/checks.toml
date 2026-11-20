@@ -15,9 +15,11 @@
 #   {report}           a per-step path for a JSON report (set by layer_checks.py)
 #
 # Fields: layers (where it runs; "final" runs every step once more), cwd (relative to the tree),
-# cmd (run with bash -o pipefail -c), when ("vm" | "native" | "file:<path>"), requires (a gap from
-# harness_caps.py: the step is off until it lands), harness (true: the protocol-testing run, with
-# its own database and ports), timeout_min, needs (placeholders that must be set).
+# cmd (run with bash -o pipefail -c), when (a list of kinds, "vm" | "native" | "hybrid", or
+# "file:<path>"), requires (a gap from harness_caps.py: the step is off until it lands), harness
+# (true: the protocol-testing run, with its own database and ports), timeout_min, needs
+# (placeholders that must be set), report_checks (for a step with a {report}: the report checks
+# each layer answers for, added to the earlier layers'; "*" is every check).
 
 [[step]]
 name = "substreams-fmt"
@@ -51,14 +53,14 @@ timeout_min = 30
 [[step]]
 name = "adapter-fmt"
 layers = ["simulation"]
-when = "vm"
+when = ["vm"]
 cwd = "protocols/adapter-integration/evm"
 cmd = "forge fmt --check"
 
 [[step]]
 name = "adapter-test"
 layers = ["simulation"]
-when = "vm"
+when = ["vm"]
 cwd = "protocols/adapter-integration/evm"
 cmd = "forge test --match-contract {adapter} -j 1"
 needs = ["adapter"]
@@ -73,7 +75,7 @@ cmd = 'cargo +"$RUST_NIGHTLY" fmt --all --check'
 [[step]]
 name = "simulation-clippy"
 layers = ["simulation"]
-when = "native"
+when = ["native", "hybrid"]
 cwd = "."
 cmd = 'cargo +"$RUST_NIGHTLY" clippy -p tycho-simulation --all-features --all-targets -- -D warnings'
 timeout_min = 40
@@ -81,7 +83,7 @@ timeout_min = 40
 [[step]]
 name = "simulation-test"
 layers = ["simulation"]
-when = "native"
+when = ["native", "hybrid"]
 cwd = "."
 cmd = "cargo nextest run -p tycho-simulation --all-features -E 'test(/{sim_module}/)'"
 needs = ["sim_module"]
@@ -151,8 +153,10 @@ needs = ["protocol_system"]
 [[step]]
 # The protocol-testing range run of the package, strict: indexing, balances against the lens,
 # the quote ladder, executions matched exactly, and each direction's declared limit
-# (`protocols/testing/README.md`, "Strict mode"). `--report` writes every check's outcome; a failed,
-# not-run or skipped check fails the step, and checks.json lists each one.
+# (`protocols/testing/README.md`, "Strict mode", "Test report"). The runner always runs every check,
+# but a layer answers only for its own and the earlier layers' (`report_checks`): before the decoder
+# and the executor exist, the simulation and execution checks fail by construction and are listed
+# as a later layer's. How a step's outcome follows from its checks: `layer_checks.judge_report`.
 name = "protocol-testing"
 layers = ["indexing", "simulation", "execution"]
 harness = true
@@ -160,6 +164,11 @@ cwd = "protocols/testing"
 cmd = "cargo run --release -- range --package {test_package} --chain {chain} --report {report}"
 needs = ["package", "chain"]
 timeout_min = 120
+
+[step.report_checks]
+indexing = ["index", "state.components", "state.excluded", "balances"]
+simulation = ["decode", "sim.ladder", "balances.tvl_only", "limits.max_output"]
+execution = ["*"]
 
 [[step]]
 # G10's catalogue; its PR defines the entry point. Update this command when it lands.

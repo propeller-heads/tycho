@@ -23,7 +23,7 @@ BRIEFS = ("classify", "research", "falsify", "amend", "decide", "review-decision
 
 # Knowledge every layer's implementer reads beyond the path table's own entries.
 ALWAYS = ("general", "integration", "architecture", "version_control")
-LANGUAGES = {"indexing": ("rust",), "simulation:native": ("rust",), "simulation:vm": ("solidity",), "execution": ("rust", "solidity")}
+LANGUAGES = {"indexing": ("rust",), "simulation:native": ("rust",), "simulation:hybrid": ("rust",), "simulation:vm": ("solidity",), "execution": ("rust", "solidity")}
 
 
 def knowledge_for(layer: str, kind: str) -> list:
@@ -34,8 +34,6 @@ def knowledge_for(layer: str, kind: str) -> list:
         if entry["name"] == layer or (layer == "simulation" and entry["name"] == "shared-simulation"):
             names += entry.get("knowledge", [])
     names += LANGUAGES.get(f"{layer}:{kind}", LANGUAGES.get(layer, ()))
-    if layer == "simulation" and kind == "vm":
-        names.append("solidity")
     seen, out = set(), []
     for n in names:
         if n not in seen:
@@ -45,8 +43,8 @@ def knowledge_for(layer: str, kind: str) -> list:
 
 
 def failed_checks(run: Path, layer: str, round_n: int) -> str:
-    """The previous round's failed check steps, and each failed, not-run or skipped check of its
-    protocol-testing report, for the implementer to fix."""
+    """The previous round's failed check steps, and each check of its protocol-testing report that
+    failed this layer (`layer_checks.judge_report`), for the implementer to fix."""
     path = run / "rounds" / f"{layer}-{round_n - 1}" / "checks.json"
     if round_n <= 1 or not path.exists():
         return "(no earlier round of this layer)"

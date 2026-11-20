@@ -57,7 +57,7 @@ def integration_yamls(tree: Path, package: str) -> list:
     if found:
         return sorted(found)
     try:
-        changed = git(tree, "diff", "--name-only", f"origin/{schema.pr_base()}...HEAD").split()
+        changed = git(tree, "diff", "--name-only", f"origin/{schema.BASE}...HEAD").split()
     except subprocess.CalledProcessError:
         changed = []
     for rel in changed:
@@ -74,16 +74,18 @@ def gate(name: str, status: str, detail: str, **extra) -> dict:
 
 
 def gate_layers_clean(run: Path) -> dict:
+    """Each layer's stop rules now, not its last recorded stop: a finding from the final review, an
+    amendment or a red round after a clean stop reopens the layer."""
     st = ledger.State(ledger.read_events(run))
     layers = ledger.route_layers(run)
-    # A layer a person closed after its stop (a round-cap or no-progress answer that grants nothing)
-    # is closed, though its last stop is not `clean`.
-    not_clean = {l: st.stops.get(l, "not run") for l in layers if st.stops.get(l) != "clean" and l not in st.closed}
+    now = {l: ledger.next_step(st, l) for l in layers}
+    # A layer a person closed (a cap or no-progress answer that grants nothing) counts as done.
+    not_clean = {l: r["reason"] for l, r in now.items() if r["action"] not in ("clean", "closed")}
     if not_clean:
         return gate("layers-clean", "fail", f"layers not clean: {not_clean}")
-    closed = {l: st.closed[l] for l in layers if st.stops.get(l) != "clean"}
+    closed = {l: st.closed[l] for l, r in now.items() if r["action"] == "closed"}
     note = f"; closed by a person's decision: {closed}" if closed else ""
-    return gate("layers-clean", "pass", f"{', '.join(layers)} stopped clean{note}")
+    return gate("layers-clean", "pass", f"{', '.join(layers)} clean{note}")
 
 
 def gate_checks(protocol: str, n: int) -> dict:
@@ -149,13 +151,13 @@ def gate_proxies(spec: dict) -> dict:
 
 
 def gate_base_current(tree: Path) -> dict:
-    """The run pins its base at the worktree's creation; main (or the strict suite's branch) moves
+    """The run pins its base at the worktree's creation; main moves
     on while the layers are built, and a squash-merge of the pinned base leaves it unreachable. The
     gates before Gate 3 must run on a branch that contains the base's tip, or what merges is
     untested: stale router slots and removed helpers only show after a rebase."""
-    base = f"origin/{schema.pr_base()}"
+    base = f"origin/{schema.BASE}"
     try:
-        git(tree, "fetch", "origin", schema.pr_base())
+        git(tree, "fetch", "origin", schema.BASE)
         behind = int(git(tree, "rev-list", "--count", f"HEAD..{base}").strip())
         if behind == 0:
             return gate("base-current", "pass", f"the branch contains {base}")
@@ -171,7 +173,7 @@ def gate_base_current(tree: Path) -> dict:
 
 
 def gate_sibling_executors(tree: Path) -> dict:
-    changed = git(tree, "diff", "--name-only", f"origin/{schema.pr_base()}...HEAD").split()
+    changed = git(tree, "diff", "--name-only", f"origin/{schema.BASE}...HEAD").split()
     if ROUTER_TEST_SETUP not in changed:
         return gate("sibling-executor-address", "n/a", "TychoRouterTestSetup unchanged")
     try:

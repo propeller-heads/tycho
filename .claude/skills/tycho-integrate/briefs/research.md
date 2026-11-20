@@ -50,11 +50,23 @@ Each answer is one or more facts (below). Mark the facts every layer depends on 
    math, config or registry, oracle, custody); proxies and implementations; verified source.
 2. **Interfaces**: selectors and signatures of swap and quote entrypoints, config getters, admin
    setters, pause controls; return layouts decoded from raw words.
-3. **Pricing determinism**: is the executable price a pure function of on-chain state, and of
-   which contracts' storage? External calls, oracle reads, signature checks, `block.timestamp` or
-   `block.number` on the pricing path? This decides native vs VM (and rules out RFQ for this
-   pipeline). Set `kind` accordingly; `simulation-prefer-native` in
-   `.claude/knowledge/simulation.md` points to where the choice is made.
+3. **Pricing determinism and the simulation kind**: is the executable price a pure function of
+   on-chain state, and of which contracts' storage? External calls, oracle reads, signature checks,
+   `block.timestamp` or `block.number` on the pricing path? (Not a pure function of chain state at
+   all rules the venue out: RFQ is not this pipeline's.) Then choose the kind with
+   `crates/tycho-simulation/CLAUDE.md` "Choosing an approach" and `simulation-prefer-native` in
+   `.claude/knowledge/simulation.md`, weighing:
+   - **native**: the swap math and all the state it reads can be ported and indexed as attributes;
+     the fastest, and what solvers use first;
+   - **hybrid**: the math ports, but the state it reads is too complex to track independently, so
+     indexing stays VM-shaped and the quote reads that state through the VM (Fluid V1, Balancer
+     V3, Curve); name that state in `vm_reads`;
+   - **vm**: neither ports (many contracts, upgradeable math, assembly). A VM quote is about 1000x
+     slower than native and some solvers skip VM venues, so say what that costs this venue;
+   - **not worth integrating**: the venue's reachable volume or TVL does not justify the kind it
+     needs. Say so with the numbers; the person decides at Gate 1.
+   Write the choice as one fact (section `summary`, `critical`) with these reasons and the
+   alternatives' costs, set `kind`, and point `kind_fact` at that fact.
 4. **How a swap works**: the call path, who holds the tokens, the pricing formula, fees and where
    they apply, rounding direction, exact-in and exact-out support.
 5. **Limits**: per direction, what happens above capacity and the exact bound with its
@@ -116,7 +128,9 @@ DCI on this run's chains:
 ```json
 {
   "protocol": "{{protocol}}",
-  "kind": "native | vm",
+  "kind": "native | hybrid | vm",
+  "kind_fact": "S2",
+  "vm_reads": ["hybrid only: the state the quote reads through the VM, and from which contract"],
   "chains": ["ethereum"],
   "scope": "which markets, which sides",
   "facts": [

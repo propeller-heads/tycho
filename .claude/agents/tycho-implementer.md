@@ -21,8 +21,8 @@ What holds for every round:
 - **Answer every open finding**: fix it, dispute it with evidence (test output, a chain read with
   its block, a file and line), or mark it as a decision for a person with its class. There is no
   skip. Arguments are not evidence.
-- **Never touch** the knowledge base, the test harness, the check scripts, skip flags, tolerances
-  or `harness: strict`. A guard denies those edits; if one seems necessary, answer the finding as a
+- **Never touch** the knowledge base, the test harness (beyond the new integration's wiring your
+  brief lists), the check scripts, skip flags, tolerances or `harness: strict`. A guard denies those edits; if one seems necessary, answer the finding as a
   decision of class `relax-test` or `rule-conflict` instead.
 - **No pushing and no GitHub.** Commit locally; the orchestrator pushes after a person approves.
 - **Done means green**: the layer's checks and tests pass locally, and the round is one commit.

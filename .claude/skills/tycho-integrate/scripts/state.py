@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The run's ledger: append, replay, findings, budgets, stop rules, guards and amendments.
 
-The ledger (`.claude/integrations/<protocol>/ledger.jsonl`) is append-only and is the single
+The ledger (`.claude/worktrees/integrations/<protocol>/ledger.jsonl`) is append-only and is the single
 source of the run's state: resuming a run, `status` and the stop rules all replay it. The stop
 rules are code here, not a judgement the model makes.
 
@@ -120,6 +120,7 @@ class State:
         elif t == "round":
             self.rounds[e["layer"]].append(e)
             self.closed.pop(e["layer"], None)
+            self.stops.pop(e["layer"], None)  # a new round supersedes the layer's last stop
         elif t == "review":
             self.reviews[e["layer"]].append(e)
         elif t == "spend":
@@ -129,6 +130,7 @@ class State:
             if e.get("layer"):
                 self.spend_layer[e["layer"]] += usd
         elif t == "finding":
+            self.stops.pop(e["layer"], None)  # a new or reopened finding supersedes a clean stop
             f = self.findings.get(e["id"])
             if f is None:
                 self.findings[e["id"]] = {
@@ -550,11 +552,11 @@ def check_guards(worktree: Path, rev_from: str, rev_to: str) -> list:
                 continue
             if schema.guarded_path(path):
                 old = subprocess.run(["git", "-C", str(worktree), "show", f"{sha}^:{path}"], capture_output=True, text=True).stdout
-                bad = schema.disallowed_additions_text(path, old, git("show", f"{sha}:{path}")) if path in schema.GUARDED_PATH_ADDITIONS else None
+                bad = schema.disallowed_change(path, old, git("show", f"{sha}:{path}")) if path in schema.GUARDED_PATH_EDITS else None
                 if bad is None:
                     violations.append({"commit": sha[:10], "path": path, "why": "guarded path"})
                 elif bad:
-                    violations.append({"commit": sha[:10], "path": path, "why": f"lines outside a fixture registration or the test module: {bad}"})
+                    violations.append({"commit": sha[:10], "path": path, "why": f"changes beyond the integration's wiring: {bad}"})
             elif schema.INTEGRATION_YAML_RE.search(path):
                 for line in schema.guarded_yaml_changes(*changed_lines(sha, path)):
                     violations.append({"commit": sha[:10], "path": path, "why": f"changes `{line}`"})

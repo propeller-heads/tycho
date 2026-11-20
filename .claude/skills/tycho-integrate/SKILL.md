@@ -19,7 +19,8 @@ through `run_agent.py`, which caps it at the remaining budget and records its co
 Rules come from `.claude/knowledge/`; this skill restates none of them.
 
 In the commands below, `S` is `python3 -I .claude/skills/tycho-integrate/scripts`, `P` is the
-protocol name as given, and `RUN` is `.claude/integrations/<slug>/` (`state.py P init` prints it).
+protocol name as given, and `RUN` is `.claude/worktrees/integrations/<slug>/` (`state.py P init` prints it). It sits
+under `.claude/worktrees/` because a headless agent may not write anywhere else under `.claude/`.
 Run everything from the repo root. Never build in the person's checkout: code changes happen in the
 run's worktree only.
 
@@ -89,12 +90,9 @@ amendment. Run `envcheck.py --protocol P` again now that the chains and credenti
 S/worktree.py --protocol P
 ```
 
-It cuts `.claude/worktrees/integrate-<slug>` on branch `integrate/<slug>` from `origin/main`, and,
-while the strict integration-test suite (stack #1804, `schema.HARNESS_BRANCH`) is not on main,
-merges it in, so the run's packages are tested in strict mode. It links the git-ignored `.env`
-files from the person's checkout, which is never touched. Record its `pr_base` in the ledger
-(`{"t":"stage","stage":"worktree","status":"done","pr_base":"<pr_base>"}`). Exit 2 is a merge
-conflict with the suite: ask the person (class `outside-repo`) with the files it names.
+It cuts `.claude/worktrees/integrate-<slug>` on branch `integrate/<slug>` from `origin/main`, with
+its submodules, and links the git-ignored `.env` files from the person's checkout, which is never
+touched. Record the stage in the ledger (`{"t":"stage","stage":"worktree","status":"done"}`).
 
 **Classify.** Before research, sort the venue into one of four cases:
 
@@ -130,10 +128,13 @@ contested becomes `contested` with an open risk. Then `spec_render.py --check` a
 
 ### 6. Gate 1: the spec (`gate1`)
 
-Show the person `RUN/SPEC.md` (its path and a summary: kind, route, contracts, how a swap works,
+Show the person `RUN/SPEC.md` (its path and a summary: route, contracts, how a swap works,
 the critical facts, open risks, which harness gates are off, and per chain whether DCI is
-available and which dependencies need it). Ask: approve, or correct. A
-correction goes to the `amend` brief and the spec is rendered and shown again. On approval:
+available and which dependencies need it). Ask the simulation kind as a question of its own:
+native, hybrid or vm as research chose it, the other kinds with their costs from the kind fact, or
+not worth integrating (the run stops: `{"t":"stage","stage":"gate1","status":"stopped"}`). Then
+ask: approve the spec, or correct it. A different kind or any correction goes to the `amend` brief
+and the spec is rendered and shown again. On approval:
 
 ```bash
 S/state.py P append '{"t":"gate","gate":1,"status":"approved","facts":[<every fact id>]}'
@@ -259,11 +260,8 @@ branch and open the PR. Only on approval:
 
 ```bash
 git -C <worktree> push -u origin integrate/<slug>
-gh pr create --head integrate/<slug> --base <pr_base> --title "feat: integrate <protocol> as <protocol_system>" --body-file <PR.md plus this session's attribution lines>
+gh pr create --head integrate/<slug> --base main --title "feat: integrate <protocol> as <protocol_system>" --body-file <PR.md plus this session's attribution lines>
 ```
-
-`<pr_base>` is the worktree stage's: `main`, or the suite's branch while stack #1804 is open (the
-PR then says it depends on #1773, and is retargeted to `main` when the stack merges).
 
 Shadow mode is the default until the escape rate earns more (the person decides when to drop
 `--shadow`): the decisions and the ledger are held back in `RUN/PR-held.md` until the person has

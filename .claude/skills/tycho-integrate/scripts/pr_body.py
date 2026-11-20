@@ -80,12 +80,6 @@ def render(protocol: str, shadow: bool = False) -> tuple:
         "findings before this PR was opened; what is left is listed under \"For a person\".",
         "",
     ]
-    if schema.pr_base() != "main":
-        out += [
-            f"Based on `{schema.pr_base()}` (not yet on `main`): the package's tests run in strict mode. "
-            "Retarget to `main` once that branch merges.",
-            "",
-        ]
     out += [
         "## Cross-layer agreements",
         "",

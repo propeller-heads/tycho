@@ -40,18 +40,51 @@ def placeholders(run: Path, tree: Path) -> dict:
     return values
 
 
-def report_failures(path: Path) -> list:
-    """The failed and not-run checks of a protocol-testing `--report` file
-    (`protocols/testing/README.md`, "Test report"), one entry each, with the component and the
-    direction where the check is per component, and every skip with its reason."""
+def layer_patterns(step: dict, layer: str):
+    """The report checks `layer` answers for: its own `report_checks` and the earlier layers'. None
+    when the step lists none, or for the final run: every check."""
+    table = step.get("report_checks")
+    if not table or layer == "final":
+        return None
+    out = []
+    for l in schema.LAYERS:
+        out += table.get(l, [])
+        if l == layer:
+            break
+    return None if "*" in out else out
+
+
+def judge_report(path: Path, patterns, exit_code: int) -> tuple:
+    """(status, detail, failing checks, later-layer checks) of a protocol-testing `--report` file
+    (`protocols/testing/README.md`, "Test report").
+
+    The layer's checks (`patterns`; None is all) decide the step: one that failed, did not run, or
+    was skipped without a reason fails it. A skip with a reason is structural (a direction capped
+    at the int128 limit, a zero-limit dust band): it is listed, not failed. A missing or empty
+    report fails, since the runner exits 0 having tested nothing when a package has no test yaml or
+    manifest; so does a report with none of the layer's checks. A failed exit with none of the
+    layer's checks failing passes only when a later layer's check explains it."""
     if not path.exists():
-        return []
+        return "fail", f"exit {exit_code}, and the runner wrote no report: nothing was tested", [], []
     try:
-        report = schema.load_json(path)
-    except (OSError, ValueError):
-        return [{"check": "report", "outcome": "fail", "detail": f"unreadable report {path}"}]
+        results = schema.load_json(path).get("results") or []
+    except (OSError, ValueError, AttributeError):
+        return "fail", f"exit {exit_code}, and the report {path} is unreadable", [], []
     keep = ("test", "check", "component", "direction", "outcome", "detail", "reason", "block", "limit")
-    return [{k: r[k] for k in keep if k in r} for r in report.get("results", []) if r.get("outcome") in ("fail", "not_run", "skipped")]
+    mine = lambda c: patterns is None or c in patterns
+    own = [r for r in results if mine(r.get("check", ""))]
+    later = [{k: r[k] for k in keep if k in r} for r in results if not mine(r.get("check", "")) and r.get("outcome") != "pass"]
+    bad = [{k: r[k] for k in keep if k in r} for r in own
+           if r.get("outcome") in ("fail", "not_run") or (r.get("outcome") == "skipped" and not r.get("reason"))]
+    skipped = [{k: r[k] for k in keep if k in r} for r in own if r.get("outcome") == "skipped" and r.get("reason")]
+    if not own:
+        return "fail", f"exit {exit_code}, and the report has none of this layer's checks ({len(results)} results)", [], later
+    if bad:
+        return "fail", f"exit {exit_code}; {len(bad)} of this layer's checks failed", bad + skipped, later
+    if exit_code != 0 and not later:
+        return "fail", f"exit {exit_code} with every check passing: see the log", skipped, later
+    note = f"; {len(later)} later-layer checks not counted" if later else ""
+    return "pass", f"{len(own)} checks of this layer passed{note}", skipped, later
 
 
 def free_port(start: int) -> int:
@@ -107,9 +140,9 @@ def applies(step: dict, layer: str, values: dict, caps: dict, tree: Path) -> tup
     if layer == "final" and not layers:
         return False, None
     when = step.get("when")
-    if when in ("vm", "native") and values.get("kind") != when:
+    if isinstance(when, list) and values.get("kind") not in when:
         return False, f"n/a: {values.get('kind') or 'unknown'} integration"
-    if when and when.startswith("file:") and not (tree / when[5:]).exists():
+    if isinstance(when, str) and when.startswith("file:") and not (tree / when[5:]).exists():
         return False, f"n/a: no {when[5:]} in the tree"
     gap = step.get("requires")
     if gap and not caps.get(gap, {}).get("on"):
@@ -170,16 +203,12 @@ def main() -> None:
                 detail = f"exit {proc.returncode}"
             except subprocess.TimeoutExpired:
                 status, detail = "fail", f"timed out after {step.get('timeout_min', 20)} min"
+            result = {"name": step["name"], "cmd": cmd, "log": str(log), "seconds": round(time.time() - started)}
+            if "{report}" in step["cmd"] and not detail.startswith("timed out"):
+                status, detail, checks, later = judge_report(report_path, layer_patterns(step, args.layer), proc.returncode)
+                result.update(report=str(report_path), checks=checks, later=later)
             tail = log.read_text(errors="replace").splitlines()[-30:] if status == "fail" else []
-            result = {"name": step["name"], "status": status, "detail": detail, "cmd": cmd, "log": str(log), "seconds": round(time.time() - started), "tail": tail}
-            if "{report}" in step["cmd"]:
-                result["report"] = str(report_path)
-                result["checks"] = report_failures(report_path)
-                # The runner's exit code is its verdict. A `skipped` check with a reason is structural
-                # (a direction capped at the int128 limit, a zero-limit dust band) and is listed, not
-                # failed; `not_run` only follows a failed prerequisite. A skip nobody explained fails.
-                if any(c["outcome"] == "fail" or (c["outcome"] == "skipped" and not c.get("reason")) for c in result["checks"]):
-                    result["status"] = "fail"
+            result.update(status=status, detail=detail, tail=tail)
             results.append(result)
     finally:
         if harness is not None:
