@@ -21,7 +21,7 @@ use crate::evm::{
             erc20_token::{Overwrites, TokenProxyOverwriteFactory},
         },
     },
-    simulation::{SimulationEngine, SimulationParameters},
+    simulation::{SimulationEngine, SimulationEngineError, SimulationParameters},
 };
 
 sol! {
@@ -30,6 +30,8 @@ sol! {
     function maxDeposit(address caller) external returns (uint256);
     function maxWithdraw(address caller) external returns (uint256);
     function totalSupply() external view returns (uint256);
+    function previewRedeem(uint256 shares) external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
 }
 
 #[expect(
@@ -107,9 +109,8 @@ where
         "maxDeposit",
     )?;
 
-    // Use the vault's totalSupply as the upper bound for maxRedeem.
-    // This represents the maximum amount of shares that can be burned, since
-    // a user cannot redeem more shares than the total supply of the vault.
+    let max_redeem = find_max_redeem(&vm_engine, pool, asset_token, total_supply)?;
+
     Ok(ERC4626State::new(
         pool,
         asset_token,
@@ -117,8 +118,56 @@ where
         asset_price,
         share_price,
         max_deposit,
-        total_supply,
+        max_redeem,
     ))
+}
+
+/// The most shares a redeem can burn: the vault's total supply, or fewer when the vault pays
+/// redeems only from the assets it holds.
+///
+/// A vault that pays only from its own balance, such as SparkVault, reverts `previewRedeem` above
+/// that balance. For such a vault the limit is the share value of the assets it holds.
+fn find_max_redeem<D: EngineDatabaseInterface + Clone + Debug>(
+    vm_engine: &SimulationEngine<D>,
+    pool: &Address,
+    asset_token: &Token,
+    total_supply: U256,
+) -> Result<U256, SimulationError>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    let params = SimulationParameters {
+        caller: AlloyAddress::ZERO,
+        to: AlloyAddress::from_bytes(pool),
+        data: previewRedeemCall { shares: total_supply }.abi_encode(),
+        ..Default::default()
+    };
+    match vm_engine.simulate(&params) {
+        Ok(_) => return Ok(total_supply),
+        Err(SimulationEngineError::TransactionError { .. }) => {}
+        Err(err) => {
+            return Err(SimulationError::FatalError(format!("previewRedeem simulate failed: {err}")))
+        }
+    }
+
+    let liquidity = simulate_and_decode_call(
+        vm_engine,
+        &asset_token.address,
+        AlloyAddress::ZERO,
+        &balanceOfCall { account: AlloyAddress::from_bytes(pool) },
+        None,
+        "balanceOf",
+    )?;
+    let liquid_shares = simulate_and_decode_call(
+        vm_engine,
+        pool,
+        AlloyAddress::ZERO,
+        &convertToSharesCall { assets: liquidity },
+        None,
+        "convertToShares",
+    )?;
+    Ok(liquid_shares.min(total_supply))
 }
 
 fn simulate_and_decode_call<D, Call, Ret>(
@@ -152,9 +201,11 @@ where
 mod test {
     use std::str::FromStr;
 
+    use num_bigint::BigUint;
     use tycho_client::feed::BlockHeader;
     use tycho_common::{
         models::{token::Token, Chain},
+        simulation::protocol_sim::ProtocolSim,
         Bytes,
     };
 
@@ -202,12 +253,21 @@ mod test {
         db.set_block(Some(block));
         let vm = SimulationEngine::new(db, false);
 
-        decode_from_vm(
+        let state = decode_from_vm(
             &Bytes::from("0x28B3a8fb53B741A8Fd78c0fb9A6B2393d896a43d"),
             &usdc,
             &sp_usdc,
             vm,
         )
         .expect("decoding failed");
+
+        let (max_redeem, max_assets_out) = state
+            .get_limits(sp_usdc.address, usdc.address)
+            .expect("valid pair");
+        // At this block the vault has 161.7M spUSDC outstanding but holds only 16.35M USDC, and
+        // it pays redeems from that balance alone.
+        let vault_usdc_balance = BigUint::from(16_348_727_682_085u64);
+        assert_eq!(max_redeem, BigUint::from(16_276_712_707_870u64));
+        assert!(max_assets_out <= vault_usdc_balance);
     }
 }
