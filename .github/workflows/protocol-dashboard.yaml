@@ -1,0 +1,70 @@
+name: Protocol dashboard
+
+# Builds the protocol integration dashboard (one HTML page, one tab per chain) from the
+# "Protocol Integrations" org project, main, and the dev and prod Tycho indexers, and attaches
+# it to the run as the `protocol-dashboard` artifact. See scripts/protocol_dashboard/build.py.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/protocol-dashboard.yaml
+      - scripts/protocol_dashboard/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protocol-dashboard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the dashboard script
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          path: workflow
+          sparse-checkout: scripts/protocol_dashboard
+
+      # The stages read main, whichever ref runs the workflow.
+      - name: Check out main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          ref: main
+          path: main
+          sparse-checkout: |
+            crates/tycho-execution/config
+            protocols/substreams
+
+      # The default GITHUB_TOKEN can't read organization projects.
+      - name: Create a GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-organization-projects: read
+          permission-pull-requests: read
+
+      - name: Build the dashboard
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TYCHO_API_KEY: ${{ secrets.TYCHO_API_KEY }}
+          MAIN_DIR: main
+          OUT_DIR: out
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          export MAIN_SHA="$(git -C main rev-parse HEAD)"
+          python3 workflow/scripts/protocol_dashboard/build.py
+
+      - name: Upload the dashboard
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: protocol-dashboard
+          path: out/
+          retention-days: 30
