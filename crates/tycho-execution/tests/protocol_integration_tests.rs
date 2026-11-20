@@ -4408,7 +4408,7 @@ fn write_baibai_single_swap(name: &str, sell_base: bool, amount: u64) {
         if sell_base { (base.clone(), quote.clone()) } else { (quote.clone(), base.clone()) };
     let swap = Swap::new(
         ProtocolComponent {
-            protocol_system: "baibai".into(),
+            protocol_system: "pamm:baibai".into(),
             static_attributes: HashMap::from([("base".into(), base), ("quote".into(), quote)]),
             ..Default::default()
         },
@@ -4466,7 +4466,7 @@ fn test_sequential_encoding_strategy_baibai() {
     let usdc = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
     let cbbtc = Bytes::from("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf");
     let pair = |base: &Bytes| ProtocolComponent {
-        protocol_system: "baibai".into(),
+        protocol_system: "pamm:baibai".into(),
         static_attributes: HashMap::from([
             ("base".into(), base.clone()),
             ("quote".into(), usdc.clone()),

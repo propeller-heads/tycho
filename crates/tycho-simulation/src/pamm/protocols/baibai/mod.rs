@@ -65,7 +65,7 @@ pub use state::BaibaiState;
 
 /// Protocol system stamped on every component this integration emits; tycho-execution keys
 /// BaiBai's encoder on it.
-pub const PROTOCOL_SYSTEM: &str = "baibai";
+pub const PROTOCOL_SYSTEM: &str = "pamm:baibai";
 
 /// Component type stamped on every pair this integration emits.
 pub(crate) const PROTOCOL_TYPE: &str = "baibai_pair";

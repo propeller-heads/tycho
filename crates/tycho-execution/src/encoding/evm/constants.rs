@@ -173,7 +173,7 @@ pub const SUBSIDY_KEY: &str = "subsidy";
 pub const NATIVE_WRAPPER_PROTOCOL_SYSTEM: &str = "native_wrapper";
 
 /// Protocol system of BaiBai components.
-pub const BAIBAI_PROTOCOL_SYSTEM: &str = "baibai";
+pub const BAIBAI_PROTOCOL_SYSTEM: &str = "pamm:baibai";
 /// Static attribute of a BaiBai component naming the pair's base token.
 pub const BAIBAI_BASE_ATTRIBUTE: &str = "base";
 /// Static attribute of a BaiBai component naming the pair's quote token.

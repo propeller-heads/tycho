@@ -392,7 +392,7 @@ mod tests {
             let base = bytes(pair.base);
             let id = pair_component_id(PROTOCOL_SYSTEM, &base, &quote_token().address);
             let book = &books[&id.to_string()];
-            assert_eq!(book.component.protocol_system, "baibai");
+            assert_eq!(book.component.protocol_system, "pamm:baibai");
             assert_eq!(book.component.static_attributes["base"], base);
             assert_eq!(book.component.static_attributes["quote"], quote_token().address);
             let updated_at = book.updated_at.unwrap().timestamp();
