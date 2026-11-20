@@ -113,14 +113,9 @@ impl CurveState {
     }
 
     /// Sets the pool's policy contract.
-    pub fn with_policy(mut self, policy: CurvePolicy) -> Self {
+    pub(super) fn with_policy(mut self, policy: CurvePolicy) -> Self {
         self.policy = policy;
         self
-    }
-
-    /// The pool's policy contract.
-    pub fn policy(&self) -> &CurvePolicy {
-        &self.policy
     }
 
     /// Returns a copy that quotes swaps with a grant from the pool's policy: at the policy's
@@ -693,8 +688,11 @@ mod tests {
             .delta_transition(delta, &HashMap::new(), &Balances::default())
             .expect("delta transition failed");
 
-        assert_eq!(curve.policy().address(), expected.map(Bytes::from).as_ref());
-        assert_eq!(curve.policy().min_fee(), U256::from(5));
+        let mut expected_entries = vec![(POLICY_MIN_FEE_ATTRIBUTE, vec![5])];
+        if let Some(address) = expected {
+            expected_entries.push((POLICY_ATTRIBUTE, address));
+        }
+        assert_eq!(curve.policy, policy(&expected_entries));
     }
 
     const WAD: u128 = 1_000_000_000_000_000_000;
@@ -954,7 +952,7 @@ mod tests {
             curve.delta_transition(delta(attributes), &HashMap::new(), &Balances::default());
 
         assert!(matches!(result, Err(TransitionError::SimulationError(_))), "got {result:?}");
-        assert_eq!(curve.policy(), &before);
+        assert_eq!(curve.policy, before);
     }
 
     fn two_crypto_ng_state() -> (CurveState, Token, Token) {

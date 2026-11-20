@@ -6,22 +6,22 @@ use serde::{Deserialize, Serialize};
 use tycho_common::{simulation::errors::SimulationError, Bytes};
 
 /// Name of the state attribute that holds the pool's policy contract.
-pub const POLICY_ATTRIBUTE: &str = "policy";
+pub(super) const POLICY_ATTRIBUTE: &str = "policy";
 /// Name of the state attribute that holds the version of the policy's grant rules.
-pub const POLICY_VERSION_ATTRIBUTE: &str = "policy_version";
+pub(super) const POLICY_VERSION_ATTRIBUTE: &str = "policy_version";
 /// Name of the state attribute that holds the key that signs the policy's grants.
-pub const POLICY_CONTROLLER_ATTRIBUTE: &str = "policy_controller";
+pub(super) const POLICY_CONTROLLER_ATTRIBUTE: &str = "policy_controller";
 /// Name of the state attribute that holds the only caller that can submit a grant.
-pub const POLICY_ROUTER_ATTRIBUTE: &str = "policy_router";
+pub(super) const POLICY_ROUTER_ATTRIBUTE: &str = "policy_router";
 /// Name of the state attribute that is `1` while the policy refuses grants.
-pub const POLICY_KILLED_ATTRIBUTE: &str = "policy_killed";
+pub(super) const POLICY_KILLED_ATTRIBUTE: &str = "policy_killed";
 /// Name of the state attribute that holds the lowest fee of a granted swap, in units of 1e-10.
-pub const POLICY_MIN_FEE_ATTRIBUTE: &str = "policy_min_fee";
+pub(super) const POLICY_MIN_FEE_ATTRIBUTE: &str = "policy_min_fee";
 
 /// The policy contract of a pool and the terms of its grants. A zero attribute value means unset:
 /// a pool without a grant policy has version 0.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CurvePolicy {
+pub(super) struct CurvePolicy {
     address: Option<Bytes>,
     version: U256,
     controller: Option<Bytes>,
@@ -67,24 +67,9 @@ impl CurvePolicy {
         }
     }
 
-    /// The policy contract.
-    pub fn address(&self) -> Option<&Bytes> {
-        self.address.as_ref()
-    }
-
     /// The version of the grant rules. 0 if the policy has no grants.
     pub fn version(&self) -> U256 {
         self.version
-    }
-
-    /// The key that signs grants.
-    pub fn controller(&self) -> Option<&Bytes> {
-        self.controller.as_ref()
-    }
-
-    /// The only caller that can submit a grant.
-    pub fn router(&self) -> Option<&Bytes> {
-        self.router.as_ref()
     }
 
     /// Whether the policy refuses grants.
@@ -146,12 +131,15 @@ mod tests {
         ]))
         .expect("decode");
 
-        assert_eq!(policy.address(), Some(&Bytes::from(vec![1; 20])));
-        assert_eq!(policy.version(), U256::from(1));
-        assert_eq!(policy.controller(), Some(&Bytes::from(vec![2; 20])));
-        assert_eq!(policy.router(), Some(&Bytes::from(vec![3; 20])));
-        assert!(policy.is_killed());
-        assert_eq!(policy.min_fee(), U256::from(100_000));
+        let expected = CurvePolicy {
+            address: Some(Bytes::from(vec![1; 20])),
+            version: U256::from(1),
+            controller: Some(Bytes::from(vec![2; 20])),
+            router: Some(Bytes::from(vec![3; 20])),
+            is_killed: true,
+            min_fee: U256::from(100_000),
+        };
+        assert_eq!(policy, expected);
     }
 
     #[test]
