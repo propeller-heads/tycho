@@ -1,3 +1,12 @@
+## [0.532.2](https://github.com/propeller-heads/tycho/compare/0.532.1...0.532.2) (2026-11-20)
+
+
+### Bug Fixes
+
+* **simulation:** price the bin a Metric order ends in along its curve ([a90cca0](https://github.com/propeller-heads/tycho/commit/a90cca01a9cea9dc521e15942b91521b864d16f0))
+* **simulation:** price the bin a Metric order ends in along its curve ([c7f45a0](https://github.com/propeller-heads/tycho/commit/c7f45a09fd258f09b7579415d66865768b7fba34))
+* **simulation:** treat a zero Metric ask price as no quote ([176329b](https://github.com/propeller-heads/tycho/commit/176329b8c1df0e197dcf4fd79f9dc0636a063d43))
+
 ## [0.532.1](https://github.com/propeller-heads/tycho/compare/0.532.0...0.532.1) (2026-11-19)
 
 
