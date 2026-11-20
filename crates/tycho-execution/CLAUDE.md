@@ -276,9 +276,7 @@ quote that reverts, returns nothing decodable or gets malformed protocol data co
 the pAMM. A pAMM that quotes zero skips the fallback quote and its own swap, so the fallback runs straight away. The
 fallback quote costs gas on every other leg, including the ones the pAMM fills: about 107k for a Uniswap V4
 simulation, about 44k for Fluid, about 39k for Curve, about 31k for Uniswap V3, about 11k for Uniswap V2 (router
-call, cold state, mainnet fork). The gas estimate charges both quotes only for `fallback:biconomy`, whose `quote`
-reads every maker's board (180-260k on Base): the venue gas again plus `METRIC_FALLBACK_QUOTE_GAS`. Other pAMM legs
-carry only `FALLBACK_ROUTER_OVERHEAD_GAS`.
+call, cold state, mainnet fork).
 
 `FallbackSwap(primary, tokenIn, tokenOut, amountIn, protocol, reason)` is emitted when the fallback runs. `reason` is
 `FallbackQuotedHigher` (the fallback quote beat the pAMM quote, a pAMM that cannot quote included) or
