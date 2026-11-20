@@ -59,13 +59,12 @@ EXECUTOR_FAMILIES = {
     "rfq:aqua0": "uniswap_v4",
 }
 BIN_POOL_MANAGER_CHAINS = {"base", "bsc"}  # SwapEncoderRegistry::has_bin_pool_manager
-# RFQ venues quote off-chain, so no indexer serves them: an executor for the chain on main means
-# they are live in dev and prod.
-RFQ_PREFIX = "rfq:"
-# Other executor entries that no indexer serves: fallbacks, book feeds and helpers. The indexers
-# can't say whether these are live, so they get no untracked card and tracked ones show "can't
-# tell".
-NOT_INDEXED_PREFIXES = ("fallback", "pamm:", "propamm:", "pricelevelstream")
+# RFQ venues and pAMM book feeds quote off-chain, so no indexer serves them: an executor for the
+# chain on main means they are live in dev and prod.
+OFFCHAIN_PREFIXES = ("rfq:", "pamm:", "propamm:")
+# Other executor entries that no indexer serves: fallbacks and helpers. The indexers can't say
+# whether these are live, so they get no untracked card and tracked ones show "can't tell".
+NOT_INDEXED_PREFIXES = ("fallback", "pricelevelstream")
 NOT_INDEXED = {"native_wrapper", "subsidy"}
 
 PROJECT_QUERY = """
@@ -379,21 +378,21 @@ class Indexers:
         return None if found is None else hook in found
 
 
-def is_rfq(system: str) -> bool:
-    return system.startswith(RFQ_PREFIX)
+def is_offchain(system: str) -> bool:
+    return system.startswith(OFFCHAIN_PREFIXES)
 
 
 def is_indexed(system: str) -> bool:
     return (
-        not is_rfq(system)
+        not is_offchain(system)
         and system not in NOT_INDEXED
         and not system.startswith(NOT_INDEXED_PREFIXES)
     )
 
 
 def is_tracked_kind(system: str) -> bool:
-    """Whether the dashboard can say where this system is live: indexed, or RFQ."""
-    return is_rfq(system) or is_indexed(system)
+    """Whether the dashboard can say where this system is live: indexed, or an off-chain venue."""
+    return is_offchain(system) or is_indexed(system)
 
 
 def decode_hex_text(value: str) -> str:
@@ -454,9 +453,9 @@ def build_cards(items: list[dict], repo: MainRepo, indexers: Indexers | None) ->
             "Executor deployed": executor is not None,
         }
         for env, name in (("dev", "In Dev"), ("prod", "In Prod")):
-            if is_rfq(system):
-                # Live once its code is merged and the chain has its executor. Some RFQ venues
-                # reuse an existing executor (rfq:aqua0), so the executor alone isn't enough.
+            if is_offchain(system):
+                # Live once its code is merged and the chain has its executor. Some off-chain
+                # venues reuse an existing executor (rfq:aqua0), so the executor alone isn't enough.
                 checks[name] = executor is not None and checks["Merged"]
             elif indexers is None or not is_indexed(system):
                 checks[name] = None  # not checked, or not something an indexer serves
@@ -543,7 +542,7 @@ def untracked_cards(tracked: list[dict], repo: MainRepo, indexers: Indexers | No
             if (chain, system) in known or not is_tracked_kind(system):
                 continue
             executor = repo.executor(chain, system)
-            if is_rfq(system):
+            if is_offchain(system):
                 in_dev = in_prod = executor is not None
             else:
                 in_dev = indexers.runs("dev", chain, system) if indexers else None
