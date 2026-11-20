@@ -108,13 +108,20 @@ pub fn map_montra_enriched_block_changes(
     Ok(BlockChanges { block: Some((&block).into()), changes, storage_changes: vec![] })
 }
 
+/// The storage layout of a pool's hook, which decides the attributes its writes become.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    Montra,
+    Ascend,
+}
+
 /// A pool `map_montra_pools_created` created in this block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Launch {
     /// The creation transaction.
     tx: Transaction,
-    /// Whether the pool's hook is an Ascend hook, not a Montra one.
-    ascend: bool,
+    /// The layout of the pool's hook.
+    layout: Layout,
 }
 
 /// The creation of every pool `map_montra_pools_created` created in this block, by component id.
@@ -129,10 +136,15 @@ fn created_launches(
             anyhow!("map_montra_pools_created emitted a change without a transaction")
         })?;
         for component in &change.component_changes {
-            let ascend = component
+            let layout = if component
                 .get_attribute_value("hooks")
-                .is_some_and(|hook| params.is_ascend_hook(&hook));
-            launches.insert(component.id.clone(), Launch { tx: tx.clone(), ascend });
+                .is_some_and(|hook| params.is_ascend_hook(&hook))
+            {
+                Layout::Ascend
+            } else {
+                Layout::Montra
+            };
+            launches.insert(component.id.clone(), Launch { tx: tx.clone(), layout });
         }
     }
     Ok(launches)
@@ -180,18 +192,18 @@ impl PoolWrites {
     }
 
     /// The pool's state in its creation transaction: every attribute of its hook's layout
-    /// (`montra_*`, or `ascend_*` when `ascend`), created. A Montra pool is created paused unless
+    /// (`montra_*` or `ascend_*`, by `layout`), created. A Montra pool is created paused unless
     /// the transaction placed its seed; an Ascend pool is never paused.
-    fn launch_state(&self, ascend: bool) -> HookStateChange {
-        if ascend {
-            return HookStateChange {
+    fn launch_state(&self, layout: Layout) -> HookStateChange {
+        match layout {
+            Layout::Ascend => HookStateChange {
                 attributes: final_attributes(&AscendWord::ALL, &self.ascend, ChangeType::Creation),
                 pause_change: None,
-            };
-        }
-        HookStateChange {
-            attributes: final_attributes(&ConfigWord::ALL, &self.config, ChangeType::Creation),
-            pause_change: (!self.places_seed).then_some(PauseChange::Pause),
+            },
+            Layout::Montra => HookStateChange {
+                attributes: final_attributes(&ConfigWord::ALL, &self.config, ChangeType::Creation),
+                pause_change: (!self.places_seed).then_some(PauseChange::Pause),
+            },
         }
     }
 
@@ -356,7 +368,7 @@ fn hook_added_liquidity(
     Ok(receipt
         .logs
         .iter()
-        .filter(|log| log.address == params.pool_manager)
+        .filter(|log| log.address == *params.pool_manager())
         .filter_map(ModifyLiquidity::match_and_decode)
         .any(|event| {
             let adds_liquidity = event.liquidity_delta > BigInt::zero();
@@ -428,7 +440,7 @@ fn with_hook_state(
         };
         for (component_id, pool_writes) in pools {
             let state = match launches.get(&component_id) {
-                Some(launch) if launch.tx.index == index => pool_writes.launch_state(launch.ascend),
+                Some(launch) if launch.tx.index == index => pool_writes.launch_state(launch.layout),
                 _ => pool_writes.update_state(),
             };
             if !state.attributes.is_empty() {
@@ -494,7 +506,9 @@ mod tests {
         address_list::Address,
         montra::{
             pool_config::{pool_slots, HookWord, KeyWord},
-            test_fixtures::{params, ASCEND_HOOK, HOOK, POOL_ID, POOL_MANAGER, TOKEN},
+            test_fixtures::{
+                params, params_with_montra_hooks, ASCEND_HOOK, HOOK, POOL_ID, POOL_MANAGER, TOKEN,
+            },
         },
         storage::{pad32, Word},
     };
@@ -1496,8 +1510,7 @@ mod tests {
         let second_hook = hex!("0000000000000000000000000000000000000002");
         let mut write = config_write(ConfigWord::Terms, STAGE_3_WORD_0, STAGE_4_WORD_0, 1);
         write.address = second_hook.to_vec();
-        let mut params = params();
-        params.montra_hooks.insert(second_hook);
+        let params = params_with_montra_hooks(&[HOOK, second_hook]);
 
         let hook_writes = collect_hook_writes(
             &block(vec![trace(2, vec![write], vec![])]),

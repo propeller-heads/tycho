@@ -34,11 +34,13 @@ const INITIALIZE_TOPIC: Word =
 
 /// The Elysium manifest's parameters: [`POOL_MANAGER`], [`HOOK`] and [`ASCEND_HOOK`].
 pub(crate) fn params() -> Params {
-    Params {
-        pool_manager: POOL_MANAGER,
-        montra_hooks: BTreeSet::from([HOOK]),
-        ascend_hooks: BTreeSet::from([ASCEND_HOOK]),
-    }
+    params_with_montra_hooks(&[HOOK])
+}
+
+/// The Elysium manifest's parameters with `montra_hooks` as the Montra hooks.
+pub(crate) fn params_with_montra_hooks(montra_hooks: &[Address]) -> Params {
+    Params::new(POOL_MANAGER, montra_hooks.iter().copied().collect(), BTreeSet::from([ASCEND_HOOK]))
+        .expect("the fixture hooks are disjoint")
 }
 
 fn word(bytes: &[u8]) -> Word {

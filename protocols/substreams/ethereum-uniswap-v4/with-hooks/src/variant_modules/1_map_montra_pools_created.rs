@@ -25,8 +25,9 @@ pub fn map_montra_pools_created(
 /// `ascend_*` attributes carry its fees.
 ///
 /// Deployment assumption: the Ascend launch writes `PoolData` words 0 to 3 and `Bid` word 2 in the
-/// same transaction as `Initialize` (checked on the launch transactions of all 4962 pools to block
-/// 8365800).
+/// same transaction as `Initialize`. Observed in the prestate trace of one launch transaction; the
+/// other launches are known only by their `Launched` events (4962 pools to block 8365800), which
+/// show that each pool launched, not what each launch wrote.
 /// `map_montra_enriched_block_changes` reads those writes for the pool's `ascend_*` attributes, so
 /// a pool initialised without them would get zero for every attribute, and the simulation refuses
 /// a pool whose fee or EMA is zero.
@@ -35,21 +36,19 @@ pub(crate) fn pools_created(params: &Params, block: &eth::Block) -> Vec<Transact
         .logs()
         // This filter runs first because any contract can emit an `Initialize` with a real pool
         // id.
-        .filter(|view| view.log.address == params.pool_manager)
+        .filter(|view| view.log.address == *params.pool_manager())
         .filter_map(|view| {
             Initialize::match_and_decode(view.log).map(|event| (view.receipt.transaction, event))
         })
         .filter(|(_, event)| {
             params.is_montra_hook(&event.hooks) || params.is_ascend_hook(&event.hooks)
         })
-        .map(|(tx, event)| pool_creation(tx, event, &params.pool_manager))
+        .map(|(tx, event)| pool_creation(tx, event, params.pool_manager()))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use hex_literal::hex;
 
     use rstest::rstest;
@@ -58,7 +57,8 @@ mod tests {
     use crate::{
         address_list::Address,
         montra::test_fixtures::{
-            initialize_log, launch_block, params, ASCEND_HOOK, HOOK, LAUNCH_TX, POOL_MANAGER,
+            initialize_log, launch_block, params, params_with_montra_hooks, ASCEND_HOOK, HOOK,
+            LAUNCH_TX, POOL_MANAGER,
         },
     };
 
@@ -117,11 +117,7 @@ mod tests {
     #[test]
     fn test_every_listed_hook_creates_pools() {
         let second_hook = hex!("0000000000000000000000000000000000000080");
-        let params = Params {
-            pool_manager: POOL_MANAGER,
-            montra_hooks: BTreeSet::from([HOOK, second_hook]),
-            ascend_hooks: BTreeSet::from([ASCEND_HOOK]),
-        };
+        let params = params_with_montra_hooks(&[HOOK, second_hook]);
 
         let changes = pools_created(
             &params,

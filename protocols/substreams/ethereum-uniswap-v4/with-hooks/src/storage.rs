@@ -150,6 +150,7 @@ impl BytesField {
         Self { low, width }
     }
 
+    /// The field's bytes, big-endian, as the attribute carries them.
     pub(crate) fn bytes(self, word: &Word) -> Vec<u8> {
         word[32 - self.low - self.width..32 - self.low].to_vec()
     }

@@ -28,7 +28,8 @@ pub fn store_montra_slots(
     pools_created: BlockEntityChanges,
     store: StoreSetIfNotExistsString,
 ) {
-    let ascend_hooks = parse_ascend_hooks(&params).expect("store_montra_slots params parse");
+    let ascend_hooks = parse_ascend_hooks(&params)
+        .unwrap_or_else(|e| panic!("store_montra_slots cannot read its params: {e}"));
     for (key, value) in slot_entries(&ascend_hooks, &pools_created) {
         store.set_if_not_exists(0, key, &value);
     }
@@ -92,7 +93,7 @@ mod tests {
             }],
         };
 
-        let entries = slot_entries(&params().ascend_hooks, &pools_created);
+        let entries = slot_entries(params().ascend_hooks(), &pools_created);
 
         let hook = "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec";
         let config = format!(
@@ -132,7 +133,7 @@ mod tests {
             }],
         };
 
-        let entries = slot_entries(&params().ascend_hooks, &pools_created);
+        let entries = slot_entries(params().ascend_hooks(), &pools_created);
 
         let hook = "0xe0def4221b9840a610d4e7d55812a79a6431a8ec";
         let pool_data = "0xeed4aedf482dc31cd5db10dafcce24e9cd678d08586286766e5957130525";

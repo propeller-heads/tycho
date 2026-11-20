@@ -10,14 +10,16 @@ use serde::Deserialize;
 use crate::address_list::{parse_address, parse_address_list, Address};
 
 /// Parameters of `map_montra_pools_created` and `map_montra_enriched_block_changes`: the
-/// `PoolManager` whose `Initialize` and `ModifyLiquidity`
-/// events the modules read, the Montra hooks and the Ascend hooks whose pools and storage writes
-/// are indexed.
+/// `PoolManager` whose `Initialize` and `ModifyLiquidity` events the modules read, the Montra hooks
+/// and the Ascend hooks whose pools and storage writes are indexed.
+///
+/// The fields are private so that every value went through [`Params::new`], which refuses a hook
+/// listed for both layouts.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Params {
-    pub(crate) pool_manager: Address,
-    pub(crate) montra_hooks: BTreeSet<Address>,
-    pub(crate) ascend_hooks: BTreeSet<Address>,
+    pool_manager: Address,
+    montra_hooks: BTreeSet<Address>,
+    ascend_hooks: BTreeSet<Address>,
 }
 
 #[derive(Deserialize)]
@@ -66,6 +68,17 @@ impl Params {
             parse_address_list("ascend_hooks", &query.ascend_hooks)?
                 .into_iter()
                 .collect();
+        Self::new(parse_address("pool_manager", &query.pool_manager)?, montra_hooks, ascend_hooks)
+    }
+
+    /// The parameters of `pool_manager` and the two hook lists. Fails when a hook is in both
+    /// lists: the two layouts differ, so a hook in both would be decoded as one of them by
+    /// accident.
+    pub(crate) fn new(
+        pool_manager: Address,
+        montra_hooks: BTreeSet<Address>,
+        ascend_hooks: BTreeSet<Address>,
+    ) -> Result<Self> {
         if let Some(shared) = montra_hooks
             .intersection(&ascend_hooks)
             .next()
@@ -75,11 +88,18 @@ impl Params {
                 hex::encode(shared)
             ));
         }
-        Ok(Self {
-            pool_manager: parse_address("pool_manager", &query.pool_manager)?,
-            montra_hooks,
-            ascend_hooks,
-        })
+        Ok(Self { pool_manager, montra_hooks, ascend_hooks })
+    }
+
+    /// The `PoolManager` whose events the modules read.
+    pub(crate) fn pool_manager(&self) -> &Address {
+        &self.pool_manager
+    }
+
+    /// The hooks that use the Ascend layout.
+    #[cfg(test)]
+    pub(crate) fn ascend_hooks(&self) -> &BTreeSet<Address> {
+        &self.ascend_hooks
     }
 
     /// Whether `address` is one of the `montra_hooks`. An address that is not 20 bytes is none.
@@ -122,11 +142,12 @@ mod tests {
 
         assert_eq!(
             params,
-            Params {
-                pool_manager: POOL_MANAGER,
-                montra_hooks: BTreeSet::from([HOOK, SECOND_HOOK]),
-                ascend_hooks: BTreeSet::from([ASCEND_HOOK]),
-            }
+            Params::new(
+                POOL_MANAGER,
+                BTreeSet::from([HOOK, SECOND_HOOK]),
+                BTreeSet::from([ASCEND_HOOK])
+            )
+            .unwrap()
         );
     }
 

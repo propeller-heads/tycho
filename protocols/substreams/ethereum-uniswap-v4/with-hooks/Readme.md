@@ -47,8 +47,8 @@ observed. The plugin would hand every Montra and Ascend pool (their hooks have s
 to its default orchestrator, which traces through `debug_storageRangeAt` (unavailable on Elysium,
 above), and after failures writes a pool `paused` with value 2 or 3. The simulation reads any
 `paused` value other than empty or 0 as paused, so the stream would keep decoding, but every
-Montra and Ascend pool would then stay paused and unquotable. No package code guards this, and the integration test cannot
-catch it, since the harness always runs with `--dci-plugin rpc`.
+Montra and Ascend pool would then stay paused and unquotable. No package code guards this, and the
+integration test cannot catch it, since the harness always runs with `--dci-plugin rpc`.
 
 ### Balances
 
@@ -138,7 +138,9 @@ decoded; it has no `SSTORE` site of its own, and any write it caused to a watche
 decoded anyway.
 
 Deployment assumption: the launch writes `PoolData` words 0 to 3 and `Bid` word 2 in the same
-transaction as `Initialize` (every one of the 4962 launches to block 8365800). A pool initialised
+transaction as `Initialize`. Observed in the prestate trace of one launch transaction; the other
+launches are only known to have a `Launched` event (4962 of them to block 8365800), which shows
+that each pool launched, not what each launch wrote. A pool initialised
 without them would get zero for every attribute, and the simulation refuses such a pool. `Bid`
 words 0 and 1 (the inventory and the filled quote, at `keccak(poolId . 2)` and the next slot) are
 not written at launch and start at zero.
@@ -155,6 +157,16 @@ not established, since its source is unverified.
 ### Balances of Ascend pools
 
 As for Montra: the shared V4 pipeline's amounts, with the `UniswapV4Balances` lens in the test.
+The Ascend pool's own swaps charge no LP fee (every `Swap` event carries fee 0, and
+`feeGrowthGlobal0/1X128` read 0 at the end of the tests' ranges), the hook's fee is its
+ERC-6909 claim, and the pipeline's amounts are the summed `Swap` amounts. They sit above the lens
+by a small amount, never below it. It was reproduced by replaying every `Swap` event of two pools
+against the amounts their price steps imply: the surplus is the sum of the events' amounts over
+those implied amounts (4610 and 254 wei of 4612 and 255 measured, in the 940 swaps of
+`0x21e12450…`; 310,400,285 and 573 wei of 310,400,288 and 574 measured, in the 2384 swaps of
+`0xea03c9c4…`). One unit of the Q96 price is worth `L * 2^96 / P^2` of currency0, which is 58 wei
+in the first pool and 2.2 million in the second, so the surplus grows with a pool's swap count
+and with how low its price is.
 The bid inventory is quote the hook holds at its own address, paid out only through fills; it is
 not in the pool's amounts and not counted in the balance, so a pool's payable size on a fill is
 larger than its indexed balance. The hook's fee claims are ERC-6909 balances at the `PoolManager`,
@@ -175,7 +187,9 @@ The hook and the library it calls are not upgradeable: one code hash at blocks 4
 ### Store cost of Ascend
 
 `store_montra_slots` keeps five keys per Ascend pool, about 24,800 keys at 4962 pools (block
-8365800), each value about 70 bytes.
+8365800), each value about 70 bytes. As for Montra, the terminal module reads the store once for
+each distinct hook slot a transaction writes, watched or not: an Ascend swap writes many slots of
+the hook that no attribute reads.
 
 ### Quotes in the next block
 
