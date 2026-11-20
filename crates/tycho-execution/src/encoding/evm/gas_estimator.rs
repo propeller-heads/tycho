@@ -113,10 +113,17 @@ pub fn needs_approval(protocol_system: &str) -> bool {
 /// A swap that actually falls back pays for the fallback protocol on top.
 pub const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 40_000;
 
-/// Gas for `MetricFallbackRouter`'s `quoteFallback` call, which prices the fallback protocol
-/// before the router picks a side. The cost depends on how much of the fallback pool's liquidity
-/// the quote walks; this covers most quotes on a concentrated-liquidity pool.
+/// Gas for the `quoteFallback` call of a router in [`FALLBACK_ROUTERS_QUOTING_PRIMARY`], which
+/// prices the fallback protocol before the router picks a side. The cost depends on how much of
+/// the fallback pool's liquidity the quote walks; this covers most quotes on a
+/// concentrated-liquidity pool.
 pub const METRIC_FALLBACK_QUOTE_GAS: u64 = 100_000;
+
+/// Fallback-router legs that quote the primary on chain, at about the primary's swap gas, and
+/// then the fallback before picking a side. `MetricFallbackRouter` quotes the pool by running its
+/// swap; `PropAMMFallbackRouter` calls Biconomy's `quote`, which reads every maker's board.
+pub const FALLBACK_ROUTERS_QUOTING_PRIMARY: &[&str] =
+    &[METRIC_FALLBACK_PROTOCOL_SYSTEM, "fallback:biconomy"];
 
 /// Extra gas of a subsidized swap.
 pub const SUBSIDY_GAS: u64 = 65_000;
@@ -176,8 +183,7 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
             &strategy,
         );
         total_gas += group_transfer_overhead + &group.estimated_gas;
-        // `MetricFallbackRouter` quotes the pool by running its swap, then quotes the fallback.
-        if group.protocol_system == METRIC_FALLBACK_PROTOCOL_SYSTEM {
+        if FALLBACK_ROUTERS_QUOTING_PRIMARY.contains(&group.protocol_system.as_str()) {
             total_gas += &group.estimated_gas;
             total_gas += BigUint::from(METRIC_FALLBACK_QUOTE_GAS);
         }
@@ -469,6 +475,21 @@ mod tests {
         // pool gas                            100_000
         // simulated quote                     100_000  ← the pool gas again
         // fee output transfer                  60_000
+        assert_eq!(gas, BigUint::from(440_000u64));
+    }
+
+    #[test]
+    fn test_single_biconomy_fallback_router() {
+        let solution = make_solution(vec![make_swap("fallback:biconomy")]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // input transfer                            0  ← push-payment, funds sent directly
+        // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
+        // fallback quote                      100_000  ← METRIC_FALLBACK_QUOTE_GAS
+        // venue gas                           100_000
+        // venue quote                         100_000  ← the venue gas again
+        // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER
         assert_eq!(gas, BigUint::from(440_000u64));
     }
 
